@@ -51,7 +51,7 @@ struct tlb_entry {
 	uword lpgno;
 	uword xaddr;
 	int (*pte_lookup)[2];
-	u8 *ppte;
+	u32 pte_addr;
 };
 
 /*
@@ -201,11 +201,21 @@ void i386_profile_dump(void);
 void i386_profile_reset(void);
 #endif
 
+// paging definitions
+#define FAST_MEM_PAGE_SIZE (4ul << 10)
+#define FAST_MEM_PAGE_MASK (0xFFF)
+#define FAST_MEM_PAGE_SIZE32 (FAST_MEM_PAGE_SIZE >> 2)
+#define FAST_MEM_PAGE_SHIFT (12)
 #define FAST_MEM_SIZE (148ul << 10)
-extern u8 sram_mem[FAST_MEM_SIZE];
-extern u8* psram_mem;
-inline u8 get_phys_mem8(u32 addr) { return (addr < FAST_MEM_SIZE ? sram_mem : psram_mem)[addr]; }
-inline void put_phys_mem8(u32 addr, u8 v) { (addr < FAST_MEM_SIZE ? sram_mem : psram_mem)[addr] = v; }
+#define FAST_MEM_PAGES (FAST_MEM_SIZE / FAST_MEM_PAGE_SIZE)
+
+#define MAX_MEM_SIZE (4ul << 20)
+#define MAX_PHYS_PAGES (MAX_MEM_SIZE / FAST_MEM_PAGE_SIZE)
+
+u8* get_page4r(u32 addr);
+u8* get_page4w(u32 addr);
+inline static u8 get_phys_mem8(u32 addr) { return get_page4r(addr)[addr & FAST_MEM_PAGE_MASK]; }
+inline static void put_phys_mem8(u32 addr, u8 v) { get_page4w(addr)[addr & FAST_MEM_PAGE_MASK] = v; }
 void phys_memcpy_to_512(u32 addr, const u8* src);
 void phys_memcpy_from_512(u8* dst, u32 addr);
 

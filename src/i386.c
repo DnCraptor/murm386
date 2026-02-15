@@ -199,19 +199,19 @@ static uword sext32(u32 a)
 }
 
 static u8 __always_inline pload8(uword addr) {
-	return (addr < FAST_MEM_SIZE ? sram_mem : psram_mem)[addr];
+	return get_phys_mem8(addr);
 }
 
 static inline u16 __always_inline pload16(uword addr)
 {
-    if (addr + 1 < FAST_MEM_SIZE) {
-        return *(u16*)(sram_mem + addr);
+    u32 off = addr & FAST_MEM_PAGE_MASK;   // 0xFFF for 4K
+    // fast path: не пересекает 4K страницу
+    if (likely(off != FAST_MEM_PAGE_MASK)) {
+        u8* page = get_page4r(addr);
+        return *(u16*)(page + off);
     }
-    if (addr >= FAST_MEM_SIZE) {
-        return *(u16*)(psram_mem + addr);
-    }
-    // Пересечение границы
-    u16 v;
+    // slow path: пересечение границы страницы
+	u16 v;
     v  = pload8(addr);
     v |= (u16)pload8(addr + 1) << 8;
     return v;
@@ -219,13 +219,13 @@ static inline u16 __always_inline pload16(uword addr)
 
 static inline u32 __always_inline pload32(uword addr)
 {
-    if (addr + 3 < FAST_MEM_SIZE) {
-        return *(u32*)(sram_mem + addr);
+    u32 off = addr & FAST_MEM_PAGE_MASK;   // 0xFFF for 4K
+    // fast path: не пересекает 4K страницу
+    if (likely(off <= FAST_MEM_PAGE_SIZE - 4)) {
+        u8* page = get_page4r(addr);
+        return *(u32*)(page + off);
     }
-    if (addr >= FAST_MEM_SIZE) {
-        return *(u32*)(psram_mem + addr);
-    }
-    // Пересечение границы
+    // slow path: пересечение границы страницы
     u32 v = 0;
     v |= (u32)pload8(addr);
     v |= (u32)pload8(addr + 1) << 8;
@@ -235,36 +235,32 @@ static inline u32 __always_inline pload32(uword addr)
 }
 
 static void __always_inline pstore8(uword addr, u8 val) {
-	(addr < FAST_MEM_SIZE ? sram_mem : psram_mem)[addr] = val;
+	put_phys_mem8(addr, val);
 }
 
 static inline void __always_inline pstore16(uword addr, u16 val)
 {
-    if (addr + 1 < FAST_MEM_SIZE) {
-        *(u16*)(sram_mem + addr) = val;
-        return;
+    u32 off = addr & FAST_MEM_PAGE_MASK;   // 0xFFF for 4K
+    // fast path: не пересекает 4K страницу
+    if (likely(off != FAST_MEM_PAGE_MASK)) {
+        u8* page = get_page4w(addr);
+        *(u16*)(page + off) = val;
+		return;
     }
-    if (addr >= FAST_MEM_SIZE) {
-        *(u16*)(psram_mem + addr) = val;
-        return;
-    }
-
-    // Пересечение
+    // slow path: пересечение границы страницы
     pstore8(addr, val & 0xff);
     pstore8(addr + 1, val >> 8);
 }
 
 static inline void __always_inline pstore32(uword addr, u32 val)
 {
-    if (addr + 3 < FAST_MEM_SIZE) {
-        *(u32*)(sram_mem + addr) = val;
-        return;
+    u32 off = addr & FAST_MEM_PAGE_MASK;   // 0xFFF for 4K
+    // fast path: не пересекает 4K страницу
+    if (likely(off <= FAST_MEM_PAGE_SIZE - 4)) {
+        u8* page = get_page4w(addr);
+        *(u32*)(page + off) = val;
+		return;
     }
-    if (addr >= FAST_MEM_SIZE) {
-        *(u32*)(psram_mem + addr) = val;
-        return;
-    }
-
     pstore8(addr, val & 0xff);
     pstore8(addr + 1, (val >> 8) & 0xff);
     pstore8(addr + 2, (val >> 16) & 0xff);
@@ -531,10 +527,7 @@ static bool IRAM_ATTR tlb_refill(CPUI386 *cpu, struct tlb_entry *ent, uword lpgn
 	ent->xaddr = (pte & ~0xfff) ^ (lpgno << 12);
 	pte = pte & ((pde & 7) | 0xfffffff8);
 	ent->pte_lookup = pte_lookup[!!(cpu->cr0 & CR0_WP)][(pte >> 1) & 3];
-	if (addr2 < FAST_MEM_SIZE)
-		ent->ppte = &sram_mem[addr2];
-	else
-		ent->ppte = &psram_mem[addr2];
+	ent->pte_addr = addr2;
 	return true;
 }
 
@@ -566,9 +559,7 @@ static bool IRAM_ATTR translate_lpgno(CPUI386 *cpu, int rwm, uword lpgno, uword 
 	}
 	*paddr = ent->xaddr ^ laddr;
 	if (rwm & 2) {
-		*(ent->ppte) |= 1 << 6; // dirty
-//		pstore8(cpu, ent->ppte,
-//			pload8(cpu, ent->ppte) | (1 << 6)); // dirty
+		pstore8(ent->pte_addr, pload8(ent->pte_addr) | (1 << 6)); // dirty
 	}
 	return true;
 }
@@ -7947,40 +7938,123 @@ void cpu_set_int13_handler(CPUI386 *cpu, int13_handler_t handler, void *opaque)
 	cpu->int13_opaque = opaque;
 }
 
+
+inline static void memcpy32(u32* dst, const u32* src, u32 cnt) {
+	while(cnt--) {
+		*dst++ = *src++;
+	}
+}
+
+extern u8* psram_mem;
+extern u8 sram_mem[FAST_MEM_SIZE];
+extern u8 idx_by_phys_page[MAX_PHYS_PAGES];
+extern u32 phys_page_by_idx[FAST_MEM_PAGES];
+static u8 last_idx = 0; // rollout idx
+u8* IRAM_ATTR get_page4r(u32 addr) {
+	register u32 phys_page = addr >> FAST_MEM_PAGE_SHIFT;
+	if (!phys_page) return sram_mem; // zero page is unreloadable (persistent)
+	register u8 idx = idx_by_phys_page[phys_page];
+	if (!idx) {
+		static u8 last_idx = 0; // rollout idx
+		++last_idx;
+		if (last_idx >= FAST_MEM_PAGES) last_idx = 1; // zero page is resistent
+		register u8* sram = sram_mem + FAST_MEM_PAGE_SIZE * last_idx;
+		{ // unload prev. page from sram to psram
+			u32 old_phys_page = phys_page_by_idx[last_idx];
+			if (old_phys_page & 0x80000000) { // marked as dirty
+				memcpy32((u32*)(psram_mem + (old_phys_page << FAST_MEM_PAGE_SHIFT)), (u32*)sram, FAST_MEM_PAGE_SIZE32);
+			}
+			idx_by_phys_page[old_phys_page & ~0x80000000] = 0;
+		}
+		// load new page from psram to sram
+		memcpy32((u32*)sram, (u32*)(psram_mem + (phys_page << FAST_MEM_PAGE_SHIFT)), FAST_MEM_PAGE_SIZE32);
+		phys_page_by_idx[last_idx] = phys_page;
+		idx_by_phys_page[phys_page] = last_idx;
+		return sram;
+	}
+	return sram_mem + FAST_MEM_PAGE_SIZE * idx;
+}
+u8* IRAM_ATTR get_page4w(u32 addr) {
+	register u32 phys_page = addr >> FAST_MEM_PAGE_SHIFT;
+	if (!phys_page) return sram_mem; // zero page is unreloadable (persistent)
+	register u8 idx = idx_by_phys_page[phys_page];
+	if (!idx) {
+		++last_idx;
+		if (last_idx >= FAST_MEM_PAGES) last_idx = 1; // zero page is resistent
+		register u8* sram = sram_mem + FAST_MEM_PAGE_SIZE * last_idx;
+		{ // unload prev. page from sram to psram
+			u32 old_phys_page = phys_page_by_idx[last_idx];
+			if (old_phys_page & 0x80000000) { // marked as dirty
+				memcpy32((u32*)(psram_mem + (old_phys_page << FAST_MEM_PAGE_SHIFT)), (u32*)sram, FAST_MEM_PAGE_SIZE32);
+			}
+			idx_by_phys_page[old_phys_page & ~0x80000000] = 0;
+		}
+		// load new page from psram to sram
+		memcpy32((u32*)sram, (u32*)(psram_mem + (phys_page << FAST_MEM_PAGE_SHIFT)), FAST_MEM_PAGE_SIZE32);
+		phys_page_by_idx[last_idx] = phys_page | 0x80000000; // with dirty mark
+		idx_by_phys_page[phys_page] = last_idx;
+		return sram;
+	}
+	phys_page_by_idx[idx] |= 0x80000000; // dirty mark
+	return sram_mem + FAST_MEM_PAGE_SIZE * idx;
+}
+
 void phys_memcpy_to_512(u32 addr, const u8* src)
 {
-    if (addr + 512 <= FAST_MEM_SIZE) {
-        // Полностью в SRAM
-        memcpy(sram_mem + addr, src, 512);
+    u32 off = addr & FAST_MEM_PAGE_MASK;
+
+    // fast path: всё внутри одной страницы
+    if (off + 512 <= FAST_MEM_PAGE_SIZE) {
+        u8* page = get_page4w(addr);
+        memcpy(page + off, src, 512);
         return;
     }
 
-    if (addr >= FAST_MEM_SIZE) {
-        // Полностью в PSRAM
-        memcpy(psram_mem + addr, src, 512);
-        return;
-    }
+    // slow path: пересечение страницы
+    u32 remaining = 512;
 
-    // Пересечение границы
-    u32 first = FAST_MEM_SIZE - addr;
-    memcpy(sram_mem + addr, src, first);
-    memcpy(psram_mem + FAST_MEM_SIZE, src + first, 512 - first);
+    while (remaining) {
+        off = addr & FAST_MEM_PAGE_MASK;
+        u32 chunk = FAST_MEM_PAGE_SIZE - off;
+
+        if (chunk > remaining)
+            chunk = remaining;
+
+        u8* page = get_page4w(addr);
+        memcpy(page + off, src, chunk);
+
+        addr += chunk;
+        src  += chunk;
+        remaining -= chunk;
+    }
 }
 
 void phys_memcpy_from_512(u8* dst, u32 addr)
 {
-    if (addr + 512 <= FAST_MEM_SIZE) {
-        memcpy(dst, sram_mem + addr, 512);
+    u32 off = addr & FAST_MEM_PAGE_MASK;
+
+    // fast path: всё внутри одной страницы
+    if (off + 512 <= FAST_MEM_PAGE_SIZE) {
+        u8* page = get_page4r(addr);
+        memcpy(dst, page + off, 512);
         return;
     }
 
-    if (addr >= FAST_MEM_SIZE) {
-        memcpy(dst, psram_mem + addr, 512);
-        return;
-    }
+    // slow path: пересечение страницы
+    u32 remaining = 512;
 
-    // Пересечение
-    u32 first = FAST_MEM_SIZE - addr;
-    memcpy(dst, sram_mem + addr, first);
-    memcpy(dst + first, psram_mem + FAST_MEM_SIZE, 512 - first);
+    while (remaining) {
+        off = addr & FAST_MEM_PAGE_MASK;
+        u32 chunk = FAST_MEM_PAGE_SIZE - off;
+
+        if (chunk > remaining)
+            chunk = remaining;
+
+        u8* page = get_page4r(addr);
+        memcpy(dst, page + off, chunk);
+
+        addr += chunk;
+        dst  += chunk;
+        remaining -= chunk;
+    }
 }

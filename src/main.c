@@ -223,6 +223,7 @@ void *bigmalloc(size_t size) {
     return ptr;
 }
 
+extern u8* psram_mem;
 /**
  * Load ROM file from SD card to memory.
  */

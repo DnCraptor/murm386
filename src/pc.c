@@ -8,6 +8,8 @@
 
 u8* psram_mem = 0;
 u8 sram_mem[FAST_MEM_SIZE] __aligned(4) = { 0 };
+u8 idx_by_phys_page[MAX_PHYS_PAGES] = { 0 };
+u32 phys_page_by_idx[FAST_MEM_PAGES] = { 0 };
 
 #ifdef USEKVM
 #define cpu_raise_irq cpukvm_raise_irq
@@ -555,7 +557,6 @@ static void iomem_write32(void *iomem, uword addr, u32 val)
 static bool iomem_write_string(void *iomem, uword addr, u32 phy_addr, int len)
 {
     PC *pc = iomem;
-
     uword vga_base = pc->pci_vga_ram_addr;
 
     if (addr >= vga_base) {
@@ -564,64 +565,51 @@ static bool iomem_write_string(void *iomem, uword addr, u32 phy_addr, int len)
         if (addr + len > pc->vga_mem_size)
             return false;
 
-        if (phy_addr + len <= FAST_MEM_SIZE) {
-            // целиком в SRAM
-            memcpy(pc->vga_mem + addr,
-                   sram_mem + phy_addr,
-                   len);
-        }
-        else if (phy_addr >= FAST_MEM_SIZE) {
-            // целиком в PSRAM
-            memcpy(pc->vga_mem + addr,
-                   psram_mem + phy_addr,
-                   len);
-        }
-        else {
-            // пересечение границы FAST_MEM_SIZE
-            u32 first = FAST_MEM_SIZE - phy_addr;
-            u32 second = len - first;
+        while (len > 0) {
+            u32 off = phy_addr & FAST_MEM_PAGE_MASK;
+            u32 chunk = FAST_MEM_PAGE_SIZE - off;
+
+            if (chunk > (u32)len)
+                chunk = len;
+
+            u8* page = get_page4r(phy_addr);
 
             memcpy(pc->vga_mem + addr,
-                   sram_mem + phy_addr,
-                   first);
+                   page + off,
+                   chunk);
 
-            memcpy(pc->vga_mem + addr + first,
-                   psram_mem + FAST_MEM_SIZE,
-                   second);
+            phy_addr += chunk;
+            addr     += chunk;
+            len      -= chunk;
         }
 
         return true;
     }
 
-    // IO path (не VGA RAM)
-    // тут тот же split-принцип
-    if (phy_addr + len <= FAST_MEM_SIZE) {
-        return vga_mem_write_string(pc->vga,
-                                    addr - 0xa0000,
-                                    sram_mem + phy_addr,
-                                    len);
-    }
-    else if (phy_addr >= FAST_MEM_SIZE) {
-        return vga_mem_write_string(pc->vga,
-                                    addr - 0xa0000,
-                                    psram_mem + phy_addr,
-                                    len);
-    }
-    else {
-        u32 first = FAST_MEM_SIZE - phy_addr;
-        u32 second = len - first;
+    // --- IO path ---
+    uword io_addr = addr - 0xa0000;
+
+    while (len > 0) {
+        u32 off = phy_addr & FAST_MEM_PAGE_MASK;
+        u32 chunk = FAST_MEM_PAGE_SIZE - off;
+
+        if (chunk > (u32)len)
+            chunk = len;
+
+        u8* page = get_page4r(phy_addr);
 
         if (!vga_mem_write_string(pc->vga,
-                                  addr - 0xa0000,
-                                  sram_mem + phy_addr,
-                                  first))
+                                  io_addr,
+                                  page + off,
+                                  chunk))
             return false;
 
-        return vga_mem_write_string(pc->vga,
-                                    addr - 0xa0000 + first,
-                                    psram_mem + FAST_MEM_SIZE,
-                                    second);
+        phy_addr += chunk;
+        io_addr  += chunk;
+        len      -= chunk;
     }
+
+    return true;
 }
 
 static void pc_reset_request(void *p)
@@ -638,6 +626,10 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	pc->phys_mem_size = conf->mem_size;
 	CPU_CB *cb = NULL;
 	memset(psram_mem, 0, conf->mem_size);
+	memset(sram_mem, 0, sizeof(sram_mem));
+	memset(idx_by_phys_page, 0, sizeof(idx_by_phys_page));
+	memset(phys_page_by_idx, 0, sizeof(phys_page_by_idx));
+
 	pc->cpu = cpui386_new(conf->cpu_gen, conf->mem_size, &cb);
 	if (conf->fpu)
 		cpui386_enable_fpu(pc->cpu);
@@ -806,6 +798,9 @@ void mixer_callback (void *opaque, uint8_t *stream, int free)
 
 void load_bios_and_reset(PC *pc)
 {
+	// сброс кэшей
+	memset(idx_by_phys_page, 0, sizeof(idx_by_phys_page));
+	memset(phys_page_by_idx, 0, sizeof(phys_page_by_idx));
 	int bios_size = 0;
 	if (pc->bios && pc->bios[0])
 		bios_size = load_rom(pc->bios, 0x100000, 1);
