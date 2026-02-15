@@ -17,8 +17,8 @@
 #elif defined(RP2350_BUILD)
 // RP2350: Place critical functions in RAM for faster execution
 // __time_critical_func places code in RAM section
-#define IRAM_ATTR __time_critical_func()
-#define IRAM_ATTR_CPU_EXEC1 __time_critical_func()
+#define IRAM_ATTR
+#define IRAM_ATTR_CPU_EXEC1
 #define DRAM_ATTR
 #else
 #define IRAM_ATTR
@@ -42,7 +42,8 @@
 
 /* Note: CPUI386 struct is defined in i386.h */
 
-#define dolog(...) fprintf(stderr, __VA_ARGS__)
+//#define dolog(...) fprintf(stderr, __VA_ARGS__)
+#define dolog(...)
 #define likely(x) __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
 
@@ -3733,7 +3734,7 @@ static bool verbose;
 #define C_16(_1, ...) CX(_1) C_15(__VA_ARGS__)
 #define C(...) PASTE(C_, ARGCOUNT(__VA_ARGS__))(__VA_ARGS__)
 
-static bool IRAM_ATTR_CPU_EXEC1 cpu_exec1(CPUI386 *cpu, int stepcount)
+static bool __time_critical_func(cpu_exec1)(CPUI386 *cpu, int stepcount)
 {
 #ifndef I386_OPT2
 #define eswitch(b) switch(b)
@@ -3800,7 +3801,7 @@ static bool IRAM_ATTR_CPU_EXEC1 cpu_exec1(CPUI386 *cpu, int stepcount)
 		break;
 	}
 #else
-	static const DRAM_ATTR void *pfxlabel[] = {
+	static const void *pfxlabel[] __not_in_flash("pfxlabel") = {
 /* 0x00 */	&&f0x00_fast, &&f0x01_fast, &&f0x02_fast, &&f0x03_fast, &&f0x04_fast, &&f0x05_fast, &&f0x06, &&f0x07,
 /* 0x08 */	&&f0x08_fast, &&f0x09_fast, &&f0x0a_fast, &&f0x0b_fast, &&f0x0c_fast, &&f0x0d_fast, &&f0x0e, &&f0x0f,
 /* 0x10 */	&&f0x10, &&f0x11, &&f0x12, &&f0x13, &&f0x14, &&f0x15, &&f0x16, &&f0x17,
@@ -6203,7 +6204,7 @@ GRPEND
 #ifdef I386_OPT2
 		// Computed goto dispatch for 0x0f two-byte opcodes
 		// Note: MMX opcodes (0x60-0x7f, 0xd1-0xdf, 0xe1-0xef, 0xf1-0xfe) included when I386_ENABLE_MMX
-		static const DRAM_ATTR void *pfxlabel_0f[] = {
+		static const void *pfxlabel_0f[] __not_in_flash("pfxlabel") = {
 /* 0x00 */	&&f0f_0x00, &&f0f_0x01, &&f0f_0x02, &&f0f_0x03, &&f0f_ud, &&f0f_ud, &&f0f_0x06, &&f0f_ud,
 /* 0x08 */	&&f0f_ud, &&f0f_0x09, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud,
 /* 0x10 */	&&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud,
@@ -7947,9 +7948,6 @@ inline static void memcpy32(u32* dst, const u32* src, u32 cnt) {
 }
 
 extern u8* psram_mem;
-extern u8 sram_mem[FAST_MEM_SIZE];
-extern u8 idx_by_phys_page[MAX_PHYS_PAGES];
-extern u32 phys_page_by_idx[FAST_MEM_PAGES];
 static u8 last_idx = 0; // rollout idx
 
 static inline u32 cpu_esp_linear() {
@@ -7972,7 +7970,7 @@ static inline u32 cpu_eip_linear() {
 }
 
 
-static inline u8* refill_page(u32 phys_page, u32 mark_dirty)
+u8* refill_page(u32 phys_page, u32 mark_dirty)
 {
     // вычислим защищённые phys_page (только если paging OFF)
     u32 prot1 = 0xffffffffu;
@@ -7989,7 +7987,7 @@ static inline u8* refill_page(u32 phys_page, u32 mark_dirty)
 #endif
     }
 
-    // найдём victim-слот, который не совпадает с prot1/prot2
+    // найдём victim-слот, который не совпадает с prot1/prot2/...
     for (u32 tries = 0; tries < (FAST_MEM_PAGES - 1); ++tries) {
         ++last_idx;
         if (last_idx >= FAST_MEM_PAGES) last_idx = 1;
@@ -8001,7 +7999,7 @@ static inline u8* refill_page(u32 phys_page, u32 mark_dirty)
         if (old_page == 0)
             break;
 
-        // пропускаем защищённые страницы (стек/код)
+        // пропускаем защищённые страницы (стек/код/data)
         if (old_page == prot1 || old_page == prot2 || old_page == prot3 || old_page == prot4)
             continue;
 
@@ -8032,33 +8030,6 @@ static inline u8* refill_page(u32 phys_page, u32 mark_dirty)
     idx_by_phys_page[phys_page] = (u8)last_idx;
 
     return sram;
-}
-
-u8* IRAM_ATTR get_page4r(u32 addr)
-{
-    u32 phys_page = addr >> FAST_MEM_PAGE_SHIFT;
-    if (!phys_page)
-        return sram_mem;
-
-    u8 idx = idx_by_phys_page[phys_page];
-    if (idx)
-        return sram_mem + FAST_MEM_PAGE_SIZE * idx;
-
-    return refill_page(phys_page, 0);
-}
-u8* IRAM_ATTR get_page4w(u32 addr)
-{
-    u32 phys_page = addr >> FAST_MEM_PAGE_SHIFT;
-    if (!phys_page)
-        return sram_mem;
-
-    u8 idx = idx_by_phys_page[phys_page];
-    if (idx) {
-        phys_page_by_idx[idx] |= 0x80000000; // dirty
-        return sram_mem + FAST_MEM_PAGE_SIZE * idx;
-    }
-
-    return refill_page(phys_page, 0x80000000);
 }
 
 void phys_memcpy_to_512(u32 addr, const u8* src)

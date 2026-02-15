@@ -206,14 +206,35 @@ void i386_profile_reset(void);
 #define FAST_MEM_PAGE_MASK (0xFFF)
 #define FAST_MEM_PAGE_SIZE32 (FAST_MEM_PAGE_SIZE >> 2)
 #define FAST_MEM_PAGE_SHIFT (12)
-#define FAST_MEM_SIZE (148ul << 10)
+#define FAST_MEM_SIZE (156ul << 10)
 #define FAST_MEM_PAGES (FAST_MEM_SIZE / FAST_MEM_PAGE_SIZE)
 
 #define MAX_MEM_SIZE (4ul << 20)
 #define MAX_PHYS_PAGES (MAX_MEM_SIZE / FAST_MEM_PAGE_SIZE)
 
-u8* get_page4r(u32 addr);
-u8* get_page4w(u32 addr);
+extern u8 sram_mem[FAST_MEM_SIZE];
+extern u8 idx_by_phys_page[MAX_PHYS_PAGES];
+extern u32 phys_page_by_idx[FAST_MEM_PAGES];
+
+u8* refill_page(u32 phys_page, u32 mark_dirty);
+
+inline static u8* get_page4r(u32 addr) {
+    register u32 phys_page = addr >> FAST_MEM_PAGE_SHIFT;
+    if (!phys_page) return sram_mem;
+    register u8 idx = idx_by_phys_page[phys_page];
+    if (idx) return sram_mem + FAST_MEM_PAGE_SIZE * idx;
+    return refill_page(phys_page, 0);
+}
+inline static u8* get_page4w(u32 addr) {
+    register u32 phys_page = addr >> FAST_MEM_PAGE_SHIFT;
+    if (!phys_page) return sram_mem;
+    register u8 idx = idx_by_phys_page[phys_page];
+    if (idx) {
+        phys_page_by_idx[idx] |= 0x80000000; // dirty
+        return sram_mem + FAST_MEM_PAGE_SIZE * idx;
+    }
+    return refill_page(phys_page, 0x80000000);
+}
 inline static u8 get_phys_mem8(u32 addr) { return get_page4r(addr)[addr & FAST_MEM_PAGE_MASK]; }
 inline static void put_phys_mem8(u32 addr, u8 v) { get_page4w(addr)[addr & FAST_MEM_PAGE_MASK] = v; }
 void phys_memcpy_to_512(u32 addr, const u8* src);

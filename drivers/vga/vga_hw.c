@@ -110,8 +110,8 @@ static volatile int in_vblank = 0;         // Set by IRQ during vblank
 #define GFX_BUFFER_SIZE (112 * 1024)
 static uint8_t gfx_buffer_a[GFX_BUFFER_SIZE] __attribute__((aligned(4)));
 //static uint8_t gfx_buffer_b[GFX_BUFFER_SIZE] __attribute__((aligned(4)));
-static uint8_t * volatile gfx_display_buffer = gfx_buffer_a;  // ISR reads from this
-static uint8_t *gfx_write_buffer = gfx_buffer_a;    // Main loop writes to this
+//static uint8_t * volatile gfx_display_buffer = gfx_buffer_a;  // ISR reads from this
+//static uint8_t *gfx_write_buffer = gfx_buffer_a;    // Main loop writes to this
 static volatile int gfx_write_done = 0;  // Set when write buffer has new frame
 static volatile int gfx_copy_allowed = 0;  // Set during vblank to allow copy
 
@@ -297,7 +297,7 @@ static void __time_critical_func(render_gfx_line_from_sram)(uint32_t line, uint3
     } else {
         // Read from display buffer (stable during active video)
         // 320 pixels = 320 bytes. Stride is 320.
-        const uint32_t *src32 = (const uint32_t *)(gfx_display_buffer + (src_line * 320));
+        const uint32_t *src32 = (const uint32_t *)(gfx_buffer_a + (src_line * 320));
 
         // Each pixel outputs 16 bits (2 bytes) of dithered color
         // Low byte = c_hi (conv0), high byte = c_lo (conv1)
@@ -335,7 +335,7 @@ static void __time_critical_func(render_gfx_line_cga)(uint32_t line, uint32_t *o
         uint32_t cga_row = src_line >> 1;  // Which row within bank (0-99)
         uint32_t cga_line_offset = cga_bank + cga_row * 80;
 
-        const uint8_t *src = gfx_display_buffer;
+        const uint8_t *src = gfx_buffer_a;
 
         // In CGA/odd-even mode, data is stored linearly in planes 0 and 1
         // Even bytes go to plane 0, odd bytes go to plane 1
@@ -386,7 +386,7 @@ static void __time_critical_func(render_gfx_line_cga2)(uint32_t line, uint32_t *
         // In planar layout: multiply by 4 to get actual byte offset
         uint32_t base_addr = (bank_offset + row_in_bank * 80) * 4;
 
-        const uint8_t *src = gfx_display_buffer;
+        const uint8_t *src = gfx_buffer_a;
 
         // CGA 2-color palette: 0 = black, 1 = white (or foreground color)
         uint8_t bg = cga_palette[0];  // Background (black)
@@ -479,7 +479,7 @@ static void __time_critical_func(render_gfx_line_ega)(uint32_t line, uint32_t *o
     }
 
     // Snapshot display buffer pointer
-    const uint8_t *disp_buf = gfx_display_buffer;
+    const uint8_t *disp_buf = gfx_buffer_a;
 
     // Read from display buffer (stable during active video)
     // Use calculated stride
@@ -973,7 +973,7 @@ void vga_hw_update(void) {
             int split_line = line_compare;
             
             const uint32_t *src = (const uint32_t *)vga_ram_psram;
-            uint32_t *dst = (uint32_t *)gfx_write_buffer;
+            uint32_t *dst = (uint32_t *)gfx_buffer_a;
             
             if (gfx_submode == 1 || gfx_submode == 4) {
                 // CGA 4-color or 2-color: copy 32KB (same memory layout)

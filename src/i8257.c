@@ -34,19 +34,18 @@
 #elif defined(RP2350_BUILD)
 #include "pico/stdlib.h"
 #define IRAM_ATTR __time_critical_func()
-#define DRAM_ATTR
 #else
 #define IRAM_ATTR
-#define DRAM_ATTR
 #endif
 
 /* #define DEBUG_DMA */
 
-#define dolog(...) fprintf (stderr, "dma: " __VA_ARGS__)
 #ifdef DEBUG_DMA
+#define dolog(...) fprintf (stderr, "dma: " __VA_ARGS__)
 #define linfo(...) fprintf (stderr, "dma: " __VA_ARGS__)
 #define ldebug(...) fprintf (stderr, "dma: " __VA_ARGS__)
 #else
+#define dolog(...)
 #define linfo(...)
 #define ldebug(...)
 #endif
