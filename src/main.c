@@ -226,7 +226,7 @@ void *bigmalloc(size_t size) {
 /**
  * Load ROM file from SD card to memory.
  */
-int load_rom(void *phys_mem, const char *file, uword addr, int backward) {
+int load_rom(const char *file, uword addr, int backward) {
     FIL fp;
     FRESULT res;
     UINT bytes_read;
@@ -245,12 +245,12 @@ int load_rom(void *phys_mem, const char *file, uword addr, int backward) {
     uint8_t *dest;
     if (backward) {
         // Load so ROM ends at addr (for BIOS - should end at 1MB boundary)
-        dest = (uint8_t *)phys_mem + addr - size;
+        dest = (uint8_t *)psram_mem + addr - size;
         DBG_PRINT("Loading ROM: %s (%lu bytes) at 0x%08lx-0x%08lx (dest=%p)\n",
                file, (unsigned long)size,
                (unsigned long)(addr - size), (unsigned long)(addr - 1), dest);
     } else {
-        dest = (uint8_t *)phys_mem + addr;
+        dest = (uint8_t *)psram_mem + addr;
         DBG_PRINT("Loading ROM: %s (%lu bytes) at 0x%08lx (dest=%p)\n",
                file, (unsigned long)size, (unsigned long)addr, dest);
     }

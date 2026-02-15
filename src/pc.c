@@ -6,6 +6,9 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+u8* psram_mem = 0;
+u8 sram_mem[FAST_MEM_SIZE] __aligned(4) = { 0 };
+
 #ifdef USEKVM
 #define cpu_raise_irq cpukvm_raise_irq
 #define cpu_get_cycle cpukvm_get_cycle
@@ -190,17 +193,6 @@ static u32 pc_io_read32(void *o, int addr)
 		fprintf(stderr, "ind 0x%x <= 0x%x\n", addr, 0xffffffff);
 	}
 	return 0xffffffff;
-}
-
-static int pc_io_read_string(void *o, int addr, uint8_t *buf, int size, int count)
-{
-	(void)o;
-	/* IDE and Emulink removed - using INT 13h disk handler instead */
-	(void)addr;
-	(void)buf;
-	(void)size;
-	(void)count;
-	return 0;
 }
 
 static void pc_io_write(void *o, int addr, u8 val)
@@ -392,13 +384,6 @@ static void pc_io_write32(void *o, int addr, u32 val)
 	}
 }
 
-static int pc_io_write_string(void *o, int addr, uint8_t *buf, int size, int count)
-{
-	(void)o; (void)addr; (void)buf; (void)size; (void)count;
-	/* IDE and emulink removed - using INT 13h disk handler instead */
-	return 0;
-}
-
 void pc_vga_step(void *o)
 {
 	PC *pc = o;
@@ -567,21 +552,76 @@ static void iomem_write32(void *iomem, uword addr, u32 val)
 	vga_mem_write32(pc->vga, addr - 0xa0000, val);
 }
 
-static bool iomem_write_string(void *iomem, uword addr, uint8_t *buf, int len)
+static bool iomem_write_string(void *iomem, uword addr, u32 phy_addr, int len)
 {
-	PC *pc = iomem;
-	// fast path for vga ram
-	uword vga_addr2 = pc->pci_vga_ram_addr;
-	if (addr >= vga_addr2) {
-		uword vga_addr2 = pc->pci_vga_ram_addr;
-		addr -= vga_addr2;
-		if (addr + len < pc->vga_mem_size) {
-			memcpy(pc->vga_mem + addr, buf, len);
-			return true;
-		}
-		return false;
-	}
-	return vga_mem_write_string(pc->vga, addr - 0xa0000, buf, len);
+    PC *pc = iomem;
+
+    uword vga_base = pc->pci_vga_ram_addr;
+
+    if (addr >= vga_base) {
+        addr -= vga_base;
+
+        if (addr + len > pc->vga_mem_size)
+            return false;
+
+        if (phy_addr + len <= FAST_MEM_SIZE) {
+            // целиком в SRAM
+            memcpy(pc->vga_mem + addr,
+                   sram_mem + phy_addr,
+                   len);
+        }
+        else if (phy_addr >= FAST_MEM_SIZE) {
+            // целиком в PSRAM
+            memcpy(pc->vga_mem + addr,
+                   psram_mem + phy_addr,
+                   len);
+        }
+        else {
+            // пересечение границы FAST_MEM_SIZE
+            u32 first = FAST_MEM_SIZE - phy_addr;
+            u32 second = len - first;
+
+            memcpy(pc->vga_mem + addr,
+                   sram_mem + phy_addr,
+                   first);
+
+            memcpy(pc->vga_mem + addr + first,
+                   psram_mem + FAST_MEM_SIZE,
+                   second);
+        }
+
+        return true;
+    }
+
+    // IO path (не VGA RAM)
+    // тут тот же split-принцип
+    if (phy_addr + len <= FAST_MEM_SIZE) {
+        return vga_mem_write_string(pc->vga,
+                                    addr - 0xa0000,
+                                    sram_mem + phy_addr,
+                                    len);
+    }
+    else if (phy_addr >= FAST_MEM_SIZE) {
+        return vga_mem_write_string(pc->vga,
+                                    addr - 0xa0000,
+                                    psram_mem + phy_addr,
+                                    len);
+    }
+    else {
+        u32 first = FAST_MEM_SIZE - phy_addr;
+        u32 second = len - first;
+
+        if (!vga_mem_write_string(pc->vga,
+                                  addr - 0xa0000,
+                                  sram_mem + phy_addr,
+                                  first))
+            return false;
+
+        return vga_mem_write_string(pc->vga,
+                                    addr - 0xa0000 + first,
+                                    psram_mem + FAST_MEM_SIZE,
+                                    second);
+    }
 }
 
 static void pc_reset_request(void *p)
@@ -594,22 +634,13 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	   u8 *fb, PCConfig *conf)
 {
 	PC *pc = malloc(sizeof(PC));
-	char *mem = bigmalloc(conf->mem_size);
+	psram_mem = bigmalloc(conf->mem_size);
+	pc->phys_mem_size = conf->mem_size;
 	CPU_CB *cb = NULL;
-	memset(mem, 0, conf->mem_size);
-#ifdef BUILD_ESP32
-	extern char *pcram;
-	extern long pcram_len;
-	pcram = mem + 0xa0000;
-	pcram_len = 0xc0000 - 0xa0000;
-#endif
-#ifdef USEKVM
-	pc->cpu = cpukvm_new(mem, conf->mem_size, &cb);
-#else
-	pc->cpu = cpui386_new(conf->cpu_gen, mem, conf->mem_size, &cb);
+	memset(psram_mem, 0, conf->mem_size);
+	pc->cpu = cpui386_new(conf->cpu_gen, conf->mem_size, &cb);
 	if (conf->fpu)
 		cpui386_enable_fpu(pc->cpu);
-#endif
 	pc->bios = conf->bios;
 	pc->vga_bios = conf->vga_bios;
 	pc->linuxstart = conf->linuxstart;
@@ -650,9 +681,6 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	pc->i440fx = i440fx_init(&pc->pcibus, &piix3_devfn);
 	/* PCI IDE removed - using INT 13h disk handler instead */
 
-	pc->phys_mem = mem;
-	pc->phys_mem_size = conf->mem_size;
-
 	cb->io = pc;
 	cb->io_read8 = pc_io_read;
 	cb->io_write8 = pc_io_write;
@@ -660,8 +688,6 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	cb->io_write16 = pc_io_write16;
 	cb->io_read32 = pc_io_read32;
 	cb->io_write32 = pc_io_write32;
-	cb->io_read_string = pc_io_read_string;
-	cb->io_write_string = pc_io_write_string;
 
 	pc->boot_start_time = 0;
 
@@ -701,10 +727,8 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 			       pc, pc_reset_request);
 	pc->adlib = adlib_new();
 	/* NE2000 networking removed */
-	pc->isa_dma = i8257_new(pc->phys_mem, pc->phys_mem_size,
-				0x00, 0x80, 0x480, 0);
-	pc->isa_hdma = i8257_new(pc->phys_mem, pc->phys_mem_size,
-				 0xc0, 0x88, 0x488, 1);
+	pc->isa_dma = i8257_new(pc->phys_mem_size, 0x00, 0x80, 0x480, 0);
+	pc->isa_hdma = i8257_new(pc->phys_mem_size, 0xc0, 0x88, 0x488, 1);
 	pc->sb16 = sb16_new(0x220, 5,
 			    pc->isa_dma, pc->isa_hdma,
 			    pc->pic, set_irq);
@@ -784,38 +808,38 @@ void load_bios_and_reset(PC *pc)
 {
 	int bios_size = 0;
 	if (pc->bios && pc->bios[0])
-		bios_size = load_rom(pc->phys_mem, pc->bios, 0x100000, 1);
+		bios_size = load_rom(pc->bios, 0x100000, 1);
 
 	// Only load VGA BIOS if main BIOS doesn't overlap with 0xC0000
 	// 256KB BIOS starts at 0xC0000, so VGA BIOS would overwrite it
 	int bios_start = 0x100000 - bios_size;
 	if (pc->vga_bios && pc->vga_bios[0] && bios_start >= 0xC8000) {
-		load_rom(pc->phys_mem, pc->vga_bios, 0xc0000, 0);
+		load_rom(pc->vga_bios, 0xc0000, 0);
 	} else if (pc->vga_bios && pc->vga_bios[0]) {
 		printf("Skipping VGA BIOS - main BIOS overlaps at 0x%x\n", bios_start);
 	}
 
 	// Debug: verify BIOS loaded at reset vector
-	uint8_t *reset_vec = (uint8_t *)pc->phys_mem + 0xFFFF0;
+	uint8_t *reset_vec = (uint8_t *)psram_mem + 0xFFFF0;
 	printf("Reset vector at 0xFFFF0: %02x %02x %02x %02x %02x %02x %02x %02x\n",
 	       reset_vec[0], reset_vec[1], reset_vec[2], reset_vec[3],
 	       reset_vec[4], reset_vec[5], reset_vec[6], reset_vec[7]);
-	printf("phys_mem=%p, reset_vec=%p\n", pc->phys_mem, reset_vec);
+	printf("psram_mem=%p, reset_vec=%p\n", psram_mem, reset_vec);
 
 #ifndef USEKVM
 	if (pc->kernel && pc->kernel[0]) {
 		int start_addr = 0x10000;
 		int cmdline_addr = 0xf800;
-		int kernel_size = load_rom(pc->phys_mem, pc->kernel, 0x00100000, 0);
+		int kernel_size = load_rom(pc->kernel, 0x00100000, 0);
 		int initrd_size = 0;
 		if (pc->initrd && pc->initrd[0])
-			initrd_size = load_rom(pc->phys_mem, pc->initrd, 0x00400000, 0);
+			initrd_size = load_rom(pc->initrd, 0x00400000, 0);
 		if (pc->cmdline && pc->cmdline[0])
-			strcpy(pc->phys_mem + cmdline_addr, pc->cmdline);
+			strcpy(psram_mem + cmdline_addr, pc->cmdline);
 		else
-			strcpy(pc->phys_mem + cmdline_addr, "");
+			strcpy(psram_mem + cmdline_addr, "");
 
-		load_rom(pc->phys_mem, pc->linuxstart, start_addr, 0);
+		load_rom(pc->linuxstart, start_addr, 0);
 		cpui386_reset_pm(pc->cpu, 0x10000);
 		cpui386_set_gpr(pc->cpu, 0, pc->phys_mem_size);
 		cpui386_set_gpr(pc->cpu, 3, initrd_size);

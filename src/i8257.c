@@ -22,6 +22,7 @@
  * THE SOFTWARE.
  */
 #include "i8257.h"
+#include "i386.h"
 #include <stdbool.h>
 #include <stdio.h>
 #include <inttypes.h>
@@ -418,10 +419,8 @@ int i8257_dma_read_memory(IsaDma *obj, int nchan, void *buf, int pos,
 
     uint8_t *p = buf;
     if (r->mode & 0x20) {
-        for (hwaddr i = 0;
-             addr - pos - len + i < d->phys_mem_size && i < len;
-             i++) {
-            p[i] = d->phys_mem[addr - pos - len + i];
+        for (hwaddr i = 0; addr - pos - len + i < d->phys_mem_size && i < len; i++) {
+            p[i] = get_phys_mem8(addr - pos - len + i);
         }
         //cpu_physical_memory_read (d->phys_mem + addr - pos - len, buf, len);
         /* What about 16bit transfers? */
@@ -430,10 +429,8 @@ int i8257_dma_read_memory(IsaDma *obj, int nchan, void *buf, int pos,
             p[i] = b;
         }
     } else {
-        for (hwaddr i = 0;
-             addr + pos + i < d->phys_mem_size && i < len;
-             i++) {
-            p[i] = d->phys_mem[addr + pos + i];
+        for (hwaddr i = 0; addr + pos + i < d->phys_mem_size && i < len; i++) {
+            p[i] = get_phys_mem8(addr + pos + i);
         }
         //cpu_physical_memory_read (addr + pos, buf, len);
     }
@@ -454,10 +451,8 @@ int i8257_dma_write_memory(IsaDma *obj, int nchan, void *buf, int pos,
 
     uint8_t *p = buf;
     if (r->mode & 0x20) {
-        for (hwaddr i = 0;
-             addr - pos - len + i < s->phys_mem_size && i < len;
-             i++) {
-            s->phys_mem[addr - pos - len + i] = p[i];
+        for (hwaddr i = 0; addr - pos - len + i < s->phys_mem_size && i < len; i++) {
+            put_phys_mem8(addr - pos - len + i, p[i]);
         }
         //cpu_physical_memory_write (addr - pos - len, buf, len);
         /* What about 16bit transfers? */
@@ -466,10 +461,8 @@ int i8257_dma_write_memory(IsaDma *obj, int nchan, void *buf, int pos,
             p[i] = b;
         }
     } else {
-        for (hwaddr i = 0;
-             addr + pos + i < s->phys_mem_size && i < len;
-             i++) {
-            s->phys_mem[addr + pos + i] = p[i];
+        for (hwaddr i = 0; addr + pos + i < s->phys_mem_size && i < len; i++) {
+            put_phys_mem8(addr + pos + i, p[i]);
         }
         //cpu_physical_memory_write (addr + pos, buf, len);
     }
@@ -651,7 +644,6 @@ void i8257_dma_init(ISABus *bus, bool high_page_enable)
 #endif
 
 I8257State *i8257_new(
-    char *phys_mem,
     long phys_mem_size,
     int base, int page_base, int pageh_base, int dshift)
 {
@@ -661,7 +653,6 @@ I8257State *i8257_new(
     d->page_base = page_base;
     d->pageh_base = pageh_base;
     d->dshift = dshift;
-    d->phys_mem = phys_mem;
     d->phys_mem_size = phys_mem_size;
     int i;
 

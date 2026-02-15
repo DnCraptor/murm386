@@ -27,11 +27,9 @@ struct struct_drive {
 
 static int led_state = 0;
 static CPUI386 *disk_cpu = NULL;
-static uint8_t *disk_mem = NULL;
 
 void disk_set_cpu(CPUI386 *cpu) {
     disk_cpu = cpu;
-    disk_mem = cpu_get_phys_mem(cpu);
 }
 
 // Forward declaration for filename tracking
@@ -54,7 +52,10 @@ static inline void ejectdisk(uint8_t drivenum) {
 uint8_t insertdisk(uint8_t drivenum, const char *pathname) {
     FIL file;
 
-    if (drivenum & 0x80) drivenum -= 126;  // Normalize hard drive numbers
+    if (drivenum & 0x80)
+        drivenum = drivenum - 0x80 + 2;  // Normalize hard drive numbers, Drive C = 0x80 -> 2
+    if (drivenum >= 5)
+        return 0;
 
     // Build full path (files are in 386/ directory)
     char path[256];
@@ -181,7 +182,7 @@ static void readdisk(uint8_t drivenum,
         if (is_verify) {
             for (int sectoffset = 0; sectoffset < 512; sectoffset++) {
                 // Verify sector data
-                if (disk_mem[memdest++] != sectorbuffer[sectoffset]) {
+                if (get_phys_mem8(memdest++) != sectorbuffer[sectoffset]) {
                     // Sector verify failed
                     cpu_set_al(disk_cpu, cursect);
                     cpu_set_cf(disk_cpu, 1);
@@ -191,7 +192,7 @@ static void readdisk(uint8_t drivenum,
             }
         } else {
             // Copy sector data to memory
-            memcpy(disk_mem + memdest, sectorbuffer, 512);
+            phys_memcpy_to_512(memdest, sectorbuffer);
             memdest += 512;
         }
 
@@ -263,7 +264,7 @@ static void writedisk(uint8_t drivenum,
     // Write each sector
     for (cursect = 0; cursect < sectcount; cursect++) {
         // Copy from memory to sector buffer
-        memcpy(sectorbuffer, disk_mem + memdest, 512);
+        phys_memcpy_from_512(sectorbuffer, memdest);
         memdest += 512;
 
         // Write the buffer to the file
@@ -294,7 +295,6 @@ void diskhandler(CPUI386 *cpu) {
     static uint8_t lastdiskah[5] = { 0 }, lastdiskcf[5] = { 0 };
 
     disk_cpu = cpu;
-    disk_mem = cpu_get_phys_mem(cpu);
 
     uint8_t drivenum = cpu_get_dl(cpu);
 
@@ -382,7 +382,7 @@ void diskhandler(CPUI386 *cpu) {
 
     // Set the last status in BIOS Data Area (for hard drives)
     if (cpu_get_dl(cpu) & 0x80) {
-        disk_mem[0x474] = cpu_get_ah(cpu);
+        put_phys_mem8(0x474, cpu_get_ah(cpu));
     }
 }
 

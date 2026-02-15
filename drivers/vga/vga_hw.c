@@ -109,9 +109,9 @@ static volatile int in_vblank = 0;         // Set by IRQ during vblank
 // Mode X (320x400) not supported - would need 128KB
 #define GFX_BUFFER_SIZE (112 * 1024)
 static uint8_t gfx_buffer_a[GFX_BUFFER_SIZE] __attribute__((aligned(4)));
-static uint8_t gfx_buffer_b[GFX_BUFFER_SIZE] __attribute__((aligned(4)));
+//static uint8_t gfx_buffer_b[GFX_BUFFER_SIZE] __attribute__((aligned(4)));
 static uint8_t * volatile gfx_display_buffer = gfx_buffer_a;  // ISR reads from this
-static uint8_t *gfx_write_buffer = gfx_buffer_b;    // Main loop writes to this
+static uint8_t *gfx_write_buffer = gfx_buffer_a;    // Main loop writes to this
 static volatile int gfx_write_done = 0;  // Set when write buffer has new frame
 static volatile int gfx_copy_allowed = 0;  // Set during vblank to allow copy
 
@@ -640,9 +640,9 @@ static void __isr __time_critical_func(dma_handler_vga)(void) {
             frame_pixel_panning = pixel_panning;
             frame_line_compare = line_compare;
 
-            uint8_t *tmp = gfx_display_buffer;
-            gfx_display_buffer = gfx_write_buffer;
-            gfx_write_buffer = tmp;
+        ///    uint8_t *tmp = gfx_display_buffer;
+        ///    gfx_display_buffer = gfx_write_buffer;
+        ///    gfx_write_buffer = tmp;
             gfx_write_done = 0;
         }
 

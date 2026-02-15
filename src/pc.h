@@ -23,7 +23,7 @@
 uint32_t get_uticks();
 void *pcmalloc(long size);
 void *bigmalloc(size_t size);
-int load_rom(void *phys_mem, const char *file, uword addr, int backward);
+int load_rom(const char *file, uword addr, int backward);
 
 /// PC
 #ifdef USEKVM
@@ -40,7 +40,6 @@ typedef struct {
 	U8250 *serial;
 	CMOS *cmos;
 	VGAState *vga;
-	char *phys_mem;
 	long phys_mem_size;
 	char *vga_mem;
 	int vga_mem_size;

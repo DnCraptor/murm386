@@ -35,8 +35,6 @@ typedef struct {
 	void (*io_write16)(void *, int, u16);
 	u32 (*io_read32)(void *, int);
 	void (*io_write32)(void *, int, u32);
-	int (*io_read_string)(void *, int, uint8_t *, int, int);
-	int (*io_write_string)(void *, int, uint8_t *, int, int);
 
 	void *iomem;
 	u8 (*iomem_read8)(void *, uword);
@@ -45,7 +43,7 @@ typedef struct {
 	void (*iomem_write16)(void *, uword, u16);
 	u32 (*iomem_read32)(void *, uword);
 	void (*iomem_write32)(void *, uword, u32);
-	bool (*iomem_write_string)(void *, uword, uint8_t *, int);
+	bool (*iomem_write_string)(void *, uword, u32, int);
 } CPU_CB;
 
 /* TLB entry structure */
@@ -115,7 +113,6 @@ struct CPUI386 {
 		struct tlb_entry *tab;
 	} tlb;
 
-	u8 *phys_mem;
 	long phys_mem_size;
 
 	long cycle;
@@ -138,7 +135,7 @@ struct CPUI386 {
 
 typedef struct CPUI386 CPUI386;
 
-CPUI386 *cpui386_new(int gen, char *phys_mem, long phys_mem_size, CPU_CB **cb);
+CPUI386 *cpui386_new(int gen, long phys_mem_size, CPU_CB **cb);
 void cpui386_delete(CPUI386 *cpu);
 void cpui386_enable_fpu(CPUI386 *cpu);
 void cpui386_reset(CPUI386 *cpu);
@@ -192,7 +189,6 @@ void cpu_set_dx(CPUI386 *cpu, u16 val);
 void cpu_set_cf(CPUI386 *cpu, int val);
 int cpu_get_cf(CPUI386 *cpu);
 // Physical memory access
-u8 *cpu_get_phys_mem(CPUI386 *cpu);
 long cpu_get_phys_mem_size(CPUI386 *cpu);
 
 // INT 13h disk handler callback
@@ -204,5 +200,13 @@ void cpu_set_int13_handler(CPUI386 *cpu, int13_handler_t handler, void *opaque);
 void i386_profile_dump(void);
 void i386_profile_reset(void);
 #endif
+
+#define FAST_MEM_SIZE (148ul << 10)
+extern u8 sram_mem[FAST_MEM_SIZE];
+extern u8* psram_mem;
+inline u8 get_phys_mem8(u32 addr) { return (addr < FAST_MEM_SIZE ? sram_mem : psram_mem)[addr]; }
+inline void put_phys_mem8(u32 addr, u8 v) { (addr < FAST_MEM_SIZE ? sram_mem : psram_mem)[addr] = v; }
+void phys_memcpy_to_512(u32 addr, const u8* src);
+void phys_memcpy_from_512(u8* dst, u32 addr);
 
 #endif /* I386_H */
