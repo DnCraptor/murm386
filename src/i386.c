@@ -7769,9 +7769,11 @@ void cpui386_get_state(CPUI386 *cpu, uint32_t *cs, uint32_t *ip, int *halt)
 	*halt = cpu->halt ? 1 : 0;
 }
 
+static CPUI386* TheCPU = 0;
 CPUI386 *cpui386_new(int gen, long phys_mem_size, CPU_CB **cb)
 {
 	CPUI386 *cpu = malloc(sizeof(CPUI386));
+	TheCPU = cpu;
 	switch (gen) {
 	case 3: cpu->flags_mask = EFLAGS_MASK_386; break;
 	case 4: cpu->flags_mask = EFLAGS_MASK_486; break;
@@ -7938,7 +7940,6 @@ void cpu_set_int13_handler(CPUI386 *cpu, int13_handler_t handler, void *opaque)
 	cpu->int13_opaque = opaque;
 }
 
-
 inline static void memcpy32(u32* dst, const u32* src, u32 cnt) {
 	while(cnt--) {
 		*dst++ = *src++;
@@ -7950,53 +7951,114 @@ extern u8 sram_mem[FAST_MEM_SIZE];
 extern u8 idx_by_phys_page[MAX_PHYS_PAGES];
 extern u32 phys_page_by_idx[FAST_MEM_PAGES];
 static u8 last_idx = 0; // rollout idx
-u8* IRAM_ATTR get_page4r(u32 addr) {
-	register u32 phys_page = addr >> FAST_MEM_PAGE_SHIFT;
-	if (!phys_page) return sram_mem; // zero page is unreloadable (persistent)
-	register u8 idx = idx_by_phys_page[phys_page];
-	if (!idx) {
-		static u8 last_idx = 0; // rollout idx
-		++last_idx;
-		if (last_idx >= FAST_MEM_PAGES) last_idx = 1; // zero page is resistent
-		register u8* sram = sram_mem + FAST_MEM_PAGE_SIZE * last_idx;
-		{ // unload prev. page from sram to psram
-			u32 old_phys_page = phys_page_by_idx[last_idx];
-			if (old_phys_page & 0x80000000) { // marked as dirty
-				memcpy32((u32*)(psram_mem + (old_phys_page << FAST_MEM_PAGE_SHIFT)), (u32*)sram, FAST_MEM_PAGE_SIZE32);
-			}
-			idx_by_phys_page[old_phys_page & ~0x80000000] = 0;
-		}
-		// load new page from psram to sram
-		memcpy32((u32*)sram, (u32*)(psram_mem + (phys_page << FAST_MEM_PAGE_SHIFT)), FAST_MEM_PAGE_SIZE32);
-		phys_page_by_idx[last_idx] = phys_page;
-		idx_by_phys_page[phys_page] = last_idx;
-		return sram;
-	}
-	return sram_mem + FAST_MEM_PAGE_SIZE * idx;
+
+static inline u32 cpu_esp_linear() {
+#ifdef I386_OPT1
+    u32 esp = TheCPU->gprx[4].r32;
+#else
+    u32 esp = (u32)cpu->gpr[4];
+#endif
+    esp &= (u32)TheCPU->sp_mask;
+    return (u32)(TheCPU->seg[SEG_SS].base + (uword)esp);
 }
-u8* IRAM_ATTR get_page4w(u32 addr) {
-	register u32 phys_page = addr >> FAST_MEM_PAGE_SHIFT;
-	if (!phys_page) return sram_mem; // zero page is unreloadable (persistent)
-	register u8 idx = idx_by_phys_page[phys_page];
-	if (!idx) {
-		++last_idx;
-		if (last_idx >= FAST_MEM_PAGES) last_idx = 1; // zero page is resistent
-		register u8* sram = sram_mem + FAST_MEM_PAGE_SIZE * last_idx;
-		{ // unload prev. page from sram to psram
-			u32 old_phys_page = phys_page_by_idx[last_idx];
-			if (old_phys_page & 0x80000000) { // marked as dirty
-				memcpy32((u32*)(psram_mem + (old_phys_page << FAST_MEM_PAGE_SHIFT)), (u32*)sram, FAST_MEM_PAGE_SIZE32);
-			}
-			idx_by_phys_page[old_phys_page & ~0x80000000] = 0;
-		}
-		// load new page from psram to sram
-		memcpy32((u32*)sram, (u32*)(psram_mem + (phys_page << FAST_MEM_PAGE_SHIFT)), FAST_MEM_PAGE_SIZE32);
-		phys_page_by_idx[last_idx] = phys_page | 0x80000000; // with dirty mark
-		idx_by_phys_page[phys_page] = last_idx;
-		return sram;
-	}
-	phys_page_by_idx[idx] |= 0x80000000; // dirty mark
-	return sram_mem + FAST_MEM_PAGE_SIZE * idx;
+
+static inline u32 cpu_seg_linear(int seg, u32 off)
+{
+    return (u32)(TheCPU->seg[seg].base + off);
+}
+
+static inline u32 cpu_eip_linear() {
+    return (u32)(TheCPU->seg[SEG_CS].base + TheCPU->next_ip);
+}
+
+
+static inline u8* refill_page(u32 phys_page, u32 mark_dirty)
+{
+    // вычислим защищённые phys_page (только если paging OFF)
+    u32 prot1 = 0xffffffffu;
+    u32 prot2 = 0xffffffffu;
+    u32 prot3 = 0xffffffffu;
+    u32 prot4 = 0xffffffffu;
+
+    if (!(TheCPU->cr0 & CR0_PG)) {
+        prot1 = cpu_esp_linear() >> FAST_MEM_PAGE_SHIFT;
+        prot2 = cpu_eip_linear() >> FAST_MEM_PAGE_SHIFT;
+#ifdef I386_OPT1
+        prot3 = cpu_seg_linear(SEG_DS, TheCPU->gprx[0].r32) >> FAST_MEM_PAGE_SHIFT;
+        prot4 = cpu_seg_linear(SEG_ES, TheCPU->gprx[7].r32) >> FAST_MEM_PAGE_SHIFT;
+#endif
+    }
+
+    // найдём victim-слот, который не совпадает с prot1/prot2
+    for (u32 tries = 0; tries < (FAST_MEM_PAGES - 1); ++tries) {
+        ++last_idx;
+        if (last_idx >= FAST_MEM_PAGES) last_idx = 1;
+
+        u32 old = phys_page_by_idx[last_idx];
+        register u32 old_page = old & 0x7fffffff;
+
+        // пустой слот — идеально
+        if (old_page == 0)
+            break;
+
+        // пропускаем защищённые страницы (стек/код)
+        if (old_page == prot1 || old_page == prot2 || old_page == prot3 || old_page == prot4)
+            continue;
+
+        break;
+    }
+
+    u8* sram = sram_mem + FAST_MEM_PAGE_SIZE * last_idx;
+
+    // --- eviction ---
+    u32 old = phys_page_by_idx[last_idx];
+    u32 old_page = old & 0x7fffffff;
+
+    if (old_page) {
+        if (old & 0x80000000) {
+            memcpy32((u32*)(psram_mem + (old_page << FAST_MEM_PAGE_SHIFT)),
+                     (u32*)sram,
+                     FAST_MEM_PAGE_SIZE32);
+        }
+        idx_by_phys_page[old_page] = 0;
+    }
+
+    // --- load ---
+    memcpy32((u32*)sram,
+             (u32*)(psram_mem + (phys_page << FAST_MEM_PAGE_SHIFT)),
+             FAST_MEM_PAGE_SIZE32);
+
+    phys_page_by_idx[last_idx] = phys_page | mark_dirty;
+    idx_by_phys_page[phys_page] = (u8)last_idx;
+
+    return sram;
+}
+
+u8* IRAM_ATTR get_page4r(u32 addr)
+{
+    u32 phys_page = addr >> FAST_MEM_PAGE_SHIFT;
+    if (!phys_page)
+        return sram_mem;
+
+    u8 idx = idx_by_phys_page[phys_page];
+    if (idx)
+        return sram_mem + FAST_MEM_PAGE_SIZE * idx;
+
+    return refill_page(phys_page, 0);
+}
+u8* IRAM_ATTR get_page4w(u32 addr)
+{
+    u32 phys_page = addr >> FAST_MEM_PAGE_SHIFT;
+    if (!phys_page)
+        return sram_mem;
+
+    u8 idx = idx_by_phys_page[phys_page];
+    if (idx) {
+        phys_page_by_idx[idx] |= 0x80000000; // dirty
+        return sram_mem + FAST_MEM_PAGE_SIZE * idx;
+    }
+
+    return refill_page(phys_page, 0x80000000);
 }
 
 void phys_memcpy_to_512(u32 addr, const u8* src)
