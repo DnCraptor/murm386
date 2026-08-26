@@ -880,7 +880,7 @@ rebuild_dpb:
 /*
 DOS 1+ - main DOS handler
 */
-bool fdos_21h(CPU* _cpu) {
+bool __hfa_func(fdos_21h)(CPU* _cpu) {
     COUNT rc;
     UWORD entry_ss, entry_sp;
     UWORD entry_ip, entry_cs;
