@@ -115,10 +115,7 @@ struct SB16State {
     int bytes_per_second;
     int align;
     int audio_free;
-/* PCM ring depth.  A blocking SD-card read on core0 stalls the guest DMA
- * that refills this buffer; a deeper ring survives typical multi-ms card
- * stalls (clicks while streaming audio / loading levels). */
-#define AUDIO_BUF_LEN 8192
+#define AUDIO_BUF_LEN 4096
     uint8_t audio_buf[AUDIO_BUF_LEN];
     unsigned int audio_p, audio_q;
     void *voice;

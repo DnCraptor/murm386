@@ -362,7 +362,7 @@ bool __not_in_flash_func(timer_callback)(repeating_timer_t *rt) {
 }
 
 // to call DMA-wait not from ISR for timer
-void __not_in_flash_func(repeat_me_often)(void) {
+bool __not_in_flash_func(repeat_me_often)(void) {
     #if FEATURE_AUDIO_I2S
         i2s_dma_write(&i2s_config, samples);
     #endif

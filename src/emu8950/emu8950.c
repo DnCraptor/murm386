@@ -624,21 +624,10 @@ static INLINE void update_key_status(OPL *opl) {
     }
 #endif
 
-    /*
-     * In OPL rhythm mode channels 6/7/8 are driven by the percussion key
-     * bits in reg 0xBD, not by their melodic B6/B7/B8 key bits.  A stale
-     * melodic key bit on one of those channels must therefore not keep the
-     * voice sounding, otherwise a percussion-mode tune leaves a droning
-     * voice on ch6/7/8 whose pitch follows the bass-drum / tom fnumber
-     * (observed on Prince of Persia).  Key only the purely melodic channels
-     * while rhythm mode is active.
-     */
-    const int melodic_channels = perc_mode ? 6 : 9;
-    for (ch = 0; ch < melodic_channels; ch++)
+    for (ch = 0; ch < 9; ch++)
         if (opl->reg[0xB0 + ch] & 0x20)
             new_slot_key_status |= 3 << (ch * 2);
 
-#if !EMU8950_NO_PERCUSSION_MODE
     if (perc_mode) {
         if (r14 & 0x10)
             new_slot_key_status |= 3 << SLOT_BD1;
@@ -655,7 +644,6 @@ static INLINE void update_key_status(OPL *opl) {
         if (r14 & 0x02)
             new_slot_key_status |= 1 << SLOT_CYM;
     }
-#endif
 
     updated_status = opl->slot_key_status ^ new_slot_key_status;
 
