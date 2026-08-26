@@ -33,6 +33,7 @@
 #include <assert.h>
 
 #include "vga.h"
+#include "codeprofile.h"
 #include "pci.h"
 
 #ifdef BUILD_ESP32
@@ -52,7 +53,7 @@ void *pcmalloc(long size);
 #define pcmalloc malloc
 #endif
 
-static int after_eq(uint32_t a, uint32_t b)
+inline static int after_eq(uint32_t a, uint32_t b)
 {
     return (a - b) < (1u << 31);
 }
@@ -273,6 +274,8 @@ static int update_palette256(VGAState *s, uint32_t *palette)
     full_update = 0;
     v = 0;
     for(i = 0; i < 256; i++) {
+        int pi = i & s->pel_mask;
+        v = pi * 3;
         if (s->dac_8bit) {
           col = rgb_to_pixel(s->palette[v],
                              s->palette[v + 1],
@@ -286,7 +289,6 @@ static int update_palette256(VGAState *s, uint32_t *palette)
             full_update = 1;
             palette[i] = col;
         }
-        v += 3;
     }
     return full_update;
 }
@@ -303,6 +305,7 @@ static int update_palette16(VGAState *s, uint32_t *palette)
             v = ((s->ar[0x14] & 0xf) << 4) | (v & 0xf);
         else
             v = ((s->ar[0x14] & 0xc) << 4) | (v & 0x3f);
+        v &= s->pel_mask;
         v = v * 3;
         col = (c6_to_8(s->palette[v]) << 16) |
             (c6_to_8(s->palette[v + 1]) << 8) |
@@ -323,6 +326,8 @@ static int update_palette256(VGAState *s, uint32_t *palette)
     full_update = 0;
     v = 0;
     for(i = 0; i < 256; i++) {
+        int pi = i & s->pel_mask;
+        v = pi * 3;
         if (s->dac_8bit) {
             col = ((s->palette[v + 2] >> 3)) |
                 ((s->palette[v + 1] >> 2) << 5) |
@@ -336,7 +341,6 @@ static int update_palette256(VGAState *s, uint32_t *palette)
             full_update = 1;
             palette[i] = col;
         }
-        v += 3;
     }
     return full_update;
 }
@@ -353,6 +357,7 @@ static int update_palette16(VGAState *s, uint32_t *palette)
             v = ((s->ar[0x14] & 0xf) << 4) | (v & 0xf);
         else
             v = ((s->ar[0x14] & 0xc) << 4) | (v & 0x3f);
+        v &= s->pel_mask;
         v = v * 3;
         col = (s->palette[v + 2] >> 1) |
               ((s->palette[v + 1]) << 5) |
@@ -425,9 +430,79 @@ static int update_palette16(VGAState *s, uint32_t *palette)
 /* VGA graphics controller bit masks */
 #define VGA_GR06_GRAPHICS_MODE  0x01
 
+/* Physical VRAM size is a build-time property. Mask only after the VGA
+ * address translation has produced an offset into the backing array. */
+#if defined(MCGA)
+#define VGA_PHYS_ADDR_MASK 0x0ffffu
+#elif defined(EGA128) || defined(VGA128)
+#define VGA_PHYS_ADDR_MASK 0x1ffffu
+#else
+#define VGA_PHYS_ADDR_MASK 0x3ffffu
+#endif
+
+static inline uint32_t __attribute__((always_inline)) vga_phys_offset(uint32_t addr)
+{
+    return addr & VGA_PHYS_ADDR_MASK;
+}
+
+static inline uint32_t __attribute__((always_inline)) vga_plane_word_offset(uint32_t addr)
+{
+    return addr & (VGA_PHYS_ADDR_MASK >> 2);
+}
+
+static inline void __attribute__((always_inline))
+vga_phys_write16(uint8_t *vram, uint32_t addr, uint16_t val)
+{
+    addr = vga_phys_offset(addr);
+    if (addr != VGA_PHYS_ADDR_MASK) {
+        *(uint16_t *)(vram + addr) = val;
+    } else {
+        vram[addr] = (uint8_t)val;
+        vram[0] = (uint8_t)(val >> 8);
+    }
+}
+
+static inline void __attribute__((always_inline))
+vga_phys_write32(uint8_t *vram, uint32_t addr, uint32_t val)
+{
+    addr = vga_phys_offset(addr);
+    if (addr <= VGA_PHYS_ADDR_MASK - 3u) {
+        *(uint32_t *)(vram + addr) = val;
+    } else {
+        vram[addr] = (uint8_t)val;
+        vram[vga_phys_offset(addr + 1u)] = (uint8_t)(val >> 8);
+        vram[vga_phys_offset(addr + 2u)] = (uint8_t)(val >> 16);
+        vram[vga_phys_offset(addr + 3u)] = (uint8_t)(val >> 24);
+    }
+}
+
+void *__not_in_flash_func(dos_api_memcpy)(void *dst,
+                                          const void *src,
+                                          size_t len);
+
+static inline void vga_phys_memcpy(uint8_t *vram, uint32_t addr,
+                                   const uint8_t *src, size_t len)
+{
+    while (len) {
+        addr = vga_phys_offset(addr);
+        size_t chunk = (size_t)VGA_PHYS_ADDR_MASK + 1u - addr;
+        if (chunk > len)
+            chunk = len;
+        dos_api_memcpy(vram + addr, src, chunk);
+        addr += (uint32_t)chunk;
+        src += chunk;
+        len -= chunk;
+    }
+}
+
 static bool vbe_enabled(VGAState *s)
 {
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+    (void)s;
+    return false;
+#else
     return s->vbe_regs[VBE_DISPI_INDEX_ENABLE] & VBE_DISPI_ENABLED;
+#endif
 }
 
 /*
@@ -574,7 +649,7 @@ static void vga_text_refresh(VGAState *s,
     uint32_t fgcol, bgcol, cursor_offset, cursor_start, cursor_end;
     uint32_t now = get_uticks();
     if (after_eq(now, s->cursor_blink_time)) {
-        s->cursor_blink_time = now + 266666;
+        s->cursor_blink_time = now + 133333;
         s->cursor_visible_phase = !s->cursor_visible_phase;
     }
 
@@ -1119,7 +1194,7 @@ static int __not_in_flash_func(vga_update_retrace)(VGAState *s)
     return ret;
 }
 
-int __not_in_flash_func(vga_step)(VGAState *s)
+int __scratch_x("vga_step") vga_step(VGAState *s)
 {
 #ifdef RP2350_BUILD
     /* On RP2350, the DMA ISR in vga_hw.c updates st01 on every scanline
@@ -1223,6 +1298,10 @@ uint32_t __not_in_flash_func(vga_ioport_read)(VGAState *s, uint32_t addr)
      * Some games (like Goblins) poll 0x3BA for vertical retrace even in color mode.
      * Update retrace status on each read so tight polling loops see changes. */
     if (addr == 0x3ba || addr == 0x3da) {
+#ifdef MCGA
+        // W/A for [M]CGA "snow suppress" way (TODO: may be required to make it smarter)
+        s->st01 ^= ST01_DISP_ENABLE;
+#endif
         /* st01 is updated by the VGA ISR on every scanline — just return it.
          * Wolf3D polling this port sees exact hardware vblank timing. */
         val = s->st01;
@@ -1264,6 +1343,9 @@ uint32_t __not_in_flash_func(vga_ioport_read)(VGAState *s, uint32_t addr)
             break;
         case 0x3c7:
             val = s->dac_state;
+            break;
+        case 0x3c6:
+            val = s->pel_mask;
             break;
         case 0x3c8:
             val = s->dac_write_index;
@@ -1375,6 +1457,10 @@ void __not_in_flash_func(vga_ioport_write)(VGAState *s, uint32_t addr, uint32_t 
 #endif
         s->sr[s->sr_index] = val & sr_mask[s->sr_index];
         break;
+    case 0x3c6:
+        s->pel_mask = val;
+        s->palette_dirty = 1;
+        break;
     case 0x3c7:
         s->dac_read_index = val;
         s->dac_sub_index = 0;
@@ -1450,6 +1536,10 @@ static void vga_write_ ## base(void *opaque, uint32_t addr, uint32_t val, int si
 
 void vbe_write(VGAState *s, uint32_t offset, uint32_t val)
 {
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+    if (offset != 0)
+        return;
+#endif
     if (offset == 0) {
         s->vbe_index = val;
     } else {
@@ -1611,6 +1701,7 @@ static const uint32_t mask16[16] __not_in_flash("mask16") = {
 //#define TARGET_FMT_plx "%x"
 void IRAM_ATTR vga_mem_write16(VGAState *s, uint32_t addr, uint16_t val16)
 {
+	cp_vga_write();
     if (!(s->sr[VGA_SEQ_MEMORY_MODE] & VGA_SR04_CHN_4M)) {
         vga_mem_write(s, addr, val16);
         vga_mem_write(s, addr + 1, val16 >> 8);
@@ -1651,12 +1742,13 @@ void IRAM_ATTR vga_mem_write16(VGAState *s, uint32_t addr, uint16_t val16)
     plane = addr & 3;
     mask = (1 << plane);
     if (s->sr[VGA_SEQ_PLANE_WRITE] & mask) {
-        * (uint16_t *) &(s->vga_ram[addr]) = val;
+        vga_phys_write16(s->vga_ram, addr, (uint16_t)val);
     }
 }
 
 void IRAM_ATTR vga_mem_write32(VGAState *s, uint32_t addr, uint32_t val)
 {
+	cp_vga_write();
     if (!(s->sr[VGA_SEQ_MEMORY_MODE] & VGA_SR04_CHN_4M)) {
         vga_mem_write(s, addr, val);
         vga_mem_write(s, addr + 1, val >> 8);
@@ -1698,7 +1790,7 @@ void IRAM_ATTR vga_mem_write32(VGAState *s, uint32_t addr, uint32_t val)
     plane = addr & 3;
     mask = (1 << plane);
     if (s->sr[VGA_SEQ_PLANE_WRITE] & mask) {
-        * (uint32_t *) &(s->vga_ram[addr]) = val;
+        vga_phys_write32(s->vga_ram, addr, val);
     }
 }
 
@@ -1741,14 +1833,32 @@ bool IRAM_ATTR vga_mem_write_string(VGAState *s, uint32_t addr, uint8_t *buf, in
     plane = addr & 3;
     mask = (1 << plane);
     if (s->sr[VGA_SEQ_PLANE_WRITE] & mask) {
-        memcpy(s->vga_ram + addr, buf, len);
+        vga_phys_memcpy(s->vga_ram, addr, buf, (size_t)len);
         return true;
     }
     return false;
 }
 
-void IRAM_ATTR vga_mem_write(VGAState *s, uint32_t addr, uint8_t val8)
+#if defined(VGA128) || defined(MCGA)
+static inline bool reduced_linear_mono_access(const VGAState *s)
 {
+    int w = (s->cr[0x01] + 1) * 8;
+    int h = s->cr[0x12] |
+            ((s->cr[0x07] & 0x02) << 7) |
+            ((s->cr[0x07] & 0x40) << 3);
+    h++;
+
+    return w >= 640 && h >= 480 &&
+           !(s->sr[VGA_SEQ_MEMORY_MODE] & VGA_SR04_CHN_4M) &&
+           !(s->gr[VGA_GFX_MODE] & 0x10) &&
+           s->sr[VGA_SEQ_PLANE_WRITE] == 0x01 &&
+           ((s->gr[VGA_GFX_MISC] >> 2) & 3) == 1;
+}
+#endif
+
+void __not_in_flash("vga_mem_write") vga_mem_write(VGAState *s, uint32_t addr, uint8_t val8)
+{
+	cp_vga_write();
     uint32_t val = val8;
 
     int memory_map_mode, plane, write_mode, b, func_select, mask;
@@ -1781,12 +1891,19 @@ void IRAM_ATTR vga_mem_write(VGAState *s, uint32_t addr, uint8_t val8)
         break;
     }
 
+#if defined(VGA128) || defined(MCGA)
+    if (reduced_linear_mono_access(s)) {
+        s->vga_ram[vga_phys_offset(addr)] = (uint8_t)val;
+        return;
+    }
+#endif
+
     if (s->sr[VGA_SEQ_MEMORY_MODE] & VGA_SR04_CHN_4M) {
         /* chain 4 mode : simplest access */
         plane = addr & 3;
         mask = (1 << plane);
         if (s->sr[VGA_SEQ_PLANE_WRITE] & mask) {
-            s->vga_ram[addr] = val;
+            s->vga_ram[vga_phys_offset(addr)] = val;
 #ifdef DEBUG_VGA_MEM
             printf("vga: chain4: [0x" TARGET_FMT_plx "]\n", addr);
 #endif
@@ -1799,9 +1916,7 @@ void IRAM_ATTR vga_mem_write(VGAState *s, uint32_t addr, uint8_t val8)
         mask = (1 << plane);
         if (s->sr[VGA_SEQ_PLANE_WRITE] & mask) {
             addr = ((addr & ~1) << 1) | plane;
-            if (addr >= s->vga_ram_size) {
-                return;
-            }
+            addr = vga_phys_offset(addr);
             s->vga_ram[addr] = val;
 #ifdef DEBUG_VGA_MEM
             printf("vga: odd/even: [0x" TARGET_FMT_plx "]\n", addr);
@@ -1875,9 +1990,7 @@ void IRAM_ATTR vga_mem_write(VGAState *s, uint32_t addr, uint8_t val8)
         mask = s->sr[VGA_SEQ_PLANE_WRITE];
 //        s->plane_updated |= mask; /* only used to detect font change */
         write_mask = mask16[mask];
-        if (addr * sizeof(uint32_t) >= s->vga_ram_size) {
-            return;
-        }
+        addr = vga_plane_word_offset(addr);
         ((uint32_t *)s->vga_ram)[addr] =
             (((uint32_t *)s->vga_ram)[addr] & ~write_mask) |
             (val & write_mask);
@@ -1891,6 +2004,7 @@ void IRAM_ATTR vga_mem_write(VGAState *s, uint32_t addr, uint8_t val8)
 
 uint8_t __not_in_flash_func(vga_mem_read)(VGAState *s, uint32_t addr)
 {
+	cp_vga_read();
     int memory_map_mode, plane;
     uint32_t ret;
 
@@ -1918,23 +2032,25 @@ uint8_t __not_in_flash_func(vga_mem_read)(VGAState *s, uint32_t addr)
         break;
     }
 
+#if defined(VGA128) || defined(MCGA)
+    if (reduced_linear_mono_access(s)) {
+        return s->vga_ram[vga_phys_offset(addr)];
+    }
+#endif
+
     if (s->sr[VGA_SEQ_MEMORY_MODE] & VGA_SR04_CHN_4M) {
         /* chain 4 mode : simplest access */
 //        assert(addr < s->vram_size);
-        ret = s->vga_ram[addr];
+        ret = s->vga_ram[vga_phys_offset(addr)];
     } else if (s->gr[VGA_GFX_MODE] & 0x10) {
         /* odd/even mode (aka text mode mapping) */
         plane = (s->gr[VGA_GFX_PLANE_READ] & 2) | (addr & 1);
         addr = ((addr & ~1) << 1) | plane;
-        if (addr >= s->vga_ram_size) { // s->vram_size) {
-            return 0xff;
-        }
+        addr = vga_phys_offset(addr);
         ret = s->vga_ram[addr];
     } else {
         /* standard VGA latched access */
-        if (addr * sizeof(uint32_t) >= s->vga_ram_size) {//s->vram_size) {
-            return 0xff;
-        }
+        addr = vga_plane_word_offset(addr);
         s->latch = ((uint32_t *)s->vga_ram)[addr];
 
         if (!(s->gr[VGA_GFX_MODE] & 0x08)) {
@@ -2309,6 +2425,7 @@ static void vga_initmode(VGAState *s)
     for (int i = 0; i < 64*3; i++)
         s->palette[i] = pal_ega[i];
     s->palette_dirty = 1;
+    s->pel_mask = 0xFF;
 
     for (int i = 0; i <= 0x13; i++)
         s->ar[i] = actl[i];
@@ -2357,7 +2474,7 @@ int __time_critical_func(vga_get_text_cols)(VGAState *s) {
 }
 
 /* Get current VGA mode: 0=blank, 1=text, 2=graphics */
-int __time_critical_func(vga_get_mode)(VGAState *s)
+int __not_in_flash("vga_get_mode") vga_get_mode(VGAState *s)
 {
     if (!(s->ar_index & 0x20)) {
         return 0;  // blank
@@ -2450,7 +2567,8 @@ void __time_critical_func(vga_get_palette16)(VGAState *s, uint8_t *palette16)
 
 /* Get detailed graphics mode information for hardware rendering
  * Returns: 0=text, 1=CGA 4-color, 2=EGA 16-color, 3=VGA 256-color (mode 13h),
- *          4=CGA 2-color, 5=Mode X (VGA 256-color planar unchained)
+ *          4=CGA 2-color, 5=Mode X (VGA 256-color planar unchained),
+ *          7=VBE packed 8bpp, 8=VGA/MCGA 640x480x2
  * Also fills in width, height if pointers are non-NULL
  */
 int __time_critical_func(vga_get_graphics_mode)(VGAState *s, int *width, int *height)
@@ -2464,6 +2582,15 @@ int __time_critical_func(vga_get_graphics_mode)(VGAState *s, int *width, int *he
     if (!(s->gr[0x06] & 1)) {
         return 0;  // text mode
     }
+
+#if !defined(EGA128) && !defined(VGA128) && !defined(MCGA)
+    // Minimal hardware-renderer fast path for banked VBE packed 8bpp.
+    if (vbe_enabled(s) && s->vbe_regs[VBE_DISPI_INDEX_BPP] == 8) {
+        if (width)  *width  = s->vbe_regs[VBE_DISPI_INDEX_XRES];
+        if (height) *height = s->vbe_regs[VBE_DISPI_INDEX_YRES];
+        return 7;
+    }
+#endif
 
     // Get shift_control to determine graphics mode type
     int shift_control = (s->gr[0x05] >> 5) & 3;
@@ -2501,13 +2628,18 @@ int __time_critical_func(vga_get_graphics_mode)(VGAState *s, int *width, int *he
     //   VL_DePlaneVGA: SR[4] = (old & ~8) | 4  →  chain4=0 (bit3), seq=1 (bit2)
     // -----------------------------------------------------------------------
     int rv;
+#if !defined(EGA128) && !defined(MCGA)
     if (!(s->sr[VGA_SEQ_MEMORY_MODE] & VGA_SR04_CHN_4M) &&   /* chain4 OFF */
          (s->sr[VGA_SEQ_MEMORY_MODE] & VGA_SR04_SEQ_MODE) &&  /* sequential ON */
          (s->ar[0x10] & 0x40) &&                               /* 8-bit DAC color */
          w == 320) {
         rv = 5;  // Mode X
-    } else if (shift_control == 0) {
-        if ((s->gr[0x06] & 0x0C) == 0x0C && w >= 640)
+    } else
+#endif
+    if (shift_control == 0) {
+        if (s->sr[VGA_SEQ_PLANE_WRITE] == 0x01 && w >= 640 && h >= 480)
+            rv = 8;  // VGA/MCGA mode 11h: packed one-plane monochrome
+        else if ((s->gr[0x06] & 0x0C) == 0x0C && w >= 640)
             rv = 4;  // CGA 2-color
         else if (!(s->cr[0x17] & 0x01) && w >= 640)
             rv = 4;  // CGA 2-color
@@ -2550,11 +2682,11 @@ bool __not_in_flash_func(vga_in_retrace)(VGAState *s)
 /* Get cursor blink phase (1 = visible, 0 = hidden during blink)
  * Also updates the blink state based on time for hardware VGA drivers
  * that don't use vga_display_update_text */
-int vga_get_cursor_blink_phase(VGAState *s)
+int __time_critical_func(vga_get_cursor_blink_phase)(VGAState *s)
 {
     uint32_t now = get_uticks();
     if (after_eq(now, s->cursor_blink_time)) {
-        s->cursor_blink_time = now + 266666;  // ~3.75 Hz blink rate
+        s->cursor_blink_time = now + 133333;  // ~3.75 Hz blink rate
         s->cursor_visible_phase = !s->cursor_visible_phase;
     }
     return s->cursor_visible_phase;

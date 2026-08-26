@@ -1,5 +1,5 @@
 /**
- * murm386 - i386 PC Emulator for RP2350
+ * frank-386 - i386 PC Emulator for RP2350
  *
  * Board Configuration - supports M1 and M2 board variants with
  * different GPIO layouts for VGA, SD card, PS/2, and I2S audio.
@@ -10,6 +10,8 @@
 
 #ifndef BOARD_CONFIG_H
 #define BOARD_CONFIG_H
+
+//#define DIAG 1
 
 #include "hardware/structs/sysinfo.h"
 #include "hardware/vreg.h"
@@ -43,8 +45,23 @@
  */
 
 // Default to M1 if no config specified
-#if !defined(BOARD_M1) && !defined(BOARD_M2) && !defined(BOARD_PC) && !defined(BOARD_Z2)
+#if !defined(BOARD_M1) && !defined(BOARD_M2) && !defined(BOARD_PC) && \
+    !defined(BOARD_Z2) && !defined(BOARD_C2)
 #define BOARD_M1
+#endif
+
+/*
+ * Input capability flags.
+ *
+ * Every board except C2 has a PS/2 keyboard and mouse header. C2 has no
+ * PS/2 at all — GPIO0/1 are the debug UART (J2) and GPIO2/3 are unrouted
+ * — so USB HID is the only input path there. Code that touches the PS/2
+ * driver is guarded on BOARD_HAS_PS2 rather than on the board name, so
+ * adding a future PS/2-less board does not mean revisiting every call
+ * site again.
+ */
+#ifndef BOARD_C2
+#define BOARD_HAS_PS2 1
 #endif
 
 //=============================================================================
@@ -72,9 +89,13 @@
 
 // PSRAM pin for RP2350A variants
 #ifdef BOARD_M1
-#define PSRAM_PIN_RP2350A 19
+    #define PSRAM_PIN_RP2350A 19
 #else
-#define PSRAM_PIN_RP2350A 8
+    #ifdef BOARD_Z2 // no RP2350A option, GP47 only
+        #define PSRAM_PIN_RP2350A 47
+    #else // M2 / C2
+        #define PSRAM_PIN_RP2350A 8
+    #endif
 #endif
 
 // PSRAM pin for RP2350B (always GPIO47)
@@ -90,7 +111,9 @@
 
 // Aliases for compatibility with psram_init.h
 #define PSRAM_SIZE_BYTES PSRAM_SIZE
+#ifndef PSRAM_BASE_ADDR
 #define PSRAM_BASE_ADDR  PSRAM_BASE
+#endif
 
 // Runtime function to get PSRAM pin based on chip package
 static inline uint get_psram_pin(void) {
@@ -105,10 +128,22 @@ static inline uint get_psram_pin(void) {
     }
 }
 
+/* Current core voltage, in millivolts, as last programmed by main.c. */
+extern volatile uint16_t current_vreg_mv;
+
+static inline char get_rp2350_package_letter(void) {
+    uint32_t package_sel = *((io_ro_32*)(SYSINFO_BASE + SYSINFO_PACKAGE_SEL_OFFSET));
+    return (package_sel & 1) ? 'A' : 'B';
+}
+
 //=============================================================================
 // M1 Layout Configuration
 //=============================================================================
 #ifdef BOARD_M1
+
+#ifndef PICO_DEFAULT_LED_PIN
+#define PICO_DEFAULT_LED_PIN 25
+#endif
 
 // HDMI Pins
 #define HDMI_PIN_CLKN 6
@@ -121,6 +156,18 @@ static inline uint get_psram_pin(void) {
 #define HDMI_PIN_D2P  13
 
 #define HDMI_BASE_PIN HDMI_PIN_CLKN
+
+// SPI PSRAM support (old M1 style)
+#define PSRAM
+//#define PSRAM_MUTEX 1
+#define PSRAM_SPINLOCK 1
+#define PSRAM_ASYNC 1
+
+#define PSRAM_PIN_CS 18
+#define PSRAM_PIN_SCK 19
+#define PSRAM_PIN_MOSI 20
+#define PSRAM_PIN_MISO 21
+
 
 // SD Card Pins (directly define for both naming conventions)
 #define SDCARD_PIN_CLK    2
@@ -142,6 +189,11 @@ static inline uint get_psram_pin(void) {
 #define PS2_MOUSE_CLK  14
 #define PS2_MOUSE_DATA 15
 
+// NES/SNES Gamepad Pins (directly after HDMI pins)
+#define NESPAD_GPIO_CLK   14
+#define NESPAD_GPIO_DATA  16
+#define NESPAD_GPIO_LATCH 15
+
 // I2S Audio Pins
 #define I2S_DATA_PIN       26
 #define I2S_CLOCK_PIN_BASE 27
@@ -162,6 +214,10 @@ static inline uint get_psram_pin(void) {
 // M2 Layout Configuration
 //=============================================================================
 #ifdef BOARD_M2
+
+#ifndef PICO_DEFAULT_LED_PIN
+#define PICO_DEFAULT_LED_PIN 25
+#endif
 
 // HDMI Pins
 #define HDMI_PIN_CLKN 12
@@ -194,6 +250,11 @@ static inline uint get_psram_pin(void) {
 // PS/2 Mouse Pins
 #define PS2_MOUSE_CLK  0
 #define PS2_MOUSE_DATA 1
+
+// NES/SNES Gamepad Pins
+#define NESPAD_GPIO_CLK   20
+#define NESPAD_GPIO_DATA  26
+#define NESPAD_GPIO_LATCH 21
 
 // I2S Audio Pins
 #define I2S_DATA_PIN       9
@@ -306,15 +367,125 @@ static inline uint get_psram_pin(void) {
 #endif // BOARD_PC
 
 //=============================================================================
+// FRANK Core 2 Layout Configuration (dual RP2350)
+//=============================================================================
+/*
+ * C2 is the master half (U3, RP2350B) of the FRANK Core 2 / Core 2U
+ * board. Every assignment below comes from the KiCad netlist via
+ * frank_core2/firmware/common/frank_core2_board.h.
+ *
+ * The HDMI, microSD and I2S pins happen to be identical to M2, so those
+ * paths need no new code. What differs:
+ *
+ *   - No PS/2 and no NES pad. USB HID is the only input.
+ *   - No analog VGA DAC; HDMI is forced (see FORCE_HDMI in CMakeLists).
+ *   - LD1 is a WS2812B on GPIO46, not a plain LED.
+ *   - GPIO20..42 belong to the inter-processor link and must not be
+ *     claimed by anything else. That is why the M2 NES pad pins (20, 21,
+ *     26) and PWM audio pins are absent here.
+ */
+#ifdef BOARD_C2
+
+// HDMI Pins (J5) — same layout as M2
+#define HDMI_PIN_CLKN 12
+#define HDMI_PIN_CLKP 13
+#define HDMI_PIN_D0N  14
+#define HDMI_PIN_D0P  15
+#define HDMI_PIN_D1N  16
+#define HDMI_PIN_D1P  17
+#define HDMI_PIN_D2N  18
+#define HDMI_PIN_D2P  19
+
+#define HDMI_BASE_PIN HDMI_PIN_CLKN
+
+// microSD (J7) on SPI0 — SDIO pin names from the schematic in comments
+#define SDCARD_PIN_CLK    6   // SD CLK
+#define SDCARD_PIN_CMD    7   // SD CMD
+#define SDCARD_PIN_D0     4   // SD DAT0
+#define SDCARD_PIN_D3     5   // SD DAT3/CD
+
+#define SDCARD_PIN_SPI0_SCK   SDCARD_PIN_CLK
+#define SDCARD_PIN_SPI0_MOSI  SDCARD_PIN_CMD
+#define SDCARD_PIN_SPI0_MISO  SDCARD_PIN_D0
+#define SDCARD_PIN_SPI0_CS    SDCARD_PIN_D3
+
+// TDA1387T I2S DAC (U8): DATA = GPIO9, SCLK = GPIO10, LRCK = GPIO11
+#define I2S_DATA_PIN       9
+#define I2S_CLOCK_PIN_BASE 10
+
+/* VGA is not populated on this board. vga_hw.c still references
+ * VGA_BASE_PIN at compile time, but every use is behind SELECT_VGA,
+ * which FORCE_HDMI pins to false. Alias it to the HDMI base so the
+ * driver compiles without a C2-specific #ifdef in it. */
+#define VGA_BASE_PIN HDMI_BASE_PIN
+
+/* Status LED LD1 is a WS2812B via 330R (R11). Deliberately NOT
+ * PICO_DEFAULT_LED_PIN — SDK helpers would drive it as a level. */
+#define M_LED_WS2812_PIN 46
+
+/*
+ * Inter-processor link pins (see boards/frank_core2_master.h and
+ * frank_core2/firmware/common/frank_core2_board.h).
+ *
+ * Two 8-bit source-synchronous buses plus three SIO control wires.
+ * Nothing else may claim GPIO20..42.
+ */
+#define M_LINK_A_DATA_BASE   20   /* GPIO20..27, master -> slave (TX) */
+#define M_LINK_A_CLK         28   /* == DATA_BASE + 8 */
+#define M_LINK_A_VALID       29   /* == DATA_BASE + 9 */
+
+#define M_LINK_B_DATA_BASE   30   /* GPIO30..37, slave -> master (RX) */
+#define M_LINK_B_CLK         38
+#define M_LINK_B_VALID       39
+
+#define M_LINK_FS            40   /* frame sync / reset request, out */
+#define M_LINK_DB_OUT        41   /* DB_MS, out */
+#define M_LINK_DB_IN         42   /* DB_SM, in  */
+
+/*
+ * PIO instance for the link.
+ *
+ * Link bus B lands on GPIO30..39, so the instance needs
+ * pio_set_gpio_base(16). That is a per-instance setting, and it makes
+ * every pin below 16 unreachable on that instance — so the link cannot
+ * share with anything down there.
+ *
+ * PIO2 is always the I2S DAC (audio.c hardcodes pio2, GPIO9..11). The
+ * video path takes a different instance depending on the output:
+ *
+ *   HDMI build — hdmi.c uses PIO_VIDEO = pio1 (GPIO12..19) => link on PIO0
+ *   VGA  build — vga_hw.h defines VGA_PIO = pio0 (GPIO12..19) => link on PIO1
+ *
+ * Getting this wrong is quiet: pio_sm_init() rejects the configuration
+ * with PICO_ERROR_BAD_ALIGNMENT and the link simply never answers, which
+ * reads as a dead slave rather than a PIO clash.
+ */
+#ifdef FORCE_VGA
+#define LINK_PIO_MASTER      pio1
+#else
+#define LINK_PIO_MASTER      pio0
+#endif
+#define LINK_PIO_GPIO_BASE   16
+
+#endif // BOARD_C2
+
+//=============================================================================
 // Common PIO Assignments
 //=============================================================================
 
-// Video output uses PIO1
+/* Z2 uses the same PIO assignment as the known-good ZERO2 HDMI path:
+ * PIO0 drives GPIO32..39 with gpio_base=16, while PS/2 stays on a separate
+ * PIO instance whose gpio_base remains 0.  Other boards keep the existing
+ * allocation. */
+#ifdef BOARD_Z2
+#define PIO_VIDEO       pio0
+#define PIO_VIDEO_ADDR  pio0
+#define PIO_PS2KBD      pio1
+#else
 #define PIO_VIDEO       pio1
 #define PIO_VIDEO_ADDR  pio1
-
-// PS/2 Keyboard uses PIO0
 #define PIO_PS2KBD      pio0
+#endif
 
 // SD Card PIO (if using PIO SPI)
 #define PIO_SDCARD      pio1
@@ -326,13 +497,9 @@ static inline uint get_psram_pin(void) {
 // HDMI Configuration
 //=============================================================================
 
-// HDMI differential pair encoding options
-#define HDMI_PIN_RGB_notBGR       1
-#define HDMI_PIN_invert_diffpairs 1
-
-// HDMI clock pins (relative to base)
-#define beginHDMI_PIN_clk   HDMI_BASE_PIN
-#define beginHDMI_PIN_data  (HDMI_BASE_PIN + 2)
+/* HDMI electrical lane order is board-specific and is defined in
+ * drivers/hdmi/hdmi.h.  In particular, Z0/Z2 route TMDS data on the first
+ * three pairs and TMDS clock on the last pair, unlike M1/M2. */
 
 //=============================================================================
 // VGA Display Configuration
@@ -349,11 +516,6 @@ static inline uint get_psram_pin(void) {
 // Emulator Memory Configuration
 //=============================================================================
 
-// Main memory size (configurable, limited by 8MB PSRAM minus VGA memory)
-#ifndef EMU_MEM_SIZE_MB
-#define EMU_MEM_SIZE_MB 4
-#endif
-
 // VGA memory size (up to 2MB)
 #ifndef EMU_VGA_MEM_SIZE_KB
 #define EMU_VGA_MEM_SIZE_KB 256
@@ -368,11 +530,30 @@ static inline uint get_psram_pin(void) {
 // SD Card Configuration
 //=============================================================================
 
-// SD Card SPI bus (use hardware SPI0 or PIO)
+// SD Card SPI bus. Waveshare RP2350-PiZero routes GPIO30/31/40 to SPI1.
+#ifdef BOARD_Z2
+#define SDCARD_SPI_BUS spi1
+#else
 #define SDCARD_SPI_BUS spi0
+#endif
 
-// Enable PIO-based SD card for better performance
+/*
+ * Enable PIO-based SD card for better performance.
+ *
+ * Not on C2: sdcard.c hardcodes pio1 for its SPI program, and on that
+ * board every PIO instance is spoken for. With VGA selected the video
+ * path takes pio0 and the I2S DAC takes pio2, so a PIO-based SD card
+ * leaves nothing for the inter-processor link — pio_set_gpio_base()
+ * then fails with PICO_ERROR_INVALID_STATE and the link silently never
+ * answers, which reads as a dead slave.
+ *
+ * Nothing is lost by dropping it here. The C2 microSD sits on GPIO4..7,
+ * which are exactly the hardware SPI0 pins (RX/CSn/SCK/TX), so the
+ * non-PIO path in sdcard.c drives it directly.
+ */
+#if !defined(BOARD_C2) && !defined(BOARD_Z2)
 #define SDCARD_PIO 1
+#endif
 
 //=============================================================================
 // Debug Configuration
@@ -386,6 +567,17 @@ static inline uint get_psram_pin(void) {
 #define DEBUG_PRINTF(...) printf(__VA_ARGS__)
 #else
 #define DEBUG_PRINTF(...)
+#endif
+
+
+/* SD-card data directory (BIOS/config/disk images). Normally supplied by the
+   build as -DSD_DATA_DIR / -DSD_DATA_DIR_SLASH, tied to CPU_TARGET (286 vs 386
+   need different files). These fallbacks only apply to a non-CMake compile. */
+#ifndef SD_DATA_DIR
+#define SD_DATA_DIR "386"
+#endif
+#ifndef SD_DATA_DIR_SLASH
+#define SD_DATA_DIR_SLASH SD_DATA_DIR "/"
 #endif
 
 #endif // BOARD_CONFIG_H

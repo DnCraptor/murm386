@@ -14,6 +14,9 @@
 
 #include "ff.h"
 #include "diskio.h"
+#include "profile_subsys.h"
+#include "diskcache.h"
+#include "mem.h"
 
 
 /*--------------------------------------------------------------------------
@@ -59,6 +62,356 @@ DSTATUS Stat = STA_NOINIT;	/* Physical drive status */
 
 static
 BYTE CardType;			/* Card type flags */
+
+/*
+ * Small FatFs disk-I/O cache backed by SRAM released when core0 moves its
+ * native stack into the unused tail of GFX_BUFFER.
+ *
+ * The hooks deliberately start as SRAM-resident no-ops.  Only after SP has
+ * moved does main.c publish the active hooks and hand over CORE0_STACK.  Once
+ * CONFIG.SYS processing and the initial DoInstall() are complete,
+ * CORE0_STACK_EXT is dead boot scratch too and the same cache is re-enabled on
+ * the contiguous 8 KiB CORE0_STACK_EXT+CORE0_STACK range.
+ *
+ * Writes are true write-through: the physical SD write completes first, then
+ * the resident copy is updated.  No disk data exists only in this SRAM.
+ */
+#define FF_STACK_CACHE_SECTOR_SIZE 512u
+#define FF_STACK_CACHE_MAX_SECTORS 16u
+
+typedef bool (*ff_stack_cache_read_hook_t)(LBA_t sector, UINT count, BYTE *dst);
+typedef void (*ff_stack_cache_store_hook_t)(LBA_t sector, UINT count, const BYTE *src);
+
+static BYTE *ff_stack_cache_data;
+static LBA_t ff_stack_cache_tag[FF_STACK_CACHE_MAX_SECTORS];
+static uint8_t ff_stack_cache_valid[FF_STACK_CACHE_MAX_SECTORS];
+static uint8_t ff_stack_cache_sectors;
+static uint8_t ff_stack_cache_victim;
+
+/*
+ * Reclaimable L2 cache in memory-mapped QSPI PSRAM.  Lines are anchored from
+ * the fixed ceiling downward, so shrinking the free tail never moves the
+ * surviving lines.  A direct mapping keeps all tags out of scarce SRAM; each
+ * QSPI line carries its own LBA tag and epoch next to the 512-byte payload.
+ *
+ * owner_floor[] is deliberately small and generic.  XMS may move its floor
+ * both ways as EMBs are allocated/freed.  The native allocator currently only
+ * raises its floor (see task.c), which is conservative but cannot resurrect a
+ * line over in-band heap metadata that may still be live.
+ */
+typedef struct __attribute__((aligned(4))) {
+    uint32_t tag;
+    uint32_t epoch;
+    BYTE data[FF_STACK_CACHE_SECTOR_SIZE];
+} ff_qspi_cache_line_t;
+
+#define FF_QSPI_CACHE_INVALID_EPOCH 0u
+
+static uintptr_t ff_qspi_cache_minimum;
+static uintptr_t ff_qspi_cache_ceiling;
+static uintptr_t ff_qspi_cache_owner_floor[SDCARD_FF_QSPI_OWNER_COUNT];
+static uint32_t ff_qspi_cache_max_lines;
+static uint32_t ff_qspi_cache_active_lines;
+static uint32_t ff_qspi_cache_epoch = 1u;
+static bool ff_qspi_cache_enabled;
+
+static inline uintptr_t ff_qspi_cache_effective_floor(void)
+{
+    uintptr_t floor = ff_qspi_cache_minimum;
+    for (uint32_t i = 0; i < SDCARD_FF_QSPI_OWNER_COUNT; ++i)
+        if (ff_qspi_cache_owner_floor[i] > floor)
+            floor = ff_qspi_cache_owner_floor[i];
+    if (floor > ff_qspi_cache_ceiling)
+        floor = ff_qspi_cache_ceiling;
+    return floor;
+}
+
+static inline ff_qspi_cache_line_t *ff_qspi_cache_line(uint32_t slot)
+{
+    return (ff_qspi_cache_line_t *)(ff_qspi_cache_ceiling -
+        (uintptr_t)(slot + 1u) * sizeof(ff_qspi_cache_line_t));
+}
+
+static void __not_in_flash_func(ff_qspi_cache_resize)(void)
+{
+    uint32_t old_active = ff_qspi_cache_active_lines;
+    uintptr_t floor;
+    uint32_t active;
+
+    if (!ff_qspi_cache_enabled || ff_qspi_cache_max_lines == 0) {
+        ff_qspi_cache_active_lines = 0;
+        return;
+    }
+
+    floor = ff_qspi_cache_effective_floor();
+    active = (uint32_t)((ff_qspi_cache_ceiling - floor) /
+                        sizeof(ff_qspi_cache_line_t));
+    if (active > ff_qspi_cache_max_lines)
+        active = ff_qspi_cache_max_lines;
+
+    /* Growing exposes memory that an owner may have overwritten while it was
+     * outside the cache.  Invalidate only the newly visible line headers. */
+    if (active > old_active) {
+        for (uint32_t slot = old_active; slot < active; ++slot)
+            ff_qspi_cache_line(slot)->epoch = FF_QSPI_CACHE_INVALID_EPOCH;
+    }
+    ff_qspi_cache_active_lines = active;
+}
+
+static inline uint32_t ff_qspi_cache_slot(LBA_t sector)
+{
+    if (!ff_qspi_cache_max_lines)
+        return 0;
+    return (uint32_t)(sector % ff_qspi_cache_max_lines);
+}
+
+static ff_qspi_cache_line_t *__not_in_flash_func(ff_qspi_cache_find)(LBA_t sector)
+{
+    uint32_t slot;
+    ff_qspi_cache_line_t *line;
+
+    if (!ff_qspi_cache_enabled || !ff_qspi_cache_active_lines)
+        return NULL;
+    slot = ff_qspi_cache_slot(sector);
+    if (slot >= ff_qspi_cache_active_lines)
+        return NULL;
+    line = ff_qspi_cache_line(slot);
+    if (line->epoch != ff_qspi_cache_epoch || line->tag != sector)
+        return NULL;
+    return line;
+}
+
+static void __not_in_flash_func(ff_qspi_cache_store)(LBA_t sector,
+                                                      UINT count,
+                                                      const BYTE *src)
+{
+    if (!ff_qspi_cache_enabled || !ff_qspi_cache_active_lines)
+        return;
+    for (UINT i = 0; i < count; ++i) {
+        LBA_t tag = sector + i;
+        uint32_t slot = ff_qspi_cache_slot(tag);
+        ff_qspi_cache_line_t *line;
+        if (slot >= ff_qspi_cache_active_lines)
+            continue;
+        line = ff_qspi_cache_line(slot);
+        line->epoch = FF_QSPI_CACHE_INVALID_EPOCH;
+        dos_api_memcpy(line->data,
+                       src + (size_t)i * FF_STACK_CACHE_SECTOR_SIZE,
+                       FF_STACK_CACHE_SECTOR_SIZE);
+        line->tag = tag;
+        line->epoch = ff_qspi_cache_epoch;
+    }
+}
+
+static void __not_in_flash_func(ff_qspi_cache_invalidate_range)(LBA_t sector,
+                                                                 UINT count)
+{
+    if (!ff_qspi_cache_enabled || !count)
+        return;
+    for (UINT i = 0; i < count; ++i) {
+        LBA_t tag = sector + i;
+        uint32_t slot = ff_qspi_cache_slot(tag);
+        ff_qspi_cache_line_t *line;
+        if (slot >= ff_qspi_cache_active_lines)
+            continue;
+        line = ff_qspi_cache_line(slot);
+        if (line->epoch == ff_qspi_cache_epoch && line->tag == tag)
+            line->epoch = FF_QSPI_CACHE_INVALID_EPOCH;
+    }
+}
+
+static void __not_in_flash_func(ff_qspi_cache_invalidate_all)(void)
+{
+    if (!ff_qspi_cache_enabled)
+        return;
+    ++ff_qspi_cache_epoch;
+    if (ff_qspi_cache_epoch == FF_QSPI_CACHE_INVALID_EPOCH) {
+        ff_qspi_cache_epoch = 1u;
+        for (uint32_t slot = 0; slot < ff_qspi_cache_active_lines; ++slot)
+            ff_qspi_cache_line(slot)->epoch = FF_QSPI_CACHE_INVALID_EPOCH;
+    }
+}
+
+static bool __not_in_flash_func(ff_stack_cache_read_disabled)(LBA_t sector,
+                                                               UINT count,
+                                                               BYTE *dst)
+{
+    (void)sector;
+    (void)count;
+    (void)dst;
+    return false;
+}
+
+static void __not_in_flash_func(ff_stack_cache_store_disabled)(LBA_t sector,
+                                                                UINT count,
+                                                                const BYTE *src)
+{
+    (void)sector;
+    (void)count;
+    (void)src;
+}
+
+static ff_stack_cache_read_hook_t ff_stack_cache_read_hook = ff_stack_cache_read_disabled;
+static ff_stack_cache_store_hook_t ff_stack_cache_store_hook = ff_stack_cache_store_disabled;
+
+static void __not_in_flash_func(ff_stack_cache_invalidate_all)(void)
+{
+    nf_memset(ff_stack_cache_valid, 0, sizeof(ff_stack_cache_valid));
+    ff_stack_cache_victim = 0;
+    ff_qspi_cache_invalidate_all();
+}
+
+static void __not_in_flash_func(ff_stack_cache_invalidate_range)(LBA_t sector, UINT count)
+{
+    ff_qspi_cache_invalidate_range(sector, count);
+    if (!ff_stack_cache_sectors || !count)
+        return;
+    for (uint32_t slot = 0; slot < ff_stack_cache_sectors; ++slot) {
+        if (!ff_stack_cache_valid[slot])
+            continue;
+        LBA_t tag = ff_stack_cache_tag[slot];
+        if (tag >= sector && (tag - sector) < count)
+            ff_stack_cache_valid[slot] = 0;
+    }
+}
+
+static int __not_in_flash_func(ff_stack_cache_find)(LBA_t sector)
+{
+    for (uint32_t slot = 0; slot < ff_stack_cache_sectors; ++slot) {
+        if (ff_stack_cache_valid[slot] && ff_stack_cache_tag[slot] == sector)
+            return (int)slot;
+    }
+    return -1;
+}
+
+static uint32_t __not_in_flash_func(ff_stack_cache_alloc)(LBA_t sector)
+{
+    int found = ff_stack_cache_find(sector);
+    if (found >= 0)
+        return (uint32_t)found;
+
+    uint32_t slot = ff_stack_cache_victim++;
+    if (ff_stack_cache_victim == ff_stack_cache_sectors)
+        ff_stack_cache_victim = 0;
+    ff_stack_cache_tag[slot] = sector;
+    ff_stack_cache_valid[slot] = 1;
+    return slot;
+}
+
+static bool __not_in_flash_func(ff_stack_cache_read_active)(LBA_t sector,
+                                                             UINT count,
+                                                             BYTE *dst)
+{
+    if (!count)
+        return false;
+
+    /* First pass only proves that the complete FatFs request is resident in
+     * L1 or L2.  Partial hits must not modify dst because disk_read() then
+     * falls through to the lower cache/card path for the whole request. */
+    for (UINT i = 0; i < count; ++i) {
+        if (ff_stack_cache_find(sector + i) >= 0)
+            continue;
+        if (ff_qspi_cache_find(sector + i) == NULL)
+            return false;
+    }
+
+    for (UINT i = 0; i < count; ++i) {
+        LBA_t tag = sector + i;
+        int l1 = ff_stack_cache_find(tag);
+        BYTE *out = dst + (size_t)i * FF_STACK_CACHE_SECTOR_SIZE;
+        if (l1 >= 0) {
+            dos_api_memcpy(out,
+                           ff_stack_cache_data +
+                               (size_t)l1 * FF_STACK_CACHE_SECTOR_SIZE,
+                           FF_STACK_CACHE_SECTOR_SIZE);
+        } else {
+            ff_qspi_cache_line_t *line = ff_qspi_cache_find(tag);
+            uint32_t slot;
+            dos_api_memcpy(out, line->data, FF_STACK_CACHE_SECTOR_SIZE);
+            /* Promote an L2 hit into the small SRAM L1. */
+            if (ff_stack_cache_sectors) {
+                slot = ff_stack_cache_alloc(tag);
+                dos_api_memcpy(ff_stack_cache_data +
+                                   (size_t)slot * FF_STACK_CACHE_SECTOR_SIZE,
+                               line->data, FF_STACK_CACHE_SECTOR_SIZE);
+            }
+        }
+    }
+    return true;
+}
+
+static void __not_in_flash_func(ff_stack_cache_store_active)(LBA_t sector,
+                                                              UINT count,
+                                                              const BYTE *src)
+{
+    ff_qspi_cache_store(sector, count, src);
+    if (!ff_stack_cache_sectors)
+        return;
+    for (UINT i = 0; i < count; ++i) {
+        uint32_t slot = ff_stack_cache_alloc(sector + i);
+        dos_api_memcpy(ff_stack_cache_data + (size_t)slot * FF_STACK_CACHE_SECTOR_SIZE,
+                       src + (size_t)i * FF_STACK_CACHE_SECTOR_SIZE,
+                       FF_STACK_CACHE_SECTOR_SIZE);
+    }
+}
+
+void sdcard_enable_ff_stack_cache(void *storage, size_t bytes)
+{
+    size_t sectors = bytes / FF_STACK_CACHE_SECTOR_SIZE;
+    if (!storage || sectors == 0)
+        return;
+    if (sectors > FF_STACK_CACHE_MAX_SECTORS)
+        sectors = FF_STACK_CACHE_MAX_SECTORS;
+
+    /* Re-enabling is intentional: first CORE0_STACK (4 KiB), then the full
+     * CORE0_STACK_EXT+CORE0_STACK range (8 KiB).  Drop old tags because the
+     * backing address and number of lines change. */
+    ff_stack_cache_data = (BYTE *)storage;
+    ff_stack_cache_sectors = (uint8_t)sectors;
+    ff_stack_cache_invalidate_all();
+    ff_stack_cache_store_hook = ff_stack_cache_store_active;
+    ff_stack_cache_read_hook = ff_stack_cache_read_active;
+}
+
+void sdcard_enable_ff_qspi_cache(void *minimum, void *ceiling)
+{
+    uintptr_t lo = ((uintptr_t)minimum + 3u) & ~(uintptr_t)3u;
+    uintptr_t hi = (uintptr_t)ceiling & ~(uintptr_t)3u;
+
+    ff_qspi_cache_enabled = false;
+    ff_qspi_cache_active_lines = 0;
+    ff_qspi_cache_max_lines = 0;
+    if (!minimum || !ceiling || hi <= lo + sizeof(ff_qspi_cache_line_t))
+        return;
+
+    ff_qspi_cache_minimum = lo;
+    ff_qspi_cache_ceiling = hi;
+    for (uint32_t i = 0; i < SDCARD_FF_QSPI_OWNER_COUNT; ++i) {
+        if (ff_qspi_cache_owner_floor[i] < lo)
+            ff_qspi_cache_owner_floor[i] = lo;
+        else if (ff_qspi_cache_owner_floor[i] > hi)
+            ff_qspi_cache_owner_floor[i] = hi;
+    }
+    ff_qspi_cache_max_lines =
+        (uint32_t)((hi - lo) / sizeof(ff_qspi_cache_line_t));
+    ff_qspi_cache_epoch = 1u;
+    ff_qspi_cache_enabled = ff_qspi_cache_max_lines != 0;
+    ff_qspi_cache_resize();
+    if (ff_qspi_cache_enabled) {
+        ff_stack_cache_store_hook = ff_stack_cache_store_active;
+        ff_stack_cache_read_hook = ff_stack_cache_read_active;
+    }
+}
+
+void sdcard_ff_qspi_cache_set_floor(sdcard_ff_qspi_owner_t owner, void *floor)
+{
+    uintptr_t p;
+    if ((unsigned)owner >= SDCARD_FF_QSPI_OWNER_COUNT)
+        return;
+    p = (uintptr_t)floor;
+    ff_qspi_cache_owner_floor[owner] = p;
+    ff_qspi_cache_resize();
+}
 
 #ifdef SDCARD_PIO
 pio_spi_inst_t pio_spi = {
@@ -284,7 +637,27 @@ int rcvr_datablock (	/* 1:OK, 0:Error */
 	if(token != 0xFE) return 0;		/* Function fails if invalid DataStart token or timeout */
 
 	rcvr_spi_multi(buff, btr);		/* Store trailing data to the buffer */
-	xchg_spi(0xFF); xchg_spi(0xFF);			/* Discard CRC */
+	{
+		BYTE crc_hi = xchg_spi(0xFF);	/* CRC16 high byte */
+		BYTE crc_lo = xchg_spi(0xFF);	/* CRC16 low  byte */
+#ifdef SDCARD_VERIFY_CRC
+		/* The data packet always carries a valid CRC16-CCITT in SPI mode,
+		   regardless of CMD59. Verify it so a corrupted transfer is not
+		   silently accepted as a zero/garbage block. */
+		uint16_t rx = ((uint16_t)crc_hi << 8) | crc_lo;
+		uint16_t crc = 0;
+		UINT i; int k;
+		for (i = 0; i < btr; i++) {
+			crc ^= (uint16_t)buff[i] << 8;
+			for (k = 0; k < 8; k++)
+				crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021)
+				                     : (uint16_t)(crc << 1);
+		}
+		if (crc != rx) return 0;	/* CRC mismatch -> error; caller retries */
+#else
+		(void)crc_hi; (void)crc_lo;
+#endif
+	}
 
 	return 1;						/* Function succeeded */
 }
@@ -357,6 +730,7 @@ DSTATUS disk_initialize (
 
 
 	if (drv) return STA_NOINIT;			/* Supports only drive 0 */
+	ff_stack_cache_invalidate_all();		/* Media/re-init invalidates cached sectors */
 	init_spi();							/* Initialize SPI */
     sleep_ms(10);
 
@@ -423,7 +797,7 @@ DSTATUS disk_status (
 /* Read sector(s)                                                        */
 /*-----------------------------------------------------------------------*/
 
-DRESULT disk_read (
+static DRESULT disk_read_impl (
 	BYTE drv,		/* Physical drive number (0) */
 	BYTE *buff,		/* Pointer to the data buffer to store read data */
 	LBA_t sector,	/* Start sector number (LBA) */
@@ -436,9 +810,13 @@ DRESULT disk_read (
 	if (!(CardType & CT_BLOCK)) sector *= 512;	/* LBA ot BA conversion (byte addressing cards) */
 
 	if (count == 1) {	/* Single sector read */
-		if ((send_cmd(CMD17, sector) == 0)	/* READ_SINGLE_BLOCK */
-			&& rcvr_datablock(buff, 512)) {
-			count = 0;
+		int tries = 5;
+		while (tries--) {	/* retry on CRC/token failure */
+			if ((send_cmd(CMD17, sector) == 0)	/* READ_SINGLE_BLOCK */
+				&& rcvr_datablock(buff, 512)) {
+				count = 0;
+				break;
+			}
 		}
 	}
 	else {				/* Multiple sector read */
@@ -509,7 +887,7 @@ int xmit_datablock (	/* 1:OK, 0:Error */
 /* Write sector(s)                                                       */
 /*-----------------------------------------------------------------------*/
 
-DRESULT disk_write (
+static DRESULT disk_write_impl (
 	BYTE drv,			/* Physical drive number (0) */
 	const BYTE *buff,	/* Ponter to the data to write */
 	LBA_t sector,		/* Start sector number (LBA) */
@@ -618,6 +996,7 @@ DRESULT disk_ioctl (
 		}
 		if (send_cmd(CMD32, st) == 0 && send_cmd(CMD33, ed) == 0 && send_cmd(CMD38, 0) == 0 && wait_ready(30000)) {	/* Erase sector block */
 			res = RES_OK;	/* FatFs does not check result of this command */
+			ff_stack_cache_invalidate_range((LBA_t)dp[0], (UINT)(dp[1] - dp[0] + 1u));
 		}
 		break;
 
@@ -628,4 +1007,58 @@ DRESULT disk_ioctl (
 	deselect();
 
 	return res;
+}
+/*
+ * Timed wrappers around the two FatFS entry points.
+ *
+ * Every byte the emulator reads from a disk image passes through here,
+ * so this is the one place that can answer "how much of core 0 goes to
+ * blocking SD I/O?" without instrumenting each f_read site in ide.c,
+ * fdd.c and disk.c. It measures the card transfer, not FatFS's own
+ * bookkeeping on top of it, so treat the figure as a lower bound.
+ */
+DRESULT disk_read (BYTE drv, BYTE *buff, LBA_t sector, UINT count)
+{
+	if (!drv && count && !(Stat & STA_NOINIT) &&
+	    ff_stack_cache_read_hook(sector, count, buff))
+		return RES_OK;
+
+	/* Served from the slave's PSRAM when the whole request is resident;
+	 * roughly 30x faster than the same blocks over SPI. */
+	if (dc_read((uint32_t)sector, (uint32_t)count, (uint8_t *)buff)) {
+		ff_stack_cache_store_hook(sector, count, buff);
+		return RES_OK;
+	}
+
+	PROF_T(t_disk);
+	DRESULT r = disk_read_impl(drv, buff, sector, count);
+#if SUBSYS_PROFILE
+	PROF_ADD(t_disk, disk);
+	g_prof.disk_ops++;
+#endif
+	if (r == RES_OK) {
+		ff_stack_cache_store_hook(sector, count, buff);
+		dc_fill((uint32_t)sector, (uint32_t)count, (const uint8_t *)buff);
+	}
+	return r;
+}
+
+DRESULT disk_write (BYTE drv, const BYTE *buff, LBA_t sector, UINT count)
+{
+	PROF_T(t_disk);
+	DRESULT r = disk_write_impl(drv, buff, sector, count);
+#if SUBSYS_PROFILE
+	PROF_ADD(t_disk, disk);
+	g_prof.disk_ops++;
+#endif
+	if (r == RES_OK)
+		ff_stack_cache_store_hook(sector, count, buff);
+	else
+		/* A failed multi-sector write may have reached only part of the card. */
+		ff_stack_cache_invalidate_range(sector, count);
+
+	/* The optional slave-PSRAM cache keeps its existing invalidate-on-write
+	 * contract.  The local SRAM cache above is write-through and stays hot. */
+	dc_invalidate((uint32_t)sector, (uint32_t)count);
+	return r;
 }

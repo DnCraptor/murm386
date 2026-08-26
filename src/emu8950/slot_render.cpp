@@ -172,7 +172,8 @@ static uint16_t SLOT_RENDER_DATA logsin_table[LOGSIN_TABLE_SIZE] = {
 //  _  _
 // / \/ \ which is abs(sine) wave
 //
-static uint16_t wav_or_table_lookup[4][4] = {
+static uint16_t wav_or_table_lookup[4][4]
+        __attribute__((aligned(2))) = {
         {0x0000, 0x0000, 0x8000, 0x8000}, // .. negate second half
         {0x0000, 0x0000, 0x0fff, 0x0fff}, // .. attenuate second half
         {0x0000, 0x0000, 0x0000, 0x0000}, // .. leave second half alone

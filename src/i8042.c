@@ -115,9 +115,9 @@ struct KBDState {
 
 /* A20 gate — controlled by KBC commands 0xDD/0xDF and output port bit 1.
  * The CPU pointer is set once from pc_new() via i8042_set_cpu(). */
-static CPUI386 *a20_cpu = NULL;
+static CPU *a20_cpu = NULL;
 
-void i8042_set_cpu(void *cpu) { a20_cpu = (CPUI386 *)cpu; }
+void i8042_set_cpu(void *cpu) { a20_cpu = (CPU *)cpu; }
 
 static void ioport_set_a20(int val)
 {
@@ -464,6 +464,7 @@ struct  PS2KbdState {
        not the keyboard controller.  */
     int translate;
     bool delay;
+    bool delay_critical;
     uint32_t delay_time;
     int delay_keycode;
 };
@@ -516,6 +517,25 @@ void ps2_queue(void *opaque, int b)
 #endif
 }
 
+
+#define PS2_KBD_BREAK_RESERVE 32
+
+/*
+ * Keep part of the keyboard queue unavailable to ordinary make/typematic
+ * events.  A full queue must never be allowed to drop the later break code,
+ * otherwise the guest can keep a key pressed forever.  Release events (and
+ * both bytes of an extended release) are allowed to consume the reserve.
+ */
+static int ps2_kbd_queue(PS2KbdState *s, int b, int critical)
+{
+    if (!critical &&
+        s->common.queue.count >= PS2_QUEUE_SIZE - PS2_KBD_BREAK_RESERVE)
+        return 0;
+
+    ps2_queue(&s->common, b);
+    return 1;
+}
+
 #define INPUT_MAKE_KEY_MIN 96
 #define INPUT_MAKE_KEY_MAX 127
 
@@ -530,14 +550,18 @@ static const uint8_t linux_input_to_keycode_set1[INPUT_MAKE_KEY_MAX - INPUT_MAKE
    keycode set 1 */
 void ps2_put_keycode(PS2KbdState *s, int is_down, int keycode)
 {
+    int critical = !is_down;
+
     if (s->delay) {
         s->delay = false;
-        ps2_queue(&s->common, s->delay_keycode);
+        ps2_kbd_queue(s, s->delay_keycode, s->delay_critical);
     }
 
     if (keycode >= 0xe000) {
-        ps2_queue(&s->common, keycode >> 8);
+        if (!ps2_kbd_queue(s, keycode >> 8, critical))
+            return;
         s->delay = true;
+        s->delay_critical = critical;
         s->delay_time = get_uticks() + 10000;
         s->delay_keycode = (keycode & 0xff) | ((!is_down) << 7);
     } else if (keycode >= INPUT_MAKE_KEY_MIN) {
@@ -546,17 +570,19 @@ void ps2_put_keycode(PS2KbdState *s, int is_down, int keycode)
         keycode = linux_input_to_keycode_set1[keycode - INPUT_MAKE_KEY_MIN];
         if (keycode == 0)
             return;
-        ps2_queue(&s->common, 0xe0);
+        if (!ps2_kbd_queue(s, 0xe0, critical))
+            return;
         /* XXX: currently the ps2 queue is driven by data reading,
            however the "e0" prefix may be read by some old DOS
            software more than once, The workaround is to send the
            second keycode later, so that the guest software can read
            the same data again. */
         s->delay = true;
+        s->delay_critical = critical;
         s->delay_time = get_uticks() + 1000;
         s->delay_keycode = keycode | ((!is_down) << 7);
     } else {
-        ps2_queue(&s->common, keycode | ((!is_down) << 7));
+        ps2_kbd_queue(s, keycode | ((!is_down) << 7), critical);
     }
 }
 
@@ -567,7 +593,7 @@ void __not_in_flash_func(kbd_step)(void *opaque)
     PS2KbdState *kbd = s->kbd;
     if (kbd->delay && after_eq(get_uticks(), kbd->delay_time)) {
         kbd->delay = false;
-        ps2_queue(&(kbd->common), kbd->delay_keycode);
+        ps2_kbd_queue(kbd, kbd->delay_keycode, kbd->delay_critical);
     }
 #ifndef __wasm__
     if (s->kbd->common.queue.count)
@@ -930,4 +956,34 @@ PS2MouseState *ps2_mouse_init(void (*update_irq)(void *, int), void *update_arg)
     s->common.update_arg = update_arg;
     ps2_reset(&s->common);
     return s;
+}
+
+void i8042_bios_post_init(KBDState *s)
+{
+    if (!s || !s->kbd || !s->mouse)
+        return;
+
+    /* SeaBIOS ps2_keyboard_setup() finishes with keyboard scanning on,
+     * controller translation on, keyboard IRQ enabled, and AUX disabled.
+     * This backend already feeds translated set-1 keycodes internally, so
+     * establish the corresponding controller-visible state directly. */
+    s->write_cmd = 0;
+    s->mode = KBD_MODE_KBD_INT | KBD_MODE_DISABLE_MOUSE | KBD_MODE_KCC;
+    s->status = KBD_STAT_SELFTEST | KBD_STAT_UNLOCKED;
+    s->pending = 0;
+
+    s->kbd->common.write_cmd = -1;
+    s->kbd->common.queue.rptr = 0;
+    s->kbd->common.queue.wptr = 0;
+    s->kbd->common.queue.count = 0;
+    s->kbd->scan_enabled = 1;
+    s->kbd->translate = 1;
+    s->kbd->delay = false;
+
+    s->mouse->common.write_cmd = -1;
+    s->mouse->common.queue.rptr = 0;
+    s->mouse->common.queue.wptr = 0;
+    s->mouse->common.queue.count = 0;
+
+    kbd_update_irq(s);
 }

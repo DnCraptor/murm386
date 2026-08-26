@@ -29,6 +29,8 @@
 
 //#include "cutils.h"
 #include "ide.h"
+#include "mem.h"
+#include "bulk_bounce.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -43,7 +45,7 @@ static int _atapi_tf_open = 0;
 void atapi_tlog(const char *fmt, ...)
 {
     if (!_atapi_tf_open) {
-        _atapi_tf_open = (f_open(&_atapi_tf, "386/atapi2.txt",
+        _atapi_tf_open = (f_open(&_atapi_tf, SD_DATA_DIR_SLASH "atapi2.txt",
                                  FA_WRITE | FA_OPEN_APPEND | FA_OPEN_ALWAYS) == FR_OK);
     }
     if (!_atapi_tf_open)
@@ -1586,7 +1588,7 @@ uint32_t ide_data_readl(void *opaque)
     return v;
 }
 
-int ide_data_write_string(void *opaque, uint8_t *buf, int size, int count)
+int ide_data_write_string(void *opaque, uint32_t addr, int size, int count)
 {
     IDEIFState *s1 = opaque;
     IDEState *s = s1->cur_drive;
@@ -1595,16 +1597,27 @@ int ide_data_write_string(void *opaque, uint8_t *buf, int size, int count)
     if (len > s->xfer_left) len = s->xfer_left;
     len -= len % size;
     if (s->drive_kind == IDE_HD) {
-        UINT bw; f_write(s->fp, buf, len, &bw);
+        UINT bw;
+        uint8_t *buf = guest_bulk_buf;   /* общий bounce, не на стеке */
+        for (int i = 0; i < len; i += 512) {
+            UINT l = len - i;
+            if (l > 512) l = 512;
+            for (int j = 0; j < l; ++j) {
+                buf[j] = pload8(addr + i + j);
+            }
+            f_write(s->fp, buf, l, &bw);
+        }
     } else {
-        memcpy(s->atapi_buf + s->atapi_buf_pos, buf, len);
+        for (int i = 0; i < len; ++i) {
+            s->atapi_buf[s->atapi_buf_pos + i] = pload8(addr + i);
+        }
         s->atapi_buf_pos += len;
     }
     xfer_advance(s, len);
     return len / size;
 }
 
-int ide_data_read_string(void *opaque, uint8_t *buf, int size, int count)
+int ide_data_read_string(void *opaque, uint32_t addr, int size, int count)
 {
     IDEIFState *s1 = opaque;
     IDEState *s = s1->cur_drive;
@@ -1613,9 +1626,20 @@ int ide_data_read_string(void *opaque, uint8_t *buf, int size, int count)
     if (len > s->xfer_left) len = s->xfer_left;
     len -= len % size;
     if (xfer_from_file(s)) {
-        UINT br; f_read(s->fp, buf, len, &br);
+        UINT br;
+        uint8_t *buf = guest_bulk_buf;   /* общий bounce, не на стеке */
+        for (int i = 0; i < len; i += 512) {
+            UINT l = len - i;
+            if (l > 512) l = 512;
+            f_read(s->fp, buf, l, &br);
+            for (int j = 0; j < l; ++j) {
+                pstore8(addr + i + j, buf[j]);
+            }
+        }
     } else {
-        memcpy(buf, s->atapi_buf + s->atapi_buf_pos, len);
+        for (int i = 0; i < len; ++i) {
+            pstore8(addr + i, s->atapi_buf[s->atapi_buf_pos + i]);
+        }
         s->atapi_buf_pos += len;
     }
     xfer_advance(s, len);
@@ -1803,4 +1827,33 @@ PCIDevice *piix3_ide_init(PCIBus *pci_bus, int devfn)
     d = pci_register_device(pci_bus, "PIIX3 IDE", devfn, 0x8086, 0x7010, 0x00, 0x0101);
     pci_device_set_config8(d, 0x09, 0x00);
     return d;
+}
+
+void ide_fill_cmos(IDEIFState *s, void *cmos,
+                   uint8_t (*set)(void *cmos, int addr, uint8_t val))
+{
+    uint8_t d_0x12 = 0;
+    if (s->drives[0]) {
+        d_0x12 |= 0xf0;
+        set(cmos, 0x19, 47);
+        set(cmos, 0x1b, set(cmos, 0x21, s->drives[0]->cylinders));
+        set(cmos, 0x1c, set(cmos, 0x22, s->drives[0]->cylinders >> 8));
+        set(cmos, 0x1d, s->drives[0]->heads);
+        set(cmos, 0x1e, 0xff);
+        set(cmos, 0x1f, 0xff);
+        set(cmos, 0x20, 0xc0 | ((s->drives[0]->heads > 8) << 3));
+        set(cmos, 0x23, s->drives[0]->sectors);
+    }
+    if (s->drives[1]) {
+        d_0x12 |= 0x0f;
+        set(cmos, 0x1a, 47);
+        set(cmos, 0x24, set(cmos, 0x2a, s->drives[1]->cylinders));
+        set(cmos, 0x25, set(cmos, 0x2b, s->drives[1]->cylinders >> 8));
+        set(cmos, 0x26, s->drives[1]->heads);
+        set(cmos, 0x27, 0xff);
+        set(cmos, 0x28, 0xff);
+        set(cmos, 0x29, 0xc0 | ((s->drives[1]->heads > 8) << 3));
+        set(cmos, 0x2c, s->drives[1]->sectors);
+    }
+    set(cmos, 0x12, d_0x12);
 }

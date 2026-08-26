@@ -1,5 +1,5 @@
 /*
- * Network Redirector (INT 2Fh) for murm386
+ * Network Redirector (INT 2Fh) for frank-386
  * Ported from pico-286/pc_ref network-redirector-rp2350.c.inl
  * Provides SD card filesystem passthrough as DOS drive H:
  */
@@ -11,6 +11,7 @@
 #include <ctype.h>
 #include "i386.h"
 #include "ff.h"
+#include "mem.h"
 
 //#define DEBUG_2F
 
@@ -20,7 +21,7 @@ static FIL _2f_tf;
 static int _2f_tf_open = 0;
 void debug_log(const char *fmt, ...) {
     if (!_2f_tf_open) {
-        _2f_tf_open = (f_open(&_2f_tf, "386/2f.txt", FA_WRITE | FA_OPEN_APPEND | FA_OPEN_ALWAYS) == FR_OK);
+        _2f_tf_open = (f_open(&_2f_tf, SD_DATA_DIR_SLASH "2f.txt", FA_WRITE | FA_OPEN_APPEND | FA_OPEN_ALWAYS) == FR_OK);
     }
     if (!_2f_tf_open) return;
     char buf[256];
@@ -40,39 +41,40 @@ void debug_log(const char *fmt, ...) {
 
 
 /* ---- Register access adapter macros ---- */
-#define _cpu  (_nr_cpu)
-#define CPU_AX   cpu_getax(_cpu)
-#define CPU_AH   cpu_get_ah(_cpu)
-#define CPU_AL   cpu_get_al(_cpu)
-#define CPU_BX   cpu_get_bx(_cpu)
-#define CPU_CX   cpu_get_cx(_cpu)
-#define CPU_DX   cpu_get_dx(_cpu)
-#define CPU_ES   cpu_get_es(_cpu)
-#define CPU_DI   cpu_get_di(_cpu)
-#define CPU_SI   cpu_get_si(_cpu)
-#define CPU_DS   cpu_get_ds(_cpu)
+#define _cpu  _nr_cpu
+#define AX   _cpu->ext_accessors->get_reg16(_cpu, AX_REG_IDX)
+#define AH   _cpu->ext_accessors->get_reg8(_cpu, AH_REG_IDX)
+#define AL   _cpu->ext_accessors->get_reg8(_cpu, AL_REG_IDX)
+#define BX   _cpu->ext_accessors->get_reg16(_cpu, BX_REG_IDX)
+#define CX   _cpu->ext_accessors->get_reg16(_cpu, CX_REG_IDX)
+#define DX   _cpu->ext_accessors->get_reg16(_cpu, DX_REG_IDX)
+#define DI   _cpu->ext_accessors->get_reg16(_cpu, DI_REG_IDX)
+#define SI   _cpu->ext_accessors->get_reg16(_cpu, SI_REG_IDX)
+#define ES   _cpu->ext_accessors->get_seg16(_cpu, SEG_ES)
+#define DS   _cpu->ext_accessors->get_seg16(_cpu, SEG_DS)
 
 /* Setters as lvalue-compatible macros via statement expressions */
-#define SET_CPU_AX(v)  cpu_setax(_cpu, (v))
-#define SET_CPU_AL(v)  cpu_set_al(_cpu, (v))
-#define SET_CPU_AH(v)  cpu_set_ah(_cpu, (v))
-#define SET_CPU_BX(v)  cpu_set_bx(_cpu, (v))
-#define SET_CPU_CX(v)  cpu_set_cx(_cpu, (v))
-#define SET_CPU_DX(v)  cpu_set_dx(_cpu, (v))
-#define SET_CPU_DI(v)  cpu_set_di(_cpu, (v))
-#define SET_CPU_FL_CF(v) cpu_set_cf(_cpu, (v))
-#define CPU_FL_CF      cpu_get_cf(_cpu)
+#define SET_AX(v)  _cpu->ext_accessors->set_reg16(_cpu, AX_REG_IDX, (v))
+#define SET_AL(v)  _cpu->ext_accessors->set_reg8(_cpu, AL_REG_IDX, (v))
+#define SET_AH(v)  _cpu->ext_accessors->set_reg8(_cpu, AH_REG_IDX, (v))
+#define SET_BX(v)  _cpu->ext_accessors->set_reg16(_cpu, BX_REG_IDX, (v))
+#define SET_CX(v)  _cpu->ext_accessors->set_reg16(_cpu, CX_REG_IDX, (v))
+#define SET_DX(v)  _cpu->ext_accessors->set_reg16(_cpu, DX_REG_IDX, (v))
+#define SET_DI(v)  _cpu->ext_accessors->set_reg16(_cpu, DI_REG_IDX, (v))
+#define SET_FL_CF(v) _cpu->ext_accessors->set_flag(_cpu, CF, (v))
+#define FL_CF      (_cpu->ext_accessors->get_flags(_cpu, CF) ? 1 : 0)
 
 /* Guest memory access via physical mem pointer */
-static CPUI386 *_nr_cpu;
-static uint8_t *_nr_mem;
+static CPU* _nr_cpu;
 
-static inline uint8_t  read86(uint32_t a)     { return _nr_mem[a]; }
-static inline uint16_t readw86(uint32_t a)    { return _nr_mem[a] | ((uint16_t)_nr_mem[a+1] << 8); }
-static inline uint32_t readdw86(uint32_t a)   { return _nr_mem[a] | ((uint32_t)_nr_mem[a+1]<<8) | ((uint32_t)_nr_mem[a+2]<<16) | ((uint32_t)_nr_mem[a+3]<<24); }
-static inline void write86(uint32_t a, uint8_t v)   { _nr_mem[a] = v; }
-static inline void writew86(uint32_t a, uint16_t v) { _nr_mem[a]=v&0xff; _nr_mem[a+1]=v>>8; }
-static inline void writedw86(uint32_t a, uint32_t v){ _nr_mem[a]=v&0xff; _nr_mem[a+1]=(v>>8)&0xff; _nr_mem[a+2]=(v>>16)&0xff; _nr_mem[a+3]=(v>>24)&0xff; }
+
+// TODO: emulator.h
+static inline uint8_t  read86(uint32_t a)     { return pload8(a); }
+static inline uint16_t readw86(uint32_t a)    { return pload8(a) | ((uint16_t)pload8(a+1) << 8); }
+static inline uint32_t readdw86(uint32_t a)   { return pload8(a) | ((uint32_t)pload8(a+1)<<8) | ((uint32_t)pload8(a+2)<<16) | ((uint32_t)pload8(a+3)<<24); }
+static inline void write86(uint32_t a, uint8_t v)   { pstore8(a, v); }
+static inline void writew86(uint32_t a, uint16_t v) { pstore8(a, v); pstore8(a+1, v>>8); }
+static inline void writedw86(uint32_t a, uint32_t v){ pstore8(a, v); pstore8(a+1, v>>8); pstore8(a+2, v>>16); pstore8(a+3, v>>24); }
 
 // Host filesystem passthrough base directory
 #define HOST_BASE_DIR "\\"
@@ -83,28 +85,28 @@ FIL* open_files[MAX_FILES] = {0};
 
 // Convert FatFS FRESULT to DOS error codes
 static void fresult_to_dos_error(const FRESULT fr) {
-    SET_CPU_FL_CF(fr == FR_OK ? 0 : 1);
+    SET_FL_CF(fr == FR_OK ? 0 : 1);
     switch (fr) {
-        case FR_OK:                   SET_CPU_AX(0);   break;
-        case FR_NO_FILE:              SET_CPU_AX(2);   break;
-        case FR_NO_PATH:              SET_CPU_AX(3);   break;
-        case FR_TOO_MANY_OPEN_FILES:  SET_CPU_AX(4);   break;
+        case FR_OK:                   SET_AX(0);   break;
+        case FR_NO_FILE:              SET_AX(2);   break;
+        case FR_NO_PATH:              SET_AX(3);   break;
+        case FR_TOO_MANY_OPEN_FILES:  SET_AX(4);   break;
         case FR_DENIED:
-        case FR_EXIST:                SET_CPU_AX(5);   break;
-        case FR_INVALID_OBJECT:       SET_CPU_AX(6);   break;
-        case FR_WRITE_PROTECTED:      SET_CPU_AX(19);  break;
-        case FR_INVALID_DRIVE:        SET_CPU_AX(15);  break;
-        case FR_NOT_READY:            SET_CPU_AX(21);  break;
+        case FR_EXIST:                SET_AX(5);   break;
+        case FR_INVALID_OBJECT:       SET_AX(6);   break;
+        case FR_WRITE_PROTECTED:      SET_AX(19);  break;
+        case FR_INVALID_DRIVE:        SET_AX(15);  break;
+        case FR_NOT_READY:            SET_AX(21);  break;
         case FR_DISK_ERR:
-        case FR_INT_ERR:              SET_CPU_AX(29);  break;
-        case FR_INVALID_NAME:         SET_CPU_AX(3);   break;
+        case FR_INT_ERR:              SET_AX(29);  break;
+        case FR_INVALID_NAME:         SET_AX(3);   break;
         case FR_NOT_ENABLED:
-        case FR_NO_FILESYSTEM:        SET_CPU_AX(15);  break;
-        case FR_TIMEOUT:              SET_CPU_AX(32);  break;
-        case FR_LOCKED:               SET_CPU_AX(33);  break;
-        case FR_NOT_ENOUGH_CORE:      SET_CPU_AX(8);   break;
-        case FR_INVALID_PARAMETER:    SET_CPU_AX(87);  break;
-        default:                      SET_CPU_AX(29);  break;
+        case FR_NO_FILESYSTEM:        SET_AX(15);  break;
+        case FR_TIMEOUT:              SET_AX(32);  break;
+        case FR_LOCKED:               SET_AX(33);  break;
+        case FR_NOT_ENOUGH_CORE:      SET_AX(8);   break;
+        case FR_INVALID_PARAMETER:    SET_AX(87);  break;
+        default:                      SET_AX(29);  break;
     }
 }
 
@@ -295,7 +297,7 @@ static bool path_is_ours(uint32_t sda_addr) {
 }
 
 static bool sft_is_ours(void) {
-    uint32_t sft_addr = ((uint32_t)CPU_ES << 4) + CPU_DI;
+    uint32_t sft_addr = ((uint32_t)ES << 4) + DI;
     uint16_t devinfo = readw86(sft_addr + offsetof(sftstruct, device_info));
     /* our redirector writes 0x8040 | 'H' into SFT.device_info */
     return devinfo == (uint16_t)(0x8040 | REDIR_DRIVE_LETTER);
@@ -317,7 +319,7 @@ static bool redirector_handler_impl() {
      * Gate Flush on whether we have any open files at all.
      * Everything else (handle ops, install check) passes through — DOS
      * already routes handle ops only to the redirector that owns the handle. */
-    switch (CPU_AX) {
+    switch (AX) {
         case 0x1101: /* Remove Remote Directory   */
         case 0x1103: /* Create Remote Directory   */
         case 0x1105: /* Change Directory          */
@@ -331,7 +333,7 @@ static bool redirector_handler_impl() {
                 find_is_ours = false; /* foreign Find First resets our state */
                 return false;
             }
-            if (CPU_AX == 0x111B) find_is_ours = true;
+            if (AX == 0x111B) find_is_ours = true;
             break;
         case 0x111C: /* Find Next — only if we started this search */
             if (!find_is_ours)
@@ -358,14 +360,14 @@ static bool redirector_handler_impl() {
             break;
     }
 
-    SET_CPU_FL_CF(0); /* default: success, handlers override for errors */
-    switch (CPU_AX) {
+    SET_FL_CF(0); /* default: success, handlers override for errors */
+    switch (AX) {
         case 0x1100: // Installation Check
             if (!sda_addr) {
                 // Set swappable data address, cause in emulator we don't have it
-                sda_addr = ((uint32_t) CPU_BX << 4) + CPU_DX;
+                sda_addr = ((uint32_t) BX << 4) + DX;
             }
-            SET_CPU_AL(0xFF); // Indicate that the redirector is installed
+            SET_AL(0xFF); // Indicate that the redirector is installed
             break;
 
         case 0x1101: {
@@ -405,25 +407,25 @@ static bool redirector_handler_impl() {
             }
 
             debug_log("Current remote dir set to: '%s'\n", current_remote_dir);
-            SET_CPU_AX(0);
-            SET_CPU_FL_CF(0);
+            SET_AX(0);
+            SET_FL_CF(0);
         }
         break;
         case 0x1107: // Commit Remote File
         case 0x1106: // Close Remote File
         {
-            uint32_t sft_addr = ((uint32_t) CPU_ES << 4) + CPU_DI;
+            uint32_t sft_addr = ((uint32_t) ES << 4) + DI;
             uint16_t file_handle = readw86(sft_addr + offsetof(sftstruct, file_handle));
             if (file_handle < MAX_FILES && open_files[file_handle]) {
                 f_close(open_files[file_handle]);
                 free(open_files[file_handle]);
                 writew86(sft_addr + offsetof(sftstruct, total_handles), 0xffff);
                 open_files[file_handle] = NULL;
-                SET_CPU_AX(0);
-                SET_CPU_FL_CF(0);
+                SET_AX(0);
+                SET_FL_CF(0);
             } else {
-                SET_CPU_AX(6); // Invalid handle
-                SET_CPU_FL_CF(1);
+                SET_AX(6); // Invalid handle
+                SET_FL_CF(1);
             }
         }
         break;
@@ -431,12 +433,12 @@ static bool redirector_handler_impl() {
 
         case 0x1108: // Read Remote File
         {
-            uint32_t sft_addr = ((uint32_t) CPU_ES << 4) + CPU_DI;
+            uint32_t sft_addr = ((uint32_t) ES << 4) + DI;
             uint16_t file_handle = readw86(sft_addr + offsetof(sftstruct, file_handle));
 
             if (file_handle < MAX_FILES && open_files[file_handle]) {
                 uint32_t file_pos = readdw86(sft_addr + offsetof(sftstruct, file_position));
-                uint16_t bytes_to_read = CPU_CX;
+                uint16_t bytes_to_read = CX;
                 debug_log("HANDLE COUNT %X %i (file_pos: %ld)\n", file_handle, bytes_to_read, file_pos);
 
                 FRESULT seek_result = f_lseek(open_files[file_handle], file_pos);
@@ -460,24 +462,24 @@ static bool redirector_handler_impl() {
                 debug_log("bytes read %i at offset %ld -> %x\n", (int) total_bytes_read, file_pos, dta_addr);
 
                 writedw86(sft_addr + offsetof(sftstruct, file_position), file_pos + total_bytes_read);
-                SET_CPU_AX(0);
-                SET_CPU_CX(total_bytes_read);
-                SET_CPU_FL_CF(0);
+                SET_AX(0);
+                SET_CX(total_bytes_read);
+                SET_FL_CF(0);
             } else {
-                SET_CPU_AX(6); // Invalid handle
-                SET_CPU_FL_CF(1);
+                SET_AX(6); // Invalid handle
+                SET_FL_CF(1);
             }
         }
         break;
 
         case 0x1109: // Write Remote File
         {
-            uint32_t sft_addr = ((uint32_t) CPU_ES << 4) + CPU_DI;
+            uint32_t sft_addr = ((uint32_t) ES << 4) + DI;
             uint16_t file_handle = readw86(sft_addr + offsetof(sftstruct, file_handle));
 
             if (file_handle < MAX_FILES && open_files[file_handle]) {
                 uint32_t file_pos = readdw86(sft_addr + offsetof(sftstruct, file_position));
-                uint16_t bytes_to_write = CPU_CX;
+                uint16_t bytes_to_write = CX;
                 debug_log("WRITE HANDLE %X %i (file_pos: %ld)\n", file_handle, bytes_to_write, file_pos);
 
                 FRESULT seek_result = f_lseek(open_files[file_handle], file_pos);
@@ -502,11 +504,11 @@ static bool redirector_handler_impl() {
 
                 writedw86(sft_addr + offsetof(sftstruct, file_position), file_pos + total_bytes_written);
                 f_sync(open_files[file_handle]);
-                SET_CPU_CX(total_bytes_written);
-                SET_CPU_FL_CF(0);
+                SET_CX(total_bytes_written);
+                SET_FL_CF(0);
             } else {
-                SET_CPU_AX(6); // Invalid handle
-                SET_CPU_FL_CF(1);
+                SET_AX(6); // Invalid handle
+                SET_FL_CF(1);
             }
         }
         break;
@@ -544,8 +546,8 @@ static bool redirector_handler_impl() {
             if (file_handle != -1) {
                 open_files[file_handle] = malloc(sizeof(FIL));
                 if (!open_files[file_handle]) {
-                    SET_CPU_AX(4); // Too many open files (or out of memory)
-                    SET_CPU_FL_CF(1);
+                    SET_AX(4); // Too many open files (or out of memory)
+                    SET_FL_CF(1);
                     break;
                 }
                 FRESULT res = f_open(open_files[file_handle], path, FA_READ | FA_WRITE);
@@ -558,7 +560,7 @@ static bool redirector_handler_impl() {
                     if (filename) filename++; else filename = guest_path;
 
                     to_dos_name(filename, sft.file_name);
-                    sft.open_mode = (readw86(((uint32_t) CPU_ES << 4) + CPU_DI + offsetof(sftstruct, open_mode)) & 0xff00) | 0xff02;
+                    sft.open_mode = (readw86(((uint32_t) ES << 4) + DI + offsetof(sftstruct, open_mode)) & 0xff00) | 0xff02;
                     sft.attribute = 0x8;
                     sft.device_info = 0x8040 | 'H';
                     sft.file_handle = file_handle;
@@ -572,19 +574,19 @@ static bool redirector_handler_impl() {
                     sft.unk3 = 0;
                     sft.unk4 = 0xFF;
 
-                    uint32_t sft_addr = ((uint32_t) CPU_ES << 4) + CPU_DI;
+                    uint32_t sft_addr = ((uint32_t) ES << 4) + DI;
                     for(int i=0; i<sizeof(sft); i++) write86(sft_addr + i, ((uint8_t*)&sft)[i]);
 
-                    SET_CPU_AX(0);
-                    SET_CPU_FL_CF(0);
+                    SET_AX(0);
+                    SET_FL_CF(0);
                 } else {
                     free(open_files[file_handle]);
                     open_files[file_handle] = NULL;
                     fresult_to_dos_error(res);
                 }
             } else {
-                SET_CPU_AX(4); // Too many open files
-                SET_CPU_FL_CF(1);
+                SET_AX(4); // Too many open files
+                SET_FL_CF(1);
             }
         }
         break;
@@ -598,8 +600,8 @@ static bool redirector_handler_impl() {
 
                 open_files[file_handle] = malloc(sizeof(FIL));
                 if (!open_files[file_handle]) {
-                    SET_CPU_AX(4); // Too many open files (or out of memory)
-                    SET_CPU_FL_CF(1);
+                    SET_AX(4); // Too many open files (or out of memory)
+                    SET_FL_CF(1);
                     break;
                 }
 
@@ -610,7 +612,7 @@ static bool redirector_handler_impl() {
                     if (filename) filename++; else filename = guest_path;
 
                     to_dos_name(filename, sft.file_name);
-                    sft.open_mode = (readw86(((uint32_t) CPU_ES << 4) + CPU_DI + offsetof(sftstruct, open_mode)) & 0xff00) | 0x0002;
+                    sft.open_mode = (readw86(((uint32_t) ES << 4) + DI + offsetof(sftstruct, open_mode)) & 0xff00) | 0x0002;
                     sft.attribute = 0x08;
                     sft.device_info = 0x8040 | 'H';
                     sft.file_handle = file_handle;
@@ -624,41 +626,41 @@ static bool redirector_handler_impl() {
                     sft.unk3 = 0;
                     sft.unk4 = 0xFF;
 
-                    uint32_t sft_addr = ((uint32_t) CPU_ES << 4) + CPU_DI;
+                    uint32_t sft_addr = ((uint32_t) ES << 4) + DI;
                     for(int i=0; i<sizeof(sft); i++) write86(sft_addr + i, ((uint8_t*)&sft)[i]);
 
-                    SET_CPU_AX(0);
-                    SET_CPU_FL_CF(0);
+                    SET_AX(0);
+                    SET_FL_CF(0);
                 } else {
                     free(open_files[file_handle]);
                     open_files[file_handle] = NULL;
                     fresult_to_dos_error(create_result);
                 }
             } else {
-                SET_CPU_AX(4); // Too many open files
-                SET_CPU_FL_CF(1);
+                SET_AX(4); // Too many open files
+                SET_FL_CF(1);
             }
         }
         break;
 
         case 0x110A: // Lock/Unlock Region
-            SET_CPU_AX(0);
-            SET_CPU_FL_CF(0);
+            SET_AX(0);
+            SET_FL_CF(0);
             break;
 
         case 0x110C: // TODO: Get Disk Information
         {
-            SET_CPU_AX(512);
-            SET_CPU_BX(512);
-            SET_CPU_CX(512);
-            SET_CPU_DX(512);
-            SET_CPU_FL_CF(0);
+            SET_AX(512);
+            SET_BX(512);
+            SET_CX(512);
+            SET_DX(512);
+            SET_FL_CF(0);
         }
         break;
 
         case 0x110e: // TODO: Set File Attributes
-            SET_CPU_AX(0);
-            SET_CPU_FL_CF(0);
+            SET_AX(0);
+            SET_FL_CF(0);
             break;
 
         case 0x110F: {
@@ -677,12 +679,12 @@ static bool redirector_handler_impl() {
                 if (file_info.fattrib & AM_DIR) dos_attributes |= 0x10;
                 if (file_info.fattrib & AM_ARC) dos_attributes |= 0x20;
 
-                SET_CPU_AX(dos_attributes);
-                SET_CPU_BX((file_info.fsize >> 16) & 0xFFFF); // High word
-                SET_CPU_DI(file_info.fsize & 0xFFFF); // Low word
-                SET_CPU_CX(file_info.ftime);
-                SET_CPU_DX(file_info.fdate);
-                SET_CPU_FL_CF(0);
+                SET_AX(dos_attributes);
+                SET_BX((file_info.fsize >> 16) & 0xFFFF); // High word
+                SET_DI(file_info.fsize & 0xFFFF); // Low word
+                SET_CX(file_info.ftime);
+                SET_DX(file_info.fdate);
+                SET_FL_CF(0);
             }
         }
         break;
@@ -728,13 +730,13 @@ static bool redirector_handler_impl() {
 
                 for(int i=0; i<sizeof(sdb); i++) write86(dta_addr + i, ((uint8_t*)&sdb)[i]);
 
-                SET_CPU_FL_CF(0);
+                SET_FL_CF(0);
             } else {
                 debug_log("no files found for '%s' in '%s': %i\n", new_path, path, find_result);
                 find_is_ours = false;
                 if (FR_OK == find_result) {
-                    SET_CPU_AX(18); // No more files
-                    SET_CPU_FL_CF(1);
+                    SET_AX(18); // No more files
+                    SET_FL_CF(1);
                 }  else {
                     fresult_to_dos_error(find_result);
                 }
@@ -759,13 +761,13 @@ static bool redirector_handler_impl() {
 
                 for(int i=0; i<sizeof(sdb); i++) write86(dta_addr + i, ((uint8_t*)&sdb)[i]);
 
-                SET_CPU_FL_CF(0);
+                SET_FL_CF(0);
             } else {
                 debug_log("no more files found for '%s' in '%s': %i\n", path, find_result);
                 find_is_ours = false;
                 if (FR_OK == find_result) {
-                    SET_CPU_AX(18); // No more files
-                    SET_CPU_FL_CF(1);
+                    SET_AX(18); // No more files
+                    SET_FL_CF(1);
                 }  else {
                     fresult_to_dos_error(find_result);
                 }
@@ -779,17 +781,17 @@ static bool redirector_handler_impl() {
                     f_sync(open_files[i]);
                 }
             }
-            SET_CPU_AX(0);
-            SET_CPU_FL_CF(0);
+            SET_AX(0);
+            SET_FL_CF(0);
             break;
 
         case 0x1121: // Seek from File End
         {
-            uint32_t sft_addr = ((uint32_t) CPU_ES << 4) + CPU_DI;
+            uint32_t sft_addr = ((uint32_t) ES << 4) + DI;
             uint16_t file_handle = readw86(sft_addr + offsetof(sftstruct, file_handle));
 
             if (file_handle < MAX_FILES && open_files[file_handle]) {
-                int32_t offset_from_end = ((int32_t)CPU_CX << 16) | CPU_DX;
+                int32_t offset_from_end = ((int32_t)CX << 16) | DX;
                 debug_log("Seek from end: handle %d, offset %ld\n", file_handle, offset_from_end);
 
                 long file_size = f_size(open_files[file_handle]);
@@ -804,39 +806,41 @@ static bool redirector_handler_impl() {
                 }
 
                 writedw86(sft_addr + offsetof(sftstruct, file_position), new_position);
-                SET_CPU_DX((new_position >> 16) & 0xFFFF);
-                SET_CPU_AX(new_position & 0xFFFF);
-                SET_CPU_FL_CF(0);
+                SET_DX((new_position >> 16) & 0xFFFF);
+                SET_AX(new_position & 0xFFFF);
+                SET_FL_CF(0);
 
-                debug_log("Seek result: new position %ld (DX:AX = %04X:%04X)\n", new_position, CPU_DX, CPU_AX);
+                debug_log("Seek result: new position %ld (DX:AX = %04X:%04X)\n", new_position, DX, AX);
             } else {
-                SET_CPU_AX(6); // Invalid handle
-                SET_CPU_FL_CF(1);
+                SET_AX(6); // Invalid handle
+                SET_FL_CF(1);
             }
         }
         break;
 
         default:
-            if (CPU_AH == 0x11 && CPU_AL != 0x23)
-                debug_log("UNIMPLEMENTED Redirector handler 0x%04x\n", CPU_AX);
+            if (AH == 0x11 && AL != 0x23)
+                debug_log("UNIMPLEMENTED Redirector handler 0x%04x\n", AX);
             return false;
     }
     return true;
 }
 
-static bool int2f_callback(CPUI386 *cpu, void *opaque) {
+static bool int2f_callback(CPU *cpu, void *opaque) {
     _nr_cpu = cpu;
     /* Only handle our redirector multiplex (AH=11h) */
-    if (cpu_get_ah(cpu) != 0x11) {
+    if (AH != 0x11) {
         return false; /* not handled, let BIOS chain */
     }
-    debug_log("redirector_handler_impl -> 0x%04x\n", CPU_AX);
+    debug_log("redirector_handler_impl -> 0x%04x\n", AX);
     bool res = redirector_handler_impl();
-    debug_log("redirector_handler_impl <-(%d) 0x%04x %d\n", res, CPU_AX, CPU_FL_CF);
+    debug_log("redirector_handler_impl <-(%d) 0x%04x %d\n", res, AX, FL_CF);
     return res;
 }
 
-void netredirect_init(CPUI386 *cpu, int enable) {
-    _nr_mem = cpu_get_phys_mem(cpu);
-    cpu_set_int2f_handler(cpu, enable ? int2f_callback : NULL, NULL);
+void netredirect_init(CPU *cpu, int enable) {
+    cpu_int_hook_t* new = enable ? (cpu_int_hook_t*)calloc(sizeof(cpu_int_hook_t), 1) : NULL;
+    if (new) new->handler = int2f_callback;
+    cpu_int_hook_t* prev = cpu_set_int_hook(cpu, 0x2F, new);
+    if (prev) free(prev);
 }

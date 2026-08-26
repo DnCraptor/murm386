@@ -1,5 +1,5 @@
 /**
- * murm386 - i386 PC Emulator for RP2350
+ * frank-386 - i386 PC Emulator for RP2350
  *
  * Settings UI - on-screen settings manager for changing emulator
  * configuration at runtime. Triggered by Win+F11 hotkey.
@@ -16,6 +16,8 @@
 #include <stdio.h>
 #include "audio.h"
 
+extern bool SELECT_VGA;
+
 // Menu states
 typedef enum {
     SETTINGS_CLOSED,
@@ -27,7 +29,6 @@ typedef enum {
 // Setting items
 typedef enum {
     SETTING_VOL= 0,
-    SETTING_MEM,
     SETTING_CPU,
     SETTING_FPU,
     SETTING_REDIRECTOR,
@@ -39,6 +40,10 @@ typedef enum {
     SETTING_COVOX,
     SETTING_DSS,
     SETTING_MOUSE,
+    SETTING_NES_MOUSE,
+    SETTING_NES_JOYSTICK,
+    SETTING_USB_JOYSTICK,
+    SETTING_MOUSE_INVERT_Y,
     SETTING_CPU_FREQ,
     SETTING_VOLTAGE,
     SETTING_PSRAM_FREQ,
@@ -50,23 +55,20 @@ typedef enum {
 static const int vol_options[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
 static const int vol_option_count = 17;
 
-#if EMULATE_LTEMS
-static const int mem_options[] = { 1, 2, 4, 6 };
+#ifndef I386_MODE
+static const int cpu_options[] = { 0, 1, 2 };
 #else
-static const int mem_options[] = { 1, 2, 4, 8 };
-#endif
-static const int mem_option_count = 4;
-
 static const int cpu_options[] = { 3, 4, 5 };
+#endif
 static const int cpu_option_count = 3;
 
-static const int cpu_freq_options[] = { 524, 504, 378, 252 };
-static const int cpu_freq_option_count = 4;
+static const int cpu_freq_options[] = { 252, 378, 504, 524, 564 };
+static const int cpu_freq_option_count = 5;
 
-static const int psram_freq_options[] = { 166, 133, 100, 84, 66 };
+static const int psram_freq_options[] = { 66, 84, 100, 133, 166 };
 static const int psram_freq_option_count = 5;
 
-static const int flash_freq_options[] = { 166, 133, 100, 84, 66 };
+static const int flash_freq_options[] = { 66, 84, 100, 133, 166 };
 static const int flash_freq_option_count = 5;
 
 /* Voltage options: -1 = Auto, then vreg_voltage enum values.
@@ -92,16 +94,16 @@ static bool restart_requested = false;
 static int plasma_frame = 0;  // Animation frame counter
 
 // Original values (to detect changes)
-static int orig_mem, orig_cpu, orig_fpu, orig_redirector;
-static int orig_pcspeaker, orig_adlib, orig_soundblaster, orig_tandy, orig_covox, orig_dss, orig_mouse, orig_mpu401;
-static int orig_cpu_freq, orig_psram_freq, orig_flash_freq, orig_volume, orig_voltage;
+static int orig_cpu, orig_fpu, orig_redirector;
+static int orig_pcspeaker, orig_adlib, orig_soundblaster, orig_tandy, orig_covox, orig_dss, orig_mouse, orig_nes_mouse, orig_nes_joystick, orig_mpu401;
+static int orig_cpu_freq, orig_psram_freq, orig_flash_freq, orig_volume, orig_voltage, orig_mouse_invert_y;
 
 // UI dimensions
 #define MENU_X      10
 #define MENU_Y      1
 #define MENU_W      60
-#define MENU_H      23
-#define VISIBLE_ITEMS 17
+#define MENU_H      24
+#define VISIBLE_ITEMS 18
 
 // Forward declarations
 static void draw_settings_menu(void);
@@ -119,7 +121,6 @@ void settingsui_open(void) {
     if (settings_state != SETTINGS_CLOSED) return;
 
     // Store original values
-    orig_mem = config_get_mem_size_mb();
     orig_cpu = config_get_cpu_gen();
     orig_fpu = config_get_fpu();
     orig_redirector = config_get_redirector();
@@ -131,11 +132,14 @@ void settingsui_open(void) {
     orig_covox = config_get_covox();
     orig_dss = config_get_dss();
     orig_mouse = config_get_mouse();
+    orig_nes_mouse = config_get_nes_mouse();
+    orig_nes_joystick = config_get_nes_joystick();
     orig_cpu_freq = config_get_cpu_freq();
     orig_psram_freq = config_get_psram_freq();
     orig_flash_freq = config_get_flash_freq();
     orig_volume = audio_get_volume();
     orig_voltage = config_get_voltage();
+    orig_mouse_invert_y = config_get_mouse_invert_y();
 
     settings_state = SETTINGS_MAIN;
     selected_item = 0;
@@ -148,7 +152,6 @@ void settingsui_open(void) {
 void settingsui_close(void) {
     // Restore original values if not confirmed
     if (settings_state == SETTINGS_MAIN && config_has_changes()) {
-        config_set_mem_size_mb(orig_mem);
         config_set_cpu_gen(orig_cpu);
         config_set_fpu(orig_fpu);
         config_set_redirector(orig_redirector);
@@ -156,6 +159,7 @@ void settingsui_close(void) {
         config_set_psram_freq(orig_psram_freq);
         config_set_flash_freq(orig_flash_freq);
         config_set_voltage(orig_voltage);
+        config_set_mouse_invert_y(orig_mouse_invert_y);
         audio_set_volume(orig_volume);
         config_clear_changes();
     }
@@ -194,14 +198,6 @@ static void cycle_option(int direction) {
             idx = (idx + direction + count) % count;
             audio_set_volume(options[idx]);
             config_set_volume(options[idx]);
-            break;
-
-        case SETTING_MEM:
-            options = mem_options;
-            count = mem_option_count;
-            idx = find_option_index(options, count, config_get_mem_size_mb());
-            idx = (idx + direction + count) % count;
-            config_set_mem_size_mb(options[idx]);
             break;
 
         case SETTING_CPU:
@@ -250,9 +246,36 @@ static void cycle_option(int direction) {
 
         case SETTING_MOUSE:
             config_set_mouse(config_get_mouse() ? 0 : 1);
+            if (config_get_mouse()) config_set_nes_mouse(0);
+            break;
+
+        case SETTING_NES_MOUSE:
+            config_set_nes_mouse(config_get_nes_mouse() ? 0 : 1);
+            /* One pad, one role: mouse emulation and the game port cannot
+             * both be driven from it. */
+            if (config_get_nes_mouse()) {
+                config_set_mouse(0);
+                config_set_nes_joystick(0);
+            }
+            break;
+
+        case SETTING_NES_JOYSTICK:
+            config_set_nes_joystick(config_get_nes_joystick() ? 0 : 1);
+            if (config_get_nes_joystick()) config_set_nes_mouse(0);
+            break;
+
+        case SETTING_USB_JOYSTICK:
+            /* Not exclusive with the NES pad: both feed the same
+             * emulated stick, so either can drive it. */
+            config_set_usb_joystick(config_get_usb_joystick() ? 0 : 1);
+            break;
+
+        case SETTING_MOUSE_INVERT_Y:
+            config_set_mouse_invert_y(config_get_mouse_invert_y() ? 0 : 1);
             break;
 
         case SETTING_CPU_FREQ:
+            if (!SELECT_VGA) break;  // locked to 504 MHz on HDMI
             options = cpu_freq_options;
             count = cpu_freq_option_count;
             idx = find_option_index(options, count, config_get_cpu_freq());
@@ -261,6 +284,7 @@ static void cycle_option(int direction) {
             break;
 
         case SETTING_VOLTAGE:
+            if (!SELECT_VGA) break;  // locked on HDMI
             options = voltage_options;
             count = voltage_option_count;
             idx = find_option_index(options, count, config_get_voltage());
@@ -298,7 +322,6 @@ static void draw_settings_menu(void) {
     // Settings items
     const char *labels[] = {
         "Volume:",
-        "RAM Size:",
         "CPU Type:",
         "FPU (387):",
         "SD cart as H drive:",
@@ -309,7 +332,11 @@ static void draw_settings_menu(void) {
         "Tandy Sound:",
         "Covox (LPT2):",
         "Disney Sound Source:",
-        "Mouse:",
+        "PS/2 or USB Mouse:",
+        "NES Mouse:",
+        "NES Joystick:",
+        "USB Joystick:",
+        "Invert Mouse Y:",
         "RP2350 Freq:",
         "CPU Voltage:",
         "PSRAM Freq:",
@@ -332,11 +359,12 @@ static void draw_settings_menu(void) {
             case SETTING_VOL:
                 snprintf(value, sizeof(value), "< %d >", audio_get_volume());
                 break;
-            case SETTING_MEM:
-                snprintf(value, sizeof(value), "< %d MB >", config_get_mem_size_mb());
-                break;
             case SETTING_CPU:
-                snprintf(value, sizeof(value), "< 80%d86 >", config_get_cpu_gen());
+                if (!config_get_cpu_gen()) {
+                    snprintf(value, sizeof(value), "< i8086 >");
+                } else {
+                    snprintf(value, sizeof(value), "< 80%d86 >", config_get_cpu_gen());
+                }
                 break;
             case SETTING_FPU:
                 snprintf(value, sizeof(value), "< %s >", config_get_fpu() ? "Enabled" : "Disabled");
@@ -368,12 +396,31 @@ static void draw_settings_menu(void) {
             case SETTING_MOUSE:
                 snprintf(value, sizeof(value), "< %s >", config_get_mouse() ? "Enabled" : "Disabled");
                 break;
+            case SETTING_NES_MOUSE:
+                snprintf(value, sizeof(value), "< %s >", config_get_nes_mouse() ? "Enabled" : "Disabled");
+                break;
+            case SETTING_NES_JOYSTICK:
+                snprintf(value, sizeof(value), "< %s >", config_get_nes_joystick() ? "Enabled" : "Disabled");
+                break;
+            case SETTING_USB_JOYSTICK:
+                snprintf(value, sizeof(value), "< %s >", config_get_usb_joystick() ? "Enabled" : "Disabled");
+                break;
+            case SETTING_MOUSE_INVERT_Y:
+                snprintf(value, sizeof(value), "< %s >", config_get_mouse_invert_y() ? "Yes" : "No");
+                break;
             case SETTING_CPU_FREQ:
-                snprintf(value, sizeof(value), "< %d MHz >", config_get_cpu_freq());
+                if (!SELECT_VGA)
+                    snprintf(value, sizeof(value), "  504 MHz (HDMI)");
+                else
+                    snprintf(value, sizeof(value), "< %d MHz >", config_get_cpu_freq());
                 break;
             case SETTING_VOLTAGE: {
-                int idx = find_option_index(voltage_options, voltage_option_count, config_get_voltage());
-                snprintf(value, sizeof(value), "< %s >", voltage_labels[idx]);
+                if (!SELECT_VGA) {
+                    snprintf(value, sizeof(value), "  1.60V (HDMI)");
+                } else {
+                    int idx = find_option_index(voltage_options, voltage_option_count, config_get_voltage());
+                    snprintf(value, sizeof(value), "< %s >", voltage_labels[idx]);
+                }
                 break;
             }
             case SETTING_PSRAM_FREQ:
@@ -383,16 +430,18 @@ static void draw_settings_menu(void) {
                 snprintf(value, sizeof(value), "< %d MHz >", config_get_flash_freq());
                 break;
         }
-        osd_print(MENU_X + 25, y, value, attr);
+        // Right-align value
+        int val_len = strlen(value);
+        osd_print(MENU_X + MENU_W - 4 - val_len, y, value, attr);
     }
 
     // Show if changes pending
     if (config_has_changes()) {
-        osd_print(MENU_X + 3, MENU_Y + MENU_H - 4, "* Changes pending - Enter to apply", OSD_ATTR_HIGHLIGHT);
+        osd_print_center(MENU_Y + MENU_H - 4, "* Changes pending - Enter to apply", OSD_ATTR_HIGHLIGHT);
     }
 
-    // Help
-    osd_print(MENU_X + 2, MENU_Y + MENU_H - 2, "\x18\x19:Select  \x1b\x1a:Change  Enter:Apply  Esc:Cancel", OSD_ATTR_HIGHLIGHT);
+    // Help (centered)
+    osd_print_center(MENU_Y + MENU_H - 2, "\x18\x19: Select  \x1b\x1a: Change  Enter: Apply  Esc: Cancel", OSD_ATTR_HIGHLIGHT);
 }
 
 static void draw_confirm_dialog(void) {
@@ -514,6 +563,7 @@ bool settingsui_handle_key(int keycode, bool is_down) {
 void settingsui_animate(void) {
     if (settings_state == SETTINGS_CLOSED) return;
     plasma_frame++;
+
     // Only update plasma background, not the window content
     osd_draw_plasma_background(plasma_frame * 3, MENU_X, MENU_Y, MENU_W, MENU_H);
 }

@@ -15,6 +15,9 @@
 #include "hdmi.h"
 #include "font8x16.h"
 
+/* Shared SRAM-resident memset from src/dos_api.c. */
+void *nf_memset(void *ptr, int value, size_t len);
+
 //PIO параметры
 static uint offs_prg0 = 0;
 static uint offs_prg1 = 0;
@@ -32,7 +35,13 @@ extern uint32_t palette_a[256];
 #define SCREEN_WIDTH (320)
 #define SCREEN_HEIGHT (240)
 
-#define GFX_BUFFER_SIZE (256 * 1024)
+#ifdef MCGA
+#define GFX_BUFFER_SIZE (64u * 1024u)
+#elif defined(EGA128) || defined(VGA128)
+#define GFX_BUFFER_SIZE (128u * 1024u)
+#else
+#define GFX_BUFFER_SIZE (256u * 1024u)
+#endif
 extern uint8_t gfx_buffer[GFX_BUFFER_SIZE];
 extern uint8_t text_buffer_sram[80 * 25 * 2];
 extern int text_cols;
@@ -53,6 +62,54 @@ extern int cursor_blink_state;
 
 extern int active_start;
 extern int active_end;
+
+#if DIAG
+extern volatile uint32_t dos_diag_code;
+extern volatile uint32_t dos_diag_kernel_code;
+
+/* Same diagnostic latch as VGA, rendered in the normally blank top border. */
+static inline void __time_critical_func(render_diag_border_hdmi)(
+    uint32_t line, uint8_t *output_buffer)
+{
+    uint32_t code;
+    const char *prefix;
+    uint32_t glyph_line;
+
+    if (active_start < 40)
+        return;
+
+    if (line >= 2 && line < 18) {
+        code = dos_diag_code;
+        prefix = "APP:";
+        glyph_line = line - 2;
+    } else if (line >= 22 && line < 38) {
+        code = dos_diag_kernel_code;
+        prefix = "KRN:";
+        glyph_line = line - 22;
+    } else {
+        return;
+    }
+
+    if (!code)
+        return;
+
+    static const char hex[] = "0123456789ABCDEF";
+    const uint8_t fg = 0x0f;
+    const uint8_t bg = 0x00;
+    const int x0 = 8;
+
+    for (int col = 0; col < 12; ++col) {
+        char ch = (col < 4)
+            ? prefix[col]
+            : hex[(code >> ((11 - col) * 4)) & 0x0f];
+
+        uint8_t glyph = font_8x16[(uint8_t)ch * 16 + glyph_line];
+        uint8_t *d = output_buffer + x0 + col * 8;
+        for (int bit = 0; bit < 8; ++bit)
+            d[bit] = (glyph & (1u << bit)) ? fg : bg;
+    }
+}
+#endif
 
 extern int gfx_submode;
 extern int gfx_width;
@@ -201,53 +258,22 @@ static void pio_set_x(PIO pio, const int sm, uint32_t v) {
     pio_sm_exec(pio, sm, instr_mov);
 }
 
-static inline void* __not_in_flash_func(nf_memset)(void* ptr, int value, size_t len)
-{
-    uint8_t* p = (uint8_t*)ptr;
-    uint8_t v8 = (uint8_t)value;
-
-    // --- выравниваем до 4 байт ---
-    while (len && ((uintptr_t)p & 3)) {
-        *p++ = v8;
-        len--;
-    }
-
-    // --- основной 32-битный цикл ---
-    if (len >= 4) {
-        uint32_t v32 = v8;
-        v32 |= v32 << 8;
-        v32 |= v32 << 16;
-
-        uint32_t* p32 = (uint32_t*)p;
-        size_t n32 = len >> 2;
-
-        while (n32--) {
-            *p32++ = v32;
-        }
-
-        p = (uint8_t*)p32;
-        len &= 3;
-    }
-
-    // --- хвост ---
-    while (len--) {
-        *p++ = v8;
-    }
-
-    return ptr;
-}
-
 #define is_hdmi_sync(c) (c >= HDMI_CTRL_0)
 #define ob(x) { register uint8_t c = x; *output_buffer++ = is_hdmi_sync(c) ? (HDMI_CTRL_0 - 1) : c; }
 
 static void __time_critical_func(render_text_line)(uint32_t line, uint8_t *output_buffer) {
-    uint32_t char_row = line >> 4; // div 16
-    uint32_t glyph_line = line & 15;
+    int char_height = vga_get_char_height(vga_state);
+    if (char_height <= 0 || char_height > 32)
+        char_height = 16;
+
+    uint32_t char_row = line / (uint32_t)char_height;
+    uint32_t glyph_line = line % (uint32_t)char_height;
+    uint32_t text_rows = (uint32_t)(active_end - active_start) / (uint32_t)char_height;
 
     int cols = text_cols;
     int double_h = (cols == 40);  // 40 columns => 2x horizontal scaling
 
-    if (char_row < 25) {
+    if (char_row < text_rows) {
         // Use snapped start address for the frame (prevents mid-frame tearing).
         const uint32_t *base = (const uint32_t *)(gfx_buffer + ((uint32_t)frame_vram_offset << 2));
         const uint32_t *text_row = base + (char_row * (uint32_t)text_stride_cells);
@@ -479,6 +505,35 @@ static void __time_critical_func(render_gfx_line_cga2)(uint32_t line, uint8_t *o
     }
 }
 
+// VGA/MCGA mode 11h: 640x480x2. HDMI line storage packs two
+// monochrome pixels into each byte, so 80 source bytes become 320 bytes.
+static void __time_critical_func(render_gfx_line_mono640)(uint32_t line, uint8_t *output_buffer) {
+    if (line >= (uint32_t)gfx_height || gfx_width != 640) {
+        nf_memset(output_buffer, 0, SCREEN_WIDTH);
+        return;
+    }
+
+    uint32_t stride = gfx_line_offset > 0 ? (uint32_t)gfx_line_offset * 2u : 80u;
+    uint32_t offset;
+    if (frame_line_compare >= 0 && line >= (uint32_t)frame_line_compare)
+        offset = (line - (uint32_t)frame_line_compare) * stride;
+    else
+        offset = frame_vram_offset + line * stride;
+    offset &= 0xFFFFu;
+
+    for (int i = 0; i < 80; ++i) {
+#if defined(VGA128) || defined(MCGA)
+        uint8_t byte = gfx_buffer[offset + (uint32_t)i];
+#else
+        uint8_t byte = gfx_buffer[(offset + (uint32_t)i) * 4u];
+#endif
+        *output_buffer++ = ((byte >> 7) << 1) | ((byte >> 6) & 1);
+        *output_buffer++ = (((byte >> 5) & 1) << 1) | ((byte >> 4) & 1);
+        *output_buffer++ = (((byte >> 3) & 1) << 1) | ((byte >> 2) & 1);
+        *output_buffer++ = (((byte >> 1) & 1) << 1) | (byte & 1);
+    }
+}
+
 // Spread 8 bits of a byte into positions 0,4,8,...28
 extern uint32_t spread8_lut[256];
 
@@ -634,8 +689,28 @@ static void __time_critical_func(render_gfx_line_ega640)(uint32_t line, uint8_t 
     }
 }
 
+// VBE 100h packed 8bpp.  HDMI scanline storage has SCREEN_WIDTH (320)
+// palette indexes; each index is expanded to two output pixels.  Sampling
+// every second source pixel avoids overrunning the 320-byte DMA line buffer.
+static void __time_critical_func(render_gfx_line_vbe8)(uint32_t line,
+                                                        uint8_t *output_buffer) {
+    if (line >= (uint32_t)gfx_height || gfx_width != 640) {
+        nf_memset(output_buffer, 0, SCREEN_WIDTH);
+        return;
+    }
+    const uint8_t *src = gfx_buffer + line * 640u;
+    for (int i = 0; i < SCREEN_WIDTH; ++i)
+        ob(src[i << 1]);
+}
+
 void pre_render_line(void);
 static void __time_critical_func(render_line)(uint32_t line, uint8_t *output_buffer) {
+    /* Early hardware errors are shown before pc_new()/vga_init(), while
+     * vga_state is still NULL.  OSD rendering itself does not need it. */
+    if (osd_is_visible()) {
+        return osd_render_line_hdmi(line, output_buffer);
+    }
+
     // Before emulator init: output black, avoid calling any flash-resident
     // functions that could cause XIP contention with Core 0's BIOS loading.
     if (!vga_state) {
@@ -643,9 +718,6 @@ static void __time_critical_func(render_line)(uint32_t line, uint8_t *output_buf
         return;
     }
     pre_render_line();
-    if (osd_is_visible()) {
-        return osd_render_line_hdmi(line, output_buffer);
-    }
     int mode = current_mode;
     if (mode == 1) {
         // Text mode now rendered from linear framebuffer
@@ -674,12 +746,26 @@ static void __time_critical_func(render_line)(uint32_t line, uint8_t *output_buf
             render_gfx_line_cga2(line, output_buffer);
             return;
         }
+        if (submode == 8) {
+            // VGA/MCGA mode 11h: 640x480x2
+            render_gfx_line_mono640(line, output_buffer);
+            return;
+        }
+#if !defined(EGA128) && !defined(MCGA)
         if (submode == 5) {
             // VGA 256-color planar (Mode X)
             render_gfx_line_vga_planar256(line, output_buffer);
             return;
         }
-        // VGA 256-color (mode 13h) - default
+#endif
+#if !defined(EGA128) && !defined(VGA128) && !defined(MCGA)
+        if (submode == 7) {
+            // VBE 100h: 640x400x256 packed pixels
+            render_gfx_line_vbe8(line, output_buffer);
+            return;
+        }
+#endif
+        // VGA/MCGA 256-color (mode 13h) - default
         render_gfx_line_from_sram(line, output_buffer);
         return;
     }
@@ -700,15 +786,17 @@ static void __time_critical_func(dma_handler_HDMI)() {
         ++line;
     }
 
-    // Update VGA status register 1 (port 0x3DA) from ISR
+    // Update VGA status register 1 (port 0x3DA) from ISR — this is the
+    // authoritative source. Core0 reads it as-is without any logic.
+    // Bit 0 (DISP_ENABLE): 0 = active display, 1 = blanking interval
+    // Bit 3 (V_RETRACE):   1 = vertical retrace, 0 = active display
     if (vga_state) {
         if (line >= 480) {
-            vga_state->st01 |=  ST01_V_RETRACE;
-            vga_state->st01 &= ~ST01_DISP_ENABLE;
+            vga_state->st01 |= ST01_V_RETRACE;
         } else {
             vga_state->st01 &= ~ST01_V_RETRACE;
-            vga_state->st01 |=  ST01_DISP_ENABLE;
         }
+        vga_state->st01 &= ~ST01_DISP_ENABLE; // start visible line-part
     }
 
     // 4-buffer rendering: DMA reads buf (line % 4), ISR renders (line+2) % 4.
@@ -722,6 +810,9 @@ static void __time_critical_func(dma_handler_HDMI)() {
         uint8_t* output_buffer = activ_buf + 72;
         if (line < (uint32_t)active_start) {
             nf_memset(output_buffer, 0, SCREEN_WIDTH);
+#if DIAG
+            render_diag_border_hdmi(line, output_buffer);
+#endif
             goto f;
         }
         if (line >= (uint32_t)active_end) {
@@ -769,6 +860,15 @@ f:
             }
         }
     }
+    if (vga_state) {
+        vga_state->st01 |= ST01_DISP_ENABLE; // start invisible line-part
+    }
+
+    /* Native TSR1 hook: called once per scanline on core1, after the
+       time-critical VGA DMA/render work is complete. Client callbacks run
+       in this IRQ context and must return quickly or video timing will fail. */
+    extern void tsr1_dispatch(void);
+    tsr1_dispatch();
 }
 
 static inline void irq_remove_handler_DMA_core1() {
@@ -1096,8 +1196,11 @@ void graphics_init_hdmi() {
 
     hdmi_init();
 
-    // Set high priority on all 4 video DMA channels AFTER hdmi_init
-    // (dma_channel_configure overwrites ctrl, so we must set priority here)
+    // DMA starts at normal priority to avoid starving SD/PSRAM during init.
+    // Call hdmi_set_dma_high_priority() after BIOS loading is complete.
+}
+
+void hdmi_set_dma_high_priority(void) {
     hw_set_bits(&dma_hw->ch[dma_chan].ctrl_trig, DMA_CH0_CTRL_TRIG_HIGH_PRIORITY_BITS);
     hw_set_bits(&dma_hw->ch[dma_chan_ctrl].ctrl_trig, DMA_CH0_CTRL_TRIG_HIGH_PRIORITY_BITS);
     hw_set_bits(&dma_hw->ch[dma_chan_pal_conv].ctrl_trig, DMA_CH0_CTRL_TRIG_HIGH_PRIORITY_BITS);

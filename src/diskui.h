@@ -1,5 +1,5 @@
 /**
- * murm386 - i386 PC Emulator for RP2350
+ * frank-386 - i386 PC Emulator for RP2350
  *
  * Disk UI - on-screen disk manager for inserting/ejecting disk images
  * at runtime. Triggered by Win+F12 hotkey.
@@ -16,20 +16,23 @@
 
 // Drive types
 typedef enum {
-    DRIVE_FDD_A = 0,    // Floppy A:
-    DRIVE_FDD_B = 1,    // Floppy B:
-    DRIVE_HDD_C = 2,    // Hard Disk C:
-    DRIVE_HDD_D = 3,    // Hard Disk D:
-    DRIVE_CDROM_E = 4,  // CD-ROM E:
-    DRIVE_COUNT = 5
+    DRIVE_FDD0 = 0,    // Floppy A:
+    DRIVE_FDD1 = 1,    // Floppy B:
+    // Hard Disks or CD-ROM
+    DRIVE_ATA0_0 = 2,  
+    DRIVE_ATA0_1 = 3,
+    DRIVE_ATA1_0 = 4,
+    DRIVE_ATA1_1 = 5,
+    DRIVE_SD_CARD = 6,   // SD card as raw drive (Via BIOS only) - On/Off toggle
+    DRIVE_USB_MODE = 7,  // USB HOST/DEVICE toggle
+    DRIVE_BIOS = 8,
+    DRIVE_TOTAL = 9
 } DiskUIDrive;
 
 // Drive info for UI display
 typedef struct {
     const char *label;       // "A:", "B:", etc.
     const char *type_name;   // "Floppy", "Hard Disk", "CD-ROM"
-    bool is_floppy;
-    bool is_cdrom;
 } DriveInfo;
 
 // Initialize disk UI system
@@ -43,6 +46,11 @@ void diskui_close(void);
 
 // Check if disk menu is currently open
 bool diskui_is_open(void);
+
+// Handle a USB-host-initiated disconnect of the exported MSC device: does the
+// same work as pressing Esc in the DEVICE-mode Disk Manager (save config back
+// to HOST, shut down TinyUSB, reboot). No-op outside USB_MODE_DEVICE.
+void diskui_usb_device_disconnected(void);
 
 // Handle keyboard input
 // keycode: Linux keycode
@@ -70,5 +78,7 @@ void diskui_animate(void);
 #define KEY_C       46
 #define KEY_D       32
 #define KEY_E       18
+#define KEY_F       33
+#define KEY_G       34
 
 #endif // DISKUI_H

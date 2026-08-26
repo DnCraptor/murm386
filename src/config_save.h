@@ -1,5 +1,5 @@
 /**
- * murm386 - i386 PC Emulator for RP2350
+ * frank-386 - i386 PC Emulator for RP2350
  *
  * Configuration Save - writes configuration to INI file on SD card.
  *
@@ -13,6 +13,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+// Ensure the per-CPU data directory ("/286" or "/386") exists.
+// Safe to call when it already exists.
+bool config_ensure_data_dir(void);
+
 // Save all configuration to INI file
 // Returns true on success
 bool config_save_all(void);
@@ -21,9 +25,6 @@ bool config_save_all(void);
 bool config_save_disks(void);
 
 // Get/set configuration values (stored in memory until saved)
-int config_get_mem_size_mb(void);
-void config_set_mem_size_mb(int mb);
-
 int config_get_cpu_gen(void);
 void config_set_cpu_gen(int gen);
 
@@ -33,7 +34,17 @@ void config_set_fpu(int enabled);
 int config_get_redirector(void);
 void config_set_redirector(int enabled);
 
-// Hardware settings (saved in [murm386] section)
+const char *config_get_bios_file(void);
+void config_set_bios_file(const char *filename);
+int config_get_raw_sd_hdd(void);
+void config_set_raw_sd_hdd(int enabled);
+
+#define USB_MODE_HOST   0
+#define USB_MODE_DEVICE 1
+int config_get_usb_mode(void);
+void config_set_usb_mode(int mode);
+
+// Hardware settings (saved in [frank-386] section)
 int config_get_pcspeaker(void);
 void config_set_pcspeaker(int enabled);
 
@@ -58,17 +69,34 @@ void config_set_mpu401(int enabled);
 int config_get_mouse(void);
 void config_set_mouse(int enabled);
 
+int config_get_nes_mouse(void);
+void config_set_nes_mouse(int enabled);
+/* NES pad as a DOS analog joystick on the game port (0x201). Mutually
+ * exclusive with nes_mouse: one pad cannot be both at once. */
+int config_get_nes_joystick(void);
+void config_set_nes_joystick(int enabled);
+/* USB gamepad as a DOS analog joystick on the same game port. Can run
+ * alongside the NES pad: both feed the one emulated stick. */
+int config_get_usb_joystick(void);
+void config_set_usb_joystick(int enabled);
+
 int config_get_cpu_freq(void);
 void config_set_cpu_freq(int mhz);
 
 int config_get_psram_freq(void);
 void config_set_psram_freq(int mhz);
+int config_get_psram_size_mb(void);
+int config_get_psram_test_freq(void);
+void config_set_psram_test_cache(int size_mb, int test_freq_mhz);
+void config_invalidate_psram_test_cache_runtime(void);
 int config_get_flash_freq(void);
 void config_set_flash_freq(int mhz);
 int config_get_volume(void);
 void config_set_volume(int vol);
 int config_get_voltage(void);
 void config_set_voltage(int v);
+int config_get_mouse_invert_y(void);
+void config_set_mouse_invert_y(int enabled);
 
 // Check if hardware settings changed (requires reboot)
 bool config_hw_changed(void);
@@ -82,8 +110,8 @@ void config_clear_changes(void);
 // Initialize config from current PCConfig
 void config_init_from_current(void);
 
-// INI parser callback for [murm386] section
-int parse_murm386_ini(void* user, const char* section,
+// INI parser callback for [frank-386] section
+int parse_frank_386_ini(void* user, const char* section,
                       const char* name, const char* value);
 
 #endif // CONFIG_SAVE_H

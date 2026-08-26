@@ -7,7 +7,10 @@
 #include <stdlib.h>
 #include <hardware/gpio.h>
 #include "i386.h"
+#include "disk.h"
 #include "ff.h"
+#include "diskio.h"
+#include "mem.h"
 #include "ems.h"
 #include "vga.h"
 
@@ -16,6 +19,9 @@ extern FATFS fs;
 int hdcount = 0;
 
 static uint8_t sectorbuffer[512];
+
+static uint8_t raw_sd_hdd_enabled = 0;
+static uint32_t raw_sd_hdd_sectors = 0;
 
 struct struct_fdd {
     FIL fil;
@@ -43,42 +49,18 @@ struct struct_ata {
 } ata[4] = { 0 };
 
 
-static CPUI386 *disk_cpu = NULL;
-static uint8_t *disk_mem = NULL;
+static CPU *disk_cpu = NULL;
 static VGAState *disk_vga = NULL;
 void disk_set_vga(VGAState *vga) { disk_vga = vga; }
 
-/* Copy sector data to guest memory, routing VGA IOMEM through vga_mem_write */
-static inline void disk_copy_to_guest(uint8_t *phys_mem, uint32_t guest,
-                                      const uint8_t *buf, uint32_t len)
-{
-    if (disk_vga && guest >= 0xA0000 && guest + len <= 0xC0000) {
-        for (uint32_t i = 0; i < len; i++)
-            vga_mem_write(disk_vga, guest - 0xA0000 + i, buf[i]);
-        return;
-    }
-    ems_copy_to_guest(phys_mem, guest, buf, len);
-}
-
-/* Copy from guest memory, routing VGA IOMEM through vga_mem_read */
-static inline void disk_copy_from_guest(uint8_t *phys_mem, uint32_t guest,
-                                        uint8_t *buf, uint32_t len)
-{
-    if (disk_vga && guest >= 0xA0000 && guest + len <= 0xC0000) {
-        for (uint32_t i = 0; i < len; i++)
-            buf[i] = vga_mem_read(disk_vga, guest - 0xA0000 + i);
-        return;
-    }
-    ems_copy_from_guest(phys_mem, guest, buf, len);
-}
 static void (*disk_cmos_update_cb)(uint8_t type_a, uint8_t type_b) = NULL;
 void disk_set_cmos_callback(void (*cb)(uint8_t, uint8_t)) { disk_cmos_update_cb = cb; }
 
 static void (*disk_fdc_mediachange_cb)(int drive) = NULL;
 void disk_set_fdc_mediachange_callback(void (*cb)(int drive)) { disk_fdc_mediachange_cb = cb; }
 
-static void (*disk_cdrom_change_cb)(int drive, const char *filename) = NULL;
-void disk_set_cdrom_change_callback(void (*cb)(int drive, const char *filename)) { disk_cdrom_change_cb = cb; }
+static void (*disk_cdrom_change_cb)(int drive, const char *filename, int was_present) = NULL;
+void disk_set_cdrom_change_callback(void (*cb)(int drive, const char *filename, int was_present)) { disk_cdrom_change_cb = cb; }
 
 /* Установить FDPT (Fixed Disk Parameter Table) и INT 41h/46h векторы.
  * Вызывается при каждом INT 13h для HDD — перезаписывает то что мог
@@ -89,25 +71,25 @@ static void install_fdpt(void) {
     /* Всегда перезаписываем — SeaBIOS может восстановить свои векторы */
 #define FDPT(base, c, h, s) do { \
     uint16_t _c=(c); uint8_t _h=(h),_s=(s),_ctrl=(_h>8)?0x08:0x00; \
-    disk_mem[(base)+0x00]=_c&0xFF; disk_mem[(base)+0x01]=_c>>8; \
-    disk_mem[(base)+0x02]=_h;      disk_mem[(base)+0x03]=0; \
-    disk_mem[(base)+0x04]=0xFF;    disk_mem[(base)+0x05]=0xFF; /* reduced write */ \
-    disk_mem[(base)+0x06]=0xFF;    disk_mem[(base)+0x07]=0xFF; /* write precomp */ \
-    disk_mem[(base)+0x08]=0;       disk_mem[(base)+0x09]=_ctrl; \
-    disk_mem[(base)+0x0A]=0;       disk_mem[(base)+0x0B]=0; \
-    disk_mem[(base)+0x0C]=0; \
-    disk_mem[(base)+0x0D]=_c&0xFF; disk_mem[(base)+0x0E]=_c>>8; /* landing zone */ \
-    disk_mem[(base)+0x0F]=_s; /* sectors per track */ \
+    pstore8((base)+0x00,_c&0xFF); pstore8((base)+0x01,_c>>8); \
+    pstore8((base)+0x02,_h);      pstore8((base)+0x03,0); \
+    pstore8((base)+0x04,0xFF);    pstore8((base)+0x05,0xFF); /* reduced write */ \
+    pstore8((base)+0x06,0xFF);    pstore8((base)+0x07,0xFF); /* write precomp */ \
+    pstore8((base)+0x08,0);       pstore8((base)+0x09,_ctrl); \
+    pstore8((base)+0x0A,0);       pstore8((base)+0x0B,0); \
+    pstore8((base)+0x0C,0); \
+    pstore8((base)+0x0D,_c&0xFF); pstore8((base)+0x0E,_c>>8); /* landing zone */ \
+    pstore8((base)+0x0F,_s); /* sectors per track */ \
 } while(0)
     if (ata[0].name) {
         FDPT(0x522, ata[0].cyls, ata[0].heads, ata[0].sects);
-        disk_mem[0x104]=0x22; disk_mem[0x105]=0x05;
-        disk_mem[0x106]=0x00; disk_mem[0x107]=0x00;
+        pstore8(0x104,0x22); pstore8(0x105,0x05);
+        pstore8(0x106,0x00); pstore8(0x107,0x00);
     }
     if (ata[1].name) {
         FDPT(0x532, ata[1].cyls, ata[1].heads, ata[1].sects);
-        disk_mem[0x118]=0x32; disk_mem[0x119]=0x05;
-        disk_mem[0x11A]=0x00; disk_mem[0x11B]=0x00;
+        pstore8(0x118,0x32); pstore8(0x119,0x05);
+        pstore8(0x11A,0x00); pstore8(0x11B,0x00);
     }
     // TODO: ata[2,3]
 #undef FDPT
@@ -134,16 +116,12 @@ static int detect_vhd(FIL *file, size_t size) {
     return 0;
 }
 
-void disk_set_cpu(CPUI386 *cpu) {
+void disk_set_cpu(CPU *cpu) {
     disk_cpu = cpu;
-    disk_mem = cpu_get_phys_mem(cpu);
 }
 
-void ejectdisk(uint8_t drivenum, bool atapi) {
-    /* Check floppy FIRST (drivenum < 2) to avoid drivenum aliasing with ata[].
-     * diskui passes atapi=false for both floppy and HDD; the only way to
-     * distinguish them is the atapi flag combined with drivenum range. */
-    if (drivenum < 2 && !atapi && fdd[drivenum].name) {
+void ejectdisk(uint8_t drivenum, bool is_fdd) {
+    if (drivenum < 2 && is_fdd && fdd[drivenum].name) {
         f_close(&fdd[drivenum].fil);
         free(fdd[drivenum].name);
         fdd[drivenum].name = 0;
@@ -155,45 +133,56 @@ void ejectdisk(uint8_t drivenum, bool atapi) {
         update_floppy_cmos();
         if (disk_fdc_mediachange_cb)
             disk_fdc_mediachange_cb(drivenum);
+        return;
     }
-    else if (drivenum < 4 && atapi && ata[drivenum].name) {
-        /* ATA eject: atapi=true for both HDD and CD (from GUI or insertdisk) */
+    if (drivenum < 4 && ata[drivenum].iscdrom && ata[drivenum].name) {
+        /* ATA eject: CD (from GUI or insertdisk) */
         f_close(&ata[drivenum].fil);
         free(ata[drivenum].name);
         ata[drivenum].name = 0;
-        if (ata[drivenum].iscdrom) {
-            if (disk_cdrom_change_cb)
-                disk_cdrom_change_cb(drivenum, NULL);
-        } else {
-            hdcount--;
-        }
+        ata[drivenum].iscdrom = 0;
+        ata[drivenum].usable_size = 0;
+        ata[drivenum].cyls = 0;
+        ata[drivenum].heads = 0;
+        ata[drivenum].sects = 0;
+        ata[drivenum].drive_type = 0;
+        if (disk_cdrom_change_cb)
+            disk_cdrom_change_cb(drivenum, NULL, 1);
+        return;
     }
-    else if (drivenum < 4 && !atapi && ata[drivenum].name && !ata[drivenum].iscdrom) {
-        /* HDD eject via atapi=false path (e.g. from GUI for HDD drives) */
+    if (drivenum < 4 && ata[drivenum].name) {
+        /* HDD eject (e.g. from GUI for HDD drives) */
         f_close(&ata[drivenum].fil);
         free(ata[drivenum].name);
         ata[drivenum].name = 0;
-        hdcount--;
+        ata[drivenum].iscdrom = 0;
+        ata[drivenum].usable_size = 0;
+        ata[drivenum].cyls = 0;
+        ata[drivenum].heads = 0;
+        ata[drivenum].sects = 0;
+        ata[drivenum].drive_type = 0;
+        if (hdcount > 0) hdcount--;
     }
 }
 
 uint8_t insertdisk(uint8_t drivenum, bool is_fdd, bool is_cd, const char *pathname) {
     if ((is_fdd && drivenum >= 2) || drivenum >= 4) return false;
-    // Build full path (files are in 386/ directory)
+    // Build full path (files are in the SD_DATA_DIR directory)
     char path[256];
-    snprintf(path, sizeof(path), "386/%s", pathname);
+    snprintf(path, sizeof(path), SD_DATA_DIR_SLASH "%s", pathname);
 
     /* CD-ROMs are read-only; regular disks need write access */
     BYTE fmode = is_cd ? FA_READ : (FA_READ | FA_WRITE);
     FIL* pf = is_fdd ? &fdd[drivenum].fil : &ata[drivenum].fil;
+    const int cd_was_present = (!is_fdd && is_cd && pf->obj.fs) ? 1 : 0;
     if (pf->obj.fs) {
         /* Eject whatever is currently in the drive before inserting new image */
         if (is_fdd)
-            ejectdisk(drivenum, false);
-        else if (is_cd)
             ejectdisk(drivenum, true);
+        else if (is_cd)
+            ejectdisk(drivenum, false);
         else
-            ejectdisk(drivenum, false);  /* HDD: atapi=false path */
+            ejectdisk(drivenum, false);
     }
     FRESULT fres = f_open(pf, path, fmode);
     if (FR_OK != fres) {
@@ -227,7 +216,7 @@ uint8_t insertdisk(uint8_t drivenum, bool is_fdd, bool is_cd, const char *pathna
         ata[drivenum].heads      = 0;
         ata[drivenum].sects      = 0;
         if (disk_cdrom_change_cb)
-            disk_cdrom_change_cb(drivenum, path);
+            disk_cdrom_change_cb(drivenum, path, cd_was_present);
         return 1;
     }
     // Validate size constraints (non-CD-ROM only)
@@ -330,6 +319,223 @@ void disk_set_cdrom(uint8_t drivenum, uint8_t iscdrom) {
 uint8_t ata_is_cdrom(uint8_t drivenum) {
     if (drivenum >= 4) return 0;
     return ata[drivenum].iscdrom;
+}
+
+int8_t ata_hdd_slot(uint8_t bios_index) {
+    for (uint8_t slot = 0; slot < 4; slot++) {
+        if (!ata[slot].name || ata[slot].iscdrom)
+            continue;
+        if (bios_index == 0)
+            return (int8_t)slot;
+        bios_index--;
+    }
+    return -1;
+}
+
+uint8_t ata_hdd_count(void) {
+    uint8_t count = 0;
+    for (uint8_t slot = 0; slot < 4; slot++) {
+        if (ata[slot].name && !ata[slot].iscdrom)
+            count++;
+    }
+    return count;
+}
+
+void disk_set_raw_sd_hdd(uint8_t enabled) {
+    raw_sd_hdd_enabled = 0;
+    raw_sd_hdd_sectors = 0;
+
+    if (!enabled)
+        return;
+
+    DWORD sectors = 0;
+    if (disk_ioctl(0, GET_SECTOR_COUNT, &sectors) == RES_OK && sectors) {
+        raw_sd_hdd_sectors = (uint32_t)sectors;
+        raw_sd_hdd_enabled = 1;
+    }
+}
+
+uint8_t disk_raw_sd_hdd_enabled(void) {
+    return raw_sd_hdd_enabled;
+}
+
+uint32_t disk_raw_sd_sectors(void) {
+    return raw_sd_hdd_enabled ? raw_sd_hdd_sectors : 0u;
+}
+
+bool disk_raw_sd_readonly(void) {
+    return (disk_status(0) & STA_PROTECT) != 0;
+}
+
+bool disk_raw_sd_read(uint32_t lba, void *buf, uint32_t count) {
+    if (!raw_sd_hdd_enabled || !count) return false;
+    if (lba >= raw_sd_hdd_sectors || count > raw_sd_hdd_sectors - lba) return false;
+    return disk_read(0, (BYTE *)buf, (LBA_t)lba, count) == RES_OK;
+}
+
+bool disk_raw_sd_write(uint32_t lba, const void *buf, uint32_t count) {
+    if (!raw_sd_hdd_enabled || !count) return false;
+    if (disk_status(0) & STA_PROTECT) return false;
+    if (lba >= raw_sd_hdd_sectors || count > raw_sd_hdd_sectors - lba) return false;
+    return disk_write(0, (const BYTE *)buf, (LBA_t)lba, count) == RES_OK;
+}
+
+bool disk_raw_sd_sync(void) {
+    if (!raw_sd_hdd_enabled) return false;
+    return disk_ioctl(0, CTRL_SYNC, NULL) == RES_OK;
+}
+
+uint8_t bios_hdd_count(void) {
+    return (uint8_t)(ata_hdd_count() + (raw_sd_hdd_enabled ? 1u : 0u));
+}
+
+bool bios_hdd_get_info(uint8_t bios_index, bios_hdd_info_t *info) {
+    if (!info)
+        return false;
+
+    memset(info, 0, sizeof(*info));
+    info->ata_slot = -1;
+
+    uint8_t ata_count = ata_hdd_count();
+    if (bios_index < ata_count) {
+        int8_t slot = ata_hdd_slot(bios_index);
+        if (slot < 0)
+            return false;
+
+        info->ata_slot = slot;
+        info->cyls = ata[(uint8_t)slot].cyls;
+        info->heads = ata[(uint8_t)slot].heads;
+        info->sects = ata[(uint8_t)slot].sects;
+        info->total_sectors = ata[(uint8_t)slot].usable_size / 512u;
+        return info->cyls && info->heads && info->sects && info->total_sectors;
+    }
+
+    if (raw_sd_hdd_enabled && bios_index == ata_count) {
+        const uint32_t track = 255u * 63u;
+        uint32_t cyls = (raw_sd_hdd_sectors + track - 1u) / track;
+        if (cyls == 0) cyls = 1;
+        if (cyls > 0xFFFFu) cyls = 0xFFFFu;
+
+        info->raw_sd = 1;
+        info->cyls = (uint16_t)cyls;
+        info->heads = 255;
+        info->sects = 63;
+        info->total_sectors = raw_sd_hdd_sectors;
+        return true;
+    }
+
+    return false;
+}
+
+#ifdef FDOS_RAWSD_DIAG
+#include <stdarg.h>
+/* Mirrors the debug-trace pattern in i386.c / ide.c: a static FIL opened
+ * once in append mode. Called only AFTER disk_read() has returned, so the
+ * SD/SPI is idle and this is a plain sequential FatFS write, not nested
+ * inside the driver. Writes to 386/rawsd.log; read it off the card on a PC. */
+static void rawsd_diag_log(const char *fmt, ...)
+{
+    static FIL lf;
+    static int state = 0;              /* 0=unopened 1=open 2=failed */
+    if (state == 2) return;
+    if (state == 0) {
+        if (f_open(&lf, SD_DATA_DIR_SLASH "rawsd.log",
+                   FA_WRITE | FA_OPEN_APPEND | FA_OPEN_ALWAYS) == FR_OK)
+            state = 1;
+        else if (f_open(&lf, "rawsd.log",
+                        FA_WRITE | FA_OPEN_APPEND | FA_OPEN_ALWAYS) == FR_OK)
+            state = 1;                 /* fallback: volume root */
+        else
+            state = 2;
+    }
+    if (state != 1) return;
+    char line[128];
+    va_list ap; va_start(ap, fmt);
+    int n = vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+    if (n < 0) return;
+    if (n > (int)sizeof(line) - 1) n = (int)sizeof(line) - 1;
+    UINT bw = 0;
+    f_write(&lf, line, (UINT)n, &bw);
+    f_sync(&lf);
+}
+#endif
+
+bool bios_hdd_read(uint8_t bios_index, uint32_t lba, void *buf, uint16_t count) {
+    bios_hdd_info_t info;
+    if (!count || !bios_hdd_get_info(bios_index, &info)) return false;
+    if (lba >= info.total_sectors || count > info.total_sectors - lba) {
+#ifdef FDOS_RAWSD_DIAG
+        if (info.raw_sd)
+            rawsd_diag_log("RANGE REJECT lba=%lu cnt=%u tot=%lu\r\n",
+                           (unsigned long)lba, (unsigned)count,
+                           (unsigned long)info.total_sectors);
+#endif
+        return false;
+    }
+
+    if (info.raw_sd) {
+        DRESULT r = disk_read(0, (BYTE *)buf, (LBA_t)lba, count);
+#ifdef FDOS_RAWSD_DIAG
+        {
+            /* Unconditional trace of the first raw_sd reads, so the log
+               ALWAYS appears once any raw_sd read happens (no failure
+               needed). Shows cluster-1 LBAs, the FAT read (a low lba among
+               high ones), and exactly where z=1 begins. */
+            static unsigned seen = 0;
+            static int hdr = 0;
+            const uint8_t *b = (const uint8_t *)buf;
+            unsigned nbytes = 512u * (unsigned)count, k;
+            int allzero = 1;
+            for (k = 0; k < nbytes; k++) if (b[k]) { allzero = 0; break; }
+            if (!hdr) {
+                hdr = 1;
+                rawsd_diag_log("== rawsd trace tot=%lu ==\r\n",
+                               (unsigned long)info.total_sectors);
+            }
+            if (seen < 48u) {
+                seen++;
+                rawsd_diag_log("%u lba=%lu cnt=%u rc=%d z=%d "
+                               "b=%02x%02x%02x%02x\r\n",
+                               seen, (unsigned long)lba, (unsigned)count,
+                               (int)r, allzero, b[0], b[1], b[2], b[3]);
+            }
+        }
+#endif
+        return r == RES_OK;
+    }
+
+    FIL *f = &ata[(uint8_t)info.ata_slot].fil;
+    UINT done = 0;
+    UINT bytes = (UINT)count * 512u;
+    if (f_lseek(f, (FSIZE_t)lba * 512u) != FR_OK) return false;
+    return f_read(f, buf, bytes, &done) == FR_OK && done == bytes;
+}
+
+bool bios_hdd_write(uint8_t bios_index, uint32_t lba, const void *buf, uint16_t count) {
+    bios_hdd_info_t info;
+    if (!count || !bios_hdd_get_info(bios_index, &info)) return false;
+    if (lba >= info.total_sectors || count > info.total_sectors - lba) return false;
+
+    if (info.raw_sd)
+        return disk_write(0, (const BYTE *)buf, (LBA_t)lba, count) == RES_OK;
+
+    FIL *f = &ata[(uint8_t)info.ata_slot].fil;
+    UINT done = 0;
+    UINT bytes = (UINT)count * 512u;
+    if (f_lseek(f, (FSIZE_t)lba * 512u) != FR_OK) return false;
+    return f_write(f, buf, bytes, &done) == FR_OK && done == bytes;
+}
+
+bool bios_hdd_sync(uint8_t bios_index) {
+    bios_hdd_info_t info;
+    if (!bios_hdd_get_info(bios_index, &info)) return false;
+    if (info.raw_sd) return disk_ioctl(0, CTRL_SYNC, NULL) == RES_OK;
+    return f_sync(&ata[(uint8_t)info.ata_slot].fil) == FR_OK;
+}
+
+uint8_t *disk_sector_buffer(void) {
+    return sectorbuffer;
 }
 
 const char* fdd_get_filename(int i) {

@@ -1,5 +1,5 @@
 /**
- * murm386 - i386 PC Emulator for RP2350
+ * frank-386 - i386 PC Emulator for RP2350
  *
  * VGA Driver - based on pico-286's vga-nextgen by xrip.
  * Reads directly from emulator VRAM and renders text/graphics on-the-fly.
@@ -15,6 +15,7 @@
 #include "font8x16.h"
 #include "debug.h"
 #include "board_config.h"
+#include "tsr_callback.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -72,6 +73,65 @@ static const struct pio_program pio_vga_program = {
 int active_start = DEFAULT_ACTIVE_START;
 int active_end   = DEFAULT_ACTIVE_END;
 
+#if DIAG
+extern volatile uint32_t dos_diag_code;
+extern volatile uint32_t dos_diag_kernel_code;
+
+/*
+ * Draw the native diagnostic latch in the otherwise blank 40-line top border.
+ * 8x16 built-in font, white-on-black, no locks/calls into DOS.
+ */
+static inline void __time_critical_func(render_diag_border_vga)(
+    uint32_t line, uint32_t *output_buffer)
+{
+    uint32_t code;
+    const char *prefix;
+    uint32_t glyph_line;
+
+    /*
+     * Keep the native application and FDOS/kernel producers independent.
+     * The standard 640x400-in-640x480 modes have 40 blank lines above:
+     *
+     *   lines  2..17: APP:xxxxxxxx
+     *   lines 22..37: KRN:xxxxxxxx
+     */
+    if (active_start < 40)
+        return;
+
+    if (line >= 2 && line < 18) {
+        code = dos_diag_code;
+        prefix = "APP:";
+        glyph_line = line - 2;
+    } else if (line >= 22 && line < 38) {
+        code = dos_diag_kernel_code;
+        prefix = "KRN:";
+        glyph_line = line - 22;
+    } else {
+        return;
+    }
+
+    if (!code)
+        return;
+
+    static const char hex[] = "0123456789ABCDEF";
+    uint8_t *out = (uint8_t *)output_buffer + VGA_SHIFT_PICTURE;
+    const uint8_t fg = 0xC0u | 0x3fu;
+    const uint8_t bg = 0xC0u;
+    const int x0 = 8;
+
+    for (int col = 0; col < 12; ++col) {
+        char ch = (col < 4)
+            ? prefix[col]
+            : hex[(code >> ((11 - col) * 4)) & 0x0f];
+
+        uint8_t glyph = font_8x16[(uint8_t)ch * 16 + glyph_line];
+        uint8_t *d = out + x0 + col * 8;
+        for (int bit = 0; bit < 8; ++bit)
+            d[bit] = (glyph & (1u << bit)) ? fg : bg;
+    }
+}
+#endif
+
 #define HS_SIZE             96
 #define SHIFT_PICTURE       VGA_SHIFT_PICTURE  // Where active video starts (from board_config.h)
 
@@ -85,10 +145,9 @@ int active_end   = DEFAULT_ACTIVE_END;
 // Module State
 // ============================================================================
 
-// Line pattern buffers - now 6 buffers:
-// 0 = hsync template, 1 = vsync template, 2-5 = active video (4 line rolling buffer)
-static uint32_t *lines_pattern[6];
-static uint32_t *lines_pattern_data = NULL;
+// Line pattern buffers:
+// 0 = hsync template, 1 = vsync template, 2-3 = active video (2-line ping-pong)
+static uint32_t* lines_pattern[4];
 
 // DMA channels
 static int dma_data_chan = -1;
@@ -98,21 +157,41 @@ static int dma_ctrl_chan = -1;
 static uint vga_sm = 0;
 
 // Text buffer in SRAM (non-static to allow OSD reuse when paused)
-uint8_t text_buffer_sram[80 * 25 * 2] __attribute__((aligned(4)));
+uint8_t text_buffer_sram[80 * 25 * 2] __attribute__((aligned(4))) __attribute__((section(".text_buffer")));
 static volatile int update_requested = 0;  // Set by update call
 
-#define GFX_BUFFER_SIZE (256 * 1024)
-uint8_t gfx_buffer[GFX_BUFFER_SIZE] __attribute__((aligned(4)));
+#ifdef MCGA
+#define GFX_BUFFER_SIZE (64u * 1024u)
+#elif defined(EGA128) || defined(VGA128)
+#define GFX_BUFFER_SIZE (128u * 1024u)
+#else
+#define GFX_BUFFER_SIZE (256u * 1024u)
+#endif
+uint8_t gfx_buffer[GFX_BUFFER_SIZE] __attribute__((section(".bss.gfx_buffer"), aligned(4)));
 
-// Fast text palette for 2-bit pixel pairs
-extern uint32_t conv_color2[1024]; // 4096 in hdmi only
-static uint16_t* txt_palette_fast = (uint16_t*)&conv_color2[0]; ///[256 * 4]; 2048, reusing
+// VGA renderer hot palettes.  Keep these in SRAM9 so Core 1 palette
+// lookups do not contend with Core 0 for SRAM0..3.
+//
+// Text needs only the foreground/background byte for each of 128 effective
+// attributes (bit 7 is ignored by the current renderer): 128 * 2 = 256 B.
+// Graphics needs one 16-bit dither pair per DAC entry: 256 * 2 = 512 B.
+// The opposite dither phase is just a byte swap, so a second 256-entry table
+// is redundant.  Total SCRATCH_Y cost: 768 B.
+static uint16_t vga_text_attr_colors[128] __scratch_y("vga_text_attr_colors");
+uint16_t palette_a[256] __scratch_y("vga_palette_a");
 
-// Graphics palette (256 entries) - 16-bit dithered format
-// Each entry: low byte = c_hi (conv0), high byte = c_lo (conv1)
-// even - A, odd - B
-uint16_t palette_a[512] __aligned(4);
-static uint16_t* palette_b = &palette_a[256];
+static inline uint16_t vga_palette_phase(uint8_t idx, bool swap_phase) {
+    uint16_t v = palette_a[idx];
+    return swap_phase ? (uint16_t)((v << 8) | (v >> 8)) : v;
+}
+
+static inline uint16_t vga_text_pair(uint16_t colors, uint32_t bits) {
+    uint8_t fg = (uint8_t)colors;
+    uint8_t bg = (uint8_t)(colors >> 8);
+    uint8_t left  = (bits & 1u) ? fg : bg;
+    uint8_t right = (bits & 2u) ? fg : bg;
+    return (uint16_t)left | ((uint16_t)right << 8);
+}
 
 // 16-color EGA palette (for 16-color modes) - 8-bit VGA format with sync bits
 static uint8_t ega_palette[16];
@@ -124,7 +203,7 @@ static uint8_t cga_palette[4];
 // Current video mode (0=blank, 1=text, 2=graphics)
 int current_mode = 1;  // Default text mode
 
-// Graphics sub-mode: 1=CGA 4-color, 2=EGA planar, 3=VGA 256-color, 4=CGA 2-color
+// Graphics sub-mode: 1=CGA4, 2=EGA, 3=VGA256, 4=CGA2, 5=ModeX, 7=VBE packed8, 8=mono640
 int gfx_submode = 3;
 int gfx_width = 320;
 int gfx_height = 200;
@@ -138,12 +217,12 @@ int cursor_blink_state = 1;
 
 // Direct pointer to VGA register state (set once by core0 after vga_init).
 // ISR reads cr[], ar[] directly at the right moment — no volatile intermediates.
-VGAState *vga_state = NULL;
+VGAState* __scratch_y("vga_state") vga_state = NULL;
 
 // Per-frame values latched by ISR from vga_state->cr[] late in vblank
-uint16_t frame_vram_offset   = 0;
-uint8_t  frame_pixel_panning = 0;
-int      frame_line_compare  = -1;
+uint16_t __scratch_y("frame_vram_offset") frame_vram_offset   = 0;
+uint8_t  __scratch_y("frame_pixel_panning") frame_pixel_panning = 0;
+int      __scratch_y("frame_line_compare") frame_line_compare  = -1;
 
 int text_cols = 80;
 // Stride in *character cells* (uint32_t per cell in gfx_buffer text layout).
@@ -216,7 +295,6 @@ static void vga_color_to_dithered(uint8_t r6, uint8_t g6, uint8_t b6, uint32_t i
     uint8_t c_lo = TMPL_LINE | (conv1[r] << 4) | (conv1[g] << 2) | conv1[b];
 
     palette_a[idx] = (uint16_t)c_hi | ((uint16_t)c_lo << 8);
-    palette_b[idx] = (uint16_t)c_lo | ((uint16_t)c_hi << 8);
 }
 
 static void init_palettes(void) {
@@ -241,24 +319,14 @@ static void init_palettes(void) {
         0x3F | TMPL_LINE,  // 15: White
     };
     
-    // Build fast palette for text rendering
-    // Each entry handles 2 pixels (foreground/background combinations)
-    // For 2-bit value from glyph: high bit is LEFT pixel, low bit is RIGHT pixel
-    // When we extract (glyph >> 6) & 3, we get bits 7,6 where bit7=left, bit6=right
-    // Index XY (X=bit7, Y=bit6): X is left pixel, Y is right pixel
-    // Output 16-bit: low byte outputs first (left), high byte outputs second (right)
-    for (int i = 0; i < 256; i++) {
+    // Store only foreground/background colors.  The four two-pixel
+    // combinations are assembled in registers by vga_text_pair().
+    for (int i = 0; i < 128; i++) {
         uint8_t fg = cga_colors[i & 0x0F];
-        uint8_t bg = cga_colors[i >> 4];
-        
-        // Index bits: [left_pixel][right_pixel]
-        // For little-endian 16-bit output: low byte = left, high byte = right
-        txt_palette_fast[i * 4 + 0] = bg | (bg << 8);  // 00: left=bg, right=bg
-        txt_palette_fast[i * 4 + 1] = fg | (bg << 8);  // 01: left=fg, right=bg (bit7=0,bit6=1)
-        txt_palette_fast[i * 4 + 2] = bg | (fg << 8);  // 10: left=bg, right=fg (bit7=1,bit6=0)
-        txt_palette_fast[i * 4 + 3] = fg | (fg << 8);  // 11: left=fg, right=fg
+        uint8_t bg = cga_colors[(i >> 4) & 0x07];
+        vga_text_attr_colors[i] = (uint16_t)fg | ((uint16_t)bg << 8);
     }
-    
+
     // Initialize 256-color dithered palette with black (will be overwritten by emulator)
     for (int i = 0; i < 256; i++) {
         vga_color_to_dithered(0, 0, 0, i);
@@ -276,6 +344,7 @@ static void init_palettes(void) {
 // DMA Interrupt Handler - Renders each scanline
 // ============================================================================
 
+#if !defined(EGA128) && !defined(MCGA)
 // Render VGA 256-color planar (Mode X: 320x200x256, unchained)
 // VRAM layout in our emulator: packed planes in dwords.
 // Each dword holds 4 bytes: plane0..plane3, and those bytes are pixels x%4.
@@ -309,18 +378,20 @@ static void __time_critical_func(render_gfx_line_vga_planar256)(uint32_t line, u
     // base is in dwords; gfx_buffer is bytes, so byte offset = base * 4
     const uint32_t *src32 = (const uint32_t *)(gfx_buffer + base * 4);
     // Select dither phase per scanline
-    uint16_t *active_palette = (src_line & 1) ? palette_a : palette_b;
+    bool swap_phase = (src_line & 1u) == 0;
     // 320 pixels -> 80 dwords -> 160 output dwords (640px doubled)
     for (int i = 0; i < 80; i++) {
         uint32_t pixels = src32[i];
-        uint16_t p0 = active_palette[pixels & 0xFF];
-        uint16_t p1 = active_palette[(pixels >> 8) & 0xFF];
-        uint16_t p2 = active_palette[(pixels >> 16) & 0xFF];
-        uint16_t p3 = active_palette[(pixels >> 24) & 0xFF];
+        uint16_t p0 = vga_palette_phase((uint8_t)pixels, swap_phase);
+        uint16_t p1 = vga_palette_phase((uint8_t)(pixels >> 8), swap_phase);
+        uint16_t p2 = vga_palette_phase((uint8_t)(pixels >> 16), swap_phase);
+        uint16_t p3 = vga_palette_phase((uint8_t)(pixels >> 24), swap_phase);
         *out32++ = (uint32_t)p0 | ((uint32_t)p1 << 16);
         *out32++ = (uint32_t)p2 | ((uint32_t)p3 << 16);
     }
 }
+
+#endif /* !EGA128 && !MCGA */
 
 // Render graphics line directly from SRAM framebuffer (for IRQ use)
 // Uses dithered 16-bit palette for ~2197 perceived colors
@@ -364,19 +435,58 @@ static void __time_critical_func(render_gfx_line_from_sram)(uint32_t line, uint3
         // offset is in dwords; gfx_buffer is bytes, so byte offset = offset * 4
         const uint32_t *src32 = (const uint32_t *)(gfx_buffer + offset * 4);
         // Select dither phase per scanline
-        uint16_t *active_palette = (src_line & 1) ? palette_a : palette_b;
+        bool swap_phase = (src_line & 1u) == 0;
         // 320 pixels -> 80 dwords
         for (int i = 0; i < 80; i++) {
             uint32_t pixels = src32[i];
-            uint16_t p0 = active_palette[pixels & 0xFF];
-            uint16_t p1 = active_palette[(pixels >> 8) & 0xFF];
-            uint16_t p2 = active_palette[(pixels >> 16) & 0xFF];
-            uint16_t p3 = active_palette[(pixels >> 24) & 0xFF];
+            uint16_t p0 = vga_palette_phase((uint8_t)pixels, swap_phase);
+            uint16_t p1 = vga_palette_phase((uint8_t)(pixels >> 8), swap_phase);
+            uint16_t p2 = vga_palette_phase((uint8_t)(pixels >> 16), swap_phase);
+            uint16_t p3 = vga_palette_phase((uint8_t)(pixels >> 24), swap_phase);
             *out32++ = (uint32_t)p0 | ((uint32_t)p1 << 16);
             *out32++ = (uint32_t)p2 | ((uint32_t)p3 << 16);
         }
     }
 }
+
+#if !defined(EGA128) && !defined(VGA128) && !defined(MCGA)
+// Render VBE 100h: 640x400x8 packed pixels, one VRAM byte per pixel.
+static void __time_critical_func(render_gfx_line_vbe8)(uint32_t line,
+                                                        uint32_t *output_buffer) {
+    uint32_t *out32 = (uint32_t *)((uint8_t *)output_buffer + SHIFT_PICTURE);
+
+    if (line >= (uint32_t)gfx_height || gfx_width != 640) {
+        uint32_t blank = TMPL_LINE | (TMPL_LINE << 8) |
+                         (TMPL_LINE << 16) | (TMPL_LINE << 24);
+        for (int i = 0; i < 160; ++i)
+            out32[i] = blank;
+        return;
+    }
+
+    const uint8_t *src = gfx_buffer + line * 640u;
+    bool swap_phase = (line & 1u) != 0;
+
+    /*
+     * Two neighbouring source pixels use opposite dither phases. Pack four
+     * physical pixels per uint32 without horizontal doubling.
+     */
+    for (int i = 0; i < 160; ++i) {
+        uint16_t q0 = vga_palette_phase(src[i * 4 + 0], swap_phase);
+        uint16_t q1 = vga_palette_phase(src[i * 4 + 1], swap_phase);
+        uint16_t q2 = vga_palette_phase(src[i * 4 + 2], swap_phase);
+        uint16_t q3 = vga_palette_phase(src[i * 4 + 3], swap_phase);
+        uint8_t p0 = (uint8_t)(q0 & 0xFFu);
+        uint8_t p1 = (uint8_t)(q1 >> 8);
+        uint8_t p2 = (uint8_t)(q2 & 0xFFu);
+        uint8_t p3 = (uint8_t)(q3 >> 8);
+        out32[i] = (uint32_t)p0 |
+                   ((uint32_t)p1 << 8) |
+                   ((uint32_t)p2 << 16) |
+                   ((uint32_t)p3 << 24);
+    }
+}
+
+#endif /* !EGA128 && !VGA128 && !MCGA */
 
 // Render CGA 4-color graphics line (320x200, 2 bits per pixel, interleaved)
 // VGA stores CGA data in odd/even mode with interleaved planes
@@ -491,7 +601,52 @@ static void __time_critical_func(render_gfx_line_cga2)(uint32_t line, uint32_t *
     }
 }
 
-uint32_t __scratch_y("spread8_lut") spread8_lut[256];
+// Render VGA/MCGA mode 11h: 640x480x2, one packed bit per pixel.
+// VGA128/MCGA store this mode linearly (80 bytes/scanline); full VGA
+// keeps plane 0 in the normal four-plane representation.
+static void __time_critical_func(render_gfx_line_mono640)(uint32_t line, uint32_t *output_buffer) {
+    uint32_t *out32 = (uint32_t *)((uint8_t *)output_buffer + SHIFT_PICTURE);
+
+    if (line >= (uint32_t)gfx_height || gfx_width != 640) {
+        uint32_t blank = TMPL_LINE | (TMPL_LINE << 8) |
+                         (TMPL_LINE << 16) | (TMPL_LINE << 24);
+        for (int i = 0; i < 160; ++i)
+            out32[i] = blank;
+        return;
+    }
+
+    uint32_t stride = gfx_line_offset > 0 ? (uint32_t)gfx_line_offset * 2u : 80u;
+    uint32_t offset;
+    if (frame_line_compare >= 0 && line >= (uint32_t)frame_line_compare)
+        offset = (line - (uint32_t)frame_line_compare) * stride;
+    else
+        offset = frame_vram_offset + line * stride;
+    offset &= 0xFFFFu;
+
+    uint8_t bg = cga_palette[0];
+    uint8_t fg = cga_palette[3];
+    for (int i = 0; i < 80; ++i) {
+#if defined(VGA128) || defined(MCGA)
+        uint8_t byte = gfx_buffer[offset + (uint32_t)i];
+#else
+        uint8_t byte = gfx_buffer[(offset + (uint32_t)i) * 4u];
+#endif
+        uint8_t p0 = (byte & 0x80) ? fg : bg;
+        uint8_t p1 = (byte & 0x40) ? fg : bg;
+        uint8_t p2 = (byte & 0x20) ? fg : bg;
+        uint8_t p3 = (byte & 0x10) ? fg : bg;
+        uint8_t p4 = (byte & 0x08) ? fg : bg;
+        uint8_t p5 = (byte & 0x04) ? fg : bg;
+        uint8_t p6 = (byte & 0x02) ? fg : bg;
+        uint8_t p7 = (byte & 0x01) ? fg : bg;
+        *out32++ = (uint32_t)p0 | ((uint32_t)p1 << 8) |
+                   ((uint32_t)p2 << 16) | ((uint32_t)p3 << 24);
+        *out32++ = (uint32_t)p4 | ((uint32_t)p5 << 8) |
+                   ((uint32_t)p6 << 16) | ((uint32_t)p7 << 24);
+    }
+}
+
+uint32_t __not_in_flash("spread8_lut") spread8_lut[256];
 // Spread 8 bits of a byte into positions 0,4,8,...28
 static inline uint32_t spread8(uint32_t plane) {
     plane = (plane | (plane << 12)) & 0x000F000Fu;
@@ -632,7 +787,7 @@ static void __time_critical_func(render_gfx_line_ega)(uint32_t line, uint32_t *o
 
 // 80 cols: one uint16 = 2 pixels (left in low byte, right in high byte)
 // 40 cols: need true 2x horizontal scaling per pixel: A B -> A A B B
-static inline void __time_critical_func(out16_2x_per_pixel)(uint16_t **pp, uint16_t v) {
+static void __time_critical_func(out16_2x_per_pixel)(uint16_t **pp, uint16_t v) {
     uint16_t *p = *pp;
     uint8_t a = (uint8_t)(v & 0xFF);
     uint8_t b = (uint8_t)(v >> 8);
@@ -645,13 +800,18 @@ static inline void __time_critical_func(out16_2x_per_pixel)(uint16_t **pp, uint1
 static void __time_critical_func(render_text_line)(uint32_t line, uint32_t *output_buffer) {
     uint16_t *out16 = (uint16_t *)((uint8_t *)output_buffer + SHIFT_PICTURE);
 
-    uint32_t char_row = line >> 4;
-    uint32_t glyph_line = line & 15;
+    int char_height = vga_get_char_height(vga_state);
+    if (char_height <= 0 || char_height > 32)
+        char_height = 16;
+
+    uint32_t char_row = line / (uint32_t)char_height;
+    uint32_t glyph_line = line % (uint32_t)char_height;
+    uint32_t text_rows = (uint32_t)(active_end - active_start) / (uint32_t)char_height;
 
     int cols = text_cols;
     int double_h = (cols == 40);  // 40 columns => 2x horizontal scaling
 
-    if (char_row < 25) {
+    if (char_row < text_rows) {
         // Use snapped start address for the frame (prevents mid-frame tearing).
         const uint32_t *base = (const uint32_t *)(gfx_buffer + ((uint32_t)frame_vram_offset << 2));
         const uint32_t *text_row = base + (char_row * (uint32_t)text_stride_cells);
@@ -670,7 +830,7 @@ static void __time_critical_func(render_text_line)(uint32_t line, uint32_t *outp
             } else {
                 glyph = font_8x16[ch * 16 + glyph_line];
             }
-            uint16_t *pal = &txt_palette_fast[(attr & 0x7F) * 4];
+            uint16_t colors = vga_text_attr_colors[attr & 0x7F];
 
             if (cursor_blink_state && col == cursor_x &&
                 char_row == (uint32_t)cursor_y &&
@@ -682,16 +842,16 @@ static void __time_critical_func(render_text_line)(uint32_t line, uint32_t *outp
             // 8px glyph -> 4x uint16 (каждый uint16 = 2 пикселя)
             uint16_t v;
             if (!double_h) {
-                v = pal[glyph & 3];           *out16++ = v;
-                v = pal[(glyph >> 2) & 3];    *out16++ = v;
-                v = pal[(glyph >> 4) & 3];    *out16++ = v;
-                v = pal[(glyph >> 6) & 3];    *out16++ = v;
+                v = vga_text_pair(colors, glyph & 3u);           *out16++ = v;
+                v = vga_text_pair(colors, (glyph >> 2) & 3u);    *out16++ = v;
+                v = vga_text_pair(colors, (glyph >> 4) & 3u);    *out16++ = v;
+                v = vga_text_pair(colors, (glyph >> 6) & 3u);    *out16++ = v;
             } else {
                 // true per-pixel doubling: (A,B) -> (A,A,B,B)
-                v = pal[glyph & 3];           out16_2x_per_pixel(&out16, v);
-                v = pal[(glyph >> 2) & 3];    out16_2x_per_pixel(&out16, v);
-                v = pal[(glyph >> 4) & 3];    out16_2x_per_pixel(&out16, v);
-                v = pal[(glyph >> 6) & 3];    out16_2x_per_pixel(&out16, v);
+                v = vga_text_pair(colors, glyph & 3u);           out16_2x_per_pixel(&out16, v);
+                v = vga_text_pair(colors, (glyph >> 2) & 3u);    out16_2x_per_pixel(&out16, v);
+                v = vga_text_pair(colors, (glyph >> 4) & 3u);    out16_2x_per_pixel(&out16, v);
+                v = vga_text_pair(colors, (glyph >> 6) & 3u);    out16_2x_per_pixel(&out16, v);
             }
         }
     }
@@ -717,7 +877,7 @@ void __time_critical_func(pre_render_line)(void) {
 }
 
 // Dispatch to appropriate renderer based on current mode
-static void __time_critical_func(render_line)(uint32_t line, uint32_t *output_buffer) {
+static void __not_in_flash_func(render_line)(uint32_t line, uint32_t *output_buffer) {
     pre_render_line();
     // --- Верхнее поле ---
     if (line < (uint32_t)active_start) {
@@ -725,6 +885,9 @@ static void __time_critical_func(render_line)(uint32_t line, uint32_t *output_bu
         uint32_t *out32 = (uint32_t *)((uint8_t *)output_buffer + SHIFT_PICTURE);
         for (int i = 0; i < 160; i++)
             out32[i] = blank;
+#if DIAG
+        render_diag_border_vga(line, output_buffer);
+#endif
         return;
     }
 
@@ -761,12 +924,28 @@ static void __time_critical_func(render_line)(uint32_t line, uint32_t *output_bu
         } else if (gfx_submode == 4) {
             // CGA 2-color (640x200 monochrome)
             render_gfx_line_cga2(line, output_buffer);
+        } else if (gfx_submode == 8) {
+            // VGA/MCGA mode 11h: 640x480x2
+            render_gfx_line_mono640(line, output_buffer);
+#if !defined(EGA128) && !defined(MCGA)
         } else if (gfx_submode == 5) {
             // VGA 256-color planar (Mode X)
             render_gfx_line_vga_planar256(line, output_buffer);
+#endif
+#if !defined(EGA128) && !defined(VGA128) && !defined(MCGA)
+        } else if (gfx_submode == 7) {
+            // VBE 100h: 640x400x256 packed pixels
+            render_gfx_line_vbe8(line, output_buffer);
+#endif
+#ifndef EGA128
         } else {
-            // VGA 256-color (mode 13h) - default
+            // VGA/MCGA 256-color mode 13h
             render_gfx_line_from_sram(line, output_buffer);
+#else
+        } else {
+            // Keep the existing EGA128-only renderer restriction.
+            render_gfx_line_ega(line, output_buffer);
+#endif
         }
         return;
     }
@@ -859,6 +1038,7 @@ static void vga_hw_new_frame_deferred(void) {
 #define LOAD_BAR_ENABLE  0   // set to 0 to disable
 #define LOAD_BAR_HEIGHT  10   // 5px ISR load + 5px new_frame duration
 
+#if LOAD_BAR_ENABLE
 static uint32_t isr_busy_us_acc  = 0;
 static uint32_t isr_busy_us_prev = 0;
 static uint32_t blank_frame_count = 0;
@@ -872,8 +1052,6 @@ static uint32_t anomaly_ever_seen = 0;
 static uint32_t pio_stall_ever_seen = 0;
 // Max observed vga_hw_new_frame duration in µs (for debugging long new_frame calls)
 static uint32_t new_frame_max_us = 0;
-// Deferred frame update flag (set in ISR, processed outside)
-volatile uint32_t frame_update_request = 0;
 
 // Frame period in µs — computed in vga_hw_init() to avoid overflow.
 static uint32_t frame_period_us = 16688u;
@@ -882,7 +1060,6 @@ static uint32_t frame_period_us = 16688u;
 // Called for absolute scanlines in range [active_end .. active_end+LOAD_BAR_HEIGHT).
 static void __time_critical_func(render_load_bar)(uint32_t abs_line,
                                                    uint32_t *output_buffer) {
-#if LOAD_BAR_ENABLE
     if (abs_line < (uint32_t)active_end) return;
     if (abs_line >= (uint32_t)active_end + LOAD_BAR_HEIGHT) return;
 
@@ -927,16 +1104,20 @@ static void __time_critical_func(render_load_bar)(uint32_t abs_line,
                 out[x] = 0xCCu;  // green: spare
         }
     }
-#endif
 }
+#endif
 
-static void __isr __time_critical_func(dma_handler_vga)(void) {
-    uint32_t t_enter = timer_hw->timerawl;
+// Deferred frame update flag (set in ISR, processed outside)
+volatile uint32_t __scratch_y("frame_update_request") frame_update_request = 0;
+
+static void __isr  __not_in_flash_func(dma_handler_vga)(void) {
     dma_hw->ints0 = 1u << dma_ctrl_chan;
-    static uint32_t current_line = 0;
-    static uint32_t prev_line    = 0xFFFFFFFF;
+    static uint32_t __scratch_y("current_line") current_line = 0;
     uint32_t line = current_line++;
 
+#if LOAD_BAR_ENABLE
+    static uint32_t __scratch_y("prev_line") prev_line    = 0xFFFFFFFF;
+    uint32_t t_enter = timer_hw->timerawl;
     // Check PIO FDEBUG.TXSTALL - sticky bit set if PIO ever ran out of data
     // This is the definitive indicator of a DMA underrun causing sync loss.
     uint32_t txstall_bit = 1u << (8 + vga_sm);
@@ -949,9 +1130,15 @@ static void __isr __time_critical_func(dma_handler_vga)(void) {
     if (prev_line != 0xFFFFFFFF && line > prev_line + 1)
         missed_isr_count += line - prev_line - 1;
     prev_line = line;
+#endif
 
     if (line >= N_LINES_TOTAL) {
-        line = current_line = prev_line = 0;
+        line = current_line = 
+#if LOAD_BAR_ENABLE
+        prev_line =
+#endif
+         0;
+#if LOAD_BAR_ENABLE
         isr_busy_us_prev  = isr_busy_us_acc;
         isr_busy_us_acc   = 0;
         blank_frame_prev  = blank_frame_count;
@@ -968,81 +1155,87 @@ static void __isr __time_critical_func(dma_handler_vga)(void) {
             // If new_frame took more than one scanline (~32µs), that's a problem
             if (dt > 32) anomaly_ever_seen = 1;
         }*/
-        // Defer heavy frame work outside ISR
-        frame_update_request = 1;
         if (vga_state && vga_get_mode(vga_state) == 0)
             blank_frame_count = 1;
+#endif
+        // Defer heavy frame work outside ISR
+        frame_update_request = 1;
     }
     
     // Update VGA status register 1 (port 0x3DA) from ISR — this is the
     // authoritative source. Core0 reads it as-is without any logic.
-    // Bit 0 (DISP_ENABLE): 1 = active display, 0 = blanking interval
+    // Bit 0 (DISP_ENABLE): 0 = active display, 1 = blanking interval
     // Bit 3 (V_RETRACE):   1 = vertical retrace, 0 = active display
     if (vga_state) {
         if (line >= N_LINES_VISIBLE) {
-            vga_state->st01 |=  ST01_V_RETRACE;
-            vga_state->st01 &= ~ST01_DISP_ENABLE;
+            vga_state->st01 |= ST01_V_RETRACE;
         } else {
             vga_state->st01 &= ~ST01_V_RETRACE;
-            vga_state->st01 |=  ST01_DISP_ENABLE;
+        }
+        vga_state->st01 &= ~ST01_DISP_ENABLE; // start visible line-part
+    }
+
+    // Latch frame state late in vblank.  The control-channel IRQ is raised
+    // only after that channel has already programmed and chained the next
+    // data transfer, so this ISR always prepares the line TWO transfers ahead.
+    if (line == N_LINES_TOTAL - 4) {
+        if (vga_state) {
+            const uint8_t *cr = vga_state->cr;
+            // Wolf3D writes cr[0x0c] and cr[0x0d] as two separate OUT
+            // instructions. The ISR may land between them and read a
+            // half-updated 16-bit address.  Re-read until both bytes
+            // are stable (usually only one extra read is needed).
+            uint8_t hi, lo;
+            do {
+                hi = cr[0x0c];
+                lo = cr[0x0d];
+            } while (hi != cr[0x0c]);
+            frame_vram_offset = (uint16_t)((hi << 8) | lo);
+            frame_pixel_panning = vga_state->ar[0x13] & 0x07;
+            int lc = (int)cr[0x18]
+                   | (((int)cr[0x07] & 0x10) << 4)
+                   | (((int)cr[0x09] & 0x40) << 3);
+            frame_line_compare = (lc > 0 && lc < N_LINES_VISIBLE) ? lc : -1;
         }
     }
 
-    // Vertical blanking region
-    if (line >= N_LINES_VISIBLE) {
-        if (line >= LINE_VS_BEGIN && line <= LINE_VS_END) {
-            dma_channel_set_read_addr(dma_ctrl_chan, &lines_pattern[1], false);
-        } else {
-            dma_channel_set_read_addr(dma_ctrl_chan, &lines_pattern[0], false);
-        }
+    /*
+     * At ISR entry data line N+1 is already being transmitted.  The control
+     * source selected here will be consumed when N+1 finishes, i.e. for N+2.
+     * Render N+2 into the opposite ping-pong buffer; never touch the buffer
+     * currently being read by data DMA.
+     */
+    uint32_t prepare_line = line + 2;
+    if (prepare_line >= N_LINES_TOTAL)
+        prepare_line -= N_LINES_TOTAL;
 
-        // Line N_LINES_TOTAL-4 (521): late in vblank, just before DMA needs line 0.
-        // Wolf3D has already written the new page address to CRTC by now.
-        // Read cr[] and ar[] directly — no intermediate volatile copies.
-        if (line == N_LINES_TOTAL - 4) {
-            if (vga_state) {
-                const uint8_t *cr = vga_state->cr;
-                // Wolf3D writes cr[0x0c] and cr[0x0d] as two separate OUT
-                // instructions. The ISR may land between them and read a
-                // half-updated 16-bit address.  Re-read until both bytes
-                // are stable (usually only one extra read is needed).
-                uint8_t hi, lo;
-                do {
-                    hi = cr[0x0c];
-                    lo = cr[0x0d];
-                } while (hi != cr[0x0c]);
-                frame_vram_offset = (uint16_t)((hi << 8) | lo);
-                frame_pixel_panning = vga_state->ar[0x13] & 0x07;
-                int lc = (int)cr[0x18]
-                       | (((int)cr[0x07] & 0x10) << 4)
-                       | (((int)cr[0x09] & 0x40) << 3);
-                frame_line_compare = (lc > 0 && lc < N_LINES_VISIBLE) ? lc : -1;
-            }
-            render_line(0, lines_pattern[2]);
-            render_line(1, lines_pattern[3]);
-            render_line(2, lines_pattern[4]);
-            render_line(3, lines_pattern[5]);
-        }
-        return;
-    }
-    
-    // Active video: DMA reads from buffer (line % 4), we render (line + 2) % 4
-    uint32_t read_buf = 2 + (line & 3);
-    uint32_t render_buf = 2 + ((line + 2) & 3);
-    uint32_t render_line_num = line + 2;
+    if (prepare_line >= N_LINES_VISIBLE) {
+        uint32_t sync_buf =
+            (prepare_line >= LINE_VS_BEGIN && prepare_line <= LINE_VS_END) ? 1u : 0u;
+        dma_channel_set_read_addr(dma_ctrl_chan, &lines_pattern[sync_buf], false);
+    } else {
+        uint32_t render_buf = 2u + (prepare_line & 1u);
 
-    // Set DMA to read from the buffer we already rendered
-    dma_channel_set_read_addr(dma_ctrl_chan, &lines_pattern[read_buf], false);
-
-    // Pre-render 2 lines ahead
-    if (render_line_num < N_LINES_VISIBLE) {
-        render_line(render_line_num, lines_pattern[render_buf]);
+        dma_channel_set_read_addr(dma_ctrl_chan, &lines_pattern[render_buf], false);
+        render_line(prepare_line, lines_pattern[render_buf]);
+#if LOAD_BAR_ENABLE
         // Load bar goes into the inactive region below active_end (e.g. lines 440-479)
-        render_load_bar(render_line_num, lines_pattern[render_buf]);
+        render_load_bar(prepare_line, lines_pattern[render_buf]);
+#endif
     }
 
+    if (vga_state) {
+        vga_state->st01 |= ST01_DISP_ENABLE; // start invisible line-part
+    }
+#if LOAD_BAR_ENABLE
     // Accumulate ISR busy time (µs)
     isr_busy_us_acc += timer_hw->timerawl - t_enter;
+#endif
+
+    /* Native TSR1 hook: called once per scanline on core1, after the
+       time-critical VGA DMA/render work is complete. Client callbacks run
+       in this IRQ context and must return quickly or video timing will fail. */
+    tsr1_dispatch();
 }
 
 // ============================================================================
@@ -1051,7 +1244,7 @@ static void __isr __time_critical_func(dma_handler_vga)(void) {
 int testPins(uint32_t pin0, uint32_t pin1);
 void graphics_init_hdmi();
 // From main.c — needed for safe flash access at high clock speeds
-extern void set_flash_timings(int cpu_mhz);
+extern void set_flash_timings(int cpu_mhz, int cfg_flash);
 
 // HDMI TMDS requires an exact 252 MHz PIO clock. Boost clk_sys to 504 MHz
 // so the PIO divider is an integer 2 (no jitter).
@@ -1061,10 +1254,13 @@ static void hdmi_boost_clock(void) {
     int cur_mhz = clock_get_hz(clk_sys) / 1000000;
     if (cur_mhz >= HDMI_SYS_CLOCK_MHZ) return;
     vreg_disable_voltage_limit();
-    vreg_set_voltage(VREG_VOLTAGE_1_65);
+    vreg_set_voltage(VREG_VOLTAGE_1_60);
     sleep_ms(50);
-    set_flash_timings(HDMI_SYS_CLOCK_MHZ);
+    set_flash_timings(HDMI_SYS_CLOCK_MHZ, FLASH_MAX_FREQ_MHZ);
     set_sys_clock_khz(HDMI_SYS_CLOCK_MHZ * 1000, false);
+    /* clk_peri moved with clk_sys; the UART's divisors did not. */
+    extern void console_reclock(void);
+    console_reclock();
     // Immediately reinit PSRAM for the new clock speed.
     // Without this, PSRAM runs at ~177 MHz (overclocked) until
     // reconfigure_clocks runs much later, causing intermittent hangs.
@@ -1078,19 +1274,50 @@ void vga_hw_reclock(void) {
     uint32_t div_int  = (uint32_t)clk_div;
     uint32_t div_frac = (uint32_t)((clk_div - (float)div_int) * 256.0f);
     VGA_PIO->sm[vga_sm].clkdiv = (div_int << 16) | (div_frac << 8);
+#if LOAD_BAR_ENABLE
     frame_period_us = (uint32_t)((float)(LINE_SIZE * N_LINES_TOTAL) * 1000000.0f / VGA_CLK);
+#endif
 }
+
+static uint32_t vga_line0[LINE_SIZE / 4] __scratch_y("vga_line0") = { 0 };
+static uint32_t vga_line1[LINE_SIZE / 4] __scratch_y("vga_line1") = { 0 };
+static uint32_t vga_line2[LINE_SIZE / 4] __scratch_y("vga_line2") = { 0 };
+static uint32_t vga_line3[LINE_SIZE / 4] __scratch_y("vga_line3") = { 0 };
 
 void vga_hw_init(void) {
     for(uint32_t i = 0; i < 256; ++i) {
         spread8_lut[i] = spread8(i);
     }
-    uint8_t linkVGA01 = testPins(VGA_BASE_PIN, VGA_BASE_PIN + 1);
-    #if defined(BOARD_Z0) || defined(BOARD_Z2) || defined(BOARD_DV)
-        SELECT_VGA = linkVGA01 == 0x1F;
+    #if defined(FORCE_VGA)
+        /* Skip the pin probe and commit to VGA. Wins over FORCE_HDMI so a
+         * board that defaults to HDMI can still be built for VGA without
+         * unpicking its board block. */
+        SELECT_VGA = true;
+    #elif defined(FORCE_HDMI)
+        SELECT_VGA = false;
+    #elif defined(BOARD_Z2)
+        /* Waveshare RP2350-PiZero has HDMI output only. */
+        SELECT_VGA = false;
     #else
-        SELECT_VGA = (linkVGA01 == 0) || (linkVGA01 == 0x1F);
+        uint8_t linkVGA01 = testPins(VGA_BASE_PIN, VGA_BASE_PIN + 1);
+        #if defined(BOARD_Z0) || defined(BOARD_Z2) || defined(BOARD_DV)
+            SELECT_VGA = linkVGA01 == 0x1F;
+        #else
+            SELECT_VGA = (linkVGA01 == 0) || (linkVGA01 == 0x1F);
+        #endif
+        // If HDMI detected, reset tested pins to clean hi-Z state.
+        // testPins leaves pull-downs enabled via gpio_deinit(), which can
+        // disturb the HDMI differential pair during clock boost.
+        if (!SELECT_VGA) {
+            gpio_init(VGA_BASE_PIN);
+            gpio_set_dir(VGA_BASE_PIN, GPIO_IN);
+            gpio_disable_pulls(VGA_BASE_PIN);
+            gpio_init(VGA_BASE_PIN + 1);
+            gpio_set_dir(VGA_BASE_PIN + 1, GPIO_IN);
+            gpio_disable_pulls(VGA_BASE_PIN + 1);
+        }
     #endif
+    DBG_PRINT("  Video output: %s\n", SELECT_VGA ? "VGA" : "HDMI");
     if (!SELECT_VGA) {
         hdmi_boost_clock();
         graphics_init_hdmi();
@@ -1104,6 +1331,7 @@ void vga_hw_init(void) {
     float sys_clk = (float)clock_get_hz(clk_sys);
     float clk_div = sys_clk / VGA_CLK;
 
+#if LOAD_BAR_ENABLE
     // Frame period: LINE_SIZE pixels per line, N_LINES_TOTAL lines, at VGA_CLK px/s
     // Use float to avoid 32-bit overflow (800*525*1e6 ≈ 4.2e11)
     frame_period_us = (uint32_t)((float)(LINE_SIZE * N_LINES_TOTAL) * 1000000.0f / VGA_CLK);
@@ -1111,17 +1339,11 @@ void vga_hw_init(void) {
     DBG_PRINT("  System clock: %.1f MHz\n", sys_clk / 1e6f);
     DBG_PRINT("  Clock divider: %.4f\n", clk_div);
     DBG_PRINT("  Frame period: %lu us\n", (unsigned long)frame_period_us);
-    
-    // Allocate line pattern buffers (6 buffers: 2 sync + 4 active)
-    lines_pattern_data = (uint32_t *)calloc(LINE_SIZE * 6 / 4, sizeof(uint32_t));
-    if (!lines_pattern_data) {
-        printf("ERROR: Failed to allocate VGA buffers!\n");
-        return;
-    }
-    
-    for (int i = 0; i < 6; i++) {
-        lines_pattern[i] = &lines_pattern_data[i * (LINE_SIZE / 4)];
-    }
+#endif    
+    lines_pattern[0] = vga_line0;
+    lines_pattern[1] = vga_line1;
+    lines_pattern[2] = vga_line2;
+    lines_pattern[3] = vga_line3;
     
     // Initialize line templates
     uint8_t *base = (uint8_t *)lines_pattern[0];
@@ -1132,8 +1354,8 @@ void vga_hw_init(void) {
     memset(base, TMPL_VS, LINE_SIZE);
     memset(base, TMPL_VHS, HS_SIZE);
     
-    // Initialize all 4 active line buffers with the sync template
-    for (int i = 2; i < 6; i++) {
+    // Initialize both active line buffers with the sync template
+    for (int i = 2; i < 4; i++) {
         memcpy(lines_pattern[i], lines_pattern[0], LINE_SIZE);
     }
 
@@ -1181,6 +1403,7 @@ void vga_hw_init(void) {
     channel_config_set_transfer_data_size(&c0, DMA_SIZE_32);
     channel_config_set_read_increment(&c0, true);
     channel_config_set_write_increment(&c0, false);
+    channel_config_set_high_priority(&c0, true);
     
     uint dreq = (VGA_PIO == pio0) ? DREQ_PIO0_TX0 + vga_sm : DREQ_PIO1_TX0 + vga_sm;
     channel_config_set_dreq(&c0, dreq);
@@ -1194,6 +1417,7 @@ void vga_hw_init(void) {
     channel_config_set_transfer_data_size(&c1, DMA_SIZE_32);
     channel_config_set_read_increment(&c1, false);
     channel_config_set_write_increment(&c1, false);
+    channel_config_set_high_priority(&c1, true);
     channel_config_set_chain_to(&c1, dma_data_chan);
     
     dma_channel_configure(dma_ctrl_chan, &c1,
@@ -1278,7 +1502,7 @@ void vga_hw_set_palette(const uint8_t *palette_data) {
 
 // Update EGA 16-color palette from AC palette registers
 // palette16_data is 48 bytes (16 entries × 3 bytes RGB, each 0-63)
-void __time_critical_func(vga_hw_set_palette16)(const uint8_t *palette16_data) {
+void vga_hw_set_palette16(const uint8_t *palette16_data) {
     for (int i = 0; i < 16; i++) {
         uint8_t r6 = palette16_data[i * 3 + 0];
         uint8_t g6 = palette16_data[i * 3 + 1];
@@ -1304,7 +1528,7 @@ void __time_critical_func(vga_hw_set_palette16)(const uint8_t *palette16_data) {
     }
 }
 
-// Set graphics sub-mode: 1=CGA 4-color, 2=EGA planar, 3=VGA 256-color, 4=CGA 2-color
+// Set graphics sub-mode: 1=CGA4, 2=EGA, 3=VGA256, 4=CGA2, 5=ModeX, 7=VBE packed8, 8=mono640
 void __time_critical_func(vga_hw_set_gfx_mode)(int submode, int width, int height, int line_offset) {
     gfx_submode = submode;
     gfx_width = width;
@@ -1329,16 +1553,20 @@ void __not_in_flash_func(vga_hw_process_deferred)(void) {
     if (!frame_update_request)
         return;
     frame_update_request = 0;
+#if LOAD_BAR_ENABLE
     uint32_t t0 = timer_hw->timerawl;
+#endif
     if (!SELECT_VGA && required_to_repair_text_pal) {
         required_to_repair_text_pal = false;
         // Only restore palette entries (0..1023), not the DMA line buffers (1024..1223)
         memcpy(conv_color, conv_color2, 1024 * sizeof(uint32_t));
     }
     vga_hw_new_frame_deferred();
+#if LOAD_BAR_ENABLE
     uint32_t dt = timer_hw->timerawl - t0;
     if (dt > new_frame_max_us)
         new_frame_max_us = dt;
     if (dt > 32)
         anomaly_ever_seen = 1;
+#endif
 }
