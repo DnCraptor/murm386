@@ -27,6 +27,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
+#include "pico/time.h"
 #include "adlib.h"
 #include "pc.h"
 #include "emu8950/emu8950.h"
@@ -47,14 +48,14 @@ extern PC *pc;
  * AdLib is asynchronous with respect to x86 execution.
  *
  * Guest OUT 388h only changes the address latch. OUT 389h publishes a compact
- * register/value command into an SPSC queue. Core1 owns the emu8950 state: its
- * non-IRQ service drains commands, calls OPL_writeReg() and refills the PCM
- * double-buffer. The 44.1 kHz audio IRQ on the same core only consumes already
- * rendered PCM, so FM rendering cannot extend the time-critical audio/video IRQ.
+ * register/value command into an SPSC queue. A 1 kHz native timer on core0 is
+ * the sole owner of the emu8950 state: it drains commands, calls OPL_writeReg()
+ * and refills the PCM double-buffer. Therefore FM generation no longer depends
+ * on pc_step(), pc_service() or native-application yield frequency.
  *
- * PCM remains the existing double-buffer, now entirely serviced on core1:
- *   ready[2]  — non-IRQ core1 service publishes a filled buffer;
- *               audio IRQ/core1 clears it after consumption.
+ * PCM remains the existing core0->core1 double-buffer:
+ *   ready[2]  — timer/core0 publishes a filled buffer;
+ *               audio/core1 clears it after consumption.
  *   play_buf  — buffer currently consumed on core1.
  *   read_pos  — sample index within play_buf.
  */
@@ -74,8 +75,8 @@ struct AdlibState {
 
     /*
      * SPSC command queue. Producer is guest I/O on core0; consumer is the
-     * non-IRQ AdLib service on core1. Payload is written before cmd_head is
-     * published, so core1 never observes a partially published command.
+     * native timer IRQ on the same core. Payload is written before cmd_head is
+     * published, so an IRQ which arrives mid-enqueue simply sees the old head.
      */
     AdlibCommand cmd[ADLIB_CMD_COUNT];
     volatile uint16_t cmd_head;
@@ -84,10 +85,11 @@ struct AdlibState {
     uint8_t  started;
 
     int16_t  buf[2][ADLIB_BATCH_SIZE];
-    volatile uint8_t ready[2];  /* 1 = filled, not yet consumed on Core 1 */
+    volatile uint8_t ready[2];  /* 1 = filled by Core 0, not yet consumed */
     uint8_t  play_buf;          /* Core 1: which buf is being played */
     uint32_t read_pos;          /* Core 1: next sample index in play_buf */
 
+    repeating_timer_t timer;
     uint32_t underrun_count;
 };
 
@@ -108,15 +110,15 @@ static inline void adlib_queue_command(AdlibState *s,
     uint16_t head = s->cmd_head;
     uint16_t next = (uint16_t)((head + 1u) & ADLIB_CMD_MASK);
 
-    /*
-     * OPL register writes are ordered device I/O and must never be dropped:
-     * losing a B0..B8 key-off leaves a voice sounding indefinitely.  Core1 is
-     * the independent consumer, so apply backpressure to guest OUT until one
-     * queue slot is free instead of discarding an arbitrary command.
-     */
-    while (next == s->cmd_tail)
-        ;
-    __dmb();
+    if (next == s->cmd_tail) {
+        /*
+         * This should be practically unreachable with a 1 kHz consumer and a
+         * 256-entry queue. Never touch emu8950 from the producer as a fallback:
+         * keeping one owner is more important than hiding an overflow.
+         */
+        s->cmd_overflow_count++;
+        return;
+    }
 
     s->cmd[head].reg = reg;
     s->cmd[head].value = value;
@@ -162,6 +164,8 @@ uint32_t adlib_read(void *opaque, uint32_t nport)
     return 0xFF;
 }
 
+static bool __not_in_flash_func(adlib_timer_callback)(repeating_timer_t *rt);
+
 AdlibState *adlib_new()
 {
     AdlibState *s = malloc(sizeof(AdlibState));
@@ -178,10 +182,21 @@ AdlibState *adlib_new()
         return NULL;
     }
 
+    /*
+     * add_repeating_timer_us() is called on core0, so the default alarm-pool
+     * callback also runs on core0. Negative delay means start-to-start timing.
+     */
+    if (!add_repeating_timer_us(-1000, adlib_timer_callback, s, &s->timer)) {
+        /* No public OPL destructor exists in this backend. Keep old behaviour:
+         * fail construction rather than run a polling-dependent half-device. */
+        free(s);
+        return NULL;
+    }
+
     return s;
 }
 
-/* Called by the 44.1 kHz audio IRQ on core1; consume only pre-rendered PCM. */
+// call it 44100 times per sec from timer on core1 (ISR, so should be fast)
 int16_t __not_in_flash_func(adlib_getsample)(AdlibState *s) {
     if (!s->opl) return 0;
 
@@ -203,15 +218,14 @@ int16_t __not_in_flash_func(adlib_getsample)(AdlibState *s) {
 }
 
 /*
- * Core1 1 kHz timer service.
+ * Core0 timer-owned service.
  *
- * Drain every pending register command first, then refill every free PCM
- * buffer. The two buffers are the latency reserve between this opportunistic
- * non-IRQ producer and the fixed-rate 44.1 kHz IRQ consumer; leaving one free
- * 128-sample batch.  This runs from a private, deliberately low-priority
- * hardware-alarm IRQ; audio/video IRQs on core1 may preempt it.
+ * Drain every register command first, then render at most one 128-sample batch
+ * per tick. One batch is ~2.90 ms at 44.1 kHz, while the service period is
+ * 1 ms, so a single refill per tick is enough to recover a consumed buffer
+ * without spending a long 256-sample burst in IRQ context.
  */
-void __not_in_flash_func(adlib_service)(AdlibState *s)
+static void __not_in_flash_func(adlib_service)(AdlibState *s)
 {
     if (!s->opl)
         return;
@@ -219,24 +233,12 @@ void __not_in_flash_func(adlib_service)(AdlibState *s)
     uint16_t tail = s->cmd_tail;
     uint16_t head = s->cmd_head;
 
-    /*
-     * Producer publishes the payload before cmd_head.  Pair its release DMB
-     * with an acquire DMB before reading any slot covered by the observed head.
-     */
-    __dmb();
-
     while (tail != head) {
         AdlibCommand command = s->cmd[tail];
         tail = (uint16_t)((tail + 1u) & ADLIB_CMD_MASK);
         OPL_writeReg(s->opl, command.reg, command.value);
         s->started = 1;
     }
-
-    /*
-     * Do not publish a freed slot until every payload read from it has
-     * completed; otherwise core0 may reuse the slot while core1 still reads it.
-     */
-    __dmb();
     s->cmd_tail = tail;
 
     /*
@@ -271,12 +273,17 @@ void __not_in_flash_func(adlib_service)(AdlibState *s)
 
         __dmb();
         s->ready[fill_buf] = 1;
+        break;  /* At most one batch per 1 ms timer tick. */
     }
 }
 
-bool __not_in_flash_func(adlib_timer_callback)(repeating_timer_t *rt)
+static bool __not_in_flash_func(adlib_timer_callback)(repeating_timer_t *rt)
 {
     AdlibState *s = (AdlibState *)rt->user_data;
+
+    if (!pc || !pc->adlib_enabled)
+        return true;
+
     adlib_service(s);
     return true;
 }

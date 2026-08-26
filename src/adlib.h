@@ -2,7 +2,6 @@
 #define ADLIB_H
 
 #include <stdint.h>
-#include <pico/time.h>
 
 #define FLOAT float
 
@@ -13,9 +12,7 @@ typedef struct AdlibState AdlibState;
 void adlib_write(void *opaque, uint32_t nport, uint32_t val);
 uint32_t adlib_read(void *opaque, uint32_t nport);
 AdlibState *adlib_new();
-/* Audio IRQ consumer and private 1 kHz core1 OPL producer, respectively. */
+// call it 44100 times per sec from timer on core1 (ISR, so should be fast)
 int16_t adlib_getsample(AdlibState *s);
-void adlib_service(AdlibState *s);
-bool adlib_timer_callback(repeating_timer_t *rt);
 
 #endif /* ADLIB_H */

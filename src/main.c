@@ -1570,58 +1570,11 @@ static void __not_in_flash_func(core1_entry)(void) {
     }
     static repeating_timer_t m_timer = { 0 };
     int hz = 44100;
-    alarm_pool_t *audio_alarm_pool = alarm_pool_create_with_unused_hardware_alarm(1);
-    if (audio_alarm_pool)
-        alarm_pool_add_repeating_timer_us(audio_alarm_pool, -1000000 / hz,
-                                          timer_callback0, pc, &m_timer);
-    else
-        add_repeating_timer_us(-1000000 / hz, timer_callback0, pc, &m_timer);
+	add_repeating_timer_us(-1000000 / hz, timer_callback0, pc, &m_timer);
 
     __dmb();
     audio_timer_ready = true;
-
-    /*
-     * AdLib rendering is deliberately not part of the 44.1 kHz audio IRQ and
-     * not part of the ordinary core1 loop.  Give it its own hardware alarm so
-     * the 1 kHz OPL producer has an independent IRQ and can be assigned a lower
-     * priority than the time-critical audio/video work on this core.
-     *
-     * Claim the alarm lazily: configurations which never enable AdLib do not
-     * consume the fourth hardware alarm.
-     */
-    alarm_pool_t *adlib_alarm_pool = NULL;
-    static repeating_timer_t adlib_timer = { 0 };
-    bool adlib_timer_running = false;
-
     while(1) {
-        bool want_adlib_timer = pc && pc->adlib_enabled && pc->adlib;
-        if (want_adlib_timer != adlib_timer_running) {
-            if (want_adlib_timer) {
-                adlib_alarm_pool = alarm_pool_create_with_unused_hardware_alarm(1);
-                uint alarm_num = alarm_pool_timer_alarm_num(adlib_alarm_pool);
-
-                /*
-                 * RP2350 implements the upper four priority bits.  0xc0 is
-                 * intentionally below the SDK default (0x80): audio/video IRQs
-                 * can therefore preempt OPL rendering.
-                 */
-                irq_set_priority(hardware_alarm_get_irq_num(alarm_num), 0xc0);
-
-                if (alarm_pool_add_repeating_timer_us(adlib_alarm_pool, -1000,
-                                                      adlib_timer_callback,
-                                                      pc->adlib, &adlib_timer)) {
-                    adlib_timer_running = true;
-                } else {
-                    alarm_pool_destroy(adlib_alarm_pool);
-                    adlib_alarm_pool = NULL;
-                }
-            } else {
-                cancel_repeating_timer(&adlib_timer);
-                alarm_pool_destroy(adlib_alarm_pool);
-                adlib_alarm_pool = NULL;
-                adlib_timer_running = false;
-            }
-        }
         repeat_me_often();
 #ifdef DIAG_ENABLED
         diag_core1_poll();  /* reports if core0's heartbeat stopped */
@@ -1889,15 +1842,11 @@ static void __attribute__((noinline, noreturn)) main_after_hardware(void)
 
     initialized = true;
 
-    /* TSR0 is an OS/native-API source and must execute on core0.  Give it a
-       private hardware alarm so Doom/DMX cannot extend the core1 audio IRQ. */
-    alarm_pool_t *tsr0_alarm_pool = alarm_pool_create_with_unused_hardware_alarm(1);
+    /* TSR0 is an OS/native-API source and must execute on core0.  Keep its
+       44.1 kHz source rate independent from the core1 audio timer; clients may
+       cheaply chain the saved callback on ticks they do not need. */
     static repeating_timer_t tsr0_timer = { 0 };
-    if (tsr0_alarm_pool)
-        alarm_pool_add_repeating_timer_us(tsr0_alarm_pool, -1000000 / 44100,
-                                          timer_callback_core0, pc, &tsr0_timer);
-    else
-        add_repeating_timer_us(-1000000 / 44100, timer_callback_core0, pc, &tsr0_timer);
+    add_repeating_timer_us(-1000000 / 44100, timer_callback_core0, pc, &tsr0_timer);
 
     /* Native POST ran before core1 could start its audio timer.  Wait until
      * the mixer is actually servicing samples, then emit the queued POST tone. */
