@@ -8,7 +8,7 @@ set "ROOT=%~dp0"
 cd /d "%ROOT%"
 
 set "BOARD=M1"
-set "VIDEO_MODE=VGA256"
+set "VIDEO_MODE=MCGA"
 set "AUDIO=I2S"
 set "CPU_SPEED=504"
 set "PSRAM_SPEED=100"
