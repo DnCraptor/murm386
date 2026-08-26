@@ -52,6 +52,15 @@ The paging implementation lives in `src/ega128_paging.c`.
 
 When reduced-VRAM builds use direct QSPI PSRAM, core0 can move its stack into the unused tail of `GFX_BUFFER`. The released stack SRAM is then available to the FatFs write-through sector cache.
 
+## EMM (for -emm.uf2 only)
+
+EMM (Expanded Memory Manager) is the software driver used to manage EMS (Expanded Memory Specification) in DOS.
+
+LTEMM driver in your config wirh `/P:D000` key is required for correct work. Example:
+```text
+DEVICEHIGH=C:\LTEMM.EXE /P:D000
+```
+
 ## Audio
 
 Supported firmware audio backends are:
