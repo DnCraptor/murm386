@@ -6,7 +6,10 @@
 
 #define FLOAT float
 
-#define ADLIB_BATCH_SIZE 128
+/* Half of the AdLib PCM double-buffer.  256 samples/buffer -> ~11.6 ms of
+ * reserve across the two buffers, giving the low-priority 1 kHz core1
+ * producer more slack against audio/video IRQ jitter (note-tail dropouts). */
+#define ADLIB_BATCH_SIZE 256
 
 typedef struct AdlibState AdlibState;
 

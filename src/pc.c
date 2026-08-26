@@ -426,7 +426,10 @@ static __always_inline u16 _pc_io_read16(void *o, int addr)
 			return 0xff00u | gameport_read();
 		return 0xfff0u;
 	default:
-		return 0;
+		/* Assemble a 16-bit IN from two 8-bit reads (addr, addr+1) instead
+		 * of returning 0 - e.g. a word read of the AdLib status port. */
+		return (u16)_pc_io_read(o, addr)
+		     | ((u16)_pc_io_read(o, addr + 1) << 8);
 	}
 }
 
@@ -738,7 +741,12 @@ static void pc_io_write16(void *o, int addr, u16 val)
 	case 0x310:
 		return;
 	default:
-///		fprintf(stderr, "outw 0x%x => 0x%x\n", val, addr);
+		/* A 16-bit OUT to a byte-wide port is two 8-bit bus cycles: low
+		 * byte to addr, high byte to addr+1.  Without this split, OUT DX,AX
+		 * to AdLib (388h/389h), Sound Blaster or MPU-401 was silently
+		 * dropped. */
+		pc_io_write(o, addr, (uint8_t)(val & 0xff));
+		pc_io_write(o, addr + 1, (uint8_t)((val >> 8) & 0xff));
 		return;
 	}
 }

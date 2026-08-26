@@ -1532,7 +1532,7 @@ void __not_in_flash_func(tsr1_dispatch)(void)
         cb();
 }
 // to call DMA wait not from ISR for timer
-bool repeat_me_often(void);
+void repeat_me_often(void);
 static void __not_in_flash_func(core1_entry)(void) {
 
     // Audio comes first so fatal PSRAM errors can signal before video starts.
@@ -1569,12 +1569,21 @@ static void __not_in_flash_func(core1_entry)(void) {
     }
     static repeating_timer_t m_timer = { 0 };
     int hz = 44100;
+    /*
+     * -1000000 / 44100 truncates to -22 us = 45454 Hz: the mixer would run
+     * ~3% fast versus the I2S PIO (an exact 44100 Hz), dropping ~1350
+     * produced frames/s and detuning every sub-mixer.  Round to nearest so
+     * it errs slow (-23 us = 43478 Hz), making the decoupled samples[]
+     * handoff repeat a frame rather than drop one.  The fully correct fix
+     * paces production from the I2S DMA - see AUDIO_REVIEW.md.
+     */
+    int audio_period_us = -(1000000 + hz / 2) / hz;
     alarm_pool_t *audio_alarm_pool = alarm_pool_create_with_unused_hardware_alarm(1);
     if (audio_alarm_pool)
-        alarm_pool_add_repeating_timer_us(audio_alarm_pool, -1000000 / hz,
+        alarm_pool_add_repeating_timer_us(audio_alarm_pool, audio_period_us,
                                           timer_callback0, pc, &m_timer);
     else
-        add_repeating_timer_us(-1000000 / hz, timer_callback0, pc, &m_timer);
+        add_repeating_timer_us(audio_period_us, timer_callback0, pc, &m_timer);
 
     __dmb();
     audio_timer_ready = true;
@@ -1896,10 +1905,10 @@ static void __attribute__((noinline, noreturn)) main_after_hardware(void)
     alarm_pool_t *tsr0_alarm_pool = alarm_pool_create_with_unused_hardware_alarm(1);
     static repeating_timer_t tsr0_timer = { 0 };
     if (tsr0_alarm_pool)
-        alarm_pool_add_repeating_timer_us(tsr0_alarm_pool, -1000000 / 44100,
+        alarm_pool_add_repeating_timer_us(tsr0_alarm_pool, -23, /* round(1e6/44100), was -22 */
                                           timer_callback_core0, pc, &tsr0_timer);
     else
-        add_repeating_timer_us(-1000000 / 44100, timer_callback_core0, pc, &tsr0_timer);
+        add_repeating_timer_us(-23, timer_callback_core0, pc, &tsr0_timer);
 
     /* Native POST ran before core1 could start its audio timer.  Wait until
      * the mixer is actually servicing samples, then emit the queued POST tone. */

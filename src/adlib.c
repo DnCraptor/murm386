@@ -128,9 +128,11 @@ void adlib_write(void *opaque, uint32_t nport, uint32_t val)
 {
     AdlibState *s = opaque;
     switch (nport) {
+        case 0x220: case 0x222: case 0x228:   /* Sound Blaster FM address alias */
         case 0x388:
             s->adlib_register = val;
             break;
+        case 0x221: case 0x223: case 0x229:   /* Sound Blaster FM data alias */
         case 0x389:
             if (s->adlib_register <= 4) {
                 s->adlibregmem[s->adlib_register] = val;
@@ -148,6 +150,8 @@ uint32_t adlib_read(void *opaque, uint32_t nport)
 {
     AdlibState *s = opaque;
     switch (nport) {
+        case 0x220: case 0x221: case 0x222: case 0x223:
+        case 0x228: case 0x229:
         case 0x388:
         case 0x389:
             if (!s->adlibregmem[4])
