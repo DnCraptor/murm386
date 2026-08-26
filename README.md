@@ -1,4 +1,4 @@
-# murm286 / murm386 PC firmware
+# murm286/386 RP2350 "PC" firmware
 
 RP2350-based PC/AT-compatible firmware with a 286-class x86 core, native FreeDOS kernel integration, VGA/HDMI output, SD-card storage, PS/2/USB input and multiple audio backends.
 
