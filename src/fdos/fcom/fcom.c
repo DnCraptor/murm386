@@ -16,6 +16,11 @@ void free(void *p);
 #include "fdos/mcb_proxy.h"
 #include "fcom_help.inc"
 
+#ifndef __hfa_func
+#define __hfa(group) __attribute__((section(".hfa." group)))
+#define __hfa_func(func_name) __hfa(__STRING(func_name)) func_name
+#endif
+
 #define FCOM_LINE_MAX          126u
 #define FCOM_WORK_OFFSET       0x0100u
 #define FCOM_STACK_GUARD       16u
@@ -6607,7 +6612,7 @@ static int builtin_loadfix(CPU *cpu, UWORD command_psp,
 }
 
 
-static int run_builtin(CPU *cpu, UWORD command_psp,
+static int __hfa_func(run_builtin)(CPU *cpu, UWORD command_psp,
                        struct fcom_guest *g, char *args)
 {
   if (command_is(g->filename, "?")) {
@@ -9073,7 +9078,7 @@ static int execute_compact_echo(CPU *cpu, UWORD command_psp,
  * split out.  noinline is therefore part of the native-stack lifetime model.
  */
 static __attribute__((noinline))
-int execute_command_core(CPU *cpu, UWORD command_psp,
+int __hfa_func(execute_command_core)(CPU *cpu, UWORD command_psp,
                          struct fcom_guest *g, char *line)
 {
   char *args;
