@@ -1522,6 +1522,7 @@ static bool __not_in_flash_func(timer_callback0)(repeating_timer_t *rt) {
         ps2kbd_tick();
     }
 #endif
+    vga_hw_process_deferred();
     return true;
 }
 
@@ -1602,8 +1603,6 @@ static void __not_in_flash_func(core1_entry)(void) {
     bool adlib_timer_running = false;
 
     while(1) {
-        vga_hw_process_deferred();
-
         bool want_adlib_timer = pc && pc->adlib_enabled && pc->adlib;
         if (want_adlib_timer != adlib_timer_running) {
             if (want_adlib_timer) {
@@ -1632,7 +1631,6 @@ static void __not_in_flash_func(core1_entry)(void) {
                 adlib_timer_running = false;
             }
         }
-
         repeat_me_often();
 #ifdef DIAG_ENABLED
         diag_core1_poll();  /* reports if core0's heartbeat stopped */
