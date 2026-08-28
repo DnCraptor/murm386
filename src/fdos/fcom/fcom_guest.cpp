@@ -43,33 +43,6 @@ static constexpr uint32_t fcom_lol_linear =
 
 
 namespace {
-constexpr unsigned FCOM_SHADOW_MAX_DEPTH = 8;
-struct shadow_state {
-    uint8_t *storage;
-    uint32_t base;
-    size_t size;
-};
-
-static uint8_t *shadow_storage;
-static uint32_t shadow_base;
-static size_t shadow_size;
-static unsigned shadow_depth;
-static shadow_state shadow_stack[FCOM_SHADOW_MAX_DEPTH];
-
-static bool shadow_range(uint32_t addr, size_t len, size_t *off)
-{
-    if (shadow_depth == 0 || shadow_storage == nullptr)
-        return false;
-    if (addr < shadow_base)
-        return false;
-    const uint64_t delta = static_cast<uint64_t>(addr) - shadow_base;
-    if (delta > shadow_size || len > shadow_size - static_cast<size_t>(delta))
-        return false;
-    if (off)
-        *off = static_cast<size_t>(delta);
-    return true;
-}
-
 static void raw_read(uint32_t addr, void *dst, size_t len)
 {
     guest_read_block(addr, dst, len);
@@ -90,61 +63,36 @@ uint32_t fcom_guest_linear(uint16_t segment, uint16_t offset)
 
 uint8_t fcom_guest_read8(uint32_t addr)
 {
-    size_t off;
-    if (shadow_range(addr, 1, &off))
-        return shadow_storage[off];
     return pload8(addr);
 }
 
 void fcom_guest_write8(uint32_t addr, uint8_t value)
 {
-    size_t off;
-    if (shadow_range(addr, 1, &off)) {
-        shadow_storage[off] = value;
-        return;
-    }
     pstore8(addr, value);
 }
 
 uint16_t fcom_guest_read16(uint32_t addr)
 {
-    return static_cast<uint16_t>(fcom_guest_read8(addr)) |
-           (static_cast<uint16_t>(fcom_guest_read8(addr + 1u)) << 8);
+    return pload16(addr);
 }
 
 void fcom_guest_write16(uint32_t addr, uint16_t value)
 {
-    fcom_guest_write8(addr, static_cast<uint8_t>(value));
-    fcom_guest_write8(addr + 1u, static_cast<uint8_t>(value >> 8));
+    pstore16(addr, value);
 }
 
 void fcom_guest_read(uint32_t addr, void *dst, size_t len)
 {
-    size_t off;
-    if (shadow_range(addr, len, &off)) {
-        std::memcpy(dst, shadow_storage + off, len);
-        return;
-    }
     raw_read(addr, dst, len);
 }
 
 void fcom_guest_write(uint32_t addr, const void *src, size_t len)
 {
-    size_t off;
-    if (shadow_range(addr, len, &off)) {
-        std::memcpy(shadow_storage + off, src, len);
-        return;
-    }
     raw_write(addr, src, len);
 }
 
 void fcom_guest_fill(uint32_t addr, uint8_t value, size_t len)
 {
-    size_t off;
-    if (shadow_range(addr, len, &off)) {
-        std::memset(shadow_storage + off, value, len);
-        return;
-    }
     guest_fill_block(addr, value, len);
 }
 
@@ -161,59 +109,6 @@ void fcom_guest_copy(uint32_t dst, uint32_t src, size_t len)
             fcom_guest_write8(dst + static_cast<uint32_t>(len),
                               fcom_guest_read8(src + static_cast<uint32_t>(len)));
     }
-}
-
-int fcom_guest_shadow_enter(uint32_t base, void *storage, size_t size)
-{
-    if (storage == nullptr || size == 0 || shadow_depth >= FCOM_SHADOW_MAX_DEPTH)
-        return 0;
-    if (shadow_depth != 0) {
-        raw_write(shadow_base, shadow_storage, shadow_size);
-        shadow_stack[shadow_depth - 1] = {shadow_storage, shadow_base, shadow_size};
-    }
-    shadow_storage = static_cast<uint8_t *>(storage);
-    shadow_base = base;
-    shadow_size = size;
-    ++shadow_depth;
-    raw_read(shadow_base, shadow_storage, shadow_size);
-    return 1;
-}
-
-void fcom_guest_shadow_leave(void)
-{
-    if (shadow_depth == 0)
-        return;
-    raw_write(shadow_base, shadow_storage, shadow_size);
-    --shadow_depth;
-    if (shadow_depth != 0) {
-        const shadow_state prev = shadow_stack[shadow_depth - 1];
-        shadow_storage = prev.storage;
-        shadow_base = prev.base;
-        shadow_size = prev.size;
-        raw_read(shadow_base, shadow_storage, shadow_size);
-    } else {
-        shadow_base = 0;
-        shadow_size = 0;
-        shadow_storage = nullptr;
-    }
-}
-
-void fcom_guest_shadow_sync_to_guest(void)
-{
-    if (shadow_depth != 0)
-        raw_write(shadow_base, shadow_storage, shadow_size);
-}
-
-void fcom_guest_shadow_sync_from_guest(void)
-{
-    if (shadow_depth != 0)
-        raw_read(shadow_base, shadow_storage, shadow_size);
-}
-
-void *fcom_guest_shadow_ptr(uint32_t addr, size_t len)
-{
-    size_t off;
-    return shadow_range(addr, len, &off) ? shadow_storage + off : nullptr;
 }
 
 size_t fcom_guest_strnlen(uint32_t addr, size_t maxlen)

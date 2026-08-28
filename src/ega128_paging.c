@@ -1,6 +1,6 @@
 #include "ega128_paging.h"
 
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
 #include <string.h>
 #include <stdio.h>
 #include "ff.h"
@@ -285,6 +285,18 @@ static uint8_t *__not_in_flash_func(ega128_paged_guest_ptr)(uint32_t addr, bool 
     return ega128_page_ptr(addr, NULL, write_access);
 }
 
+static uint8_t *__not_in_flash_func(ega128_direct_span_ptr)(uint32_t addr, uint32_t *span, bool write_access)
+{
+    (void)write_access;
+    if (span) *span = 0x4000u - (addr & 0x3fffu);
+    return guest_ram_base + addr;
+}
+
+static uint8_t *__not_in_flash_func(ega128_paged_span_ptr)(uint32_t addr, uint32_t *span, bool write_access)
+{
+    return ega128_page_ptr(addr, span, write_access);
+}
+
 ega128_read8_fn ega128_mem_read8 = ega128_direct_read8;
 ega128_read16_fn ega128_mem_read16 = ega128_direct_read16;
 ega128_read32_fn ega128_mem_read32 = ega128_direct_read32;
@@ -292,6 +304,7 @@ ega128_write8_fn ega128_mem_write8 = ega128_direct_write8;
 ega128_write16_fn ega128_mem_write16 = ega128_direct_write16;
 ega128_write32_fn ega128_mem_write32 = ega128_direct_write32;
 ega128_guest_ptr_fn ega128_guest_ptr = ega128_direct_guest_ptr;
+ega128_span_ptr_fn ega128_mem_span_ptr = ega128_direct_span_ptr;
 
 void ega128_select_direct_backend(void)
 {
@@ -302,6 +315,7 @@ void ega128_select_direct_backend(void)
     ega128_mem_write16 = ega128_direct_write16;
     ega128_mem_write32 = ega128_direct_write32;
     ega128_guest_ptr = ega128_direct_guest_ptr;
+    ega128_mem_span_ptr = ega128_direct_span_ptr;
 }
 
 static void ega128_select_paged_backend(void)
@@ -313,6 +327,7 @@ static void ega128_select_paged_backend(void)
     ega128_mem_write16 = ega128_pstore16;
     ega128_mem_write32 = ega128_pstore32;
     ega128_guest_ptr = ega128_paged_guest_ptr;
+    ega128_mem_span_ptr = ega128_paged_span_ptr;
 }
 
 bool ega128_paging_flush(void)
@@ -342,14 +357,18 @@ const char *ega128_paging_post_label(void)
 {
 #ifdef BOARD_M1
     if (active && use_spi_psram) {
-#ifdef MCGA
+#if defined(VGA256)
+        return "SPI PSRAM: 8 MB [40 KB / 20 pages]";
+#elif defined(MCGA)
         return "SPI PSRAM: 8 MB [192 KB / 96 pages]";
 #else
         return "SPI PSRAM: 8 MB [128 KB / 64 pages]";
 #endif
     }
 #endif
-#ifdef MCGA
+#if defined(VGA256)
+    return "SWAP     : 8 MB [40 KB / 20 pages]";
+#elif defined(MCGA)
     return "SWAP     : 8 MB [192 KB / 96 pages]";
 #else
     return "SWAP     : 8 MB [128 KB / 64 pages]";

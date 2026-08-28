@@ -64,38 +64,47 @@ static
 BYTE CardType;			/* Card type flags */
 
 /*
- * Small FatFs disk-I/O cache backed by SRAM released when core0 moves its
- * native stack into the unused tail of GFX_BUFFER.
+ * Small direct-mapped FatFs disk-I/O cache backed by one or more SRAM arenas.
  *
- * The hooks deliberately start as SRAM-resident no-ops.  Only after SP has
- * moved does main.c publish the active hooks and hand over CORE0_STACK.  Once
- * CONFIG.SYS processing and the initial DoInstall() are complete,
- * CORE0_STACK_EXT is dead boot scratch too and the same cache is re-enabled on
- * the contiguous 8 KiB CORE0_STACK_EXT+CORE0_STACK range.
+ * Arena 0 is the persistent RAM_4_EXT region in non-VGA256 builds. Arena 1
+ * is the old core0 stack region after SP has moved into GFX_BUFFER. Keeping
+ * the tag/epoch next to each 512-byte payload means growing the cache does not
+ * consume scarce ordinary SRAM for a parallel tag table.
  *
  * Writes are true write-through: the physical SD write completes first, then
- * the resident copy is updated.  No disk data exists only in this SRAM.
+ * the resident cache line is updated. No disk data exists only in this SRAM.
  */
 #define FF_STACK_CACHE_SECTOR_SIZE 512u
-#define FF_STACK_CACHE_MAX_SECTORS 16u
+#define FF_STACK_CACHE_MAX_ARENAS  2u
+#define FF_STACK_CACHE_INVALID_EPOCH 0u
+
+typedef struct __attribute__((aligned(4))) {
+    LBA_t tag;
+    uint32_t epoch;
+    BYTE data[FF_STACK_CACHE_SECTOR_SIZE];
+} ff_stack_cache_line_t;
+
+typedef struct {
+    ff_stack_cache_line_t *lines;
+    uint16_t line_count;
+    uint16_t first_slot;
+} ff_stack_cache_arena_t;
 
 typedef bool (*ff_stack_cache_read_hook_t)(LBA_t sector, UINT count, BYTE *dst);
 typedef void (*ff_stack_cache_store_hook_t)(LBA_t sector, UINT count, const BYTE *src);
 
-static BYTE *ff_stack_cache_data;
-static LBA_t ff_stack_cache_tag[FF_STACK_CACHE_MAX_SECTORS];
-static uint8_t ff_stack_cache_valid[FF_STACK_CACHE_MAX_SECTORS];
-static uint8_t ff_stack_cache_sectors;
-static uint8_t ff_stack_cache_victim;
+static ff_stack_cache_arena_t ff_stack_cache_arena[FF_STACK_CACHE_MAX_ARENAS];
+static uint16_t ff_stack_cache_total_lines;
+static uint32_t ff_stack_cache_epoch = 1u;
 
 /*
- * Reclaimable L2 cache in memory-mapped QSPI PSRAM.  Lines are anchored from
+ * Reclaimable L2 cache in memory-mapped QSPI PSRAM. Lines are anchored from
  * the fixed ceiling downward, so shrinking the free tail never moves the
- * surviving lines.  A direct mapping keeps all tags out of scarce SRAM; each
+ * surviving lines. A direct mapping keeps all tags out of scarce SRAM; each
  * QSPI line carries its own LBA tag and epoch next to the 512-byte payload.
  *
- * owner_floor[] is deliberately small and generic.  XMS may move its floor
- * both ways as EMBs are allocated/freed.  The native allocator currently only
+ * owner_floor[] is deliberately small and generic. XMS may move its floor
+ * both ways as EMBs are allocated/freed. The native allocator currently only
  * raises its floor (see task.c), which is conservative but cannot resurrect a
  * line over in-band heap metadata that may still be live.
  */
@@ -149,8 +158,6 @@ static void __not_in_flash_func(ff_qspi_cache_resize)(void)
     if (active > ff_qspi_cache_max_lines)
         active = ff_qspi_cache_max_lines;
 
-    /* Growing exposes memory that an owner may have overwritten while it was
-     * outside the cache.  Invalidate only the newly visible line headers. */
     if (active > old_active) {
         for (uint32_t slot = old_active; slot < active; ++slot)
             ff_qspi_cache_line(slot)->epoch = FF_QSPI_CACHE_INVALID_EPOCH;
@@ -254,48 +261,69 @@ static void __not_in_flash_func(ff_stack_cache_store_disabled)(LBA_t sector,
 static ff_stack_cache_read_hook_t ff_stack_cache_read_hook = ff_stack_cache_read_disabled;
 static ff_stack_cache_store_hook_t ff_stack_cache_store_hook = ff_stack_cache_store_disabled;
 
+static ff_stack_cache_line_t *__not_in_flash_func(ff_stack_cache_slot)(LBA_t sector)
+{
+    uint32_t slot;
+
+    if (!ff_stack_cache_total_lines)
+        return NULL;
+    slot = (uint32_t)(sector % ff_stack_cache_total_lines);
+    for (uint32_t i = 0; i < FF_STACK_CACHE_MAX_ARENAS; ++i) {
+        ff_stack_cache_arena_t *a = &ff_stack_cache_arena[i];
+        if (slot >= a->first_slot &&
+            slot < (uint32_t)a->first_slot + a->line_count)
+            return &a->lines[slot - a->first_slot];
+    }
+    return NULL;
+}
+
+static ff_stack_cache_line_t *__not_in_flash_func(ff_stack_cache_find)(LBA_t sector)
+{
+    ff_stack_cache_line_t *line = ff_stack_cache_slot(sector);
+    if (!line || line->epoch != ff_stack_cache_epoch || line->tag != sector)
+        return NULL;
+    return line;
+}
+
+static void __not_in_flash_func(ff_stack_cache_store_line)(LBA_t sector,
+                                                            const BYTE *src)
+{
+    ff_stack_cache_line_t *line = ff_stack_cache_slot(sector);
+    if (!line)
+        return;
+    line->epoch = FF_STACK_CACHE_INVALID_EPOCH;
+    dos_api_memcpy(line->data, src, FF_STACK_CACHE_SECTOR_SIZE);
+    line->tag = sector;
+    line->epoch = ff_stack_cache_epoch;
+}
+
 static void __not_in_flash_func(ff_stack_cache_invalidate_all)(void)
 {
-    nf_memset(ff_stack_cache_valid, 0, sizeof(ff_stack_cache_valid));
-    ff_stack_cache_victim = 0;
+    if (ff_stack_cache_total_lines) {
+        ++ff_stack_cache_epoch;
+        if (ff_stack_cache_epoch == FF_STACK_CACHE_INVALID_EPOCH) {
+            ff_stack_cache_epoch = 1u;
+            for (uint32_t i = 0; i < FF_STACK_CACHE_MAX_ARENAS; ++i) {
+                ff_stack_cache_arena_t *a = &ff_stack_cache_arena[i];
+                for (uint32_t n = 0; n < a->line_count; ++n)
+                    a->lines[n].epoch = FF_STACK_CACHE_INVALID_EPOCH;
+            }
+        }
+    }
     ff_qspi_cache_invalidate_all();
 }
 
 static void __not_in_flash_func(ff_stack_cache_invalidate_range)(LBA_t sector, UINT count)
 {
     ff_qspi_cache_invalidate_range(sector, count);
-    if (!ff_stack_cache_sectors || !count)
+    if (!ff_stack_cache_total_lines || !count)
         return;
-    for (uint32_t slot = 0; slot < ff_stack_cache_sectors; ++slot) {
-        if (!ff_stack_cache_valid[slot])
-            continue;
-        LBA_t tag = ff_stack_cache_tag[slot];
-        if (tag >= sector && (tag - sector) < count)
-            ff_stack_cache_valid[slot] = 0;
+    for (UINT i = 0; i < count; ++i) {
+        LBA_t tag = sector + i;
+        ff_stack_cache_line_t *line = ff_stack_cache_slot(tag);
+        if (line && line->epoch == ff_stack_cache_epoch && line->tag == tag)
+            line->epoch = FF_STACK_CACHE_INVALID_EPOCH;
     }
-}
-
-static int __not_in_flash_func(ff_stack_cache_find)(LBA_t sector)
-{
-    for (uint32_t slot = 0; slot < ff_stack_cache_sectors; ++slot) {
-        if (ff_stack_cache_valid[slot] && ff_stack_cache_tag[slot] == sector)
-            return (int)slot;
-    }
-    return -1;
-}
-
-static uint32_t __not_in_flash_func(ff_stack_cache_alloc)(LBA_t sector)
-{
-    int found = ff_stack_cache_find(sector);
-    if (found >= 0)
-        return (uint32_t)found;
-
-    uint32_t slot = ff_stack_cache_victim++;
-    if (ff_stack_cache_victim == ff_stack_cache_sectors)
-        ff_stack_cache_victim = 0;
-    ff_stack_cache_tag[slot] = sector;
-    ff_stack_cache_valid[slot] = 1;
-    return slot;
 }
 
 static bool __not_in_flash_func(ff_stack_cache_read_active)(LBA_t sector,
@@ -305,11 +333,10 @@ static bool __not_in_flash_func(ff_stack_cache_read_active)(LBA_t sector,
     if (!count)
         return false;
 
-    /* First pass only proves that the complete FatFs request is resident in
-     * L1 or L2.  Partial hits must not modify dst because disk_read() then
-     * falls through to the lower cache/card path for the whole request. */
+    /* Keep multi-sector reads atomic: prove the complete request is present
+     * across SRAM L1 and QSPI L2 before modifying the destination buffer. */
     for (UINT i = 0; i < count; ++i) {
-        if (ff_stack_cache_find(sector + i) >= 0)
+        if (ff_stack_cache_find(sector + i))
             continue;
         if (ff_qspi_cache_find(sector + i) == NULL)
             return false;
@@ -317,24 +344,15 @@ static bool __not_in_flash_func(ff_stack_cache_read_active)(LBA_t sector,
 
     for (UINT i = 0; i < count; ++i) {
         LBA_t tag = sector + i;
-        int l1 = ff_stack_cache_find(tag);
         BYTE *out = dst + (size_t)i * FF_STACK_CACHE_SECTOR_SIZE;
-        if (l1 >= 0) {
-            dos_api_memcpy(out,
-                           ff_stack_cache_data +
-                               (size_t)l1 * FF_STACK_CACHE_SECTOR_SIZE,
-                           FF_STACK_CACHE_SECTOR_SIZE);
+        ff_stack_cache_line_t *l1 = ff_stack_cache_find(tag);
+        if (l1) {
+            dos_api_memcpy(out, l1->data, FF_STACK_CACHE_SECTOR_SIZE);
         } else {
-            ff_qspi_cache_line_t *line = ff_qspi_cache_find(tag);
-            uint32_t slot;
-            dos_api_memcpy(out, line->data, FF_STACK_CACHE_SECTOR_SIZE);
-            /* Promote an L2 hit into the small SRAM L1. */
-            if (ff_stack_cache_sectors) {
-                slot = ff_stack_cache_alloc(tag);
-                dos_api_memcpy(ff_stack_cache_data +
-                                   (size_t)slot * FF_STACK_CACHE_SECTOR_SIZE,
-                               line->data, FF_STACK_CACHE_SECTOR_SIZE);
-            }
+            ff_qspi_cache_line_t *l2 = ff_qspi_cache_find(tag);
+            dos_api_memcpy(out, l2->data, FF_STACK_CACHE_SECTOR_SIZE);
+            /* Promote an L2 hit into whichever SRAM arena maps this LBA. */
+            ff_stack_cache_store_line(tag, l2->data);
         }
     }
     return true;
@@ -345,32 +363,60 @@ static void __not_in_flash_func(ff_stack_cache_store_active)(LBA_t sector,
                                                               const BYTE *src)
 {
     ff_qspi_cache_store(sector, count, src);
-    if (!ff_stack_cache_sectors)
+    for (UINT i = 0; i < count; ++i)
+        ff_stack_cache_store_line(sector + i,
+            src + (size_t)i * FF_STACK_CACHE_SECTOR_SIZE);
+}
+
+void sdcard_enable_ff_cache_arena(unsigned arena, void *storage, size_t bytes)
+{
+    uintptr_t lo;
+    size_t line_count;
+    uint32_t first = 0;
+
+    if (arena >= FF_STACK_CACHE_MAX_ARENAS)
         return;
-    for (UINT i = 0; i < count; ++i) {
-        uint32_t slot = ff_stack_cache_alloc(sector + i);
-        dos_api_memcpy(ff_stack_cache_data + (size_t)slot * FF_STACK_CACHE_SECTOR_SIZE,
-                       src + (size_t)i * FF_STACK_CACHE_SECTOR_SIZE,
-                       FF_STACK_CACHE_SECTOR_SIZE);
+
+    lo = ((uintptr_t)storage + 3u) & ~(uintptr_t)3u;
+    if (!storage || bytes <= lo - (uintptr_t)storage) {
+        ff_stack_cache_arena[arena].lines = NULL;
+        ff_stack_cache_arena[arena].line_count = 0;
+    } else {
+        bytes -= lo - (uintptr_t)storage;
+        line_count = bytes / sizeof(ff_stack_cache_line_t);
+        if (line_count > UINT16_MAX)
+            line_count = UINT16_MAX;
+        ff_stack_cache_arena[arena].lines = (ff_stack_cache_line_t *)lo;
+        ff_stack_cache_arena[arena].line_count = (uint16_t)line_count;
+    }
+
+    for (uint32_t i = 0; i < FF_STACK_CACHE_MAX_ARENAS; ++i) {
+        ff_stack_cache_arena[i].first_slot = (uint16_t)first;
+        first += ff_stack_cache_arena[i].line_count;
+    }
+    ff_stack_cache_total_lines = (uint16_t)first;
+
+    /* Geometry changes the global sector->slot mapping, so old lines are
+     * invalid even in an arena whose address did not change. */
+    ff_stack_cache_epoch = 1u;
+    for (uint32_t i = 0; i < FF_STACK_CACHE_MAX_ARENAS; ++i) {
+        ff_stack_cache_arena_t *a = &ff_stack_cache_arena[i];
+        for (uint32_t n = 0; n < a->line_count; ++n)
+            a->lines[n].epoch = FF_STACK_CACHE_INVALID_EPOCH;
+    }
+
+    if (ff_stack_cache_total_lines || ff_qspi_cache_enabled) {
+        ff_stack_cache_store_hook = ff_stack_cache_store_active;
+        ff_stack_cache_read_hook = ff_stack_cache_read_active;
+    } else {
+        ff_stack_cache_store_hook = ff_stack_cache_store_disabled;
+        ff_stack_cache_read_hook = ff_stack_cache_read_disabled;
     }
 }
 
 void sdcard_enable_ff_stack_cache(void *storage, size_t bytes)
 {
-    size_t sectors = bytes / FF_STACK_CACHE_SECTOR_SIZE;
-    if (!storage || sectors == 0)
-        return;
-    if (sectors > FF_STACK_CACHE_MAX_SECTORS)
-        sectors = FF_STACK_CACHE_MAX_SECTORS;
-
-    /* Re-enabling is intentional: first CORE0_STACK (4 KiB), then the full
-     * CORE0_STACK_EXT+CORE0_STACK range (8 KiB).  Drop old tags because the
-     * backing address and number of lines change. */
-    ff_stack_cache_data = (BYTE *)storage;
-    ff_stack_cache_sectors = (uint8_t)sectors;
-    ff_stack_cache_invalidate_all();
-    ff_stack_cache_store_hook = ff_stack_cache_store_active;
-    ff_stack_cache_read_hook = ff_stack_cache_read_active;
+    sdcard_enable_ff_cache_arena(1u, storage, bytes);
 }
 
 void sdcard_enable_ff_qspi_cache(void *minimum, void *ceiling)

@@ -16,7 +16,7 @@ void *nf_memset(void *ptr, int value, size_t len);
 #ifdef __cplusplus
 }
 #endif
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
 #include "ega128_paging.h"
 #endif
 
@@ -26,9 +26,11 @@ void *nf_memset(void *ptr, int value, size_t len);
 #define IF_EMS(x)
 #endif
 
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
 extern uint8_t *guest_ram_base;
-#ifdef MCGA
+#if defined(VGA256)
+#define RAM_PAGES_SIZE (40u << 10)
+#elif defined(MCGA)
 #define RAM_PAGES_SIZE (192u << 10)
 #else
 #define RAM_PAGES_SIZE (128u << 10)
@@ -83,15 +85,14 @@ static inline uint8_t *guest_span_ptr_ex(uint32_t addr, uint32_t *span,
     *span = 0x4000u - (addr & 0x3FFFu);
 #if EMULATE_LTEMS
     if (unlikely(EMS_WINDOW(addr)))
-        return ems_host_ptr(addr);
+        return ems_mem_span_ptr(addr, span, write_access);
 #endif
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
-    if (unlikely(ega128_paging_active()))
-        return ega128_page_ptr(addr, span, write_access);
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+    return ega128_mem_span_ptr(addr, span, write_access);
 #else
     (void)write_access;
-#endif
     return PC_RAM + addr;
+#endif
 }
 
 static inline uint8_t *guest_span_ptr(uint32_t addr, uint32_t *span)
@@ -159,13 +160,11 @@ static inline uint8_t __attribute__((always_inline)) pload8(uint32_t addr)
     }
 #if EMULATE_LTEMS
     if (unlikely(EMS_WINDOW(addr))) {
-        return *ems_host_ptr(addr);
+        return ems_mem_read8(addr);
     }
 #endif
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
-    if (unlikely(guest_ram_base == ram_pages))
-        return ega128_mem_read8(addr);
-    return EGA128_QSPI_RAM[addr];
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+    return ega128_mem_read8(addr);
 #endif
 #if CHECK_RAM_BOARDER_ENABLED
 	if (unlikely(addr >= phys_mem_size)) {
@@ -182,13 +181,11 @@ static inline uint16_t __attribute__((always_inline)) pload16(uint32_t addr)
     }
 #if EMULATE_LTEMS
     if (unlikely(EMS_WINDOW(addr))) {
-        return *(uint16_t*)ems_host_ptr(addr);
+        return ems_mem_read16(addr);
     }
 #endif
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
-    if (unlikely(guest_ram_base == ram_pages))
-        return ega128_mem_read16(addr);
-    return *(uint16_t *)(EGA128_QSPI_RAM + addr);
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+    return ega128_mem_read16(addr);
 #endif
 #if CHECK_RAM_BOARDER_ENABLED
 	if (unlikely(addr >= phys_mem_size)) {
@@ -205,13 +202,11 @@ static inline uint32_t __attribute__((always_inline)) pload32(uint32_t addr)
     }
 #if EMULATE_LTEMS
     if (unlikely(EMS_WINDOW(addr))) {
-        return *(uint32_t*)ems_host_ptr(addr);
+        return ems_mem_read32(addr);
     }
 #endif
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
-    if (unlikely(guest_ram_base == ram_pages))
-        return ega128_mem_read32(addr);
-    return *(uint32_t *)(EGA128_QSPI_RAM + addr);
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+    return ega128_mem_read32(addr);
 #endif
 #if CHECK_RAM_BOARDER_ENABLED
 	if (unlikely(addr >= phys_mem_size)) {
@@ -228,16 +223,12 @@ static inline void __attribute__((always_inline)) pstore8(uint32_t addr, uint8_t
     }
 #if EMULATE_LTEMS
     if (unlikely(EMS_WINDOW(addr))) {
-        *ems_host_ptr(addr) = val;
+        ems_mem_write8(addr, val);
         return;
     }
 #endif
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
-    if (unlikely(guest_ram_base == ram_pages)) {
-        ega128_mem_write8(addr, val);
-        return;
-    }
-    EGA128_QSPI_RAM[addr] = val;
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+    ega128_mem_write8(addr, val);
     return;
 #endif
 #if CHECK_RAM_BOARDER_ENABLED
@@ -255,16 +246,12 @@ static inline void __attribute__((always_inline)) pstore16(uint32_t addr, uint16
     }
 #if EMULATE_LTEMS
     if (unlikely(EMS_WINDOW(addr))) {
-        *(uint16_t*)ems_host_ptr(addr) = val;
+        ems_mem_write16(addr, val);
         return;
     }
 #endif
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
-    if (unlikely(guest_ram_base == ram_pages)) {
-        ega128_mem_write16(addr, val);
-        return;
-    }
-    *(uint16_t *)(EGA128_QSPI_RAM + addr) = val;
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+    ega128_mem_write16(addr, val);
     return;
 #endif
 #if CHECK_RAM_BOARDER_ENABLED
@@ -282,16 +269,12 @@ static inline void __attribute__((always_inline)) pstore32(uint32_t addr, uint32
     }
 #if EMULATE_LTEMS
     if (unlikely(EMS_WINDOW(addr))) {
-        *(uint32_t*)ems_host_ptr(addr) = val;
+        ems_mem_write32(addr, val);
         return;
     }
 #endif
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
-    if (unlikely(guest_ram_base == ram_pages)) {
-        ega128_mem_write32(addr, val);
-        return;
-    }
-    *(uint32_t *)(EGA128_QSPI_RAM + addr) = val;
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+    ega128_mem_write32(addr, val);
     return;
 #endif
 #if CHECK_RAM_BOARDER_ENABLED
@@ -354,7 +337,7 @@ static inline size_t guest_find_byte_spans(uint32_t src, uint8_t value, size_t l
 
 static inline size_t guest_find_byte(uint32_t src, uint8_t value, size_t len)
 {
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
     if (unlikely(ega128_paging_active()))
         return guest_find_byte_spans(src, value, len);
 #endif
@@ -388,8 +371,21 @@ pstore_block(uint32_t dst, uint32_t src, int len)
             /* EMS → VGA: собираем блок из EMS и отправляем через ptr-вариант */
             /* Блок гарантированно выровнен и помещается в одну EMS-страницу
              * (гарантируется вызывающим через count из MOVS_helper2),
-             * поэтому ems_host_ptr(src) даёт непрерывный буфер */
-            return iomem_write_string_ptr(g_pc, dst, ems_host_ptr(src), len);
+             * поэтому direct EMS даёт непрерывный буфер; pageable путь дробится по cache page */
+            {
+                uint32_t left = (uint32_t)len;
+                while (left) {
+                    uint32_t span;
+                    const uint8_t *p = ems_mem_span_ptr(src, &span, false);
+                    uint32_t n = left < span ? left : span;
+                    if (!iomem_write_string_ptr(g_pc, dst, p, (int)n))
+                        return false;
+                    src += n;
+                    dst += n;
+                    left -= n;
+                }
+                return true;
+            }
         }
         /* EMS ↔ RAM или EMS ↔ EMS: word-wide через pload32/pstore32 */
         while (len > 0 && (dst & 3)) {
@@ -407,7 +403,7 @@ pstore_block(uint32_t dst, uint32_t src, int len)
     }
 #endif
 
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
     if (unlikely(ega128_paging_active())) {
         while (len >= 4) { pstore32(dst, pload32(src)); dst += 4; src += 4; len -= 4; }
         while (len--) pstore8(dst++, pload8(src++));

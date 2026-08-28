@@ -56,7 +56,7 @@ static inline uint8_t *xms_ptr(uint32_t offset) {
 
 static inline uint8_t xms_load8(uint32_t offset)
 {
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
     if (ega128_paging_active())
         return read86(FDOS_XMS_EMB_BASE_PHYS + offset);
 #endif
@@ -65,7 +65,7 @@ static inline uint8_t xms_load8(uint32_t offset)
 
 static inline void xms_store8(uint32_t offset, uint8_t value)
 {
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
     if (ega128_paging_active()) {
         write86(FDOS_XMS_EMB_BASE_PHYS + offset, value);
         return;
@@ -430,7 +430,7 @@ static inline void xms_move_mem_to_mem(uint32_t destination, uint32_t source, ui
 
 static inline void xms_move_xms_to_xms(uint32_t destination, uint32_t source, uint32_t length) {
     dpb_watch_check_chain("xms_move_xms_to_xms 1");
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
     if (ega128_paging_active()) {
         if (destination > source && destination - source < length) {
             source += length;

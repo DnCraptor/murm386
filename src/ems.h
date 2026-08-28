@@ -12,29 +12,42 @@
  */
 
 #include <stdint.h>
+#include <stdbool.h>
 #include <string.h>
-
 #if EMULATE_LTEMS
 
-/* Physical base of the fixed 2 MiB EMS backing store.  Its location is
- * chosen at runtime immediately above local guest RAM, because PSRAM size is
- * auto-detected (1/2/4/8/16 MiB). */
-extern uint8_t *ems_base_ptr;
-#define EMS_BASE_PTR ems_base_ptr
+#ifndef EMS_START
+#define EMS_START  (0xD0000ul)
+#endif
+#ifndef EMS_END
+#define EMS_END    (0xE0000ul)
+#endif
 
-/* Page-selector array — defined once in pc.c */
 extern uint8_t ems_pages[4];
+extern uint32_t ems_backing_linear_base;
 
-// inilined anyway
+typedef uint8_t  (*ems_read8_fn)(uint32_t addr);
+typedef uint16_t (*ems_read16_fn)(uint32_t addr);
+typedef uint32_t (*ems_read32_fn)(uint32_t addr);
+typedef void (*ems_write8_fn)(uint32_t addr, uint8_t value);
+typedef void (*ems_write16_fn)(uint32_t addr, uint16_t value);
+typedef void (*ems_write32_fn)(uint32_t addr, uint32_t value);
+typedef uint8_t *(*ems_span_ptr_fn)(uint32_t addr, uint32_t *span,
+                                    bool write_access);
+
+extern ems_read8_fn ems_mem_read8;
+extern ems_read16_fn ems_mem_read16;
+extern ems_read32_fn ems_mem_read32;
+extern ems_write8_fn ems_mem_write8;
+extern ems_write16_fn ems_mem_write16;
+extern ems_write32_fn ems_mem_write32;
+extern ems_span_ptr_fn ems_mem_span_ptr;
+
+void ems_select_direct_backend(uint32_t linear_base);
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+void ems_select_paged_backend(uint32_t linear_base);
+#endif
+
 #define EMS_WINDOW(addr) ((addr - EMS_START) < (EMS_END - EMS_START))
-
-/* Translate a guest-physical address inside the EMS window to a host pointer */
-static inline uint8_t *ems_host_ptr(uint32_t addr)
-{
-    uint32_t offset    = addr - EMS_START;          /* 0x000..0xFFFF */
-    uint8_t  selector  = ems_pages[(offset >> 14) & 3];
-    uint32_t page_off  = offset & 0x3FFF;
-    return EMS_BASE_PTR + (uint32_t)selector * 0x4000u + page_off;
-}
 
 #endif /* EMULATE_LTEMS */

@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
 typedef uint8_t  (*ega128_read8_fn)(uint32_t addr);
 typedef uint16_t (*ega128_read16_fn)(uint32_t addr);
 typedef uint32_t (*ega128_read32_fn)(uint32_t addr);
@@ -12,6 +12,7 @@ typedef void (*ega128_write8_fn)(uint32_t addr, uint8_t value);
 typedef void (*ega128_write16_fn)(uint32_t addr, uint16_t value);
 typedef void (*ega128_write32_fn)(uint32_t addr, uint32_t value);
 typedef uint8_t *(*ega128_guest_ptr_fn)(uint32_t addr, bool write_access);
+typedef uint8_t *(*ega128_span_ptr_fn)(uint32_t addr, uint32_t *span, bool write_access);
 
 extern ega128_read8_fn ega128_mem_read8;
 extern ega128_read16_fn ega128_mem_read16;
@@ -20,6 +21,7 @@ extern ega128_write8_fn ega128_mem_write8;
 extern ega128_write16_fn ega128_mem_write16;
 extern ega128_write32_fn ega128_mem_write32;
 extern ega128_guest_ptr_fn ega128_guest_ptr;
+extern ega128_span_ptr_fn ega128_mem_span_ptr;
 
 void ega128_select_direct_backend(void);
 

@@ -31,7 +31,7 @@
 #include "board_config.h"
 #include "psram_init.h"
 #include "core0_stack.h"
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
 #include "ega128_paging.h"
 #endif
 #include "ems.h"
@@ -57,7 +57,7 @@
 #include "tsr_callback.h"
 #include "mem.h"
 #include "bulk_bounce.h"
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
 bool ega128_paging_flush(void);
 #endif
 #include "i8259.h"
@@ -438,7 +438,7 @@ int load_rom(void *phys_mem, const char *file, uword addr, int backward) {
                file, (unsigned long)size, (unsigned long)addr, dest);
     }
 
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
     if (ega128_paging_active()) {
         uint32_t guest_addr = backward ? (uint32_t)(addr - size) : (uint32_t)addr;
         FSIZE_t left = size;
@@ -472,7 +472,7 @@ int load_rom(void *phys_mem, const char *file, uword addr, int backward) {
     f_close(&fp);
 
     // Debug: verify data was written to memory
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
     if (ega128_paging_active()) {
         uint32_t first = backward ? (uint32_t)(addr - size) : (uint32_t)addr;
         uint32_t last = first + (uint32_t)size - 8u;
@@ -835,17 +835,25 @@ static void load_default_config(void) {
     // Guest RAM follows the physically detected PSRAM.  The optional
     // Lo-tech EMS board reserves its fixed 2 MiB backing store at the top.
     size_t detected_psram = psram_detected_size();
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
     if (guest_ram_base == ram_pages)
         detected_psram = ega128_paging_active() ? EGA128_VIRTUAL_RAM_SIZE : RAM_PAGES_SIZE;
 #endif
 #if EMULATE_LTEMS
     if (detected_psram >= (4u << 20)) {
         config.mem_size = detected_psram - (2u << 20);
-        ems_base_ptr = PC_RAM + config.mem_size;
+        ems_backing_linear_base = (uint32_t)config.mem_size;
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+        if (guest_ram_base == ram_pages && ega128_paging_active())
+            ems_select_paged_backend(ems_backing_linear_base);
+        else
+            ems_select_direct_backend(ems_backing_linear_base);
+#else
+        ems_select_direct_backend(ems_backing_linear_base);
+#endif
     } else {
         config.mem_size = detected_psram;
-        ems_base_ptr = NULL;
+        ems_backing_linear_base = 0;
     }
 #else
     config.mem_size = detected_psram;
@@ -1103,7 +1111,7 @@ static bool init_hardware(void) {
     early_psram_missing = psram_missing;
     __dmb();
 
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
     if (psram_missing) {
         guest_ram_base = ram_pages;
         printf("PSRAM not detected; using %u KiB SRAM guest-RAM fallback\n", (unsigned)(RAM_PAGES_SIZE >> 10));
@@ -1124,7 +1132,7 @@ static bool init_hardware(void) {
     }
     __dmb();
 
-#if !defined(EGA128) && !defined(VGA128) && !defined(MCGA)
+#if !defined(EGA128) && !defined(VGA128) && !defined(MCGA) && !defined(VGA256)
     if (psram_missing) {
         show_error_screen(" PSRAM Error ",
                           "QSPI PSRAM not detected (>= 4 MB is required).",
@@ -1243,7 +1251,7 @@ static bool init_hardware(void) {
         } else {
             detected_psram = psram_missing ? 0 : psram_detect_size();
             if (detected_psram < (1u << 20)) {
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
                 if (!ega128_paging_init()) {
                     printf("ERROR: guest-RAM paging backing store initialization failed!\n");
                     return false;
@@ -1554,7 +1562,7 @@ static void __not_in_flash_func(core1_entry)(void) {
     config_clear_changes();
 
     __dmb();
-#if !defined(EGA128) && !defined(VGA128) && !defined(MCGA)
+#if !defined(EGA128) && !defined(VGA128) && !defined(MCGA) && !defined(VGA256)
     if (early_psram_missing)
         audio_play_tone(300u, 500u);
 #endif
@@ -1678,7 +1686,7 @@ static void __attribute__((noinline, used)) core0_enable_relocated_stack_service
     uintptr_t top = (uintptr_t)&__Core0StackRegionEnd;
 
     /* SP has already moved into GFX_BUFFER. CORE0_STACK is now permanently
-       free and becomes an 8-sector FatFs write-through cache. */
+       free and becomes FatFs cache arena 1. */
     sdcard_enable_ff_stack_cache((void *)bottom, (size_t)(top - bottom));
 }
 
@@ -1778,12 +1786,25 @@ int main(void) {
         }
     }
 
+#ifndef VGA256
+    /* RAM_4_EXT is permanently free in every non-VGA256 build.  Make it
+       arena 0 of the FatFs read cache before any optional old-stack arena is
+       published.  VGA256 reserves the same 40 KiB for guest paging instead. */
+    {
+        extern uint8_t __ram_4_ext_region_start__;
+        extern uint8_t __ram_4_ext_region_end__;
+        uintptr_t bottom = (uintptr_t)&__ram_4_ext_region_start__;
+        uintptr_t top = (uintptr_t)&__ram_4_ext_region_end__;
+        sdcard_enable_ff_cache_arena(0u, (void *)bottom, (size_t)(top - bottom));
+    }
+#endif
+
 #if defined(EGA128) || defined(VGA128) || defined(MCGA)
     /* With direct QSPI guest RAM the ram_pages tail of GFX_BUFFER is unused.
        Reuse that SRAM as a large core0 stack without adding checks to the
        guest-memory hot paths. Once SP has moved, the old CORE0_STACK becomes
-       an 8-sector FatFs cache. Paging/fallback builds keep the original stack
-       and leave this cache disabled. */
+       FatFs cache arena 1. Paging/fallback builds keep the original stack;
+       arena 0 in RAM_4_EXT remains active in non-VGA256 builds. */
     if (guest_ram_base == (uint8_t *)PSRAM_BASE_ADDR && !ega128_paging_active()) {
         extern uint8_t __gfx_video_end__;
         extern uint8_t __gfx_buffer_end__;

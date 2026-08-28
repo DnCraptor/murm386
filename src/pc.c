@@ -29,10 +29,14 @@ uint8_t guest_bulk_buf[GUEST_BULK_BUF_SIZE];
 void netredirect_init(CPU *cpu, int enable);
 
 unsigned long phys_mem_size = 8l << 20;
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
 uint8_t* __scratch_y("guest_ram_base") guest_ram_base = (uint8_t *)PSRAM_BASE_ADDR;
 uint8_t ram_pages[RAM_PAGES_SIZE]
+#ifdef VGA256
+    __attribute__((section(".bss.ram_4_ext.ram_pages"), aligned(4)));
+#else
     __attribute__((section(".bss.gfx_buffer.ram_pages"), aligned(4)));
+#endif
 #endif
 void* g_pc;
 
@@ -485,7 +489,114 @@ static int pc_io_read_string(void *o, int addr, uint32_t buf, int size, int coun
 
 #if EMULATE_LTEMS
 uint8_t ems_pages[4] = {0};
-uint8_t *ems_base_ptr = NULL;
+uint32_t ems_backing_linear_base = 0;
+
+static inline uint32_t ems_selected_offset(uint32_t addr)
+{
+    uint32_t offset = addr - EMS_START;
+    uint8_t selector = ems_pages[(offset >> 14) & 3u];
+    return (uint32_t)selector * 0x4000u + (offset & 0x3fffu);
+}
+
+static uint8_t __not_in_flash_func(ems_direct_read8)(uint32_t addr)
+{
+    return PC_RAM[ems_backing_linear_base + ems_selected_offset(addr)];
+}
+static uint16_t __not_in_flash_func(ems_direct_read16)(uint32_t addr)
+{
+    return *(uint16_t *)(PC_RAM + ems_backing_linear_base + ems_selected_offset(addr));
+}
+static uint32_t __not_in_flash_func(ems_direct_read32)(uint32_t addr)
+{
+    return *(uint32_t *)(PC_RAM + ems_backing_linear_base + ems_selected_offset(addr));
+}
+static void __not_in_flash_func(ems_direct_write8)(uint32_t addr, uint8_t value)
+{
+    PC_RAM[ems_backing_linear_base + ems_selected_offset(addr)] = value;
+}
+static void __not_in_flash_func(ems_direct_write16)(uint32_t addr, uint16_t value)
+{
+    *(uint16_t *)(PC_RAM + ems_backing_linear_base + ems_selected_offset(addr)) = value;
+}
+static void __not_in_flash_func(ems_direct_write32)(uint32_t addr, uint32_t value)
+{
+    *(uint32_t *)(PC_RAM + ems_backing_linear_base + ems_selected_offset(addr)) = value;
+}
+static uint8_t *__not_in_flash_func(ems_direct_span_ptr)(uint32_t addr,
+                                                         uint32_t *span,
+                                                         bool write_access)
+{
+    (void)span;
+    (void)write_access;
+    return PC_RAM + ems_backing_linear_base + ems_selected_offset(addr);
+}
+
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+static uint8_t __not_in_flash_func(ems_paged_read8)(uint32_t addr)
+{
+    return ega128_pload8(ems_backing_linear_base + ems_selected_offset(addr));
+}
+static uint16_t __not_in_flash_func(ems_paged_read16)(uint32_t addr)
+{
+    return ega128_pload16(ems_backing_linear_base + ems_selected_offset(addr));
+}
+static uint32_t __not_in_flash_func(ems_paged_read32)(uint32_t addr)
+{
+    return ega128_pload32(ems_backing_linear_base + ems_selected_offset(addr));
+}
+static void __not_in_flash_func(ems_paged_write8)(uint32_t addr, uint8_t value)
+{
+    ega128_pstore8(ems_backing_linear_base + ems_selected_offset(addr), value);
+}
+static void __not_in_flash_func(ems_paged_write16)(uint32_t addr, uint16_t value)
+{
+    ega128_pstore16(ems_backing_linear_base + ems_selected_offset(addr), value);
+}
+static void __not_in_flash_func(ems_paged_write32)(uint32_t addr, uint32_t value)
+{
+    ega128_pstore32(ems_backing_linear_base + ems_selected_offset(addr), value);
+}
+static uint8_t *__not_in_flash_func(ems_paged_span_ptr)(uint32_t addr,
+                                                        uint32_t *span,
+                                                        bool write_access)
+{
+    return ega128_page_ptr(ems_backing_linear_base + ems_selected_offset(addr),
+                           span, write_access);
+}
+#endif
+
+ems_read8_fn ems_mem_read8 = ems_direct_read8;
+ems_read16_fn ems_mem_read16 = ems_direct_read16;
+ems_read32_fn ems_mem_read32 = ems_direct_read32;
+ems_write8_fn ems_mem_write8 = ems_direct_write8;
+ems_write16_fn ems_mem_write16 = ems_direct_write16;
+ems_write32_fn ems_mem_write32 = ems_direct_write32;
+ems_span_ptr_fn ems_mem_span_ptr = ems_direct_span_ptr;
+
+void ems_select_direct_backend(uint32_t linear_base)
+{
+    ems_backing_linear_base = linear_base;
+    ems_mem_read8 = ems_direct_read8;
+    ems_mem_read16 = ems_direct_read16;
+    ems_mem_read32 = ems_direct_read32;
+    ems_mem_write8 = ems_direct_write8;
+    ems_mem_write16 = ems_direct_write16;
+    ems_mem_write32 = ems_direct_write32;
+    ems_mem_span_ptr = ems_direct_span_ptr;
+}
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+void ems_select_paged_backend(uint32_t linear_base)
+{
+    ems_backing_linear_base = linear_base;
+    ems_mem_read8 = ems_paged_read8;
+    ems_mem_read16 = ems_paged_read16;
+    ems_mem_read32 = ems_paged_read32;
+    ems_mem_write8 = ems_paged_write8;
+    ems_mem_write16 = ems_paged_write16;
+    ems_mem_write32 = ems_paged_write32;
+    ems_mem_span_ptr = ems_paged_span_ptr;
+}
+#endif
 
 inline static void out_ems(const uint16_t port, const uint8_t data) {
     ems_pages[port & 3] = data;
@@ -1036,7 +1147,7 @@ bool __not_in_flash_func(iomem_write_string_ptr)(void *iomem, uint32_t addr, con
 // Старая версия теперь через новую
 bool __not_in_flash_func(iomem_write_string)(void *iomem, uint32_t addr, uint32_t buf, int len)
 {
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
     if (unlikely(ega128_paging_active())) {
         while (len > 0) {
             uint32_t span;
@@ -1124,7 +1235,7 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	PC *pc = malloc(sizeof(PC));
 	g_pc = pc;
 	CPU_CB *cb = NULL;
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
 	if (!ega128_paging_active())
 #endif
 	for(int i = 0; i < (conf->mem_size >> 2); ++i)
@@ -1553,7 +1664,7 @@ static void bios_post_components(PC *pc, size_t psram_size)
     snprintf(left, sizeof(left), "Video    : VGA VBE 1.2 256 KB [%s]",
              SELECT_VGA ? "VGA" : "HDMI");
 #endif
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
     if (ega128_paging_active())
         snprintf(right, sizeof(right), "%s", ega128_paging_post_label());
     else
@@ -1639,7 +1750,7 @@ void pc_play_pending_post_beep(PC *pc)
     pcspk_ioport_write(pc->pcspk, old61);
 }
 
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
 static bool bios_post_paged_memory_test(PC *pc)
 {
     const uint32_t total = EGA128_VIRTUAL_RAM_SIZE;
@@ -2023,7 +2134,7 @@ void bios_post(PC *pc) {
 
         /* Memory test and its result tone are cold-POST features only. */
         if (cold_post) {
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
             bool memory_ok = ega128_paging_active()
                        ? bios_post_paged_memory_test(pc)
                        : bios_post_psram_test(pc, psram_size);
@@ -2195,7 +2306,7 @@ void load_bios_and_reset(PC *pc)
 		umb_select_map(1, 0x100000u, 0);
 		bios_post(pc);
 	}
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
 	/* Fake/native BIOS (F9000-FFFFF) and external ROM images share the
 	 * pageable physical backing with UMB RAM.  There is deliberately no
 	 * ROM overlay over F0000-F8FFF: that range is native-BIOS UMB. */

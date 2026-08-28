@@ -29,7 +29,7 @@ using linear_t = uint32_t;
 template <typename T>
 class ref_base {
 protected:
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
     explicit constexpr ref_base(linear_t addr) : addr_(addr) {}
 #else
     explicit ref_base(linear_t addr)
@@ -38,7 +38,7 @@ protected:
 
     template <typename V>
     __attribute__((always_inline)) V scalar_load(std::size_t off) const {
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
         const uint32_t a = addr_ + static_cast<uint32_t>(off);
         if constexpr (sizeof(V) == 1)
             return static_cast<V>(pload8(a));
@@ -55,7 +55,7 @@ protected:
 
     template <typename V>
     __attribute__((always_inline)) void scalar_store(std::size_t off, V value) const {
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
         const uint32_t a = addr_ + static_cast<uint32_t>(off);
         if constexpr (sizeof(V) == 1)
             pstore8(a, static_cast<uint8_t>(value));
@@ -81,7 +81,7 @@ protected:
     __attribute__((always_inline)) linear_t base_linear() const { return addr_; }
 
     linear_t addr_;
-#if !defined(EGA128) && !defined(VGA128) && !defined(MCGA)
+#if !defined(EGA128) && !defined(VGA128) && !defined(MCGA) && !defined(VGA256)
     uint8_t *native_;
 #endif
 };
@@ -107,7 +107,7 @@ public:
         store_byte(offsetof(mcb, m_name) + i, static_cast<uint8_t>(v));
     }
     __attribute__((always_inline)) void clear_name() const {
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
         pstore32(addr_ + offsetof(mcb, m_name), 0);
         pstore32(addr_ + offsetof(mcb, m_name) + 4, 0);
 #else
@@ -138,7 +138,7 @@ private:
 template <typename V>
 class scalar_proxy {
 public:
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
     constexpr scalar_proxy(linear_t addr) : addr_(addr) {}
 #else
     __attribute__((always_inline)) scalar_proxy(linear_t addr)
@@ -147,7 +147,7 @@ public:
         : ptr_(ptr) {}
 #endif
     __attribute__((always_inline)) operator V() const {
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
         if constexpr (sizeof(V) == 1) {
             return static_cast<V>(pload8(addr_));
         } else if constexpr (sizeof(V) == 2) {
@@ -164,7 +164,7 @@ public:
         return *this = static_cast<V>(other);
     }
     __attribute__((always_inline)) scalar_proxy &operator=(V v) {
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
         if constexpr (sizeof(V) == 1) pstore8(addr_, static_cast<uint8_t>(v));
         else if constexpr (sizeof(V) == 2) pstore16(addr_, static_cast<uint16_t>(v));
         else { static_assert(sizeof(V) == 4, "guest scalar must be 1, 2 or 4 bytes"); pstore32(addr_, static_cast<uint32_t>(v)); }
@@ -178,7 +178,7 @@ public:
     __attribute__((always_inline)) scalar_proxy &operator|=(V x) { V v = *this; *this = static_cast<V>(v | x); return *this; }
     __attribute__((always_inline)) scalar_proxy &operator&=(V x) { V v = *this; *this = static_cast<V>(v & x); return *this; }
 private:
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
     linear_t addr_;
 #else
     uint8_t *ptr_;
@@ -205,7 +205,7 @@ private:
 
 class cpu_regs_ref final {
 public:
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
     explicit constexpr cpu_regs_ref(linear_t addr) : addr_(addr) {}
 #define FDOS_CPU_REG_PROXY(type, off) scalar_proxy<type>(addr_ + (off))
 #else
@@ -246,7 +246,7 @@ public:
     }
 private:
     linear_t addr_;
-#if !defined(EGA128) && !defined(VGA128) && !defined(MCGA)
+#if !defined(EGA128) && !defined(VGA128) && !defined(MCGA) && !defined(VGA256)
     uint8_t *native_;
 #endif
 };

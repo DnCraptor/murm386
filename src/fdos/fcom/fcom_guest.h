@@ -22,15 +22,6 @@ void fcom_guest_write(uint32_t addr, const void *src, size_t len);
 void fcom_guest_fill(uint32_t addr, uint8_t value, size_t len);
 void fcom_guest_copy(uint32_t dst, uint32_t src, size_t len);
 
-/* Native shadow for FCOM persistent process data.  Guest addresses inside
- * the active range are routed to the shadow; explicit sync keeps the DOS
- * PSP:offset mirror coherent around guest interrupt execution. */
-int fcom_guest_shadow_enter(uint32_t base, void *storage, size_t size);
-void fcom_guest_shadow_leave(void);
-void fcom_guest_shadow_sync_to_guest(void);
-void fcom_guest_shadow_sync_from_guest(void);
-void *fcom_guest_shadow_ptr(uint32_t addr, size_t len);
-
 size_t fcom_guest_strnlen(uint32_t addr, size_t maxlen);
 int fcom_guest_env_name_matches(uint32_t entry, size_t entry_len,
                                 const char *name, size_t name_len);

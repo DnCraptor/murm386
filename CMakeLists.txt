@@ -15,17 +15,17 @@ endif()
 cmake_minimum_required(VERSION 3.13)
 
 # Board configuration variant (M1, M2, PC, Z2 or C2)
-set(BOARD "M2" CACHE STRING "Board variant: M1, M2, PC, Z2 or C2")
+set(BOARD "M1" CACHE STRING "Board variant: M1, M2, PC, Z2 or C2")
 # Alias for backwards compatibility
 if(DEFINED BOARD_VARIANT AND NOT DEFINED BOARD)
     set(BOARD ${BOARD_VARIANT})
 endif()
 
 # Enable LTEMM support (performance degradation is expected)
-option(EMM "Enable LTEMM support" ON)
+option(EMM "Enable LTEMM support" OFF)
 
 # Video adapter profile: one mutually exclusive build mode.
-set(VIDEO_MODE "VGA128" CACHE STRING "Video adapter: MCGA, EGA128, VGA128 or VGA256")
+set(VIDEO_MODE "VGA256" CACHE STRING "Video adapter: MCGA, EGA128, VGA128 or VGA256")
 set_property(CACHE VIDEO_MODE PROPERTY STRINGS MCGA EGA128 VGA128 VGA256)
 string(TOUPPER "${VIDEO_MODE}" VIDEO_MODE)
 
@@ -450,12 +450,10 @@ add_executable(${BUILD_NAME}
     ${EMU_CORE_SOURCES}
 )
 
-if(NOT VIDEO_MODE STREQUAL "VGA256")
-    target_sources(${BUILD_NAME} PRIVATE src/ega128_paging.c)
-    if(BOARD STREQUAL "M1")
-        target_include_directories(${BUILD_NAME} PRIVATE drivers/psram_spi)
-        target_sources(${BUILD_NAME} PRIVATE drivers/psram_spi/psram_spi.c)
-    endif()
+target_sources(${BUILD_NAME} PRIVATE src/ega128_paging.c)
+if(BOARD STREQUAL "M1")
+    target_include_directories(${BUILD_NAME} PRIVATE drivers/psram_spi)
+    target_sources(${BUILD_NAME} PRIVATE drivers/psram_spi/psram_spi.c)
 endif()
 
 set(GFX_BUFFER_EXPECTED_SIZE 262144)
@@ -478,7 +476,7 @@ target_include_directories(${BUILD_NAME} PRIVATE
 if(BOARD STREQUAL "C2")
     pico_generate_pio_header(${BUILD_NAME} ${CMAKE_CURRENT_LIST_DIR}/link/link_bus.pio)
 endif()
-if((NOT VIDEO_MODE STREQUAL "VGA256") AND BOARD STREQUAL "M1")
+if(BOARD STREQUAL "M1")
     target_include_directories(${BUILD_NAME} PRIVATE ${CMAKE_CURRENT_LIST_DIR}/drivers/psram_spi)
     pico_generate_pio_header(${BUILD_NAME} ${CMAKE_CURRENT_LIST_DIR}/drivers/psram_spi/psram_spi.pio)
     target_compile_definitions(${BUILD_NAME} PRIVATE
@@ -742,6 +740,7 @@ set(FDOS_WARN_SOURCES
 set_source_files_properties(${FDOS_WARN_SOURCES} PROPERTIES
     COMPILE_OPTIONS "-Wall;-Wextra;-Wno-unused-parameter;-Wno-sign-compare"
 )
+set_source_files_properties(src/fdos/fcom/fcom.c PROPERTIES LANGUAGE CXX)
 
 # ARM assembly flags for Cortex-M33
 set_source_files_properties(src/i386_arm.S PROPERTIES
