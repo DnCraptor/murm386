@@ -302,7 +302,7 @@ static dos_far_ptr searchblock(ULONG blkno, COUNT dsk)
 
   if (uncache_buf)
     p = MK_FP(FP_SEG(first), uncache_buf);
-  else if ((buffer_ref(lru).flag() & BFR_FAT) && fat_count < 3 && last_non_fat)
+  else if ((buffer_ref(p).flag() & BFR_FAT) && fat_count < 3 && last_non_fat)
     p = MK_FP(FP_SEG(first), last_non_fat);
   else
     p = lru;

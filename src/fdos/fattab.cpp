@@ -135,7 +135,7 @@ static CLUSTER read_fat_guest(dos_far_ptr x86_dpbp, CLUSTER cluster1)
 #endif
   const UWORD dpb_size = d.dpb_size();
   const bool fat12 = (dpb_size - 1u) < FAT_MAGIC;
-  const bool fat16 = !fat12 && dpb_size <= FAT_MAGIC16;
+  const bool fat16 = dpb_size > FAT_MAGIC && dpb_size <= FAT_MAGIC16;
   CLUSTER max_cluster = dpb_size;
 #ifdef WITHFAT32
   if (fat32)
@@ -246,7 +246,7 @@ CLUSTER link_fat(dos_far_ptr /* -> struct dpb */ x86_dpbp, CLUSTER Cluster1,
   const UWORD fatstrt = d.dpb_fatstrt();
   const UWORD fatsize = d.dpb_fatsize();
   const bool fat12 = (dpb_size - 1u) < FAT_MAGIC;
-  const bool fat16 = !fat12 && dpb_size <= FAT_MAGIC16;
+  const bool fat16 = dpb_size > FAT_MAGIC && dpb_size <= FAT_MAGIC16;
 #ifdef WITHFAT32
   const bool fat32 = fatsize == 0;
 #else
