@@ -33,30 +33,28 @@ Exactly one video/VRAM profile is selected at build time:
 | `MCGA` | 64 KiB | Reduced-VRAM build |
 | `EGA128` | 128 KiB | Reduced-VRAM build |
 | `VGA128` | 128 KiB | Reduced-VRAM build |
-| `VGA256` | 256 KiB | Full 256 KiB VGA RAM, QSPI PSRAM required |
+| `VGA256` | 256 KiB | Full 256 KiB VGA RAM |
 
 Physical output is VGA or HDMI depending on the board and runtime/forced output selection. `--vga` and `--hdmi` in the build scripts force one path where the board supports it.
 
 ### Guest RAM backends
 
-`VGA256` expects direct QSPI PSRAM for guest RAM.
+Guest RAM can be built in two modes:
 
-Reduced-VRAM builds (`MCGA`, `EGA128`, `VGA128`) can use either direct QSPI PSRAM or the paging backend:
+- `NO_PAGING=ON` — paging is disabled and guest RAM uses direct QSPI PSRAM access;
+- `NO_PAGING=OFF` — the paging backend is enabled.
 
-- on **M1**, paging can use the external SPI PSRAM backend;
-- otherwise paging falls back to `286/pagefile.sys` on the SD card;
-- paging exposes an 8 MiB guest address space with a cache in RP2350 SRAM;
-- current cache size is 192 KiB for `MCGA` and 128 KiB for `EGA128`/`VGA128`.
+`NO_PAGING` currently defaults to `ON` in CMake. When it is enabled, CMake appends `-np` to the firmware name.
 
-The paging implementation lives in `src/ega128_paging.c`.
+The paging implementation lives in `src/ega128_paging.c`. The linker reserves the 40 KiB `RAM_4_EXT` region as the primary swap/cache area for `VGA256`; reduced-VRAM modes also use SRAM-backed paging structures. On M1 the paging implementation can use the external SPI PSRAM backend; SD-backed paging uses `286/pagefile.sys`.
 
-When reduced-VRAM builds use direct QSPI PSRAM, core0 can move its stack into the unused tail of `GFX_BUFFER`. The released stack SRAM is then available to the FatFs write-through sector cache.
+When a build uses direct QSPI PSRAM, core0 can reclaim SRAM that would otherwise be needed by the paging path; parts of the released SRAM are also reused by runtime caches.
 
 ## EMM (for -emm.uf2 only)
 
 EMM (Expanded Memory Manager) is the software driver used to manage EMS (Expanded Memory Specification) in DOS.
 
-LTEMM driver in your config wirh `/P:D000` key is required for correct work. Example:
+The LTEMM driver in `config.sys` must be loaded with `/P:D000` for the `-emm` firmware variant. Example:
 ```text
 DEVICEHIGH=C:\LTEMM.EXE /P:D000
 ```
@@ -117,6 +115,8 @@ Examples:
 
 The single-build scripts always pass `CPU_TARGET=286` intentionally. The all-build scripts accept `286` as an explicit CPU-target argument for forward compatibility, but currently reject `386` because that branch is not considered tested. `build_all` builds both `EMM=OFF` and `EMM=ON` variants.
 
+`NO_PAGING` is currently a CMake option rather than a documented common wrapper-script switch. Its CMake default is `ON`, so a clean configure that does not explicitly pass `-DNO_PAGING=OFF` produces a direct-QSPI (`-np`) firmware.
+
 See [README-host-build.md](README-host-build.md) for toolchain setup, script options, build matrix and output locations.
 
 ## Output names
@@ -124,7 +124,7 @@ See [README-host-build.md](README-host-build.md) for toolchain setup, script opt
 CMake encodes the important build parameters in the firmware name. Typical output looks like:
 
 ```text
-m1p2-286-VGA128-504MHz-1.6V-P66-I2S-v1.14.uf2
+m1p2-286-VGA128-504MHz-1.6V-P66-I2S-v1.14-np.uf2
 ```
 
 Outputs are written under:

@@ -25,7 +25,7 @@ shift
 goto collect_args
 :args_done
 set /a COUNT=0
-set "TOTAL=64"
+set "TOTAL=80"
 
 for %%B in (M1 M2 PC Z2 C2) do (
     for %%V in (MCGA EGA128 VGA128 VGA256) do (
@@ -49,6 +49,29 @@ for %%B in (M1 M2 PC Z2 C2) do (
             call :build_one %%B %%V PWM ON
             if errorlevel 1 exit /b !errorlevel!
         )
+
+        if "%%V"=="VGA256" (
+            if "%%B"=="PC" (
+                call :build_one %%B %%V PWM OFF NP
+                if errorlevel 1 exit /b !errorlevel!
+                call :build_one %%B %%V PWM ON NP
+                if errorlevel 1 exit /b !errorlevel!
+            ) else if "%%B"=="C2" (
+                call :build_one %%B %%V I2S OFF NP
+                if errorlevel 1 exit /b !errorlevel!
+                call :build_one %%B %%V I2S ON NP
+                if errorlevel 1 exit /b !errorlevel!
+            ) else (
+                call :build_one %%B %%V I2S OFF NP
+                if errorlevel 1 exit /b !errorlevel!
+                call :build_one %%B %%V I2S ON NP
+                if errorlevel 1 exit /b !errorlevel!
+                call :build_one %%B %%V PWM OFF NP
+                if errorlevel 1 exit /b !errorlevel!
+                call :build_one %%B %%V PWM ON NP
+                if errorlevel 1 exit /b !errorlevel!
+            )
+        )
     )
 )
 
@@ -62,13 +85,19 @@ set "B=%~1"
 set "V=%~2"
 set "A=%~3"
 set "E=%~4"
+set "P=%~5"
 set "TAG=!B!-286-!V!-!A!"
 set "EMM_ARG="
+set "PAGING_ARG="
 if /I "!E!"=="ON" (
     set "TAG=!TAG!-emm"
     set "EMM_ARG=--emm"
 )
+if /I "!P!"=="NP" (
+    set "TAG=!TAG!-np"
+    set "PAGING_ARG=--no-paging"
+)
 echo.
 echo [!COUNT!/%TOTAL%] !TAG!
-call "%ROOT%build.bat" --board !B! --video !V! --audio !A! --build-dir "%ROOT%build\all\!TAG!" !EMM_ARG! %EXTRA_ARGS%
+call "%ROOT%build.bat" --board !B! --video !V! --audio !A! --build-dir "%ROOT%build\all\!TAG!" !EMM_ARG! !PAGING_ARG! %EXTRA_ARGS%
 exit /b %errorlevel%

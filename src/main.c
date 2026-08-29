@@ -1786,10 +1786,10 @@ int main(void) {
         }
     }
 
-#ifndef VGA256
-    /* RAM_4_EXT is permanently free in every non-VGA256 build.  Make it
-       arena 0 of the FatFs read cache before any optional old-stack arena is
-       published.  VGA256 reserves the same 40 KiB for guest paging instead. */
+#if !defined(VGA256) || defined(NO_PAGING)
+    /* RAM_4_EXT is free in every non-VGA256 build and also in VGA256 when
+       paging is compiled out. Make it arena 0 of the FatFs read cache before
+       any optional old-stack arena is published. */
     {
         extern uint8_t __ram_4_ext_region_start__;
         extern uint8_t __ram_4_ext_region_end__;
@@ -1804,7 +1804,7 @@ int main(void) {
        Reuse that SRAM as a large core0 stack without adding checks to the
        guest-memory hot paths. Once SP has moved, the old CORE0_STACK becomes
        FatFs cache arena 1. Paging/fallback builds keep the original stack;
-       arena 0 in RAM_4_EXT remains active in non-VGA256 builds. */
+       arena 0 in RAM_4_EXT remains active whenever paging does not reserve it. */
     if (guest_ram_base == (uint8_t *)PSRAM_BASE_ADDR && !ega128_paging_active()) {
         extern uint8_t __gfx_video_end__;
         extern uint8_t __gfx_buffer_end__;
