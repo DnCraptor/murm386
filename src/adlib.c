@@ -174,7 +174,13 @@ uint32_t adlib_read(void *opaque, uint32_t nport)
     switch (nport) {
         case 0x388:
         case 0x389:
-            s->adlibstatus = OPL_status(s->opl);
+            if (!s->adlibregmem[4])
+                s->adlibstatus = 0;
+            else
+                s->adlibstatus = 0x80;
+            s->adlibstatus = s->adlibstatus
+                           + (s->adlibregmem[4] & 1) * 0x40
+                           + (s->adlibregmem[4] & 2) * 0x10;
             return s->adlibstatus;
     }
     return 0xFF;
