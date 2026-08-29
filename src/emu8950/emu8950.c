@@ -1859,6 +1859,20 @@ void OPL_calc_buffer_stereo(OPL *opl, int32_t *buffer, uint32_t nsamples) {
 #endif
 }
 
+uint8_t OPL_status(OPL *opl) {
+    if (!opl)
+        return 0;
+
+    uint8_t status = opl->status & 0x60;
+    uint8_t timer_ctrl = opl->reg[0x04];
+
+    if (((status & 0x40) && !(timer_ctrl & 0x40)) ||
+        ((status & 0x20) && !(timer_ctrl & 0x20)))
+        status |= 0x80;
+
+    return status;
+}
+
 void OPL_writeReg(OPL *opl, uint32_t reg, uint8_t data) {
 
     //printf("WR %04x %2x\n", reg, data);

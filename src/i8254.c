@@ -28,6 +28,7 @@
 #include <stdio.h>
 #include "i8254.h"
 #include <pico.h>
+#include <hardware/sync.h>
 //#define DEBUG_PIT
 
 #define RW_STATE_LSB 1
@@ -137,6 +138,7 @@ static void pit_latch_count(PITChannelState *s)
 
 void i8254_ioport_write(PITState *pit, uint32_t addr, uint32_t val)
 {
+	uint32_t irq_state = save_and_disable_interrupts();
 	int channel, access;
 	PITChannelState *s;
 
@@ -197,10 +199,12 @@ void i8254_ioport_write(PITState *pit, uint32_t addr, uint32_t val)
 			break;
 		}
 	}
+	restore_interrupts(irq_state);
 }
 
 uint32_t i8254_ioport_read(PITState *pit, uint32_t addr)
 {
+	uint32_t irq_state = save_and_disable_interrupts();
 	int ret, count;
 	PITChannelState *s;
 
@@ -248,6 +252,7 @@ uint32_t i8254_ioport_read(PITState *pit, uint32_t addr)
 			break;
 		}
 	}
+	restore_interrupts(irq_state);
 	return ret;
 }
 

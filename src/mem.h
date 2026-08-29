@@ -16,7 +16,7 @@ void *nf_memset(void *ptr, int value, size_t len);
 #ifdef __cplusplus
 }
 #endif
-#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+#if !defined(NO_PAGING)
 #include "ega128_paging.h"
 #endif
 
@@ -26,7 +26,7 @@ void *nf_memset(void *ptr, int value, size_t len);
 #define IF_EMS(x)
 #endif
 
-#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+#if !defined(NO_PAGING)
 extern uint8_t *guest_ram_base;
 #if defined(VGA256)
 #define RAM_PAGES_SIZE (40u << 10)
@@ -87,7 +87,7 @@ static inline uint8_t *guest_span_ptr_ex(uint32_t addr, uint32_t *span,
     if (unlikely(EMS_WINDOW(addr)))
         return ems_mem_span_ptr(addr, span, write_access);
 #endif
-#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+#if !defined(NO_PAGING)
     return ega128_mem_span_ptr(addr, span, write_access);
 #else
     (void)write_access;
@@ -163,7 +163,7 @@ static inline uint8_t __attribute__((always_inline)) pload8(uint32_t addr)
         return ems_mem_read8(addr);
     }
 #endif
-#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+#if !defined(NO_PAGING)
     return ega128_mem_read8(addr);
 #endif
 #if CHECK_RAM_BOARDER_ENABLED
@@ -184,7 +184,7 @@ static inline uint16_t __attribute__((always_inline)) pload16(uint32_t addr)
         return ems_mem_read16(addr);
     }
 #endif
-#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+#if !defined(NO_PAGING)
     return ega128_mem_read16(addr);
 #endif
 #if CHECK_RAM_BOARDER_ENABLED
@@ -205,7 +205,7 @@ static inline uint32_t __attribute__((always_inline)) pload32(uint32_t addr)
         return ems_mem_read32(addr);
     }
 #endif
-#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+#if !defined(NO_PAGING)
     return ega128_mem_read32(addr);
 #endif
 #if CHECK_RAM_BOARDER_ENABLED
@@ -227,7 +227,7 @@ static inline void __attribute__((always_inline)) pstore8(uint32_t addr, uint8_t
         return;
     }
 #endif
-#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+#if !defined(NO_PAGING)
     ega128_mem_write8(addr, val);
     return;
 #endif
@@ -250,7 +250,7 @@ static inline void __attribute__((always_inline)) pstore16(uint32_t addr, uint16
         return;
     }
 #endif
-#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+#if !defined(NO_PAGING)
     ega128_mem_write16(addr, val);
     return;
 #endif
@@ -273,7 +273,7 @@ static inline void __attribute__((always_inline)) pstore32(uint32_t addr, uint32
         return;
     }
 #endif
-#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+#if !defined(NO_PAGING)
     ega128_mem_write32(addr, val);
     return;
 #endif
@@ -337,7 +337,7 @@ static inline size_t guest_find_byte_spans(uint32_t src, uint8_t value, size_t l
 
 static inline size_t guest_find_byte(uint32_t src, uint8_t value, size_t len)
 {
-#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+#if !defined(NO_PAGING)
     if (unlikely(ega128_paging_active()))
         return guest_find_byte_spans(src, value, len);
 #endif
@@ -403,7 +403,7 @@ pstore_block(uint32_t dst, uint32_t src, int len)
     }
 #endif
 
-#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+#if !defined(NO_PAGING)
     if (unlikely(ega128_paging_active())) {
         while (len >= 4) { pstore32(dst, pload32(src)); dst += 4; src += 4; len -= 4; }
         while (len--) pstore8(dst++, pload8(src++));

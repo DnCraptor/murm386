@@ -203,7 +203,7 @@ template <typename T, size_t N>
 class fcom_buffer_ref {
 public:
   __attribute__((always_inline)) explicit fcom_buffer_ref(linear_t addr)
-#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+#if !defined(NO_PAGING)
       : addr_(addr), loaded_(false), dirty_(false) {}
 #else
       : ptr_(reinterpret_cast<T *>(X86_RAM_BASE + addr)) {}
@@ -212,7 +212,7 @@ public:
   fcom_buffer_ref(const fcom_buffer_ref &) = delete;
   fcom_buffer_ref &operator=(const fcom_buffer_ref &) = delete;
 
-#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+#if !defined(NO_PAGING)
   fcom_buffer_ref(fcom_buffer_ref &&other) noexcept
       : addr_(other.addr_), loaded_(other.loaded_), dirty_(other.dirty_) {
     if (loaded_)
@@ -230,7 +230,7 @@ public:
 #endif
 
   __attribute__((always_inline)) operator T *() {
-#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+#if !defined(NO_PAGING)
     load();
     dirty_ = true;
     return buffer_;
@@ -240,7 +240,7 @@ public:
   }
 
   __attribute__((always_inline)) operator const T *() const {
-#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+#if !defined(NO_PAGING)
     load();
     return buffer_;
 #else
@@ -250,7 +250,7 @@ public:
 
   template <typename Index>
   __attribute__((always_inline)) T &operator[](Index index) {
-#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+#if !defined(NO_PAGING)
     load();
     dirty_ = true;
     return buffer_[(size_t)index];
@@ -261,7 +261,7 @@ public:
 
   template <typename Index>
   __attribute__((always_inline)) const T &operator[](Index index) const {
-#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+#if !defined(NO_PAGING)
     load();
     return buffer_[(size_t)index];
 #else
@@ -274,7 +274,7 @@ public:
   static constexpr size_t size() { return N; }
 
 private:
-#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+#if !defined(NO_PAGING)
   __attribute__((always_inline)) void load() const {
     if (!loaded_) {
       guest_read_block(addr_, buffer_, sizeof(buffer_));

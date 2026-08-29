@@ -1850,6 +1850,13 @@ void I_InitDiskFlash (void)
 // draw disk icon
 void I_BeginRead (void)
 {
+#ifdef ELF_MODE
+	/* Skip the emulated-VGA disk icon (~384 guest-VGA accesses per lump read)
+	   and instead drain the host keyboard queue, so key presses during long
+	   loads - when the main loop / I_StartTic do not run - are not lost. */
+	I_PollNativeKeyboard();
+	return;
+#else
 	byte    *src,*dest;
 	int             y;
 
@@ -1909,11 +1916,13 @@ void I_BeginRead (void)
 // set write mode 0
 	outp (GC_INDEX,GC_MODE);
 	outp (GC_INDEX+1,inp(GC_INDEX+1)&~1);
+#endif /* ELF_MODE */
 }
 
 // erase disk icon
 void I_EndRead (void)
 {
+#ifndef ELF_MODE
 	byte    *src,*dest;
 	int             y;
 
@@ -1952,6 +1961,7 @@ void I_EndRead (void)
 // set write mode 0
 	outp (GC_INDEX,GC_MODE);
 	outp (GC_INDEX+1,inp(GC_INDEX+1)&~1);
+#endif /* ELF_MODE */
 }
 
 

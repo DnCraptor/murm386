@@ -24,6 +24,11 @@ endif()
 # Enable LTEMM support (performance degradation is expected)
 option(EMM "Enable LTEMM support" OFF)
 
+option(NO_PAGING "Disable guest-RAM paging and use direct QSPI PSRAM access" ON)
+if(NO_PAGING)
+    add_compile_definitions(NO_PAGING=1)
+endif()
+
 # Video adapter profile: one mutually exclusive build mode.
 set(VIDEO_MODE "VGA256" CACHE STRING "Video adapter: MCGA, EGA128, VGA128 or VGA256")
 set_property(CACHE VIDEO_MODE PROPERTY STRINGS MCGA EGA128 VGA128 VGA256)
@@ -155,7 +160,7 @@ else()
     set(CPU_VOLTAGE "VREG_VOLTAGE_1_60")
 endif()
 
-message(STATUS "frank-386: Board=${BOARD}, CPU=${CPU_SPEED}MHz, PSRAM=${PSRAM_SPEED}MHz, Voltage=${CPU_VOLTAGE} ${AUDIO_TYPE}")
+message(STATUS "murm-386: Board=${BOARD}, CPU=${CPU_SPEED}MHz, PSRAM=${PSRAM_SPEED}MHz, Voltage=${CPU_VOLTAGE} ${AUDIO_TYPE}")
 
 include(pico_sdk_import.cmake)
 
@@ -178,7 +183,7 @@ if(_minor_len LESS 2)
 else()
     set(FIRMWARE_VERSION "v${FRANK_386_VERSION_MAJOR}.${FRANK_386_VERSION_MINOR}")
 endif()
-message(STATUS "frank-386 version: ${FIRMWARE_VERSION}")
+message(STATUS "murm-386 version: ${FIRMWARE_VERSION}")
 
 pico_sdk_init()
 
@@ -317,6 +322,10 @@ if(EMM)
     SET(BUILD_NAME "${BUILD_NAME}-${CPU_SPEED}MHz-1.6V-P${PSRAM_SPEED}-${AUDIO_TYPE}-${FIRMWARE_VERSION}-emm")
 else ()
     SET(BUILD_NAME "${BUILD_NAME}-${CPU_SPEED}MHz-1.6V-P${PSRAM_SPEED}-${AUDIO_TYPE}-${FIRMWARE_VERSION}")
+endif()
+
+if(NO_PAGING)
+    SET(BUILD_NAME "${BUILD_NAME}-np")
 endif()
 
 #=============================================================================
@@ -784,12 +793,13 @@ endif()
 # Print configuration summary
 #=============================================================================
 message(STATUS "")
-message(STATUS "frank-386 Build Configuration:")
+message(STATUS "murm-386 Build Configuration:")
 message(STATUS "  Board Variant:  ${BOARD}")
 message(STATUS "  EMM:            ${EMM}")
 message(STATUS "  CPU Speed:      ${CPU_SPEED} MHz")
 message(STATUS "  CPU Voltage:    ${CPU_VOLTAGE}")
 message(STATUS "  PSRAM Speed:    ${PSRAM_SPEED} MHz")
+message(STATUS "  NO_PAGING:      ${NO_PAGING}")
 message(STATUS "  Audio Type:     ${AUDIO_TYPE}")
 message(STATUS "  USB:            runtime HOST/DEVICE")
 message(STATUS "  Debug Output:   ${DEBUG_ENABLED}")

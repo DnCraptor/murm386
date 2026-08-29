@@ -44,7 +44,7 @@ extern ems_write32_fn ems_mem_write32;
 extern ems_span_ptr_fn ems_mem_span_ptr;
 
 void ems_select_direct_backend(uint32_t linear_base);
-#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+#if !defined(NO_PAGING)
 void ems_select_paged_backend(uint32_t linear_base);
 #endif
 

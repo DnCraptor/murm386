@@ -5,6 +5,7 @@
 #include "codeprofile.h"
 #include "bbprofile.h"
 #include <pico.h>
+#include "hardware/sync.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
@@ -678,7 +679,7 @@ static bool IRAM_ATTR tlb_refill(CPUI386 *cpu, struct tlb_entry *ent, uword lpgn
 	uword pde = pload32(base_addr + i * 4);
 	if (!(pde & 1))
 		return false;
-	#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+	#if !defined(NO_PAGING)
 	pstore8(base_addr + i * 4, pload8(base_addr + i * 4) | (1 << 5));
 #else
 	PC_RAM[base_addr + i * 4] |= 1 << 5; // accessed
@@ -689,7 +690,7 @@ static bool IRAM_ATTR tlb_refill(CPUI386 *cpu, struct tlb_entry *ent, uword lpgn
 	if (!(pte & 1))
 		return false;
 
-	#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+	#if !defined(NO_PAGING)
 	pstore8(base_addr2 + j * 4, pload8(base_addr2 + j * 4) | (1 << 5));
 #else
 	PC_RAM[base_addr2 + j * 4] |= 1 << 5; // accessed
@@ -700,7 +701,7 @@ static bool IRAM_ATTR tlb_refill(CPUI386 *cpu, struct tlb_entry *ent, uword lpgn
 	ent->xaddr = (pte & ~0xfff) ^ (lpgno << 12);
 	pte = pte & ((pde & 7) | 0xfffffff8);
 	ent->pte_lookup = pte_lookup[!!(cpu->cr0 & CR0_WP)][(pte >> 1) & 3];
-	#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+	#if !defined(NO_PAGING)
 	ent->ppte = (u8 *)(uintptr_t)(base_addr2 + j * 4);
 #else
 	ent->ppte = &(PC_RAM[base_addr2 + j * 4]);
@@ -736,7 +737,7 @@ static bool IRAM_ATTR translate_lpgno(CPUI386 *cpu, int rwm, uword lpgno, uword 
 	}
 	*paddr = ent->xaddr ^ laddr;
 	if (rwm & 2) {
-#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+#if !defined(NO_PAGING)
 		uword ppte_addr = (uword)(uintptr_t)ent->ppte;
 		pstore8(ppte_addr, pload8(ppte_addr) | (1 << 6)); // dirty
 #else
@@ -979,7 +980,7 @@ prefetch_fill(CPUI386 *cpu, uword paddr)
 	cp_note(base);
 	cpu->prefetch_base = base;
 	register u32* prefetch = (u32*)cpu->prefetch;
-#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+#if !defined(NO_PAGING)
 	*prefetch++ = pload32(base);
 	*prefetch++ = pload32(base + 4);
 	*prefetch++ = pload32(base + 8);
@@ -5226,9 +5227,11 @@ static void IRAM_ATTR i386_step(CPU* _cpu, int stepcount)
 {
 	CPUI386* cpu = (CPUI386*)_cpu;
 	if ((cpu->flags & IF) && cpu->intr) {
+		uint32_t irq_state = save_and_disable_interrupts();
 		cpu->intr = false;
-		cpu->halt = false;
 		int no = cpu->cb.pic_read_irq(cpu->cb.pic);
+		restore_interrupts(irq_state);
+		cpu->halt = false;
 		cpu->ip = cpu->next_ip;
 		if (!call_isr(cpu, no, false, 1)) {
 			if (!call_isr(cpu, EX_DF, true, 1)) {

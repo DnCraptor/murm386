@@ -1,6 +1,6 @@
 #include "ega128_paging.h"
 
-#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+#if !defined(NO_PAGING)
 #include <string.h>
 #include <stdio.h>
 #include "ff.h"

@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+#if !defined(NO_PAGING)
 typedef uint8_t  (*ega128_read8_fn)(uint32_t addr);
 typedef uint16_t (*ega128_read16_fn)(uint32_t addr);
 typedef uint32_t (*ega128_read32_fn)(uint32_t addr);

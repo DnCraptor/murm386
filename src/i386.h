@@ -252,6 +252,10 @@ void cpu_intcall(CPU* cpu, uint8_t intnum);
 bool cpu_pending_trap(void);
 void cpu_pending_trap_set(bool v);
 
+/* One-instruction maskable-IRQ inhibit after STI/MOV SS/POP SS. */
+bool cpu_irq_shadow(void);
+void cpu_irq_shadow_set(bool v);
+
 CPU *cpu_new(int gen, CPU_CB **cb);
 #ifdef I386_MODE
 unsigned long cpui386_get_cycle(const CPU *cpu);

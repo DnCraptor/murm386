@@ -1,6 +1,7 @@
 #include <time.h>
 #include <stdbool.h>
 #include <pico.h>
+#include "hardware/sync.h"
 #include "i386.h"
 #include "cpu.h"
 #include "bios/bios.h"
@@ -18,6 +19,8 @@ extern void request_terminate(uint8_t exit_code, uint8_t exit_type);
 #define INLINE __always_inline
 
 static uint32_t segregs32[6];
+static bool irq_shadow;
+static bool hltstate;
 
 #undef CPU_CS
 #undef CPU_DS
@@ -81,6 +84,8 @@ static void reset(CPU* cpu) {
         SET_IP ( 0x0000 );
     }
     cpu->flags.value = 2;
+    irq_shadow = false;
+    hltstate = false;
 }
 
 #include "./fpu.h"
@@ -1036,18 +1041,27 @@ bool rp2350_bios_handler(CPU* cpu, uint8_t intnum) {
  */
 static bool pending_ss_trap;
 
-bool cpu_pending_trap(void)        { return pending_ss_trap; }
-void cpu_pending_trap_set(bool v)  { pending_ss_trap = v; }
+bool __not_in_flash_func(cpu_pending_trap)(void)        { return pending_ss_trap; }
+void __not_in_flash_func(cpu_pending_trap_set)(bool v)  { pending_ss_trap = v; }
+
+bool __not_in_flash_func(cpu_irq_shadow)(void)          { return irq_shadow; }
+void __not_in_flash_func(cpu_irq_shadow_set)(bool v)    { irq_shadow = v; }
 
 static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
     static uint16_t firstip;
 
     for (uint32_t loopcount = 0; loopcount < execloops; loopcount++) {
         if (cpu->native_done) break;
-        if ((cpu->flags.value & IF) && cpu->intr) {
+        bool inhibit_irq = irq_shadow;
+        if (!inhibit_irq && (cpu->flags.value & IF) && cpu->intr) {
+            hltstate = false;
+            uint32_t irq_state = save_and_disable_interrupts();
             cpu->intr = false;
             int no = cpu->cb.pic_read_irq(cpu->cb.pic);
+            restore_interrupts(irq_state);
             intcall86(cpu, no);
+        } else if (hltstate) {
+            break;
         }
         if (!cpu->bios) {
             u32 ip32 = (((u32)CPU_CS << 4) + CPU_IP);
@@ -1063,6 +1077,10 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 }
             }
         }
+        /* The shadow belongs to the next real guest instruction, not to a
+           host-side interpreter pass which can leave through the BIOS-trap
+           continue above without decoding an opcode. Consume it only now. */
+        irq_shadow = false;
         reptype = 0;
         segoverride = 0;
         useseg = CPU_DS;
@@ -1413,6 +1431,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
 
             case 0x17: /* 17 POP CPU_SS */
                 CPU_SS = pop(cpu);
+                irq_shadow = true;
                 break;
 
             case 0x18: /* 18 SBB Eb Gb */
@@ -2476,6 +2495,9 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
             case 0x8E: /* 8E MOV Sw Ew */
                 modregrm(cpu);
                 putsegreg(reg, readrm16(cpu, rm));
+                if (reg == regss) {
+                    irq_shadow = true;
+                }
                 break;
 
             case 0x8F: /* 8F POP Ev */
@@ -3322,8 +3344,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 break;
 
             case 0xF4: /* F4 HLT */
-                /// TODO:
-                //hltstate = 1;
+                hltstate = true;
                 break;
 
             case 0xF5: /* F5 CMC */
@@ -3433,7 +3454,10 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 break;
 
             case 0xFB: /* FB STI */
-                ifl = 1;
+                if (!ifl) {
+                    ifl = 1;
+                    irq_shadow = true;
+                }
                 break;
 
             case 0xFC: /* FC CLD */

@@ -563,7 +563,9 @@ void cpu_far_call(CPU* cpu, UWORD seg, UWORD off)
   /* См. bios_intcall(): native_done стекуется, внешнее состояние
      восстанавливается после вложенного цикла. */
   bool old_native_done = cpu->native_done;
+  bool old_irq_shadow = cpu_irq_shadow();
   cpu->native_done = false;
+  cpu_irq_shadow_set(false);
   set_bios_callback(cpu, &params, true);
 ///  printf("cpu_far_call callback node=%p ret=%04x:%04x\n",  &params, params.expected_cs, params.expected_ip);
   /* Emulate exactly what "CALL FAR seg:off" pushes: CS, then IP (so
@@ -599,6 +601,7 @@ void cpu_far_call(CPU* cpu, UWORD seg, UWORD off)
   }
   cpu->native_done = old_native_done;
   drop_bios_callback(cpu, &params);
+  cpu_irq_shadow_set(old_irq_shadow);
   SET_CS(save_cs);
   SET_IP(save_ip);
 }

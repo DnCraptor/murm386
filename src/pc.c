@@ -29,7 +29,7 @@ uint8_t guest_bulk_buf[GUEST_BULK_BUF_SIZE];
 void netredirect_init(CPU *cpu, int enable);
 
 unsigned long phys_mem_size = 8l << 20;
-#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+#if !defined(NO_PAGING)
 uint8_t* __scratch_y("guest_ram_base") guest_ram_base = (uint8_t *)PSRAM_BASE_ADDR;
 uint8_t ram_pages[RAM_PAGES_SIZE]
 #ifdef VGA256
@@ -417,9 +417,12 @@ static __always_inline u16 _pc_io_read16(void *o, int addr)
 	/* NE2000 networking removed */
 	case 0x310:
 		return 0xffff;
-	case 0x220:
-		if (pc->adlib_enabled)
-			return adlib_read(pc->adlib, addr);
+	case 0x220: case 0x228: case 0x388: case 0x38a:
+		if (pc->adlib_enabled) {
+			u16 lo = _pc_io_read(o, addr);
+			u16 hi = _pc_io_read(o, addr + 1);
+			return lo | (hi << 8);
+		}
 		return 0xFFFF;
 	/* Game port. Games normally use IN AL, but a 16-bit read must not
 	 * silently return 0 - that reads as "axes already timed out" and the
@@ -531,7 +534,7 @@ static uint8_t *__not_in_flash_func(ems_direct_span_ptr)(uint32_t addr,
     return PC_RAM + ems_backing_linear_base + ems_selected_offset(addr);
 }
 
-#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+#if !defined(NO_PAGING)
 static uint8_t __not_in_flash_func(ems_paged_read8)(uint32_t addr)
 {
     return ega128_pload8(ems_backing_linear_base + ems_selected_offset(addr));
@@ -584,7 +587,7 @@ void ems_select_direct_backend(uint32_t linear_base)
     ems_mem_write32 = ems_direct_write32;
     ems_mem_span_ptr = ems_direct_span_ptr;
 }
-#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+#if !defined(NO_PAGING)
 void ems_select_paged_backend(uint32_t linear_base)
 {
     ems_backing_linear_base = linear_base;
@@ -823,6 +826,12 @@ static void pc_io_write16(void *o, int addr, u16 val)
 		return;
 	case 0x170:
 		ide_data_writew(pc->ide2, val);
+		return;
+	case 0x220: case 0x228: case 0x388: case 0x38a:
+		if (pc->adlib_enabled) {
+			pc_io_write(o, addr, (uint8_t)val);
+			pc_io_write(o, addr + 1, (uint8_t)(val >> 8));
+		}
 		return;
     case 0x260: case 0x261: case 0x262: case 0x263:
 		pc_io_write(o, addr, (uint8_t) val);
@@ -1147,7 +1156,7 @@ bool __not_in_flash_func(iomem_write_string_ptr)(void *iomem, uint32_t addr, con
 // Старая версия теперь через новую
 bool __not_in_flash_func(iomem_write_string)(void *iomem, uint32_t addr, uint32_t buf, int len)
 {
-#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+#if !defined(NO_PAGING)
     if (unlikely(ega128_paging_active())) {
         while (len > 0) {
             uint32_t span;
@@ -1235,7 +1244,7 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	PC *pc = malloc(sizeof(PC));
 	g_pc = pc;
 	CPU_CB *cb = NULL;
-#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+#if !defined(NO_PAGING)
 	if (!ega128_paging_active())
 #endif
 	for(int i = 0; i < (conf->mem_size >> 2); ++i)
@@ -1664,7 +1673,7 @@ static void bios_post_components(PC *pc, size_t psram_size)
     snprintf(left, sizeof(left), "Video    : VGA VBE 1.2 256 KB [%s]",
              SELECT_VGA ? "VGA" : "HDMI");
 #endif
-#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+#if !defined(NO_PAGING)
     if (ega128_paging_active())
         snprintf(right, sizeof(right), "%s", ega128_paging_post_label());
     else
@@ -1750,7 +1759,7 @@ void pc_play_pending_post_beep(PC *pc)
     pcspk_ioport_write(pc->pcspk, old61);
 }
 
-#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+#if !defined(NO_PAGING)
 static bool bios_post_paged_memory_test(PC *pc)
 {
     const uint32_t total = EGA128_VIRTUAL_RAM_SIZE;
@@ -2134,7 +2143,7 @@ void bios_post(PC *pc) {
 
         /* Memory test and its result tone are cold-POST features only. */
         if (cold_post) {
-#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+#if !defined(NO_PAGING)
             bool memory_ok = ega128_paging_active()
                        ? bios_post_paged_memory_test(pc)
                        : bios_post_psram_test(pc, psram_size);
@@ -2306,7 +2315,7 @@ void load_bios_and_reset(PC *pc)
 		umb_select_map(1, 0x100000u, 0);
 		bios_post(pc);
 	}
-#if defined(EGA128) || defined(VGA128) || defined(MCGA) || defined(VGA256)
+#if !defined(NO_PAGING)
 	/* Fake/native BIOS (F9000-FFFFF) and external ROM images share the
 	 * pageable physical backing with UMB RAM.  There is deliberately no
 	 * ROM overlay over F0000-F8FFF: that range is native-BIOS UMB. */

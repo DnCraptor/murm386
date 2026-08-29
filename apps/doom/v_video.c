@@ -138,7 +138,7 @@ void V_DrawPatch (int x, int y, int scrn, patch_t *patch)
 #if (APPVER_DOOMREV < AV_DR_DM12)
 		I_Error("Bad V_DrawPatch: (%i+%i,%i+%i)", x, SHORT(patch->width), y, SHORT(patch->height));
 #else
-		I_Error("Bad V_DrawPatch");
+		I_Error("Bad V_DrawPatch(main) x=%i w=%i y=%i h=%i scrn=%i", x, SHORT(patch->width), y, SHORT(patch->height), scrn);
 #endif
    }
 #endif
@@ -193,7 +193,7 @@ void V_DrawPatchFlipped (int x, int y, int scrn, patch_t *patch)
 #ifdef RANGECHECK
 	if (x<0||x+SHORT(patch->width) >SCREENWIDTH || y<0 || y+SHORT(patch->height)>SCREENHEIGHT
 || (unsigned)scrn>4) {
-		I_Error("Bad V_DrawPatch");
+		I_Error("Bad V_DrawPatch(flip) x=%i w=%i y=%i h=%i scrn=%i", x, SHORT(patch->width), y, SHORT(patch->height), scrn);
     }
 #endif
 	if (!scrn)

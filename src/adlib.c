@@ -82,6 +82,7 @@ struct AdlibState {
     volatile uint16_t cmd_head;
     volatile uint16_t cmd_tail;
     uint32_t cmd_overflow_count;
+    volatile uint8_t reset_requested;
     uint8_t  started;
 
     int16_t  buf[2][ADLIB_BATCH_SIZE];
@@ -101,8 +102,21 @@ struct AdlibState {
  * This scratch buffer is ordinary SRAM; it is not in CORE0_STACK_EXT.
  */
 #define ADLIB_RENDER_TILE 64u
+#define ADLIB_QUEUE_SPIN_LIMIT 1000000u
 static int32_t adlib_render_scratch[ADLIB_RENDER_TILE]
     __attribute__((aligned(4)));
+
+static inline uint32_t adlib_canonical_port(uint32_t nport)
+{
+    switch (nport) {
+    case 0x220: case 0x228: case 0x388: case 0x38a:
+        return 0x388;
+    case 0x221: case 0x229: case 0x389: case 0x38b:
+        return 0x389;
+    default:
+        return nport;
+    }
+}
 
 static inline void adlib_queue_command(AdlibState *s,
                                        uint8_t reg, uint8_t value)
@@ -110,15 +124,21 @@ static inline void adlib_queue_command(AdlibState *s,
     uint16_t head = s->cmd_head;
     uint16_t next = (uint16_t)((head + 1u) & ADLIB_CMD_MASK);
 
-    if (next == s->cmd_tail) {
-        /*
-         * This should be practically unreachable with a 1 kHz consumer and a
-         * 256-entry queue. Never touch emu8950 from the producer as a fallback:
-         * keeping one owner is more important than hiding an overflow.
-         */
-        s->cmd_overflow_count++;
-        return;
+    uint32_t spins = 0;
+    while (next == s->cmd_tail) {
+        if (++spins >= ADLIB_QUEUE_SPIN_LIMIT) {
+            /*
+             * Do not leave guest OUT permanently blocked if the OPL consumer
+             * stops making progress. The producer never touches emu8950:
+             * recovery is requested and performed by adlib_service().
+             */
+            s->cmd_overflow_count++;
+            __dmb();
+            s->reset_requested = 1;
+            return;
+        }
     }
+    __dmb();
 
     s->cmd[head].reg = reg;
     s->cmd[head].value = value;
@@ -129,6 +149,7 @@ static inline void adlib_queue_command(AdlibState *s,
 void adlib_write(void *opaque, uint32_t nport, uint32_t val)
 {
     AdlibState *s = opaque;
+    nport = adlib_canonical_port(nport);
     switch (nport) {
         case 0x388:
             s->adlib_register = val;
@@ -149,16 +170,11 @@ void adlib_write(void *opaque, uint32_t nport, uint32_t val)
 uint32_t adlib_read(void *opaque, uint32_t nport)
 {
     AdlibState *s = opaque;
+    nport = adlib_canonical_port(nport);
     switch (nport) {
         case 0x388:
         case 0x389:
-            if (!s->adlibregmem[4])
-                s->adlibstatus = 0;
-            else
-                s->adlibstatus = 0x80;
-            s->adlibstatus = s->adlibstatus
-                           + (s->adlibregmem[4] & 1) * 0x40
-                           + (s->adlibregmem[4] & 2) * 0x10;
+            s->adlibstatus = OPL_status(s->opl);
             return s->adlibstatus;
     }
     return 0xFF;
@@ -183,10 +199,11 @@ AdlibState *adlib_new()
     }
 
     /*
-     * add_repeating_timer_us() is called on core0, so the default alarm-pool
-     * callback also runs on core0. Negative delay means start-to-start timing.
+     * Run end-to-start, not start-to-start. OPL rendering happens inside this
+     * IRQ and may exceed 1 ms; a negative period would then keep scheduling
+     * already-overdue callbacks and can starve foreground guest execution.
      */
-    if (!add_repeating_timer_us(-1000, adlib_timer_callback, s, &s->timer)) {
+    if (!add_repeating_timer_us(1000, adlib_timer_callback, s, &s->timer)) {
         /* No public OPL destructor exists in this backend. Keep old behaviour:
          * fail construction rather than run a polling-dependent half-device. */
         free(s);
@@ -229,6 +246,30 @@ static void __not_in_flash_func(adlib_service)(AdlibState *s)
 {
     if (!s->opl)
         return;
+
+    if (s->reset_requested) {
+        /*
+         * Recovery is intentionally core1-only. Publish all currently queued
+         * slots as free first, then reset the OPL and discard already-rendered
+         * PCM. Commands published by core0 after this head snapshot remain in
+         * the queue and are consumed below, rebuilding the music state.
+         */
+        __dmb();
+        uint16_t reset_head = s->cmd_head;
+        s->cmd_tail = reset_head;
+
+        OPL_reset(s->opl);
+        s->started = 0;
+
+        /* Drop PCM generated from the pre-reset OPL state. */
+        s->ready[0] = 0;
+        s->ready[1] = 0;
+        s->play_buf = 0;
+        s->read_pos = 0;
+
+        __dmb();
+        s->reset_requested = 0;
+    }
 
     uint16_t tail = s->cmd_tail;
     uint16_t head = s->cmd_head;
