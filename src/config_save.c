@@ -16,6 +16,7 @@
 #include <string.h>
 #include <strings.h>
 #include "pc.h"
+#include "video_profile.h"
 
 // Current configuration values (minimal storage)
 static int cfg_cpu_gen = 4;
@@ -46,6 +47,7 @@ static int cfg_flash_freq = FLASH_MAX_FREQ_MHZ;
 static int cfg_volume = 15;
 static int cfg_voltage = -1;  /* -1 = auto (by cpu_freq) */
 static int cfg_mouse_invert_y = 0;
+static int cfg_video_adapter = VIDEO_ADAPTER_DEFAULT;
 static bool cfg_hw_changed = false;
 
 extern PC *pc;
@@ -308,6 +310,19 @@ void config_set_voltage(int v) {
         cfg_hw_changed = true;
     }
 }
+int config_get_video_adapter(void) { return cfg_video_adapter; }
+void config_set_video_adapter(int profile) {
+#if defined(NO_PAGING)
+    profile = VIDEO_ADAPTER_VGA256;
+#endif
+    if (profile < VIDEO_ADAPTER_MCGA || profile > VIDEO_ADAPTER_VGA256)
+        return;
+    if (cfg_video_adapter != profile) {
+        cfg_video_adapter = profile;
+        cfg_changed = true;
+        cfg_hw_changed = true;
+    }
+}
 int config_get_mouse_invert_y(void) { return cfg_mouse_invert_y; }
 void config_set_mouse_invert_y(int enabled) {
     if (cfg_mouse_invert_y != enabled) {
@@ -431,6 +446,14 @@ bool config_save_all(void) {
 
     // Hardware settings (frank-386-specific)
     write_line(&fp, "\n[frank-386]\n");
+    {
+        static const char *video_values[] = { "MCGA", "EGA128", "EGA256", "VGA128", "VGA256" };
+        int v = cfg_video_adapter;
+        if (v < VIDEO_ADAPTER_MCGA || v > VIDEO_ADAPTER_VGA256)
+            v = VIDEO_ADAPTER_VGA256;
+        snprintf(line, sizeof(line), "video=%s\n", video_values[v]);
+        write_line(&fp, line);
+    }
     snprintf(line, sizeof(line), "pcspeaker=%d\n", cfg_pcspeaker);
     write_line(&fp, line);
     snprintf(line, sizeof(line), "adlib=%d\n", cfg_adlib);
@@ -494,7 +517,16 @@ int parse_frank_386_ini(void* user, const char* section,
     // Accept both new and legacy section names
     if (strcmp(section, "frank-386") != 0 && strcmp(section, "murm386") != 0) return 1;
 
-    if (strcmp(name, "pcspeaker") == 0) {
+    if (strcmp(name, "video") == 0) {
+        VideoAdapterProfile profile;
+        if (video_profile_parse(value, &profile)) {
+#if defined(NO_PAGING)
+            profile = VIDEO_ADAPTER_VGA256;
+#endif
+            cfg_video_adapter = (int)profile;
+            video_profile_set(profile);
+        }
+    } else if (strcmp(name, "pcspeaker") == 0) {
         cfg_pcspeaker = atoi(value);
     } else if (strcmp(name, "adlib") == 0) {
         cfg_adlib = atoi(value);

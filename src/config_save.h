@@ -45,6 +45,8 @@ int config_get_usb_mode(void);
 void config_set_usb_mode(int mode);
 
 // Hardware settings (saved in [frank-386] section)
+int config_get_video_adapter(void);
+void config_set_video_adapter(int profile);
 int config_get_pcspeaker(void);
 void config_set_pcspeaker(int enabled);
 

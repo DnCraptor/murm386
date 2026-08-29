@@ -1,4 +1,5 @@
 #include "pc.h"
+#include "video_profile.h"
 #include "mem.h"
 #include "ide.h"
 #include "dss.h"
@@ -31,12 +32,8 @@ void netredirect_init(CPU *cpu, int enable);
 unsigned long phys_mem_size = 8l << 20;
 #if !defined(NO_PAGING)
 uint8_t* __scratch_y("guest_ram_base") guest_ram_base = (uint8_t *)PSRAM_BASE_ADDR;
-uint8_t ram_pages[RAM_PAGES_SIZE]
-#ifdef VGA256
-    __attribute__((section(".bss.ram_4_ext.ram_pages"), aligned(4)));
-#else
-    __attribute__((section(".bss.gfx_buffer.ram_pages"), aligned(4)));
-#endif
+uint8_t *ram_pages;
+uint32_t ram_pages_size;
 #endif
 void* g_pc;
 
@@ -1373,15 +1370,9 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 
 	pc->boot_start_time = 0;
 
-	/* The build profile owns the physical video-memory size.  Normal VGA is
-	 * 256 KiB; EGA128/VGA128 use 128 KiB and MCGA uses 64 KiB. */
-#ifdef MCGA
-	pc->vga_mem_size = 64u << 10;
-#elif defined(EGA128) || defined(VGA128)
-	pc->vga_mem_size = 128u << 10;
-#else
-	pc->vga_mem_size = 256u << 10;
-#endif
+	/* The paging firmware owns one 256 KiB GFX arena.  The selected
+	 * adapter determines how much of its prefix is visible as VRAM. */
+	pc->vga_mem_size = (int)video_profile_vram_size();
 	pc->vga_mem = gfx_buffer;
 	memset(pc->vga_mem, 0, pc->vga_mem_size);
 	pc->vga = vga_init(pc->vga_mem, pc->vga_mem_size,
@@ -1660,19 +1651,8 @@ static void bios_post_components(PC *pc, size_t psram_size)
     bios_post_table_rule(pc, 0xDA, 0xC2, 0xBF);
     bios_post_table_row(pc, left, right);
 
-#if defined(EGA128)
-    snprintf(left, sizeof(left), "Video    : EGA 128 KB [%s]",
-             SELECT_VGA ? "VGA" : "HDMI");
-#elif defined(VGA128)
-    snprintf(left, sizeof(left), "Video    : VGA 128 KB [%s]",
-             SELECT_VGA ? "VGA" : "HDMI");
-#elif defined(MCGA)
-    snprintf(left, sizeof(left), "Video    : MCGA 64 KB [%s]",
-             SELECT_VGA ? "VGA" : "HDMI");
-#else
-    snprintf(left, sizeof(left), "Video    : VGA VBE 1.2 256 KB [%s]",
-             SELECT_VGA ? "VGA" : "HDMI");
-#endif
+snprintf(left, sizeof(left), "Video    : %s [%s]",
+             video_profile_name(), SELECT_VGA ? "VGA" : "HDMI");
 #if !defined(NO_PAGING)
     if (ega128_paging_active())
         snprintf(right, sizeof(right), "%s", ega128_paging_post_label());
@@ -1997,13 +1977,8 @@ void bios_post(PC *pc) {
 	pstore16(0x482, 0x003E);                             /* keyboard buffer end */
 	pstore8 (0x484, 24);                                 /* rows minus one */
 	pstore16(0x485, 16);                                 /* char height */
-#ifdef MCGA
-	pstore8 (0x487, 0x00);                               /* video_ctl: 64K */
-#elif defined(EGA128) || defined(VGA128)
-	pstore8 (0x487, 0x20);                               /* video_ctl: 128K */
-#else
-	pstore8 (0x487, 0x60);                               /* video_ctl: 256K */
-#endif
+	pstore8 (0x487, video_profile_is_mcga() ? 0x00 :
+	                    (video_profile_has_256k_vram() ? 0x60 : 0x20));
 	pstore8 (0x488, 0xF9);                               /* video_switches */
 	pstore8 (0x489, 0x51);                               /* modeset_ctl (SeaBIOS vgainit.c:144) */
 	/* 40:8E = disk_interrupt_flag, 40:8F = floppy_harddisk_info.

@@ -28,14 +28,9 @@ void *nf_memset(void *ptr, int value, size_t len);
 
 #if !defined(NO_PAGING)
 extern uint8_t *guest_ram_base;
-#if defined(VGA256)
-#define RAM_PAGES_SIZE (40u << 10)
-#elif defined(MCGA)
-#define RAM_PAGES_SIZE (192u << 10)
-#else
-#define RAM_PAGES_SIZE (128u << 10)
-#endif
-extern uint8_t ram_pages[RAM_PAGES_SIZE];
+#define RAM_PAGES_MAX_SIZE (192u << 10)
+extern uint8_t *ram_pages;
+extern uint32_t ram_pages_size;
 #define PC_RAM (guest_ram_base)
 #define PC_RAM32 ((uint32_t*)guest_ram_base)
 #define EGA128_QSPI_RAM ((uint8_t *)0x11000000u)

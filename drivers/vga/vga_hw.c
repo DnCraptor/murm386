@@ -10,6 +10,7 @@
 
 #pragma GCC optimize("Ofast")
 
+#include "../../src/video_profile.h"
 #include "vga_hw.h"
 #include "vga_osd.h"
 #include "font8x16.h"
@@ -160,13 +161,7 @@ static uint vga_sm = 0;
 uint8_t text_buffer_sram[80 * 25 * 2] __attribute__((aligned(4))) __attribute__((section(".text_buffer")));
 static volatile int update_requested = 0;  // Set by update call
 
-#ifdef MCGA
-#define GFX_BUFFER_SIZE (64u * 1024u)
-#elif defined(EGA128) || defined(VGA128)
-#define GFX_BUFFER_SIZE (128u * 1024u)
-#else
 #define GFX_BUFFER_SIZE (256u * 1024u)
-#endif
 uint8_t gfx_buffer[GFX_BUFFER_SIZE] __attribute__((section(".bss.gfx_buffer"), aligned(4)));
 
 // VGA renderer hot palettes.  Keep these in SRAM9 so Core 1 palette
@@ -344,7 +339,7 @@ static void init_palettes(void) {
 // DMA Interrupt Handler - Renders each scanline
 // ============================================================================
 
-#if !defined(EGA128) && !defined(MCGA)
+#if defined(VIDEO_RUNTIME) || (!defined(EGA128) && !defined(MCGA))
 // Render VGA 256-color planar (Mode X: 320x200x256, unchained)
 // VRAM layout in our emulator: packed planes in dwords.
 // Each dword holds 4 bytes: plane0..plane3, and those bytes are pixels x%4.
@@ -449,7 +444,7 @@ static void __time_critical_func(render_gfx_line_from_sram)(uint32_t line, uint3
     }
 }
 
-#if !defined(EGA128) && !defined(VGA128) && !defined(MCGA)
+#if defined(VIDEO_RUNTIME) || (!defined(EGA128) && !defined(VGA128) && !defined(MCGA))
 // Render VBE 100h: 640x400x8 packed pixels, one VRAM byte per pixel.
 static void __time_critical_func(render_gfx_line_vbe8)(uint32_t line,
                                                         uint32_t *output_buffer) {
@@ -626,7 +621,11 @@ static void __time_critical_func(render_gfx_line_mono640)(uint32_t line, uint32_
     uint8_t bg = cga_palette[0];
     uint8_t fg = cga_palette[3];
     for (int i = 0; i < 80; ++i) {
-#if defined(VGA128) || defined(MCGA)
+#if defined(VIDEO_RUNTIME)
+        uint8_t byte = (video_profile_is_vga128() || video_profile_is_mcga())
+                     ? gfx_buffer[offset + (uint32_t)i]
+                     : gfx_buffer[(offset + (uint32_t)i) * 4u];
+#elif defined(VGA128) || defined(MCGA)
         uint8_t byte = gfx_buffer[offset + (uint32_t)i];
 #else
         uint8_t byte = gfx_buffer[(offset + (uint32_t)i) * 4u];
@@ -927,18 +926,18 @@ static void __not_in_flash_func(render_line)(uint32_t line, uint32_t *output_buf
         } else if (gfx_submode == 8) {
             // VGA/MCGA mode 11h: 640x480x2
             render_gfx_line_mono640(line, output_buffer);
-#if !defined(EGA128) && !defined(MCGA)
+#if defined(VIDEO_RUNTIME) || (!defined(EGA128) && !defined(MCGA))
         } else if (gfx_submode == 5) {
             // VGA 256-color planar (Mode X)
             render_gfx_line_vga_planar256(line, output_buffer);
 #endif
-#if !defined(EGA128) && !defined(VGA128) && !defined(MCGA)
+#if defined(VIDEO_RUNTIME) || (!defined(EGA128) && !defined(VGA128) && !defined(MCGA))
         } else if (gfx_submode == 7) {
             // VBE 100h: 640x400x256 packed pixels
             render_gfx_line_vbe8(line, output_buffer);
 #endif
-#ifndef EGA128
-        } else {
+#if defined(VIDEO_RUNTIME) || !defined(EGA128)
+        } else if (!video_profile_is_ega()) {
             // VGA/MCGA 256-color mode 13h
             render_gfx_line_from_sram(line, output_buffer);
 #else

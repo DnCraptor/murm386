@@ -65,6 +65,7 @@ bool ega128_paging_flush(void);
 #include "debug.h"
 #include "diskui.h"
 #include "settingsui.h"
+#include "video_profile.h"
 #include "config_save.h"
 #include "vga_osd.h"
 #include "profile_subsys.h"
@@ -837,7 +838,7 @@ static void load_default_config(void) {
     size_t detected_psram = psram_detected_size();
 #if !defined(NO_PAGING)
     if (guest_ram_base == ram_pages)
-        detected_psram = ega128_paging_active() ? EGA128_VIRTUAL_RAM_SIZE : RAM_PAGES_SIZE;
+        detected_psram = ega128_paging_active() ? EGA128_VIRTUAL_RAM_SIZE : ram_pages_size;
 #endif
 #if EMULATE_LTEMS
     if (detected_psram >= (4u << 20)) {
@@ -1114,7 +1115,7 @@ static bool init_hardware(void) {
 #if !defined(NO_PAGING)
     if (psram_missing) {
         guest_ram_base = ram_pages;
-        printf("PSRAM not detected; using %u KiB SRAM guest-RAM fallback\n", (unsigned)(RAM_PAGES_SIZE >> 10));
+        printf("PSRAM not detected; using %u KiB SRAM guest-RAM fallback\n", (unsigned)(ram_pages_size >> 10));
     } else {
         guest_ram_base = (uint8_t *)PSRAM_BASE_ADDR;
         ega128_select_direct_backend();
@@ -1224,6 +1225,10 @@ static bool init_hardware(void) {
         }
 #endif
     }
+
+    /* video= has now been parsed. Derive the selected VRAM/page-cache
+     * partition before any guest paging backend is initialized. */
+    video_profile_configure_memory();
 
     /* A real power-on follows the same reset-cause test as the welcome screen:
      * always redetect and fully POST-test PSRAM.  Warm/watchdog reboots may
@@ -1352,7 +1357,7 @@ static bool init_emulator(void) {
      * boundary and the fixed native-stack arena; XMS/native owners will raise
      * the reclaim floor dynamically as they consume PSRAM.
      */
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(VIDEO_RUNTIME) || defined(EGA128) || defined(VGA128) || defined(MCGA)
     const bool direct_qspi_guest = !ega128_paging_active();
 #else
     const bool direct_qspi_guest = true;
@@ -1677,7 +1682,7 @@ bool core0_stack_uses_gfx_buffer;
 
 static void __attribute__((noinline, noreturn)) main_after_hardware(void);
 
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(VIDEO_RUNTIME) || defined(EGA128) || defined(VGA128) || defined(MCGA)
 static void __attribute__((noinline, used)) core0_enable_relocated_stack_services(void)
 {
     extern uint8_t __Core0StackRegionStart;
@@ -1786,10 +1791,14 @@ int main(void) {
         }
     }
 
-#if !defined(VGA256) || defined(NO_PAGING)
-    /* RAM_4_EXT is free in every non-VGA256 build and also in VGA256 when
-       paging is compiled out. Make it arena 0 of the FatFs read cache before
-       any optional old-stack arena is published. */
+    /* 256 KiB video profiles use RAM_4_EXT for their 40 KiB guest page cache.
+       Smaller runtime adapters leave it free for the FatFs cache.
+       NO_PAGING never uses a guest page cache, so RAM_4_EXT is free too. */
+#if defined(NO_PAGING)
+    if (true)
+#else
+    if (!video_profile_has_256k_vram() && !ega128_paging_active())
+#endif
     {
         extern uint8_t __ram_4_ext_region_start__;
         extern uint8_t __ram_4_ext_region_end__;
@@ -1797,18 +1806,18 @@ int main(void) {
         uintptr_t top = (uintptr_t)&__ram_4_ext_region_end__;
         sdcard_enable_ff_cache_arena(0u, (void *)bottom, (size_t)(top - bottom));
     }
-#endif
 
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(VIDEO_RUNTIME) || defined(EGA128) || defined(VGA128) || defined(MCGA)
     /* With direct QSPI guest RAM the ram_pages tail of GFX_BUFFER is unused.
        Reuse that SRAM as a large core0 stack without adding checks to the
        guest-memory hot paths. Once SP has moved, the old CORE0_STACK becomes
        FatFs cache arena 1. Paging/fallback builds keep the original stack;
        arena 0 in RAM_4_EXT remains active whenever paging does not reserve it. */
-    if (guest_ram_base == (uint8_t *)PSRAM_BASE_ADDR && !ega128_paging_active()) {
-        extern uint8_t __gfx_video_end__;
+    if (!video_profile_has_256k_vram() &&
+        guest_ram_base == (uint8_t *)PSRAM_BASE_ADDR && !ega128_paging_active()) {
+        extern uint8_t gfx_buffer[];
         extern uint8_t __gfx_buffer_end__;
-        core0_stack_floor_runtime = (uintptr_t)&__gfx_video_end__;
+        core0_stack_floor_runtime = (uintptr_t)gfx_buffer + video_profile_vram_size();
         core0_stack_top_runtime = (uintptr_t)&__gfx_buffer_end__;
         core0_stack_uses_gfx_buffer = true;
         core0_stack_switch_and_continue(core0_stack_top_runtime);
@@ -1820,7 +1829,7 @@ int main(void) {
 
 void core0_expand_relocated_stack_services(void)
 {
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(VIDEO_RUNTIME) || defined(EGA128) || defined(VGA128) || defined(MCGA)
     if (core0_stack_uses_gfx_buffer) {
         extern uint8_t __Core0StackExtRegionStart;
         extern uint8_t __Core0StackRegionEnd;

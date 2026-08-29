@@ -15,6 +15,7 @@
 #include <string.h>
 #include <stdio.h>
 #include "audio.h"
+#include "video_profile.h"
 
 extern bool SELECT_VGA;
 
@@ -29,6 +30,7 @@ typedef enum {
 // Setting items
 typedef enum {
     SETTING_VOL= 0,
+    SETTING_VIDEO,
     SETTING_CPU,
     SETTING_FPU,
     SETTING_REDIRECTOR,
@@ -94,7 +96,7 @@ static bool restart_requested = false;
 static int plasma_frame = 0;  // Animation frame counter
 
 // Original values (to detect changes)
-static int orig_cpu, orig_fpu, orig_redirector;
+static int orig_cpu, orig_fpu, orig_redirector, orig_video_adapter;
 static int orig_pcspeaker, orig_adlib, orig_soundblaster, orig_tandy, orig_covox, orig_dss, orig_mouse, orig_nes_mouse, orig_nes_joystick, orig_mpu401;
 static int orig_cpu_freq, orig_psram_freq, orig_flash_freq, orig_volume, orig_voltage, orig_mouse_invert_y;
 
@@ -122,6 +124,7 @@ void settingsui_open(void) {
 
     // Store original values
     orig_cpu = config_get_cpu_gen();
+    orig_video_adapter = config_get_video_adapter();
     orig_fpu = config_get_fpu();
     orig_redirector = config_get_redirector();
     orig_pcspeaker = config_get_pcspeaker();
@@ -153,6 +156,7 @@ void settingsui_close(void) {
     // Restore original values if not confirmed
     if (settings_state == SETTINGS_MAIN && config_has_changes()) {
         config_set_cpu_gen(orig_cpu);
+        config_set_video_adapter(orig_video_adapter);
         config_set_fpu(orig_fpu);
         config_set_redirector(orig_redirector);
         config_set_cpu_freq(orig_cpu_freq);
@@ -191,6 +195,17 @@ static void cycle_option(int direction) {
     const int *options;
 
     switch (selected_item) {
+        case SETTING_VIDEO: {
+#if defined(NO_PAGING)
+            config_set_video_adapter(VIDEO_ADAPTER_VGA256);
+#else
+            int v = config_get_video_adapter();
+            v = (v + direction + 5) % 5;
+            config_set_video_adapter(v);
+#endif
+            break;
+        }
+
         case SETTING_VOL:
             options = vol_options;
             count = vol_option_count;
@@ -322,6 +337,7 @@ static void draw_settings_menu(void) {
     // Settings items
     const char *labels[] = {
         "Volume:",
+        "Video adapter:",
         "CPU Type:",
         "FPU (387):",
         "SD cart as H drive:",
@@ -356,6 +372,13 @@ static void draw_settings_menu(void) {
 
         // Format value
         switch (setting_idx) {
+            case SETTING_VIDEO: {
+                static const char *names[] = { "MCGA 64K", "EGA 128K", "EGA 256K", "VGA 128K", "VGA 256K" };
+                int v = config_get_video_adapter();
+                if (v < VIDEO_ADAPTER_MCGA || v > VIDEO_ADAPTER_VGA256) v = VIDEO_ADAPTER_VGA256;
+                snprintf(value, sizeof(value), "< %s >", names[v]);
+                break;
+            }
             case SETTING_VOL:
                 snprintf(value, sizeof(value), "< %d >", audio_get_volume());
                 break;

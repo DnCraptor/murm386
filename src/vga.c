@@ -33,6 +33,7 @@
 #include <assert.h>
 
 #include "vga.h"
+#include "video_profile.h"
 #include "codeprofile.h"
 #include "pci.h"
 
@@ -432,29 +433,35 @@ static int update_palette16(VGAState *s, uint32_t *palette)
 
 /* Physical VRAM size is a build-time property. Mask only after the VGA
  * address translation has produced an offset into the backing array. */
-#if defined(MCGA)
-#define VGA_PHYS_ADDR_MASK 0x0ffffu
+static inline uint32_t __attribute__((always_inline)) vga_phys_addr_mask(void)
+{
+#if defined(VIDEO_RUNTIME)
+    return video_vram_mask;
+#elif defined(MCGA)
+    return 0x0ffffu;
 #elif defined(EGA128) || defined(VGA128)
-#define VGA_PHYS_ADDR_MASK 0x1ffffu
+    return 0x1ffffu;
 #else
-#define VGA_PHYS_ADDR_MASK 0x3ffffu
+    return 0x3ffffu;
 #endif
+}
 
 static inline uint32_t __attribute__((always_inline)) vga_phys_offset(uint32_t addr)
 {
-    return addr & VGA_PHYS_ADDR_MASK;
+    return addr & vga_phys_addr_mask();
 }
 
 static inline uint32_t __attribute__((always_inline)) vga_plane_word_offset(uint32_t addr)
 {
-    return addr & (VGA_PHYS_ADDR_MASK >> 2);
+    return addr & (vga_phys_addr_mask() >> 2);
 }
 
 static inline void __attribute__((always_inline))
 vga_phys_write16(uint8_t *vram, uint32_t addr, uint16_t val)
 {
     addr = vga_phys_offset(addr);
-    if (addr != VGA_PHYS_ADDR_MASK) {
+    uint32_t phys_mask = vga_phys_addr_mask();
+    if (addr != phys_mask) {
         *(uint16_t *)(vram + addr) = val;
     } else {
         vram[addr] = (uint8_t)val;
@@ -466,7 +473,8 @@ static inline void __attribute__((always_inline))
 vga_phys_write32(uint8_t *vram, uint32_t addr, uint32_t val)
 {
     addr = vga_phys_offset(addr);
-    if (addr <= VGA_PHYS_ADDR_MASK - 3u) {
+    uint32_t phys_mask = vga_phys_addr_mask();
+    if (addr <= phys_mask - 3u) {
         *(uint32_t *)(vram + addr) = val;
     } else {
         vram[addr] = (uint8_t)val;
@@ -485,7 +493,7 @@ static inline void vga_phys_memcpy(uint8_t *vram, uint32_t addr,
 {
     while (len) {
         addr = vga_phys_offset(addr);
-        size_t chunk = (size_t)VGA_PHYS_ADDR_MASK + 1u - addr;
+        size_t chunk = (size_t)vga_phys_addr_mask() + 1u - addr;
         if (chunk > len)
             chunk = len;
         dos_api_memcpy(vram + addr, src, chunk);
@@ -497,12 +505,13 @@ static inline void vga_phys_memcpy(uint8_t *vram, uint32_t addr,
 
 static bool vbe_enabled(VGAState *s)
 {
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+#if defined(VIDEO_RUNTIME)
+    if (!video_profile_is_vga256()) return false;
+#elif defined(EGA128) || defined(VGA128) || defined(MCGA)
     (void)s;
     return false;
-#else
-    return s->vbe_regs[VBE_DISPI_INDEX_ENABLE] & VBE_DISPI_ENABLED;
 #endif
+    return s->vbe_regs[VBE_DISPI_INDEX_ENABLE] & VBE_DISPI_ENABLED;
 }
 
 /*
@@ -1298,9 +1307,11 @@ uint32_t __not_in_flash_func(vga_ioport_read)(VGAState *s, uint32_t addr)
      * Some games (like Goblins) poll 0x3BA for vertical retrace even in color mode.
      * Update retrace status on each read so tight polling loops see changes. */
     if (addr == 0x3ba || addr == 0x3da) {
-#ifdef MCGA
+#if defined(VIDEO_RUNTIME) || defined(MCGA)
+        if (video_profile_is_mcga()) {
         // W/A for [M]CGA "snow suppress" way (TODO: may be required to make it smarter)
         s->st01 ^= ST01_DISP_ENABLE;
+        }
 #endif
         /* st01 is updated by the VGA ISR on every scanline — just return it.
          * Wolf3D polling this port sees exact hardware vblank timing. */
@@ -1536,8 +1547,8 @@ static void vga_write_ ## base(void *opaque, uint32_t addr, uint32_t val, int si
 
 void vbe_write(VGAState *s, uint32_t offset, uint32_t val)
 {
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
-    if (offset != 0)
+#if defined(VIDEO_RUNTIME) || defined(EGA128) || defined(VGA128) || defined(MCGA)
+    if (!video_profile_is_vga256() && offset != 0)
         return;
 #endif
     if (offset == 0) {
@@ -1839,7 +1850,7 @@ bool IRAM_ATTR vga_mem_write_string(VGAState *s, uint32_t addr, uint8_t *buf, in
     return false;
 }
 
-#if defined(VGA128) || defined(MCGA)
+#if defined(VIDEO_RUNTIME) || defined(VGA128) || defined(MCGA)
 static inline bool reduced_linear_mono_access(const VGAState *s)
 {
     int w = (s->cr[0x01] + 1) * 8;
@@ -1891,8 +1902,8 @@ void __not_in_flash("vga_mem_write") vga_mem_write(VGAState *s, uint32_t addr, u
         break;
     }
 
-#if defined(VGA128) || defined(MCGA)
-    if (reduced_linear_mono_access(s)) {
+#if defined(VIDEO_RUNTIME) || defined(VGA128) || defined(MCGA)
+    if ((video_profile_is_vga128() || video_profile_is_mcga()) && reduced_linear_mono_access(s)) {
         s->vga_ram[vga_phys_offset(addr)] = (uint8_t)val;
         return;
     }
@@ -2032,8 +2043,8 @@ uint8_t __not_in_flash_func(vga_mem_read)(VGAState *s, uint32_t addr)
         break;
     }
 
-#if defined(VGA128) || defined(MCGA)
-    if (reduced_linear_mono_access(s)) {
+#if defined(VIDEO_RUNTIME) || defined(VGA128) || defined(MCGA)
+    if ((video_profile_is_vga128() || video_profile_is_mcga()) && reduced_linear_mono_access(s)) {
         return s->vga_ram[vga_phys_offset(addr)];
     }
 #endif
@@ -2583,9 +2594,9 @@ int __time_critical_func(vga_get_graphics_mode)(VGAState *s, int *width, int *he
         return 0;  // text mode
     }
 
-#if !defined(EGA128) && !defined(VGA128) && !defined(MCGA)
+#if defined(VIDEO_RUNTIME) || (!defined(EGA128) && !defined(VGA128) && !defined(MCGA))
     // Minimal hardware-renderer fast path for banked VBE packed 8bpp.
-    if (vbe_enabled(s) && s->vbe_regs[VBE_DISPI_INDEX_BPP] == 8) {
+    if (video_profile_is_vga256() && vbe_enabled(s) && s->vbe_regs[VBE_DISPI_INDEX_BPP] == 8) {
         if (width)  *width  = s->vbe_regs[VBE_DISPI_INDEX_XRES];
         if (height) *height = s->vbe_regs[VBE_DISPI_INDEX_YRES];
         return 7;
@@ -2628,8 +2639,9 @@ int __time_critical_func(vga_get_graphics_mode)(VGAState *s, int *width, int *he
     //   VL_DePlaneVGA: SR[4] = (old & ~8) | 4  →  chain4=0 (bit3), seq=1 (bit2)
     // -----------------------------------------------------------------------
     int rv;
-#if !defined(EGA128) && !defined(MCGA)
-    if (!(s->sr[VGA_SEQ_MEMORY_MODE] & VGA_SR04_CHN_4M) &&   /* chain4 OFF */
+#if defined(VIDEO_RUNTIME) || (!defined(EGA128) && !defined(MCGA))
+    if (!video_profile_is_ega() && !video_profile_is_mcga() &&
+        !(s->sr[VGA_SEQ_MEMORY_MODE] & VGA_SR04_CHN_4M) &&   /* chain4 OFF */
          (s->sr[VGA_SEQ_MEMORY_MODE] & VGA_SR04_SEQ_MODE) &&  /* sequential ON */
          (s->ar[0x10] & 0x40) &&                               /* 8-bit DAC color */
          w == 320) {

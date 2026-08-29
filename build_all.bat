@@ -25,56 +25,53 @@ shift
 goto collect_args
 :args_done
 set /a COUNT=0
-set "TOTAL=80"
+set "TOTAL=32"
 
 for %%B in (M1 M2 PC Z2 C2) do (
-    for %%V in (MCGA EGA128 VGA128 VGA256) do (
-        if "%%B"=="PC" (
-            call :build_one %%B %%V PWM OFF
-            if errorlevel 1 exit /b !errorlevel!
-            call :build_one %%B %%V PWM ON
-            if errorlevel 1 exit /b !errorlevel!
-        ) else if "%%B"=="C2" (
-            call :build_one %%B %%V I2S OFF
-            if errorlevel 1 exit /b !errorlevel!
-            call :build_one %%B %%V I2S ON
-            if errorlevel 1 exit /b !errorlevel!
-        ) else (
-            call :build_one %%B %%V I2S OFF
-            if errorlevel 1 exit /b !errorlevel!
-            call :build_one %%B %%V I2S ON
-            if errorlevel 1 exit /b !errorlevel!
-            call :build_one %%B %%V PWM OFF
-            if errorlevel 1 exit /b !errorlevel!
-            call :build_one %%B %%V PWM ON
-            if errorlevel 1 exit /b !errorlevel!
-        )
+    rem One paging firmware: MCGA/EGA128/VGA128/VGA256 selected at runtime.
+    if "%%B"=="PC" (
+        call :build_one %%B RUNTIME PWM OFF
+        if errorlevel 1 exit /b !errorlevel!
+        call :build_one %%B RUNTIME PWM ON
+        if errorlevel 1 exit /b !errorlevel!
+    ) else if "%%B"=="C2" (
+        call :build_one %%B RUNTIME I2S OFF
+        if errorlevel 1 exit /b !errorlevel!
+        call :build_one %%B RUNTIME I2S ON
+        if errorlevel 1 exit /b !errorlevel!
+    ) else (
+        call :build_one %%B RUNTIME I2S OFF
+        if errorlevel 1 exit /b !errorlevel!
+        call :build_one %%B RUNTIME I2S ON
+        if errorlevel 1 exit /b !errorlevel!
+        call :build_one %%B RUNTIME PWM OFF
+        if errorlevel 1 exit /b !errorlevel!
+        call :build_one %%B RUNTIME PWM ON
+        if errorlevel 1 exit /b !errorlevel!
+    )
 
-        if "%%V"=="VGA256" (
-            if "%%B"=="PC" (
-                call :build_one %%B %%V PWM OFF NP
-                if errorlevel 1 exit /b !errorlevel!
-                call :build_one %%B %%V PWM ON NP
-                if errorlevel 1 exit /b !errorlevel!
-            ) else if "%%B"=="C2" (
-                call :build_one %%B %%V I2S OFF NP
-                if errorlevel 1 exit /b !errorlevel!
-                call :build_one %%B %%V I2S ON NP
-                if errorlevel 1 exit /b !errorlevel!
-            ) else (
-                call :build_one %%B %%V I2S OFF NP
-                if errorlevel 1 exit /b !errorlevel!
-                call :build_one %%B %%V I2S ON NP
-                if errorlevel 1 exit /b !errorlevel!
-                call :build_one %%B %%V PWM OFF NP
-                if errorlevel 1 exit /b !errorlevel!
-                call :build_one %%B %%V PWM ON NP
-                if errorlevel 1 exit /b !errorlevel!
-            )
-        )
+    rem The only separate memory model: VGA256 with direct QSPI guest RAM.
+    if "%%B"=="PC" (
+        call :build_one %%B VGA256 PWM OFF NP
+        if errorlevel 1 exit /b !errorlevel!
+        call :build_one %%B VGA256 PWM ON NP
+        if errorlevel 1 exit /b !errorlevel!
+    ) else if "%%B"=="C2" (
+        call :build_one %%B VGA256 I2S OFF NP
+        if errorlevel 1 exit /b !errorlevel!
+        call :build_one %%B VGA256 I2S ON NP
+        if errorlevel 1 exit /b !errorlevel!
+    ) else (
+        call :build_one %%B VGA256 I2S OFF NP
+        if errorlevel 1 exit /b !errorlevel!
+        call :build_one %%B VGA256 I2S ON NP
+        if errorlevel 1 exit /b !errorlevel!
+        call :build_one %%B VGA256 PWM OFF NP
+        if errorlevel 1 exit /b !errorlevel!
+        call :build_one %%B VGA256 PWM ON NP
+        if errorlevel 1 exit /b !errorlevel!
     )
 )
-
 echo.
 echo All %TOTAL% supported 286 variants ^(with and without EMM^) built. UF2 files are under bin/^<build-type^>/.
 exit /b 0

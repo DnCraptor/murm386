@@ -26,29 +26,28 @@ The authoritative GPIO map is `src/board_config.h`. Board-specific Pico SDK head
 
 ## Video profiles
 
-Exactly one video/VRAM profile is selected at build time:
+The normal firmware is built as `VIDEO_MODE=RUNTIME`. Win+F11 selects the guest-visible adapter profile and stores it in `286/config.ini`; the change takes effect after restart.
 
-| `VIDEO_MODE` | Guest video RAM | Notes |
+| Runtime profile | Guest video RAM | Notes |
 |---|---:|---|
-| `MCGA` | 64 KiB | Reduced-VRAM build |
-| `EGA128` | 128 KiB | Reduced-VRAM build |
-| `VGA128` | 128 KiB | Reduced-VRAM build |
-| `VGA256` | 256 KiB | Full 256 KiB VGA RAM |
+| `MCGA` | 64 KiB | MCGA capabilities |
+| `EGA128` | 128 KiB | EGA, 128 KiB |
+| `EGA256` | 256 KiB | EGA capabilities with the 256 KiB physical layout |
+| `VGA128` | 128 KiB | VGA, 128 KiB |
+| `VGA256` | 256 KiB | VGA/VBE 1.2, 256 KiB |
 
 Physical output is VGA or HDMI depending on the board and runtime/forced output selection. `--vga` and `--hdmi` in the build scripts force one path where the board supports it.
 
 ### Guest RAM backends
 
-Guest RAM can be built in two modes:
+The production build has two memory-model classes:
 
-- `NO_PAGING=ON` — paging is disabled and guest RAM uses direct QSPI PSRAM access;
-- `NO_PAGING=OFF` — the paging backend is enabled.
+- `RUNTIME`, `NO_PAGING=OFF` — normal paging firmware containing all five runtime video profiles;
+- `VGA256`, `NO_PAGING=ON` — separate direct-QSPI guest-RAM firmware, named with the `-np` suffix.
 
-`NO_PAGING` currently defaults to `ON` in CMake. When it is enabled, CMake appends `-np` to the firmware name.
+For runtime profiles with 64/128 KiB VRAM, the unused tail of the 256 KiB `gfx_buffer` is used as the guest paging cache: MCGA gets 192 KiB / 96 pages, while EGA128 and VGA128 get 128 KiB / 64 pages. EGA256 and VGA256 use the dedicated 40 KiB `RAM_4_EXT` cache (20 pages). The selected `video=` profile is loaded before this memory layout is configured.
 
-The paging implementation lives in `src/ega128_paging.c`. The linker reserves the 40 KiB `RAM_4_EXT` region as the primary swap/cache area for `VGA256`; reduced-VRAM modes also use SRAM-backed paging structures. On M1 the paging implementation can use the external SPI PSRAM backend; SD-backed paging uses `286/pagefile.sys`.
-
-When a build uses direct QSPI PSRAM, core0 can reclaim SRAM that would otherwise be needed by the paging path; parts of the released SRAM are also reused by runtime caches.
+The paging implementation lives in `src/ega128_paging.c`. SD-backed paging uses `286/pagefile.sys`; supported hardware can use its PSRAM paging backend when available.
 
 ## EMM (for -emm.uf2 only)
 
@@ -103,19 +102,20 @@ The recommended entry points are:
 
 - Linux/macOS/WSL: `./build.sh`
 - Windows: `build.bat`
-- all supported 286 board/video/audio combinations, both with and without EMM: `build_all.sh` / `build_all.bat`
+- the complete supported 286 production matrix: `build_all.sh` / `build_all.bat`
 
 Examples:
 
 ```sh
-./build.sh -M1 -VGA256 -i2s -504 -p 66 --clean
-./build.sh -M2 -VGA128 -pwm --hdmi
+./build.sh -M1 -RUNTIME -i2s -504 -p 66 --clean
+./build.sh -M2 -RUNTIME -pwm --hdmi
+./build.sh -M2 -VGA256 -i2s --no-paging
 ./build_all.sh 286
 ```
 
-The single-build scripts always pass `CPU_TARGET=286` intentionally. The all-build scripts accept `286` as an explicit CPU-target argument for forward compatibility, but currently reject `386` because that branch is not considered tested. `build_all` builds both `EMM=OFF` and `EMM=ON` variants.
+The single-build scripts always pass `CPU_TARGET=286` intentionally. The all-build scripts accept `286` as an explicit CPU-target argument for forward compatibility, but currently reject `386` because that branch is not considered tested. `build_all` builds both `EMM=OFF` and `EMM=ON` variants. For each valid board/audio/EMM combination it builds one `RUNTIME` paging firmware and one `VGA256 --no-paging` firmware: **32 builds** total.
 
-`NO_PAGING` is currently a CMake option rather than a documented common wrapper-script switch. Its CMake default is `ON`, so a clean configure that does not explicitly pass `-DNO_PAGING=OFF` produces a direct-QSPI (`-np`) firmware.
+The single-build wrappers default to `RUNTIME` with paging enabled. `--no-paging` is reserved for the separate `VGA256` direct-QSPI memory model.
 
 See [README-host-build.md](README-host-build.md) for toolchain setup, script options, build matrix and output locations.
 
@@ -124,7 +124,7 @@ See [README-host-build.md](README-host-build.md) for toolchain setup, script opt
 CMake encodes the important build parameters in the firmware name. Typical output looks like:
 
 ```text
-m1p2-286-VGA128-504MHz-1.6V-P66-I2S-v1.14-np.uf2
+m1p2-286-RUNTIME-504MHz-1.6V-P66-I2S-v1.16.uf2
 ```
 
 Outputs are written under:

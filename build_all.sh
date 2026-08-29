@@ -16,7 +16,6 @@ if [[ "$CPU_TARGET" != "286" ]]; then
 fi
 
 BOARDS=(M1 M2 PC Z2 C2)
-VIDEOS=(MCGA EGA128 VGA128 VGA256)
 EXTRA_ARGS=("$@")
 for arg in "${EXTRA_ARGS[@]}"; do
     if [[ "$arg" == "--emm" ]]; then
@@ -25,42 +24,41 @@ for arg in "${EXTRA_ARGS[@]}"; do
     fi
 done
 COUNT=0
-TOTAL=64
+TOTAL=32
 
 build_one() {
-    local board="$1" video="$2" audio="$3" emm="$4"
+    local board="$1" video="$2" audio="$3" emm="$4" paging="${5:-PAGING}"
     local tag="${board}-${CPU_TARGET}-${video}-${audio}"
-    local emm_args=()
+    local emm_args=() paging_args=()
     if [[ "$emm" == "ON" ]]; then
         tag+="-emm"
         emm_args+=(--emm)
+    fi
+    if [[ "$paging" == "NP" ]]; then
+        tag+="-np"
+        paging_args+=(--no-paging)
     fi
     COUNT=$((COUNT + 1))
     printf '\n[%d/%d] %s\n' "$COUNT" "$TOTAL" "$tag"
     "$SCRIPT_DIR/build.sh" \
         --board "$board" --video "$video" --audio "$audio" \
         --build-dir "$SCRIPT_DIR/build/all/$tag" \
-        "${emm_args[@]}" "${EXTRA_ARGS[@]}"
+        "${emm_args[@]}" "${paging_args[@]}" "${EXTRA_ARGS[@]}"
 }
 
 for board in "${BOARDS[@]}"; do
-    for video in "${VIDEOS[@]}"; do
-        case "$board" in
-            PC)
-                build_one "$board" "$video" PWM OFF
-                build_one "$board" "$video" PWM ON
-                ;;
-            C2)
-                build_one "$board" "$video" I2S OFF
-                build_one "$board" "$video" I2S ON
-                ;;
-            *)
-                build_one "$board" "$video" I2S OFF
-                build_one "$board" "$video" I2S ON
-                build_one "$board" "$video" PWM OFF
-                build_one "$board" "$video" PWM ON
-                ;;
-        esac
+    case "$board" in
+        PC) audios=(PWM) ;;
+        C2) audios=(I2S) ;;
+        *) audios=(I2S PWM) ;;
+    esac
+    for audio in "${audios[@]}"; do
+        for emm in OFF ON; do
+            # Common paging firmware: MCGA/EGA128/EGA256/VGA128/VGA256 selected at runtime.
+            build_one "$board" RUNTIME "$audio" "$emm"
+            # The only separate memory model: VGA256 with direct QSPI guest RAM.
+            build_one "$board" VGA256 "$audio" "$emm" NP
+        done
     done
 done
 

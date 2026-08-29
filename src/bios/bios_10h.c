@@ -1,3 +1,4 @@
+#include "video_profile.h"
 #include <stdio.h>
 #include "286/cpu.h"
 #include "bios.h"
@@ -55,15 +56,26 @@
  * Bits set here match vga_modes[]:
  *   00h..07h, 0Dh..13h
  */
-#if defined(EGA128)
-#define BIOS10_FUNC_MODES_BITMAP      0x0001E0FFu /* 00h..07h, 0Dh..10h */
+static uint32_t bios10_func_modes_bitmap(void)
+{
+#if defined(VIDEO_RUNTIME)
+    switch (video_profile_get()) {
+    case VIDEO_ADAPTER_EGA128:
+    case VIDEO_ADAPTER_EGA256: return 0x0001E0FFu;
+    case VIDEO_ADAPTER_VGA128: return 0x000BE0FFu;
+    case VIDEO_ADAPTER_MCGA:   return 0x000A00FFu;
+    default:                   return 0x000FE0FFu;
+    }
+#elif defined(EGA128)
+    return 0x0001E0FFu;
 #elif defined(VGA128)
-#define BIOS10_FUNC_MODES_BITMAP      0x000BE0FFu /* 00h..11h, 13h; no 12h */
+    return 0x000BE0FFu;
 #elif defined(MCGA)
-#define BIOS10_FUNC_MODES_BITMAP      0x000A00FFu /* 00h..07h, 11h, 13h */
+    return 0x000A00FFu;
 #else
-#define BIOS10_FUNC_MODES_BITMAP      0x000FE0FFu
+    return 0x000FE0FFu;
 #endif
+}
 
 /*
  * INT 10h/AH=12h/BL=10h GET EGA/VGA INFORMATION constants.
@@ -581,6 +593,10 @@ static const VgaMode vga_modes[] = {
 
 static const VgaMode *vga_find_mode(uint8_t mode)
 {
+#if defined(VIDEO_RUNTIME)
+    if (!video_profile_supports_mode(mode))
+        return NULL;
+#endif
     for (uint8_t i = 0; i < sizeof(vga_modes) / sizeof(vga_modes[0]); i++) {
         if (vga_modes[i].mode == mode)
             return &vga_modes[i];
@@ -790,10 +806,16 @@ static bool bios_10h_00h(CPU* cpu)
         return true;
     }
 
-#if !defined(EGA128) && !defined(VGA128) && !defined(MCGA)
+#if defined(VIDEO_RUNTIME) || (!defined(EGA128) && !defined(VGA128) && !defined(MCGA))
     /* Legacy VGA mode set must leave DISPI/VBE mode first. */
+#if defined(VIDEO_RUNTIME)
+    if (video_profile_is_vga256()) {
+#endif
     cpu_portout16(0x1CE, VBE_DISPI_INDEX_ENABLE);
     cpu_portout16(0x1CF, VBE_DISPI_DISABLED);
+#if defined(VIDEO_RUNTIME)
+    }
+#endif
 #endif
 
     vga_program_regs(cpu, m->regs, m->crtc_base);
@@ -818,7 +840,12 @@ static bool bios_10h_00h(CPU* cpu)
        video_ctl - это BDA 0x487 (vgabios.c:303: 0x60 = 256K, адаптер
        активен; бит 7 = no_clear). Пишем канонические IBM-значения
        3x8 по номеру режима. */
-#ifdef MCGA
+#if defined(VIDEO_RUNTIME)
+    write86(BIOS10_BDA_VIDEO_CTL,
+            (video_profile_is_mcga() ? 0x00 :
+             (video_profile_has_256k_vram() ? 0x60 : 0x20)) |
+            (no_clear ? 0x80 : 0x00));
+#elif defined(MCGA)
     write86(BIOS10_BDA_VIDEO_CTL, no_clear ? 0x80 : 0x00);
 #elif defined(EGA128) || defined(VGA128)
     write86(BIOS10_BDA_VIDEO_CTL, no_clear ? 0xA0 : 0x20);
@@ -831,7 +858,10 @@ static bool bios_10h_00h(CPU* cpu)
         write86(BIOS10_BDA_VIDEO_MSR, (mode < 8) ? crt_msr[mode] : 0x29);
     }
     write86(0x488, 0xF9);                               /* video_switches */
-#ifdef MCGA
+#if defined(VIDEO_RUNTIME)
+    write86(0x48A, video_profile_is_mcga() ? BIOS10_DCC_MCGA_COLOR_ANALOG :
+                   (video_profile_is_ega() ? BIOS10_DCC_EGA_COLOR : BIOS10_DCC_VGA_COLOR_ANALOG));
+#elif defined(MCGA)
     write86(0x48A, BIOS10_DCC_MCGA_COLOR_ANALOG);
 #elif defined(EGA128)
     write86(0x48A, BIOS10_DCC_EGA_COLOR);
@@ -2515,7 +2545,9 @@ no second physical display.
 static bool bios_10h_1A00h(CPU* cpu)
 {
     CPU_AL = 0x1A;
-#ifdef MCGA
+#if defined(VIDEO_RUNTIME)
+    CPU_BL = video_profile_is_mcga() ? BIOS10_DCC_MCGA_COLOR_ANALOG : BIOS10_DCC_VGA_COLOR_ANALOG;
+#elif defined(MCGA)
     CPU_BL = BIOS10_DCC_MCGA_COLOR_ANALOG;
 #else
     CPU_BL = BIOS10_DCC_VGA_COLOR_ANALOG;
@@ -2552,7 +2584,7 @@ static bool bios_10h_1B00h(CPU* cpu)
      *   +0A misc flags
      *   +0E save/restore flags
      */
-    writedw86(stat + 0x00, BIOS10_FUNC_MODES_BITMAP);
+    writedw86(stat + 0x00, bios10_func_modes_bitmap());
     write86  (stat + 0x04, 0x00);
     write86  (stat + 0x05, 0x00);
     write86  (stat + 0x06, 0x00);
@@ -2573,7 +2605,10 @@ static bool bios_10h_1B00h(CPU* cpu)
         write86(info + 0x04 + i, read86(0x449 + i));
     for (uint8_t i = 0; i < 3; i++)
         write86(info + 0x22 + i, read86(0x484 + i));
-#ifdef MCGA
+#if defined(VIDEO_RUNTIME)
+    write86 (info + 0x25, video_profile_is_mcga() ? BIOS10_DCC_MCGA_COLOR_ANALOG :
+                            (video_profile_is_ega() ? BIOS10_DCC_EGA_COLOR : BIOS10_DCC_VGA_COLOR_ANALOG));
+#elif defined(MCGA)
     write86 (info + 0x25, BIOS10_DCC_MCGA_COLOR_ANALOG);
 #else
     write86 (info + 0x25, BIOS10_DCC_VGA_COLOR_ANALOG);
@@ -2586,7 +2621,10 @@ static bool bios_10h_1B00h(CPU* cpu)
     write86 (info + 0x2C, 0);
     write86 (info + 0x2D, 0);
     write86 (info + 0x2E, 0);
-#ifdef MCGA
+#if defined(VIDEO_RUNTIME)
+    write86 (info + 0x31, video_profile_is_mcga() ? BIOS10_EGA_INFO_MEM_64K :
+                            (video_profile_has_256k_vram() ? BIOS10_EGA_INFO_MEM_256K : BIOS10_EGA_INFO_MEM_128K));
+#elif defined(MCGA)
     write86 (info + 0x31, BIOS10_EGA_INFO_MEM_64K);
 #elif defined(EGA128) || defined(VGA128)
     write86 (info + 0x31, BIOS10_EGA_INFO_MEM_128K);
@@ -2818,7 +2856,10 @@ static bool bios_10h_1210h(CPU* cpu)
         BIOS10_EGA_INFO_MONO_IO :
         BIOS10_EGA_INFO_COLOR_IO;
 
-#ifdef MCGA
+#if defined(VIDEO_RUNTIME)
+    CPU_BL = video_profile_is_mcga() ? BIOS10_EGA_INFO_MEM_64K :
+             (video_profile_has_256k_vram() ? BIOS10_EGA_INFO_MEM_256K : BIOS10_EGA_INFO_MEM_128K);
+#elif defined(MCGA)
     CPU_BL = BIOS10_EGA_INFO_MEM_64K;
 #elif defined(EGA128) || defined(VGA128)
     CPU_BL = BIOS10_EGA_INFO_MEM_128K;
@@ -3751,27 +3792,27 @@ bool bios_10h(CPU* cpu) {
             case 9: bios_10h_1009h(cpu); // READ ALL PALETTE REGISTERS
                 break;
 #ifndef EGA128
-            case 0x10: bios_10h_1010h(cpu); // SET INDIVIDUAL DAC REGISTER
+            case 0x10: if (video_profile_is_ega()) goto err; bios_10h_1010h(cpu); // SET INDIVIDUAL DAC REGISTER
                 break;
-            case 0x12: bios_10h_1012h(cpu); // SET BLOCK OF DAC REGISTERS
-                break;
-#ifndef MCGA
-            case 0x13: bios_10h_1013h(cpu); // SELECT VIDEO DAC COLOR PAGE (VGA)
-                break;
-#endif
-            case 0x15: bios_10h_1015h(cpu); // READ INDIVIDUAL DAC REGISTER
-                break;
-            case 0x17: bios_10h_1017h(cpu); // READ BLOCK OF DAC REGISTERS
-                break;
-            case 0x18: bios_10h_1018h(cpu); // SET PEL MASK
-                break;
-            case 0x19: bios_10h_1019h(cpu); // READ PEL MASK
+            case 0x12: if (video_profile_is_ega()) goto err; bios_10h_1012h(cpu); // SET BLOCK OF DAC REGISTERS
                 break;
 #ifndef MCGA
-            case 0x1A: bios_10h_101Ah(cpu); // GET VIDEO DAC COLOR PAGE STATE (VGA)
+            case 0x13: if (video_profile_is_mcga() || video_profile_is_ega()) goto err; bios_10h_1013h(cpu); // SELECT VIDEO DAC COLOR PAGE (VGA)
                 break;
 #endif
-            case 0x1B: bios_10h_101Bh(cpu); // PERFORM GRAY-SCALE SUMMING
+            case 0x15: if (video_profile_is_ega()) goto err; bios_10h_1015h(cpu); // READ INDIVIDUAL DAC REGISTER
+                break;
+            case 0x17: if (video_profile_is_ega()) goto err; bios_10h_1017h(cpu); // READ BLOCK OF DAC REGISTERS
+                break;
+            case 0x18: if (video_profile_is_ega()) goto err; bios_10h_1018h(cpu); // SET PEL MASK
+                break;
+            case 0x19: if (video_profile_is_ega()) goto err; bios_10h_1019h(cpu); // READ PEL MASK
+                break;
+#ifndef MCGA
+            case 0x1A: if (video_profile_is_mcga() || video_profile_is_ega()) goto err; bios_10h_101Ah(cpu); // GET VIDEO DAC COLOR PAGE STATE (VGA)
+                break;
+#endif
+            case 0x1B: if (video_profile_is_ega()) goto err; bios_10h_101Bh(cpu); // PERFORM GRAY-SCALE SUMMING
                 break;
 #endif
             default:
@@ -3815,28 +3856,28 @@ bool bios_10h(CPU* cpu) {
         case 0x12:
             switch(CPU_BL) {
 #ifndef MCGA
-            case 0x10: bios_10h_1210h(cpu); // GET EGA/VGA INFORMATION
+            case 0x10: if (video_profile_is_mcga()) goto err; bios_10h_1210h(cpu); // GET EGA/VGA INFORMATION
                 break;
 #endif
             case 0x20: bios_10h_1220h(cpu); // ALTERNATE PRINT SCREEN
                 break;
 #ifndef EGA128
 #ifndef MCGA
-            case 0x30: bios_10h_1230h(cpu); // SELECT TEXT SCAN LINES
+            case 0x30: if (video_profile_is_mcga() || video_profile_is_ega()) goto err; bios_10h_1230h(cpu); // SELECT TEXT SCAN LINES
                 break;
 #endif
-            case 0x31: bios_10h_1231h(cpu); // DEFAULT PALETTE LOADING
+            case 0x31: if (video_profile_is_ega()) goto err; bios_10h_1231h(cpu); // DEFAULT PALETTE LOADING
                 break;
-            case 0x32: bios_10h_1232h(cpu); // VIDEO ADDRESSING
+            case 0x32: if (video_profile_is_ega()) goto err; bios_10h_1232h(cpu); // VIDEO ADDRESSING
                 break;
-            case 0x33: bios_10h_1233h(cpu); // GRAYSCALE SUMMING
+            case 0x33: if (video_profile_is_ega()) goto err; bios_10h_1233h(cpu); // GRAYSCALE SUMMING
                 break;
-            case 0x35: bios_10h_1235h(cpu); // DISPLAY SWITCH INTERFACE
+            case 0x35: if (video_profile_is_ega()) goto err; bios_10h_1235h(cpu); // DISPLAY SWITCH INTERFACE
                 break;
 #ifndef MCGA
-            case 0x34: bios_10h_1234h(cpu); // CURSOR EMULATION
+            case 0x34: if (video_profile_is_mcga() || video_profile_is_ega()) goto err; bios_10h_1234h(cpu); // CURSOR EMULATION
                 break;
-            case 0x36: bios_10h_1236h(cpu); // VIDEO REFRESH CONTROL
+            case 0x36: if (video_profile_is_mcga() || video_profile_is_ega()) goto err; bios_10h_1236h(cpu); // VIDEO REFRESH CONTROL
                 break;
 #endif
 #endif
@@ -3849,12 +3890,18 @@ bool bios_10h(CPU* cpu) {
             break;
 #ifndef EGA128
         case 0x1A:
+#if defined(VIDEO_RUNTIME)
+            if (video_profile_is_ega()) goto err;
+#endif
             if (CPU_AL == 0x00)
                 bios_10h_1A00h(cpu); // GET DISPLAY COMBINATION CODE
             else
                 goto err;
             break;
         case 0x1B:
+#if defined(VIDEO_RUNTIME)
+            if (video_profile_is_ega()) goto err;
+#endif
             if (CPU_AL == 0x00)
                 bios_10h_1B00h(cpu); // GET FUNCTIONALITY/STATE INFORMATION
             else
@@ -3862,12 +3909,18 @@ bool bios_10h(CPU* cpu) {
             break;
 #ifndef MCGA
         case 0x1C:
+#if defined(VIDEO_RUNTIME)
+            if (video_profile_is_mcga() || video_profile_is_ega()) goto err;
+#endif
             bios_10h_1Ch(cpu); // SAVE/RESTORE VIDEO STATE
             break;
 #endif
 #endif
 #if !defined(EGA128) && !defined(VGA128) && !defined(MCGA)
         case 0x4F:
+#if defined(VIDEO_RUNTIME)
+            if (!video_profile_is_vga256()) goto err;
+#endif
             if (!bios_10h_4Fh(cpu))
                 goto err;
             break;
@@ -3904,7 +3957,10 @@ void bios_10h_install_rom_fonts(CPU* cpu) // calling from load_bios_and_reset
        базовые опции 0x51, dcc_index - VGA color 0x08. Читаются
        библиотеками определения адаптера напрямую из BDA. */
     write86(BIOS10_BDA_MODESET_CTL, 0x51);
-#ifdef EGA128
+#if defined(VIDEO_RUNTIME)
+    write86(0x48A, video_profile_is_ega() ? BIOS10_DCC_EGA_COLOR :
+                   (video_profile_is_mcga() ? BIOS10_DCC_MCGA_COLOR_ANALOG : BIOS10_DCC_VGA_COLOR_ANALOG));
+#elif defined(EGA128)
     write86(0x48A, BIOS10_DCC_EGA_COLOR);
 #elif defined(MCGA)
     write86(0x48A, BIOS10_DCC_MCGA_COLOR_ANALOG);

@@ -1,3 +1,4 @@
+#include "../../src/video_profile.h"
 #include <stdio.h>
 #include <string.h>
 #include <malloc.h>
@@ -35,13 +36,7 @@ extern uint32_t palette_a[256];
 #define SCREEN_WIDTH (320)
 #define SCREEN_HEIGHT (240)
 
-#ifdef MCGA
-#define GFX_BUFFER_SIZE (64u * 1024u)
-#elif defined(EGA128) || defined(VGA128)
-#define GFX_BUFFER_SIZE (128u * 1024u)
-#else
 #define GFX_BUFFER_SIZE (256u * 1024u)
-#endif
 extern uint8_t gfx_buffer[GFX_BUFFER_SIZE];
 extern uint8_t text_buffer_sram[80 * 25 * 2];
 extern int text_cols;
@@ -522,7 +517,11 @@ static void __time_critical_func(render_gfx_line_mono640)(uint32_t line, uint8_t
     offset &= 0xFFFFu;
 
     for (int i = 0; i < 80; ++i) {
-#if defined(VGA128) || defined(MCGA)
+#if defined(VIDEO_RUNTIME)
+        uint8_t byte = (video_profile_is_vga128() || video_profile_is_mcga())
+                     ? gfx_buffer[offset + (uint32_t)i]
+                     : gfx_buffer[(offset + (uint32_t)i) * 4u];
+#elif defined(VGA128) || defined(MCGA)
         uint8_t byte = gfx_buffer[offset + (uint32_t)i];
 #else
         uint8_t byte = gfx_buffer[(offset + (uint32_t)i) * 4u];
@@ -751,15 +750,15 @@ static void __time_critical_func(render_line)(uint32_t line, uint8_t *output_buf
             render_gfx_line_mono640(line, output_buffer);
             return;
         }
-#if !defined(EGA128) && !defined(MCGA)
-        if (submode == 5) {
+#if defined(VIDEO_RUNTIME) || (!defined(EGA128) && !defined(MCGA))
+        if (!video_profile_is_ega() && !video_profile_is_mcga() && submode == 5) {
             // VGA 256-color planar (Mode X)
             render_gfx_line_vga_planar256(line, output_buffer);
             return;
         }
 #endif
-#if !defined(EGA128) && !defined(VGA128) && !defined(MCGA)
-        if (submode == 7) {
+#if defined(VIDEO_RUNTIME) || (!defined(EGA128) && !defined(VGA128) && !defined(MCGA))
+        if (video_profile_is_vga256() && submode == 7) {
             // VBE 100h: 640x400x256 packed pixels
             render_gfx_line_vbe8(line, output_buffer);
             return;

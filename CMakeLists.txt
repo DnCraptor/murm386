@@ -30,14 +30,22 @@ if(NO_PAGING)
 endif()
 
 # Video adapter profile: one mutually exclusive build mode.
-set(VIDEO_MODE "VGA256" CACHE STRING "Video adapter: MCGA, EGA128, VGA128 or VGA256")
-set_property(CACHE VIDEO_MODE PROPERTY STRINGS MCGA EGA128 VGA128 VGA256)
+set(VIDEO_MODE "VGA256" CACHE STRING "Video adapter: RUNTIME, MCGA, EGA128, VGA128 or VGA256")
+set_property(CACHE VIDEO_MODE PROPERTY STRINGS RUNTIME MCGA EGA128 VGA128 VGA256)
 string(TOUPPER "${VIDEO_MODE}" VIDEO_MODE)
 
 # Audio output configuration (I2S or PWM)
 set(AUDIO_TYPE "I2S" CACHE STRING "Audio output: I2S or PWM")
 
-if(VIDEO_MODE STREQUAL "MCGA")
+if(VIDEO_MODE STREQUAL "RUNTIME")
+    if(NO_PAGING)
+        message(FATAL_ERROR "VIDEO_MODE=RUNTIME requires paging; use VGA256 with NO_PAGING")
+    endif()
+    # Compile the full VGA256 implementation; guest-visible capabilities are
+    # filtered at runtime by video_profile.
+    add_compile_definitions(VIDEO_RUNTIME=1 VGA256=1)
+    set(EMU_VGA_MEM_SIZE_KB 256)
+elseif(VIDEO_MODE STREQUAL "MCGA")
     add_compile_definitions(MCGA=1)
     set(EMU_VGA_MEM_SIZE_KB 64)
 elseif(VIDEO_MODE STREQUAL "EGA128")
@@ -50,7 +58,7 @@ elseif(VIDEO_MODE STREQUAL "VGA256")
     add_compile_definitions(VGA256=1)
     set(EMU_VGA_MEM_SIZE_KB 256)
 else()
-    message(FATAL_ERROR "Invalid VIDEO_MODE='${VIDEO_MODE}'; expected MCGA, EGA128, VGA128 or VGA256")
+    message(FATAL_ERROR "Invalid VIDEO_MODE='${VIDEO_MODE}'; expected RUNTIME, MCGA, EGA128, VGA128 or VGA256")
 endif()
 
 if(BOARD STREQUAL "Z2")
@@ -336,6 +344,7 @@ set(EMU_CORE_SOURCES
     src/i386.c
     src/i386_arm.S   # ARM assembly optimizations for hot paths
     src/pc.c
+    src/video_profile.c
 
     src/286/cpu.c
     src/286/fpu.c

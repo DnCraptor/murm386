@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 BOARD="M1"
-VIDEO_MODE="EGA128"
+VIDEO_MODE="RUNTIME"
 AUDIO="PWM"
 CPU_SPEED="504"
 PSRAM_SPEED="66"
@@ -21,6 +21,7 @@ FORCE_VGA="OFF"
 DEBUG="OFF"
 DIAG="OFF"
 EMM="OFF"
+NO_PAGING="OFF"
 
 usage() {
     cat <<'USAGE'
@@ -30,8 +31,8 @@ Supported production CPU target: 286
 
 Main options:
   -b, --board M1|M2|PC|Z2|C2       Board variant (default: M1)
-  -v, --video MCGA|EGA128|VGA128|VGA256
-                                      Video/VRAM profile (default: EGA128)
+  -v, --video RUNTIME|MCGA|EGA128|VGA128|VGA256
+                                      Video profile (default: RUNTIME)
   -a, --audio I2S|PWM               Audio backend (default: PWM)
   -c, --clock MHz                   RP2350 clock (default: 504)
   -p, --psram MHz                   QSPI PSRAM max clock (default: 66)
@@ -40,6 +41,7 @@ Main options:
       --debug                       Enable DEBUG_ENABLED
       --diag                        Enable DIAG_ENABLED
       --emm                         Enable EMM
+      --no-paging                   Disable guest-RAM paging (VGA256 only)
       --build-type TYPE             CMake build type (default: Release)
       --build-dir DIR               Build directory (default: ./build)
   -j, --jobs N                      Parallel build jobs
@@ -48,7 +50,7 @@ Main options:
 
 Short forms:
   -M1 -M2 -PC -Z2 -C2
-  -MCGA -EGA128 -VGA128 -VGA256
+  -RUNTIME -MCGA -EGA128 -VGA128 -VGA256
   -i2s -pwm
   -252 -378 -504
 
@@ -77,7 +79,7 @@ while [[ $# -gt 0 ]]; do
         -j|--jobs) need_arg "$@"; JOBS="$2"; shift 2 ;;
 
         -M1|-M2|-PC|-Z2|-C2) BOARD="${1#-}"; shift ;;
-        -MCGA|-EGA128|-VGA128|-VGA256) VIDEO_MODE="${1#-}"; shift ;;
+        -RUNTIME|-MCGA|-EGA128|-VGA128|-VGA256) VIDEO_MODE="${1#-}"; shift ;;
         -i2s) AUDIO="I2S"; shift ;;
         -pwm) AUDIO="PWM"; shift ;;
         -252|-378|-504) CPU_SPEED="${1#-}"; shift ;;
@@ -87,6 +89,7 @@ while [[ $# -gt 0 ]]; do
         --debug) DEBUG="ON"; shift ;;
         --diag) DIAG="ON"; shift ;;
         --emm) EMM="ON"; shift ;;
+        --no-paging) NO_PAGING="ON"; shift ;;
         --clean|-clean) CLEAN=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -94,8 +97,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$BOARD" in M1|M2|PC|Z2|C2) ;; *) echo "Invalid board: $BOARD" >&2; exit 2 ;; esac
-case "$VIDEO_MODE" in MCGA|EGA128|VGA128|VGA256) ;; *) echo "Invalid video mode: $VIDEO_MODE" >&2; exit 2 ;; esac
+case "$VIDEO_MODE" in RUNTIME|MCGA|EGA128|VGA128|VGA256) ;; *) echo "Invalid video mode: $VIDEO_MODE" >&2; exit 2 ;; esac
 case "$AUDIO" in I2S|PWM) ;; *) echo "Invalid audio type: $AUDIO" >&2; exit 2 ;; esac
+if [[ "$VIDEO_MODE" == "RUNTIME" && "$NO_PAGING" == "ON" ]]; then
+    echo "RUNTIME requires paging; use VGA256 with --no-paging." >&2
+    exit 2
+fi
 
 # Hardware constraints mirrored from CMakeLists.txt.
 if [[ "$BOARD" == "PC" ]]; then
@@ -134,6 +141,7 @@ CMAKE_ARGS=(
     "-DDEBUG_ENABLED=$DEBUG"
     "-DDIAG_ENABLED=$DIAG"
     "-DEMM=$EMM"
+    "-DNO_PAGING=$NO_PAGING"
 )
 
 printf 'murm386 build\n'
@@ -144,6 +152,7 @@ printf '  Audio      : %s\n' "$AUDIO"
 printf '  RP2350     : %s MHz\n' "$CPU_SPEED"
 printf '  PSRAM max  : %s MHz\n' "$PSRAM_SPEED"
 printf '  EMM        : %s\n' "$EMM"
+printf '  NO_PAGING  : %s\n' "$NO_PAGING"
 printf '  Build type : %s\n' "$BUILD_TYPE"
 printf '  Build dir  : %s\n\n' "$BUILD_DIR"
 

@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include "ff.h"
 #include "board_config.h"
+#include "video_profile.h"
 #include "mem.h"
 #include "pico/platform.h"
 
@@ -13,11 +14,11 @@
 #endif
 
 #define PAGE_COUNT       (EGA128_VIRTUAL_RAM_SIZE / EGA128_PAGE_SIZE)
-#define CACHE_PAGE_COUNT (RAM_PAGES_SIZE / EGA128_PAGE_SIZE)
+#define CACHE_PAGE_COUNT_MAX (RAM_PAGES_MAX_SIZE / EGA128_PAGE_SIZE)
 #define INVALID_PAGE     0xffffu
 
-static uint16_t cache_page[CACHE_PAGE_COUNT];
-static uint8_t cache_dirty[CACHE_PAGE_COUNT];
+static uint16_t cache_page[CACHE_PAGE_COUNT_MAX];
+static uint8_t cache_dirty[CACHE_PAGE_COUNT_MAX];
 static uint8_t backing_valid[PAGE_COUNT / 8u];
 
 /* Tiny page->slot lookup for the CPU hot path.  Four entries are enough to
@@ -29,6 +30,7 @@ static uint16_t hot_page[HOT_PAGE_COUNT];
 static uint8_t hot_slot[HOT_PAGE_COUNT];
 
 static uint16_t victim;
+static uint32_t cache_page_count;
 static bool active;
 static bool use_spi_psram;
 static FIL pagefile;
@@ -126,14 +128,14 @@ static uint32_t __not_in_flash_func(map_page)(uint32_t page, bool write_access)
      * of pages.  Avoid the 64/96-entry cache scan on those repeated hits. */
     for (uint32_t i = 0; i < HOT_PAGE_COUNT; ++i) {
         uint32_t slot = hot_slot[i];
-        if (hot_page[i] == page && slot < CACHE_PAGE_COUNT &&
+        if (hot_page[i] == page && slot < cache_page_count &&
             cache_page[slot] == page) {
             if (write_access) cache_dirty[slot] = 1;
             return slot;
         }
     }
 
-    for (uint32_t slot = 0; slot < CACHE_PAGE_COUNT; ++slot) {
+    for (uint32_t slot = 0; slot < cache_page_count; ++slot) {
         if (cache_page[slot] == page) {
             if (write_access) cache_dirty[slot] = 1;
             hot_page_remember(page, slot);
@@ -142,7 +144,7 @@ static uint32_t __not_in_flash_func(map_page)(uint32_t page, bool write_access)
     }
 
     uint32_t slot = victim++;
-    if (victim == CACHE_PAGE_COUNT) victim = 0;
+    if (victim == cache_page_count) victim = 0;
 
     if (cache_page[slot] != INVALID_PAGE && cache_dirty[slot]) {
         if (!backing_write(cache_page[slot], ram_pages + slot * EGA128_PAGE_SIZE)) {
@@ -172,7 +174,7 @@ bool ega128_cache_ptr_to_linear(const void *ptr, uint32_t *linear)
 {
     uintptr_t p = (uintptr_t)ptr;
     uintptr_t base = (uintptr_t)ram_pages;
-    if (p < base || p >= base + RAM_PAGES_SIZE)
+    if (p < base || p >= base + ram_pages_size)
         return false;
 
     uint32_t cache_off = (uint32_t)(p - base);
@@ -334,7 +336,7 @@ bool ega128_paging_flush(void)
 {
     if (!active) return true;
 
-    for (uint32_t slot = 0; slot < CACHE_PAGE_COUNT; ++slot) {
+    for (uint32_t slot = 0; slot < cache_page_count; ++slot) {
         if (cache_page[slot] == INVALID_PAGE || !cache_dirty[slot])
             continue;
         if (!backing_write(cache_page[slot],
@@ -355,34 +357,29 @@ bool ega128_paging_active(void)
 
 const char *ega128_paging_post_label(void)
 {
+    static char label[48];
 #ifdef BOARD_M1
-    if (active && use_spi_psram) {
-#if defined(VGA256)
-        return "SPI PSRAM: 8 MB [40 KB / 20 pages]";
-#elif defined(MCGA)
-        return "SPI PSRAM: 8 MB [192 KB / 96 pages]";
+    const char *kind = (active && use_spi_psram) ? "SPI PSRAM" : "SWAP @ SD";
 #else
-        return "SPI PSRAM: 8 MB [128 KB / 64 pages]";
+    const char *kind = "SWAP @ SD";
 #endif
-    }
-#endif
-#if defined(VGA256)
-    return "SWAP     : 8 MB [40 KB / 20 pages]";
-#elif defined(MCGA)
-    return "SWAP     : 8 MB [192 KB / 96 pages]";
-#else
-    return "SWAP     : 8 MB [128 KB / 64 pages]";
-#endif
+    snprintf(label, sizeof(label), "%s: 8 MB [%u KB / %u pages]",
+             kind, (unsigned)(ram_pages_size >> 10),
+             (unsigned)cache_page_count);
+    return label;
 }
 
 bool ega128_paging_init(void)
 {
+    cache_page_count = video_profile_page_cache_count();
+    if (!cache_page_count || cache_page_count > CACHE_PAGE_COUNT_MAX)
+        return false;
     nf_memset(cache_page, 0xff, sizeof(cache_page));
     nf_memset(cache_dirty, 0, sizeof(cache_dirty));
     nf_memset(backing_valid, 0, sizeof(backing_valid));
     nf_memset(hot_page, 0xff, sizeof(hot_page));
     nf_memset(hot_slot, 0xff, sizeof(hot_slot));
-    nf_memset(ram_pages, 0, RAM_PAGES_SIZE);
+    nf_memset(ram_pages, 0, ram_pages_size);
     victim = 0;
 
 #ifdef BOARD_M1
@@ -393,7 +390,7 @@ bool ega128_paging_init(void)
     if (use_spi_psram) {
         ega128_select_paged_backend();
         active = true;
-        printf("guest-RAM paging: %u KiB cache -> SPI PSRAM\n", (unsigned)(RAM_PAGES_SIZE >> 10));
+        printf("guest-RAM paging: %u KiB cache -> SPI PSRAM\n", (unsigned)(ram_pages_size >> 10));
         return true;
     }
 #endif
@@ -410,7 +407,7 @@ bool ega128_paging_init(void)
     pagefile_open = true;
     ega128_select_paged_backend();
     active = true;
-    printf("guest-RAM paging: %u KiB cache -> " SD_DATA_DIR_SLASH "pagefile.sys\n", (unsigned)(RAM_PAGES_SIZE >> 10));
+    printf("guest-RAM paging: %u KiB cache -> " SD_DATA_DIR_SLASH "pagefile.sys\n", (unsigned)(ram_pages_size >> 10));
     return true;
 }
 #endif

@@ -41,6 +41,7 @@ if /I "%~1"=="-M2" set "BOARD=M2"& shift& goto parse
 if /I "%~1"=="-PC" set "BOARD=PC"& shift& goto parse
 if /I "%~1"=="-Z2" set "BOARD=Z2"& shift& goto parse
 if /I "%~1"=="-C2" set "BOARD=C2"& shift& goto parse
+if /I "%~1"=="-RUNTIME" set "VIDEO_MODE=RUNTIME"& shift& goto parse
 if /I "%~1"=="-MCGA" set "VIDEO_MODE=MCGA"& shift& goto parse
 if /I "%~1"=="-EGA128" set "VIDEO_MODE=EGA128"& shift& goto parse
 if /I "%~1"=="-VGA128" set "VIDEO_MODE=VGA128"& shift& goto parse
@@ -101,7 +102,7 @@ goto usage_error
 :validate
 for %%B in (M1 M2 PC Z2 C2) do if /I "!BOARD!"=="%%B" set "BOARD=%%B"& set "BOARD_OK=1"
 if not defined BOARD_OK echo Invalid board: !BOARD! 1>&2& exit /b 2
-for %%V in (MCGA EGA128 VGA128 VGA256) do if /I "!VIDEO_MODE!"=="%%V" set "VIDEO_MODE=%%V"& set "VIDEO_OK=1"
+for %%V in (RUNTIME MCGA EGA128 VGA128 VGA256) do if /I "!VIDEO_MODE!"=="%%V" set "VIDEO_MODE=%%V"& set "VIDEO_OK=1"
 if not defined VIDEO_OK echo Invalid video mode: !VIDEO_MODE! 1>&2& exit /b 2
 for %%A in (I2S PWM) do if /I "!AUDIO!"=="%%A" set "AUDIO=%%A"& set "AUDIO_OK=1"
 if not defined AUDIO_OK echo Invalid audio type: !AUDIO! 1>&2& exit /b 2
@@ -173,7 +174,7 @@ echo.
 echo Supported production CPU target: 286
 echo.
 echo   -b, --board M1^|M2^|PC^|Z2^|C2
-echo   -v, --video MCGA^|EGA128^|VGA128^|VGA256
+echo   -v, --video RUNTIME^|MCGA^|EGA128^|VGA128^|VGA256
 echo   -a, --audio I2S^|PWM
 echo   -c, --clock MHz
 echo   -p, --psram MHz
@@ -184,6 +185,6 @@ echo       --build-dir DIR
 echo   -j, --jobs N
 echo       --clean
 echo.
-echo Short forms: -M1 -M2 -PC -Z2 -C2, -MCGA -EGA128 -VGA128 -VGA256,
+echo Short forms: -M1 -M2 -PC -Z2 -C2, -RUNTIME -MCGA -EGA128 -VGA128 -VGA256,
 echo              -i2s -pwm, -252 -378 -504
 exit /b 0
