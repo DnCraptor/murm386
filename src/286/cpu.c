@@ -384,6 +384,29 @@ static INLINE uint8_t readrm8(CPU* cpu, uint8_t rmval) {
     return getreg8(rmval);
 }
 
+static INLINE uint16_t readw16_safe(uint32_t addr) {
+    /* readw86() is the fast path, but unlike two read86() calls it must not
+       span a backend/selector boundary.  Paging-page boundaries are already
+       handled inside ega128_pload16(). */
+    if (unlikely(addr == 0x9FFFFu || addr == 0xBFFFFu ||
+                 addr == 0xDFFFFFFFu))
+        return (uint16_t)read86(addr) | ((uint16_t)read86(addr + 1u) << 8);
+
+#if EMULATE_LTEMS
+    if (unlikely(addr == (EMS_START - 1u) ||
+                 (EMS_WINDOW(addr) && ((addr & 0x3FFFu) == 0x3FFFu))))
+        return (uint16_t)read86(addr) | ((uint16_t)read86(addr + 1u) << 8);
+#endif
+
+#if CHECK_RAM_BOARDER_ENABLED
+    if (unlikely(addr < phys_mem_size && addr + 1u >= phys_mem_size))
+        return (uint16_t)read86(addr) | ((uint16_t)read86(addr + 1u) << 8);
+#endif
+
+    return readw86(addr);
+}
+
+
 static INLINE void writerm16(CPU* cpu, uint8_t rmval, uint16_t value) {
     if (mode < 3) {
         getea(cpu, rmval);
@@ -1032,8 +1055,8 @@ static __not_in_flash() void op_grp5(CPU* cpu, uint16_t oper1) {
             push(cpu, CPU_CS);
             push(cpu, CPU_IP);
             getea(cpu, rm);
-            SET_IP ( (uint16_t) read86(ea) + (uint16_t) read86(ea + 1) * 256 );
-            CPU_CS = (uint16_t) read86(ea + 2) + (uint16_t) read86(ea + 3) * 256;
+            SET_IP ( readw16_safe(ea) );
+            CPU_CS = readw16_safe(ea + 2u);
             break;
 
         case 4: /* JMP Ev */
@@ -1042,8 +1065,8 @@ static __not_in_flash() void op_grp5(CPU* cpu, uint16_t oper1) {
 
         case 5: /* JMP Mp */
             getea(cpu, rm);
-            SET_IP ( (uint16_t) read86(ea) + (uint16_t) read86(ea + 1) * 256 );
-            CPU_CS = (uint16_t) read86(ea + 2) + (uint16_t) read86(ea + 3) * 256;
+            SET_IP ( readw16_safe(ea) );
+            CPU_CS = readw16_safe(ea + 2u);
             break;
 
         case 6: /* PUSH Ev */
@@ -3126,16 +3149,16 @@ grp1_16_exec:
                 modregrm(cpu);
 
                 getea(cpu, rm);
-                putreg16(reg, read86(ea) + read86(ea + 1) * 256);
-                CPU_ES = read86(ea + 2) + read86(ea + 3) * 256;
+                putreg16(reg, readw16_safe(ea));
+                CPU_ES = readw16_safe(ea + 2u);
                 break;
 
             case 0xC5: /* C5 LDS Gv Mp */
                 modregrm(cpu);
 
                 getea(cpu, rm);
-                putreg16(reg, read86(ea) + read86(ea + 1) * 256);
-                CPU_DS = read86(ea + 2) + read86(ea + 3) * 256;
+                putreg16(reg, readw16_safe(ea));
+                CPU_DS = readw16_safe(ea + 2u);
                 break;
 
             case 0xC6: /* C6 MOV Eb Ib */
