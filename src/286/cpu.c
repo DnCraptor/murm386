@@ -3139,7 +3139,7 @@ grp1_16_exec:
                 oper1b = readrm8(cpu, rm);
                 oper2b = getmem8(CPU_CS, CPU_IP);
                 StepIP(1);
-                writerm8(cpu, rm, op_grp2_8(cpu, oper2b, oper1b));
+                writerm8_cached_ea(cpu, rm, op_grp2_8(cpu, oper2b, oper1b));
                 break;
 
             case 0xC1: /* C1 GRP2 word imm8 (80186+) */
@@ -3148,7 +3148,7 @@ grp1_16_exec:
                 oper1 = readrm16(cpu, rm);
                 oper2 = getmem8(CPU_CS, CPU_IP);
                 StepIP(1);
-                writerm16(cpu, rm, op_grp2_16(cpu, (uint8_t) oper2, oper1)
+                writerm16_cached_ea(cpu, rm, op_grp2_16(cpu, (uint8_t) oper2, oper1)
                 );
                 break;
 
@@ -3269,28 +3269,28 @@ grp1_16_exec:
                 modregrm(cpu);
 
                 oper1b = readrm8(cpu, rm);
-                writerm8(cpu, rm, op_grp2_8(cpu, 1, oper1b));
+                writerm8_cached_ea(cpu, rm, op_grp2_8(cpu, 1, oper1b));
                 break;
 
             case 0xD1: /* D1 GRP2 Ev 1 */
                 modregrm(cpu);
 
                 oper1 = readrm16(cpu, rm);
-                writerm16(cpu, rm, op_grp2_16(cpu, 1, oper1));
+                writerm16_cached_ea(cpu, rm, op_grp2_16(cpu, 1, oper1));
                 break;
 
             case 0xD2: /* D2 GRP2 Eb CPU_CL */
                 modregrm(cpu);
 
                 oper1b = readrm8(cpu, rm);
-                writerm8(cpu, rm, op_grp2_8(cpu, CPU_CL, oper1b));
+                writerm8_cached_ea(cpu, rm, op_grp2_8(cpu, CPU_CL, oper1b));
                 break;
 
             case 0xD3: /* D3 GRP2 Ev CPU_CL */
                 modregrm(cpu);
 
                 oper1 = readrm16(cpu, rm);
-                writerm16(cpu, rm, op_grp2_16(cpu, CPU_CL, oper1)
+                writerm16_cached_ea(cpu, rm, op_grp2_16(cpu, CPU_CL, oper1)
                 );
                 break;
 
@@ -3529,7 +3529,7 @@ grp1_16_exec:
                 }
 
                 if ((reg > 1) && (reg < 4)) {
-                    writerm8(cpu, rm, res8
+                    writerm8_cached_ea(cpu, rm, res8
                     );
                 }
                 break;
@@ -3540,7 +3540,7 @@ grp1_16_exec:
                 oper1 = readrm16(cpu, rm);
                 res16 = op_grp3_16(cpu, oper1);
                 if ((reg > 1) && (reg < 4)) {
-                    writerm16(cpu, rm, res16
+                    writerm16_cached_ea(cpu, rm, res16
                     );
                 }
                 break;
@@ -3580,12 +3580,12 @@ grp1_16_exec:
                 if (!reg) {
                     op_add8();
                     cf = saved_cf;
-                    writerm8(cpu, rm, res8);
+                    writerm8_cached_ea(cpu, rm, res8);
                 } else {
                     res8 = oper1b - oper2b;
                     flag_sub8(cpu, oper1b, oper2b);
                     cf = saved_cf;
-                    writerm8(cpu, rm, res8);
+                    writerm8_cached_ea(cpu, rm, res8);
                 }
                 break;
             }
