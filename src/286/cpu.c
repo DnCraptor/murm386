@@ -19,7 +19,6 @@ extern void request_terminate(uint8_t exit_code, uint8_t exit_type);
 #define INLINE __always_inline
 
 static bool irq_shadow;
-static bool hltstate;
 
 #undef CPU_CS
 #undef CPU_DS
@@ -82,7 +81,7 @@ static void reset(CPU* cpu) {
     }
     cpu->flags.value = 2;
     irq_shadow = false;
-    hltstate = false;
+    cpu->i286_hltstate = false;
 }
 
 #include "./fpu.h"
@@ -246,8 +245,6 @@ void cpu_install_dos_handlers(CPU* cpu) {
 //#define CPU_SET_HIGH_FLAGS
 #define CPU_286_STYLE_PUSH_SP
 
-u8 reptype;
-
 /* Keep the 286 ModR/M decode state relative to the already-hot CPU pointer.
  * This avoids independent literal-pool loads for each former global. */
 #define mode        (cpu->i286_mode)
@@ -257,6 +254,8 @@ u8 reptype;
 #define useseg      (cpu->i286_useseg)
 #define ea          (cpu->i286_ea)
 #define segoverride (cpu->i286_segoverride)
+#define firstip     (cpu->i286_firstip)
+#define reptype     (cpu->i286_reptype)
 
 static const bool __not_in_flash("cpu.pf") parity[0x100] = {
     1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
@@ -1054,20 +1053,19 @@ bool __not_in_flash_func(cpu_irq_shadow)(void)          { return irq_shadow; }
 void __not_in_flash_func(cpu_irq_shadow_set)(bool v)    { irq_shadow = v; }
 
 static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
-    static uint16_t firstip;
     uint16_t oper1, oper2, res16;
 
     for (uint32_t loopcount = 0; loopcount < execloops; loopcount++) {
         if (cpu->native_done) break;
         bool inhibit_irq = irq_shadow;
         if (!inhibit_irq && (cpu->flags.value & IF) && cpu->intr) {
-            hltstate = false;
+            cpu->i286_hltstate = false;
             uint32_t irq_state = save_and_disable_interrupts();
             cpu->intr = false;
             int no = cpu->cb.pic_read_irq(cpu->cb.pic);
             restore_interrupts(irq_state);
             intcall86(cpu, no);
-        } else if (hltstate) {
+        } else if (cpu->i286_hltstate) {
             break;
         }
         if (!cpu->bios) {
@@ -3356,7 +3354,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 break;
 
             case 0xF4: /* F4 HLT */
-                hltstate = true;
+                cpu->i286_hltstate = true;
                 break;
 
             case 0xF5: /* F5 CMC */
