@@ -268,7 +268,19 @@ static const bool __not_in_flash("cpu.pf") parity[0x100] = {
 };
 
 __not_in_flash() void modregrm(CPU* cpu) {
-    register uint8_t addrbyte = getmem8(CPU_CS, CPU_IP);
+    const uint16_t ip = CPU_IP;
+    const uint32_t codeaddr = segbase(CPU_CS) + ip;
+    uint32_t decodeword;
+    register uint8_t addrbyte;
+
+    /* Fetch ModR/M and the following byte together on the normal code path.
+       Bit 16 marks that the speculative high byte is valid.  Stay byte-wide
+       where the word could cross into another backend or wrap 16-bit IP. */
+    if (likely(codeaddr < 0x9FFFFu && ip != 0xFFFFu))
+        decodeword = (uint32_t)readw86(codeaddr) | 0x10000u;
+    else
+        decodeword = read86(codeaddr);
+    addrbyte = (uint8_t)decodeword;
     StepIP(1);
     mode = addrbyte >> 6;
     reg = (addrbyte >> 3) & 7;
@@ -286,7 +298,10 @@ __not_in_flash() void modregrm(CPU* cpu) {
             }
             break;
         case 1:
-            disp16 = signext(getmem8(CPU_CS, CPU_IP));
+            if (likely(decodeword & 0x10000u))
+                disp16 = signext((uint8_t)(decodeword >> 8));
+            else
+                disp16 = signext(getmem8(CPU_CS, CPU_IP));
             StepIP(1);
             if (((rm == 2) || (rm == 3) || (rm == 6)) && !segoverride) {
                 useseg = CPU_SS;
