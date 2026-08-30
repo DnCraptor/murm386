@@ -305,51 +305,32 @@ __not_in_flash() void modregrm(CPU* cpu) {
 }
 
 __not_in_flash() void getea(CPU* cpu, uint8_t rmval) {
-    register uint32_t tempea = 0;
-    switch (mode) {
-        case 0:
-            switch (rmval) {
-                case 0: tempea = CPU_BX + CPU_SI;
-                    break;
-                case 1: tempea = CPU_BX + CPU_DI;
-                    break;
-                case 2: tempea = CPU_BP + CPU_SI;
-                    break;
-                case 3: tempea = CPU_BP + CPU_DI;
-                    break;
-                case 4: tempea = CPU_SI;
-                    break;
-                case 5: tempea = CPU_DI;
-                    break;
-                case 6: tempea = disp16;
-                    break;
-                case 7: tempea = CPU_BX;
-                    break;
-            }
-            break;
+    register uint32_t tempea;
 
-        case 1:
-        case 2:
-            switch (rmval) {
-                case 0: tempea = CPU_BX + CPU_SI + disp16;
-                    break;
-                case 1: tempea = CPU_BX + CPU_DI + disp16;
-                    break;
-                case 2: tempea = CPU_BP + CPU_SI + disp16;
-                    break;
-                case 3: tempea = CPU_BP + CPU_DI + disp16;
-                    break;
-                case 4: tempea = CPU_SI + disp16;
-                    break;
-                case 5: tempea = CPU_DI + disp16;
-                    break;
-                case 6: tempea = CPU_BP + disp16;
-                    break;
-                case 7: tempea = CPU_BX + disp16;
-                    break;
-            }
+    /* modregrm() normalizes displacement handling for us:
+     *   mode 0: disp16 == 0, except rm=6 where it is [disp16]
+     *   mode 1/2: disp16 is the decoded signed/word displacement.
+     * Therefore the eight base forms only need one switch. */
+    switch (rmval) {
+        case 0: tempea = CPU_BX + CPU_SI;
+            break;
+        case 1: tempea = CPU_BX + CPU_DI;
+            break;
+        case 2: tempea = CPU_BP + CPU_SI;
+            break;
+        case 3: tempea = CPU_BP + CPU_DI;
+            break;
+        case 4: tempea = CPU_SI;
+            break;
+        case 5: tempea = CPU_DI;
+            break;
+        case 6: tempea = (mode == 0) ? 0 : CPU_BP;
+            break;
+        default: tempea = CPU_BX;
             break;
     }
+
+    tempea += disp16;
     ea = (tempea & 0xFFFF) + (useseg << 4);
 }
 
