@@ -2376,18 +2376,19 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 break;
 
             case 0x81: /* 81 GRP1 Ev Iv */
+                modregrm(cpu);
+                oper1 = readrm16(cpu, rm);
+                oper2 = getmem16(CPU_CS, CPU_IP);
+                StepIP(2);
+                goto grp1_16_exec;
+
             case 0x83: /* 83 GRP1 Ev Ib */
                 modregrm(cpu);
-
                 oper1 = readrm16(cpu, rm);
-                if (opcode == 0x81) {
-                    oper2 = getmem16(CPU_CS, CPU_IP);
-                    StepIP(2);
-                } else {
-                    oper2 = signext(getmem8(CPU_CS, CPU_IP));
-                    StepIP(1);
-                }
+                oper2 = signext(getmem8(CPU_CS, CPU_IP));
+                StepIP(1);
 
+grp1_16_exec:
                 switch (reg) {
                     case 0:
                         op_add16();
