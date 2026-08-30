@@ -1050,7 +1050,7 @@ static __not_in_flash() void op_grp5(CPU* cpu, uint16_t oper1) {
             oper2 = 1;
             op_add16();
             cf = saved_cf;
-            writerm16(cpu, rm, res16);
+            writerm16_cached_ea(cpu, rm, res16);
             break;
         }
 
@@ -1059,7 +1059,7 @@ static __not_in_flash() void op_grp5(CPU* cpu, uint16_t oper1) {
             oper2 = 1;
             op_sub16();
             cf = saved_cf;
-            writerm16(cpu, rm, res16);
+            writerm16_cached_ea(cpu, rm, res16);
             break;
         }
 
