@@ -252,7 +252,7 @@ uint8_t tempcf, oldcf, sib;
 bool operandSizeOverride = false;
 bool addressSizeOverride = false;
 u8 nestlev;
-u16 saveip, savecs, oper1, oper2, res16, temp16, dummy, stacksize, frametemp;
+u16 saveip, savecs, temp16, dummy, stacksize, frametemp;
 
 /* Keep the 286 ModR/M decode state relative to the already-hot CPU pointer.
  * This avoids independent literal-pool loads for each former global. */
@@ -711,8 +711,8 @@ static __not_in_flash() uint8_t op_grp2_8(CPU* cpu, uint8_t cnt, uint8_t oper1b)
     return s & 0xFF;
 }
 
-static __not_in_flash() uint16_t op_grp2_16(CPU* cpu, uint8_t cnt) {
-    register uint32_t s = oper1;
+static __not_in_flash() uint16_t op_grp2_16(CPU* cpu, uint8_t cnt, uint16_t value) {
+    register uint32_t s = value;
 #ifdef CPU_LIMIT_SHIFT_COUNT
     cnt &= 0x1F;
 #endif
@@ -887,7 +887,9 @@ static inline void op_idiv16(CPU* cpu, uint32_t valdiv, uint16_t divisor) {
 }
 
 
-static __not_in_flash() void op_grp3_16(CPU* cpu) {
+static __not_in_flash() uint16_t op_grp3_16(CPU* cpu, uint16_t oper1) {
+    uint16_t res16 = oper1;
+
     switch (reg) {
         case 0:
         case 1: /* TEST */
@@ -949,9 +951,13 @@ static __not_in_flash() void op_grp3_16(CPU* cpu) {
             op_idiv16(cpu, ((uint32_t) CPU_DX << 16) + CPU_AX, oper1);
             break;
     }
+
+    return res16;
 }
 
-static __not_in_flash() void op_grp5(CPU* cpu) {
+static __not_in_flash() void op_grp5(CPU* cpu, uint16_t oper1) {
+    uint16_t oper2, res16;
+
     switch (reg) {
         case 0: /* INC Ev */
             oper2 = 1;
@@ -1053,6 +1059,7 @@ void __not_in_flash_func(cpu_irq_shadow_set)(bool v)    { irq_shadow = v; }
 
 static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
     static uint16_t firstip;
+    uint16_t oper1, oper2, res16;
 
     for (uint32_t loopcount = 0; loopcount < execloops; loopcount++) {
         if (cpu->native_done) break;
@@ -3049,7 +3056,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 oper1 = readrm16(cpu, rm);
                 oper2 = getmem8(CPU_CS, CPU_IP);
                 StepIP(1);
-                writerm16(cpu, rm, op_grp2_16(cpu, (uint8_t) oper2)
+                writerm16(cpu, rm, op_grp2_16(cpu, (uint8_t) oper2, oper1)
                 );
                 break;
 
@@ -3176,7 +3183,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 modregrm(cpu);
 
                 oper1 = readrm16(cpu, rm);
-                writerm16(cpu, rm, op_grp2_16(cpu, 1));
+                writerm16(cpu, rm, op_grp2_16(cpu, 1, oper1));
                 break;
 
             case 0xD2: /* D2 GRP2 Eb CPU_CL */
@@ -3190,7 +3197,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 modregrm(cpu);
 
                 oper1 = readrm16(cpu, rm);
-                writerm16(cpu, rm, op_grp2_16(cpu, CPU_CL)
+                writerm16(cpu, rm, op_grp2_16(cpu, CPU_CL, oper1)
                 );
                 break;
 
@@ -3438,7 +3445,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 modregrm(cpu);
 
                 oper1 = readrm16(cpu, rm);
-                op_grp3_16(cpu);
+                res16 = op_grp3_16(cpu, oper1);
                 if ((reg > 1) && (reg < 4)) {
                     writerm16(cpu, rm, res16
                     );
@@ -3494,7 +3501,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 modregrm(cpu);
 
                 oper1 = readrm16(cpu, rm);
-                op_grp5(cpu);
+                op_grp5(cpu, oper1);
                 break;
 
             default:
