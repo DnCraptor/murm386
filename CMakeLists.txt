@@ -475,6 +475,22 @@ if(BOARD STREQUAL "M1")
 endif()
 
 set(GFX_BUFFER_EXPECTED_SIZE 262144)
+
+# The real i386 core has a much larger RAM-resident hot path than the 286
+# core. In the VGA256 no-paging build RAM_4_EXT is not needed by guest-RAM
+# paging, so merge that contiguous 40 KiB bank back into the main RAM region.
+# Every other build keeps the normal 204 KiB + 40 KiB split.
+set(MAIN_RAM_LENGTH "204k")
+set(RAM_4_EXT_ORIGIN "0x20033000")
+set(RAM_4_EXT_LENGTH "40k")
+set(MERGE_RAM_4_EXT OFF)
+if(CPU_TARGET STREQUAL "386" AND VIDEO_MODE STREQUAL "VGA256" AND NO_PAGING)
+    set(MAIN_RAM_LENGTH "244k")
+    set(RAM_4_EXT_ORIGIN "0x2003D000")
+    set(RAM_4_EXT_LENGTH "0k")
+    set(MERGE_RAM_4_EXT ON)
+endif()
+
 configure_file(memmap.ld.in memmap.ld @ONLY)
 pico_set_linker_script(${BUILD_NAME} ${CMAKE_CURRENT_BINARY_DIR}/memmap.ld)
 
@@ -520,6 +536,9 @@ if(EMM)
 endif()
 if(CPU_TARGET STREQUAL "386")
     target_compile_definitions(${BUILD_NAME} PRIVATE I386_MODE=1)
+endif()
+if(MERGE_RAM_4_EXT)
+    target_compile_definitions(${BUILD_NAME} PRIVATE RAM_4_EXT_MERGED=1)
 endif()
 
 # --- Нативный стек core0 -----------------------------------------------

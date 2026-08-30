@@ -632,11 +632,11 @@ static inline int get_IOPL(CPUI386 *cpu)
 /* MMU */
 #define CR0_PG (1<<31)
 #define CR0_WP (0x10000)
-#ifdef BUILD_ESP32
+//#ifdef PICO_RP2350
 #define tlb_size 256
-#else
-#define tlb_size 512
-#endif
+//#else
+//#define tlb_size 512
+//#endif
 typedef struct {
 	enum {
 		ADDR_OK1,
@@ -3309,7 +3309,7 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 
 #define RET() RETw(0, limm, 0)
 
-static bool __not_in_flash_func(enter_helper)(
+static bool __attribute__((noinline)) enter_helper(
 	CPUI386 *cpu,
 	bool opsz16,
 	uword sp_mask,
@@ -4027,7 +4027,7 @@ static void __sysenter(CPUI386 *cpu, int pl, int cs)
 #endif
 
 static bool pmcall(CPUI386 *cpu, bool opsz16, uword addr, int sel, bool isjmp);
-static bool IRAM_ATTR pmret(CPUI386 *cpu, bool opsz16, int off, bool isiret);
+static bool pmret(CPUI386 *cpu, bool opsz16, int off, bool isiret);
 
 static bool verbose;
 
@@ -4052,6 +4052,79 @@ static bool verbose;
 #define C_15(_1, ...) CX(_1) C_14(__VA_ARGS__)
 #define C_16(_1, ...) CX(_1) C_15(__VA_ARGS__)
 #define C(...) PASTE(C_, ARGCOUNT(__VA_ARGS__))(__VA_ARGS__)
+
+/*
+ * Two-byte (0F xx) opcodes are relatively uncommon in the DOS hot path and
+ * contain a large part of the 386+ system/extended instruction decoder.
+ * Keep them out of the RAM-resident cpu_exec1() body.  noinline is important
+ * here: with LTO enabled, inlining this helper would put the code back into
+ * .time_critical together with cpu_exec1().
+ */
+static bool __attribute__((noinline)) cpu_exec_0f(CPUI386 *cpu,
+                                                   bool opsz16,
+                                                   bool adsz16,
+                                                   int curr_seg)
+{
+  u8 b1;
+  u8 modrm;
+  OptAddr meml;
+  uword addr;
+  uword sp_mask = cpu->sp_mask;
+
+  TRY(fetch8(cpu, &b1));
+
+#undef CX
+#define CX(_1) case _1:
+#define GRPBEG TRY(peek8(cpu, &modrm)); switch((modrm >> 3) & 7) {
+#define GRPCASE(_case, _rm, _rwm, _op) _case { _rm(_rwm, _op); return true; }
+#define GRPEND default: THROW0(EX_UD); }
+
+  switch (b1) {
+#define I2(_case, _rm, _rwm, _op) _case { _rm(_rwm, _op); return true; }
+#include "i386ins.def"
+#undef I2
+
+  case 0x00: { // G6
+GRPBEG
+#define IG6 GRPCASE
+#include "i386ins.def"
+#undef IG6
+GRPEND
+  }
+
+  case 0x01: { // G7
+GRPBEG
+#define IG7 GRPCASE
+#include "i386ins.def"
+#undef IG7
+GRPEND
+  }
+
+  case 0xba: { // G8
+GRPBEG
+#define IG8 GRPCASE
+#include "i386ins.def"
+#undef IG8
+GRPEND
+  }
+
+  case 0xc7: { // G9
+GRPBEG
+#define IG9 GRPCASE
+#include "i386ins.def"
+#undef IG9
+GRPEND
+  }
+
+  default:
+    THROW0(EX_UD);
+  }
+
+#undef GRPBEG
+#undef GRPCASE
+#undef GRPEND
+#undef CX
+}
 
 static bool IRAM_ATTR_CPU_EXEC1 cpu_exec1(CPUI386 *cpu, int stepcount)
 {
@@ -4308,45 +4381,7 @@ GRPEND
 	}
 
 	ecase(0x0f): { // two byte
-		TRY(fetch8(cpu, &b1));
-		switch(b1) {
-#define I2(_case, _rm, _rwm, _op) _case { _rm(_rwm, _op); ebreak; }
-#include "i386ins.def"
-#undef I2
-
-		case 0x00: { // G6
-GRPBEG
-#define IG6 GRPCASE
-#include "i386ins.def"
-#undef IG6
-GRPEND
-		}
-
-		case 0x01: { // G7
-GRPBEG
-#define IG7 GRPCASE
-#include "i386ins.def"
-#undef IG7
-GRPEND
-		}
-
-		case 0xba: { // G8
-GRPBEG
-#define IG8 GRPCASE
-#include "i386ins.def"
-#undef IG8
-GRPEND
-		}
-
-		case 0xc7: { // G9
-GRPBEG
-#define IG9 GRPCASE
-#include "i386ins.def"
-#undef IG9
-GRPEND
-		}
-		default: default_ud;
-		}
+		TRY(cpu_exec_0f(cpu, opsz16, adsz16, curr_seg));
 		ebreak;
 	}
 
@@ -4653,7 +4688,7 @@ static bool pmcall(CPUI386 *cpu, bool opsz16, uword addr, int sel, bool isjmp)
 // 1: intra PVL
 // 2: inter PVL
 // 3: from v8086
-static int __not_in_flash_func(__call_isr_check_cs)(CPUI386 *cpu, int sel, int ext, int *csdpl)
+static int __call_isr_check_cs(CPUI386 *cpu, int sel, int ext, int *csdpl)
 {
 	sel = sel & 0xffff;
 	OptAddr meml;
@@ -4714,61 +4749,8 @@ static int __not_in_flash_func(__call_isr_check_cs)(CPUI386 *cpu, int sel, int e
 	__builtin_unreachable();
 }
 
-static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
+static bool __attribute__((noinline)) call_isr_pm(CPUI386 *cpu, int no, bool pusherr, int ext)
 {
-	cpu_int_hook_t* int_hook = cpu->int_hooks[no];
-	/* INT handler hook - intercept in V86 and real mode */
-	if (int_hook && (!(cpu->cr0 & 1) || (cpu->flags & VM))) {
-		if (int_hook->handler((CPU*)cpu, int_hook->opaque)) return true; /* handled */
-	}
-	#if DEBUG_CPU
-	if (cpu->flags & VM && no >= 0x20) {
-		dolog("V86 INT %02xh\n", no);
-	}
-	#endif
-	if (!(cpu->cr0 & 1)) {
-#if BIOS_DEBUG
-u16 prev_cs = cpu->seg[SEG_CS].base;
-u16 prev_ip = cpu->next_ip;
-#endif
-		/* REAL-ADDRESS-MODE */
-		uword sp_mask = cpu->seg[SEG_SS].flags & SEG_B_BIT ? 0xffffffff : 0xffff;
-		OptAddr meml;
-		uword base = cpu->idt.base;
-		int off = no * 4;
-		TRY1(translate_laddr(cpu, &meml, 1, base + off, 4, 0));
-		uword w1 = load32(cpu, &meml);
-		int newcs = w1 >> 16;
-		uword newip = w1 & 0xffff;
-
-		OptAddr meml1, meml2, meml3;
-		uword sp = lreg32(4);
-		TRY1(translate(cpu, &meml1, 2, SEG_SS, (sp - 2 * 1) & sp_mask, 2, 0));
-		TRY1(translate(cpu, &meml2, 2, SEG_SS, (sp - 2 * 2) & sp_mask, 2, 0));
-		TRY1(translate(cpu, &meml3, 2, SEG_SS, (sp - 2 * 3) & sp_mask, 2, 0));
-		refresh_flags(cpu);
-		cpu->cc.mask = 0;
-		saddr16(&meml1, cpu->flags);
-		saddr16(&meml2, cpu->seg[SEG_CS].sel);
-		saddr16(&meml3, cpu->ip);
-		sreg32(4, (sp - 2 * 3) & sp_mask);
-
-		TRY1(set_seg(cpu, SEG_CS, newcs));
-		cpu->next_ip = newip; PREFETCH_RESET
-		cpu->ip = newip;
-		cpu->flags &= ~(IF|TF);
-		#if BIOS_DEBUG
-    	if (no != 0x10 && no != 0x1C && no != 0x08) {
-        	char buf[80];
-        	snprintf(buf, 79, "INT %02Xh DOS? %05X+%04X->%05X+%04X AX:%04X  ",
-				no, prev_cs, prev_ip, cpu->seg[SEG_CS].base, newip, cpu->gprx[0].r16);
-        	print_line(buf, 0);
-    	}
-		#endif
-		return true;
-	}
-
-	/* PROTECTED-MODE */
 	OptAddr meml;
 	uword base = cpu->idt.base;
 	int off = no << 3;
@@ -5024,6 +5006,63 @@ u16 prev_ip = cpu->next_ip;
 	return true;
 }
 
+static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
+{
+	cpu_int_hook_t* int_hook = cpu->int_hooks[no];
+	/* INT handler hook - intercept in V86 and real mode */
+	if (int_hook && (!(cpu->cr0 & 1) || (cpu->flags & VM))) {
+		if (int_hook->handler((CPU*)cpu, int_hook->opaque)) return true; /* handled */
+	}
+	#if DEBUG_CPU
+	if (cpu->flags & VM && no >= 0x20) {
+		dolog("V86 INT %02xh\n", no);
+	}
+	#endif
+	if (!(cpu->cr0 & 1)) {
+#if BIOS_DEBUG
+u16 prev_cs = cpu->seg[SEG_CS].base;
+u16 prev_ip = cpu->next_ip;
+#endif
+		/* REAL-ADDRESS-MODE */
+		uword sp_mask = cpu->seg[SEG_SS].flags & SEG_B_BIT ? 0xffffffff : 0xffff;
+		OptAddr meml;
+		uword base = cpu->idt.base;
+		int off = no * 4;
+		TRY1(translate_laddr(cpu, &meml, 1, base + off, 4, 0));
+		uword w1 = load32(cpu, &meml);
+		int newcs = w1 >> 16;
+		uword newip = w1 & 0xffff;
+
+		OptAddr meml1, meml2, meml3;
+		uword sp = lreg32(4);
+		TRY1(translate(cpu, &meml1, 2, SEG_SS, (sp - 2 * 1) & sp_mask, 2, 0));
+		TRY1(translate(cpu, &meml2, 2, SEG_SS, (sp - 2 * 2) & sp_mask, 2, 0));
+		TRY1(translate(cpu, &meml3, 2, SEG_SS, (sp - 2 * 3) & sp_mask, 2, 0));
+		refresh_flags(cpu);
+		cpu->cc.mask = 0;
+		saddr16(&meml1, cpu->flags);
+		saddr16(&meml2, cpu->seg[SEG_CS].sel);
+		saddr16(&meml3, cpu->ip);
+		sreg32(4, (sp - 2 * 3) & sp_mask);
+
+		TRY1(set_seg(cpu, SEG_CS, newcs));
+		cpu->next_ip = newip; PREFETCH_RESET
+		cpu->ip = newip;
+		cpu->flags &= ~(IF|TF);
+		#if BIOS_DEBUG
+    	if (no != 0x10 && no != 0x1C && no != 0x08) {
+        	char buf[80];
+        	snprintf(buf, 79, "INT %02Xh DOS? %05X+%04X->%05X+%04X AX:%04X  ",
+				no, prev_cs, prev_ip, cpu->seg[SEG_CS].base, newip, cpu->gprx[0].r16);
+        	print_line(buf, 0);
+    	}
+		#endif
+		return true;
+	}
+
+	return call_isr_pm(cpu, no, pusherr, ext);
+}
+
 static bool __pmiret_check_cs_same(CPUI386 *cpu, int sel)
 {
 	sel = sel & 0xffff;
@@ -5055,7 +5094,7 @@ static bool __pmiret_check_cs_same(CPUI386 *cpu, int sel)
 	return true;
 }
 
-static bool __not_in_flash_func(__pmiret_check_cs_outer)(CPUI386 *cpu, int sel)
+static bool __attribute__((noinline)) __pmiret_check_cs_outer(CPUI386 *cpu, int sel)
 {
 	sel = sel & 0xffff;
 	if ((sel & ~0x3) == 0) {
@@ -5269,19 +5308,19 @@ static void IRAM_ATTR i386_step(CPU* _cpu, int stepcount)
 	}
 }
 
-void IRAM_ATTR cpu_set_ax(CPU* _cpu, u16 ax)
+void cpu_set_ax(CPU* _cpu, u16 ax)
 {
 	CPUI386 *cpu = (CPUI386*)_cpu;
 	sreg16(0, ax);
 }
 
-u16 IRAM_ATTR cpu_get_ax(CPU* _cpu)
+u16 cpu_get_ax(CPU* _cpu)
 {
 	CPUI386 *cpu = (CPUI386*)_cpu;
 	return lreg16(0);
 }
 
-void IRAM_ATTR setexc(CPU* cpu, int excno, uword excerr)
+void setexc(CPU* cpu, int excno, uword excerr)
 {
 	cpu->excno = excno;
 	cpu->excerr = excerr;
@@ -5357,33 +5396,33 @@ void cpui386_set_gpr(CPUI386 *cpu, int i, u32 val)
 	sreg32(i, val);
 }
 
-u8 IRAM_ATTR get_reg8(struct CPU* cpu, u8 regn) {
+u8 get_reg8(struct CPU* cpu, u8 regn) {
 	return lreg8(regn);
 }
-u16 IRAM_ATTR get_reg16(const struct CPU* cpu, u8 regn) {
+u16 get_reg16(const struct CPU* cpu, u8 regn) {
 	return lreg16(regn);
 }
-u32 IRAM_ATTR get_reg32(struct CPU* cpu, u8 regn) {
+u32 get_reg32(struct CPU* cpu, u8 regn) {
 	return lreg32(regn);
 }
-void IRAM_ATTR set_reg8(struct CPU* cpu, u8 regn, u8 v) {
+void set_reg8(struct CPU* cpu, u8 regn, u8 v) {
 	sreg8(regn, v);
 }
-void IRAM_ATTR set_reg16(struct CPU* cpu, u8 regn, u16 v) {
+void set_reg16(struct CPU* cpu, u8 regn, u16 v) {
 	sreg16(regn, v);
 }
-void IRAM_ATTR set_reg32(struct CPU* cpu, u8 regn, u32 v) {
+void set_reg32(struct CPU* cpu, u8 regn, u32 v) {
 	sreg32(regn, v);
 }
-static u16 IRAM_ATTR get_seg16(const struct CPU* _cpu, u8 segn) {
+static u16 get_seg16(const struct CPU* _cpu, u8 segn) {
 	register CPUI386* cpu = (CPUI386*)_cpu;
 	return cpu->seg[segn].sel;
 }
-static void IRAM_ATTR set_seg16(struct CPU* _cpu, u8 segn, u16 v) {
+static void set_seg16(struct CPU* _cpu, u8 segn, u16 v) {
 	register CPUI386* cpu = (CPUI386*)_cpu;
 	set_seg(cpu, segn, v);
 }
-static void IRAM_ATTR set_flag(CPU* _cpu, u32 mask, bool val)
+static void set_flag(CPU* _cpu, u32 mask, bool val)
 {
 	CPUI386* cpu = (CPUI386*)_cpu;
 	if (cpu->cc.mask & mask) {
@@ -5395,7 +5434,7 @@ static void IRAM_ATTR set_flag(CPU* _cpu, u32 mask, bool val)
 	else
 		cpu->flags &= ~mask;
 }
-static u32 IRAM_ATTR get_flags(CPU* _cpu, u32 mask)
+static u32 get_flags(CPU* _cpu, u32 mask)
 {
 	CPUI386* cpu = (CPUI386*)_cpu;
 	if (cpu->cc.mask & mask) {
@@ -5555,7 +5594,7 @@ static void cpu_debug(CPUI386 *cpu)
 }
 #endif
 
-void IRAM_ATTR cpu_set_a20(CPU* cpu, int enabled)
+void cpu_set_a20(CPU* cpu, int enabled)
 {
 	/* This machine models A20 as permanently enabled.  Some software still
 	 * probes the legacy gate through the KBC or port 92h; disable requests
@@ -5564,7 +5603,7 @@ void IRAM_ATTR cpu_set_a20(CPU* cpu, int enabled)
 	cpu->a20_mask = 0xFFFFFFFFu;
 }
 
-int IRAM_ATTR cpu_get_a20(CPU* cpu)
+int cpu_get_a20(CPU* cpu)
 {
 	(void)cpu;
 	return 1;

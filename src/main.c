@@ -296,7 +296,7 @@ static void cpu_feature_warning_tick(void)
  * Halts execution after displaying the message.
  * Can only display errors if VGA is initialized.
  */
-static void show_error_screen(const char *title, const char *message, const char *detail) {
+void show_error_screen(const char *title, const char *message, const char *detail) {
     if (!vga_initialized) {
         // VGA not ready, just print to serial and halt
         printf("FATAL ERROR: %s\n", title);
@@ -403,7 +403,7 @@ uint32_t __not_in_flash_func(get_uticks)(void) {
 /**
  * Allocate memory (uses PSRAM for large allocations).
  */
-void *pcmalloc(long size) {
+void* pcmalloc(long size) {
     return malloc(size);
 }
 
@@ -1417,8 +1417,10 @@ static bool init_emulator(void) {
     DBG_PRINT("\nCreating PC instance...\n");
     pc = pc_new(vga_redraw, platform_poll, NULL, NULL, &config);
     if (!pc) {
-        printf("ERROR: Failed to create PC instance\n");
-        return false;
+        show_error_screen(" ERROR ",
+                          "Failed to create PC instance.",
+                          "Try other hardware configuration in config.ini");
+        __unreachable();
     }
 
     // Give ISR direct access to VGA register state.
@@ -1794,6 +1796,7 @@ int main(void) {
     /* 256 KiB video profiles use RAM_4_EXT for their 40 KiB guest page cache.
        Smaller runtime adapters leave it free for the FatFs cache.
        NO_PAGING never uses a guest page cache, so RAM_4_EXT is free too. */
+#if !defined(RAM_4_EXT_MERGED)
 #if defined(NO_PAGING)
     if (true)
 #else
@@ -1806,6 +1809,7 @@ int main(void) {
         uintptr_t top = (uintptr_t)&__ram_4_ext_region_end__;
         sdcard_enable_ff_cache_arena(0u, (void *)bottom, (size_t)(top - bottom));
     }
+#endif
 
 #if defined(VIDEO_RUNTIME) || defined(EGA128) || defined(VGA128) || defined(MCGA)
     /* With direct QSPI guest RAM the ram_pages tail of GFX_BUFFER is unused.

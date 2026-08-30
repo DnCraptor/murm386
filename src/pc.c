@@ -1232,13 +1232,34 @@ static void cdrom_change_notify(int drivenum, const char *filename, int was_pres
     ide_change_cd(ide, ide_drive, f, was_present);
 }
 
+void show_error_screen(const char *title, const char *message, const char *detail);
+
+/* Temporary pc_new() startup instrumentation. */
+#define PCNEW_MARK(name) \
+    printf("PCNEW: %s\n", (name))
+#define PCNEW_PTR(name, p) do { \
+    printf("PCNEW: %s -> %p\n", (name), (void *)(p)); \
+    if (!(p)) { \
+        show_error_screen(" PC INIT ERROR ", (name), "constructor returned NULL"); \
+        __unreachable(); \
+    } \
+} while (0)
+
 PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	   u8 *fb, PCConfig *conf)
 {
 #if TRACE_PORTS
 	f_open(&ports_log, "ports.log", FA_WRITE | FA_CREATE_ALWAYS);
 #endif
+	PCNEW_MARK("PC malloc BEGIN");
 	PC *pc = malloc(sizeof(PC));
+	printf("PCNEW: PC malloc -> %p (%u bytes)\n", (void *)pc, (unsigned)sizeof(PC));
+	if (!pc) {
+        show_error_screen(" ERROR ",
+                          "Failed to create PC instance.",
+                          "Critical fault!");
+        __unreachable();
+	}
 	g_pc = pc;
 	CPU_CB *cb = NULL;
 #if !defined(NO_PAGING)
@@ -1253,10 +1274,22 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	pcram_len = 0xc0000 - 0xa0000;
 #endif
 	phys_mem_size = conf->mem_size;
+	PCNEW_MARK("cpu_new BEGIN");
 	pc->cpu = cpu_new(conf->cpu_gen, &cb);
+	PCNEW_PTR("cpu_new", pc->cpu);
+	PCNEW_PTR("cpu callback block", cb);
+	if (!pc->cpu) {
+        show_error_screen(" ERROR ",
+                          "Failed to create PC CPU instance.",
+                          "Critical fault!");
+        __unreachable();
+	}
 	pc->fpu_enabled = conf->fpu ? 1 : 0;
-	if (conf->fpu)
+	if (conf->fpu) {
+		PCNEW_MARK("enable_fpu BEGIN");
 		enable_fpu(pc->cpu);
+		PCNEW_MARK("enable_fpu OK");
+	}
 	pc->bios = conf->bios;
 	pc->cpu->bios = pc->bios;
 	if (!pc->bios) {
@@ -1271,13 +1304,21 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 #endif
 	pc->full_update = 0;
 
+	PCNEW_MARK("i8259_init BEGIN");
 	pc->pic = i8259_init(raise_irq, pc->cpu);
+	PCNEW_PTR("i8259_init", pc->pic);
 	cb->pic = pc->pic;
 	cb->pic_read_irq = read_irq;
 
+	PCNEW_MARK("i8254_init BEGIN");
 	pc->pit = i8254_init(0, pc->pic, set_irq);
+	PCNEW_PTR("i8254_init", pc->pit);
+	PCNEW_MARK("u8250_init BEGIN");
 	pc->serial = u8250_init(4, pc->pic, set_irq);
+	PCNEW_PTR("u8250_init", pc->serial);
+	PCNEW_MARK("cmos_init BEGIN");
 	pc->cmos = cmos_init(conf->mem_size, 8, pc->pic, set_irq);
+	PCNEW_PTR("cmos_init", pc->cmos);
 	_pc_cmos_for_floppy = pc->cmos;
 
 	/* Set up INT 13h disk handler (real mode - DOS) */
@@ -1285,11 +1326,17 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	disk_set_cmos_callback(cmos_floppy_update);
 	bios_13h_init();
 
+	PCNEW_MARK("netredirect_init BEGIN");
 	netredirect_init(pc->cpu, conf->redirector);
+	PCNEW_MARK("netredirect_init OK");
 
 	/* Set up IDE emulation (protected mode - Win95) */
+	PCNEW_MARK("ide_allocate primary BEGIN");
 	pc->ide  = ide_allocate(14, pc->pic, set_irq);
+	PCNEW_PTR("ide_allocate primary", pc->ide);
+	PCNEW_MARK("ide_allocate secondary BEGIN");
 	pc->ide2 = ide_allocate(15, pc->pic, set_irq);
+	PCNEW_PTR("ide_allocate secondary", pc->ide2);
 
 	/* Register CD-ROM callback BEFORE insertdisk so the callback fires
 	 * correctly when insertdisk opens a configured CD image below. */
@@ -1300,6 +1347,7 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	 * ide_attach_cd MUST come before insertdisk for CD slots: insertdisk
 	 * immediately fires disk_cdrom_change_cb which calls ide_change_cd,
 	 * and that requires drives[n] to already exist. */
+	PCNEW_MARK("configured ATA attach BEGIN");
 	for (int i = 0; i < 4; i++) {
 		if (!conf->ata[i] || conf->ata[i][0] == 0)
 			continue;
@@ -1323,13 +1371,17 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 				               ata_get_sects(i));
 		}
 	}
+	PCNEW_MARK("configured ATA attach OK");
 
 	disk_set_raw_sd_hdd(conf->raw_sd_hdd);
 
 	/* CD-ROM E: always present on ide2/drive0 (secondary master).
 	 * Only attach if cdc= didn't already claim that slot (ata[2]). */
-	if (!ide_has_drive(pc->ide2, 0))
+	if (!ide_has_drive(pc->ide2, 0)) {
+		PCNEW_MARK("default CD attach BEGIN");
 		ide_attach_cd(pc->ide2, 0);
+		PCNEW_MARK("default CD attach OK");
+	}
 
 
 
@@ -1355,8 +1407,13 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	cmos_update_checksum(pc->cmos);         /* обязательно, после ide_fill_cmos */
 
 	int piix3_devfn;
+	PCNEW_MARK("i440fx_init BEGIN");
 	pc->i440fx = i440fx_init(&pc->pcibus, &piix3_devfn);
+	PCNEW_PTR("i440fx_init", pc->i440fx);
+	PCNEW_PTR("PCI bus", pc->pcibus);
+	PCNEW_MARK("piix3_ide_init BEGIN");
 	pc->pci_ide = piix3_ide_init(pc->pcibus, piix3_devfn + 1);
+	PCNEW_PTR("piix3_ide_init", pc->pci_ide);
 
 	cb->io = pc;
 	cb->io_read8 = pc_io_read;
@@ -1375,14 +1432,19 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	pc->vga_mem_size = (int)video_profile_vram_size();
 	pc->vga_mem = gfx_buffer;
 	memset(pc->vga_mem, 0, pc->vga_mem_size);
+	PCNEW_MARK("vga_init BEGIN");
 	pc->vga = vga_init(pc->vga_mem, pc->vga_mem_size,
 			   fb, conf->width, conf->height);
+	PCNEW_PTR("vga_init", pc->vga);
 	vga_set_force_8dm(pc->vga, conf->vga_force_8dm);
+	PCNEW_MARK("vga_pci_init BEGIN");
 	pc->pci_vga = vga_pci_init(pc->vga, pc->pcibus, pc, set_pci_vga_bar);
+	PCNEW_PTR("vga_pci_init", pc->pci_vga);
 	pc->pci_vga_ram_addr = -1;
 	disk_set_vga(pc->vga);
 
 	/* Attach floppy disks using INT 13h disk handler */
+	PCNEW_MARK("configured FDD attach BEGIN");
 	const char **fdd = conf->fdd;
 	for (int i = 0; i < 2; i++) {
 		if (!fdd[i] || fdd[i][0] == 0)
@@ -1390,6 +1452,7 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 		/* Floppy drives use drivenum 0 and 1 */
 		insertdisk(i, true, false, fdd[i]);
 	}
+	PCNEW_MARK("configured FDD attach OK");
 
 	cb->iomem = pc;
 
@@ -1397,14 +1460,24 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	pc->redraw_data = redraw_data;
 	pc->poll = poll;
 
+	PCNEW_MARK("i8042_init BEGIN");
 	pc->i8042 = i8042_init(&(pc->kbd), &(pc->mouse),
 			       1, 12, pc->pic, set_irq,
 			       pc, pc_reset_request);
+	PCNEW_PTR("i8042_init", pc->i8042);
+	PCNEW_PTR("PS2 keyboard", pc->kbd);
+	PCNEW_PTR("PS2 mouse", pc->mouse);
 	i8042_set_cpu(pc->cpu);
+	PCNEW_MARK("adlib_new BEGIN");
 	pc->adlib = adlib_new();
+	PCNEW_PTR("adlib_new", pc->adlib);
 	/* NE2000 networking removed */
+	PCNEW_MARK("i8257_new low BEGIN");
 	pc->isa_dma = i8257_new(0x00, 0x80, 0x480, 0);
+	PCNEW_PTR("i8257_new low", pc->isa_dma);
+	PCNEW_MARK("i8257_new high BEGIN");
 	pc->isa_hdma = i8257_new(0xc0, 0x88, 0x488, 1);
+	PCNEW_PTR("i8257_new high", pc->isa_hdma);
 	/* Emulink FDD – virtual floppy on ports 0xF1F0/0xF1F4 (required by BIOS) */
 	memset(&pc->emulink, 0, sizeof(pc->emulink));
 	pc->emulink.cmd = -1;
@@ -1412,14 +1485,22 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	/* FDC (Intel 8272A/82077AA) – port I/O 0x3F0-0x3F7, DMA ch2, IRQ 6.
 	 * Created after isa_dma/pic, and floppy images already inserted above,
 	 * so fdc_media_changed fires correctly on subsequent insert/eject. */
+	PCNEW_MARK("fdc_new BEGIN");
 	pc->fdc = fdc_new(pc->pic, pc->isa_dma);
+	PCNEW_PTR("fdc_new", pc->fdc);
 	_pc_for_fdc = pc;
 	disk_set_fdc_mediachange_callback(fdc_mediachange_notify);
+	PCNEW_MARK("sb16_new BEGIN");
 	pc->sb16 = sb16_new(0x220, 5,
 			    pc->isa_dma, pc->isa_hdma,
 			    pc->pic, set_irq);
+	PCNEW_PTR("sb16_new", pc->sb16);
+	PCNEW_MARK("pcspk_init BEGIN");
 	pc->pcspk = pcspk_init(pc->pit);
+	PCNEW_PTR("pcspk_init", pc->pcspk);
+	PCNEW_MARK("sn76489_reset BEGIN");
 	sn76489_reset();
+	PCNEW_MARK("sn76489_reset OK");
 
 	// Audio/mouse enable flags default to enabled
 	// These can be disabled via config_set_* functions at runtime
@@ -1441,6 +1522,7 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	pc->port92 = 0x2;
 	pc->shutdown_state = 0;
 	pc->reset_request = 0;
+	PCNEW_MARK("pc_new COMPLETE");
 	return pc;
 }
 
