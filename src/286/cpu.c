@@ -541,11 +541,16 @@ static inline void flag_sub8(CPU* cpu, uint8_t v1, uint8_t v2) {
 
 static inline void flag_sub16(CPU* cpu, uint16_t v1, uint16_t v2) {
     /* v1 = destination operand, v2 = source operand */
-    register uint32_t dst = (uint32_t) v1 - (uint32_t) v2;
-    flag_szp16(cpu, (uint16_t) dst);
-    cf = (dst & 0xFFFF0000) != 0;
-    of = ((dst ^ (uint32_t)v1) & ((uint32_t)v1 ^ (uint32_t)v2) & 0x8000) != 0;
-    af = (((uint32_t)v1 ^ (uint32_t)v2 ^ dst) & 0x10) != 0;
+    const uint32_t dst = (uint32_t)v1 - (uint32_t)v2;
+    const uint32_t result16 = (uint16_t)dst;
+    uint32_t flags = cpu->flags.value & ~I286_ALU_FLAGS_MASK;
+    flags |= (dst >> 16) & 1u;                                    /* CF (borrow) */
+    flags |= (uint32_t)parity[(uint8_t)dst] << 2;                  /* PF */
+    flags |= ((uint32_t)(v1 ^ v2 ^ dst)) & 0x10u;                 /* AF */
+    flags |= ((result16 - 1u) >> 31) << 6;                        /* ZF */
+    flags |= (result16 & 0x8000u) >> 8;                           /* SF */
+    flags |= (((dst ^ (uint32_t)v1) & ((uint32_t)v1 ^ (uint32_t)v2) & 0x8000u) >> 4); /* OF */
+    cpu->flags.value = flags;
 }
 
 #define op_adc8() { res8 = oper1b + oper2b + cf; flag_adc8(cpu, oper1b, oper2b, cf); }
