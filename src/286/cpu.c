@@ -248,11 +248,11 @@ void cpu_install_dos_handlers(CPU* cpu) {
 
 u8 reptype;
 u16 oldsp;
-uint8_t tempcf, oldcf, sib;
+uint8_t sib;
 bool operandSizeOverride = false;
 bool addressSizeOverride = false;
 u8 nestlev;
-u16 saveip, savecs, temp16, dummy, stacksize, frametemp;
+u16 saveip, savecs, dummy, stacksize, frametemp;
 
 /* Keep the 286 ModR/M decode state relative to the already-hot CPU pointer.
  * This avoids independent literal-pool loads for each former global. */
@@ -959,21 +959,23 @@ static __not_in_flash() void op_grp5(CPU* cpu, uint16_t oper1) {
     uint16_t oper2, res16;
 
     switch (reg) {
-        case 0: /* INC Ev */
+        case 0: { /* INC Ev */
+            const uint8_t saved_cf = cf;
             oper2 = 1;
-            tempcf = cf;
             op_add16();
-            cf = tempcf;
+            cf = saved_cf;
             writerm16(cpu, rm, res16);
             break;
+        }
 
-        case 1: /* DEC Ev */
+        case 1: { /* DEC Ev */
+            const uint8_t saved_cf = cf;
             oper2 = 1;
-            tempcf = cf;
             op_sub16();
-            cf = tempcf;
+            cf = saved_cf;
             writerm16(cpu, rm, res16);
             break;
+        }
 
         case 2: /* CALL Ev */
             push(cpu, CPU_IP);
@@ -1169,6 +1171,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
         register uint8_t res8;
         register uint8_t oper1b;
         register uint8_t oper2b;
+        register uint16_t temp16;
         switch (opcode) {
             case 0x0: /* 00 ADD Eb Gb */
                 modregrm(cpu);
@@ -1876,77 +1879,85 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 CPU_DI = (uint16_t) dst;
                 break;
             }
-            case 0x48: /* 48 DEC eAX */
-                oldcf = cf;
+            case 0x48: { /* 48 DEC eAX */
+                const uint8_t saved_cf = cf;
                 oper1 = CPU_AX;
                 oper2 = 1;
                 op_sub16();
-                cf = oldcf;
+                cf = saved_cf;
                 CPU_AX = res16;
                 break;
+            }
 
-            case 0x49: /* 49 DEC eCX */
-                oldcf = cf;
+            case 0x49: { /* 49 DEC eCX */
+                const uint8_t saved_cf = cf;
                 oper1 = CPU_CX;
                 oper2 = 1;
                 op_sub16();
-                cf = oldcf;
+                cf = saved_cf;
                 CPU_CX = res16;
                 break;
+            }
 
-            case 0x4A: /* 4A DEC eDX */
-                oldcf = cf;
+            case 0x4A: { /* 4A DEC eDX */
+                const uint8_t saved_cf = cf;
                 oper1 = CPU_DX;
                 oper2 = 1;
                 op_sub16();
-                cf = oldcf;
+                cf = saved_cf;
                 CPU_DX = res16;
                 break;
+            }
 
-            case 0x4B: /* 4B DEC eBX */
-                oldcf = cf;
+            case 0x4B: { /* 4B DEC eBX */
+                const uint8_t saved_cf = cf;
                 oper1 = CPU_BX;
                 oper2 = 1;
                 op_sub16();
-                cf = oldcf;
+                cf = saved_cf;
                 CPU_BX = res16;
                 break;
+            }
 
-            case 0x4C: /* 4C DEC eSP */
-                oldcf = cf;
+            case 0x4C: { /* 4C DEC eSP */
+                const uint8_t saved_cf = cf;
                 oper1 = CPU_SP;
                 oper2 = 1;
                 op_sub16();
-                cf = oldcf;
+                cf = saved_cf;
                 CPU_SP = res16;
                 break;
+            }
 
-            case 0x4D: /* 4D DEC eBP */
-                oldcf = cf;
+            case 0x4D: { /* 4D DEC eBP */
+                const uint8_t saved_cf = cf;
                 oper1 = CPU_BP;
                 oper2 = 1;
                 op_sub16();
-                cf = oldcf;
+                cf = saved_cf;
                 CPU_BP = res16;
                 break;
+            }
 
-            case 0x4E: /* 4E DEC eSI */
-                oldcf = cf;
+            case 0x4E: { /* 4E DEC eSI */
+                const uint8_t saved_cf = cf;
                 oper1 = CPU_SI;
                 oper2 = 1;
                 op_sub16();
-                cf = oldcf;
+                cf = saved_cf;
                 CPU_SI = res16;
                 break;
+            }
 
-            case 0x4F: /* 4F DEC eDI */
-                oldcf = cf;
+            case 0x4F: { /* 4F DEC eDI */
+                const uint8_t saved_cf = cf;
                 oper1 = CPU_DI;
                 oper2 = 1;
                 op_sub16();
-                cf = oldcf;
+                cf = saved_cf;
                 CPU_DI = res16;
                 break;
+            }
 
             case 0x50: /* 50 PUSH eAX */
                 push(cpu, CPU_AX);
@@ -3479,23 +3490,23 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 df = 1;
                 break;
 
-            case 0xFE: /* FE GRP4 Eb */
+            case 0xFE: { /* FE GRP4 Eb */
+                const uint8_t saved_cf = cf;
                 modregrm(cpu);
                 oper1b = readrm8(cpu, rm);
                 oper2b = 1;
                 if (!reg) {
-                    tempcf = cf;
                     op_add8();
-                    cf = tempcf;
+                    cf = saved_cf;
                     writerm8(cpu, rm, res8);
                 } else {
-                    tempcf = cf;
                     res8 = oper1b - oper2b;
                     flag_sub8(cpu, oper1b, oper2b);
-                    cf = tempcf;
+                    cf = saved_cf;
                     writerm8(cpu, rm, res8);
                 }
                 break;
+            }
 
             case 0xFF: /* FF GRP5 Ev */
                 modregrm(cpu);
