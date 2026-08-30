@@ -247,12 +247,6 @@ void cpu_install_dos_handlers(CPU* cpu) {
 #define CPU_286_STYLE_PUSH_SP
 
 u8 reptype;
-u16 oldsp;
-uint8_t sib;
-bool operandSizeOverride = false;
-bool addressSizeOverride = false;
-u8 nestlev;
-u16 saveip, savecs, dummy, stacksize, frametemp;
 
 /* Keep the 286 ModR/M decode state relative to the already-hot CPU pointer.
  * This avoids independent literal-pool loads for each former global. */
@@ -1104,8 +1098,6 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
         while (!docontinue) {
             ///         CPU_CS &= 0xFFFF;
             ///         CPU_IP &= 0xFFFF;
-            //            savecs = CPU_CS;
-            //            saveip = ip;
             // W/A-hack: last byte of interrupts table (actually should not be ever used as CS:IP)
         //    if (unlikely(CPU_CS == XMS_FN_CS && ip == XMS_FN_IP)) {
         //        // hook for XMS
@@ -1183,12 +1175,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
 
             case 0x1: /* 01 ADD Ev Gv */
                 modregrm(cpu);
-                if (operandSizeOverride) {
-                    register uint32_t oper1 = readrm32(cpu, rm);
-                    register uint32_t oper2 = getreg32(reg);
-                    op_add32();
-                    writerm32(cpu, rm, res32);
-                } else {
+                {
                     register uint32_t oper1 = readrm16(cpu, rm);
                     register uint32_t oper2 = getreg16(reg);
                     op_add16();
@@ -2029,15 +2016,17 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
 
 #ifndef CPU_8086
             case 0x60: /* 60 PUSHA (80186+) */
-                oldsp = CPU_SP;
-                push(cpu, CPU_AX);
-                push(cpu, CPU_CX);
-                push(cpu, CPU_DX);
-                push(cpu, CPU_BX);
-                push(cpu, oldsp);
-                push(cpu, CPU_BP);
-                push(cpu, CPU_SI);
-                push(cpu, CPU_DI);
+                {
+                    const uint16_t oldsp = CPU_SP;
+                    push(cpu, CPU_AX);
+                    push(cpu, CPU_CX);
+                    push(cpu, CPU_DX);
+                    push(cpu, CPU_BX);
+                    push(cpu, oldsp);
+                    push(cpu, CPU_BP);
+                    push(cpu, CPU_SI);
+                    push(cpu, CPU_DI);
+                }
                 break;
 
             case 0x61: /* 61 POPA (80186+) */
@@ -3114,27 +3103,28 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 break;
 
             case 0xC8: /* C8 ENTER (80186+) */
-                stacksize = getmem16(CPU_CS, CPU_IP);
-                StepIP(2);
-                nestlev = getmem8(CPU_CS, CPU_IP);
-                StepIP(1);
-                push(cpu, CPU_BP);
-                frametemp = CPU_SP;
-                if (nestlev) {
-                    for (
-                        temp16 = 1;
-                        temp16 < nestlev;
-                        ++temp16) {
-                        CPU_BP = CPU_BP - 2;
-                        push(cpu, CPU_BP);
+                {
+                    const uint16_t stacksize = getmem16(CPU_CS, CPU_IP);
+                    StepIP(2);
+                    const uint8_t nestlev = getmem8(CPU_CS, CPU_IP);
+                    StepIP(1);
+                    push(cpu, CPU_BP);
+                    const uint16_t frametemp = CPU_SP;
+                    if (nestlev) {
+                        for (
+                            temp16 = 1;
+                            temp16 < nestlev;
+                            ++temp16) {
+                            CPU_BP = CPU_BP - 2;
+                            push(cpu, CPU_BP);
+                        }
+
+                        push(cpu, frametemp); //CPU_SP);
                     }
 
-                    push(cpu, frametemp); //CPU_SP);
+                    CPU_BP = frametemp;
+                    CPU_SP = CPU_BP - stacksize;
                 }
-
-                CPU_BP = frametemp;
-                CPU_SP = CPU_BP - stacksize;
-
                 break;
 
             case 0xC9: /* C9 LEAVE (80186+) */
