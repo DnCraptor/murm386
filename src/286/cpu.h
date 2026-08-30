@@ -24,7 +24,6 @@
 #define regbl BL_REG_IDX
 #define regbh BH_REG_IDX
 
-#define segregs ((uint16_t*)segregs32)
 #define getmem8(x, y) read86(segbase(x) + (y))
 #define getmem16(x, y)  readw86(segbase(x) + (y))
 #define getmem32(x, y)  readdw86(segbase(x) + (y))
@@ -39,8 +38,8 @@
 #define putreg16(regid, writeval) cpu->gprx[regid].r16 = writeval
 #define putreg32(regid, writeval) cpu->gprx[regid].r32 = writeval
 #define putreg8(i, v) ((i) > 3 ? (cpu->gprx[i - 4].r8[1] = (v)) : (cpu->gprx[i].r8[0] = (v)))
-#define getsegreg(regid)            segregs[(regid) << 1]
-#define putsegreg(regid, writeval)  segregs[(regid) << 1] = writeval
+#define getsegreg(regid)            (cpu->i286_segregs[(regid)])
+#define putsegreg(regid, writeval)  (cpu->i286_segregs[(regid)] = (writeval))
 #define segbase(x)  ((uint32_t) (x) << 4)
 
 #define cf  cpu->flags.bits.CF

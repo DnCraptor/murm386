@@ -18,7 +18,6 @@ extern void request_terminate(uint8_t exit_code, uint8_t exit_type);
 #define IRAM_ATTR __not_in_flash()
 #define INLINE __always_inline
 
-static uint32_t segregs32[6];
 static bool irq_shadow;
 static bool hltstate;
 
@@ -26,12 +25,12 @@ static bool hltstate;
 #undef CPU_DS
 #undef CPU_ES
 #undef CPU_SS
-#define CPU_CS    segregs[regcs << 1]
-#define CPU_DS    segregs[regds << 1]
-#define CPU_ES    segregs[reges << 1]
-#define CPU_SS    segregs[regss << 1]
-#define CPU_FS    segregs[regfs << 1]
-#define CPU_GS    segregs[reggs << 1]
+#define CPU_CS    cpu->i286_segregs[regcs]
+#define CPU_DS    cpu->i286_segregs[regds]
+#define CPU_ES    cpu->i286_segregs[reges]
+#define CPU_SS    cpu->i286_segregs[regss]
+#define CPU_FS    cpu->i286_segregs[regfs]
+#define CPU_GS    cpu->i286_segregs[reggs]
 
 u8 get_reg8(struct CPU* cpu, u8 regn);
 u16 get_reg16(const struct CPU* cpu, u8 regn);
@@ -39,13 +38,11 @@ u32 get_reg32(struct CPU* cpu, u8 regn);
 void set_reg8(struct CPU* cpu, u8 regn, u8 v);
 void set_reg16(struct CPU* cpu, u8 regn, u16 v);
 void set_reg32(struct CPU* cpu, u8 regn, u32 v);
-static u16 IRAM_ATTR get_seg16(const struct CPU* _cpu, u8 segn) {
-    (void)_cpu;
-	return getsegreg(segn);
+static u16 IRAM_ATTR get_seg16(const struct CPU* cpu, u8 segn) {
+	return cpu->i286_segregs[segn];
 }
-static void IRAM_ATTR set_seg16(struct CPU* _cpu, u8 segn, u16 v) {
-    (void)_cpu;
-    putsegreg(segn, v);
+static void IRAM_ATTR set_seg16(struct CPU* cpu, u8 segn, u16 v) {
+    cpu->i286_segregs[segn] = v;
 }
 static void IRAM_ATTR set_flag(CPU* cpu, u32 mask, bool val)
 {
