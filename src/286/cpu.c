@@ -249,16 +249,23 @@ void cpu_install_dos_handlers(CPU* cpu) {
 //#define CPU_SET_HIGH_FLAGS
 #define CPU_286_STYLE_PUSH_SP
 
-u8 segoverride, reptype;
-u16 useseg, oldsp;
-uint8_t tempcf, oldcf, mode, reg, rm, sib;
+u8 reptype;
+u16 oldsp;
+uint8_t tempcf, oldcf, sib;
 bool operandSizeOverride = false;
 bool addressSizeOverride = false;
 u8 nestlev;
 u16 saveip, savecs, oper1, oper2, res16, temp16, dummy, stacksize, frametemp;
-uint32_t disp32;
-#define disp16 (*(uint16_t*)&disp32)
-uint32_t ea;
+
+/* Keep the 286 ModR/M decode state relative to the already-hot CPU pointer.
+ * This avoids independent literal-pool loads for each former global. */
+#define mode        (cpu->i286_mode)
+#define reg         (cpu->i286_reg)
+#define rm          (cpu->i286_rm)
+#define disp16      (cpu->i286_disp16)
+#define useseg      (cpu->i286_useseg)
+#define ea          (cpu->i286_ea)
+#define segoverride (cpu->i286_segoverride)
 
 static const bool __not_in_flash("cpu.pf") parity[0x100] = {
     1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,

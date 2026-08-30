@@ -58,8 +58,9 @@
   case x:          \
     return y
 
-extern uint8_t mode, reg, rm;
-extern uint32_t ea;
+/* FPU helpers consume the decoded ModR/M fields through these TU-local
+ * snapshots. The hot CPU decoder itself keeps the state in CPU. */
+static uint8_t mode, reg, rm;
 
 #ifdef MIN
 #undef MIN
@@ -1157,11 +1158,14 @@ void OpFpu(CPU* cpu, uint8_t opcode) {
     u64 rde = 0;
     fpu.ip64 = CPU_IP - 1;
     modregrm(cpu);
+    mode = cpu->i286_mode;
+    reg = cpu->i286_reg;
+    rm = cpu->i286_rm;
     bool ismemory = mode != 3;
     fpu.op = op << 8 | mode << 6 | reg << 3 | rm;
     if (ismemory) {
         getea(cpu, rm);
-        fpu.dp = ea;
+        fpu.dp = cpu->i286_ea;
     } else {
         fpu.dp = 0;
     }
