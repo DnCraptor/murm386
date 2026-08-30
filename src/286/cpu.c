@@ -434,6 +434,23 @@ static INLINE void writerm8(CPU* cpu, uint8_t rmval, uint8_t value) {
     }
 }
 
+/* Use only after readrm8/readrm16 in the same instruction, before any
+ * register participating in the effective address can change.  This keeps
+ * the same memory access and address, but avoids recomputing getea(). */
+static INLINE void writerm8_cached_ea(CPU* cpu, uint8_t rmval, uint8_t value) {
+    if (mode < 3)
+        write86(ea, value);
+    else
+        putreg8(rmval, value);
+}
+
+static INLINE void writerm16_cached_ea(CPU* cpu, uint8_t rmval, uint16_t value) {
+    if (mode < 3)
+        writew86(ea, value);
+    else
+        putreg16(rmval, value);
+}
+
 static INLINE uint16_t makeflagsword(CPU* cpu) {
     if (cpu->gen == 2)
         return 2 | (cpu->flags.value & cpu->flags_mask);
@@ -1244,7 +1261,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 oper1b = readrm8(cpu, rm);
                 oper2b = getreg8(reg);
                 op_add8();
-                writerm8(cpu, rm, res8);
+                writerm8_cached_ea(cpu, rm, res8);
                 break;
 
             case 0x1: /* 01 ADD Ev Gv */
@@ -1253,7 +1270,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                     register uint32_t oper1 = readrm16(cpu, rm);
                     register uint32_t oper2 = getreg16(reg);
                     op_add16();
-                    writerm16(cpu, rm, res16);
+                    writerm16_cached_ea(cpu, rm, res16);
                 }
                 break;
 
@@ -1305,7 +1322,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 oper1b = readrm8(cpu, rm);
                 oper2b = getreg8(reg);
                 op_or8();
-                writerm8(cpu, rm, res8
+                writerm8_cached_ea(cpu, rm, res8
                 );
                 break;
 
@@ -1315,7 +1332,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 oper1 = readrm16(cpu, rm);
                 oper2 = getreg16(reg);
                 op_or16();
-                writerm16(cpu, rm, res16
+                writerm16_cached_ea(cpu, rm, res16
                 );
                 break;
 
@@ -1453,7 +1470,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 oper1b = readrm8(cpu, rm);
                 oper2b = getreg8(reg);
                 op_adc8();
-                writerm8(cpu, rm, res8);
+                writerm8_cached_ea(cpu, rm, res8);
                 break;
 
             case 0x11: /* 11 ADC Ev Gv */
@@ -1462,7 +1479,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 oper1 = readrm16(cpu, rm);
                 oper2 = getreg16(reg);
                 op_adc16();
-                writerm16(cpu, rm, res16);
+                writerm16_cached_ea(cpu, rm, res16);
                 break;
 
             case 0x12: /* 12 ADC Gb Eb */
@@ -1514,7 +1531,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 oper1b = readrm8(cpu, rm);
                 oper2b = getreg8(reg);
                 op_sbb8(cpu);
-                writerm8(cpu, rm, res8);
+                writerm8_cached_ea(cpu, rm, res8);
                 break;
 
             case 0x19: /* 19 SBB Ev Gv */
@@ -1522,7 +1539,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 oper1 = readrm16(cpu, rm);
                 oper2 = getreg16(reg);
                 op_sbb16(cpu);
-                writerm16(cpu, rm, res16);
+                writerm16_cached_ea(cpu, rm, res16);
                 break;
 
             case 0x1A: /* 1A SBB Gb Eb */
@@ -1573,7 +1590,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 oper1b = readrm8(cpu, rm);
                 oper2b = getreg8(reg);
                 op_and8();
-                writerm8(cpu, rm, res8);
+                writerm8_cached_ea(cpu, rm, res8);
                 break;
 
             case 0x21: /* 21 AND Ev Gv */
@@ -1582,7 +1599,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 oper1 = readrm16(cpu, rm);
                 oper2 = getreg16(reg);
                 op_and16();
-                writerm16(cpu, rm, res16
+                writerm16_cached_ea(cpu, rm, res16
                 );
                 break;
 
@@ -1652,7 +1669,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 oper1b = readrm8(cpu, rm);
                 oper2b = getreg8(reg);
                 op_sub8();
-                writerm8(cpu, rm, res8
+                writerm8_cached_ea(cpu, rm, res8
                 );
                 break;
 
@@ -1666,7 +1683,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 cf = (dst & 0xFFFF0000) != 0;
                 of = ((dst ^ oper1) & (oper1 ^ oper2) & 0x8000) != 0;
                 af = ((oper1 ^ oper2 ^ dst) & 0x10) != 0;
-                writerm16(cpu, rm, (uint16_t) dst);
+                writerm16_cached_ea(cpu, rm, (uint16_t) dst);
                 break;
             }
             case 0x2A: /* 2A SUB Gb Eb */
@@ -1735,7 +1752,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 oper1b = readrm8(cpu, rm);
                 oper2b = getreg8(reg);
                 op_xor8();
-                writerm8(cpu, rm, res8
+                writerm8_cached_ea(cpu, rm, res8
                 );
                 break;
 
@@ -1745,7 +1762,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 oper1 = readrm16(cpu, rm);
                 oper2 = getreg16(reg);
                 op_xor16();
-                writerm16(cpu, rm, res16
+                writerm16_cached_ea(cpu, rm, res16
                 );
                 break;
 
@@ -2447,7 +2464,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 }
 
                 if (reg < 7) {
-                    writerm8(cpu, rm, res8
+                    writerm8_cached_ea(cpu, rm, res8
                     );
                 }
                 break;
@@ -2497,7 +2514,7 @@ grp1_16_exec:
                 }
 
                 if (reg < 7) {
-                    writerm16(cpu, rm, res16
+                    writerm16_cached_ea(cpu, rm, res16
                     );
                 }
                 break;
