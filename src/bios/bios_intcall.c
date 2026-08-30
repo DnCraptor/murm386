@@ -45,9 +45,9 @@ void bios_intcall(CPU* cpu, uint8_t intnum, const char* owner) {
      * вернёт; здесь мы страхуем только межпоточную утечку состояния.
      */
     bool old_pending_trap = cpu_pending_trap();
-    bool old_irq_shadow = cpu_irq_shadow();
+    bool old_irq_shadow = cpu_irq_shadow(cpu);
     cpu_pending_trap_set(false);
-    cpu_irq_shadow_set(false);
+    cpu_irq_shadow_set(cpu, false);
     bios_callback_params_t params = {
         .callback = intcall_waiter,
         .expected_cs = 0xFFEF, // just default, may be changed
@@ -107,7 +107,7 @@ void bios_intcall(CPU* cpu, uint8_t intnum, const char* owner) {
     drop_bios_callback(cpu, &params);
     ifl = old_ifl;
     cpu_pending_trap_set(old_pending_trap);
-    cpu_irq_shadow_set(old_irq_shadow);
+    cpu_irq_shadow_set(cpu, old_irq_shadow);
     params.done = false;
     // restore initial CS:IP
     SET_CS (cs);

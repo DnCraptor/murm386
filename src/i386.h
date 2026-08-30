@@ -196,6 +196,7 @@ struct CPU {
 	u16 i286_firstip;
 	u8 i286_reptype;
 	u8 i286_hltstate;
+	u8 i286_irq_shadow;
 }; // should be the same in all implementations
 
 typedef struct CPU CPU;
@@ -222,7 +223,7 @@ CPU_ABI_STATIC_ASSERT(offsetof(struct CPU, bios) == 120, "CPU.bios ABI offset");
 CPU_ABI_STATIC_ASSERT(offsetof(struct CPU, prefetch_base) == 128, "CPU.prefetch_base ABI offset");
 CPU_ABI_STATIC_ASSERT(offsetof(struct CPU, int_hooks) == 148, "CPU.int_hooks ABI offset");
 CPU_ABI_STATIC_ASSERT(offsetof(struct CPU, fpu) == 1172, "CPU.fpu ABI offset");
-CPU_ABI_STATIC_ASSERT(sizeof(struct CPU) == 1204, "CPU ABI size");
+CPU_ABI_STATIC_ASSERT(sizeof(struct CPU) == 1208, "CPU ABI size");
 #endif
 
 #undef CPU_ABI_STATIC_ASSERT
@@ -267,8 +268,8 @@ bool cpu_pending_trap(void);
 void cpu_pending_trap_set(bool v);
 
 /* One-instruction maskable-IRQ inhibit after STI/MOV SS/POP SS. */
-bool cpu_irq_shadow(void);
-void cpu_irq_shadow_set(bool v);
+bool cpu_irq_shadow(const CPU* cpu);
+void cpu_irq_shadow_set(CPU* cpu, bool v);
 
 CPU *cpu_new(int gen, CPU_CB **cb);
 #ifdef I386_MODE

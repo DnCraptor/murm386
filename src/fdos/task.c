@@ -4724,7 +4724,7 @@ static void arm_elf_service_guest_irq(void)
   save_ctx(cpu, &saved);
   old_native_done = cpu->native_done;
   old_pending_trap = cpu_pending_trap();
-  old_irq_shadow = cpu_irq_shadow();
+  old_irq_shadow = cpu_irq_shadow(cpu);
   old_ifl = ifl;
 
   nf_memset(&params, 0, sizeof(params));
@@ -4734,7 +4734,7 @@ static void arm_elf_service_guest_irq(void)
   params.owner = "NATIVE ELF IRQ";
 
   cpu_pending_trap_set(false);
-  cpu_irq_shadow_set(false);
+  cpu_irq_shadow_set(cpu, false);
   set_bios_callback(cpu, &params, true);
 
   /*
@@ -4758,7 +4758,7 @@ static void arm_elf_service_guest_irq(void)
 
   drop_bios_callback(cpu, &params);
   cpu_pending_trap_set(old_pending_trap);
-  cpu_irq_shadow_set(old_irq_shadow);
+  cpu_irq_shadow_set(cpu, old_irq_shadow);
   restore_ctx(cpu, &saved);
   cpu->native_done = old_native_done;
   ifl = old_ifl;
