@@ -31,9 +31,6 @@ void config_set_cpu_gen(int gen);
 int config_get_fpu(void);
 void config_set_fpu(int enabled);
 
-int config_get_redirector(void);
-void config_set_redirector(int enabled);
-
 const char *config_get_bios_file(void);
 void config_set_bios_file(const char *filename);
 int config_get_raw_sd_hdd(void);

@@ -21,7 +21,6 @@
 // Current configuration values (minimal storage)
 static int cfg_cpu_gen = 4;
 static int cfg_fpu = 0;
-static int cfg_redirector = 1;
 static char cfg_bios[32] = "";  /* empty = Native BIOS */
 static int cfg_raw_sd_hdd = 0;
 static int cfg_usb_mode = USB_MODE_HOST;
@@ -98,14 +97,6 @@ int config_get_fpu(void) { return cfg_fpu; }
 void config_set_fpu(int enabled) {
     if (cfg_fpu != enabled) {
         cfg_fpu = enabled;
-        cfg_changed = true;
-    }
-}
-
-int config_get_redirector(void) { return cfg_redirector; }
-void config_set_redirector(int enabled) {
-    if (cfg_redirector != enabled) {
-        cfg_redirector = enabled;
         cfg_changed = true;
     }
 }
@@ -409,10 +400,6 @@ bool config_save_all(void) {
         write_line(&fp, "bios=native\n");
     }
     write_line(&fp, "vga_bios=vgabios.bin\n");
-
-    // Fill CMOS
-    snprintf(line, sizeof(line), "redirector=%d\n", cfg_redirector);
-    write_line(&fp, line);
 
     // Disks (must be in [pc] section)
     write_line(&fp, "\n; Disk images\n");

@@ -224,10 +224,6 @@ static bool i386_profile_bios_int_handler(CPUI386 *cpu, void *opaque)
 {
 	unsigned no = (unsigned)(uintptr_t)opaque & 0xffu;
 
-	/* INT 2Fh is already used as a non-BIOS redirector hook. */
-	if (no == 0x2f)
-		return false;
-
 	cpu->bios_prof_last_start[no] = cpu->cycle;
 	cpu->bios_prof_count[no]++;
 

@@ -449,8 +449,6 @@ set(EMU_CORE_SOURCES
     $<$<STREQUAL:${BOARD},C2>:${CMAKE_CURRENT_LIST_DIR}/src/remote_mem.c>
     $<$<STREQUAL:${BOARD},C2>:${CMAKE_CURRENT_LIST_DIR}/link/link_fast.c>
 
-    # access to sd-card using W/A with network-like driver (mapdrive.com)
-    src/netredirect.c
 )
 
 #=============================================================================

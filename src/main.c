@@ -883,7 +883,6 @@ static void load_default_config(void) {
     config.fdd[0] = NULL;
     config.fdd[1] = NULL;
 
-    config.redirector = 1;
     config.enable_serial = 0;
     config.vga_force_8dm = 0;
 }
@@ -1440,7 +1439,6 @@ static bool init_emulator(void) {
     // (these override INI values if not present in [frank-386] section)
     config_set_cpu_gen(config.cpu_gen);
     config_set_fpu(config.fpu);
-    config_set_redirector(config.redirector);
     config_set_bios_file(config.bios);
     config_set_raw_sd_hdd(config.raw_sd_hdd);
     // Hardware settings are loaded from [frank-386] section via parse_frank_386_ini

@@ -27,7 +27,6 @@ extern bool SELECT_VGA;
 uint8_t guest_bulk_buf[GUEST_BULK_BUF_SIZE];
 
 #include "mpu401.c.inl"
-void netredirect_init(CPU *cpu, int enable);
 
 unsigned long phys_mem_size = 8l << 20;
 #if !defined(NO_PAGING)
@@ -1285,7 +1284,6 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	disk_set_cmos_callback(cmos_floppy_update);
 	bios_13h_init();
 
-	netredirect_init(pc->cpu, conf->redirector);
 
 	/* Set up IDE emulation (protected mode - Win95) */
 	pc->ide  = ide_allocate(14, pc->pic, set_irq);
@@ -2354,8 +2352,6 @@ int parse_conf_ini(void* user, const char* section,
 			conf->fdd[0] = strdup(value);
 		} else if (NAME("fdb")) {
 			conf->fdd[1] = strdup(value);
-		} else if (NAME("redirector")) {
-			conf->redirector = atoi(value);
 		} else if (NAME("enable_serial")) {
 			conf->enable_serial = atoi(value);
 		} else if (NAME("vga_force_8dm")) {

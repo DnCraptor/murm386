@@ -138,7 +138,6 @@ typedef struct {
 	int iscd[4];
 	int raw_sd_hdd;
 	const char *fdd[2];
-	int redirector;
 	int width;
 	int height;
 	int cpu_gen;
