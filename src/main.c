@@ -78,10 +78,6 @@ bool ega128_paging_flush(void);
 #include "diskcache.h"
 #include "gameport.h"
 
-#if FEATURE_AUDIO_PWM
-#include <hardware/pwm.h>
-#endif
-
 //=============================================================================
 // Version Information
 //=============================================================================
@@ -1244,6 +1240,16 @@ static bool init_hardware(void) {
             vga_hw_set_boot_output(false);
             f_close(&fp);
         }
+#if HAS_AUDIO_I2S && HAS_AUDIO_PWM
+        if (f_open(&fp, "/.config/286/force_i2s", FA_READ) == FR_OK) {
+            audio_set_boot_output(AUDIO_OUTPUT_I2S);
+            f_close(&fp);
+        }
+        else if (f_open(&fp, "/.config/286/force_pwm", FA_READ) == FR_OK) {
+            audio_set_boot_output(AUDIO_OUTPUT_PWM);
+            f_close(&fp);
+        }
+#endif
     }
 
     // Initialize VGA early so we can show errors on screen
@@ -1632,20 +1638,11 @@ void __not_in_flash_func(tsr1_dispatch)(void)
         cb();
 }
 // to call DMA wait not from ISR for timer
-bool repeat_me_often(void);
+void repeat_me_often(void);
 static void __not_in_flash_func(core1_entry)(void) {
 
     // Audio comes first so fatal PSRAM errors can signal before video starts.
-    // Boards without an I2S DAC (Olimex PC) define no I2S pins at all, so the
-    // pin report has to follow the audio type rather than being unconditional.
-#if FEATURE_AUDIO_I2S
-    DBG_PRINT("Initializing I2S Audio...\n");
-    DBG_PRINT("  DATA: GPIO%d, CLK: GPIO%d, LRCK: GPIO%d\n",
-           I2S_DATA_PIN, I2S_CLOCK_PIN_BASE, I2S_CLOCK_PIN_BASE + 1);
-#else
-    DBG_PRINT("Initializing PWM Audio...\n");
-    DBG_PRINT("  LEFT: GPIO%d, RIGHT: GPIO%d\n", PWM_LEFT_PIN, PWM_RIGHT_PIN);
-#endif
+    DBG_PRINT("Initializing runtime audio output...\n");
     audio_set_enabled(false);
     audio_init();
     audio_set_volume(config_get_volume());

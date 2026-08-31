@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include "audio.h"
 #include "video_profile.h"
+#include "board_config.h"
 #include "ff.h"
 
 extern bool SELECT_VGA;
@@ -50,6 +51,7 @@ typedef enum {
     SETTING_VOLTAGE,
     SETTING_PSRAM_FREQ,
     SETTING_FLASH_FREQ,
+    SETTING_AUDIO_OUTPUT,
     SETTING_VIDEO_OUTPUT,
     SETTING_COUNT
 } SettingItem;
@@ -103,11 +105,14 @@ typedef enum {
 } VideoOutputSetting;
 
 static VideoOutputSetting video_output_setting = VIDEO_OUTPUT_AUTO;
+static int audio_output_setting = AUDIO_OUTPUT_AUTO;
 
 #define VIDEO_MARKER_DIR1 "/.config"
 #define VIDEO_MARKER_DIR2 "/.config/286"
 #define VIDEO_MARKER_VGA  "/.config/286/force_vga"
 #define VIDEO_MARKER_HDMI "/.config/286/force_dvi"
+#define AUDIO_MARKER_PWM  "/.config/286/force_pwm"
+#define AUDIO_MARKER_I2S  "/.config/286/force_i2s"
 
 // Original values (to detect changes)
 static int orig_cpu, orig_fpu, orig_video_adapter;
@@ -136,6 +141,49 @@ static VideoOutputSetting load_video_output_setting(void) {
         return VIDEO_OUTPUT_HDMI;
     return VIDEO_OUTPUT_AUTO;
 }
+
+static int load_audio_output_setting(void) {
+#if !HAS_AUDIO_I2S
+    return AUDIO_OUTPUT_PWM;
+#elif !HAS_AUDIO_PWM
+    return AUDIO_OUTPUT_I2S;
+#else
+    FILINFO fno;
+    if (f_stat(AUDIO_MARKER_I2S, &fno) == FR_OK)
+        return AUDIO_OUTPUT_I2S;
+    if (f_stat(AUDIO_MARKER_PWM, &fno) == FR_OK)
+        return AUDIO_OUTPUT_PWM;
+    return AUDIO_OUTPUT_AUTO;
+#endif
+}
+
+#if HAS_AUDIO_I2S && HAS_AUDIO_PWM
+static void save_audio_output_setting(int setting) {
+    FIL fp;
+
+    audio_output_setting = setting;
+    if (setting == AUDIO_OUTPUT_AUTO) {
+        (void)f_unlink(AUDIO_MARKER_PWM);
+        (void)f_unlink(AUDIO_MARKER_I2S);
+        return;
+    }
+
+    (void)f_mkdir(VIDEO_MARKER_DIR1);
+    (void)f_mkdir(VIDEO_MARKER_DIR2);
+
+    const char *create_path;
+    if (setting == AUDIO_OUTPUT_I2S) {
+        (void)f_unlink(AUDIO_MARKER_PWM);
+        create_path = AUDIO_MARKER_I2S;
+    } else {
+        (void)f_unlink(AUDIO_MARKER_I2S);
+        create_path = AUDIO_MARKER_PWM;
+    }
+
+    if (f_open(&fp, create_path, FA_CREATE_ALWAYS | FA_WRITE) == FR_OK)
+        f_close(&fp);
+}
+#endif
 
 static void save_video_output_setting(VideoOutputSetting setting) {
     FIL fp;
@@ -191,6 +239,7 @@ void settingsui_open(void) {
     orig_volume = audio_get_volume();
     orig_voltage = config_get_voltage();
     orig_mouse_invert_y = config_get_mouse_invert_y();
+    audio_output_setting = load_audio_output_setting();
     video_output_setting = load_video_output_setting();
 
     settings_state = SETTINGS_MAIN;
@@ -367,6 +416,15 @@ static void cycle_option(int direction) {
             config_set_flash_freq(options[idx]);
             break;
 
+        case SETTING_AUDIO_OUTPUT: {
+#if HAS_AUDIO_I2S && HAS_AUDIO_PWM
+            int value = audio_output_setting;
+            value = (value + direction + 3) % 3;
+            save_audio_output_setting(value);
+#endif
+            break;
+        }
+
         case SETTING_VIDEO_OUTPUT: {
             int value = (int)video_output_setting;
             value = (value + direction + 3) % 3;
@@ -407,6 +465,7 @@ static void draw_settings_menu(void) {
         "CPU Voltage:",
         "PSRAM Freq:",
         "Flash Freq:",
+        "Audio output:",
         "VGA/HDMI:"
     };
     char value[24];
@@ -500,6 +559,17 @@ static void draw_settings_menu(void) {
             case SETTING_FLASH_FREQ:
                 snprintf(value, sizeof(value), "< %d MHz >", config_get_flash_freq());
                 break;
+            case SETTING_AUDIO_OUTPUT: {
+#if HAS_AUDIO_I2S && HAS_AUDIO_PWM
+                static const char *names[] = { "Autodetect", "PWM", "I2S" };
+                snprintf(value, sizeof(value), "< %s >", names[audio_output_setting]);
+#elif HAS_AUDIO_I2S
+                snprintf(value, sizeof(value), "  I2S");
+#else
+                snprintf(value, sizeof(value), "  PWM");
+#endif
+                break;
+            }
             case SETTING_VIDEO_OUTPUT: {
                 static const char *names[] = { "Autodetect", "VGA", "HDMI" };
                 snprintf(value, sizeof(value), "< %s >", names[video_output_setting]);

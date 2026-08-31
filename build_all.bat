@@ -25,52 +25,17 @@ shift
 goto collect_args
 :args_done
 set /a COUNT=0
-set "TOTAL=32"
+set "TOTAL=20"
 
 for %%B in (M1 M2 PC Z2 C2) do (
-    rem One paging firmware: MCGA/EGA128/VGA128/VGA256 selected at runtime.
-    if "%%B"=="PC" (
-        call :build_one %%B RUNTIME PWM OFF
-        if errorlevel 1 exit /b !errorlevel!
-        call :build_one %%B RUNTIME PWM ON
-        if errorlevel 1 exit /b !errorlevel!
-    ) else if "%%B"=="C2" (
-        call :build_one %%B RUNTIME I2S OFF
-        if errorlevel 1 exit /b !errorlevel!
-        call :build_one %%B RUNTIME I2S ON
-        if errorlevel 1 exit /b !errorlevel!
-    ) else (
-        call :build_one %%B RUNTIME I2S OFF
-        if errorlevel 1 exit /b !errorlevel!
-        call :build_one %%B RUNTIME I2S ON
-        if errorlevel 1 exit /b !errorlevel!
-        call :build_one %%B RUNTIME PWM OFF
-        if errorlevel 1 exit /b !errorlevel!
-        call :build_one %%B RUNTIME PWM ON
-        if errorlevel 1 exit /b !errorlevel!
-    )
-
-    rem The only separate memory model: VGA256 with direct QSPI guest RAM.
-    if "%%B"=="PC" (
-        call :build_one %%B VGA256 PWM OFF NP
-        if errorlevel 1 exit /b !errorlevel!
-        call :build_one %%B VGA256 PWM ON NP
-        if errorlevel 1 exit /b !errorlevel!
-    ) else if "%%B"=="C2" (
-        call :build_one %%B VGA256 I2S OFF NP
-        if errorlevel 1 exit /b !errorlevel!
-        call :build_one %%B VGA256 I2S ON NP
-        if errorlevel 1 exit /b !errorlevel!
-    ) else (
-        call :build_one %%B VGA256 I2S OFF NP
-        if errorlevel 1 exit /b !errorlevel!
-        call :build_one %%B VGA256 I2S ON NP
-        if errorlevel 1 exit /b !errorlevel!
-        call :build_one %%B VGA256 PWM OFF NP
-        if errorlevel 1 exit /b !errorlevel!
-        call :build_one %%B VGA256 PWM ON NP
-        if errorlevel 1 exit /b !errorlevel!
-    )
+    call :build_one %%B RUNTIME OFF
+    if errorlevel 1 exit /b !errorlevel!
+    call :build_one %%B RUNTIME ON
+    if errorlevel 1 exit /b !errorlevel!
+    call :build_one %%B VGA256 OFF NP
+    if errorlevel 1 exit /b !errorlevel!
+    call :build_one %%B VGA256 ON NP
+    if errorlevel 1 exit /b !errorlevel!
 )
 echo.
 echo All %TOTAL% supported 286 variants ^(with and without EMM^) built. UF2 files are under bin/^<build-type^>/.
@@ -80,10 +45,9 @@ exit /b 0
 set /a COUNT+=1
 set "B=%~1"
 set "V=%~2"
-set "A=%~3"
-set "E=%~4"
-set "P=%~5"
-set "TAG=!B!-286-!V!-!A!"
+set "E=%~3"
+set "P=%~4"
+set "TAG=!B!-286-!V!"
 set "EMM_ARG="
 set "PAGING_ARG="
 if /I "!E!"=="ON" (
@@ -96,5 +60,5 @@ if /I "!P!"=="NP" (
 )
 echo.
 echo [!COUNT!/%TOTAL%] !TAG!
-call "%ROOT%build.bat" --board !B! --video !V! --audio !A! --build-dir "%ROOT%build\all\!TAG!" !EMM_ARG! !PAGING_ARG! %EXTRA_ARGS%
+call "%ROOT%build.bat" --board !B! --video !V! --build-dir "%ROOT%build\all\!TAG!" !EMM_ARG! !PAGING_ARG! %EXTRA_ARGS%
 exit /b %errorlevel%

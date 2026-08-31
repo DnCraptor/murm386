@@ -67,10 +67,7 @@ Supported firmware audio backends are:
 
 The emulated PC audio devices include PC speaker, AdLib/OPL, Sound Blaster-compatible paths, Tandy, Covox and Disney Sound Source support.
 
-Board restrictions are enforced by CMake/build scripts:
-
-- `PC` uses PWM;
-- `C2` uses I2S.
+Backend availability follows the board pinout at runtime: M1/M2/Z2 can select PWM or I2S, `PC` is PWM-only, and `C2` is I2S-only.
 
 ## Input
 
@@ -107,13 +104,13 @@ The recommended entry points are:
 Examples:
 
 ```sh
-./build.sh -M1 -RUNTIME -i2s -504 -p 66 --clean
-./build.sh -M2 -RUNTIME -pwm --hdmi
-./build.sh -M2 -VGA256 -i2s --no-paging
+./build.sh -M1 -RUNTIME -504 -p 66 --clean
+./build.sh -M2 -RUNTIME --hdmi
+./build.sh -M2 -VGA256 --no-paging
 ./build_all.sh 286
 ```
 
-The single-build scripts always pass `CPU_TARGET=286` intentionally. The all-build scripts accept `286` as an explicit CPU-target argument for forward compatibility, but currently reject `386` because that branch is not considered tested. `build_all` builds both `EMM=OFF` and `EMM=ON` variants. For each valid board/audio/EMM combination it builds one `RUNTIME` paging firmware and one `VGA256 --no-paging` firmware: **32 builds** total.
+The single-build scripts always pass `CPU_TARGET=286` intentionally. The all-build scripts accept `286` as an explicit CPU-target argument for forward compatibility, but currently reject `386` because that branch is not considered tested. `build_all` builds both `EMM=OFF` and `EMM=ON` variants. For each board/EMM combination it builds one `RUNTIME` paging firmware and one `VGA256 --no-paging` firmware: **20 builds** total. Audio output is runtime-selected and does not multiply the build matrix.
 
 The single-build wrappers default to `RUNTIME` with paging enabled. `--no-paging` is reserved for the separate `VGA256` direct-QSPI memory model.
 
@@ -124,7 +121,7 @@ See [README-host-build.md](README-host-build.md) for toolchain setup, script opt
 CMake encodes the important build parameters in the firmware name. Typical output looks like:
 
 ```text
-m1p2-286-RUNTIME-504MHz-1.6V-P66-I2S-v1.16.uf2
+m1p2-286-RUNTIME-504MHz-1.6V-P66-v1.16.uf2
 ```
 
 Outputs are written under:
@@ -139,6 +136,12 @@ At power-on, the physical video output can be overridden before video autodetect
 
 The **VGA/HDMI** item at the bottom of the Win+F11 Hardware setup menu controls the persistent boot selection. **Autodetect** is the default and removes both marker files. **VGA** creates `/.config/286/force_vga`; **HDMI** creates `/.config/286/force_dvi`. Selecting either forced output removes the opposite marker. The marker files are updated immediately when the value is changed; no Apply or restart is requested by this setting itself. The selected physical output is used on the next boot.
 
+
+### Physical audio output
+
+The physical audio backend is selected at runtime; separate I2S and PWM firmware builds are no longer required. On boards that provide both backends, **Autodetect** is the default and probes the audio pins at startup. The Win+F11 **Audio output** item selects `Autodetect / PWM / I2S` using the same early sticky-marker mechanism as video: **PWM** creates `/.config/286/force_pwm`, **I2S** creates `/.config/286/force_i2s`, and **Autodetect** removes both files. Selecting either forced output removes the opposite marker. Marker files are updated immediately; no Apply or restart is requested by this setting itself. The selected physical backend is used on the next boot. PC hardware is PWM-only and C2 is I2S-only, so those boards show their fixed backend.
+
+For automatic detection on dual-backend boards the firmware first drives the probe pins low for 50 ms to discharge residual RC-filter charge, then uses the same `testPins()` electrical-link test used by video detection. A probe that still reads HIGH under pull-down is treated as external back-feed and falls back to PWM. The selected backend is initialized after `config.ini` has been loaded.
 The project contains the on-screen settings and disk-management UI. Current key bindings are implemented in `src/main.c`; consult that source when changing input mappings so documentation does not drift from code again.
 
 ```text

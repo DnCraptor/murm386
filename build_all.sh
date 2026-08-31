@@ -24,11 +24,11 @@ for arg in "${EXTRA_ARGS[@]}"; do
     fi
 done
 COUNT=0
-TOTAL=32
+TOTAL=20
 
 build_one() {
-    local board="$1" video="$2" audio="$3" emm="$4" paging="${5:-PAGING}"
-    local tag="${board}-${CPU_TARGET}-${video}-${audio}"
+    local board="$1" video="$2" emm="$3" paging="${4:-PAGING}"
+    local tag="${board}-${CPU_TARGET}-${video}"
     local emm_args=() paging_args=()
     if [[ "$emm" == "ON" ]]; then
         tag+="-emm"
@@ -41,24 +41,15 @@ build_one() {
     COUNT=$((COUNT + 1))
     printf '\n[%d/%d] %s\n' "$COUNT" "$TOTAL" "$tag"
     "$SCRIPT_DIR/build.sh" \
-        --board "$board" --video "$video" --audio "$audio" \
+        --board "$board" --video "$video" \
         --build-dir "$SCRIPT_DIR/build/all/$tag" \
         "${emm_args[@]}" "${paging_args[@]}" "${EXTRA_ARGS[@]}"
 }
 
 for board in "${BOARDS[@]}"; do
-    case "$board" in
-        PC) audios=(PWM) ;;
-        C2) audios=(I2S) ;;
-        *) audios=(I2S PWM) ;;
-    esac
-    for audio in "${audios[@]}"; do
-        for emm in OFF ON; do
-            # Common paging firmware: MCGA/EGA128/EGA256/VGA128/VGA256 selected at runtime.
-            build_one "$board" RUNTIME "$audio" "$emm"
-            # The only separate memory model: VGA256 with direct QSPI guest RAM.
-            build_one "$board" VGA256 "$audio" "$emm" NP
-        done
+    for emm in OFF ON; do
+        build_one "$board" RUNTIME "$emm"
+        build_one "$board" VGA256 "$emm" NP
     done
 done
 

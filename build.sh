@@ -9,7 +9,6 @@ cd "$SCRIPT_DIR"
 
 BOARD="M1"
 VIDEO_MODE="RUNTIME"
-AUDIO="PWM"
 CPU_SPEED="504"
 PSRAM_SPEED="66"
 BUILD_TYPE="Release"
@@ -33,7 +32,6 @@ Main options:
   -b, --board M1|M2|PC|Z2|C2       Board variant (default: M1)
   -v, --video RUNTIME|MCGA|EGA128|VGA128|VGA256
                                       Video profile (default: RUNTIME)
-  -a, --audio I2S|PWM               Audio backend (default: PWM)
   -c, --clock MHz                   RP2350 clock (default: 504)
   -p, --psram MHz                   QSPI PSRAM max clock (default: 66)
       --hdmi                        Force HDMI output
@@ -51,12 +49,11 @@ Main options:
 Short forms:
   -M1 -M2 -PC -Z2 -C2
   -RUNTIME -MCGA -EGA128 -VGA128 -VGA256
-  -i2s -pwm
   -252 -378 -504
 
 Examples:
-  ./build.sh -M1 -VGA256 -i2s -504 -p 66 --clean
-  ./build.sh -M2 -VGA128 -pwm --hdmi
+  ./build.sh -M1 -VGA256 -504 -p 66 --clean
+  ./build.sh -M2 -VGA128 --hdmi
 USAGE
 }
 
@@ -71,7 +68,6 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         -b|--board) need_arg "$@"; BOARD="${2^^}"; shift 2 ;;
         -v|--video) need_arg "$@"; VIDEO_MODE="${2^^}"; shift 2 ;;
-        -a|--audio) need_arg "$@"; AUDIO="${2^^}"; shift 2 ;;
         -c|--clock) need_arg "$@"; CPU_SPEED="$2"; shift 2 ;;
         -p|--psram) need_arg "$@"; PSRAM_SPEED="$2"; shift 2 ;;
         --build-type) need_arg "$@"; BUILD_TYPE="$2"; shift 2 ;;
@@ -80,8 +76,6 @@ while [[ $# -gt 0 ]]; do
 
         -M1|-M2|-PC|-Z2|-C2) BOARD="${1#-}"; shift ;;
         -RUNTIME|-MCGA|-EGA128|-VGA128|-VGA256) VIDEO_MODE="${1#-}"; shift ;;
-        -i2s) AUDIO="I2S"; shift ;;
-        -pwm) AUDIO="PWM"; shift ;;
         -252|-378|-504) CPU_SPEED="${1#-}"; shift ;;
 
         --hdmi) FORCE_HDMI="ON"; FORCE_VGA="OFF"; shift ;;
@@ -98,17 +92,9 @@ done
 
 case "$BOARD" in M1|M2|PC|Z2|C2) ;; *) echo "Invalid board: $BOARD" >&2; exit 2 ;; esac
 case "$VIDEO_MODE" in RUNTIME|MCGA|EGA128|VGA128|VGA256) ;; *) echo "Invalid video mode: $VIDEO_MODE" >&2; exit 2 ;; esac
-case "$AUDIO" in I2S|PWM) ;; *) echo "Invalid audio type: $AUDIO" >&2; exit 2 ;; esac
 if [[ "$VIDEO_MODE" == "RUNTIME" && "$NO_PAGING" == "ON" ]]; then
     echo "RUNTIME requires paging; use VGA256 with --no-paging." >&2
     exit 2
-fi
-
-# Hardware constraints mirrored from CMakeLists.txt.
-if [[ "$BOARD" == "PC" ]]; then
-    AUDIO="PWM"
-elif [[ "$BOARD" == "C2" ]]; then
-    AUDIO="I2S"
 fi
 
 if [[ $CLEAN -eq 1 ]]; then
@@ -133,7 +119,6 @@ CMAKE_ARGS=(
     "-DCPU_TARGET=286"
     "-DBOARD=$BOARD"
     "-DVIDEO_MODE=$VIDEO_MODE"
-    "-DAUDIO_TYPE=$AUDIO"
     "-DCPU_SPEED=$CPU_SPEED"
     "-DPSRAM_SPEED=$PSRAM_SPEED"
     "-DFORCE_HDMI=$FORCE_HDMI"

@@ -526,6 +526,19 @@ static inline char get_rp2350_package_letter(void) {
 #define EMU_CPU_GEN 4
 #endif
 
+
+// Runtime audio backend availability derived from the selected board pins.
+#if defined(I2S_DATA_PIN) && defined(I2S_CLOCK_PIN_BASE)
+#define HAS_AUDIO_I2S 1
+#else
+#define HAS_AUDIO_I2S 0
+#endif
+#if defined(PWM_LEFT_PIN) && defined(PWM_RIGHT_PIN)
+#define HAS_AUDIO_PWM 1
+#else
+#define HAS_AUDIO_PWM 0
+#endif
+
 //=============================================================================
 // SD Card Configuration
 //=============================================================================

@@ -44,6 +44,7 @@ void config_set_usb_mode(int mode);
 // Hardware settings (saved in [murm-286] section)
 int config_get_video_adapter(void);
 void config_set_video_adapter(int profile);
+
 int config_get_pcspeaker(void);
 void config_set_pcspeaker(int enabled);
 
