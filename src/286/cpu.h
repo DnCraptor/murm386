@@ -34,10 +34,10 @@
 #define signext32(value)  (int32_t)(int16_t)(value)
 #define getreg16(regid) (cpu->gprx[regid].r16)
 #define getreg32(regid) (cpu->gprx[regid].r32)
-#define getreg8(i)  ((i) > 3 ? cpu->gprx[i - 4].r8[1] : cpu->gprx[i].r8[0])
+#define getreg8(i)  (cpu->gprx[(i) & 3].r8[(i) >> 2])
 #define putreg16(regid, writeval) cpu->gprx[regid].r16 = writeval
 #define putreg32(regid, writeval) cpu->gprx[regid].r32 = writeval
-#define putreg8(i, v) ((i) > 3 ? (cpu->gprx[i - 4].r8[1] = (v)) : (cpu->gprx[i].r8[0] = (v)))
+#define putreg8(i, v) (cpu->gprx[(i) & 3].r8[(i) >> 2] = (v))
 #define getsegreg(regid)            (cpu->i286_segregs[(regid)])
 #define putsegreg(regid, writeval)  (cpu->i286_segregs[(regid)] = (writeval))
 #define segbase(x)  ((uint32_t) (x) << 4)
