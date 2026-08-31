@@ -145,6 +145,7 @@ For automatic detection on dual-backend boards the firmware first drives the pro
 The project contains the on-screen settings and disk-management UI. Current key bindings are implemented in `src/main.c`; consult that source when changing input mappings so documentation does not drift from code again.
 
 ```text
+Win+F10 - Toggle USB HOST/DEVICE mode and reboot
 Win+F11 - Hardware setup
 Win+F12 - Attached disks / USB-device setup
 Ctrl+Alt+Del - soft reset

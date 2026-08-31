@@ -540,6 +540,33 @@ static __attribute__((noreturn)) void hard_reboot(void)
         tight_loop_contents();
 }
 
+#ifdef USB_HID_ENABLED
+/* Win+F10: persist the opposite USB role, release the currently active
+ * TinyUSB side cleanly, then perform the same full RP2350 reboot used by
+ * the settings UI.  Do not reboot if config.ini could not be updated. */
+static void usb_role_toggle_and_reboot(void)
+{
+    const int old_mode = config_get_usb_mode();
+    const int new_mode = (old_mode == USB_MODE_DEVICE)
+                       ? USB_MODE_HOST : USB_MODE_DEVICE;
+
+    if (old_mode == USB_MODE_DEVICE)
+        usbmsc_device_shutdown();
+
+    config_set_usb_mode(new_mode);
+    if (!config_save_all()) {
+        config_set_usb_mode(old_mode);
+        DBG_PRINT("Win+F10: failed to save USB mode; reboot cancelled\n");
+        return;
+    }
+
+    if (old_mode == USB_MODE_HOST)
+        usbkbd_early_host_deinit();
+
+    hard_reboot();
+}
+#endif
+
 #if CONTROL_STACK
 /* Refuse to open an OSD dialog (Win+F11/F12) when the core0 stack has grown so
    deep that rendering it would descend into TEXT_BUFFER and corrupt
@@ -595,6 +622,14 @@ static bool process_keycode(int is_down, int keycode) {
     if (keycode == KEY_LEFTMETA) {
         win_key_pressed = is_down;
     }
+
+#ifdef USB_HID_ENABLED
+    // Win+F10: toggle USB HOST/DEVICE, persist it, release USB and reboot.
+    if (is_down && keycode == KEY_F10 && win_key_pressed) {
+        usb_role_toggle_and_reboot();
+        return false;
+    }
+#endif
 
     // Win+F12: enter Disk Manager, or switch to it from Settings.
     if (is_down && keycode == KEY_F12 && win_key_pressed) {

@@ -40,6 +40,7 @@ void settingsui_clear_restart(void);
 void settingsui_animate(void);
 
 // Linux keycodes
+#define KEY_F10     68
 #define KEY_F11     87
 
 #endif // SETTINGSUI_H
