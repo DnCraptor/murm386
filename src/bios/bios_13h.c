@@ -659,6 +659,7 @@ DL = drive number
 Return:
 AH = 00h no such drive
 AH = 01h diskette, no change-line support
+AH = 02h diskette, change-line support
 AH = 03h fixed disk present, CX:DX = number of 512-byte sectors
 CF clear when a drive is present, set when absent
 */
@@ -685,7 +686,8 @@ static bool bios_13h_15h(CPU* cpu)
         CPU_CX = (uint16_t)(sectors >> 16);
         CPU_DX = (uint16_t)(sectors & 0xFFFF);
     } else {
-        CPU_AH = 0x01;
+        /* AT-class floppy drives expose media-change status through AH=16h. */
+        CPU_AH = 0x02;
     }
 
     cf = 0;
