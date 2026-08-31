@@ -15,13 +15,16 @@
  * Если гость загрузит свой драйвер мыши (CTMOUSE и т.п.), он перепишет
  * вектора INT 33h/INT 74h в IVT, и наш код просто перестанет вызываться.
  *
- * Курсор: программный, только текстовые режимы (BDA 40:49 = 0..3, 7).
- * Обработчики событий (AX=000Ch/0014h) сохраняются, но не вызываются.
+ * Курсор: программный; текстовые режимы и VGA mode 13h.
+ * Обработчики событий AX=000Ch/0014h вызываются синхронно как FAR callback.
  */
 
 #include <string.h>
 #include "286/cpu.h"
 #include "bios.h"
+
+/* Existing synchronous guest FAR-call helper from the FreeDOS runtime. */
+extern void cpu_far_call(CPU *cpu, uint16_t seg, uint16_t off);
 
 #define BDA_VIDEO_MODE   0x449u
 #define BDA_VIDEO_COLS   0x44Au
@@ -65,8 +68,15 @@ typedef struct {
     uint8_t  sens_x, sens_y, sens_d;
 
     int      drawn;
+    uint8_t  drawn_mode;
     uint32_t drawn_addr;
     uint16_t drawn_cell;
+
+    int16_t  gfx_hot_x, gfx_hot_y;
+    uint16_t gfx_screen[16], gfx_cursor[16];
+    int16_t  gfx_saved_x, gfx_saved_y;
+    uint8_t  gfx_saved_w, gfx_saved_h;
+    uint8_t  gfx_saved[16 * 16];
 
     uint16_t cb_mask, cb_seg, cb_off;
 
@@ -105,8 +115,65 @@ static void cursor_erase(void)
 {
     if (!m.drawn)
         return;
-    pstore16(m.drawn_addr, m.drawn_cell);
+
+    if (m.drawn_mode == 0x13) {
+        unsigned k = 0;
+        for (int yy = 0; yy < m.gfx_saved_h; yy++) {
+            uint32_t addr = 0xA0000u +
+                            (uint32_t)(m.gfx_saved_y + yy) * 320u +
+                            (uint32_t)m.gfx_saved_x;
+            for (int xx = 0; xx < m.gfx_saved_w; xx++)
+                pstore8(addr + (uint32_t)xx, m.gfx_saved[k++]);
+        }
+    } else {
+        pstore16(m.drawn_addr, m.drawn_cell);
+    }
     m.drawn = 0;
+}
+
+static void cursor_draw_mode13(void)
+{
+    /* Microsoft mouse coordinates are normally 0..639 in 320-pixel modes.
+       If the guest explicitly selected a <=319 range, honor that literally. */
+    int px = (m.maxx > 319) ? (m.x >> 1) : m.x;
+    int py = m.y;
+    int left = px - m.gfx_hot_x;
+    int top  = py - m.gfx_hot_y;
+    int x0 = left < 0 ? 0 : left;
+    int y0 = top  < 0 ? 0 : top;
+    int x1 = left + 16;
+    int y1 = top  + 16;
+    if (x1 > 320) x1 = 320;
+    if (y1 > 200) y1 = 200;
+    if (x0 >= x1 || y0 >= y1)
+        return;
+
+    m.gfx_saved_x = (int16_t)x0;
+    m.gfx_saved_y = (int16_t)y0;
+    m.gfx_saved_w = (uint8_t)(x1 - x0);
+    m.gfx_saved_h = (uint8_t)(y1 - y0);
+
+    unsigned k = 0;
+    for (int y = y0; y < y1; y++) {
+        int cy = y - top;
+        uint16_t sm = m.gfx_screen[cy];
+        uint16_t cm = m.gfx_cursor[cy];
+        uint32_t addr = 0xA0000u + (uint32_t)y * 320u + (uint32_t)x0;
+
+        for (int x = x0; x < x1; x++) {
+            int cx = x - left;
+            uint16_t bit = (uint16_t)(0x8000u >> cx);
+            uint8_t old = pload8(addr);
+            uint8_t out = (sm & bit) ? old : 0;
+            if (cm & bit)
+                out ^= 0xFF;
+            m.gfx_saved[k++] = old;
+            pstore8(addr++, out);
+        }
+    }
+
+    m.drawn_mode = 0x13;
+    m.drawn = 1;
 }
 
 static void cursor_draw(void)
@@ -116,6 +183,12 @@ static void cursor_draw(void)
 
     if (m.drawn || m.hide_count != 0)
         return;
+
+    if (pload8(BDA_VIDEO_MODE) == 0x13) {
+        cursor_draw_mode13();
+        return;
+    }
+
     if (!text_mode_base(&base, &cols, &rows))
         return;
 
@@ -131,6 +204,7 @@ static void cursor_draw(void)
 
     m.drawn_addr = addr;
     m.drawn_cell = cell;
+    m.drawn_mode = pload8(BDA_VIDEO_MODE);
     m.drawn      = 1;
 
     pstore16(addr, (uint16_t)((cell & m.scr_mask) ^ m.cur_mask));
@@ -143,10 +217,39 @@ static void cursor_refresh(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* User event callback (INT 33h AX=000Ch/0014h)                        */
+/* ------------------------------------------------------------------ */
+static void mouse_callback(CPU *cpu, uint16_t events, int dx, int dy)
+{
+    if (!(events & m.cb_mask) || (m.cb_seg == 0 && m.cb_off == 0))
+        return;
+
+    uint16_t ax = CPU_AX, bx = CPU_BX, cx = CPU_CX, dxr = CPU_DX;
+    uint16_t si = CPU_SI, di = CPU_DI, bp = CPU_BP;
+    uint16_t ds = CPU_DS, es = CPU_ES, ss = CPU_SS, sp = CPU_SP;
+    uint16_t flags = cpu_getflags(cpu);
+
+    CPU_AX = (uint16_t)(events & m.cb_mask);
+    CPU_BX = m.buttons;
+    CPU_CX = (uint16_t)m.x;
+    CPU_DX = (uint16_t)m.y;
+    CPU_SI = (uint16_t)(int16_t)dx;
+    CPU_DI = (uint16_t)(int16_t)dy;
+
+    cpu_far_call(cpu, m.cb_seg, m.cb_off);
+
+    SET_SS(ss); CPU_SP = sp;
+    SET_DS(ds); SET_ES(es);
+    CPU_AX = ax; CPU_BX = bx; CPU_CX = cx; CPU_DX = dxr;
+    CPU_SI = si; CPU_DI = di; CPU_BP = bp;
+    cpu_setflags(cpu, flags, (uword)~flags);
+}
+
+/* ------------------------------------------------------------------ */
 /* Применение движения                                                 */
 /* dx/dy — экранные (+x вправо, +y вниз)                               */
 /* ------------------------------------------------------------------ */
-static void mouse_apply(int dx, int dy, uint8_t nb)
+static void mouse_apply(CPU *cpu, int dx, int dy, uint8_t nb)
 {
     m.mickey_x += dx;
     m.mickey_y += dy;
@@ -173,19 +276,26 @@ static void mouse_apply(int dx, int dy, uint8_t nb)
 
     nb &= 7;
     uint8_t old = m.buttons;
+    uint16_t events = (dx || dy) ? 0x0001u : 0;
+    static const uint8_t press_event[3] = { 0x02, 0x08, 0x20 };
+    static const uint8_t rel_event[3]   = { 0x04, 0x10, 0x40 };
+
     for (int b = 0; b < 3; b++) {
         uint8_t bit = (uint8_t)(1u << b);
         if ((nb & bit) && !(old & bit)) {
             m.press_cnt[b]++;
             m.press_x[b] = (uint16_t)m.x;
             m.press_y[b] = (uint16_t)m.y;
+            events |= press_event[b];
         } else if (!(nb & bit) && (old & bit)) {
             m.rel_cnt[b]++;
             m.rel_x[b] = (uint16_t)m.x;
             m.rel_y[b] = (uint16_t)m.y;
+            events |= rel_event[b];
         }
     }
     m.buttons = nb;
+    mouse_callback(cpu, events, dx, dy);
 }
 
 /* ------------------------------------------------------------------ */
@@ -220,7 +330,7 @@ bool bios_74h(CPU* cpu)
 
                 /* PS/2: +Y = вверх; экран: +Y = вниз */
                 if (m.installed)
-                    mouse_apply(dx, -dy, (uint8_t)(f & 0x07));
+                    mouse_apply(cpu, dx, -dy, (uint8_t)(f & 0x07));
             }
         }
     }
@@ -325,6 +435,20 @@ void bios_33h_reset(void)
 
     m.scr_mask = 0x77FF;
     m.cur_mask = 0x7700;
+
+    /* Default Microsoft-style 16x16 arrow. */
+    static const uint16_t def_screen[16] = {
+        0x3FFF,0x1FFF,0x0FFF,0x07FF,0x03FF,0x01FF,0x00FF,0x007F,
+        0x003F,0x001F,0x01FF,0x10FF,0x30FF,0xF87F,0xF87F,0xFC7F
+    };
+    static const uint16_t def_cursor[16] = {
+        0x0000,0x4000,0x6000,0x7000,0x7800,0x7C00,0x7E00,0x7F00,
+        0x7F80,0x7C00,0x6C00,0x4600,0x0600,0x0300,0x0300,0x0000
+    };
+    memcpy(m.gfx_screen, def_screen, sizeof(def_screen));
+    memcpy(m.gfx_cursor, def_cursor, sizeof(def_cursor));
+    m.gfx_hot_x = 0;
+    m.gfx_hot_y = 0;
 
     m.mpp_x = 8;
     m.mpp_y = 16;
@@ -445,8 +569,19 @@ bool bios_33h(CPU* cpu)
         break;
     }
 
-    case 0x0009:    /* Define graphics cursor — не поддерживается */
+    case 0x0009: {  /* Define graphics cursor */
+        cursor_erase();
+        m.gfx_hot_x = (int16_t)CPU_BX;
+        m.gfx_hot_y = (int16_t)CPU_CX;
+        uint32_t p = ((uint32_t)CPU_ES << 4) + CPU_DX;
+        for (int i = 0; i < 16; i++)
+            m.gfx_screen[i] = pload16(p + (uint32_t)i * 2u);
+        p += 32;
+        for (int i = 0; i < 16; i++)
+            m.gfx_cursor[i] = pload16(p + (uint32_t)i * 2u);
+        cursor_draw();
         break;
+    }
 
     case 0x000A:    /* Define text cursor */
         cursor_erase();
