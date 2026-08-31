@@ -572,6 +572,67 @@ ems_write16_fn ems_mem_write16 = ems_direct_write16;
 ems_write32_fn ems_mem_write32 = ems_direct_write32;
 ems_span_ptr_fn ems_mem_span_ptr = ems_direct_span_ptr;
 
+#if EMULATE_LTEMS
+void __not_in_flash_func(pstore8)(uint32_t addr, uint8_t val)
+{
+    if (unlikely(VGA_WINDOW(addr))) {
+        iomem_write8(g_pc, addr, val);
+        return;
+    }
+    if (unlikely(EMS_WINDOW(addr))) {
+        ems_mem_write8(addr, val);
+        return;
+    }
+#if !defined(NO_PAGING)
+    ega128_mem_write8(addr, val);
+#else
+#if CHECK_RAM_BOARDER_ENABLED
+    if (unlikely(addr >= phys_mem_size))
+        return;
+#endif
+    PC_RAM[addr] = val;
+#endif
+}
+
+uint32_t __not_in_flash_func(pload32)(uint32_t addr)
+{
+    if (unlikely(VGA_WINDOW(addr)))
+        return iomem_read32(g_pc, addr);
+    if (unlikely(EMS_WINDOW(addr)))
+        return ems_mem_read32(addr);
+#if !defined(NO_PAGING)
+    return ega128_mem_read32(addr);
+#else
+#if CHECK_RAM_BOARDER_ENABLED
+    if (unlikely(addr >= phys_mem_size))
+        return 0xFFFFFFFFu;
+#endif
+    return *(uint32_t *)(PC_RAM + addr);
+#endif
+}
+
+void __not_in_flash_func(pstore32)(uint32_t addr, uint32_t val)
+{
+    if (unlikely(VGA_WINDOW(addr))) {
+        iomem_write32(g_pc, addr, val);
+        return;
+    }
+    if (unlikely(EMS_WINDOW(addr))) {
+        ems_mem_write32(addr, val);
+        return;
+    }
+#if !defined(NO_PAGING)
+    ega128_mem_write32(addr, val);
+#else
+#if CHECK_RAM_BOARDER_ENABLED
+    if (unlikely(addr >= phys_mem_size))
+        return;
+#endif
+    *(uint32_t *)(PC_RAM + addr) = val;
+#endif
+}
+#endif
+
 void ems_select_direct_backend(uint32_t linear_base)
 {
     ems_backing_linear_base = linear_base;

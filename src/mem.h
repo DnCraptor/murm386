@@ -13,6 +13,11 @@ extern "C" {
 void *dos_api_memcpy(void *dst, const void *src, size_t len);
 const void *dos_api_memchr(const void *src, int value, size_t len);
 void *nf_memset(void *ptr, int value, size_t len);
+#if EMULATE_LTEMS
+void pstore8(uint32_t addr, uint8_t val);
+uint32_t pload32(uint32_t addr);
+void pstore32(uint32_t addr, uint32_t val);
+#endif
 #ifdef __cplusplus
 }
 #endif
@@ -190,6 +195,7 @@ static inline uint16_t __attribute__((always_inline)) pload16(uint32_t addr)
 	return *(uint16_t*)(PC_RAM + addr);
 }
 
+#if !EMULATE_LTEMS
 static inline uint32_t __attribute__((always_inline)) pload32(uint32_t addr)
 {
     if (unlikely(VGA_WINDOW(addr))) {
@@ -211,17 +217,13 @@ static inline uint32_t __attribute__((always_inline)) pload32(uint32_t addr)
 	return *(uint32_t*)(PC_RAM + addr);
 }
 
+#endif
+#if !EMULATE_LTEMS
 static inline void __attribute__((always_inline)) pstore8(uint32_t addr, uint8_t val)
 {
     if (unlikely(VGA_WINDOW(addr))) {
         return iomem_write8(g_pc, addr, val);
     }
-#if EMULATE_LTEMS
-    if (unlikely(EMS_WINDOW(addr))) {
-        ems_mem_write8(addr, val);
-        return;
-    }
-#endif
 #if !defined(NO_PAGING)
     ega128_mem_write8(addr, val);
     return;
@@ -233,6 +235,7 @@ static inline void __attribute__((always_inline)) pstore8(uint32_t addr, uint8_t
 #endif
 	PC_RAM[addr] = val;
 }
+#endif
 
 static inline void __attribute__((always_inline)) pstore16(uint32_t addr, uint16_t val)
 {
@@ -257,6 +260,7 @@ static inline void __attribute__((always_inline)) pstore16(uint32_t addr, uint16
 	*(uint16_t*)(PC_RAM + addr) = val;
 }
 
+#if !EMULATE_LTEMS
 static inline void __attribute__((always_inline)) pstore32(uint32_t addr, uint32_t val)
 {
     if (unlikely(VGA_WINDOW(addr))) {
@@ -280,6 +284,7 @@ static inline void __attribute__((always_inline)) pstore32(uint32_t addr, uint32
 	*(uint32_t*)(PC_RAM + addr) = val;
 }
 
+#endif
 /* Bulk fill belongs to the paging API for the same reason as block copies:
  * resolve the current guest backing once per contiguous span instead of
  * open-coding byte-at-a-time pstore8 loops at each caller. */
