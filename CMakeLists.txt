@@ -309,7 +309,7 @@ target_compile_definitions(audio_driver PRIVATE
     SOUND_FREQUENCY=44100
 )
 pico_generate_pio_header(audio_driver ${CMAKE_CURRENT_LIST_DIR}/drivers/audio/audio_i2s.pio)
-target_link_libraries(audio_driver pico_stdlib hardware_dma hardware_pio hardware_clocks hardware_sync hardware_irq hardware_pwm)
+target_link_libraries(audio_driver pico_stdlib hardware_dma hardware_pio hardware_clocks hardware_sync hardware_irq hardware_pwm video_driver)
 
 #=============================================================================
 # USB HID Keyboard Driver (optional)
