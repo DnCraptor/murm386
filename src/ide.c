@@ -1666,9 +1666,15 @@ static IDEState *ide_hddrive_init(IDEIFState *ide_if, FIL *f, int f_open,
     if (f_open) { s->fp = f; }
 
     if (cylinders && heads && sectors) {
+        int64_t chs_sectors = (int64_t)cylinders * heads * sectors;
         s->cylinders = cylinders;
         s->heads     = heads;
         s->sectors   = sectors;
+        /* Explicit CHS geometry is authoritative for the emulated HDD.
+         * The backing file may contain trailing padding (or a VHD footer);
+         * do not advertise that tail through ATA IDENTIFY words 60/61. */
+        if (chs_sectors > 0 && chs_sectors < s->nb_sectors)
+            s->nb_sectors = chs_sectors;
     } else {
         uint32_t cyls = nb_sectors / (16 * 63);
         if (cyls > 16383) cyls = 16383;

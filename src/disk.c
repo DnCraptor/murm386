@@ -406,7 +406,11 @@ bool bios_hdd_get_info(uint8_t bios_index, bios_hdd_info_t *info) {
         info->cyls = ata[(uint8_t)slot].cyls;
         info->heads = ata[(uint8_t)slot].heads;
         info->sects = ata[(uint8_t)slot].sects;
-        info->total_sectors = ata[(uint8_t)slot].usable_size / 512u;
+        /* The CHS geometry is the guest-visible physical disk size.
+         * Do not expose trailing bytes/sectors from the backing file as an
+         * additional LBA-only tail: INT 13h AH=08/15 and EDD must describe
+         * the same disk. */
+        info->total_sectors = (uint32_t)info->cyls * info->heads * info->sects;
         return info->cyls && info->heads && info->sects && info->total_sectors;
     }
 
