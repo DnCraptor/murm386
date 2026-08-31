@@ -1,5 +1,5 @@
 /*
- * frank-386 — C2 slave firmware (RP2350A, U6)
+ * murm-286 — C2 slave firmware (RP2350A, U6)
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
@@ -88,7 +88,7 @@ int main(void) {
     gpio_set_dir(S_LED_PIN, GPIO_OUT);
     gpio_put(S_LED_PIN, 1);
 
-    printf("\nfrank-386 C2 slave — memory server\n");
+    printf("\nmurm-286 C2 slave — memory server\n");
     printf("  clk_sys %lu MHz, serving %u KB of SRAM\n",
            (unsigned long)(clock_get_hz(clk_sys) / 1000000u),
            (unsigned)(SERVED_BYTES / 1024u));

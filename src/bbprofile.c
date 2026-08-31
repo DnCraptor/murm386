@@ -1,5 +1,5 @@
 /**
- * frank-386 — basic-block discovery and reuse profiling. See bbprofile.h.
+ * murm-286 — basic-block discovery and reuse profiling. See bbprofile.h.
  */
 #include "bbprofile.h"
 

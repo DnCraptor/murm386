@@ -458,7 +458,7 @@ murm386/
                   link_bus.{c,h,pio}, link_proto.{c,h},
                   link_session.{c,h}, link_pins.h
   slave/
-    CMakeLists.txt        -> frank-386-slave
+    CMakeLists.txt        -> murm-286-slave
     src/main.c            serve loop
     src/slave_sound.c     the sound subsystem
     src/slave_cache.c     the disk block cache

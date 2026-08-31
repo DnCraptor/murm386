@@ -1,5 +1,5 @@
 /**
- * frank-386 - i386 PC Emulator for RP2350
+ * murm-286 - i386 PC Emulator for RP2350
  *
  * Main entry point for the RP2350 platform.
  * Initializes hardware, loads configuration, and starts the emulator.
@@ -955,7 +955,7 @@ static int load_config_from_sd(const char *filename) {
         return -1;
     }
 
-    // Also parse frank-386-specific settings
+    // Also parse murm-286-specific settings
     ini_parse_string(content, parse_frank_386_ini, NULL);
 
     free(content);
@@ -1175,7 +1175,7 @@ static bool init_hardware(void) {
     }
     DBG_PRINT("  " SD_DATA_DIR_SLASH " directory ready\n");
 
-    // Load frank-386-specific hardware settings from INI
+    // Load murm-286-specific hardware settings from INI
     // This allows cpu_freq and psram_freq to be configured
     {
         FIL fp;
@@ -1188,7 +1188,7 @@ static bool init_hardware(void) {
                 UINT bytes_read;
                 if (f_read(&fp, content, size, &bytes_read) == FR_OK) {
                     content[bytes_read] = '\0';
-                    // Parse just the [frank-386] section
+                    // Parse just the [murm-286] section
                     ini_parse_string(content, parse_frank_386_ini, NULL);
                 }
                 free(content);
@@ -1328,7 +1328,7 @@ static bool init_emulator(void) {
     }
 
     /* init_hardware() already invalidates the PSRAM test cache on a real
-     * power-on, but load_config_from_sd() above parses [frank-386] again and
+     * power-on, but load_config_from_sd() above parses [murm-286] again and
      * restores psram_size/psram_test_freq from disk.  Drop only the runtime
      * copy again so the upcoming BIOS POST performs the full memory test.
      * Warm/watchdog reboots keep the saved cache and skip the test. */
@@ -1436,12 +1436,12 @@ static bool init_emulator(void) {
     settingsui_init();
 
     // Initialize config save module with current values from PCConfig
-    // (these override INI values if not present in [frank-386] section)
+    // (these override INI values if not present in [murm-286] section)
     config_set_cpu_gen(config.cpu_gen);
     config_set_fpu(config.fpu);
     config_set_bios_file(config.bios);
     config_set_raw_sd_hdd(config.raw_sd_hdd);
-    // Hardware settings are loaded from [frank-386] section via parse_frank_386_ini
+    // Hardware settings are loaded from [murm-286] section via parse_frank_386_ini
     config_clear_changes();
 
     // Apply audio/mouse enable settings from config to PC instance
@@ -1624,7 +1624,7 @@ static void show_welcome_screen(void) {
 
     // Author
     osd_print_center(wy + 6, "Port by Mikhail Matveev & DnCraptor", OSD_ATTR_NORMAL);
-    osd_print_center(wy + 7, "https://github.com/rh1tech/frank-386", OSD_ATTR_NORMAL);
+    osd_print_center(wy + 7, "https://github.com/rh1tech/murm-286", OSD_ATTR_NORMAL);
 
     // Hardware info
     char hw_str[50];
@@ -1740,7 +1740,7 @@ int main(void) {
     #endif
     DBG_PRINT("\n\n");
     DBG_PRINT("============================================\n");
-    DBG_PRINT("  frank-386 - 386 Emulator for RP2350\n");
+    DBG_PRINT("  murm-286 - 386 Emulator for RP2350\n");
     DBG_PRINT("  Version %d.%02d\n", FRANK_386_VERSION_MAJOR, FRANK_386_VERSION_MINOR);
     DBG_PRINT("============================================\n\n");
 

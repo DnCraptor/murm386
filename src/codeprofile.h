@@ -1,5 +1,5 @@
 /**
- * frank-386 — guest code footprint measurement.
+ * murm-286 — guest code footprint measurement.
  *
  * SPDX-License-Identifier: MIT
  *

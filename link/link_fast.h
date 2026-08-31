@@ -1,5 +1,5 @@
 /*
- * frank-386 — low-latency request/response path over the C2 link.
+ * murm-286 — low-latency request/response path over the C2 link.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  *

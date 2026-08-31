@@ -1,5 +1,5 @@
 /**
- * frank-386 - i386 PC Emulator for RP2350
+ * murm-286 - i386 PC Emulator for RP2350
  *
  * Stub implementations for disabled features (network, FPU).
  * Sound is enabled with I2S output.

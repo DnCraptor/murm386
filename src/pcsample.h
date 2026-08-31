@@ -1,5 +1,5 @@
 /**
- * frank-386 — statistical PC sampling profiler for core 0. See pcsample.c.
+ * murm-286 — statistical PC sampling profiler for core 0. See pcsample.c.
  */
 #ifndef PCSAMPLE_H
 #define PCSAMPLE_H

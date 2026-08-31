@@ -1,5 +1,5 @@
 /**
- * frank-386 - i386 PC Emulator for RP2350
+ * murm-286 - i386 PC Emulator for RP2350
  *
  * Platform Integration Layer - platform-specific declarations for RP2350.
  *

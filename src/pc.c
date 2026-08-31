@@ -1639,9 +1639,32 @@ static void bios_post_components(PC *pc, size_t psram_size)
     char hdd[6][40];
 
 #if I386_MODE
-    snprintf(left, sizeof(left), "CPU      : 80386");
+	switch(pc->cpu->gen) {
+		case 4:
+    		snprintf(left, sizeof(left), "CPU      : i486");
+			break;
+		case 5:
+    		snprintf(left, sizeof(left), "CPU      : Am5x86"); // TODO: ensure
+			break;
+		case 6:
+    		snprintf(left, sizeof(left), "CPU      : Cx6x86");
+			break;
+		default:
+    		snprintf(left, sizeof(left), "CPU      : 80386");
+			break;
+	}
 #else
-    snprintf(left, sizeof(left), "CPU      : 80286");
+	switch(pc->cpu->gen) {
+		case 0:
+    		snprintf(left, sizeof(left), "CPU      : 8086 ");
+			break;
+		case 1:
+    		snprintf(left, sizeof(left), "CPU      : 80186");
+			break;
+		default:
+    		snprintf(left, sizeof(left), "CPU      : 80286");
+			break;
+	}
 #endif
     snprintf(right, sizeof(right), "FPU      : %s",
              pc->fpu_enabled ? "80387" : "not installed");

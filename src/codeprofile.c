@@ -1,5 +1,5 @@
 /**
- * frank-386 — guest code footprint measurement. See codeprofile.h.
+ * murm-286 — guest code footprint measurement. See codeprofile.h.
  */
 #include "codeprofile.h"
 

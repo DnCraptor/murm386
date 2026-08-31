@@ -1,5 +1,5 @@
 /**
- * frank-386 — scripted keystroke injection. See autotype.h.
+ * murm-286 — scripted keystroke injection. See autotype.h.
  */
 #include "autotype.h"
 

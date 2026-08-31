@@ -1,5 +1,5 @@
 /**
- * frank-386 — PC analog game port (joystick) emulation. See gameport.h.
+ * murm-286 — PC analog game port (joystick) emulation. See gameport.h.
  */
 #include "gameport.h"
 #include "pc.h"   /* get_uticks */

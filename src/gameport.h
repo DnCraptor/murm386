@@ -1,5 +1,5 @@
 /**
- * frank-386 — PC analog game port (joystick) emulation.
+ * murm-286 — PC analog game port (joystick) emulation.
  *
  * Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
  * SPDX-License-Identifier: MIT

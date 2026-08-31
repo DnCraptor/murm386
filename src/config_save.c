@@ -1,5 +1,5 @@
 /**
- * frank-386 - i386 PC Emulator for RP2350
+ * murm-286 - i386 PC Emulator for RP2350
  *
  * Configuration Save - writes configuration to INI file on SD card.
  *
@@ -383,32 +383,32 @@ bool config_save_all(void) {
     if (res != FR_OK) return false;
 
     // Write [pc] section
-    write_line(&fp, "[pc]\n");
+    write_line(&fp, "[pc]\r\n");
 
 //    snprintf(line, sizeof(line), "vga_mem=%dK\n", cfg_vga_kb);
 //    write_line(&fp, line);
 
     // CPU
-    snprintf(line, sizeof(line), "cpu=%d\n", cfg_cpu_gen);
+    snprintf(line, sizeof(line), "cpu=%d\r\n", cfg_cpu_gen);
     write_line(&fp, line);
 
     // BIOS files
     if (cfg_bios[0]) {
-        snprintf(line, sizeof(line), "bios=%s\n", cfg_bios);
+        snprintf(line, sizeof(line), "bios=%s\r\n", cfg_bios);
         write_line(&fp, line);
     } else {
-        write_line(&fp, "bios=native\n");
+        write_line(&fp, "bios=native\r\n");
     }
-    write_line(&fp, "vga_bios=vgabios.bin\n");
+    write_line(&fp, "vga_bios=vgabios.bin\r\n");
 
     // Disks (must be in [pc] section)
-    write_line(&fp, "\n; Disk images\n");
-    snprintf(line, sizeof(line), "raw_sd_hdd=%d\n", cfg_raw_sd_hdd);
+    write_line(&fp, "\n; Disk images\r\n");
+    snprintf(line, sizeof(line), "raw_sd_hdd=%d\r\n", cfg_raw_sd_hdd);
     write_line(&fp, line);
     for (int i = 0; i < 2; i++) {
         const char *fname = fdd_get_filename(i);
         if (fname && fname[0]) {
-            snprintf(line, sizeof(line), "fd%c=%s\n", 'a' + i, fname);
+            snprintf(line, sizeof(line), "fd%c=%s\r\n", 'a' + i, fname);
             write_line(&fp, line);
         }
     }
@@ -416,9 +416,9 @@ bool config_save_all(void) {
         const char *fname = ata_get_filename(i);
         if (fname && fname[0]) {
             if (ata_is_cdrom(i)) {
-                snprintf(line, sizeof(line), "cd%c=%s\n", 'a' + i, fname);
+                snprintf(line, sizeof(line), "cd%c=%s\r\n", 'a' + i, fname);
             } else {
-                snprintf(line, sizeof(line), "hd%c=%s\n", 'a' + i, fname);
+                snprintf(line, sizeof(line), "hd%c=%s\r\n", 'a' + i, fname);
             }
             write_line(&fp, line);
         }
@@ -426,63 +426,63 @@ bool config_save_all(void) {
 
     // FPU (separate section)
     write_line(&fp, "\n[cpu]\n");
-    snprintf(line, sizeof(line), "gen=%d\n", cfg_cpu_gen);
+    snprintf(line, sizeof(line), "gen=%d\r\n", cfg_cpu_gen);
     write_line(&fp, line);
-    snprintf(line, sizeof(line), "fpu=%d\n", cfg_fpu);
+    snprintf(line, sizeof(line), "fpu=%d\r\n", cfg_fpu);
     write_line(&fp, line);
 
-    // Hardware settings (frank-386-specific)
-    write_line(&fp, "\n[frank-386]\n");
+    // Hardware settings (murm-286-specific)
+    write_line(&fp, "\r\n[murm-286]\r\n");
     {
         static const char *video_values[] = { "MCGA", "EGA128", "EGA256", "VGA128", "VGA256" };
         int v = cfg_video_adapter;
         if (v < VIDEO_ADAPTER_MCGA || v > VIDEO_ADAPTER_VGA256)
             v = VIDEO_ADAPTER_VGA256;
-        snprintf(line, sizeof(line), "video=%s\n", video_values[v]);
+        snprintf(line, sizeof(line), "video=%s\r\n", video_values[v]);
         write_line(&fp, line);
     }
-    snprintf(line, sizeof(line), "pcspeaker=%d\n", cfg_pcspeaker);
+    snprintf(line, sizeof(line), "pcspeaker=%d\r\n", cfg_pcspeaker);
     write_line(&fp, line);
-    snprintf(line, sizeof(line), "adlib=%d\n", cfg_adlib);
+    snprintf(line, sizeof(line), "adlib=%d\r\n", cfg_adlib);
     write_line(&fp, line);
     snprintf(line, sizeof(line), "soundblaster=%d\n", cfg_soundblaster);
     write_line(&fp, line);
-    snprintf(line, sizeof(line), "tandy=%d\n", cfg_tandy);
+    snprintf(line, sizeof(line), "tandy=%d\r\n", cfg_tandy);
     write_line(&fp, line);
-    snprintf(line, sizeof(line), "covox=%d\n", cfg_covox);
+    snprintf(line, sizeof(line), "covox=%d\r\n", cfg_covox);
     write_line(&fp, line);
-    snprintf(line, sizeof(line), "mpu401=%d\n", cfg_mpu401);
+    snprintf(line, sizeof(line), "mpu401=%d\r\n", cfg_mpu401);
     write_line(&fp, line);
-    snprintf(line, sizeof(line), "dss=%d\n", cfg_dss);
+    snprintf(line, sizeof(line), "dss=%d\r\n", cfg_dss);
     write_line(&fp, line);
-    snprintf(line, sizeof(line), "mouse=%d\n", cfg_mouse);
+    snprintf(line, sizeof(line), "mouse=%d\r\n", cfg_mouse);
     write_line(&fp, line);
-    snprintf(line, sizeof(line), "nes_mouse=%d\n", cfg_nes_mouse);
+    snprintf(line, sizeof(line), "nes_mouse=%d\r\n", cfg_nes_mouse);
     write_line(&fp, line);
-    snprintf(line, sizeof(line), "nes_joystick=%d\n", cfg_nes_joystick);
+    snprintf(line, sizeof(line), "nes_joystick=%d\r\n", cfg_nes_joystick);
     write_line(&fp, line);
-    snprintf(line, sizeof(line), "usb_joystick=%d\n", cfg_usb_joystick);
+    snprintf(line, sizeof(line), "usb_joystick=%d\r\n", cfg_usb_joystick);
     write_line(&fp, line);
-    snprintf(line, sizeof(line), "usb=%s\n",
+    snprintf(line, sizeof(line), "usb=%s\r\n",
              cfg_usb_mode == USB_MODE_DEVICE ? "DEVICE" : "HOST");
     write_line(&fp, line);
-    snprintf(line, sizeof(line), "cpu_freq=%d\n", cfg_cpu_freq);
+    snprintf(line, sizeof(line), "cpu_freq=%d\r\n", cfg_cpu_freq);
     write_line(&fp, line);
-    snprintf(line, sizeof(line), "psram_freq=%d\n", cfg_psram_freq);
+    snprintf(line, sizeof(line), "psram_freq=%d\r\n", cfg_psram_freq);
     write_line(&fp, line);
     if (cfg_psram_size_mb) {
-        snprintf(line, sizeof(line), "psram_size=%d\n", cfg_psram_size_mb);
+        snprintf(line, sizeof(line), "psram_size=%d\r\n", cfg_psram_size_mb);
         write_line(&fp, line);
-        snprintf(line, sizeof(line), "psram_test_freq=%d\n", cfg_psram_test_freq);
+        snprintf(line, sizeof(line), "psram_test_freq=%d\r\n", cfg_psram_test_freq);
         write_line(&fp, line);
     }
-    snprintf(line, sizeof(line), "flash_freq=%d\n", cfg_flash_freq);
+    snprintf(line, sizeof(line), "flash_freq=%d\r\n", cfg_flash_freq);
     write_line(&fp, line);
-    snprintf(line, sizeof(line), "volume=%d\n", cfg_volume);
+    snprintf(line, sizeof(line), "volume=%d\r\n", cfg_volume);
     write_line(&fp, line);
-    snprintf(line, sizeof(line), "voltage=%d\n", cfg_voltage);
+    snprintf(line, sizeof(line), "voltage=%d\r\n", cfg_voltage);
     write_line(&fp, line);
-    snprintf(line, sizeof(line), "mouse_invert_y=%d\n", cfg_mouse_invert_y);
+    snprintf(line, sizeof(line), "mouse_invert_y=%d\r\n", cfg_mouse_invert_y);
     write_line(&fp, line);
 
     f_close(&fp);
@@ -496,13 +496,13 @@ bool config_save_disks(void) {
     return config_save_all();
 }
 
-// INI parser callback for [frank-386] section
+// INI parser callback for [murm-286] section
 int parse_frank_386_ini(void* user, const char* section,
                       const char* name, const char* value) {
     (void)user;
 
     // Accept both new and legacy section names
-    if (strcmp(section, "frank-386") != 0 && strcmp(section, "murm386") != 0) return 1;
+    if (strcmp(section, "murm-286") != 0 && strcmp(section, "murm386") != 0) return 1;
 
     if (strcmp(name, "video") == 0) {
         VideoAdapterProfile profile;

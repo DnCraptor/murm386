@@ -1,5 +1,5 @@
 /**
- * frank-386 — coarse subsystem cycle accounting for core 0.
+ * murm-286 — coarse subsystem cycle accounting for core 0.
  *
  * Answers one question: of the time core 0 spends, how much is the i386
  * interpreter and how much is everything else? That is the number the

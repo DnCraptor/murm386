@@ -1,5 +1,5 @@
 /**
- * frank-386 — SD sector cache in the slave RP2350's PSRAM.
+ * murm-286 — SD sector cache in the slave RP2350's PSRAM.
  *
  * SPDX-License-Identifier: MIT
  *

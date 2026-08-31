@@ -1,5 +1,5 @@
 /**
- * frank-386 — scripted keystroke injection, for unattended benchmarking.
+ * murm-286 — scripted keystroke injection, for unattended benchmarking.
  *
  * SPDX-License-Identifier: MIT
  *

@@ -1,5 +1,5 @@
 /**
- * frank-386 — USB HID gamepad decoding.
+ * murm-286 — USB HID gamepad decoding.
  *
  * SPDX-License-Identifier: MIT
  *

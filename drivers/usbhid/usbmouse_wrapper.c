@@ -1,5 +1,5 @@
 /**
- * USB Mouse wrapper for frank-386
+ * USB Mouse wrapper for murm-286
  * Provides USB mouse events for the PS/2 mouse emulation
  */
 

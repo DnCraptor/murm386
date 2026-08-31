@@ -1,5 +1,5 @@
 /**
- * frank-386 — USB HID gamepad decoding. See usbgamepad.h.
+ * murm-286 — USB HID gamepad decoding. See usbgamepad.h.
  *
  * Maps ported from FRANK NES (murmnes).
  */

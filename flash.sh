@@ -1,5 +1,5 @@
 #!/bin/bash
-# Flash frank-386 to a connected board.
+# Flash murm-286 to a connected board.
 #
 # Two transports:
 #

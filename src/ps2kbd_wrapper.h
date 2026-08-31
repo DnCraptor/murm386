@@ -1,5 +1,5 @@
 /**
- * PS/2 Keyboard wrapper for frank-386
+ * PS/2 Keyboard wrapper for murm-286
  * Converts HID keycodes to Linux input keycodes
  */
 

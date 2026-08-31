@@ -1,5 +1,5 @@
 #
-# frank-386 — C2 slave firmware (RP2350A, U6)
+# murm-286 — C2 slave firmware (RP2350A, U6)
 #
 # Phase 1: a memory server. See slave/src/main.c.
 #
@@ -44,29 +44,29 @@ else()
     set(CPU_VOLTAGE "VREG_VOLTAGE_1_50")
 endif()
 
-message(STATUS "frank-386 C2 slave: CPU ${CPU_SPEED} MHz, vreg ${CPU_VOLTAGE}")
+message(STATUS "murm-286 C2 slave: CPU ${CPU_SPEED} MHz, vreg ${CPU_VOLTAGE}")
 
 include(${REPO_ROOT}/pico_sdk_import.cmake)
-project(frank-386-slave C CXX ASM)
+project(murm-286-slave C CXX ASM)
 set(CMAKE_C_STANDARD 11)
 pico_sdk_init()
 
-add_executable(frank-386-slave
+add_executable(murm-286-slave
     src/main.c
     ${REPO_ROOT}/link/link_fast.c
     ${REPO_ROOT}/drivers/psram/psram_init.c
 )
 
-target_include_directories(frank-386-slave PRIVATE
+target_include_directories(murm-286-slave PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/src
     ${REPO_ROOT}/link
     ${REPO_ROOT}/drivers/psram
     ${REPO_ROOT}/src
 )
 
-pico_generate_pio_header(frank-386-slave ${REPO_ROOT}/link/link_bus.pio)
+pico_generate_pio_header(murm-286-slave ${REPO_ROOT}/link/link_bus.pio)
 
-target_compile_definitions(frank-386-slave PRIVATE
+target_compile_definitions(murm-286-slave PRIVATE
     CPU_CLOCK_MHZ=${CPU_SPEED}
     PSRAM_MAX_FREQ_MHZ=133
     BOARD_C2=1
@@ -74,9 +74,9 @@ target_compile_definitions(frank-386-slave PRIVATE
     PICO_ON_DEVICE=1
 )
 
-target_compile_options(frank-386-slave PRIVATE -O3)
+target_compile_options(murm-286-slave PRIVATE -O3)
 
-target_link_libraries(frank-386-slave
+target_link_libraries(murm-286-slave
     pico_stdlib
     hardware_pio
     hardware_dma
@@ -87,7 +87,7 @@ target_link_libraries(frank-386-slave
 
 # Console on UART1 (J4 header, GPIO24 TX / GPIO25 RX, 115200). The slave
 # USB port is left alone so it stays available for BOOTSEL recovery.
-pico_enable_stdio_usb(frank-386-slave 0)
-pico_enable_stdio_uart(frank-386-slave 1)
+pico_enable_stdio_usb(murm-286-slave 0)
+pico_enable_stdio_uart(murm-286-slave 1)
 
-pico_add_extra_outputs(frank-386-slave)
+pico_add_extra_outputs(murm-286-slave)

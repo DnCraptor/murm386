@@ -1,5 +1,5 @@
 /**
- * frank-386 — statistical PC sampling profiler for core 0.
+ * murm-286 — statistical PC sampling profiler for core 0.
  *
  * SPDX-License-Identifier: MIT
  *

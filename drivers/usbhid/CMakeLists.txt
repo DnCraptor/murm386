@@ -1,4 +1,4 @@
-# USB driver for frank-386
+# USB driver for murm-286
 # Builds both TinyUSB Host HID and Device MSC; runtime config selects the role.
 #
 # SPDX-License-Identifier: MIT
