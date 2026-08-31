@@ -39,6 +39,46 @@ typedef struct __attribute__((packed)) {
     uint8_t other;
 } midi_command_t;
 
+/* MIDI commands are produced by the emulated CPU on core0 and consumed by
+ * the 44.1 kHz audio callback on core1.  The synth state itself therefore
+ * belongs only to core1.  Consume at most one command per audio sample so
+ * command bursts cannot turn the timer callback into an unbounded loop. */
+#define MIDI_COMMAND_QUEUE_SIZE 128u
+#define MIDI_COMMAND_QUEUE_MASK (MIDI_COMMAND_QUEUE_SIZE - 1u)
+
+static midi_command_t midi_command_queue[MIDI_COMMAND_QUEUE_SIZE];
+static uint32_t midi_command_queue_head;
+static uint32_t midi_command_queue_tail;
+
+static INLINE void parse_midi(const midi_command_t *message);
+
+static INLINE void midi_queue_command(uint32_t command) {
+    uint32_t head = __atomic_load_n(&midi_command_queue_head, __ATOMIC_RELAXED);
+    uint32_t next = (head + 1u) & MIDI_COMMAND_QUEUE_MASK;
+
+    /* Never lose MIDI events.  At one consumed command per 44.1 kHz sample
+     * this wait can only persist while core1 itself is not servicing audio. */
+    while (next == __atomic_load_n(&midi_command_queue_tail, __ATOMIC_ACQUIRE))
+        ;
+
+    midi_command_queue[head].command = (uint8_t)command;
+    midi_command_queue[head].note = (uint8_t)(command >> 8);
+    midi_command_queue[head].velocity = (uint8_t)(command >> 16);
+    midi_command_queue[head].other = (uint8_t)(command >> 24);
+    __atomic_store_n(&midi_command_queue_head, next, __ATOMIC_RELEASE);
+}
+
+static INLINE void midi_process_one_command(void) {
+    const uint32_t tail = __atomic_load_n(&midi_command_queue_tail, __ATOMIC_RELAXED);
+    if (tail == __atomic_load_n(&midi_command_queue_head, __ATOMIC_ACQUIRE))
+        return;
+
+    const midi_command_t message = midi_command_queue[tail];
+    __atomic_store_n(&midi_command_queue_tail,
+                     (tail + 1u) & MIDI_COMMAND_QUEUE_MASK, __ATOMIC_RELEASE);
+    parse_midi(&message);
+}
+
 static midi_voice_t midi_voices[MAX_MIDI_VOICES] = {0};
 static midi_channel_t midi_channels[MIDI_CHANNELS] = {
     {0, 100, 0}, {0, 100, 0}, {0, 100, 0}, {0, 100, 0},
@@ -271,6 +311,7 @@ static INLINE int16_t generate_drum_sample(const midi_voice_t *voice, const uint
 
 // Modified midi_sample function
 int16_t __not_in_flash_func(midi_sample)(void) {
+    midi_process_one_command();
     if (__builtin_expect(!active_voice_bitmask, 0)) return 0;
 
     int32_t sample = 0;
