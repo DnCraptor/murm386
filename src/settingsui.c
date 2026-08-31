@@ -43,6 +43,7 @@ typedef enum {
     SETTING_COVOX,
     SETTING_DSS,
     SETTING_MOUSE,
+    SETTING_MOUSE_SENSITIVITY,
     SETTING_NES_MOUSE,
     SETTING_NES_JOYSTICK,
     SETTING_USB_JOYSTICK,
@@ -117,7 +118,7 @@ static int audio_output_setting = AUDIO_OUTPUT_AUTO;
 // Original values (to detect changes)
 static int orig_cpu, orig_fpu, orig_video_adapter;
 static int orig_pcspeaker, orig_adlib, orig_soundblaster, orig_tandy, orig_covox, orig_dss, orig_mouse, orig_nes_mouse, orig_nes_joystick, orig_mpu401;
-static int orig_cpu_freq, orig_psram_freq, orig_flash_freq, orig_volume, orig_voltage, orig_mouse_invert_y;
+static int orig_cpu_freq, orig_psram_freq, orig_flash_freq, orig_volume, orig_voltage, orig_mouse_invert_y, orig_mouse_sensitivity;
 
 // UI dimensions
 #define MENU_X      10
@@ -239,6 +240,7 @@ void settingsui_open(void) {
     orig_volume = audio_get_volume();
     orig_voltage = config_get_voltage();
     orig_mouse_invert_y = config_get_mouse_invert_y();
+    orig_mouse_sensitivity = config_get_mouse_sensitivity();
     audio_output_setting = load_audio_output_setting();
     video_output_setting = load_video_output_setting();
 
@@ -261,6 +263,7 @@ void settingsui_close(void) {
         config_set_flash_freq(orig_flash_freq);
         config_set_voltage(orig_voltage);
         config_set_mouse_invert_y(orig_mouse_invert_y);
+        config_set_mouse_sensitivity(orig_mouse_sensitivity);
         audio_set_volume(orig_volume);
         config_clear_changes();
     }
@@ -356,6 +359,13 @@ static void cycle_option(int direction) {
             config_set_mouse(config_get_mouse() ? 0 : 1);
             if (config_get_mouse()) config_set_nes_mouse(0);
             break;
+
+        case SETTING_MOUSE_SENSITIVITY: {
+            int value = config_get_mouse_sensitivity();
+            value = (value + direction + 9) % 9;
+            config_set_mouse_sensitivity(value);
+            break;
+        }
 
         case SETTING_NES_MOUSE:
             config_set_nes_mouse(config_get_nes_mouse() ? 0 : 1);
@@ -457,6 +467,7 @@ static void draw_settings_menu(void) {
         "Covox (LPT2):",
         "Disney Sound Source:",
         "PS/2 or USB Mouse:",
+        "Mouse speed:",
         "NES Mouse:",
         "NES Joystick:",
         "USB Joystick:",
@@ -526,6 +537,14 @@ static void draw_settings_menu(void) {
             case SETTING_MOUSE:
                 snprintf(value, sizeof(value), "< %s >", config_get_mouse() ? "Enabled" : "Disabled");
                 break;
+            case SETTING_MOUSE_SENSITIVITY: {
+                static const char *names[] = {
+                    "1/4x", "1/3x", "1/2x", "2/3x", "1x",
+                    "1.5x", "2x", "3x", "4x"
+                };
+                snprintf(value, sizeof(value), "< %s >", names[config_get_mouse_sensitivity()]);
+                break;
+            }
             case SETTING_NES_MOUSE:
                 snprintf(value, sizeof(value), "< %s >", config_get_nes_mouse() ? "Enabled" : "Disabled");
                 break;

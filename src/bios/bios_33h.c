@@ -20,6 +20,7 @@
  */
 
 #include <string.h>
+#include "pico/time.h"
 #include "286/cpu.h"
 #include "bios.h"
 
@@ -65,7 +66,9 @@ typedef struct {
     uint16_t scr_mask, cur_mask;
 
     int      mpp_x, mpp_y;        /* mickeys per 8 pixels */
-    uint8_t  sens_x, sens_y, sens_d;
+    uint8_t  sens_x, sens_y;
+    uint16_t sens_d;               /* double-speed threshold, mickeys/sec */
+    uint64_t last_move_us;
 
     int      drawn;
     uint8_t  drawn_mode;
@@ -245,6 +248,15 @@ static void mouse_callback(CPU *cpu, uint16_t events, int dx, int dy)
     cpu_setflags(cpu, flags, (uword)~flags);
 }
 
+static int mouse_sensitivity_q12(uint8_t value)
+{
+    if (value < 1) value = 1;
+    if (value > 100) value = 100;
+    if (value == 50) return 4096;
+    int n = (int)value - 1;
+    return 1365 + (n * n * 4096 + 1800) / 3600;
+}
+
 /* ------------------------------------------------------------------ */
 /* Применение движения                                                 */
 /* dx/dy — экранные (+x вправо, +y вниз)                               */
@@ -254,11 +266,30 @@ static void mouse_apply(CPU *cpu, int dx, int dy, uint8_t nb)
     m.mickey_x += dx;
     m.mickey_y += dy;
 
-    m.frac_x += dx * 8;
-    m.frac_y += dy * 8;
+    int move_x = dx, move_y = dy;
+    if (dx || dy) {
+        uint64_t now = time_us_64();
+        if (m.last_move_us) {
+            uint64_t dt = now - m.last_move_us;
+            uint32_t distance = (uint32_t)(dx < 0 ? -dx : dx);
+            uint32_t ay = (uint32_t)(dy < 0 ? -dy : dy);
+            if (ay > distance) distance = ay;
+            uint32_t threshold = m.sens_d ? m.sens_d : 64;
+            if (dt && (uint64_t)distance * 1000000ull > (uint64_t)threshold * dt) {
+                move_x <<= 1;
+                move_y <<= 1;
+            }
+        }
+        m.last_move_us = now;
+    }
 
-    int mx = m.mpp_x ? m.mpp_x : 8;
-    int my = m.mpp_y ? m.mpp_y : 16;
+    int sx = mouse_sensitivity_q12(m.sens_x);
+    int sy = mouse_sensitivity_q12(m.sens_y);
+    int mx = (m.mpp_x ? m.mpp_x : 8) * 4096;
+    int my = (m.mpp_y ? m.mpp_y : 16) * 4096;
+    m.frac_x += move_x * 8 * sx;
+    m.frac_y += move_y * 8 * sy;
+
     int px = m.frac_x / mx;
     int py = m.frac_y / my;
     m.frac_x -= px * mx;
@@ -452,7 +483,9 @@ void bios_33h_reset(void)
 
     m.mpp_x = 8;
     m.mpp_y = 16;
-    m.sens_x = m.sens_y = m.sens_d = 50;
+    m.sens_x = m.sens_y = 50;
+    m.sens_d = 64;
+    m.last_move_us = 0;
 
     m.hide_count = -1;      /* скрыт */
     m.drawn = 0;
@@ -618,7 +651,11 @@ bool bios_33h(CPU* cpu)
         break;
 
     case 0x0010:    /* Define exclusion area — игнорируем */
-    case 0x0013:    /* Set double-speed threshold */
+        break;
+
+    case 0x0013:    /* Set double-speed threshold, mickeys/sec */
+        m.sens_d = CPU_DX ? CPU_DX : 64;
+        m.last_move_us = 0;
         break;
 
     case 0x0014: {  /* Exchange event handler */
@@ -655,11 +692,16 @@ bool bios_33h(CPU* cpu)
         break;
     }
 
-    case 0x001A:    /* Set mouse sensitivity */
-        m.sens_x = (uint8_t)CPU_BX;
-        m.sens_y = (uint8_t)CPU_CX;
-        m.sens_d = (uint8_t)CPU_DX;
+    case 0x001A: {  /* Set mouse sensitivity */
+        uint16_t sx = CPU_BX, sy = CPU_CX;
+        if (sx < 1) sx = 1; else if (sx > 100) sx = 100;
+        if (sy < 1) sy = 1; else if (sy > 100) sy = 100;
+        m.sens_x = (uint8_t)sx;
+        m.sens_y = (uint8_t)sy;
+        m.sens_d = CPU_DX ? CPU_DX : 64;
+        m.last_move_us = 0;
         break;
+    }
 
     case 0x001B:    /* Get mouse sensitivity */
         CPU_BX = m.sens_x;
