@@ -35,6 +35,7 @@
 #include "../../drivers/psram/psram_init.h"
 
 bool SELECT_VGA = false;
+static bool boot_output_forced = false;
 extern bool required_to_repair_text_pal;
 
 // ============================================================================
@@ -1283,6 +1284,13 @@ static uint32_t vga_line1[LINE_SIZE / 4] __scratch_y("vga_line1") = { 0 };
 static uint32_t vga_line2[LINE_SIZE / 4] __scratch_y("vga_line2") = { 0 };
 static uint32_t vga_line3[LINE_SIZE / 4] __scratch_y("vga_line3") = { 0 };
 
+void vga_hw_set_boot_output(bool select_vga)
+{
+    SELECT_VGA = select_vga;
+    boot_output_forced = true;
+    DBG_PRINT("  Boot video override: %s\n", SELECT_VGA ? "VGA" : "HDMI");
+}
+
 void vga_hw_init(void) {
     for(uint32_t i = 0; i < 256; ++i) {
         spread8_lut[i] = spread8(i);
@@ -1294,26 +1302,30 @@ void vga_hw_init(void) {
         SELECT_VGA = true;
     #elif defined(FORCE_HDMI)
         SELECT_VGA = false;
-    #elif defined(BOARD_Z2)
-        /* Waveshare RP2350-PiZero has HDMI output only. */
-        SELECT_VGA = false;
     #else
-        uint8_t linkVGA01 = testPins(VGA_BASE_PIN, VGA_BASE_PIN + 1);
-        #if defined(BOARD_Z0) || defined(BOARD_Z2) || defined(BOARD_DV)
-            SELECT_VGA = linkVGA01 == 0x1F;
+        if (!boot_output_forced) {
+        #if defined(BOARD_Z2)
+            /* Waveshare RP2350-PiZero has HDMI output only. */
+            SELECT_VGA = false;
         #else
-            SELECT_VGA = (linkVGA01 == 0) || (linkVGA01 == 0x1F);
+            uint8_t linkVGA01 = testPins(VGA_BASE_PIN, VGA_BASE_PIN + 1);
+            #if defined(BOARD_Z0) || defined(BOARD_Z2) || defined(BOARD_DV)
+                SELECT_VGA = linkVGA01 == 0x1F;
+            #else
+                SELECT_VGA = (linkVGA01 == 0) || (linkVGA01 == 0x1F);
+            #endif
+            // If HDMI detected, reset tested pins to clean hi-Z state.
+            // testPins leaves pull-downs enabled via gpio_deinit(), which can
+            // disturb the HDMI differential pair during clock boost.
+            if (!SELECT_VGA) {
+                gpio_init(VGA_BASE_PIN);
+                gpio_set_dir(VGA_BASE_PIN, GPIO_IN);
+                gpio_disable_pulls(VGA_BASE_PIN);
+                gpio_init(VGA_BASE_PIN + 1);
+                gpio_set_dir(VGA_BASE_PIN + 1, GPIO_IN);
+                gpio_disable_pulls(VGA_BASE_PIN + 1);
+            }
         #endif
-        // If HDMI detected, reset tested pins to clean hi-Z state.
-        // testPins leaves pull-downs enabled via gpio_deinit(), which can
-        // disturb the HDMI differential pair during clock boost.
-        if (!SELECT_VGA) {
-            gpio_init(VGA_BASE_PIN);
-            gpio_set_dir(VGA_BASE_PIN, GPIO_IN);
-            gpio_disable_pulls(VGA_BASE_PIN);
-            gpio_init(VGA_BASE_PIN + 1);
-            gpio_set_dir(VGA_BASE_PIN + 1, GPIO_IN);
-            gpio_disable_pulls(VGA_BASE_PIN + 1);
         }
     #endif
     DBG_PRINT("  Video output: %s\n", SELECT_VGA ? "VGA" : "HDMI");

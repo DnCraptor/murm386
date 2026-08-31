@@ -106,6 +106,14 @@ bool nespad_begin(uint32_t cpu_khz, uint8_t clkPin, uint8_t dataPin,
     return true;
 }
 
+void nespad_reclock(uint32_t cpu_khz)
+{
+    if (!pad_initialized || sm < 0)
+        return;
+
+    pio_sm_set_clkdiv_int_frac(pio, sm, cpu_khz / 1000, 0); /* 1 MHz */
+}
+
 /* Trigger PIO read (non-blocking). Result ready in ~100µs via nespad_read_finish(). */
 void nespad_read_start(void)
 {

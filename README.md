@@ -135,6 +135,10 @@ bin/<CMAKE_BUILD_TYPE>/
 
 ## Runtime controls
 
+At power-on, the physical video output can be overridden before video autodetection starts. Hold **V** on a PS/2 or USB keyboard, or **SELECT+B** on the NES/SNES-style gamepad, to force VGA (`SELECT_VGA=true`). Hold **H**, or **SELECT+A**, to force HDMI (`SELECT_VGA=false`). When either override is detected, normal VGA/HDMI pin autodetection is skipped for that boot. Compile-time `--vga` / `--hdmi` forced builds keep their explicit build-time selection.
+
+The **VGA/HDMI** item at the bottom of the Win+F11 Hardware setup menu controls the persistent boot selection. **Autodetect** is the default and removes both marker files. **VGA** creates `/.config/286/force_vga`; **HDMI** creates `/.config/286/force_dvi`. Selecting either forced output removes the opposite marker. The marker files are updated immediately when the value is changed; no Apply or restart is requested by this setting itself. The selected physical output is used on the next boot.
+
 The project contains the on-screen settings and disk-management UI. Current key bindings are implemented in `src/main.c`; consult that source when changing input mappings so documentation does not drift from code again.
 
 ```text

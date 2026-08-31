@@ -44,6 +44,7 @@
 #include "usbmouse_wrapper.h"
 #include "usbgamepad.h"
 #include "usbmsc_device.h"
+#include "usbhid.h"
 #endif
 #ifdef NESPAD_GPIO_CLK
 #include "nespad.h"
@@ -1075,6 +1076,12 @@ static void __no_inline_not_in_flash_func(reconfigure_clocks)(int cpu_mhz, int p
             set_sys_clock_khz(cpu_mhz * 1000, false);
         }
         console_reclock();
+#ifdef BOARD_HAS_PS2
+        ps2_reclock();
+#endif
+#ifdef NESPAD_GPIO_CLK
+        nespad_reclock(clock_get_hz(clk_sys) / 1000);
+#endif
     }
 
     // Re-initialize PSRAM with the new frequency
@@ -1094,6 +1101,71 @@ static void __no_inline_not_in_flash_func(reconfigure_clocks)(int cpu_mhz, int p
 #endif
 
 static void core1_entry(void);
+
+/*
+ * Boot-time physical video override.  Input is already initialized here but
+ * video is not: held V / SELECT+B selects VGA, held H / SELECT+A selects HDMI.
+ * The short polling window also gives a USB keyboard time to enumerate.
+ * VGA wins if conflicting commands are held at the same time.
+ */
+static void detect_boot_video_override(void)
+{
+    enum {
+        HOST_KEY_H = 35, HOST_KEY_V = 47,
+        USB_HID_KEY_H = 0x0B, USB_HID_KEY_V = 0x19
+    };
+    bool force_vga = false;
+    bool force_hdmi = false;
+    absolute_time_t deadline = make_timeout_time_ms(500);
+
+    while (!time_reached(deadline)) {
+        int is_down, keycode;
+
+#ifdef BOARD_HAS_PS2
+        ps2kbd_tick();
+        while (ps2kbd_get_key(&is_down, &keycode)) {
+            if (!is_down)
+                continue;
+            if (keycode == HOST_KEY_V)
+                force_vga = true;
+            else if (keycode == HOST_KEY_H)
+                force_hdmi = true;
+        }
+#endif
+
+#ifdef USB_HID_ENABLED
+        usbhid_task();
+        uint8_t hid_keycode;
+        int down;
+        while (usbhid_get_key_action(&hid_keycode, &down)) {
+            if (!down)
+                continue;
+            if (hid_keycode == USB_HID_KEY_V)
+                force_vga = true;
+            else if (hid_keycode == USB_HID_KEY_H)
+                force_hdmi = true;
+        }
+#endif
+
+#ifdef NESPAD_GPIO_CLK
+        nespad_read();
+        {
+            const uint32_t pad = nespad_state | nespad_state2;
+            if (pad == (DPAD_SELECT | DPAD_B))
+                force_vga = true;
+            if (pad == (DPAD_SELECT | DPAD_A))
+                force_hdmi = true;
+        }
+#endif
+        sleep_ms(1);
+    }
+
+    if (force_vga)
+        vga_hw_set_boot_output(true);
+    else if (force_hdmi)
+        vga_hw_set_boot_output(false);
+}
+
 static bool init_hardware(void) {
     // Configure clocks (including overclock if enabled)
     configure_clocks();
@@ -1123,6 +1195,57 @@ static bool init_hardware(void) {
     if (psram_missing)
         printf("ERROR: PSRAM not detected or smaller than 1 MiB!\n");
 #endif
+
+#ifdef BOARD_HAS_PS2
+    // Initialize physical input before video so boot-time video override can use it.
+    DBG_PRINT("Initializing PS/2 (unified driver)...\n");
+    DBG_PRINT("  Keyboard CLK: GPIO%d, DATA: GPIO%d\n", PS2_PIN_CLK, PS2_PIN_DATA);
+    DBG_PRINT("  Mouse    CLK: GPIO%d, DATA: GPIO%d\n", PS2_MOUSE_CLK, PS2_MOUSE_DATA);
+    if (!ps2_init(PIO_PS2KBD, PS2_PIN_CLK, PS2_MOUSE_CLK)) {
+        printf("WARNING: PS/2 PIO init failed\n");
+    }
+    ps2kbd_init();
+    ps2_mouse_init_device();
+#else
+    DBG_PRINT("PS/2 not present on this board; USB HID is the only input\n");
+#endif
+
+#ifdef USB_HID_ENABLED
+    // config.ini is not available yet: start HOST unconditionally for early keyboard input.
+    DBG_PRINT("Initializing early USB HID host...\n");
+    usbkbd_early_host_init();
+#endif
+
+#ifdef NESPAD_GPIO_CLK
+    DBG_PRINT("Initializing NES gamepad...\n");
+    DBG_PRINT("  CLK: GPIO%d, DATA: GPIO%d, LATCH: GPIO%d\n",
+              NESPAD_GPIO_CLK, NESPAD_GPIO_DATA, NESPAD_GPIO_LATCH);
+    if (nespad_begin(clock_get_hz(clk_sys) / 1000,
+                     NESPAD_GPIO_CLK, NESPAD_GPIO_DATA, NESPAD_GPIO_LATCH)) {
+        DBG_PRINT("  NES gamepad initialized\n");
+    } else {
+        DBG_PRINT("  NES gamepad init failed (PIO unavailable)\n");
+    }
+#endif
+
+    detect_boot_video_override();
+
+    // Initialize SD card
+    DBG_PRINT("Initializing SD card...\n");
+    FRESULT res = f_mount(&fatfs, "", 1);
+    if (res == FR_OK) {
+        FIL fp;
+        // just early stiky mark:
+        if (f_open(&fp, "/.config/286/force_vga", FA_READ) == FR_OK) {
+            vga_hw_set_boot_output(true);
+            f_close(&fp);
+        }
+        else if (f_open(&fp, "/.config/286/force_dvi", FA_READ) == FR_OK) {
+            vga_hw_set_boot_output(false);
+            f_close(&fp);
+        }
+    }
+
     // Initialize VGA early so we can show errors on screen
     multicore_launch_core1(core1_entry);
 
@@ -1141,10 +1264,7 @@ static bool init_hardware(void) {
     }
 #endif
 
-    // Initialize SD card
-    DBG_PRINT("Initializing SD card...\n");
-    FRESULT res = f_mount(&fatfs, "", 1);
-    if (res != FR_OK) {
+    if (res != FR_OK) { // show sd-card error
         char detail[32];
 
         if (res == FR_NOT_READY) {
@@ -1225,6 +1345,13 @@ static bool init_hardware(void) {
 #endif
     }
 
+#ifdef USB_HID_ENABLED
+    // HOST was started before config.ini for early keyboard input. Release the
+    // controller now if the configured role is DEVICE; device init stays late.
+    if (config_get_usb_mode() == USB_MODE_DEVICE)
+        usbkbd_early_host_deinit();
+#endif
+
     /* video= has now been parsed. Derive the selected VRAM/page-cache
      * partition before any guest paging backend is initialized. */
     video_profile_configure_memory();
@@ -1271,45 +1398,6 @@ static bool init_hardware(void) {
                       (unsigned long)(detected_psram >> 20));
         }
     }
-
-#ifdef BOARD_HAS_PS2
-    // Initialize unified PS/2 driver (keyboard + mouse on shared PIO)
-    DBG_PRINT("Initializing PS/2 (unified driver)...\n");
-    DBG_PRINT("  Keyboard CLK: GPIO%d, DATA: GPIO%d\n", PS2_PIN_CLK, PS2_PIN_DATA);
-    DBG_PRINT("  Mouse    CLK: GPIO%d, DATA: GPIO%d\n", PS2_MOUSE_CLK, PS2_MOUSE_DATA);
-    if (!ps2_init(PIO_PS2KBD, PS2_PIN_CLK, PS2_MOUSE_CLK)) {
-        printf("WARNING: PS/2 PIO init failed\n");
-    }
-
-    // Initialize PS/2 keyboard wrapper (uses unified driver for PIO)
-    ps2kbd_init();
-
-    // Initialize PS/2 mouse device (reset, detect IntelliMouse, enable streaming)
-    ps2_mouse_init_device();
-#else
-    DBG_PRINT("PS/2 not present on this board; USB HID is the only input\n");
-#endif
-
-    // Initialize USB HID keyboard (if enabled)
-#ifdef USB_HID_ENABLED
-    if (config_get_usb_mode() == USB_MODE_HOST) {
-        DBG_PRINT("Initializing USB HID host...\n");
-        usbkbd_init();
-    }
-#endif
-
-    // Initialize NES/SNES gamepad (if pins defined for this board)
-#ifdef NESPAD_GPIO_CLK
-    DBG_PRINT("Initializing NES gamepad...\n");
-    DBG_PRINT("  CLK: GPIO%d, DATA: GPIO%d, LATCH: GPIO%d\n",
-              NESPAD_GPIO_CLK, NESPAD_GPIO_DATA, NESPAD_GPIO_LATCH);
-    if (nespad_begin(clock_get_hz(clk_sys) / 1000,
-                     NESPAD_GPIO_CLK, NESPAD_GPIO_DATA, NESPAD_GPIO_LATCH)) {
-        DBG_PRINT("  NES gamepad initialized\n");
-    } else {
-        DBG_PRINT("  NES gamepad init failed (PIO unavailable)\n");
-    }
-#endif
 
     return true;
 }

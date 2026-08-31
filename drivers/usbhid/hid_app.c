@@ -381,6 +381,15 @@ void usbhid_init(void) {
     DBG_PRINT("USB HID Host initialized\n");
 }
 
+void usbhid_deinit(void) {
+    tuh_deinit(BOARD_TUH_RHPORT);
+    keyboard_connected = 0;
+    mouse_connected = 0;
+    key_action_head = 0;
+    key_action_tail = 0;
+    DBG_PRINT("USB HID Host deinitialized\n");
+}
+
 void usbhid_task(void) {
     // Process USB events
     tuh_task();

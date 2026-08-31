@@ -25,6 +25,11 @@ extern "C" {
 void usbhid_init(void);
 
 /**
+ * Deinitialize USB Host HID driver and release the root hub port.
+ */
+void usbhid_deinit(void);
+
+/**
  * Poll USB Host for events
  * Must be called periodically (e.g., in main loop)
  */

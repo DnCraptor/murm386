@@ -141,6 +141,14 @@ void usbkbd_init(void) {
         usbhid_init();
 }
 
+void usbkbd_early_host_init(void) {
+    usbhid_init();
+}
+
+void usbkbd_early_host_deinit(void) {
+    usbhid_deinit();
+}
+
 void usbkbd_tick(void) {
     if (config_get_usb_mode() == USB_MODE_HOST)
         usbhid_task();
@@ -175,6 +183,12 @@ int usbkbd_connected(void) {
 
 void usbkbd_init(void) {
     // No-op when USB HID is disabled
+}
+
+void usbkbd_early_host_init(void) {
+}
+
+void usbkbd_early_host_deinit(void) {
 }
 
 void usbkbd_tick(void) {

@@ -588,6 +588,17 @@ bool ps2_init(PIO pio, uint kbd_clk, uint mouse_clk) {
     return true;
 }
 
+void ps2_reclock(void) {
+    if (!ps2_pio)
+        return;
+
+    float div = (float)clock_get_hz(clk_sys) / (8.0f * 16700.0f);
+    if (kbd_initialized)
+        pio_sm_set_clkdiv(ps2_pio, kbd_sm, div);
+    if (mouse_pio_initialized)
+        pio_sm_set_clkdiv(ps2_pio, mouse_sm, div);
+}
+
 bool ps2_mouse_pio_init(PIO pio, uint mouse_clk) {
     ps2_pio = pio;
     mouse_clk_pin = mouse_clk;

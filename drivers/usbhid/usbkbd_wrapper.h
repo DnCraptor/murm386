@@ -16,8 +16,12 @@ extern "C" {
 
 // USB HID enabled: declare functions (implemented in usbkbd_wrapper.c)
 
-// Initialize USB keyboard driver
+// Initialize USB keyboard driver according to current configuration
 void usbkbd_init(void);
+
+// Early boot host control (independent of config.ini, for pre-video input)
+void usbkbd_early_host_init(void);
+void usbkbd_early_host_deinit(void);
 
 // Poll for keyboard events, call frequently
 void usbkbd_tick(void);
@@ -37,6 +41,12 @@ int usbkbd_connected(void);
 
 static inline void usbkbd_init(void) {
     // No-op when USB HID is disabled
+}
+
+static inline void usbkbd_early_host_init(void) {
+}
+
+static inline void usbkbd_early_host_deinit(void) {
 }
 
 static inline void usbkbd_tick(void) {

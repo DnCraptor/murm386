@@ -46,6 +46,9 @@ typedef struct {
  */
 bool ps2_init(PIO pio, uint kbd_clk, uint mouse_clk);
 
+/** Recalculate PIO clock dividers after clk_sys changes. */
+void ps2_reclock(void);
+
 /**
  * Initialize mouse only using PIO.
  * Use this when keyboard is managed by a separate driver.
