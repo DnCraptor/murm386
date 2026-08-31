@@ -281,21 +281,21 @@ __not_in_flash() void modregrm(CPU* cpu) {
             } else {
                 disp16 = 0;
             }
-            if (((rm == 2) || (rm == 3)) && !segoverride) {
+            if (__builtin_expect(((rm == 2) || (rm == 3)) && !segoverride, 0)) {
                 useseg = CPU_SS;
             }
             break;
         case 1:
             disp16 = signext(getmem8(CPU_CS, CPU_IP));
             StepIP(1);
-            if (((rm == 2) || (rm == 3) || (rm == 6)) && !segoverride) {
+            if (__builtin_expect(((rm == 2) || (rm == 3) || (rm == 6)) && !segoverride, 0)) {
                 useseg = CPU_SS;
             }
             break;
         case 2:
             disp16 = getmem16(CPU_CS, CPU_IP);
             StepIP(2);
-            if (((rm == 2) || (rm == 3) || (rm == 6)) && !segoverride) {
+            if (__builtin_expect(((rm == 2) || (rm == 3) || (rm == 6)) && !segoverride, 0)) {
                 useseg = CPU_SS;
             }
             break;
