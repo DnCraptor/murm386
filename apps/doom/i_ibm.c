@@ -1738,16 +1738,6 @@ byte *I_ZoneBase (int *size)
     if (largest < 0x180000u)
         I_Error("Insufficient memory for DOOM zone!");
 
-    /* Do not hand the entire largest free block to the zone.  The FatFs QSPI
-       L2 cache shares this PSRAM region through a monotonically rising floor
-       (arm_ff_qspi_claim_until): a zone that consumes everything drives that
-       floor to the top of the heap and starves the cache, so WAD reads fall
-       back to un-cached QSPI and load far slower.  Reserve a margin - kept
-       well above the 0x180000 zone minimum - so the L2 cache keeps working,
-       matching how the Build/Duke port leaves PSRAM free. */
-    if (largest > 0x180000u + (1024u * 1024u))
-        largest -= 1024u * 1024u;
-
     zone = (byte *)malloc(largest);
     if (!zone)
         I_Error("Unable to allocate DOOM zone!");

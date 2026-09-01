@@ -64,10 +64,12 @@ static
 BYTE CardType;			/* Card type flags */
 
 /*
- * Small direct-mapped FatFs disk-I/O cache backed by one or more SRAM arenas.
+ * Small direct-mapped FatFs disk-I/O cache backed by direct-addressable arenas.
  *
  * Arena 0 is the persistent RAM_4_EXT region in non-VGA256 builds. Arena 1
- * is the old core0 stack region after SP has moved into GFX_BUFFER. Keeping
+ * is the old core0 stack region after SP has moved into GFX_BUFFER. Arena 2
+ * borrows the payload of the largest free conventional-DOS MCB while guest
+ * RAM has a stable native mapping. Keeping
  * the tag/epoch next to each 512-byte payload means growing the cache does not
  * consume scarce ordinary SRAM for a parallel tag table.
  *
@@ -75,7 +77,7 @@ BYTE CardType;			/* Card type flags */
  * the resident cache line is updated. No disk data exists only in this SRAM.
  */
 #define FF_STACK_CACHE_SECTOR_SIZE 512u
-#define FF_STACK_CACHE_MAX_ARENAS  2u
+#define FF_STACK_CACHE_MAX_ARENAS  3u
 #define FF_STACK_CACHE_INVALID_EPOCH 0u
 
 typedef struct __attribute__((aligned(4))) {
@@ -372,23 +374,32 @@ void sdcard_enable_ff_cache_arena(unsigned arena, void *storage, size_t bytes)
 {
     uintptr_t lo;
     size_t line_count;
+    ff_stack_cache_line_t *new_lines = NULL;
+    uint16_t new_line_count = 0;
     uint32_t first = 0;
 
     if (arena >= FF_STACK_CACHE_MAX_ARENAS)
         return;
 
     lo = ((uintptr_t)storage + 3u) & ~(uintptr_t)3u;
-    if (!storage || bytes <= lo - (uintptr_t)storage) {
-        ff_stack_cache_arena[arena].lines = NULL;
-        ff_stack_cache_arena[arena].line_count = 0;
-    } else {
+    if (storage && bytes > lo - (uintptr_t)storage) {
         bytes -= lo - (uintptr_t)storage;
         line_count = bytes / sizeof(ff_stack_cache_line_t);
         if (line_count > UINT16_MAX)
             line_count = UINT16_MAX;
-        ff_stack_cache_arena[arena].lines = (ff_stack_cache_line_t *)lo;
-        ff_stack_cache_arena[arena].line_count = (uint16_t)line_count;
+        new_lines = (ff_stack_cache_line_t *)lo;
+        new_line_count = (uint16_t)line_count;
     }
+
+    /* Paragraph-sized DOS changes often leave the usable line geometry
+     * unchanged. Do not throw away every arena unless the mapping really
+     * changes. */
+    if (ff_stack_cache_arena[arena].lines == new_lines &&
+        ff_stack_cache_arena[arena].line_count == new_line_count)
+        return;
+
+    ff_stack_cache_arena[arena].lines = new_lines;
+    ff_stack_cache_arena[arena].line_count = new_line_count;
 
     for (uint32_t i = 0; i < FF_STACK_CACHE_MAX_ARENAS; ++i) {
         ff_stack_cache_arena[i].first_slot = (uint16_t)first;
@@ -417,6 +428,11 @@ void sdcard_enable_ff_cache_arena(unsigned arena, void *storage, size_t bytes)
 void sdcard_enable_ff_stack_cache(void *storage, size_t bytes)
 {
     sdcard_enable_ff_cache_arena(1u, storage, bytes);
+}
+
+void sdcard_enable_ff_dos_cache(void *storage, size_t bytes)
+{
+    sdcard_enable_ff_cache_arena(2u, storage, bytes);
 }
 
 void sdcard_enable_ff_qspi_cache(void *minimum, void *ceiling)

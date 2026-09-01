@@ -138,13 +138,15 @@ int MUS_RegisterSong(void *data) {
     FILE *mid;
     unsigned int midlen;
     unsigned short len;
+    char *new_mid = NULL;
     mus_data = NULL;
     len = ((unsigned short*)data)[2]
         + ((unsigned short*)data)[3];
-    if (mid_data)
-    {
-        free(mid_data);
-    }
+    /* Do NOT free the current song up front: the async DMX service (TSR0)
+       parses mid_data through music_tracks[].ptr, so freeing/realloc-ing it
+       while the service runs is a use-after-free.  Build the new image into a
+       local buffer with the old song still valid, then swap it in under
+       TSM_Lock() below (same guard MUSIC_StopSong already uses). */
     if (memcmp(data, "MThd", 4))
     {
         mus = fopen("temp.mus", "wb");
@@ -181,17 +183,22 @@ int MUS_RegisterSong(void *data) {
         fseek(mid, 0, SEEK_END);
         midlen = ftell(mid);
         rewind(mid);
-        mid_data = malloc(midlen);
-        if (!mid_data)
+        new_mid = malloc(midlen);
+        if (!new_mid)
         {
             fclose(mid);
             return 0;
         }
-        fread(mid_data, 1, midlen, mid);
+        fread(new_mid, 1, midlen, mid);
         fclose(mid);
-        mus_data = mid_data;
         remove("temp.mid");
         remove("temp.mus");
+        TSM_Lock();
+        if (mid_data)
+            free(mid_data);
+        mid_data = new_mid;
+        mus_data = mid_data;
+        TSM_Unlock();
 #if DMX_DIAG
         if (!dmx_diag_song_registered) {
             DMX_Diag("MUS register: MUS len=%u -> MIDI len=%u rate=%d\n",
@@ -201,7 +208,14 @@ int MUS_RegisterSong(void *data) {
 #endif
         return 0;
     }
+    TSM_Lock();
+    if (mid_data)
+    {
+        free(mid_data);
+        mid_data = NULL;
+    }
     mus_data = data;
+    TSM_Unlock();
 #if DMX_DIAG
     if (!dmx_diag_song_registered) {
         DMX_Diag("MUS register: input already MIDI\n");

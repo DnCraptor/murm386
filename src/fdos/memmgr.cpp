@@ -34,6 +34,7 @@ extern "C" {
 #endif
 
 #include "guest_ref.hpp"
+#include "sdcard.h"
 
 using fdos_guest::mcb_ref;
 using fdos_guest::lol_ref;
@@ -48,6 +49,83 @@ static inline bool mcb_valid(const mcb_ref &m) { return m.valid(); }
 static inline seg next_mcb(seg s, const mcb_ref &m)
 {
   return static_cast<seg>(s + m.size() + 1u);
+}
+
+/*
+ * FatFs may borrow the payload of the largest free conventional-memory MCB.
+ * It never owns the MCB: every DOS memory-map change recomputes the largest
+ * block before control returns to the caller. Cache lines are write-through,
+ * so dropping an old arena loses no disk state.
+ *
+ * A pageable guest mapping cannot back a long-lived native arena pointer.
+ * Keep arena 2 disabled there; direct QSPI guest RAM and NO_PAGING both have
+ * stable X86_RAM_BASE + linear addressing.
+ */
+static seg ff_low_cache_seg;
+static UWORD ff_low_cache_paras;
+
+static void refresh_ff_low_cache_arena(void)
+{
+#if !defined(NO_PAGING)
+  extern uint8_t *ram_pages;
+  if (guest_ram_base == ram_pages)
+  {
+    if (ff_low_cache_paras != 0)
+    {
+      ff_low_cache_seg = 0;
+      ff_low_cache_paras = 0;
+      sdcard_enable_ff_dos_cache(nullptr, 0);
+    }
+    return;
+  }
+#endif
+
+  const seg upper_root = (UWORD)guest_lol.uppermem_root();
+  seg best_seg = 0;
+  UWORD best_paras = 0;
+
+  for (seg pseg = (UWORD)guest_lol.first_mcb();;)
+  {
+    if (upper_root != 0xffff && pseg == upper_root)
+      break;
+
+    mcb_ref p(pseg);
+    if (!mcb_valid(p))
+      return;
+
+    const BYTE type = p.type();
+    if (p.is_free() && p.size() > best_paras)
+    {
+      best_seg = pseg;
+      best_paras = p.size();
+    }
+
+    if (type == MCB_LAST)
+      break;
+
+    const seg next = next_mcb(pseg, p);
+    if (next <= pseg)
+      return;
+    if (upper_root != 0xffff && next == upper_root)
+      break;
+    pseg = next;
+  }
+
+  if (best_seg == ff_low_cache_seg && best_paras == ff_low_cache_paras)
+    return;
+
+  ff_low_cache_seg = best_seg;
+  ff_low_cache_paras = best_paras;
+
+  if (!best_paras)
+  {
+    sdcard_enable_ff_dos_cache(nullptr, 0);
+    return;
+  }
+
+  const uint32_t linear = (uint32_t)(best_seg + 1u) << 4;
+  sdcard_enable_ff_dos_cache(X86_RAM_BASE + linear,
+                             (size_t)best_paras << 4);
 }
 
 STATIC COUNT joinMCBs(seg para)
@@ -220,6 +298,7 @@ searchAgain:
     }
     if (asize)
       *asize = biggest ? biggestSize : 0;
+    refresh_ff_low_cache_arena();
     return DE_NOMEM;
   }
 
@@ -270,6 +349,7 @@ stopIt:
   }
 
   *para = foundSegSeg;
+  refresh_ff_low_cache_arena();
   return SUCCESS;
 }
 
@@ -299,6 +379,7 @@ extern "C" COUNT DosMemFree(UWORD para)
     return DE_INVLDMCB;
   p.psp(FREE_PSP);
   p.clear_name();
+  refresh_ff_low_cache_arena();
   return SUCCESS;
 }
 
@@ -328,6 +409,7 @@ extern "C" COUNT DosMemChange(UWORD para, UWORD size, UWORD *maxSize)
     {
       if (maxSize)
         *maxSize = p.size();
+      refresh_ff_low_cache_arena();
       return DE_NOMEM;
     }
   }
@@ -351,6 +433,7 @@ extern "C" COUNT DosMemChange(UWORD para, UWORD size, UWORD *maxSize)
   }
 
   p.psp((UWORD)guest_idata.cu_psp());
+  refresh_ff_low_cache_arena();
   return SUCCESS;
 }
 
