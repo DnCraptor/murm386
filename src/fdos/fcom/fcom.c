@@ -622,17 +622,18 @@ static unsigned fcom_readline(CPU *cpu, UWORD command_psp, const fcom_guest_ref 
    * and hand back an empty line so the main loop redisplays the prompt.
    */
   if (fcom_chk_cbreak(cpu, command_psp, g, BREAK_INPUT)) {
-    dos_puts(cpu, command_psp, g, "\n");
+    dos_puts(cpu, command_psp, g, "\r\n");
     g.input()->kb_count = 0;
     g.input()->kb_buf[0] = '\0';
     return 0;
   }
 
   /*
-   * DOS buffered input echoes Enter as CR. Complete the console
-   * newline with LF so command output starts on the next row.
+   * INT 21h/AH=0Ah input echo semantics are console-dependent here.
+   * Finish the interactive command explicitly with DOS CRLF so batch
+   * echo or child-program output starts at column zero on the next row.
    */
-  dos_puts(cpu, command_psp, g, "\n");
+  dos_puts(cpu, command_psp, g, "\r\n");
 
   {
     auto input = g.input();
