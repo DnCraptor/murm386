@@ -11,6 +11,7 @@
 #include "platform_rp2350.h"
 #include "ff.h"  // FatFS for SD card access
 #include "debug.h"
+#include "usbserial.h"
 #ifndef EIO
 #define EIO 5
 #endif
@@ -99,9 +100,14 @@ struct U8250 {
 	uint8_t lcr;
 	uint8_t ier;
 	uint8_t mcr;
+	uint8_t msr;
 	uint8_t ioready;
 	int out_fd;
 	uint8_t in;
+#if defined(RP2350_BUILD)
+	uint8_t tx_pending;
+	uint8_t tx_byte;
+#endif
 
 	int irq;
 	void *pic;
@@ -113,6 +119,10 @@ U8250 *u8250_init(int irq, void *pic, void (*set_irq)(void *pic, int irq, int le
 	U8250 *s = malloc(sizeof(U8250));
 	memset(s, 0, sizeof(U8250));
 	s->out_fd = 1;
+	/* No physical modem-control inputs are exposed by the USB backend yet.
+	 * Keep the traditional connected-modem defaults used by this emulator:
+	 * CTS, DSR and DCD asserted, RI deasserted. */
+	s->msr = 0xb0;
 
 	s->irq = irq;
 	s->pic = pic;
@@ -331,13 +341,29 @@ CMOS *cmos_init(long mem_size, int irq, void *pic, void (*set_irq)(void *pic, in
 	return c;
 }
 
+static uint8_t u8250_iir(U8250 *uart)
+{
+	/* 8250 interrupt priority: receiver line status, received data,
+	 * transmitter holding register empty, modem status.  We do not
+	 * currently model receiver error interrupts, so the remaining
+	 * sources map directly onto ioready bits 0, 1 and 3. */
+	uint8_t pending = uart->ier & uart->ioready;
+	if (pending & 0x01)
+		return 0x04; /* received data available */
+	if (pending & 0x02)
+		return 0x02; /* THR empty */
+	if (pending & 0x08)
+		return 0x00; /* modem status */
+	return 0x01;     /* no interrupt pending */
+}
+
 static void u8250_update_interrupts(U8250 *uart)
 {
-	if (uart->ier & uart->ioready) {
-		uart->set_irq(uart->pic, uart->irq, 1);
-	} else {
-		uart->set_irq(uart->pic, uart->irq, 0);
-	}
+	/* On an IBM PC the UART interrupt output reaches the PIC only while
+	 * MCR.OUT2 is asserted.  DOS communications software normally sets
+	 * OUT2 before enabling UART interrupts. */
+	int level = (uart->mcr & 0x08) && !(u8250_iir(uart) & 0x01);
+	uart->set_irq(uart->pic, uart->irq, level);
 }
 
 uint8_t u8250_reg_read(U8250 *uart, int off)
@@ -361,7 +387,15 @@ uint8_t u8250_reg_read(U8250 *uart, int off)
 		val = uart->ier;
 		break;
 	case 2:
-		val = (uart->ier & uart->ioready) ? 0 : 1;
+		val = u8250_iir(uart);
+		/* Reading IIR acknowledges a THRE interrupt.  The THR itself stays
+		 * empty (LSR.THRE/TEMT remain set); only this interrupt request is
+		 * cleared until another THR write completes or THRE IRQ is enabled
+		 * again. */
+		if (val == 0x02) {
+			uart->ioready &= (uint8_t)~0x02;
+			u8250_update_interrupts(uart);
+		}
 		break;
 	case 3:
 		val = uart->lcr;
@@ -370,12 +404,29 @@ uint8_t u8250_reg_read(U8250 *uart, int off)
 		val = uart->mcr;
 		break;
 	case 5:
-		/* LSR = no error, TX done & ready */
+		/* THRE/TEMT stay clear while the one-byte THR is waiting for the
+		 * USB backend to accept it. Once accepted, the physical USB-UART
+		 * owns the character timing and the emulated 8250 is ready again. */
+#if defined(RP2350_BUILD)
+		val = (uart->tx_pending ? 0x00 : 0x60) | (uart->ioready & 1);
+#else
 		val = 0x60 | (uart->ioready & 1);
+#endif
 		break;
 	case 6:
-		/* MSR = carrier detect, no ring, data ready, clear to send. */
-		val = 0xb0;
+		if (uart->mcr & 0x10) {
+			/* Internal loopback reports the modem outputs directly on the
+			 * corresponding inputs. Do not mix in external/delta state here. */
+			val = (uint8_t)((uart->mcr & 0x0c) << 4); /* OUT1->RI, OUT2->DCD */
+			val |= (uint8_t)((uart->mcr & 0x02) << 3); /* RTS->CTS */
+			val |= (uint8_t)((uart->mcr & 0x01) << 5); /* DTR->DSR */
+		} else {
+			val = uart->msr;
+			/* Reading MSR clears the four delta bits and the corresponding IRQ. */
+			uart->msr &= 0xf0;
+			uart->ioready &= (uint8_t)~0x08;
+			u8250_update_interrupts(uart);
+		}
 		break;
 		/* no scratch register, so we should be detected as a plain 8250. */
 	default:
@@ -392,14 +443,43 @@ void u8250_reg_write(U8250 *uart, int off, uint8_t val)
 			uart->dll = val;
 			break;
 		} else {
-#if !defined(__wasm__) && !defined(RP2350_BUILD)
-			ssize_t r;
-			do {
-				r = write(uart->out_fd, &val, 1);
-			} while (r == -1 && errno == EINTR);
-#elif defined(DEBUG_ENABLED)
-			putchar(val);
+			/* A THR write consumes the current THRE interrupt request.  This
+			 * emulator has no character-time delay, so after handing the byte
+			 * to the backend THR is empty again and a fresh THRE request can be
+			 * generated.  The low-high IRQ transition is important to drivers
+			 * which transmit one byte per interrupt. */
+			uart->ioready &= (uint8_t)~0x02;
+			u8250_update_interrupts(uart);
+
+			if (uart->mcr & 0x10) {
+				/* Internal loopback passes the transmitted character through the
+				 * active word length, just like the real serial datapath. */
+				static const uint8_t data_mask[4] = { 0x1f, 0x3f, 0x7f, 0xff };
+				uart->in = val & data_mask[uart->lcr & 0x03];
+				uart->ioready |= 0x01;
+			} else {
+#if defined(RP2350_BUILD)
+				if (usbserial_connected()) {
+					if (!usbserial_write_byte(val)) {
+						uart->tx_byte = val;
+						uart->tx_pending = 1;
+					}
+				}
+#elif !defined(__wasm__)
+				ssize_t r;
+				do {
+					r = write(uart->out_fd, &val, 1);
+				} while (r == -1 && errno == EINTR);
 #endif
+			}
+
+#if defined(RP2350_BUILD)
+			if (!uart->tx_pending)
+				uart->ioready |= 0x02;
+#else
+			uart->ioready |= 0x02;
+#endif
+			u8250_update_interrupts(uart);
 		}
 		break;
 	case 1:
@@ -407,26 +487,71 @@ void u8250_reg_write(U8250 *uart, int off, uint8_t val)
 			uart->dlh = val;
 			break;
 		} else {
-			uart->ier = val;
-			if (uart->ier & 2)
+			uart->ier = val & 0x0f;
+			if (uart->ier & 2) {
+#if defined(RP2350_BUILD)
+				if (!uart->tx_pending)
+					uart->ioready |= 2;
+#else
 				uart->ioready |= 2;
-			else
+#endif
+			} else {
 				uart->ioready &= ~2;
+			}
 			u8250_update_interrupts(uart);
 		}
 		break;
-	case 3:
+	case 3: {
+#if defined(RP2350_BUILD)
+		uint8_t old_lcr = uart->lcr;
+#endif
 		uart->lcr = val;
+#if defined(RP2350_BUILD)
+		/* Software normally programs DLL/DLH while DLAB is set, then clears
+		 * DLAB. Apply the completed divisor only at that transition so the
+		 * USB-UART bridge never sees a half-written divisor.
+		 */
+		if ((old_lcr & 0x80) && !(val & 0x80)) {
+			uint16_t divisor = (uint16_t)uart->dll | ((uint16_t)uart->dlh << 8);
+			if (divisor)
+				usbserial_set_baudrate(115200u / divisor);
+		}
+#endif
 		break;
+	}
 	case 4:
-		uart->mcr = val;
+		uart->mcr = val & 0x1f;
+#if defined(RP2350_BUILD)
+		usbserial_set_control_lines(uart->mcr & 0x03);
+#endif
+		u8250_update_interrupts(uart);
 		break;
 	}
 }
 
 void u8250_update(U8250 *uart)
 {
-#if !defined(_WIN32) && !defined(__wasm__) && !defined(RP2350_BUILD)
+#if defined(RP2350_BUILD)
+	if (uart->tx_pending) {
+		/* Keep exactly one byte in the emulated THR until TinyUSB accepts it.
+		 * If the USB serial interface disappears, release THR just as a real
+		 * UART would continue shifting data with no cable attached. */
+		if (!usbserial_connected() || usbserial_write_byte(uart->tx_byte)) {
+			uart->tx_pending = 0;
+			uart->ioready |= 0x02;
+			u8250_update_interrupts(uart);
+		}
+	}
+
+	if (!(uart->mcr & 0x10) && !(uart->ioready & 1)) {
+		uint8_t value;
+		if (usbserial_read_byte(&value)) {
+			uart->in = value;
+			uart->ioready |= 1;
+			u8250_update_interrupts(uart);
+		}
+	}
+#elif !defined(_WIN32) && !defined(__wasm__)
 	if (IsKBHit()) {
 		if (!(uart->ioready & 1)) {
 			uart->in = ReadKBByte();

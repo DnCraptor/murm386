@@ -10,6 +10,7 @@
 #include "usbhid.h"
 #include "debug.h"
 #include "usbgamepad.h"
+#include "usbserial.h"
 #include <stdio.h>
 #include <string.h>
 #include "pico/stdlib.h"  // for time_us_32()
@@ -393,6 +394,7 @@ void usbhid_deinit(void) {
 void usbhid_task(void) {
     // Process USB events
     tuh_task();
+    usbserial_task();
 
     // Process key repeat (typematic)
     process_key_repeat();

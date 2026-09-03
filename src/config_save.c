@@ -24,6 +24,7 @@ static int cfg_fpu = 0;
 static char cfg_bios[32] = "";  /* empty = Native BIOS */
 static int cfg_raw_sd_hdd = 0;
 static int cfg_usb_mode = USB_MODE_HOST;
+static int cfg_usb_modem = 0;
 static bool cfg_changed = false;
 
 // Hardware settings (use build-time defaults)
@@ -120,6 +121,16 @@ void config_set_usb_mode(int mode) {
     mode = (mode == USB_MODE_DEVICE) ? USB_MODE_DEVICE : USB_MODE_HOST;
     if (cfg_usb_mode != mode) {
         cfg_usb_mode = mode;
+        cfg_changed = true;
+        cfg_hw_changed = true;
+    }
+}
+
+int config_get_usb_modem(void) { return cfg_usb_modem; }
+void config_set_usb_modem(int enabled) {
+    enabled = !!enabled;
+    if (cfg_usb_modem != enabled) {
+        cfg_usb_modem = enabled;
         cfg_changed = true;
         cfg_hw_changed = true;
     }
@@ -477,6 +488,9 @@ bool config_save_all(void) {
     snprintf(line, sizeof(line), "usb=%s\r\n",
              cfg_usb_mode == USB_MODE_DEVICE ? "DEVICE" : "HOST");
     write_line(&fp, line);
+    snprintf(line, sizeof(line), "usb_modem=%s\r\n",
+             cfg_usb_modem ? "COM1" : "NONE");
+    write_line(&fp, line);
     snprintf(line, sizeof(line), "cpu_freq=%d\r\n", cfg_cpu_freq);
     write_line(&fp, line);
     snprintf(line, sizeof(line), "psram_freq=%d\r\n", cfg_psram_freq);
@@ -547,6 +561,8 @@ int parse_frank_386_ini(void* user, const char* section,
     } else if (strcmp(name, "usb") == 0) {
         cfg_usb_mode = (strcasecmp(value, "DEVICE") == 0)
                      ? USB_MODE_DEVICE : USB_MODE_HOST;
+    } else if (strcmp(name, "usb_modem") == 0) {
+        cfg_usb_modem = (strcasecmp(value, "COM1") == 0 || atoi(value) != 0);
     } else if (strcmp(name, "nes_joystick") == 0) {
         cfg_nes_joystick = atoi(value);
     } else if (strcmp(name, "nes_mouse") == 0) {

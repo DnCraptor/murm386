@@ -41,6 +41,14 @@ static uint16_t translate_bios_key(uint8_t scan, uint8_t ascii, uint8_t flags) {
     bool shift = (flags & (KBD_FLAG_LSHIFT | KBD_FLAG_RSHIFT)) != 0;
     bool ctrl  = (flags & KBD_FLAG_CTRL) != 0;
     bool alt   = (flags & KBD_FLAG_ALT) != 0;
+
+    /* IBM PC/AT BIOS returns Alt+letter as a scan-only key (AL=00h).
+     * Old DOS applications such as Telix and Procomm use these codes
+     * for Alt hotkeys (for example Alt+Z -> AX=2C00h). */
+    if (alt && ((ascii >= 'a' && ascii <= 'z') ||
+                (ascii >= 'A' && ascii <= 'Z')))
+        return (uint16_t)scan << 8;
+
     /* BIOS-compatible scan codes for modified function keys.
      * F1..F10 are 3B00..4400 without modifiers. Since these keys already
      * have ASCII=00h, Alt/Ctrl/Shift are encoded by changing the scan byte.

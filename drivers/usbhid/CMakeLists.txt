@@ -10,6 +10,7 @@ target_sources(usbhid INTERFACE
     ${CMAKE_CURRENT_LIST_DIR}/usbgamepad.c
     ${CMAKE_CURRENT_LIST_DIR}/usbkbd_wrapper.c
     ${CMAKE_CURRENT_LIST_DIR}/usbmouse_wrapper.c
+    ${CMAKE_CURRENT_LIST_DIR}/usbserial.c
     ${CMAKE_CURRENT_LIST_DIR}/usbmsc_device.c
 )
 
@@ -27,4 +28,4 @@ target_link_libraries(usbhid INTERFACE
     tinyusb_board
 )
 
-message(STATUS "USB runtime roles enabled: HOST HID / DEVICE MSC")
+message(STATUS "USB runtime roles enabled: HOST HID+CDC / DEVICE MSC")

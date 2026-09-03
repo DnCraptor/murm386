@@ -10,6 +10,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // Include board configuration for pin definitions
 #ifdef RP2350_BUILD
 #include "board_config.h"
@@ -62,5 +66,9 @@ typedef enum {
 
 void sdcard_enable_ff_qspi_cache(void *minimum, void *ceiling);
 void sdcard_ff_qspi_cache_set_floor(sdcard_ff_qspi_owner_t owner, void *floor);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // _SDCARD_H_

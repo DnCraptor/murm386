@@ -1514,6 +1514,12 @@ static bool init_emulator(void) {
         DBG_PRINT("Using default configuration\n");
     }
 
+    /* USB modem is an optional COM1 mapping and is meaningful only while
+     * TinyUSB owns the connector in HOST mode. Resolve it before pc_new() so
+     * native POST/BDA/equipment data describe the same hardware the guest sees. */
+    config.enable_serial = config_get_usb_modem() &&
+                           config_get_usb_mode() == USB_MODE_HOST;
+
     /* init_hardware() already invalidates the PSRAM test cache on a real
      * power-on, but load_config_from_sd() above parses [murm-286] again and
      * restores psram_size/psram_test_freq from disk.  Drop only the runtime

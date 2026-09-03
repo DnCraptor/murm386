@@ -149,50 +149,39 @@ int MUS_RegisterSong(void *data) {
        TSM_Lock() below (same guard MUSIC_StopSong already uses). */
     if (memcmp(data, "MThd", 4))
     {
-        mus = fopen("temp.mus", "wb");
-        if (!mus)
+        size_t outcap = (size_t)len * 4u + 8192u;
+        new_mid = (char *)malloc(outcap);
+        if (!new_mid)
         {
             return 0;
         }
-        fwrite(data, 1, len, mus);
-        fclose(mus);
-        mus = fopen("temp.mus", "rb");
-        if (!mus)
+        /* MUS->MIDI entirely in RAM: input is the cached MUS lump, output a
+           generous malloc buffer.  No SD temp.mus/temp.mid round-trip. */
+        mus = fmemopen(data, len, "rb");
+        mid = fmemopen(new_mid, outcap, "wb");
+        if (!mus || !mid)
         {
-            return 0;
-        }
-        mid = fopen("temp.mid", "wb");
-        if (!mid)
-        {
-            fclose(mus);
+            if (mus) fclose(mus);
+            if (mid) fclose(mid);
+            free(new_mid);
             return 0;
         }
         if (mus2mid(mus, mid, mus_rate, dmx_mdev == Adlib || dmx_mdev == SoundBlaster))
         {
             fclose(mid);
             fclose(mus);
-            return 0;
-        }
-        fclose(mid);
-        fclose(mus);
-        mid = fopen("temp.mid", "rb");
-        if (!mid)
-        {
+            free(new_mid);
             return 0;
         }
         fseek(mid, 0, SEEK_END);
-        midlen = ftell(mid);
-        rewind(mid);
-        new_mid = malloc(midlen);
-        if (!new_mid)
-        {
-            fclose(mid);
-            return 0;
-        }
-        fread(new_mid, 1, midlen, mid);
+        midlen = (unsigned int)ftell(mid);
         fclose(mid);
-        remove("temp.mid");
-        remove("temp.mus");
+        fclose(mus);
+        {
+            char *shr = (char *)realloc(new_mid, midlen ? midlen : 1);
+            if (shr)
+                new_mid = shr;
+        }
         TSM_Lock();
         if (mid_data)
             free(mid_data);

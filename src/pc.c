@@ -231,7 +231,7 @@ static __always_inline u8 _pc_io_read(void *o, int addr)
 	case 0x2ec: case 0x2ed: case 0x2ee: case 0x2ef:
 	case 0x3e8: case 0x3e9: case 0x3ea: case 0x3eb:
 	case 0x3ec: case 0x3ed: case 0x3ee: case 0x3ef:
-		return 0;
+		return 0xff;
 	case 0x42:
 		/* read delay for PIT channel 2 */
 		/* certain guest code needs it to drive pc speaker properly */
@@ -677,7 +677,8 @@ static void pc_io_write(void *o, int addr, u8 val)
 		return;
 	case 0x3f8: case 0x3f9: case 0x3fa: case 0x3fb:
 	case 0x3fc: case 0x3fd: case 0x3fe: case 0x3ff:
-		u8250_reg_write(pc->serial, addr - 0x3f8, val);
+		if (pc->enable_serial)
+			u8250_reg_write(pc->serial, addr - 0x3f8, val);
 		return;
 #if EMULATE_LTEMS
     case 0x260: case 0x261: case 0x262: case 0x263:

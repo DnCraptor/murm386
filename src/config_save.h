@@ -41,6 +41,10 @@ void config_set_raw_sd_hdd(int enabled);
 int config_get_usb_mode(void);
 void config_set_usb_mode(int mode);
 
+/* Map the USB-host serial adapter to the emulated PC COM1 port. */
+int config_get_usb_modem(void);
+void config_set_usb_modem(int enabled);
+
 // Hardware settings (saved in [murm-286] section)
 int config_get_video_adapter(void);
 void config_set_video_adapter(int profile);

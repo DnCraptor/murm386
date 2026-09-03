@@ -9,6 +9,7 @@ typedef struct native_dos_FILE FILE;
 extern FILE *stdout;
 
 FILE *fopen(const char *filename, const char *mode);
+FILE *fmemopen(void *buf, size_t size, const char *mode);
 int fprintf(FILE *stream, const char *format, ...);
 int fscanf(FILE *stream, const char *format, ...);
 int sscanf(const char *buffer, const char *format, ...);

@@ -76,8 +76,19 @@ extern "C" {
 // Max number of HID interfaces
 #define CFG_TUH_HID 4
 
-// Disable unused classes
-#define CFG_TUH_CDC 0
+// USB serial host for the emulated PC COM1. Stock CDC-ACM plus the common
+// USB-UART bridges used by ZiModem (CH340C/CP210x/FTDI).
+#define CFG_TUH_CDC 1
+#define CFG_TUH_CDC_CH34X 1
+#define CFG_TUH_CDC_CP210X 1
+#define CFG_TUH_CDC_FTDI 1
+#define CFG_TUH_CDC_RX_BUFSIZE 2048
+#define CFG_TUH_CDC_TX_BUFSIZE 2048
+#define CFG_TUH_CDC_LINE_CONTROL_ON_ENUM 0x00
+#define CFG_TUH_CDC_LINE_CODING_ON_ENUM \
+    { 1200, CDC_LINE_CODING_STOP_BITS_1, CDC_LINE_CODING_PARITY_NONE, 8 }
+
+// Disable remaining unused host classes
 #define CFG_TUH_VENDOR 0
 #define CFG_TUH_MSC 0
 

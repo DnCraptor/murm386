@@ -1504,6 +1504,11 @@ struct native_dos_FILE
     int eof;
     int is_static;
     int text_mode;
+    int is_mem;              /* 1 = memory-backed (fmemopen) stream */
+    unsigned char *mem;      /* backing buffer (not owned by the stream) */
+    size_t mem_pos;          /* current offset */
+    size_t mem_len;          /* valid bytes (high-water mark for writes) */
+    size_t mem_cap;          /* buffer capacity */
 };
 
 static struct native_dos_FILE native_stdout_file = {1, 0, 1, 1};
@@ -1730,6 +1735,31 @@ FILE *fopen(const char *filename, const char *mode)
     return stream;
 }
 
+FILE *fmemopen(void *buf, size_t size, const char *mode)
+{
+    FILE *stream;
+
+    if (!buf || !mode || mode[0] == '\0')
+        return NULL;
+
+    stream = (FILE *)malloc(sizeof(*stream));
+    if (!stream)
+        return NULL;
+
+    stream->handle = -1;
+    stream->eof = 0;
+    stream->is_static = 0;
+    stream->text_mode = 0;
+    stream->is_mem = 1;
+    stream->mem = (unsigned char *)buf;
+    stream->mem_pos = 0;
+    stream->mem_cap = size;
+    /* read streams expose the whole buffer; write streams start empty and
+       grow (high-water) as bytes are written. */
+    stream->mem_len = (mode[0] == 'r') ? size : 0;
+    return stream;
+}
+
 int fclose(FILE *stream)
 {
     int rc;
@@ -1739,6 +1769,12 @@ int fclose(FILE *stream)
 
     if (stream->is_static)
         return 0;
+
+    if (stream->is_mem)
+    {
+        free(stream);
+        return 0;
+    }
 
     rc = close(stream->handle);
     free(stream);
@@ -1757,6 +1793,21 @@ size_t fread(void *buffer, size_t size, size_t count, FILE *stream)
         return 0;
 
     total = size * count;
+    if (stream->is_mem)
+    {
+        size_t avail = (stream->mem_pos < stream->mem_len)
+                     ? stream->mem_len - stream->mem_pos : 0;
+        if (avail < total)
+        {
+            total = avail;
+            stream->eof = 1;
+        }
+        if (total == 0)
+            return 0;
+        memcpy(buffer, stream->mem + stream->mem_pos, total);
+        stream->mem_pos += total;
+        return total / size;
+    }
     got = read(stream->handle, buffer, (unsigned int)total);
     if (got <= 0)
     {
@@ -1783,6 +1834,16 @@ size_t fwrite(const void *buffer, size_t size, size_t count, FILE *stream)
         return 0;
 
     total = size * count;
+    if (stream->is_mem)
+    {
+        if (stream->mem_pos + total > stream->mem_cap)
+            return 0;
+        memcpy(stream->mem + stream->mem_pos, buffer, total);
+        stream->mem_pos += total;
+        if (stream->mem_pos > stream->mem_len)
+            stream->mem_len = stream->mem_pos;
+        return count;
+    }
     written = native_stream_write(stream, (const char *)buffer, total);
     if (written < 0)
         return 0;
@@ -1795,6 +1856,25 @@ int fseek(FILE *stream, long offset, int origin)
     if (!stream)
         return -1;
 
+    if (stream->is_mem)
+    {
+        long base;
+        long np;
+        switch (origin)
+        {
+            case SEEK_SET: base = 0; break;
+            case SEEK_CUR: base = (long)stream->mem_pos; break;
+            case SEEK_END: base = (long)stream->mem_len; break;
+            default: return -1;
+        }
+        np = base + offset;
+        if (np < 0 || (size_t)np > stream->mem_cap)
+            return -1;
+        stream->mem_pos = (size_t)np;
+        stream->eof = 0;
+        return 0;
+    }
+
     if (lseek(stream->handle, (int32_t)offset, origin) < 0)
         return -1;
 
@@ -1806,6 +1886,9 @@ long ftell(FILE *stream)
 {
     if (!stream)
         return -1;
+
+    if (stream->is_mem)
+        return (long)stream->mem_pos;
 
     return (long)lseek(stream->handle, 0, SEEK_CUR);
 }

@@ -47,6 +47,7 @@ typedef enum {
     SETTING_NES_MOUSE,
     SETTING_NES_JOYSTICK,
     SETTING_USB_JOYSTICK,
+    SETTING_USB_MODEM,
     SETTING_MOUSE_INVERT_Y,
     SETTING_CPU_FREQ,
     SETTING_VOLTAGE,
@@ -118,7 +119,7 @@ static int audio_output_setting = AUDIO_OUTPUT_AUTO;
 // Original values (to detect changes)
 static int orig_cpu, orig_fpu, orig_video_adapter;
 static int orig_pcspeaker, orig_adlib, orig_soundblaster, orig_tandy, orig_covox, orig_dss, orig_mouse, orig_nes_mouse, orig_nes_joystick, orig_mpu401;
-static int orig_cpu_freq, orig_psram_freq, orig_flash_freq, orig_volume, orig_voltage, orig_mouse_invert_y, orig_mouse_sensitivity;
+static int orig_cpu_freq, orig_psram_freq, orig_flash_freq, orig_volume, orig_voltage, orig_mouse_invert_y, orig_mouse_sensitivity, orig_usb_modem;
 
 // UI dimensions
 #define MENU_X      10
@@ -241,6 +242,7 @@ void settingsui_open(void) {
     orig_voltage = config_get_voltage();
     orig_mouse_invert_y = config_get_mouse_invert_y();
     orig_mouse_sensitivity = config_get_mouse_sensitivity();
+    orig_usb_modem = config_get_usb_modem();
     audio_output_setting = load_audio_output_setting();
     video_output_setting = load_video_output_setting();
 
@@ -264,6 +266,7 @@ void settingsui_close(void) {
         config_set_voltage(orig_voltage);
         config_set_mouse_invert_y(orig_mouse_invert_y);
         config_set_mouse_sensitivity(orig_mouse_sensitivity);
+        config_set_usb_modem(orig_usb_modem);
         audio_set_volume(orig_volume);
         config_clear_changes();
     }
@@ -388,6 +391,10 @@ static void cycle_option(int direction) {
             config_set_usb_joystick(config_get_usb_joystick() ? 0 : 1);
             break;
 
+        case SETTING_USB_MODEM:
+            config_set_usb_modem(config_get_usb_modem() ? 0 : 1);
+            break;
+
         case SETTING_MOUSE_INVERT_Y:
             config_set_mouse_invert_y(config_get_mouse_invert_y() ? 0 : 1);
             break;
@@ -471,6 +478,7 @@ static void draw_settings_menu(void) {
         "NES Mouse:",
         "NES Joystick:",
         "USB Joystick:",
+        "USB modem:",
         "Invert Mouse Y:",
         "RP2350 Freq:",
         "CPU Voltage:",
@@ -553,6 +561,9 @@ static void draw_settings_menu(void) {
                 break;
             case SETTING_USB_JOYSTICK:
                 snprintf(value, sizeof(value), "< %s >", config_get_usb_joystick() ? "Enabled" : "Disabled");
+                break;
+            case SETTING_USB_MODEM:
+                snprintf(value, sizeof(value), "< %s >", config_get_usb_modem() ? "COM1" : "None");
                 break;
             case SETTING_MOUSE_INVERT_Y:
                 snprintf(value, sizeof(value), "< %s >", config_get_mouse_invert_y() ? "Yes" : "No");
