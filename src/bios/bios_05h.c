@@ -22,8 +22,8 @@ Since the BOUND instruction also calls INT 05h, but returns control to the BOUND
 infinite loop of PrtScreens unless the INT 05 handler is aware of the problem and checks whether the interrupt was invoked by a BOUND instruction
 */
 bool bios_05h(CPU* cpu) {
-    uint16_t ret_ip = getmem16(CPU_SS, CPU_SP + 2);
-    uint16_t ret_cs = getmem16(CPU_SS, CPU_SP + 4);
+    uint16_t ret_ip = getmem16(CPU_SS, CPU_SP);
+    uint16_t ret_cs = getmem16(CPU_SS, CPU_SP + 2);
 
     if (getmem8(ret_cs, ret_ip) == 0x62) {
         print_line("BOUND EXCEPTION ! ", 0);

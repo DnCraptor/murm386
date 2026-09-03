@@ -2121,7 +2121,8 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                     ) <
                     signext32(getmem16(ea >> 4, ea & 15)
                     )) {
-                    intcall86(cpu, 5); //bounds check exception
+                    SET_IP(firstip);
+                    intcall86(cpu, 5); // bounds check exception; faults restart at BOUND
                 } else {
                     ea += 2;
                     if (
@@ -2129,7 +2130,8 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                         ) >
                         signext32(getmem16(ea >> 4, ea & 15)
                         )) {
-                        intcall86(cpu, 5); //bounds check exception
+                        SET_IP(firstip);
+                        intcall86(cpu, 5); // bounds check exception; faults restart at BOUND
                     }
                 }
                 break;
