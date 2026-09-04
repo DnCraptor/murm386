@@ -938,7 +938,7 @@ static void ensure_prompt_column_zero(CPU *cpu, UWORD command_psp,
   fcom_intcall(cpu, command_psp, 0x10, "FCOM cursor position");
 
   if (CPU_DL != 0)
-    dos_puts(cpu, command_psp, g, "\n");
+    dos_puts(cpu, command_psp, g, "\r\n");
 }
 
 static int fcom_handle_attributes(CPU *cpu, UWORD command_psp,
@@ -1033,7 +1033,7 @@ static void pause_command(CPU *cpu, UWORD command_psp,
   CPU_AH = 0x08;
   fcom_intcall(cpu, command_psp, 0x21, "FCOM PAUSE");
 
-  dos_puts(cpu, command_psp, g, "\n");
+  dos_puts(cpu, command_psp, g, "\r\n");
 }
 
 
@@ -8227,6 +8227,52 @@ static void split_call_target(char *args, char **target, char **tail)
   *tail = skip_space(p);
 }
 
+static int copy_environment_value_guest(UWORD command_psp,
+                                        uint32_t name, size_t name_len,
+                                        uint32_t *dst, uint32_t end)
+{
+  UWORD env_seg = fcom_guest_psp_environment(command_psp);
+  uint32_t env;
+  unsigned left = 0x8000u;
+
+  if (env_seg == 0)
+    return 0;
+
+  env = fcom_guest_linear(env_seg, 0);
+  while (left != 0 && fcom_guest_read8(env) != 0) {
+    size_t n = fcom_guest_strnlen(env, left);
+    size_t i;
+    int match = n > name_len &&
+                fcom_guest_read8(env + (uint32_t)name_len) == '=';
+
+    if (n == left)
+      break;
+
+    for (i = 0; match && i < name_len; ++i) {
+      unsigned char a = (unsigned char)fcom_guest_read8(env + (uint32_t)i);
+      unsigned char b = (unsigned char)fcom_guest_read8(name + (uint32_t)i);
+      if (a >= 'a' && a <= 'z')
+        a = (unsigned char)(a - ('a' - 'A'));
+      if (b >= 'a' && b <= 'z')
+        b = (unsigned char)(b - ('a' - 'A'));
+      if (a != b)
+        match = 0;
+    }
+
+    if (match) {
+      uint32_t value = env + (uint32_t)name_len + 1u;
+      while (fcom_guest_read8(value) != 0 && *dst < end)
+        fcom_guest_write8((*dst)++, fcom_guest_read8(value++));
+      return fcom_guest_read8(value) == 0 ? 1 : -1;
+    }
+
+    env += (uint32_t)n + 1u;
+    left -= (unsigned)n + 1u;
+  }
+
+  return 0;
+}
+
 static int expand_batch_parameters_guest(UWORD command_psp)
 {
   const uint32_t line =
@@ -8279,6 +8325,26 @@ static int expand_batch_parameters_guest(UWORD command_psp)
       } else if (code == '%') {
         fcom_guest_write8(dst++, '%');
         src += 2u;
+        continue;
+      } else {
+        uint32_t close = src + 1u;
+
+        while (fcom_guest_read8(close) != 0 &&
+               fcom_guest_read8(close) != '%')
+          ++close;
+
+        if (fcom_guest_read8(close) == '%') {
+          int env_rc = copy_environment_value_guest(
+              command_psp, src + 1u, (size_t)(close - src - 1u),
+              &dst, end);
+          if (env_rc < 0)
+            return 0;
+          src = close + 1u;
+          continue;
+        }
+
+        /* FreeCOM drops an unmatched leading percent. */
+        ++src;
         continue;
       }
 
@@ -9368,7 +9434,7 @@ static int execute_compact_echo(CPU *cpu, UWORD command_psp,
   text = command + 5;
 
   if (*text == '\0') {
-    dos_puts(cpu, command_psp, g, "\n");
+    dos_puts(cpu, command_psp, g, "\r\n");
   } else {
     dos_puts(cpu, command_psp, g, text);
     dos_puts(cpu, command_psp, g, "\r\n");
@@ -9746,6 +9812,119 @@ failed:
 }
 
 
+static char fcom_for_variable(const char *line)
+{
+  const char *p = line;
+
+  while (*p == ' ' || *p == '\t')
+    ++p;
+  if (strncasecmp(p, "FOR", 3) != 0 ||
+      (p[3] != ' ' && p[3] != '\t'))
+    return 0;
+
+  p += 3;
+  while (*p == ' ' || *p == '\t')
+    ++p;
+  if (*p != '%')
+    return 0;
+  while (*p == '%')
+    ++p;
+
+  if (!fcom_ascii_isalpha((unsigned char)*p) ||
+      (p[1] != ' ' && p[1] != '\t'))
+    return 0;
+
+  return (char)toupper((unsigned char)*p);
+}
+
+static int expand_environment_variables(UWORD command_psp,
+                                        const fcom_guest_ref &g,
+                                        char *line, size_t line_size)
+{
+  char expanded[FCOM_LINE_MAX + 1];
+  char *src = line;
+  char *dst = expanded;
+  char *end;
+  char forvar;
+
+  if (line_size == 0)
+    return 0;
+  end = expanded + line_size - 1;
+  if (end > expanded + FCOM_LINE_MAX)
+    end = expanded + FCOM_LINE_MAX;
+  forvar = fcom_for_variable(line);
+
+  while (*src != '\0' && dst < end) {
+    if (*src != '%') {
+      *dst++ = *src++;
+      continue;
+    }
+
+    ++src;
+    if (*src == '\0') {
+      *dst++ = '%';
+      break;
+    }
+
+    if (*src == '%') {
+      *dst++ = '%';
+      ++src;
+      continue;
+    }
+
+    if (forvar != 0 &&
+        toupper((unsigned char)*src) == (unsigned char)forvar) {
+      *dst++ = '%';
+      continue;
+    }
+
+    if (*src >= '0' && *src <= '9') {
+      *dst++ = '%';
+      continue;
+    }
+
+    {
+      char *close = strchr(src, '%');
+      char saved;
+      char *value;
+
+      if (close == NULL)
+        continue; /* FreeCOM drops an unmatched leading percent. */
+
+      int is_errorlevel;
+
+      saved = *close;
+      *close = '\0';
+      is_errorlevel = strcasecmp(src, "ERRORLEVEL") == 0;
+      value = fcom_env_alloc_value(command_psp, src,
+                                   FCOM_LINE_MAX + 1u);
+      *close = saved;
+
+      if (value != NULL) {
+        const char *v = value;
+        while (*v != '\0' && dst < end)
+          *dst++ = *v++;
+        free(value);
+      } else if (is_errorlevel) {
+        int n = snprintf(dst, (size_t)(end - dst) + 1u, "%u",
+                         (unsigned)g.errorlevel());
+        if (n < 0 || dst + n > end)
+          return 0;
+        dst += n;
+      }
+
+      src = close + 1;
+    }
+  }
+
+  if (*src != '\0')
+    return 0;
+
+  *dst = '\0';
+  strcpy(line, expanded);
+  return 1;
+}
+
 static int execute_command_line(CPU *cpu, UWORD command_psp,
                                 const fcom_guest_ref &g, char *line)
 {
@@ -9866,6 +10045,13 @@ static int execute_command_line_body(CPU *cpu, UWORD command_psp,
 
   fcom_fddebug_write(cpu, command_psp, g, "COMMAND: ", line);
   fcom_expand_aliases(command_psp, g, line, FCOM_LINE_MAX + 1);
+
+  if (!g.batch_active() &&
+      !expand_environment_variables(command_psp, g, line,
+                                    FCOM_LINE_MAX + 1u)) {
+    dos_puts(cpu, command_psp, g, "Line too long.\r\n");
+    return 0;
+  }
 
   if (g.trace_mode()) {
     int answer;
@@ -10258,6 +10444,16 @@ UBYTE fcom_process_session(CPU *cpu, UWORD command_psp,
       fcom_guest_read8(fcom_guest_linear(command_psp,
                                          start_command_offset)) != 0) {
     fcom_guest_ref g = fcom_state(command_psp);
+
+    /*
+     * COMMAND /C and /K are commonly launched by file managers after they
+     * have echoed the entered command but left the cursor on that row.
+     * The normal interactive path performs this normalization before each
+     * prompt; startup commands bypass that loop, so do it here as well.
+     */
+    ensure_prompt_column_zero(cpu, command_psp, g);
+
+    g = fcom_state(command_psp);
     fcom_buffer_ref<char, FCOM_LINE_MAX + 1> start_command(
         fcom_guest_linear(command_psp, start_command_offset));
     int rc = execute_command_line(cpu, command_psp, g, start_command);
