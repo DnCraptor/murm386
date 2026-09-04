@@ -266,6 +266,13 @@ static bool bios_09h_phase2(CPU* cpu, bios_callback_params_t* params)
         write86(BDA_KBD_FLAGS2, flags2);
         goto eoi_return;
     }
+    case 0x37: /* PrintScreen make: E0 2A E0 37 */
+        if (flags1 & KF1_LAST_E0) {
+            if (!is_up)
+                bios_05h(cpu);
+            goto eoi_return;
+        }
+        break;
     case 0x46: /* Scroll Lock */
         if (flags1 & KF1_LAST_E0) {
             /* E0+46 = Ctrl+Break */

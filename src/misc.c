@@ -520,10 +520,11 @@ void u8250_reg_write(U8250 *uart, int off, uint8_t val)
 		break;
 	}
 	case 4:
+		/* MCR is part of the emulated 8250 only.  Do not mirror guest DTR/RTS
+		 * onto the USB-UART adapter: the physical bridge is a transport layer,
+		 * not the guest's RS-232 connector.
+		 */
 		uart->mcr = val & 0x1f;
-#if defined(RP2350_BUILD)
-		usbserial_set_control_lines(uart->mcr & 0x03);
-#endif
 		u8250_update_interrupts(uart);
 		break;
 	}

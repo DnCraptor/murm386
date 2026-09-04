@@ -552,6 +552,20 @@ void ps2_put_keycode(PS2KbdState *s, int is_down, int keycode)
 {
     int critical = !is_down;
 
+    /* Linux KEY_SYSRQ (99) is the HID PrintScreen key.  AT set-1 does
+       not encode PrintScreen as an ordinary E0-prefixed key: it uses
+       the four-byte fake-shift sequence below.  The generic extended-key
+       table therefore deliberately keeps entry 99 at zero. */
+    if (keycode == 99) {
+        static const uint8_t make[] = { 0xe0, 0x2a, 0xe0, 0x37 };
+        static const uint8_t brk[]  = { 0xe0, 0xb7, 0xe0, 0xaa };
+        const uint8_t *seq = is_down ? make : brk;
+        size_t n = is_down ? sizeof(make) : sizeof(brk);
+        for (size_t i = 0; i < n; ++i)
+            ps2_kbd_queue(s, seq[i], critical);
+        return;
+    }
+
     if (s->delay) {
         s->delay = false;
         ps2_kbd_queue(s, s->delay_keycode, s->delay_critical);

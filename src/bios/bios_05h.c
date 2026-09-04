@@ -69,7 +69,7 @@ bool bios_05h(CPU* cpu) {
         return true;
     }
     UINT bw;
-    FRESULT fr = f_open(fp, "/" SD_DATA_DIR_SLASH "prn.txt", FA_WRITE | FA_OPEN_APPEND | FA_OPEN_ALWAYS);
+    FRESULT fr = f_open(fp, "/" SD_DATA_DIR_SLASH "printed.txt", FA_WRITE | FA_OPEN_APPEND | FA_OPEN_ALWAYS);
     if (fr != FR_OK) {
         free(fp);
         pstore8(0x500, 0xFF);
