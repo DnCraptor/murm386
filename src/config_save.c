@@ -19,10 +19,10 @@
 #include "video_profile.h"
 
 // Current configuration values (minimal storage)
-static int cfg_cpu_gen = 4;
+static int cfg_cpu_gen = EMU_CPU_GEN;
 static int cfg_fpu = 0;
 static char cfg_bios[32] = "";  /* empty = Native BIOS */
-static int cfg_raw_sd_hdd = 0;
+static int cfg_raw_sd_hdd = RAW_SD_HDD_LAST;
 static int cfg_usb_mode = USB_MODE_HOST;
 static int cfg_usb_modem = 0;
 static bool cfg_changed = false;
@@ -54,7 +54,7 @@ static bool cfg_hw_changed = false;
 extern PC *pc;
 
 // INI file path
-#define CONFIG_PATH SD_DATA_DIR_SLASH "config.ini"
+#define CONFIG_PATH ".config/" SD_DATA_DIR_SLASH "config.ini"
 
 bool config_ensure_data_dir(void) {
     FILINFO info;
@@ -69,6 +69,8 @@ bool config_ensure_data_dir(void) {
     res = f_mkdir(SD_DATA_DIR);
     if (res == FR_OK)
         return true;
+    f_mkdir("config");
+    f_mkdir("config/286");
 
     /*
      * Another path may have created it between f_stat() and f_mkdir().
@@ -108,10 +110,11 @@ const char *config_get_bios_file(void) {
 }
 
 int config_get_raw_sd_hdd(void) { return cfg_raw_sd_hdd; }
-void config_set_raw_sd_hdd(int enabled) {
-    enabled = !!enabled;
-    if (cfg_raw_sd_hdd != enabled) {
-        cfg_raw_sd_hdd = enabled;
+void config_set_raw_sd_hdd(int mode) {
+    if (mode != RAW_SD_HDD_FIRST && mode != RAW_SD_HDD_LAST)
+        mode = RAW_SD_HDD_OFF;
+    if (cfg_raw_sd_hdd != mode) {
+        cfg_raw_sd_hdd = mode;
         cfg_changed = true;
     }
 }

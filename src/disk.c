@@ -20,7 +20,7 @@ int hdcount = 0;
 
 static uint8_t sectorbuffer[512];
 
-static uint8_t raw_sd_hdd_enabled = 0;
+static uint8_t raw_sd_hdd_mode = RAW_SD_HDD_OFF;
 static uint32_t raw_sd_hdd_sectors = 0;
 
 struct struct_fdd {
@@ -341,26 +341,26 @@ uint8_t ata_hdd_count(void) {
     return count;
 }
 
-void disk_set_raw_sd_hdd(uint8_t enabled) {
-    raw_sd_hdd_enabled = 0;
+void disk_set_raw_sd_hdd(uint8_t mode) {
+    raw_sd_hdd_mode = RAW_SD_HDD_OFF;
     raw_sd_hdd_sectors = 0;
 
-    if (!enabled)
+    if (mode != RAW_SD_HDD_FIRST && mode != RAW_SD_HDD_LAST)
         return;
 
     DWORD sectors = 0;
     if (disk_ioctl(0, GET_SECTOR_COUNT, &sectors) == RES_OK && sectors) {
         raw_sd_hdd_sectors = (uint32_t)sectors;
-        raw_sd_hdd_enabled = 1;
+        raw_sd_hdd_mode = mode;
     }
 }
 
 uint8_t disk_raw_sd_hdd_enabled(void) {
-    return raw_sd_hdd_enabled;
+    return raw_sd_hdd_mode != RAW_SD_HDD_OFF;
 }
 
 uint32_t disk_raw_sd_sectors(void) {
-    return raw_sd_hdd_enabled ? raw_sd_hdd_sectors : 0u;
+    return raw_sd_hdd_mode != RAW_SD_HDD_OFF ? raw_sd_hdd_sectors : 0u;
 }
 
 bool disk_raw_sd_readonly(void) {
@@ -368,25 +368,25 @@ bool disk_raw_sd_readonly(void) {
 }
 
 bool disk_raw_sd_read(uint32_t lba, void *buf, uint32_t count) {
-    if (!raw_sd_hdd_enabled || !count) return false;
+    if (raw_sd_hdd_mode == RAW_SD_HDD_OFF || !count) return false;
     if (lba >= raw_sd_hdd_sectors || count > raw_sd_hdd_sectors - lba) return false;
     return disk_read(0, (BYTE *)buf, (LBA_t)lba, count) == RES_OK;
 }
 
 bool disk_raw_sd_write(uint32_t lba, const void *buf, uint32_t count) {
-    if (!raw_sd_hdd_enabled || !count) return false;
+    if (raw_sd_hdd_mode == RAW_SD_HDD_OFF || !count) return false;
     if (disk_status(0) & STA_PROTECT) return false;
     if (lba >= raw_sd_hdd_sectors || count > raw_sd_hdd_sectors - lba) return false;
     return disk_write(0, (const BYTE *)buf, (LBA_t)lba, count) == RES_OK;
 }
 
 bool disk_raw_sd_sync(void) {
-    if (!raw_sd_hdd_enabled) return false;
+    if (raw_sd_hdd_mode == RAW_SD_HDD_OFF) return false;
     return disk_ioctl(0, CTRL_SYNC, NULL) == RES_OK;
 }
 
 uint8_t bios_hdd_count(void) {
-    return (uint8_t)(ata_hdd_count() + (raw_sd_hdd_enabled ? 1u : 0u));
+    return (uint8_t)(ata_hdd_count() + (raw_sd_hdd_mode != RAW_SD_HDD_OFF ? 1u : 0u));
 }
 
 bool bios_hdd_get_info(uint8_t bios_index, bios_hdd_info_t *info) {
@@ -397,8 +397,33 @@ bool bios_hdd_get_info(uint8_t bios_index, bios_hdd_info_t *info) {
     info->ata_slot = -1;
 
     uint8_t ata_count = ata_hdd_count();
-    if (bios_index < ata_count) {
-        int8_t slot = ata_hdd_slot(bios_index);
+    bool sd_here = raw_sd_hdd_mode == RAW_SD_HDD_FIRST
+                 ? (bios_index == 0)
+                 : (raw_sd_hdd_mode == RAW_SD_HDD_LAST && bios_index == ata_count);
+
+    if (sd_here) {
+        const uint32_t track = 255u * 63u;
+        uint32_t cyls = (raw_sd_hdd_sectors + track - 1u) / track;
+        if (cyls == 0) cyls = 1;
+        if (cyls > 0xFFFFu) cyls = 0xFFFFu;
+
+        info->raw_sd = 1;
+        info->cyls = (uint16_t)cyls;
+        info->heads = 255;
+        info->sects = 63;
+        info->total_sectors = raw_sd_hdd_sectors;
+        return true;
+    }
+
+    uint8_t ata_index = bios_index;
+    if (raw_sd_hdd_mode == RAW_SD_HDD_FIRST) {
+        if (bios_index == 0)
+            return false;
+        ata_index--;
+    }
+
+    if (ata_index < ata_count) {
+        int8_t slot = ata_hdd_slot(ata_index);
         if (slot < 0)
             return false;
 
@@ -412,20 +437,6 @@ bool bios_hdd_get_info(uint8_t bios_index, bios_hdd_info_t *info) {
          * the same disk. */
         info->total_sectors = (uint32_t)info->cyls * info->heads * info->sects;
         return info->cyls && info->heads && info->sects && info->total_sectors;
-    }
-
-    if (raw_sd_hdd_enabled && bios_index == ata_count) {
-        const uint32_t track = 255u * 63u;
-        uint32_t cyls = (raw_sd_hdd_sectors + track - 1u) / track;
-        if (cyls == 0) cyls = 1;
-        if (cyls > 0xFFFFu) cyls = 0xFFFFu;
-
-        info->raw_sd = 1;
-        info->cyls = (uint16_t)cyls;
-        info->heads = 255;
-        info->sects = 63;
-        info->total_sectors = raw_sd_hdd_sectors;
-        return true;
     }
 
     return false;

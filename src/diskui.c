@@ -59,10 +59,10 @@ static char pending_filename[DRIVE_TOTAL][MAX_FILENAME_LEN];
 static bool pending_changed[DRIVE_TOTAL];  // true if user modified this drive
 static bool reboot_required;               // true if any ATA drive was changed
 
-// Pending values for the two config toggles (SD-CARD raw / USB mode). They are
+// Pending values for the SD-CARD placement / USB mode. They are
 // only written to the config on "Save and Reboot" so config_get_usb_mode()
 // keeps reflecting the *running* mode until then. Initialised in diskui_open().
-static int pending_raw_sd;                 // 0/1
+static int pending_raw_sd;                 // RAW_SD_HDD_*
 static int pending_usb_mode;               // USB_MODE_HOST / USB_MODE_DEVICE
 static char file_list[MAX_FILES][MAX_FILENAME_LEN];
 static int  file_count   = 0;
@@ -94,7 +94,7 @@ static void apply_and_close(void);
 static void reset_pending(void);
 static int first_attached_drive(void);
 static void usb_device_exit_to_host(void);
-static void toggle_sd_card(void);
+static void cycle_sd_card(int direction);
 static void toggle_usb_mode(void);
 static void esc_apply_temp_and_close(void);
 static bool row_is_toggle(int row);
@@ -252,9 +252,9 @@ void diskui_open(void) {
                still exports a drive, and move the highlight onto that row.
                Enable it live (disk_set_raw_sd_hdd) because usbmsc_device_init()
                binds the exported medium right after this call. */
-            if (!config_get_raw_sd_hdd()) {
-                config_set_raw_sd_hdd(1);
-                disk_set_raw_sd_hdd(1);
+            if (config_get_raw_sd_hdd() == RAW_SD_HDD_OFF) {
+                config_set_raw_sd_hdd(RAW_SD_HDD_LAST);
+                disk_set_raw_sd_hdd(RAW_SD_HDD_LAST);
             }
             selected_row = disk_raw_sd_hdd_enabled() ? DRIVE_SD_CARD : DRIVE_FDD0;
         }
@@ -310,8 +310,14 @@ static void draw_main_menu(void) {
         // Config toggle rows: right-aligned < value >, no file/[Select]/[Eject]
         if (row_is_toggle(i)) {
             const char *val;
-            if (i == DRIVE_SD_CARD)
-                val = pending_raw_sd ? "< On >" : "< Off >";
+            if (i == DRIVE_SD_CARD) {
+                if (pending_raw_sd == RAW_SD_HDD_FIRST)
+                    val = "< First >";
+                else if (pending_raw_sd == RAW_SD_HDD_LAST)
+                    val = "< Last >";
+                else
+                    val = "< Off >";
+            }
             else
                 val = (pending_usb_mode == USB_MODE_DEVICE) ? "< DEVICE >" : "< HOST >";
             osd_print(MENU_X + MENU_W - 4 - (int)strlen(val), y, val, attr);
@@ -502,8 +508,19 @@ static void eject_pending(void) {
 // SD-CARD / USB toggles: only change the pending value here. They need a
 // reboot to take effect, so mark reboot_required; the config is written in
 // apply_and_close(). This keeps config_get_usb_mode() = the running mode.
-static void toggle_sd_card(void) {
-    pending_raw_sd = pending_raw_sd ? 0 : 1;
+static void cycle_sd_card(int direction) {
+    static const int values[] = {
+        RAW_SD_HDD_OFF, RAW_SD_HDD_FIRST, RAW_SD_HDD_LAST
+    };
+    int index = 0;
+    for (int i = 0; i < 3; i++) {
+        if (pending_raw_sd == values[i]) {
+            index = i;
+            break;
+        }
+    }
+    index = (index + (direction < 0 ? 2 : 1)) % 3;
+    pending_raw_sd = values[index];
     reboot_required = true;
     draw_main_menu();
 }
@@ -603,7 +620,7 @@ bool diskui_handle_key(int keycode, bool is_down) {
                         apply_and_close();
                         break;
                     }
-                    if (selected_row == DRIVE_SD_CARD) { toggle_sd_card(); break; }
+                    if (selected_row == DRIVE_SD_CARD) { cycle_sd_card(1); break; }
                     if (selected_row == DRIVE_USB_MODE) { toggle_usb_mode(); break; }
                     const char *filename = get_display_filename(selected_row);
                     if (selected_row == DRIVE_BIOS || !filename) {
@@ -617,8 +634,12 @@ bool diskui_handle_key(int keycode, bool is_down) {
                 }
 
                 case KEY_LEFT:
+                    if (selected_row == DRIVE_SD_CARD) cycle_sd_card(-1);
+                    else if (selected_row == DRIVE_USB_MODE) toggle_usb_mode();
+                    break;
+
                 case KEY_RIGHT:
-                    if (selected_row == DRIVE_SD_CARD) toggle_sd_card();
+                    if (selected_row == DRIVE_SD_CARD) cycle_sd_card(1);
                     else if (selected_row == DRIVE_USB_MODE) toggle_usb_mode();
                     break;
 

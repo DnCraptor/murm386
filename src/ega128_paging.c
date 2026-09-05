@@ -395,8 +395,12 @@ bool ega128_paging_init(void)
     }
 #endif
 
-    FRESULT fr = f_open(&pagefile, SD_DATA_DIR_SLASH "pagefile.sys",
-                        FA_READ | FA_WRITE | FA_CREATE_ALWAYS);
+    FRESULT fr = f_mkdir("tmp");
+    if (fr != FR_OK && fr != FR_EXIST)
+        return false;
+
+    fr = f_open(&pagefile, "tmp/pagefile.sys",
+                FA_READ | FA_WRITE | FA_CREATE_ALWAYS);
     if (fr != FR_OK)
         return false;
     fr = f_expand(&pagefile, EGA128_VIRTUAL_RAM_SIZE, 1);
@@ -407,7 +411,7 @@ bool ega128_paging_init(void)
     pagefile_open = true;
     ega128_select_paged_backend();
     active = true;
-    printf("guest-RAM paging: %u KiB cache -> " SD_DATA_DIR_SLASH "pagefile.sys\n", (unsigned)(ram_pages_size >> 10));
+    printf("guest-RAM paging: %u KiB cache -> tmp/pagefile.sys\n", (unsigned)(ram_pages_size >> 10));
     return true;
 }
 #endif

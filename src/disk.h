@@ -33,6 +33,13 @@ uint8_t ata_is_cdrom(uint8_t drivenum);
 int8_t ata_hdd_slot(uint8_t bios_index);
 /* Number of actual HDD images in ATA slots (CD-ROMs excluded). */
 uint8_t ata_hdd_count(void);
+
+/* Raw physical SD card placement in the BIOS HDD list.
+ * Keep LAST=1 for compatibility with legacy raw_sd_hdd=1 configs. */
+#define RAW_SD_HDD_OFF   0
+#define RAW_SD_HDD_LAST  1
+#define RAW_SD_HDD_FIRST 2
+
 typedef struct {
     uint8_t raw_sd;       /* 1 = whole physical SD card, 0 = file-backed ATA image */
     int8_t ata_slot;       /* 0..3 for ATA image, -1 for raw SD */
@@ -42,12 +49,12 @@ typedef struct {
     uint32_t total_sectors;
 } bios_hdd_info_t;
 
-void disk_set_raw_sd_hdd(uint8_t enabled);
+void disk_set_raw_sd_hdd(uint8_t mode);
 uint8_t disk_raw_sd_hdd_enabled(void);
 
 /* Whole-SD-card raw sector access for the USB MSC fallback (used when no
    floppy/ATA image is attached). Only usable while the SD raw HDD option is
-   enabled (disk_set_raw_sd_hdd). Sizes/LBA are in 512-byte sectors. */
+   enabled by disk_set_raw_sd_hdd(). Sizes/LBA are in 512-byte sectors. */
 uint32_t disk_raw_sd_sectors(void);
 bool     disk_raw_sd_readonly(void);
 bool     disk_raw_sd_read(uint32_t lba, void *buf, uint32_t count);

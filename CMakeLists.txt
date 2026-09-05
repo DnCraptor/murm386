@@ -556,7 +556,7 @@ target_compile_definitions(${BUILD_NAME} PRIVATE
 
     # Emulator configuration (8MB PSRAM)
     EMU_VGA_MEM_SIZE_KB=${EMU_VGA_MEM_SIZE_KB}
-    EMU_CPU_GEN=4
+    EMU_CPU_GEN=2
 
     # Disable features for initial port
 #    NO_FPU=1

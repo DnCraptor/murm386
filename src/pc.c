@@ -2408,7 +2408,9 @@ int parse_conf_ini(void* user, const char* section,
 		} else if (NAME("cpu")) {
 			conf->cpu_gen = atoi(value);
 		} else if (NAME("raw_sd_hdd")) {
-            conf->raw_sd_hdd = atoi(value) != 0;
+            int mode = atoi(value);
+            conf->raw_sd_hdd = (mode == RAW_SD_HDD_FIRST || mode == RAW_SD_HDD_LAST)
+                             ? mode : RAW_SD_HDD_OFF;
 		} else if (NAME("hda")) {
 			conf->ata[0] = strdup(value);
 			conf->iscd[0] = 0;

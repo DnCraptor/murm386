@@ -521,9 +521,9 @@ static inline char get_rp2350_package_letter(void) {
 #define EMU_VGA_MEM_SIZE_KB 256
 #endif
 
-// CPU generation (3=386, 4=486, 5=586)
+// CPU generation (0=8086, 1=80186, 2=80286, 3=386, 4=486, 5=586)
 #ifndef EMU_CPU_GEN
-#define EMU_CPU_GEN 4
+#define EMU_CPU_GEN 2
 #endif
 
 

@@ -953,7 +953,7 @@ static void load_default_config(void) {
 
     // CPU configuration
     config.cpu_gen = EMU_CPU_GEN;
-    config.fpu = 0;  // Disabled for initial port
+    config.fpu = 1;
 
     // Display configuration
     config.width = 640;
@@ -969,7 +969,7 @@ static void load_default_config(void) {
         config.ata[i] = NULL;
         config.iscd[i] = 0;
     }
-    config.raw_sd_hdd = 0;
+    config.raw_sd_hdd = RAW_SD_HDD_LAST;
     config.fdd[0] = NULL;
     config.fdd[1] = NULL;
 
@@ -977,7 +977,7 @@ static void load_default_config(void) {
     config.vga_force_8dm = 0;
 }
 
-static int load_config_from_sd(const char *filename) {
+static int load_config_from_sd() {
     FIL fp;
     FRESULT res;
     DIR dir;
@@ -985,9 +985,9 @@ static int load_config_from_sd(const char *filename) {
 
     // Debug: List 386 directory contents
     DBG_PRINT("Checking SD card contents...\n");
-    res = f_opendir(&dir, SD_DATA_DIR);
+    res = f_opendir(&dir, ".config/" SD_DATA_DIR);
     if (res == FR_OK) {
-        DBG_PRINT("  " SD_DATA_DIR_SLASH " directory found, contents:\n");
+        DBG_PRINT("  .config/" SD_DATA_DIR_SLASH " directory found, contents:\n");
         while (f_readdir(&dir, &fno) == FR_OK && fno.fname[0] != 0) {
             DBG_PRINT("    %s%s (%lu bytes)\n",
                    fno.fname,
@@ -996,7 +996,7 @@ static int load_config_from_sd(const char *filename) {
         }
         f_closedir(&dir);
     } else {
-        DBG_PRINT("  " SD_DATA_DIR_SLASH " directory not found (error %d)\n", res);
+        DBG_PRINT("  .config/" SD_DATA_DIR_SLASH " directory not found (error %d)\n", res);
         // Try root directory
         res = f_opendir(&dir, "");
         if (res == FR_OK) {
@@ -1009,7 +1009,7 @@ static int load_config_from_sd(const char *filename) {
     }
 
     char path[256];
-    snprintf(path, sizeof(path), SD_DATA_DIR_SLASH "%s", filename);
+    snprintf(path, sizeof(path), ".config/" SD_DATA_DIR_SLASH "config.ini");
 
     res = f_open(&fp, path, FA_READ);
     if (res != FR_OK) {
@@ -1400,7 +1400,7 @@ static bool init_hardware(void) {
         FIL fp;
         char *content = NULL;
 
-        if (f_open(&fp, SD_DATA_DIR_SLASH "config.ini", FA_READ) == FR_OK) {
+        if (f_open(&fp, ".config/" SD_DATA_DIR_SLASH "config.ini", FA_READ) == FR_OK) {
             FSIZE_t size = f_size(&fp);
             content = malloc(size + 1);
             if (content) {
@@ -1415,7 +1415,7 @@ static bool init_hardware(void) {
             f_close(&fp);
             DBG_PRINT("  Loaded config.ini\n");
         } else {
-            show_warning_screen(" Warning ", "config.ini not found, using defaults.", 2000);
+//            show_warning_screen(" Warning ", "config.ini not found, using defaults.", 2000);
         }
 
         // Check if clock reconfiguration is needed
@@ -1510,7 +1510,7 @@ static bool init_emulator(void) {
     load_default_config();
 
     // Try to load config from SD card
-    if (load_config_from_sd("config.ini") != 0) {
+    if (load_config_from_sd() != 0) {
         DBG_PRINT("Using default configuration\n");
     }
 

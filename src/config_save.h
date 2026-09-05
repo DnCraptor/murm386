@@ -34,7 +34,7 @@ void config_set_fpu(int enabled);
 const char *config_get_bios_file(void);
 void config_set_bios_file(const char *filename);
 int config_get_raw_sd_hdd(void);
-void config_set_raw_sd_hdd(int enabled);
+void config_set_raw_sd_hdd(int mode);
 
 #define USB_MODE_HOST   0
 #define USB_MODE_DEVICE 1

@@ -26,7 +26,7 @@ The authoritative GPIO map is `src/board_config.h`. Board-specific Pico SDK head
 
 ## Video profiles
 
-The normal firmware is built as `VIDEO_MODE=RUNTIME`. Win+F11 selects the guest-visible adapter profile and stores it in `286/config.ini`; the change takes effect after restart.
+The normal firmware is built as `VIDEO_MODE=RUNTIME`. Win+F11 selects the guest-visible adapter profile and stores it in `.config/286/config.ini`; the change takes effect after restart.
 
 | Runtime profile | Guest video RAM | Notes |
 |---|---:|---|
@@ -47,7 +47,7 @@ The production build has two memory-model classes:
 
 For runtime profiles with 64/128 KiB VRAM, the unused tail of the 256 KiB `gfx_buffer` is used as the guest paging cache: MCGA gets 192 KiB / 96 pages, while EGA128 and VGA128 get 128 KiB / 64 pages. EGA256 and VGA256 use the dedicated 40 KiB `RAM_4_EXT` cache (20 pages). The selected `video=` profile is loaded before this memory layout is configured.
 
-The paging implementation lives in `src/ega128_paging.c`. SD-backed paging uses `286/pagefile.sys`; supported hardware can use its PSRAM paging backend when available.
+The paging implementation lives in `src/ega128_paging.c`. SD-backed paging uses `tmp/pagefile.sys`; supported hardware can use its PSRAM paging backend when available.
 
 ## EMM (for -emm.uf2 only)
 
@@ -85,9 +85,11 @@ Production builds use the CPU target as their data directory. For the currently 
 
 ```text
 SD root/
+└── .config/
+    └── 286/config.ini
 └── 286/
-    ├── config.ini
-    ├── disk images ...
+    └── disk images ...
+└── tmp/
     └── pagefile.sys      # created/used by SD paging when needed
 ```
 
