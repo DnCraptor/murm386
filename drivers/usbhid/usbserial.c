@@ -1,6 +1,7 @@
 #include "usbserial.h"
 
 #include "config_save.h"
+#include "pico/stdlib.h"
 #include "tusb.h"
 
 #if CFG_TUH_ENABLED && CFG_TUH_CDC
@@ -9,6 +10,17 @@ static int cdc_idx = -1;
 static uint32_t requested_baud = 1200;
 static uint32_t applied_baud = 1200;
 static bool baud_pending;
+
+/* One-shot physical reset for the CH340C-connected ZiModem.  This is kept
+ * completely separate from the guest 8250 MCR. */
+enum {
+    MODEM_RESET_IDLE = 0,
+    MODEM_RESET_ASSERT,
+    MODEM_RESET_HOLD,
+    MODEM_RESET_RELEASE
+};
+static uint8_t modem_reset_state = MODEM_RESET_IDLE;
+static uint32_t modem_reset_deadline;
 
 static bool usbserial_host_active(void)
 {
@@ -68,13 +80,16 @@ void tuh_cdc_mount_cb(uint8_t idx)
     if (cdc_idx == idx) {
         applied_baud = 1200; /* CFG_TUH_CDC_LINE_CODING_ON_ENUM */
         baud_pending = (requested_baud != applied_baud);
+        modem_reset_state = MODEM_RESET_ASSERT;
     }
 }
 
 void tuh_cdc_umount_cb(uint8_t idx)
 {
-    if (cdc_idx == idx)
+    if (cdc_idx == idx) {
         cdc_idx = -1;
+        modem_reset_state = MODEM_RESET_IDLE;
+    }
 }
 
 void tuh_cdc_rx_cb(uint8_t idx)
@@ -89,6 +104,33 @@ void usbserial_task(void)
 {
     if (!usbserial_iface_ready())
         return;
+
+    /*
+     * Reset ZiModem once when COM1's USB serial interface is mounted.
+     * TinyUSB line-state bit 1 is RTS.  On the CH340C/ESP32 auto-reset
+     * circuit, asserted RTS holds ESP32 EN low; DTR stays inactive so GPIO0
+     * remains in normal-boot state.  Keep the USB pump non-blocking.
+     */
+    if (modem_reset_state == MODEM_RESET_ASSERT) {
+        if (tuh_cdc_set_control_line_state((uint8_t)cdc_idx, 0x02, NULL, 0)) {
+            modem_reset_deadline = time_us_32() + 100000u;
+            modem_reset_state = MODEM_RESET_HOLD;
+        }
+        return;
+    }
+
+    if (modem_reset_state == MODEM_RESET_HOLD) {
+        if ((int32_t)(time_us_32() - modem_reset_deadline) >= 0)
+            modem_reset_state = MODEM_RESET_RELEASE;
+        else
+            return;
+    }
+
+    if (modem_reset_state == MODEM_RESET_RELEASE) {
+        if (tuh_cdc_set_control_line_state((uint8_t)cdc_idx, 0x00, NULL, 0))
+            modem_reset_state = MODEM_RESET_IDLE;
+        return;
+    }
 
     /* Baud changes are deferred for the same reason: never initiate a USB
      * control transfer from guest OUT handling or a CDC callback.
