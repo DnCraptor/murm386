@@ -110,6 +110,8 @@ static uint16_t vreg_to_mv(enum vreg_voltage v) {
     case 18: return 1500;
     case 19: return 1600;
     case 20: return 1650;
+    case 21: return 1700;
+    case 22: return 1800;
     default: return 1100;
     }
 }
@@ -412,7 +414,7 @@ int load_rom(void *phys_mem, const char *file, uword addr, int backward) {
     FRESULT res;
     UINT bytes_read;
 
-    char path[256];
+    char path[FF_LFN_BUF + 1 + sizeof(SD_DATA_DIR_SLASH)];
     snprintf(path, sizeof(path), SD_DATA_DIR_SLASH "%s", file);
 
     res = f_open(&fp, path, FA_READ);
@@ -1142,11 +1144,13 @@ static void __no_inline_not_in_flash_func(reconfigure_clocks)(int cpu_mhz, int p
     DBG_PRINT("Reconfiguring clocks: %d MHz -> %d MHz, PSRAM: %d MHz, FLASH: %d\n",
               current_mhz, cpu_mhz, psram_mhz, cfg_flash);
 
+    enum vreg_voltage new_voltage = get_voltage_for_freq(cpu_mhz);
+    uint16_t new_vreg_mv = vreg_to_mv(new_voltage);
+
     // Only change system clock if CPU frequency actually differs.
     // Unnecessary PLL reconfiguration disrupts PIO timing (HDMI, audio).
     if (cpu_mhz != current_mhz) {
         bool lowering = (cpu_mhz < current_mhz);
-        enum vreg_voltage new_voltage = get_voltage_for_freq(cpu_mhz);
 
         if (lowering) {
             // LOWERING: clock first, then voltage (safe order)
@@ -1171,6 +1175,13 @@ static void __no_inline_not_in_flash_func(reconfigure_clocks)(int cpu_mhz, int p
 #ifdef NESPAD_GPIO_CLK
         nespad_reclock(clock_get_hz(clk_sys) / 1000);
 #endif
+    } else if (current_vreg_mv != new_vreg_mv) {
+        // Frequency may be pinned by HDMI at 504 MHz while voltage is still
+        // user-selectable. Apply a voltage-only change without touching PLLs.
+        vreg_disable_voltage_limit();
+        vreg_set_voltage(new_voltage);
+        current_vreg_mv = new_vreg_mv;
+        sleep_ms(50);
     }
 
     // Re-initialize PSRAM with the new frequency
@@ -1438,7 +1449,9 @@ static bool init_hardware(void) {
         DBG_PRINT("  Clocks pinned to build settings: CPU %d, PSRAM %d\n",
                   CPU_CLOCK_MHZ, PSRAM_MAX_FREQ_MHZ);
 #else
-        if (cfg_cpu != CPU_CLOCK_MHZ || cfg_psram != PSRAM_MAX_FREQ_MHZ || cfg_flash != FLASH_MAX_FREQ_MHZ) {
+        if (cfg_cpu != CPU_CLOCK_MHZ || cfg_psram != PSRAM_MAX_FREQ_MHZ ||
+            cfg_flash != FLASH_MAX_FREQ_MHZ ||
+            current_vreg_mv != vreg_to_mv(get_voltage_for_freq(cfg_cpu))) {
             reconfigure_clocks(cfg_cpu, cfg_psram, psram_pin, cfg_flash);
         }
 #endif
@@ -1656,7 +1669,7 @@ static bool init_emulator(void) {
     // NULL/empty BIOS is the Native mode and is handled by bios_post().
     DBG_PRINT("Loading BIOS...\n");
     if (config.bios && config.bios[0]) {
-        char bios_path[256];
+        char bios_path[FF_LFN_BUF + 1 + sizeof(SD_DATA_DIR_SLASH)];
         FIL fp;
         snprintf(bios_path, sizeof(bios_path), SD_DATA_DIR_SLASH "%s", config.bios);
         if (f_open(&fp, bios_path, FA_READ) != FR_OK) {

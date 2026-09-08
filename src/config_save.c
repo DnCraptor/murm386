@@ -21,7 +21,7 @@
 // Current configuration values (minimal storage)
 static int cfg_cpu_gen = EMU_CPU_GEN;
 static int cfg_fpu = 0;
-static char cfg_bios[32] = "";  /* empty = Native BIOS */
+static char *cfg_bios = NULL;  /* NULL = Native BIOS */
 static int cfg_raw_sd_hdd = RAW_SD_HDD_LAST;
 static int cfg_usb_mode = USB_MODE_HOST;
 static int cfg_usb_modem = 0;
@@ -106,7 +106,7 @@ void config_set_fpu(int enabled) {
 }
 
 const char *config_get_bios_file(void) {
-    return cfg_bios[0] ? cfg_bios : NULL;
+    return cfg_bios;
 }
 
 int config_get_raw_sd_hdd(void) { return cfg_raw_sd_hdd; }
@@ -140,22 +140,29 @@ void config_set_usb_modem(int enabled) {
 }
 
 void config_set_bios_file(const char *filename) {
-    char normalized[sizeof(cfg_bios)];
+    const bool native = !filename || filename[0] == '\0' || strcasecmp(filename, "native") == 0;
+    char *replacement = native ? NULL : strdup(filename);
 
-    if (!filename || filename[0] == '\0' || strcasecmp(filename, "native") == 0) {
-        normalized[0] = '\0';
-    } else {
-        strncpy(normalized, filename, sizeof(normalized) - 1);
-        normalized[sizeof(normalized) - 1] = '\0';
-    }
+    if (!native && !replacement)
+        return;
 
-    if (strcmp(cfg_bios, normalized) != 0) {
-        strcpy(cfg_bios, normalized);
+    const bool unchanged = native ? (cfg_bios == NULL)
+                                  : (cfg_bios && strcmp(cfg_bios, replacement) == 0);
+
+    if (!unchanged) {
+        char *old = cfg_bios;
+        cfg_bios = replacement;
+        replacement = NULL;
         cfg_changed = true;
+
+        if (pc)
+            pc->bios = cfg_bios;
+        free(old);
+    } else if (pc) {
+        pc->bios = cfg_bios;
     }
 
-    if (pc)
-        pc->bios = cfg_bios[0] ? cfg_bios : NULL;
+    free(replacement);
 }
 
 // Hardware settings
@@ -391,6 +398,10 @@ static bool write_line(FIL *fp, const char *line) {
     return true;
 }
 
+static bool write_key_value(FIL *fp, const char *key, const char *value) {
+    return write_line(fp, key) && write_line(fp, value) && write_line(fp, "\r\n");
+}
+
 bool config_save_all(void) {
     FIL fp;
     FRESULT res;
@@ -418,12 +429,10 @@ bool config_save_all(void) {
     write_line(&fp, line);
 
     // BIOS files
-    if (cfg_bios[0]) {
-        snprintf(line, sizeof(line), "bios=%s\r\n", cfg_bios);
-        write_line(&fp, line);
-    } else {
+    if (cfg_bios)
+        write_key_value(&fp, "bios=", cfg_bios);
+    else
         write_line(&fp, "bios=native\r\n");
-    }
     write_line(&fp, "vga_bios=vgabios.bin\r\n");
 
     // Disks (must be in [pc] section)
@@ -433,19 +442,17 @@ bool config_save_all(void) {
     for (int i = 0; i < 2; i++) {
         const char *fname = fdd_get_filename(i);
         if (fname && fname[0]) {
-            snprintf(line, sizeof(line), "fd%c=%s\r\n", 'a' + i, fname);
-            write_line(&fp, line);
+            char key[5];
+            snprintf(key, sizeof(key), "fd%c=", 'a' + i);
+            write_key_value(&fp, key, fname);
         }
     }
     for (int i = 0; i < 4; i++) {
         const char *fname = ata_get_filename(i);
         if (fname && fname[0]) {
-            if (ata_is_cdrom(i)) {
-                snprintf(line, sizeof(line), "cd%c=%s\r\n", 'a' + i, fname);
-            } else {
-                snprintf(line, sizeof(line), "hd%c=%s\r\n", 'a' + i, fname);
-            }
-            write_line(&fp, line);
+            char key[5];
+            snprintf(key, sizeof(key), ata_is_cdrom(i) ? "cd%c=" : "hd%c=", 'a' + i);
+            write_key_value(&fp, key, fname);
         }
     }
 

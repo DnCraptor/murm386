@@ -168,13 +168,13 @@ void ejectdisk(uint8_t drivenum, bool is_fdd) {
 uint8_t insertdisk(uint8_t drivenum, bool is_fdd, bool is_cd, const char *pathname) {
     if ((is_fdd && drivenum >= 2) || drivenum >= 4) return false;
     // Build full path (files are in the SD_DATA_DIR directory)
-    char path[256];
+    char path[FF_LFN_BUF + 1 + sizeof(SD_DATA_DIR_SLASH)];
     snprintf(path, sizeof(path), SD_DATA_DIR_SLASH "%s", pathname);
 
     /* CD-ROMs are read-only; regular disks need write access */
     BYTE fmode = is_cd ? FA_READ : (FA_READ | FA_WRITE);
     FIL* pf = is_fdd ? &fdd[drivenum].fil : &ata[drivenum].fil;
-    const int cd_was_present = (!is_fdd && is_cd && pf->obj.fs) ? 1 : 0;
+    const int cd_was_present = (!is_fdd && is_cd && ata[drivenum].iscdrom && pf->obj.fs) ? 1 : 0;
     if (pf->obj.fs) {
         /* Eject whatever is currently in the drive before inserting new image */
         if (is_fdd)
@@ -193,8 +193,16 @@ uint8_t insertdisk(uint8_t drivenum, bool is_fdd, bool is_cd, const char *pathna
     if (FR_OK != fres) {
         return 0;
     }
-    if(is_fdd) fdd[drivenum].name = strdup(pathname);
-    else ata[drivenum].name = strdup(pathname);
+
+    /* Keep the public drive state unchanged until the candidate image has
+     * passed all validation. In particular, a rejected image must not leave
+     * a non-NULL name attached to a closed FIL. */
+    char *new_name = strdup(pathname);
+    if (!new_name) {
+        f_close(pf);
+        return 0;
+    }
+
     size_t size = f_size(pf);
 
     int is_vhd = detect_vhd(pf, size);
@@ -211,6 +219,8 @@ uint8_t insertdisk(uint8_t drivenum, bool is_fdd, bool is_cd, const char *pathna
      * Skip geometry/size validation for CD-ROMs. */
     if (is_cd) {
         size_t iso_sectors = size / 512;  /* nb_sectors for block layer */
+        (void)iso_sectors;
+        ata[drivenum].name       = new_name;
         ata[drivenum].iscdrom    = 1;
         ata[drivenum].cyls       = 0;
         ata[drivenum].heads      = 0;
@@ -221,12 +231,14 @@ uint8_t insertdisk(uint8_t drivenum, bool is_fdd, bool is_cd, const char *pathna
     }
     // Validate size constraints (non-CD-ROM only)
     if (usable_size < 360 * 1024 || usable_size > 0x1f782000UL || (usable_size & 511)) {
+        free(new_name);
         f_close(pf);
         return 0;
     }
     // Determine geometry (cyls, heads, sects)
     uint16_t cyls = 0, heads = 0, sects = 0, drive_type = 47;
     if (!is_fdd) {  // Hard disk
+        ata[drivenum].name = new_name;
         sects = 63;
         heads = 16;
         // Try to detect geometry from MBR partition table.
@@ -255,6 +267,7 @@ uint8_t insertdisk(uint8_t drivenum, bool is_fdd, bool is_cd, const char *pathna
         ata[drivenum].sects = sects;
         hdcount++;
     } else {  // Floppy disk
+        fdd[drivenum].name = new_name;
         switch (size) {
             case 163840:  cyls=40; heads=1; sects=8;  drive_type=1; break; //160K
             case 184320:  cyls=40; heads=1; sects=9;  drive_type=1; break; //180K

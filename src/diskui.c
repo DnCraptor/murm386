@@ -19,6 +19,7 @@
 #include <string.h>
 #include <strings.h>  // For strcasecmp
 #include <stdio.h>
+#include <stdlib.h>
 #include <hardware/watchdog.h>
 
 // Menu states
@@ -44,7 +45,6 @@ static const DriveInfo drive_table[DRIVE_TOTAL] = {
 
 // File listing (reduced size to save SRAM)
 #define MAX_FILES        24
-#define MAX_FILENAME_LEN 32
 
 // Menu state
 static MenuState menu_state   = MENU_CLOSED;
@@ -54,8 +54,8 @@ static int file_scroll_offset = 0;
 // selected_row intentionally persists between open/close — preserves position
 
 // Pending changes: track what the user wants for each drive
-// Empty string = eject, non-empty = new filename
-static char pending_filename[DRIVE_TOTAL][MAX_FILENAME_LEN];
+// NULL = eject/native BIOS, non-NULL = full selected filename
+static char *pending_filename[DRIVE_TOTAL];
 static bool pending_changed[DRIVE_TOTAL];  // true if user modified this drive
 static bool reboot_required;               // true if any ATA drive was changed
 
@@ -64,7 +64,7 @@ static bool reboot_required;               // true if any ATA drive was changed
 // keeps reflecting the *running* mode until then. Initialised in diskui_open().
 static int pending_raw_sd;                 // RAW_SD_HDD_*
 static int pending_usb_mode;               // USB_MODE_HOST / USB_MODE_DEVICE
-static char file_list[MAX_FILES][MAX_FILENAME_LEN];
+static char *file_list[MAX_FILES];
 static int  file_count   = 0;
 static int  plasma_frame = 0;  // Animation frame counter
 
@@ -92,6 +92,7 @@ static void select_file(void);
 static void eject_pending(void);
 static void apply_and_close(void);
 static void reset_pending(void);
+static void clear_file_list(void);
 static int first_attached_drive(void);
 static void usb_device_exit_to_host(void);
 static void cycle_sd_card(int direction);
@@ -120,10 +121,8 @@ static const char *get_drive_filename(int drive_idx) {
 
 // Get the display filename for a drive (pending or current)
 static const char *get_display_filename(int drive_idx) {
-    if (pending_changed[drive_idx]) {
-        if (pending_filename[drive_idx][0] == '\0') return NULL;  // pending eject
-        return pending_filename[drive_idx];
-    }
+    if (pending_changed[drive_idx])
+        return pending_filename[drive_idx];  // NULL = pending eject/native BIOS
     return get_drive_filename(drive_idx);
 }
 
@@ -153,10 +152,19 @@ static bool ext_accepted_for_drive(const char *ext, int drive_idx) {
 
 static void reset_pending(void) {
     for (int i = 0; i < DRIVE_TOTAL; i++) {
+        free(pending_filename[i]);
+        pending_filename[i] = NULL;
         pending_changed[i] = false;
-        pending_filename[i][0] = '\0';
     }
     reboot_required = false;
+}
+
+static void clear_file_list(void) {
+    for (int i = 0; i < MAX_FILES; i++) {
+        free(file_list[i]);
+        file_list[i] = NULL;
+    }
+    file_count = 0;
 }
 
 
@@ -398,7 +406,10 @@ static void draw_file_browser(void) {
         if (file_idx == selected_file) {
             osd_print(FILE_X + 2, y, ">", attr);
         }
-        osd_print(FILE_X + 4, y, file_list[file_idx], attr);
+        char displayed[FILE_W - 7];
+        strncpy(displayed, file_list[file_idx], sizeof(displayed) - 1);
+        displayed[sizeof(displayed) - 1] = '\0';
+        osd_print(FILE_X + 4, y, displayed, attr);
     }
 
     if (file_scroll_offset > 0) {
@@ -428,11 +439,12 @@ static void scan_disk_images(int drive_idx) {
     FILINFO fno;
     FRESULT res;
 
-    file_count = 0;
-    memset(file_list, 0, sizeof(file_list));
+    clear_file_list();
 
     if (drive_idx == DRIVE_BIOS) {
-        strncpy(file_list[file_count++], "[native]", MAX_FILENAME_LEN - 1);
+        file_list[file_count] = strdup("[native]");
+        if (file_list[file_count])
+            file_count++;
     }
 
     res = f_opendir(&dir, SD_DATA_DIR);
@@ -448,23 +460,23 @@ static void scan_disk_images(int drive_idx) {
         if (!ext) continue;
 
         if (ext_accepted_for_drive(ext, drive_idx)) {
-            strncpy(file_list[file_count], fno.fname, MAX_FILENAME_LEN - 1);
-            file_list[file_count][MAX_FILENAME_LEN - 1] = '\0';
-            file_count++;
+            char *name = strdup(fno.fname);
+            if (name)
+                file_list[file_count++] = name;
         }
     }
 
     f_closedir(&dir);
 
     // Sort alphabetically, keeping the BIOS Native item first.
-    int sort_start = (drive_idx == DRIVE_BIOS) ? 1 : 0;
+    int sort_start = (drive_idx == DRIVE_BIOS && file_count > 0 &&
+                      strcasecmp(file_list[0], "[native]") == 0) ? 1 : 0;
     for (int i = sort_start; i < file_count - 1; i++) {
         for (int j = sort_start; j < file_count - i + sort_start - 1; j++) {
             if (strcasecmp(file_list[j], file_list[j + 1]) > 0) {
-                char temp[MAX_FILENAME_LEN];
-                strcpy(temp, file_list[j]);
-                strcpy(file_list[j], file_list[j + 1]);
-                strcpy(file_list[j + 1], temp);
+                char *temp = file_list[j];
+                file_list[j] = file_list[j + 1];
+                file_list[j + 1] = temp;
             }
         }
     }
@@ -481,12 +493,14 @@ static void select_file(void) {
     if (file_count == 0 || selected_file >= file_count) return;
 
     int drive_idx = selected_row;
-    if (drive_idx == DRIVE_BIOS && strcasecmp(file_list[selected_file], "[native]") == 0) {
-        pending_filename[drive_idx][0] = '\0';
-    } else {
-        strncpy(pending_filename[drive_idx], file_list[selected_file], MAX_FILENAME_LEN - 1);
-        pending_filename[drive_idx][MAX_FILENAME_LEN - 1] = '\0';
+    char *name = NULL;
+    if (!(drive_idx == DRIVE_BIOS && strcasecmp(file_list[selected_file], "[native]") == 0)) {
+        name = strdup(file_list[selected_file]);
+        if (!name) return;
     }
+
+    free(pending_filename[drive_idx]);
+    pending_filename[drive_idx] = name;
     pending_changed[drive_idx] = true;
 
     if (drive_idx >= 2) reboot_required = true;
@@ -497,7 +511,8 @@ static void select_file(void) {
 
 static void eject_pending(void) {
     int drive_idx = selected_row;
-    pending_filename[drive_idx][0] = '\0';
+    free(pending_filename[drive_idx]);
+    pending_filename[drive_idx] = NULL;
     pending_changed[drive_idx] = true;
 
     if (drive_idx >= 2) reboot_required = true;
@@ -539,7 +554,7 @@ static void toggle_usb_mode(void) {
 static void esc_apply_temp_and_close(void) {
     for (int i = DRIVE_FDD0; i <= DRIVE_FDD1; i++) {
         if (!pending_changed[i]) continue;
-        if (pending_filename[i][0] == '\0')
+        if (!pending_filename[i])
             ejectdisk(i, true);
         else
             insertdisk(i, true, false, pending_filename[i]);
@@ -552,7 +567,7 @@ static void apply_and_close(void) {
     for (int i = 0; i < DRIVE_TOTAL; i++) {
         if (!pending_changed[i]) continue;
 
-        if (pending_filename[i][0] == '\0') {
+        if (!pending_filename[i]) {
             // Eject
             if (i == DRIVE_BIOS) {
                 config_set_bios_file(NULL);
