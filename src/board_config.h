@@ -12,6 +12,7 @@
 #define BOARD_CONFIG_H
 
 //#define DIAG 1
+#define QSPI_PSRAM_ALLOWED 1
 
 #include "hardware/structs/sysinfo.h"
 #include "hardware/vreg.h"

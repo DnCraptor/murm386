@@ -154,6 +154,8 @@ void platform_print_info(void) {
     printf("  Board variant: M1\n");
 #elif defined(BOARD_M2)
     printf("  Board variant: M2\n");
+#elif defined(BOARD_Z2)
+    printf("  Board variant: Z2\n");
 #endif
 
     printf("  PSRAM base: 0x%08lx\n", (unsigned long)PSRAM_BASE);

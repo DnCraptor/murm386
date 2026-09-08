@@ -10,6 +10,7 @@ static int cdc_idx = -1;
 static uint32_t requested_baud = 1200;
 static uint32_t applied_baud = 1200;
 static bool baud_pending;
+static bool programmer_active;
 
 /* One-shot physical reset for the CH340C-connected ZiModem.  This is kept
  * completely separate from the guest 8250 MCR. */
@@ -36,12 +37,12 @@ static bool usbserial_iface_ready(void)
 
 bool usbserial_connected(void)
 {
-    return usbserial_iface_ready();
+    return usbserial_iface_ready() && !programmer_active;
 }
 
 bool usbserial_read_byte(uint8_t *value)
 {
-    if (!value || !usbserial_iface_ready())
+    if (!value || programmer_active || !usbserial_iface_ready())
         return false;
 
     return tuh_cdc_read((uint8_t)cdc_idx, value, 1) == 1;
@@ -49,7 +50,7 @@ bool usbserial_read_byte(uint8_t *value)
 
 bool usbserial_write_byte(uint8_t value)
 {
-    if (!usbserial_iface_ready())
+    if (programmer_active || !usbserial_iface_ready())
         return false;
 
     if (tuh_cdc_write((uint8_t)cdc_idx, &value, 1) != 1)
@@ -102,7 +103,7 @@ void tuh_cdc_rx_cb(uint8_t idx)
 
 void usbserial_task(void)
 {
-    if (!usbserial_iface_ready())
+    if (!usbserial_iface_ready() || programmer_active)
         return;
 
     /*
@@ -143,6 +144,122 @@ void usbserial_task(void)
     }
 }
 
+static void usbserial_program_pump_once(void)
+{
+    tuh_task();
+}
+
+void usbserial_program_delay_ms(uint32_t delay_ms)
+{
+    absolute_time_t deadline = make_timeout_time_ms(delay_ms);
+    while (!time_reached(deadline)) {
+        usbserial_program_pump_once();
+        sleep_us(100);
+    }
+}
+
+bool usbserial_program_begin(uint32_t wait_ms)
+{
+    absolute_time_t deadline = make_timeout_time_ms(wait_ms);
+    while (!usbserial_iface_ready()) {
+        if (time_reached(deadline))
+            return false;
+        usbserial_program_pump_once();
+        sleep_ms(1);
+    }
+
+    programmer_active = true;
+    modem_reset_state = MODEM_RESET_IDLE;
+    return true;
+}
+
+void usbserial_program_end(void)
+{
+    programmer_active = false;
+    baud_pending = (requested_baud != applied_baud);
+}
+
+bool usbserial_program_set_baudrate(uint32_t baudrate)
+{
+    if (!programmer_active || !usbserial_iface_ready() || baudrate == 0)
+        return false;
+
+    if (!tuh_cdc_set_baudrate((uint8_t)cdc_idx, baudrate, NULL, 0))
+        return false;
+    usbserial_program_delay_ms(20);
+    applied_baud = baudrate;
+    return true;
+}
+
+bool usbserial_program_set_control_lines(uint8_t line_state)
+{
+    if (!programmer_active || !usbserial_iface_ready())
+        return false;
+
+    if (!tuh_cdc_set_control_line_state((uint8_t)cdc_idx, line_state & 0x03, NULL, 0))
+        return false;
+    usbserial_program_delay_ms(20);
+    return true;
+}
+
+void usbserial_program_flush_input(void)
+{
+    if (!programmer_active || !usbserial_iface_ready())
+        return;
+
+    uint8_t scratch[64];
+    absolute_time_t quiet = make_timeout_time_ms(20);
+    while (!time_reached(quiet)) {
+        usbserial_program_pump_once();
+        uint32_t got = tuh_cdc_read((uint8_t)cdc_idx, scratch, sizeof(scratch));
+        if (got)
+            quiet = make_timeout_time_ms(20);
+        else
+            sleep_us(100);
+    }
+}
+
+bool usbserial_program_write(const uint8_t *data, size_t len, uint32_t timeout_ms)
+{
+    if (!programmer_active || !usbserial_iface_ready() || (!data && len))
+        return false;
+
+    absolute_time_t deadline = make_timeout_time_ms(timeout_ms);
+    size_t done = 0;
+    while (done < len) {
+        usbserial_program_pump_once();
+        uint32_t wrote = tuh_cdc_write((uint8_t)cdc_idx, data + done, (uint32_t)(len - done));
+        if (wrote) {
+            done += wrote;
+            tuh_cdc_write_flush((uint8_t)cdc_idx);
+            continue;
+        }
+        if (time_reached(deadline))
+            return false;
+        sleep_us(100);
+    }
+
+    tuh_cdc_write_flush((uint8_t)cdc_idx);
+    usbserial_program_pump_once();
+    return true;
+}
+
+bool usbserial_program_read_byte(uint8_t *value, uint32_t timeout_ms)
+{
+    if (!programmer_active || !usbserial_iface_ready() || !value)
+        return false;
+
+    absolute_time_t deadline = make_timeout_time_ms(timeout_ms);
+    do {
+        usbserial_program_pump_once();
+        if (tuh_cdc_read((uint8_t)cdc_idx, value, 1) == 1)
+            return true;
+        sleep_us(100);
+    } while (!time_reached(deadline));
+    return false;
+}
+
+
 #else
 
 bool usbserial_connected(void) { return false; }
@@ -150,5 +267,15 @@ bool usbserial_read_byte(uint8_t *value) { (void)value; return false; }
 bool usbserial_write_byte(uint8_t value) { (void)value; return false; }
 void usbserial_set_baudrate(uint32_t baudrate) { (void)baudrate; }
 void usbserial_task(void) {}
+bool usbserial_program_begin(uint32_t wait_ms) { (void)wait_ms; return false; }
+void usbserial_program_end(void) {}
+bool usbserial_program_set_baudrate(uint32_t baudrate) { (void)baudrate; return false; }
+bool usbserial_program_set_control_lines(uint8_t line_state) { (void)line_state; return false; }
+void usbserial_program_flush_input(void) {}
+bool usbserial_program_write(const uint8_t *data, size_t len, uint32_t timeout_ms)
+{ (void)data; (void)len; (void)timeout_ms; return false; }
+bool usbserial_program_read_byte(uint8_t *value, uint32_t timeout_ms)
+{ (void)value; (void)timeout_ms; return false; }
+void usbserial_program_delay_ms(uint32_t delay_ms) { (void)delay_ms; }
 
 #endif

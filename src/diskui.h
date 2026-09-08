@@ -25,8 +25,9 @@ typedef enum {
     DRIVE_ATA1_1 = 5,
     DRIVE_SD_CARD = 6,   // SD card as raw drive (Via BIOS only) - On/Off toggle
     DRIVE_USB_MODE = 7,  // USB HOST/DEVICE toggle
-    DRIVE_BIOS = 8,
-    DRIVE_TOTAL = 9
+    DRIVE_ESP_FW = 8,    // USB modem firmware image
+    DRIVE_BIOS = 9,
+    DRIVE_TOTAL = 10
 } DiskUIDrive;
 
 // Drive info for UI display
@@ -80,5 +81,6 @@ void diskui_animate(void);
 #define KEY_E       18
 #define KEY_F       33
 #define KEY_G       34
+#define KEY_H       35
 
 #endif // DISKUI_H

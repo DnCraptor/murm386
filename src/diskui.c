@@ -12,6 +12,7 @@
 #include "vga_osd.h"
 #include "disk.h"
 #include "config_save.h"
+#include "espflash.h"
 #ifdef USB_HID_ENABLED
 #include "usbmsc_device.h"
 #endif
@@ -26,7 +27,9 @@
 typedef enum {
     MENU_CLOSED,
     MENU_MAIN,          // Drive selection
-    MENU_FILE_BROWSER   // File selection for a drive
+    MENU_FILE_BROWSER,  // File selection for a drive
+    MENU_MODEM_FLASH,   // ESP32 programming progress
+    MENU_MODEM_RESULT   // ESP32 programming result, waits for a key
 } MenuState;
 
 // Drive table — matches DiskUIDrive enum order from diskui.h
@@ -40,6 +43,7 @@ static const DriveInfo drive_table[DRIVE_TOTAL] = {
     { "ATA1-1", "ATA Disk" },  // DRIVE_ATA1_1
     { "SD-CARD", "Via BIOS  [only]" },  // DRIVE_SD_CARD  (On/Off toggle)
     { "  USB",   " mode"         },  // DRIVE_USB_MODE (HOST/DEVICE toggle)
+    { "  USB",   " modem"        },  // DRIVE_ESP_FW
     { " BIOS",   "System"   },  // DRIVE_BIOS
 };
 
@@ -57,7 +61,7 @@ static int file_scroll_offset = 0;
 // NULL = eject/native BIOS, non-NULL = full selected filename
 static char *pending_filename[DRIVE_TOTAL];
 static bool pending_changed[DRIVE_TOTAL];  // true if user modified this drive
-static bool reboot_required;               // true if any ATA drive was changed
+static bool reboot_required;               // derived from pending reboot-only changes
 
 // Pending values for the SD-CARD placement / USB mode. They are
 // only written to the config on "Save and Reboot" so config_get_usb_mode()
@@ -99,6 +103,14 @@ static void cycle_sd_card(int direction);
 static void toggle_usb_mode(void);
 static void esc_apply_temp_and_close(void);
 static bool row_is_toggle(int row);
+static void modem_flash_progress(uint32_t done, uint32_t total, void *user);
+static void draw_modem_flash_screen(const char *status, int percent);
+static void draw_modem_result_screen(bool success, const char *detail);
+static bool modem_update_pending(void);
+static void apply_remaining_and_close(void);
+static void update_reboot_required(void);
+static bool filenames_equal(const char *a, const char *b);
+static void set_pending_filename(int drive_idx, char *name);
 
 // --------------------------------------------------------------------------
 // Helpers
@@ -108,15 +120,53 @@ static bool row_is_toggle(int row) {
     return row == DRIVE_SD_CARD || row == DRIVE_USB_MODE;
 }
 
+static bool filenames_equal(const char *a, const char *b) {
+    if (a == b) return true;
+    if (!a || !b) return false;
+    return strcmp(a, b) == 0;
+}
+
 static const char *get_drive_filename(int drive_idx) {
     if (drive_idx == DRIVE_BIOS) {
         return config_get_bios_file();           // NULL = Native BIOS
+    } else if (drive_idx == DRIVE_ESP_FW) {
+        return config_get_esp_firmware();        // NULL = no managed firmware
     } else if (drive_idx < 2) {
         return fdd_get_filename(drive_idx);      // FDD-0 / FDD-1
     } else if (drive_idx >= DRIVE_ATA0_0 && drive_idx <= DRIVE_ATA1_1) {
         return ata_get_filename(drive_idx - 2);  // ATA0-0 .. ATA1-1
     }
     return NULL;                                 // SD-CARD / USB toggles: no file
+}
+
+static void update_reboot_required(void) {
+    reboot_required = (pending_raw_sd != config_get_raw_sd_hdd()) ||
+                      (pending_usb_mode != config_get_usb_mode()) ||
+                      pending_changed[DRIVE_BIOS];
+
+    for (int i = DRIVE_ATA0_0; i <= DRIVE_ATA1_1; i++) {
+        if (pending_changed[i]) {
+            reboot_required = true;
+            break;
+        }
+    }
+}
+
+static void set_pending_filename(int drive_idx, char *name) {
+    const char *current = get_drive_filename(drive_idx);
+
+    free(pending_filename[drive_idx]);
+    pending_filename[drive_idx] = NULL;
+
+    if (filenames_equal(name, current)) {
+        free(name);
+        pending_changed[drive_idx] = false;
+    } else {
+        pending_filename[drive_idx] = name;
+        pending_changed[drive_idx] = true;
+    }
+
+    update_reboot_required();
 }
 
 // Get the display filename for a drive (pending or current)
@@ -136,6 +186,9 @@ static bool file_is_iso(const char *filename) {
 
 // Returns true if the extension is valid for the given drive type.
 static bool ext_accepted_for_drive(const char *ext, int drive_idx) {
+    if (drive_idx == DRIVE_ESP_FW)
+        return strcasecmp(ext, ".bin") == 0;
+
     if (drive_idx == DRIVE_BIOS) {
         if (strcasecmp(ext, ".bin") == 0) return true;
         if (strcasecmp(ext, ".rom") == 0) return true;
@@ -293,6 +346,87 @@ const DriveInfo* diskui_get_drive_info(DiskUIDrive drive) {
     return &drive_table[drive];
 }
 
+static bool modem_update_pending(void)
+{
+    const char *desired = get_display_filename(DRIVE_ESP_FW);
+    const char *flashed = config_get_esp_flashed();
+
+    if (!desired || !desired[0])
+        return false;
+    return !flashed || strcmp(desired, flashed) != 0;
+}
+
+#define MODEM_X  8
+#define MODEM_Y  6
+#define MODEM_W  64
+#define MODEM_H  13
+
+static bool modem_result_success;
+
+static void draw_modem_flash_screen(const char *status, int percent)
+{
+    osd_clear();
+    osd_draw_box(MODEM_X, MODEM_Y, MODEM_W, MODEM_H, OSD_ATTR_BORDER);
+    osd_fill(MODEM_X + 1, MODEM_Y + 1, MODEM_W - 2, MODEM_H - 2, ' ', OSD_ATTR_NORMAL);
+    osd_print_center(MODEM_Y, " ESP32 Modem Firmware ", OSD_ATTR(OSD_YELLOW, OSD_BLUE));
+
+    const char *filename = config_get_esp_firmware();
+    char shown[MODEM_W - 8];
+    if (filename) {
+        strncpy(shown, filename, sizeof(shown) - 1);
+        shown[sizeof(shown) - 1] = '\0';
+    } else {
+        strcpy(shown, "[none]");
+    }
+    osd_print_center(MODEM_Y + 3, shown, OSD_ATTR_NORMAL);
+
+    if (status && status[0])
+        osd_print_center(MODEM_Y + 6, status, OSD_ATTR(OSD_YELLOW, OSD_BLUE));
+
+    if (percent >= 0) {
+        char line[24];
+        snprintf(line, sizeof(line), "Writing: %3d%%", percent);
+        osd_print_center(MODEM_Y + 8, line, OSD_ATTR_HIGHLIGHT);
+    }
+}
+
+static void modem_flash_progress(uint32_t done, uint32_t total, void *user)
+{
+    (void)user;
+    int percent = total ? (int)(((uint64_t)done * 100u) / total) : 0;
+    draw_modem_flash_screen("Programming flash...", percent);
+}
+
+static void draw_modem_result_screen(bool success, const char *detail)
+{
+    modem_result_success = success;
+    menu_state = MENU_MODEM_RESULT;
+
+    osd_clear();
+    osd_draw_box(MODEM_X, MODEM_Y, MODEM_W, MODEM_H, OSD_ATTR_BORDER);
+    osd_fill(MODEM_X + 1, MODEM_Y + 1, MODEM_W - 2, MODEM_H - 2, ' ', OSD_ATTR_NORMAL);
+    osd_print_center(MODEM_Y, " ESP32 Modem Firmware ",
+                     success ? OSD_ATTR(OSD_LIGHTGREEN, OSD_BLUE)
+                             : OSD_ATTR(OSD_WHITE, OSD_RED));
+
+    osd_print_center(MODEM_Y + 4,
+                     success ? "Firmware updated successfully."
+                             : "Firmware update did not complete.",
+                     success ? OSD_ATTR(OSD_LIGHTGREEN, OSD_BLUE)
+                             : OSD_ATTR(OSD_WHITE, OSD_RED));
+
+    if (detail && detail[0]) {
+        char shown[MODEM_W - 8];
+        strncpy(shown, detail, sizeof(shown) - 1);
+        shown[sizeof(shown) - 1] = '\0';
+        osd_print_center(MODEM_Y + 6, shown, OSD_ATTR_NORMAL);
+    }
+
+    if (!success)
+        osd_print_center(MODEM_Y + 8, "The update remains pending.", OSD_ATTR_HIGHLIGHT);
+    osd_print_center(MODEM_Y + 10, "Press any key", OSD_ATTR_HIGHLIGHT);
+}
+
 // --------------------------------------------------------------------------
 // Drawing
 // --------------------------------------------------------------------------
@@ -340,11 +474,13 @@ static void draw_main_menu(void) {
             osd_print(MENU_X + 22, y, truncated, attr);
         } else if (i == DRIVE_BIOS) {
             osd_print(MENU_X + 22, y, "[native]", OSD_ATTR(OSD_LIGHTGRAY, OSD_BLUE));
+        } else if (i == DRIVE_ESP_FW) {
+            osd_print(MENU_X + 22, y, "[none]", OSD_ATTR(OSD_LIGHTGRAY, OSD_BLUE));
         } else {
             osd_print(MENU_X + 22, y, "[empty]", OSD_ATTR(OSD_LIGHTGRAY, OSD_BLUE));
         }
 
-        if (i == DRIVE_BIOS) {
+        if (i == DRIVE_BIOS || i == DRIVE_ESP_FW) {
             osd_print(MENU_X + MENU_W - 12, y, "[Select]", attr);
         } else if (filename) {
             osd_print(MENU_X + MENU_W - 12, y, "[Eject] ", attr);
@@ -364,7 +500,9 @@ static void draw_main_menu(void) {
     {
         uint8_t attr = (selected_row == ROW_ACTION) ? OSD_ATTR_SELECTED : OSD_ATTR_HIGHLIGHT;
         osd_fill(MENU_X + 2, action_y, MENU_W - 4, 1, ' ', attr);
-        if (reboot_required) {
+        if (modem_update_pending() && config_get_usb_mode() == USB_MODE_HOST) {
+            osd_print_center(action_y, "[ Flash and Exit ]", attr);
+        } else if (reboot_required) {
             osd_print_center(action_y, "[ Save and Reboot ]", attr);
         } else {
             osd_print_center(action_y, "[ Save and Exit ]", attr);
@@ -391,7 +529,9 @@ static void draw_file_browser(void) {
 
     char title[48];
     snprintf(title, sizeof(title),
-             (selected_row == DRIVE_BIOS) ? " Select BIOS " : " Select Image for %s ",
+             (selected_row == DRIVE_BIOS) ? " Select BIOS " :
+             (selected_row == DRIVE_ESP_FW) ? " Select USB Modem Firmware " :
+             " Select Image for %s ",
              drive_table[selected_row].label);
     osd_print_center(FILE_Y, title, OSD_ATTR(OSD_YELLOW, OSD_BLUE));
 
@@ -421,7 +561,9 @@ static void draw_file_browser(void) {
 
     if (file_count == 0) {
         osd_print_center(FILE_Y + FILE_H / 2,
-                         (selected_row == DRIVE_BIOS) ? "No BIOS files found in " SD_DATA_DIR_SLASH : "No disk images found in " SD_DATA_DIR_SLASH,
+                         (selected_row == DRIVE_BIOS) ? "No BIOS files found in " SD_DATA_DIR_SLASH :
+                         (selected_row == DRIVE_ESP_FW) ? "No modem firmware found in " SD_DATA_DIR_SLASH :
+                         "No disk images found in " SD_DATA_DIR_SLASH,
                          OSD_ATTR_DISABLED);
     }
 
@@ -443,6 +585,10 @@ static void scan_disk_images(int drive_idx) {
 
     if (drive_idx == DRIVE_BIOS) {
         file_list[file_count] = strdup("[native]");
+        if (file_list[file_count])
+            file_count++;
+    } else if (drive_idx == DRIVE_ESP_FW) {
+        file_list[file_count] = strdup("[none]");
         if (file_list[file_count])
             file_count++;
     }
@@ -469,8 +615,10 @@ static void scan_disk_images(int drive_idx) {
     f_closedir(&dir);
 
     // Sort alphabetically, keeping the BIOS Native item first.
-    int sort_start = (drive_idx == DRIVE_BIOS && file_count > 0 &&
-                      strcasecmp(file_list[0], "[native]") == 0) ? 1 : 0;
+    int sort_start = ((drive_idx == DRIVE_BIOS && file_count > 0 &&
+                       strcasecmp(file_list[0], "[native]") == 0) ||
+                      (drive_idx == DRIVE_ESP_FW && file_count > 0 &&
+                       strcasecmp(file_list[0], "[none]") == 0)) ? 1 : 0;
     for (int i = sort_start; i < file_count - 1; i++) {
         for (int j = sort_start; j < file_count - i + sort_start - 1; j++) {
             if (strcasecmp(file_list[j], file_list[j + 1]) > 0) {
@@ -494,16 +642,13 @@ static void select_file(void) {
 
     int drive_idx = selected_row;
     char *name = NULL;
-    if (!(drive_idx == DRIVE_BIOS && strcasecmp(file_list[selected_file], "[native]") == 0)) {
+    if (!((drive_idx == DRIVE_BIOS && strcasecmp(file_list[selected_file], "[native]") == 0) ||
+          (drive_idx == DRIVE_ESP_FW && strcasecmp(file_list[selected_file], "[none]") == 0))) {
         name = strdup(file_list[selected_file]);
         if (!name) return;
     }
 
-    free(pending_filename[drive_idx]);
-    pending_filename[drive_idx] = name;
-    pending_changed[drive_idx] = true;
-
-    if (drive_idx >= 2) reboot_required = true;
+    set_pending_filename(drive_idx, name);
 
     menu_state = MENU_MAIN;
     draw_main_menu();
@@ -511,11 +656,7 @@ static void select_file(void) {
 
 static void eject_pending(void) {
     int drive_idx = selected_row;
-    free(pending_filename[drive_idx]);
-    pending_filename[drive_idx] = NULL;
-    pending_changed[drive_idx] = true;
-
-    if (drive_idx >= 2) reboot_required = true;
+    set_pending_filename(drive_idx, NULL);
 
     draw_main_menu();
 }
@@ -536,14 +677,14 @@ static void cycle_sd_card(int direction) {
     }
     index = (index + (direction < 0 ? 2 : 1)) % 3;
     pending_raw_sd = values[index];
-    reboot_required = true;
+    update_reboot_required();
     draw_main_menu();
 }
 
 static void toggle_usb_mode(void) {
     pending_usb_mode = (pending_usb_mode == USB_MODE_DEVICE)
                        ? USB_MODE_HOST : USB_MODE_DEVICE;
-    reboot_required = true;
+    update_reboot_required();
     draw_main_menu();
 }
 
@@ -562,13 +703,15 @@ static void esc_apply_temp_and_close(void) {
     diskui_close();
 }
 
-static void apply_and_close(void) {
-    // Apply all pending disk changes
+static void apply_remaining_and_close(void)
+{
+    // Apply everything except the modem firmware selection, which is committed
+    // before flashing so an interrupted update remains explicitly pending.
     for (int i = 0; i < DRIVE_TOTAL; i++) {
-        if (!pending_changed[i]) continue;
+        if (i == DRIVE_ESP_FW || !pending_changed[i])
+            continue;
 
         if (!pending_filename[i]) {
-            // Eject
             if (i == DRIVE_BIOS) {
                 config_set_bios_file(NULL);
             } else if (i < 2) {
@@ -577,7 +720,6 @@ static void apply_and_close(void) {
                 ejectdisk(i - 2, false);
             }
         } else {
-            // Insert
             if (i == DRIVE_BIOS) {
                 config_set_bios_file(pending_filename[i]);
             } else if (i < 2) {
@@ -590,14 +732,13 @@ static void apply_and_close(void) {
         }
     }
 
-    // Config toggles (SD raw / USB mode) take effect on the reboot below.
     if (pending_raw_sd != config_get_raw_sd_hdd())
         config_set_raw_sd_hdd(pending_raw_sd);
     if (pending_usb_mode != config_get_usb_mode())
         config_set_usb_mode(pending_usb_mode);
 
     if (reboot_required)
-        config_save_all();     // persist disks + SD/USB/BIOS before reboot
+        config_save_all();
     else
         config_save_disks();
 
@@ -608,6 +749,47 @@ static void apply_and_close(void) {
     }
 
     diskui_close();
+}
+
+static void apply_and_close(void)
+{
+    /* Selecting a modem image is only a pending choice until this action row
+     * is activated. Persist the desired image first; esp_flashed is deliberately
+     * left untouched until the ROM loader finishes successfully. */
+    if (pending_changed[DRIVE_ESP_FW]) {
+        const char *old = config_get_esp_firmware();
+        char *old_copy = old ? strdup(old) : NULL;
+
+        config_set_esp_firmware(pending_filename[DRIVE_ESP_FW]);
+        if (!config_save_all()) {
+            config_set_esp_firmware(old_copy);
+            free(old_copy);
+            draw_modem_result_screen(false, "Cannot save firmware selection");
+            return;
+        }
+        free(old_copy);
+
+        free(pending_filename[DRIVE_ESP_FW]);
+        pending_filename[DRIVE_ESP_FW] = NULL;
+        pending_changed[DRIVE_ESP_FW] = false;
+        update_reboot_required();
+    }
+
+    /* [none] means: stop managing ESP32 firmware. Never erase or otherwise
+     * modify the modem merely because management was disabled. */
+    if (!modem_update_pending() || config_get_usb_mode() != USB_MODE_HOST) {
+        apply_remaining_and_close();
+        return;
+    }
+
+    menu_state = MENU_MODEM_FLASH;
+    draw_modem_flash_screen("Entering bootloader / erasing flash...", -1);
+
+    char detail[96];
+    espflash_result_t fr = espflash_update_if_needed(modem_flash_progress,
+                                                      NULL, detail, sizeof(detail));
+    draw_modem_result_screen(fr == ESPFLASH_OK,
+                             detail[0] ? detail : espflash_result_string(fr));
 }
 
 // --------------------------------------------------------------------------
@@ -638,7 +820,7 @@ bool diskui_handle_key(int keycode, bool is_down) {
                     if (selected_row == DRIVE_SD_CARD) { cycle_sd_card(1); break; }
                     if (selected_row == DRIVE_USB_MODE) { toggle_usb_mode(); break; }
                     const char *filename = get_display_filename(selected_row);
-                    if (selected_row == DRIVE_BIOS || !filename) {
+                    if (selected_row == DRIVE_BIOS || selected_row == DRIVE_ESP_FW || !filename) {
                         scan_disk_images(selected_row);
                         menu_state = MENU_FILE_BROWSER;
                         draw_file_browser();
@@ -676,6 +858,7 @@ bool diskui_handle_key(int keycode, bool is_down) {
                 case KEY_E: selected_row = DRIVE_ATA1_0; draw_main_menu(); break;
                 case KEY_F: selected_row = DRIVE_ATA1_1; draw_main_menu(); break;
                 case KEY_G: selected_row = DRIVE_BIOS;   draw_main_menu(); break;
+                case KEY_H: selected_row = DRIVE_ESP_FW; draw_main_menu(); break;
             }
             break;
 
@@ -718,6 +901,20 @@ bool diskui_handle_key(int keycode, bool is_down) {
                     menu_state = MENU_MAIN;
                     draw_main_menu();
                     break;
+            }
+            break;
+
+
+        case MENU_MODEM_FLASH:
+            // Flashing is synchronous and deliberately not cancellable.
+            break;
+
+        case MENU_MODEM_RESULT:
+            if (modem_result_success)
+                apply_remaining_and_close();
+            else {
+                menu_state = MENU_MAIN;
+                draw_main_menu();
             }
             break;
 

@@ -15,7 +15,7 @@ endif()
 cmake_minimum_required(VERSION 3.13)
 
 # Board configuration variant (M1, M2, PC, Z2 or C2)
-set(BOARD "Z2" CACHE STRING "Board variant: M1, M2, PC, Z2 or C2")
+set(BOARD "M2" CACHE STRING "Board variant: M1, M2, PC, Z2 or C2")
 # Alias for backwards compatibility
 if(DEFINED BOARD_VARIANT AND NOT DEFINED BOARD)
     set(BOARD ${BOARD_VARIANT})
@@ -24,13 +24,13 @@ endif()
 # Enable LTEMM support (performance degradation is expected)
 option(EMM "Enable LTEMM support" OFF)
 
-option(NO_PAGING "Disable guest-RAM paging and use direct QSPI PSRAM access" ON)
+option(NO_PAGING "Disable guest-RAM paging and use direct QSPI PSRAM access" OFF)
 if(NO_PAGING)
     add_compile_definitions(NO_PAGING=1)
 endif()
 
 # Video adapter profile: one mutually exclusive build mode.
-set(VIDEO_MODE "VGA256" CACHE STRING "Video adapter: RUNTIME, MCGA, EGA128, VGA128 or VGA256")
+set(VIDEO_MODE "RUNTIME" CACHE STRING "Video adapter: RUNTIME, MCGA, EGA128, VGA128 or VGA256")
 set_property(CACHE VIDEO_MODE PROPERTY STRINGS RUNTIME MCGA EGA128 VGA128 VGA256)
 string(TOUPPER "${VIDEO_MODE}" VIDEO_MODE)
 
@@ -451,6 +451,7 @@ add_executable(${BUILD_NAME}
     src/diskui.c
     src/settingsui.c
     src/config_save.c
+    src/espflash.c
     src/ps2kbd_mrmltr.cpp
     src/ps2kbd_wrapper.cpp
     ${EMU_CORE_SOURCES}

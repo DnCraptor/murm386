@@ -26,6 +26,7 @@
  * This function MUST run from RAM, not flash, as it reconfigures the XIP controller.
  */
 void __no_inline_not_in_flash_func(psram_init_with_freq)(uint cs_pin, int freq_mhz) {
+#if QSPI_PSRAM_ALLOWED
     const int clock_hz = clock_get_hz(clk_sys);
 
     // Configure GPIO for XIP CS1 function
@@ -98,6 +99,7 @@ void __no_inline_not_in_flash_func(psram_init_with_freq)(uint cs_pin, int freq_m
 
     // Enable writes to M1 (PSRAM) region
     hw_set_bits(&xip_ctrl_hw->ctrl, XIP_CTRL_WRITABLE_M1_BITS);
+#endif
 }
 
 /**
