@@ -69,6 +69,7 @@ bool ega128_paging_flush(void);
 #include "video_profile.h"
 #include "config_save.h"
 #include "espflash.h"
+#include "../drivers/usbhid/usbserial.h"
 #include "vga_osd.h"
 #include "profile_subsys.h"
 #include "remote_mem.h"
@@ -1868,14 +1869,6 @@ static void show_welcome_screen(void) {
     osd_hide();
 }
 
-static bool modem_update_pending(void)
-{
-    const char *desired = config_get_esp_firmware();
-    const char *flashed = config_get_esp_flashed();
-
-    return desired && desired[0] && (!flashed || strcmp(desired, flashed) != 0);
-}
-
 static bool boot_modem_get_key(int *keycode)
 {
     int is_down = 0;
@@ -1916,38 +1909,66 @@ static void boot_modem_draw_progress(uint32_t done, uint32_t total, void *user)
     osd_print_center(16, line, OSD_ATTR_HIGHLIGHT);
 }
 
+static void boot_modem_draw_stage(const char *status, void *user)
+{
+    (void)user;
+    osd_fill(10, 14, 60, 3, ' ', OSD_ATTR_NORMAL);
+    if (status && status[0])
+        osd_print_center(14, status, OSD_ATTR(OSD_YELLOW, OSD_BLUE));
+}
+
 static void show_pending_modem_update(void)
 {
-    if (!modem_update_pending())
-        return;
-
-    /* USB DEVICE owns the connector, so the CH340 is unavailable. Keep the
-       update pending without interrupting boot; Win+F12 can switch back to
-       HOST and perform it explicitly later. */
-    if (config_get_usb_mode() != USB_MODE_HOST) {
-        DBG_PRINT("ESP32 modem firmware update pending until USB HOST mode\n");
-        return;
-    }
-
     const char *desired = config_get_esp_firmware();
-    const char *flashed = config_get_esp_flashed();
-    char current[48];
-    char next[48];
-    snprintf(current, sizeof(current), "Current: %s", flashed ? flashed : "[unknown]");
-    snprintf(next, sizeof(next), "New:     %s", desired);
+    if (!desired || !desired[0])
+        return;
+
+    if (config_get_usb_mode() != USB_MODE_HOST)
+        return;
+
+    /* TinyUSB host enumeration is asynchronous. Only probe a configured
+       firmware when a supported USB serial modem is actually present. */
+    if (!usbserial_connected()) {
+        absolute_time_t discover_deadline = make_timeout_time_ms(750);
+        while (!usbserial_connected() && !time_reached(discover_deadline)) {
+            usbhid_task();
+            sleep_ms(1);
+        }
+    }
+    if (!usbserial_connected())
+        return;
 
     osd_clear();
     osd_draw_box(8, 6, 64, 14, OSD_ATTR_BORDER);
     osd_fill(9, 7, 62, 12, ' ', OSD_ATTR_NORMAL);
-    osd_print_center(6, " ESP32 Modem Firmware Update Pending ", OSD_ATTR(OSD_YELLOW, OSD_BLUE));
-    osd_print(12, 10, current, OSD_ATTR_NORMAL);
-    osd_print(12, 12, next, OSD_ATTR_NORMAL);
-    osd_print_center(16, "Enter - Flash", OSD_ATTR_HIGHLIGHT);
-    osd_print_center(17, "Esc   - Skip", OSD_ATTR_HIGHLIGHT);
+    osd_print_center(6, " ESP32 Modem Firmware ", OSD_ATTR(OSD_YELLOW, OSD_BLUE));
+    osd_print_center(11, "Checking physical modem flash...", OSD_ATTR(OSD_YELLOW, OSD_BLUE));
     osd_show();
 
-    /* Ignore any queued key presses from earlier boot-time interaction. Wait
-       for a clean release interval before accepting Enter/Esc. */
+    bool matches = false;
+    char detail[96];
+    espflash_result_t cr = espflash_selected_matches(&matches,
+                                                      boot_modem_draw_stage,
+                                                      NULL,
+                                                      detail, sizeof(detail));
+    if (cr != ESPFLASH_OK) {
+        DBG_PRINT("ESP32 modem firmware probe failed: %s\n", detail);
+        osd_hide();
+        return;
+    }
+    if (matches) {
+        osd_hide();
+        return;
+    }
+
+    char next[56];
+    snprintf(next, sizeof(next), "Selected: %s", desired);
+    osd_fill(9, 7, 62, 12, ' ', OSD_ATTR_NORMAL);
+    osd_print_center(9, "Connected modem firmware differs", OSD_ATTR(OSD_YELLOW, OSD_BLUE));
+    osd_print_center(12, next, OSD_ATTR_NORMAL);
+    osd_print_center(16, "Enter - Flash", OSD_ATTR_HIGHLIGHT);
+    osd_print_center(17, "Esc   - Skip", OSD_ATTR_HIGHLIGHT);
+
     int key;
     absolute_time_t quiet = make_timeout_time_ms(100);
     while (!time_reached(quiet)) {
@@ -1973,16 +1994,17 @@ static void show_pending_modem_update(void)
         strncpy(desired_shown, desired, sizeof(desired_shown) - 1);
         desired_shown[sizeof(desired_shown) - 1] = '\0';
         osd_print_center(11, desired_shown, OSD_ATTR_NORMAL);
-        osd_print_center(14, "Entering bootloader / erasing flash...", OSD_ATTR(OSD_YELLOW, OSD_BLUE));
+        osd_print_center(14, "Preparing firmware update...", OSD_ATTR(OSD_YELLOW, OSD_BLUE));
 
-        char detail[96];
-        espflash_result_t fr = espflash_update_if_needed(boot_modem_draw_progress,
-                                                          NULL, detail, sizeof(detail));
-        bool ok = (fr == ESPFLASH_OK);
+        espflash_result_t fr = espflash_update_selected(boot_modem_draw_progress,
+                                                         boot_modem_draw_stage,
+                                                         NULL, detail, sizeof(detail));
+        bool ok = (fr == ESPFLASH_OK || fr == ESPFLASH_NOT_NEEDED);
         osd_fill(10, 9, 60, 9, ' ', OSD_ATTR_NORMAL);
         osd_print_center(12,
-                         ok ? "Firmware updated successfully."
-                            : "Firmware update did not complete.",
+                         fr == ESPFLASH_NOT_NEEDED ? "Firmware already matches."
+                                                  : ok ? "Firmware updated successfully."
+                                                       : "Firmware update did not complete.",
                          ok ? OSD_ATTR(OSD_LIGHTGREEN, OSD_BLUE)
                             : OSD_ATTR(OSD_WHITE, OSD_RED));
         if (detail[0]) {
@@ -1991,8 +2013,6 @@ static void show_pending_modem_update(void)
             shown[sizeof(shown) - 1] = '\0';
             osd_print_center(14, shown, OSD_ATTR_NORMAL);
         }
-        if (!ok)
-            osd_print_center(16, "The update remains pending.", OSD_ATTR_HIGHLIGHT);
         osd_print_center(18, "Press any key", OSD_ATTR_HIGHLIGHT);
         boot_modem_wait_any_key();
         osd_hide();
@@ -2189,9 +2209,8 @@ static void __attribute__((noinline, noreturn)) main_after_hardware(void)
         }
     }
 
-    /* Never start an ESP32 flash silently. A mismatch means the previous
-       update was interrupted or a new image was selected; let the user decide
-       whether to flash now or continue booting with it pending. */
+    /* Determine modem firmware state from the physical ESP32 flash itself.
+       If it differs from the selected image, ask before programming. */
     show_pending_modem_update();
 
     // Start the core-0 cycle counter before emulation begins.

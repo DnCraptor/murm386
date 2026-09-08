@@ -62,6 +62,7 @@ static int file_scroll_offset = 0;
 static char *pending_filename[DRIVE_TOTAL];
 static bool pending_changed[DRIVE_TOTAL];  // true if user modified this drive
 static bool reboot_required;               // derived from pending reboot-only changes
+static bool modem_flash_requested = false;
 
 // Pending values for the SD-CARD placement / USB mode. They are
 // only written to the config on "Save and Reboot" so config_get_usb_mode()
@@ -104,9 +105,10 @@ static void toggle_usb_mode(void);
 static void esc_apply_temp_and_close(void);
 static bool row_is_toggle(int row);
 static void modem_flash_progress(uint32_t done, uint32_t total, void *user);
+static void modem_flash_stage(const char *status, void *user);
 static void draw_modem_flash_screen(const char *status, int percent);
 static void draw_modem_result_screen(bool success, const char *detail);
-static bool modem_update_pending(void);
+static bool modem_firmware_selected(void);
 static void apply_remaining_and_close(void);
 static void update_reboot_required(void);
 static bool filenames_equal(const char *a, const char *b);
@@ -210,6 +212,7 @@ static void reset_pending(void) {
         pending_changed[i] = false;
     }
     reboot_required = false;
+    modem_flash_requested = false;
 }
 
 static void clear_file_list(void) {
@@ -346,14 +349,10 @@ const DriveInfo* diskui_get_drive_info(DiskUIDrive drive) {
     return &drive_table[drive];
 }
 
-static bool modem_update_pending(void)
+static bool modem_firmware_selected(void)
 {
     const char *desired = get_display_filename(DRIVE_ESP_FW);
-    const char *flashed = config_get_esp_flashed();
-
-    if (!desired || !desired[0])
-        return false;
-    return !flashed || strcmp(desired, flashed) != 0;
+    return desired && desired[0];
 }
 
 #define MODEM_X  8
@@ -397,6 +396,12 @@ static void modem_flash_progress(uint32_t done, uint32_t total, void *user)
     draw_modem_flash_screen("Programming flash...", percent);
 }
 
+static void modem_flash_stage(const char *status, void *user)
+{
+    (void)user;
+    draw_modem_flash_screen(status, -1);
+}
+
 static void draw_modem_result_screen(bool success, const char *detail)
 {
     modem_result_success = success;
@@ -423,7 +428,7 @@ static void draw_modem_result_screen(bool success, const char *detail)
     }
 
     if (!success)
-        osd_print_center(MODEM_Y + 8, "The update remains pending.", OSD_ATTR_HIGHLIGHT);
+        osd_print_center(MODEM_Y + 8, "Firmware was not changed.", OSD_ATTR_HIGHLIGHT);
     osd_print_center(MODEM_Y + 10, "Press any key", OSD_ATTR_HIGHLIGHT);
 }
 
@@ -500,7 +505,7 @@ static void draw_main_menu(void) {
     {
         uint8_t attr = (selected_row == ROW_ACTION) ? OSD_ATTR_SELECTED : OSD_ATTR_HIGHLIGHT;
         osd_fill(MENU_X + 2, action_y, MENU_W - 4, 1, ' ', attr);
-        if (modem_update_pending() && config_get_usb_mode() == USB_MODE_HOST) {
+        if (modem_flash_requested && modem_firmware_selected() && pending_usb_mode == USB_MODE_HOST) {
             osd_print_center(action_y, "[ Flash and Exit ]", attr);
         } else if (reboot_required) {
             osd_print_center(action_y, "[ Save and Reboot ]", attr);
@@ -648,6 +653,9 @@ static void select_file(void) {
         if (!name) return;
     }
 
+    if (drive_idx == DRIVE_ESP_FW)
+        modem_flash_requested = (name != NULL);
+
     set_pending_filename(drive_idx, name);
 
     menu_state = MENU_MAIN;
@@ -754,8 +762,7 @@ static void apply_remaining_and_close(void)
 static void apply_and_close(void)
 {
     /* Selecting a modem image is only a pending choice until this action row
-     * is activated. Persist the desired image first; esp_flashed is deliberately
-     * left untouched until the ROM loader finishes successfully. */
+     * is activated. Persist the desired image before accessing the modem. */
     if (pending_changed[DRIVE_ESP_FW]) {
         const char *old = config_get_esp_firmware();
         char *old_copy = old ? strdup(old) : NULL;
@@ -777,18 +784,19 @@ static void apply_and_close(void)
 
     /* [none] means: stop managing ESP32 firmware. Never erase or otherwise
      * modify the modem merely because management was disabled. */
-    if (!modem_update_pending() || config_get_usb_mode() != USB_MODE_HOST) {
+    if (!modem_flash_requested || !modem_firmware_selected() || config_get_usb_mode() != USB_MODE_HOST) {
         apply_remaining_and_close();
         return;
     }
 
     menu_state = MENU_MODEM_FLASH;
-    draw_modem_flash_screen("Entering bootloader / erasing flash...", -1);
+    draw_modem_flash_screen("Preparing firmware update...", -1);
 
     char detail[96];
-    espflash_result_t fr = espflash_update_if_needed(modem_flash_progress,
+    espflash_result_t fr = espflash_update_selected(modem_flash_progress,
+                                                      modem_flash_stage,
                                                       NULL, detail, sizeof(detail));
-    draw_modem_result_screen(fr == ESPFLASH_OK,
+    draw_modem_result_screen(fr == ESPFLASH_OK || fr == ESPFLASH_NOT_NEEDED,
                              detail[0] ? detail : espflash_result_string(fr));
 }
 

@@ -26,7 +26,6 @@ static int cfg_raw_sd_hdd = RAW_SD_HDD_LAST;
 static int cfg_usb_mode = USB_MODE_HOST;
 static int cfg_usb_modem = 0;
 static char *cfg_esp_firmware = NULL;
-static char *cfg_esp_flashed = NULL;
 static bool cfg_changed = false;
 
 // Hardware settings (use build-time defaults)
@@ -163,14 +162,9 @@ static void config_set_dynamic_string(char **slot, const char *value, bool hardw
 const char *config_get_esp_firmware(void) { return cfg_esp_firmware; }
 void config_set_esp_firmware(const char *filename)
 {
-    config_set_dynamic_string(&cfg_esp_firmware, filename, true);
+    config_set_dynamic_string(&cfg_esp_firmware, filename, false);
 }
 
-const char *config_get_esp_flashed(void) { return cfg_esp_flashed; }
-void config_set_esp_flashed(const char *filename)
-{
-    config_set_dynamic_string(&cfg_esp_flashed, filename, false);
-}
 
 void config_set_bios_file(const char *filename) {
     const bool native = !filename || filename[0] == '\0' || strcasecmp(filename, "native") == 0;
@@ -538,10 +532,6 @@ bool config_save_all(void) {
         write_key_value(&fp, "esp_firmware=", cfg_esp_firmware);
     else
         write_line(&fp, "esp_firmware=none\r\n");
-    if (cfg_esp_flashed)
-        write_key_value(&fp, "esp_flashed=", cfg_esp_flashed);
-    else
-        write_line(&fp, "esp_flashed=none\r\n");
     snprintf(line, sizeof(line), "cpu_freq=%d\r\n", cfg_cpu_freq);
     write_line(&fp, line);
     snprintf(line, sizeof(line), "psram_freq=%d\r\n", cfg_psram_freq);
@@ -619,12 +609,6 @@ int parse_frank_386_ini(void* user, const char* section,
         if (strcasecmp(value, "none") == 0 || replacement) {
             free(cfg_esp_firmware);
             cfg_esp_firmware = replacement;
-        }
-    } else if (strcmp(name, "esp_flashed") == 0) {
-        char *replacement = strcasecmp(value, "none") == 0 ? NULL : strdup(value);
-        if (strcasecmp(value, "none") == 0 || replacement) {
-            free(cfg_esp_flashed);
-            cfg_esp_flashed = replacement;
         }
     } else if (strcmp(name, "nes_joystick") == 0) {
         cfg_nes_joystick = atoi(value);

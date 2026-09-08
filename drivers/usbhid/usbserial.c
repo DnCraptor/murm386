@@ -209,7 +209,8 @@ void usbserial_program_flush_input(void)
 
     uint8_t scratch[64];
     absolute_time_t quiet = make_timeout_time_ms(20);
-    while (!time_reached(quiet)) {
+    absolute_time_t hard_deadline = make_timeout_time_ms(100);
+    while (!time_reached(quiet) && !time_reached(hard_deadline)) {
         usbserial_program_pump_once();
         uint32_t got = tuh_cdc_read((uint8_t)cdc_idx, scratch, sizeof(scratch));
         if (got)

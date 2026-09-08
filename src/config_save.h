@@ -45,11 +45,9 @@ void config_set_usb_mode(int mode);
 int config_get_usb_modem(void);
 void config_set_usb_modem(int enabled);
 
-/* Desired and last successfully programmed ESP32 firmware image names. */
+/* Desired ESP32 modem firmware image name. */
 const char *config_get_esp_firmware(void);
 void config_set_esp_firmware(const char *filename);
-const char *config_get_esp_flashed(void);
-void config_set_esp_flashed(const char *filename);
 
 // Hardware settings (saved in [murm-286] section)
 int config_get_video_adapter(void);
