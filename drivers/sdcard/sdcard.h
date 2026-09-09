@@ -59,6 +59,9 @@ void sdcard_enable_ff_dos_cache(void *storage, size_t bytes);
 void *sdcard_borrow_ff_cache_arena(size_t min_bytes, size_t *bytes);
 void sdcard_release_ff_cache_arena(void *storage);
 
+/* Recompute SD SPI timing after clk_sys/clk_peri is changed at runtime. */
+void sdcard_reclock(void);
+
 /*
  * Optional second-level FatFs cache in direct-mapped QSPI PSRAM.  The data
  * arena is reclaimable: callers publish the lowest address still available

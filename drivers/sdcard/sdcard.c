@@ -46,6 +46,7 @@
 #define CMD38	(38)		/* ERASE */
 #define CMD55	(55)		/* APP_CMD */
 #define CMD58	(58)		/* READ_OCR */
+#define CMD6	(6)			/* SWITCH_FUNC (SDC) */
 
 /* MMC card type flags (MMC_GET_TYPE) */
 #define CT_MMC         0x01            /* MMC ver 3 */
@@ -54,14 +55,19 @@
 #define CT_SDC         (CT_SD1|CT_SD2) /* SD */
 #define CT_BLOCK       0x08            /* Block addressing */
 
-#define CLK_SLOW	(100 * KHZ)
-#define CLK_FAST	(30 * MHZ)
+#define CLK_SLOW		(100 * KHZ)
+#define CLK_DEFAULT	(25 * MHZ)
+#define CLK_HIGH		(50 * MHZ)
+#define SD_HS_RETRY_LIMIT 3
+#define SD_DEFAULT_RETRY_LIMIT 5
 
 static volatile
 DSTATUS Stat = STA_NOINIT;	/* Physical drive status */
 
 static
 BYTE CardType;			/* Card type flags */
+
+static bool CardHighSpeed;	/* SD CMD6 High-Speed function is active */
 
 /*
  * Small direct-mapped FatFs disk-I/O cache backed by direct-addressable arenas.
@@ -561,18 +567,54 @@ static inline void cs_deselect(uint cs_pin) {
     asm volatile("nop \n nop \n nop"); // FIXME
 }
 
-static void FCLK_SLOW(void)
+#ifdef SDCARD_PIO
+/* The PIO SPI program takes four PIO cycles per SPI bit. */
+static float pio_spi_clkdiv_for(uint32_t sck_hz)
+{
+    float div = (float)clock_get_hz(clk_sys) / (4.0f * (float)sck_hz);
+    return div < 1.0f ? 1.0f : div;
+}
+#endif
+
+static void set_spi_clock(uint32_t sck_hz)
 {
 #ifndef SDCARD_PIO
-    spi_set_baudrate(SDCARD_SPI_BUS, CLK_SLOW);
+    spi_set_baudrate(SDCARD_SPI_BUS, sck_hz);
+#else
+    if (pio_spi.sm >= 0)
+        pio_sm_set_clkdiv(pio_spi.pio, pio_spi.sm, pio_spi_clkdiv_for(sck_hz));
 #endif
+}
+
+static void FCLK_SLOW(void)
+{
+    set_spi_clock(CLK_SLOW);
 }
 
 static void FCLK_FAST(void)
 {
-#ifndef SDCARD_PIO
-    spi_set_baudrate(SDCARD_SPI_BUS, CLK_FAST);
-#endif
+    set_spi_clock(CardHighSpeed ? CLK_HIGH : CLK_DEFAULT);
+}
+
+void sdcard_reclock(void)
+{
+    /* Recompute the divider after clk_sys/clk_peri changes.  An initialized
+     * card runs at the negotiated transfer rate; otherwise preserve init speed. */
+    if (Stat & STA_NOINIT)
+        set_spi_clock(CLK_SLOW);
+    else
+        FCLK_FAST();
+}
+
+static void fallback_sd_clock(void)
+{
+    /* The card may remain in CMD6 High-Speed function mode; 25 MHz is still
+     * legal there.  CardHighSpeed means only that we are using the 50 MHz
+     * host clock for this initialization session. */
+    if (CardHighSpeed) {
+        CardHighSpeed = false;
+        set_spi_clock(CLK_DEFAULT);
+    }
 }
 
 static void CS_HIGH(void)
@@ -634,7 +676,9 @@ void init_spi(void)
     gpio_set_dir(SDCARD_PIN_SPI0_MISO, GPIO_OUT);
     gpio_set_dir(SDCARD_PIN_SPI0_MOSI, GPIO_OUT);
 
-	float clkdiv = 4.0f;
+	/* Start the card at the SD SPI initialization clock.  The PIO program
+	 * consumes four PIO cycles per SPI bit. */
+	float clkdiv = pio_spi_clkdiv_for(CLK_SLOW);
 	int cpol = 0;
 	int cpha = 0;
 	uint cpha0_prog_offs = pio_add_program(pio_spi.pio, &spi_cpha0_program);
@@ -737,6 +781,24 @@ int _select (void)	/* 1:OK, 0:Timeout */
 
 
 /*-----------------------------------------------------------------------*/
+/* SD data CRC16 (x^16 + x^12 + x^5 + 1, initial value 0)               */
+/*-----------------------------------------------------------------------*/
+
+static uint16_t sd_crc16(const BYTE *data, UINT len)
+{
+	uint16_t crc = 0;
+
+	while (len--) {
+		int bit;
+		crc ^= (uint16_t)*data++ << 8;
+		for (bit = 0; bit < 8; bit++)
+			crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021)
+			                         : (uint16_t)(crc << 1);
+	}
+	return crc;
+}
+
+/*-----------------------------------------------------------------------*/
 /* Receive a data packet from the MMC                                    */
 /*-----------------------------------------------------------------------*/
 
@@ -758,25 +820,11 @@ int rcvr_datablock (	/* 1:OK, 0:Error */
 
 	rcvr_spi_multi(buff, btr);		/* Store trailing data to the buffer */
 	{
-		BYTE crc_hi = xchg_spi(0xFF);	/* CRC16 high byte */
-		BYTE crc_lo = xchg_spi(0xFF);	/* CRC16 low  byte */
-#ifdef SDCARD_VERIFY_CRC
-		/* The data packet always carries a valid CRC16-CCITT in SPI mode,
-		   regardless of CMD59. Verify it so a corrupted transfer is not
-		   silently accepted as a zero/garbage block. */
-		uint16_t rx = ((uint16_t)crc_hi << 8) | crc_lo;
-		uint16_t crc = 0;
-		UINT i; int k;
-		for (i = 0; i < btr; i++) {
-			crc ^= (uint16_t)buff[i] << 8;
-			for (k = 0; k < 8; k++)
-				crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021)
-				                     : (uint16_t)(crc << 1);
-		}
-		if (crc != rx) return 0;	/* CRC mismatch -> error; caller retries */
-#else
-		(void)crc_hi; (void)crc_lo;
-#endif
+		uint16_t rx = (uint16_t)xchg_spi(0xFF) << 8;
+		rx |= xchg_spi(0xFF);
+		/* Read data blocks always carry CRC16 in SPI mode, even while
+		 * command CRC checking (CMD59) is disabled. */
+		if (sd_crc16(buff, btr) != rx) return 0;
 	}
 
 	return 1;						/* Function succeeded */
@@ -829,6 +877,33 @@ BYTE send_cmd (		/* Return value: R1 resp (bit7==1:Failed to send) */
 	return res;							/* Return received response */
 }
 
+/*-----------------------------------------------------------------------*/
+/* Negotiate SD High-Speed mode (CMD6 function group 1, function 1)      */
+/*-----------------------------------------------------------------------*/
+
+static bool try_sd_high_speed(BYTE card_type)
+{
+	BYTE status[64];
+	bool ok;
+
+	/* CMD6 is an SD command here; MMC CMD6 has different semantics. */
+	if (!(card_type & CT_SDC)) return false;
+
+	/* Check mode: keep groups 2..6 unchanged, ask whether group 1 function 1
+	 * (High Speed) is supported.  Group-1 support is bits 415..400 of the
+	 * 512-bit switch status, i.e. status[12..13] in wire order. */
+	ok = send_cmd(CMD6, 0x00FFFFF1UL) == 0 && rcvr_datablock(status, sizeof status);
+	deselect();
+	if (!ok || !(status[13] & 0x02)) return false;
+
+	/* Switch mode.  The selected function for group 1 is bits 379..376,
+	 * the low nibble of status[16].  Only raise SCK after the card confirms
+	 * that function 1 was actually selected. */
+	ok = send_cmd(CMD6, 0x80FFFFF1UL) == 0 && rcvr_datablock(status, sizeof status);
+	deselect();
+	return ok && ((status[16] & 0x0F) == 1);
+}
+
 /*--------------------------------------------------------------------------
 
    Public Functions
@@ -851,6 +926,7 @@ DSTATUS disk_initialize (
 
 	if (drv) return STA_NOINIT;			/* Supports only drive 0 */
 	ff_stack_cache_invalidate_all();		/* Media/re-init invalidates cached sectors */
+	CardHighSpeed = false;				/* CMD0 returns SD cards to Default Speed */
 	init_spi();							/* Initialize SPI */
     sleep_ms(10);
 
@@ -887,7 +963,11 @@ DSTATUS disk_initialize (
 	deselect();
 
 	if (ty) {			/* OK */
-		FCLK_FAST();			/* Set fast clock */
+		FCLK_FAST();			/* Default Speed: up to 25 MHz */
+		if (try_sd_high_speed(ty)) {
+			CardHighSpeed = true;
+			FCLK_FAST();		/* High Speed: up to 50 MHz */
+		}
 		Stat &= ~STA_NOINIT;	/* Clear STA_NOINIT flag */
 	} else {			/* Failed */
 		Stat = STA_NOINIT;
@@ -917,6 +997,30 @@ DSTATUS disk_status (
 /* Read sector(s)                                                        */
 /*-----------------------------------------------------------------------*/
 
+static DRESULT disk_read_once (
+	BYTE *buff,
+	LBA_t sector,
+	UINT count
+)
+{
+	UINT remain = count;
+
+	if (remain == 1) {
+		if ((send_cmd(CMD17, sector) == 0) && rcvr_datablock(buff, 512))
+			remain = 0;
+	}
+	else if (send_cmd(CMD18, sector) == 0) {
+		do {
+			if (!rcvr_datablock(buff, 512)) break;
+			buff += 512;
+		} while (--remain);
+		send_cmd(CMD12, 0);				/* STOP_TRANSMISSION */
+	}
+	deselect();
+
+	return remain ? RES_ERROR : RES_OK;
+}
+
 static DRESULT disk_read_impl (
 	BYTE drv,		/* Physical drive number (0) */
 	BYTE *buff,		/* Pointer to the data buffer to store read data */
@@ -924,33 +1028,34 @@ static DRESULT disk_read_impl (
 	UINT count		/* Number of sectors to read (1..128) */
 )
 {
-	if (drv || !count) return RES_PARERR;		/* Check parameter */
-	if (Stat & STA_NOINIT) return RES_NOTRDY;	/* Check if drive is ready */
+	LBA_t card_sector;
+	unsigned tries;
+	DRESULT res;
 
-	if (!(CardType & CT_BLOCK)) sector *= 512;	/* LBA ot BA conversion (byte addressing cards) */
+	if (drv || !count) return RES_PARERR;
+	if (Stat & STA_NOINIT) return RES_NOTRDY;
 
-	if (count == 1) {	/* Single sector read */
-		int tries = 5;
-		while (tries--) {	/* retry on CRC/token failure */
-			if ((send_cmd(CMD17, sector) == 0)	/* READ_SINGLE_BLOCK */
-				&& rcvr_datablock(buff, 512)) {
-				count = 0;
-				break;
-			}
+	card_sector = (CardType & CT_BLOCK) ? sector : sector * 512;
+
+	/* At 50 MHz, retry the complete request three times.  A successful retry
+	 * keeps High Speed enabled.  Three failures in this one FatFs operation
+	 * permanently drop the host clock to 25 MHz until the next card init. */
+	tries = CardHighSpeed ? SD_HS_RETRY_LIMIT : SD_DEFAULT_RETRY_LIMIT;
+	while (tries--) {
+		res = disk_read_once(buff, card_sector, count);
+		if (res == RES_OK) return res;
+	}
+
+	if (CardHighSpeed) {
+		fallback_sd_clock();
+		tries = SD_DEFAULT_RETRY_LIMIT;
+		while (tries--) {
+			res = disk_read_once(buff, card_sector, count);
+			if (res == RES_OK) return res;
 		}
 	}
-	else {				/* Multiple sector read */
-		if (send_cmd(CMD18, sector) == 0) {	/* READ_MULTIPLE_BLOCK */
-			do {
-				if (!rcvr_datablock(buff, 512)) break;
-				buff += 512;
-			} while (--count);
-			send_cmd(CMD12, 0);				/* STOP_TRANSMISSION */
-		}
-	}
-	deselect();
 
-	return count ? RES_ERROR : RES_OK;	/* Return result */
+	return RES_ERROR;
 }
 
 
@@ -993,10 +1098,14 @@ int xmit_datablock (	/* 1:OK, 0:Error */
 	if (!wait_ready(500)) return 0;
 	xchg_spi(token); /* Xmit data token */
 	if (token != 0xFD) { /* Is data token */
+		uint16_t crc = sd_crc16(buff, 512);
 		xmit_spi_multi(buff, 512); /* Xmit the data block to the MMC */
-		xchg_spi(0xFF); /* CRC (Dummy) */
-		xchg_spi(0xFF);
-		resp = xchg_spi(0xFF); /* Reveive data response */
+		/* Send the real CRC16.  Cards may ignore it while CMD59 CRC checking
+		 * is disabled, but a valid CRC is always legal and makes the path
+		 * ready for integrity checking without changing command semantics. */
+		xchg_spi((BYTE)(crc >> 8));
+		xchg_spi((BYTE)crc);
+		resp = xchg_spi(0xFF); /* Receive data response */
 		if ((resp & 0x1F) != 0x05) /* If not accepted, return with error */
 			return 0;
 	}
@@ -1007,41 +1116,72 @@ int xmit_datablock (	/* 1:OK, 0:Error */
 /* Write sector(s)                                                       */
 /*-----------------------------------------------------------------------*/
 
-static DRESULT disk_write_impl (
-	BYTE drv,			/* Physical drive number (0) */
-	const BYTE *buff,	/* Ponter to the data to write */
-	LBA_t sector,		/* Start sector number (LBA) */
-	UINT count			/* Number of sectors to write (1..128) */
+static DRESULT disk_write_once (
+	const BYTE *buff,
+	LBA_t sector,
+	UINT count
 )
 {
-	if (drv || !count) return RES_PARERR;		/* Check parameter */
-	if (Stat & STA_NOINIT) return RES_NOTRDY;	/* Check drive status */
-	if (Stat & STA_PROTECT) return RES_WRPRT;	/* Check write protect */
+	UINT remain = count;
 
-	if (!(CardType & CT_BLOCK)) sector *= 512;	/* LBA ==> BA conversion (byte addressing cards) */
-
+	/* Preserve the original pre-write ready check. */
 	if (!_select()) return RES_NOTRDY;
 
-	if (count == 1) {	/* Single sector write */
-		if ((send_cmd(CMD24, sector) == 0)	/* WRITE_BLOCK */
-			&& xmit_datablock(buff, 0xFE)) {
-			count = 0;
-		}
+	if (remain == 1) {
+		if ((send_cmd(CMD24, sector) == 0)
+			&& xmit_datablock(buff, 0xFE))
+			remain = 0;
 	}
-	else {				/* Multiple sector write */
-		if (CardType & CT_SDC) send_cmd(ACMD23, count);	/* Predefine number of sectors */
-		if (send_cmd(CMD25, sector) == 0) {	/* WRITE_MULTIPLE_BLOCK */
+	else {
+		if (CardType & CT_SDC) send_cmd(ACMD23, remain);
+		if (send_cmd(CMD25, sector) == 0) {
 			do {
 				if (!xmit_datablock(buff, 0xFC)) break;
 				buff += 512;
-			} while (--count);
-			if (!xmit_datablock(0, 0xFD)) count = 1;	/* STOP_TRAN token */
+			} while (--remain);
+			if (!xmit_datablock(0, 0xFD)) remain = 1;
 		}
 	}
 	deselect();
 
-	return count ? RES_ERROR : RES_OK;	/* Return result */
+	return remain ? RES_ERROR : RES_OK;
 }
+
+static DRESULT disk_write_impl (
+	BYTE drv,			/* Physical drive number (0) */
+	const BYTE *buff,	/* Pointer to the data to write */
+	LBA_t sector,		/* Start sector number (LBA) */
+	UINT count			/* Number of sectors to write (1..128) */
+)
+{
+	LBA_t card_sector;
+	unsigned tries;
+	DRESULT res;
+
+	if (drv || !count) return RES_PARERR;
+	if (Stat & STA_NOINIT) return RES_NOTRDY;
+	if (Stat & STA_PROTECT) return RES_WRPRT;
+
+	card_sector = (CardType & CT_BLOCK) ? sector : sector * 512;
+
+	tries = CardHighSpeed ? SD_HS_RETRY_LIMIT : SD_DEFAULT_RETRY_LIMIT;
+	while (tries--) {
+		res = disk_write_once(buff, card_sector, count);
+		if (res == RES_OK) return res;
+	}
+
+	if (CardHighSpeed) {
+		fallback_sd_clock();
+		tries = SD_DEFAULT_RETRY_LIMIT;
+		while (tries--) {
+			res = disk_write_once(buff, card_sector, count);
+			if (res == RES_OK) return res;
+		}
+	}
+
+	return RES_ERROR;
+}
+
 #endif
 
 
@@ -1056,7 +1196,7 @@ DRESULT disk_ioctl (
 )
 {
 	DRESULT res;
-	BYTE n, csd[16];
+	BYTE n, csd[64];
 	DWORD *dp, st, ed, csize;
 
 
@@ -1088,8 +1228,7 @@ DRESULT disk_ioctl (
 		if (CardType & CT_SD2) {	/* SDC ver 2.00 */
 			if (send_cmd(ACMD13, 0) == 0) {	/* Read SD status */
 				xchg_spi(0xFF);
-				if (rcvr_datablock(csd, 16)) {				/* Read partial block */
-					for (n = 64 - 16; n; n--) xchg_spi(0xFF);	/* Purge trailing data */
+				if (rcvr_datablock(csd, 64)) {				/* Read complete SD status incl. CRC */
 					*(DWORD*)buff = 16UL << (csd[10] >> 4);
 					res = RES_OK;
 				}
