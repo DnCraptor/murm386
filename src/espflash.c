@@ -4,8 +4,62 @@
 #include "config_save.h"
 #include "ff.h"
 #include "usbserial.h"
-#include "sdcard.h"
 #include "pico/time.h"
+
+#include <string.h>
+
+extern uint8_t gfx_buffer[];
+static void set_detail(char *detail, size_t detail_size, const char *text);
+
+#define ESP_GFX_BACKUP_PATH "tmp/espflash.vram"
+
+static bool gfx_scratch_acquire(size_t bytes, uint8_t **scratch,
+                                char *detail, size_t detail_size)
+{
+    FRESULT fr = f_mkdir("tmp");
+    if (fr != FR_OK && fr != FR_EXIST) {
+        set_detail(detail, detail_size, "Cannot create tmp for VRAM backup");
+        return false;
+    }
+
+    FIL backup;
+    memset(&backup, 0, sizeof(backup));
+    fr = f_open(&backup, ESP_GFX_BACKUP_PATH, FA_CREATE_ALWAYS | FA_WRITE);
+    if (fr != FR_OK) {
+        set_detail(detail, detail_size, "Cannot create VRAM backup file");
+        return false;
+    }
+
+    UINT bw = 0;
+    fr = f_write(&backup, gfx_buffer, (UINT)bytes, &bw);
+    FRESULT close_fr = f_close(&backup);
+    if (fr != FR_OK || close_fr != FR_OK || bw != bytes) {
+        f_unlink(ESP_GFX_BACKUP_PATH);
+        set_detail(detail, detail_size, "Cannot save VRAM scratch area");
+        return false;
+    }
+
+    *scratch = gfx_buffer;
+    return true;
+}
+
+static void gfx_scratch_release(uint8_t *scratch, size_t bytes)
+{
+    if (scratch != gfx_buffer)
+        return;
+
+    FIL backup;
+    memset(&backup, 0, sizeof(backup));
+    if (f_open(&backup, ESP_GFX_BACKUP_PATH, FA_READ) == FR_OK) {
+        UINT br = 0;
+        if (f_read(&backup, gfx_buffer, (UINT)bytes, &br) == FR_OK && br == bytes) {
+            f_close(&backup);
+            f_unlink(ESP_GFX_BACKUP_PATH);
+            return;
+        }
+        f_close(&backup);
+    }
+}
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -491,16 +545,13 @@ static espflash_result_t program_file(const char *filename,
         return ESPFLASH_NO_DEVICE;
     }
 
-    if (status) status("Borrowing SD cache memory...", user);
+    if (status) status("Saving video memory...", user);
     const size_t scratch_need = ESP_PACKET_RAW_MAX + ESP_PACKET_SLIP_MAX +
                                 ESP_RESPONSE_MAX + ESP_FLASH_BLOCK;
-    size_t scratch_bytes = 0;
-    uint8_t *scratch = (uint8_t *)sdcard_borrow_ff_cache_arena(scratch_need,
-                                                               &scratch_bytes);
-    if (!scratch || scratch_bytes < scratch_need) {
+    uint8_t *scratch = NULL;
+    if (!gfx_scratch_acquire(scratch_need, &scratch, detail, detail_size)) {
         usbserial_program_end();
         f_close(&file);
-        set_detail(detail, detail_size, "No reclaimable SD cache arena for ESP flasher");
         return ESPFLASH_PROTOCOL_ERROR;
     }
     uint8_t *raw_packet = scratch;
@@ -632,7 +683,7 @@ out:
     usbserial_program_set_control_lines(0x00);
     usbserial_program_end();
     f_close(&file);
-    sdcard_release_ff_cache_arena(scratch);
+    gfx_scratch_release(scratch, scratch_need);
     return result;
 }
 
@@ -671,14 +722,12 @@ espflash_result_t espflash_selected_matches(bool *matches,
 
     if (status) status("Acquiring USB modem...", user);
     if (!usbserial_program_begin(3000u)) { set_detail(detail, detail_size, "USB modem/CH340 is not connected"); return ESPFLASH_NO_DEVICE; }
+    if (status) status("Saving video memory...", user);
     const size_t scratch_need = ESP_PACKET_RAW_MAX + ESP_PACKET_SLIP_MAX + ESP_RESPONSE_MAX;
-    size_t scratch_bytes = 0;
-    uint8_t *scratch = (uint8_t *)sdcard_borrow_ff_cache_arena(scratch_need, &scratch_bytes);
+    uint8_t *scratch = NULL;
     espflash_result_t result=ESPFLASH_PROTOCOL_ERROR;
-    if (!scratch || scratch_bytes < scratch_need) {
-        set_detail(detail, detail_size, "No reclaimable SD cache arena for ESP flasher");
+    if (!gfx_scratch_acquire(scratch_need, &scratch, detail, detail_size))
         goto check_out;
-    }
     uint8_t *raw = scratch;
     uint8_t *slip = raw + ESP_PACKET_RAW_MAX;
     uint8_t *resp = slip + ESP_PACKET_SLIP_MAX;
@@ -705,7 +754,7 @@ espflash_result_t espflash_selected_matches(bool *matches,
 check_out:
     usbserial_program_set_control_lines(0x00); usbserial_program_end();
     if (scratch)
-        sdcard_release_ff_cache_arena(scratch);
+        gfx_scratch_release(scratch, scratch_need);
     return result;
 }
 
