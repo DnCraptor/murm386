@@ -1171,6 +1171,7 @@ static void __no_inline_not_in_flash_func(reconfigure_clocks)(int cpu_mhz, int p
             set_sys_clock_khz(cpu_mhz * 1000, false);
         }
         console_reclock();
+        sdcard_reclock();
 #ifdef BOARD_HAS_PS2
         ps2_reclock();
 #endif

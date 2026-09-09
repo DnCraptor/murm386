@@ -55,7 +55,7 @@
 #define CT_BLOCK       0x08            /* Block addressing */
 
 #define CLK_SLOW	(100 * KHZ)
-#define CLK_FAST	(30 * MHZ)
+#define CLK_FAST	(20 * MHZ)
 
 static volatile
 DSTATUS Stat = STA_NOINIT;	/* Physical drive status */
@@ -503,18 +503,40 @@ static inline void cs_deselect(uint cs_pin) {
     asm volatile("nop \n nop \n nop"); // FIXME
 }
 
-static void FCLK_SLOW(void)
+#ifdef SDCARD_PIO
+/* The PIO SPI program takes four PIO cycles per SPI bit. */
+static float pio_spi_clkdiv_for(uint32_t sck_hz)
+{
+    float div = (float)clock_get_hz(clk_sys) / (4.0f * (float)sck_hz);
+    return div < 1.0f ? 1.0f : div;
+}
+#endif
+
+static void set_spi_clock(uint32_t sck_hz)
 {
 #ifndef SDCARD_PIO
-    spi_set_baudrate(SDCARD_SPI_BUS, CLK_SLOW);
+    spi_set_baudrate(SDCARD_SPI_BUS, sck_hz);
+#else
+    if (pio_spi.sm >= 0)
+        pio_sm_set_clkdiv(pio_spi.pio, pio_spi.sm, pio_spi_clkdiv_for(sck_hz));
 #endif
+}
+
+static void FCLK_SLOW(void)
+{
+    set_spi_clock(CLK_SLOW);
 }
 
 static void FCLK_FAST(void)
 {
-#ifndef SDCARD_PIO
-    spi_set_baudrate(SDCARD_SPI_BUS, CLK_FAST);
-#endif
+    set_spi_clock(CLK_FAST);
+}
+
+void sdcard_reclock(void)
+{
+    /* Recompute the divider after clk_sys/clk_peri changes.  An initialized
+     * card runs at the normal transfer rate; otherwise preserve init speed. */
+    set_spi_clock((Stat & STA_NOINIT) ? CLK_SLOW : CLK_FAST);
 }
 
 static void CS_HIGH(void)
@@ -576,7 +598,9 @@ void init_spi(void)
     gpio_set_dir(SDCARD_PIN_SPI0_MISO, GPIO_OUT);
     gpio_set_dir(SDCARD_PIN_SPI0_MOSI, GPIO_OUT);
 
-	float clkdiv = 4.0f;
+	/* Start the card at the SD SPI initialization clock.  The PIO program
+	 * consumes four PIO cycles per SPI bit. */
+	float clkdiv = pio_spi_clkdiv_for(CLK_SLOW);
 	int cpol = 0;
 	int cpha = 0;
 	uint cpha0_prog_offs = pio_add_program(pio_spi.pio, &spi_cpha0_program);
