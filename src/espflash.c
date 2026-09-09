@@ -4,6 +4,7 @@
 #include "config_save.h"
 #include "ff.h"
 #include "usbserial.h"
+#include "sdcard.h"
 #include "pico/time.h"
 
 #include <stdio.h>
@@ -490,18 +491,22 @@ static espflash_result_t program_file(const char *filename,
         return ESPFLASH_NO_DEVICE;
     }
 
-    if (status) status("Preparing flasher buffers...", user);
-    uint8_t *raw_packet = (uint8_t *)malloc(ESP_PACKET_RAW_MAX);
-    uint8_t *slip_packet = (uint8_t *)malloc(ESP_PACKET_SLIP_MAX);
-    uint8_t *response = (uint8_t *)malloc(ESP_RESPONSE_MAX);
-    uint8_t *block = (uint8_t *)malloc(ESP_FLASH_BLOCK);
-    if (!raw_packet || !slip_packet || !response || !block) {
-        free(raw_packet); free(slip_packet); free(response); free(block);
+    if (status) status("Borrowing SD cache memory...", user);
+    const size_t scratch_need = ESP_PACKET_RAW_MAX + ESP_PACKET_SLIP_MAX +
+                                ESP_RESPONSE_MAX + ESP_FLASH_BLOCK;
+    size_t scratch_bytes = 0;
+    uint8_t *scratch = (uint8_t *)sdcard_borrow_ff_cache_arena(scratch_need,
+                                                               &scratch_bytes);
+    if (!scratch || scratch_bytes < scratch_need) {
         usbserial_program_end();
         f_close(&file);
-        set_detail(detail, detail_size, "Not enough RAM for ESP flasher");
+        set_detail(detail, detail_size, "No reclaimable SD cache arena for ESP flasher");
         return ESPFLASH_PROTOCOL_ERROR;
     }
+    uint8_t *raw_packet = scratch;
+    uint8_t *slip_packet = raw_packet + ESP_PACKET_RAW_MAX;
+    uint8_t *response = slip_packet + ESP_PACKET_SLIP_MAX;
+    uint8_t *block = response + ESP_RESPONSE_MAX;
 
     espflash_result_t result = ESPFLASH_PROTOCOL_ERROR;
     if (status) status("Entering bootloader...", user);
@@ -626,11 +631,8 @@ out:
     /* Leave the auto-reset circuit inactive regardless of protocol outcome. */
     usbserial_program_set_control_lines(0x00);
     usbserial_program_end();
-    free(raw_packet);
-    free(slip_packet);
-    free(response);
-    free(block);
     f_close(&file);
+    sdcard_release_ff_cache_arena(scratch);
     return result;
 }
 
@@ -669,9 +671,17 @@ espflash_result_t espflash_selected_matches(bool *matches,
 
     if (status) status("Acquiring USB modem...", user);
     if (!usbserial_program_begin(3000u)) { set_detail(detail, detail_size, "USB modem/CH340 is not connected"); return ESPFLASH_NO_DEVICE; }
-    uint8_t *raw=(uint8_t*)malloc(ESP_PACKET_RAW_MAX), *slip=(uint8_t*)malloc(ESP_PACKET_SLIP_MAX), *resp=(uint8_t*)malloc(ESP_RESPONSE_MAX);
+    const size_t scratch_need = ESP_PACKET_RAW_MAX + ESP_PACKET_SLIP_MAX + ESP_RESPONSE_MAX;
+    size_t scratch_bytes = 0;
+    uint8_t *scratch = (uint8_t *)sdcard_borrow_ff_cache_arena(scratch_need, &scratch_bytes);
     espflash_result_t result=ESPFLASH_PROTOCOL_ERROR;
-    if (!raw || !slip || !resp) { set_detail(detail, detail_size, "Not enough RAM for ESP flasher"); goto check_out; }
+    if (!scratch || scratch_bytes < scratch_need) {
+        set_detail(detail, detail_size, "No reclaimable SD cache arena for ESP flasher");
+        goto check_out;
+    }
+    uint8_t *raw = scratch;
+    uint8_t *slip = raw + ESP_PACKET_RAW_MAX;
+    uint8_t *resp = slip + ESP_PACKET_SLIP_MAX;
     if (status) status("Entering bootloader...", user);
     if (!enter_rom_loader(status, user, detail, detail_size)) goto check_out;
     uint8_t sync_data[36]={0x07,0x07,0x12,0x20}; memset(sync_data+4,0x55,32);
@@ -694,7 +704,8 @@ espflash_result_t espflash_selected_matches(bool *matches,
     result=ESPFLASH_OK;
 check_out:
     usbserial_program_set_control_lines(0x00); usbserial_program_end();
-    free(raw); free(slip); free(resp);
+    if (scratch)
+        sdcard_release_ff_cache_arena(scratch);
     return result;
 }
 

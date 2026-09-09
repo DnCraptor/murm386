@@ -425,6 +425,64 @@ void sdcard_enable_ff_cache_arena(unsigned arena, void *storage, size_t bytes)
     }
 }
 
+static int ff_stack_cache_borrowed_arena = -1;
+static void *ff_stack_cache_borrowed_storage;
+static size_t ff_stack_cache_borrowed_bytes;
+
+void *sdcard_borrow_ff_cache_arena(size_t min_bytes, size_t *bytes)
+{
+    int best = -1;
+    size_t best_bytes = (size_t)-1;
+
+    if (bytes)
+        *bytes = 0;
+    if (ff_stack_cache_borrowed_arena >= 0 || min_bytes == 0)
+        return NULL;
+
+    for (unsigned i = 0; i < FF_STACK_CACHE_MAX_ARENAS; ++i) {
+        ff_stack_cache_arena_t *a = &ff_stack_cache_arena[i];
+        size_t arena_bytes = (size_t)a->line_count * sizeof(*a->lines);
+        if (a->lines && arena_bytes >= min_bytes && arena_bytes < best_bytes) {
+            best = (int)i;
+            best_bytes = arena_bytes;
+        }
+    }
+
+    if (best < 0)
+        return NULL;
+
+    ff_stack_cache_borrowed_arena = best;
+    ff_stack_cache_borrowed_storage = ff_stack_cache_arena[best].lines;
+    ff_stack_cache_borrowed_bytes = best_bytes;
+
+    /* Removing an arena rebuilds the sector-to-slot mapping and invalidates
+       the surviving cache lines. The detached bytes are then private scratch. */
+    sdcard_enable_ff_cache_arena((unsigned)best, NULL, 0);
+
+    if (bytes)
+        *bytes = best_bytes;
+    return ff_stack_cache_borrowed_storage;
+}
+
+void sdcard_release_ff_cache_arena(void *storage)
+{
+    if (ff_stack_cache_borrowed_arena < 0 ||
+        storage != ff_stack_cache_borrowed_storage)
+        return;
+
+    int arena = ff_stack_cache_borrowed_arena;
+    void *saved_storage = ff_stack_cache_borrowed_storage;
+    size_t saved_bytes = ff_stack_cache_borrowed_bytes;
+
+    ff_stack_cache_borrowed_arena = -1;
+    ff_stack_cache_borrowed_storage = NULL;
+    ff_stack_cache_borrowed_bytes = 0;
+
+    /* Reattach empty: enable_ff_cache_arena() invalidates the rebuilt mapping,
+       so scratch contents cannot be mistaken for cached disk sectors. */
+    sdcard_enable_ff_cache_arena((unsigned)arena, saved_storage, saved_bytes);
+}
+
 void sdcard_enable_ff_stack_cache(void *storage, size_t bytes)
 {
     sdcard_enable_ff_cache_arena(1u, storage, bytes);

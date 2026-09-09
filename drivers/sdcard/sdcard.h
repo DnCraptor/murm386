@@ -52,6 +52,13 @@ void sdcard_enable_ff_cache_arena(unsigned arena, void *storage, size_t bytes);
 void sdcard_enable_ff_stack_cache(void *storage, size_t bytes);
 void sdcard_enable_ff_dos_cache(void *storage, size_t bytes);
 
+/* Temporarily detach the smallest active write-through SRAM cache arena that
+ * can satisfy min_bytes and return its storage as scratch RAM. No dirty data
+ * is lost because this cache is write-through. The arena is reattached
+ * invalid on release. Only one borrower may be active at a time. */
+void *sdcard_borrow_ff_cache_arena(size_t min_bytes, size_t *bytes);
+void sdcard_release_ff_cache_arena(void *storage);
+
 /*
  * Optional second-level FatFs cache in direct-mapped QSPI PSRAM.  The data
  * arena is reclaimable: callers publish the lowest address still available
