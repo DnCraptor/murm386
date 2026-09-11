@@ -8,6 +8,8 @@ add_library(usbhid INTERFACE)
 target_sources(usbhid INTERFACE
     ${CMAKE_CURRENT_LIST_DIR}/hid_app.c
     ${CMAKE_CURRENT_LIST_DIR}/usbgamepad.c
+    ${CMAKE_CURRENT_LIST_DIR}/xinput_host.c
+    ${CMAKE_CURRENT_LIST_DIR}/usbxinput.c
     ${CMAKE_CURRENT_LIST_DIR}/usbkbd_wrapper.c
     ${CMAKE_CURRENT_LIST_DIR}/usbmouse_wrapper.c
     ${CMAKE_CURRENT_LIST_DIR}/usbserial.c

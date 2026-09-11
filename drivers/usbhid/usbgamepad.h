@@ -21,7 +21,15 @@
 /* Called from hid_app.c. `instance` is the TinyUSB HID instance. */
 void usbgamepad_set_ids(uint8_t instance, uint16_t vid, uint16_t pid);
 void usbgamepad_report(uint8_t instance, const uint8_t *report, uint16_t len);
+/* Decode devices whose reports cannot safely go through TinyUSB's generic
+ * HID report parser (DS4/DS5, F710 DInput, selected clone pads). Returns
+ * non-zero when the report belonged to such a device and was consumed. */
+int usbgamepad_report_special(uint8_t instance, const uint8_t *report, uint16_t len);
 void usbgamepad_umount(uint8_t instance);
+
+/* XInput host class feeds the same emulated DOS game port. */
+void usbgamepad_xinput_report(uint16_t buttons, int16_t lx, int16_t ly, int connected);
+void usbgamepad_xinput_umount(void);
 
 /* Non-zero once any pad has delivered a report. */
 int usbgamepad_connected(void);

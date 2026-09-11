@@ -237,10 +237,160 @@ void usbgamepad_report(uint8_t instance, const uint8_t *report, uint16_t len) {
     gp->buttons = buttons;
 }
 
+static gp_slot_t xinput_slot;
+
+static void set_slot_state(gp_slot_t *gp, uint8_t dpad, uint16_t buttons) {
+    gp->dpad = dpad;
+    gp->buttons = buttons;
+    gp->active = 1;
+}
+
+static uint8_t hat_to_dpad(uint8_t hat) {
+    switch (hat & 0x0F) {
+    case 0: return 0x01;
+    case 1: return 0x01 | 0x08;
+    case 2: return 0x08;
+    case 3: return 0x02 | 0x08;
+    case 4: return 0x02;
+    case 5: return 0x02 | 0x04;
+    case 6: return 0x04;
+    case 7: return 0x01 | 0x04;
+    default: return 0;
+    }
+}
+
+static uint8_t axes_to_dpad(uint8_t x, uint8_t y) {
+    uint8_t d = 0;
+    if (x < 0x40) d |= 0x04;
+    if (x > 0xC0) d |= 0x08;
+    if (y < 0x40) d |= 0x01;
+    if (y > 0xC0) d |= 0x02;
+    return d;
+}
+
+int usbgamepad_report_special(uint8_t instance, const uint8_t *report, uint16_t len) {
+    if (instance >= CFG_TUH_HID || !report || !len) return 0;
+    gp_slot_t *gp = &gp_slots[instance];
+    const uint16_t vid = gp->vid, pid = gp->pid;
+    uint8_t dpad = 0;
+    uint16_t buttons = 0;
+
+    /* Sony DualShock 4, USB report 0x01. Descriptor is > TinyUSB's small
+     * enumeration buffer on this target, so decode the stable wire layout. */
+    if (vid == 0x054C && (pid == 0x05C4 || pid == 0x09CC)) {
+        if (len < 8 || report[0] != 0x01) return 1;
+        const uint8_t *r = report + 1;
+        dpad = axes_to_dpad(r[0], r[1]) | hat_to_dpad(r[4]);
+        if (r[4] & 0x20) buttons |= 0x0001; /* Cross -> A */
+        if (r[4] & 0x40) buttons |= 0x0002; /* Circle -> B */
+        if (r[4] & 0x10) buttons |= 0x0004; /* Square -> X */
+        if (r[4] & 0x80) buttons |= 0x0008; /* Triangle -> Y */
+        if (r[5] & 0x01) buttons |= 0x0010;
+        if (r[5] & 0x02) buttons |= 0x0020;
+        if (r[5] & 0x20) buttons |= 0x0040; /* Options */
+        if (r[5] & 0x10) buttons |= 0x0080; /* Share */
+        set_slot_state(gp, dpad, buttons); return 1;
+    }
+
+    /* Sony DualSense (PS5), USB report 0x01. */
+    if (vid == 0x054C && pid == 0x0CE6) {
+        if (len < 11 || report[0] != 0x01) return 1;
+        const uint8_t *r = report + 1;
+        dpad = axes_to_dpad(r[0], r[1]) | hat_to_dpad(r[7]);
+        if (r[7] & 0x20) buttons |= 0x0001;
+        if (r[7] & 0x40) buttons |= 0x0002;
+        if (r[7] & 0x10) buttons |= 0x0004;
+        if (r[7] & 0x80) buttons |= 0x0008;
+        if (r[8] & 0x01) buttons |= 0x0010;
+        if (r[8] & 0x02) buttons |= 0x0020;
+        if (r[8] & 0x20) buttons |= 0x0040;
+        if (r[8] & 0x10) buttons |= 0x0080;
+        set_slot_state(gp, dpad, buttons); return 1;
+    }
+
+    /* Logitech F710 / Cordless RumblePad 2, DirectInput mode. Report ID 1. */
+    if (vid == 0x046D && pid == 0xC219) {
+        if (len < 8 || report[0] != 0x01) return 1;
+        const uint8_t *r = report + 1;
+        dpad = axes_to_dpad(r[0], r[1]) | hat_to_dpad(r[4]);
+        if (r[4] & 0x20) buttons |= 0x0001; /* A */
+        if (r[4] & 0x40) buttons |= 0x0002; /* B */
+        if (r[4] & 0x10) buttons |= 0x0004; /* X */
+        if (r[4] & 0x80) buttons |= 0x0008; /* Y */
+        if (r[5] & 0x01) buttons |= 0x0010;
+        if (r[5] & 0x02) buttons |= 0x0020;
+        if (r[5] & 0x20) buttons |= 0x0040; /* Start */
+        if (r[5] & 0x10) buttons |= 0x0080; /* Back */
+        set_slot_state(gp, dpad, buttons); return 1;
+    }
+
+    /* FEED:2320 composite joystick, report ID 0x07. */
+    if (vid == 0xFEED && pid == 0x2320) {
+        if (len < 8 || report[0] != 0x07) return 1;
+        const uint8_t *r = report + 1;
+        dpad = axes_to_dpad(r[0], r[1]) | hat_to_dpad(r[4]);
+        if (r[5] & 0x01) buttons |= 0x0001;
+        if (r[5] & 0x02) buttons |= 0x0002;
+        if (r[5] & 0x08) buttons |= 0x0004;
+        if (r[5] & 0x04) buttons |= 0x0008;
+        if (r[5] & 0x10) buttons |= 0x0010;
+        if (r[5] & 0x20) buttons |= 0x0020;
+        if (r[6] & 0x08) buttons |= 0x0040;
+        if (r[6] & 0x04) buttons |= 0x0080;
+        set_slot_state(gp, dpad, buttons); return 1;
+    }
+
+    /* DragonRise / Game Stick Lite 0810:0001 lies about being a boot
+     * keyboard/mouse. hid_app switches it back to report protocol and sends
+     * the raw report here before the boot-protocol dispatch. */
+    if (vid == 0x0810 && pid == 0x0001) {
+        if (len < 8 || (report[0] != 0x01 && report[0] != 0x02)) return 1;
+        const uint8_t *r = report + 1;
+        dpad = axes_to_dpad(r[2], r[3]);
+        if (r[4] & 0x40) buttons |= 0x0001; /* A */
+        if (r[4] & 0x20) buttons |= 0x0002; /* B */
+        if (r[4] & 0x80) buttons |= 0x0004; /* X */
+        if (r[4] & 0x10) buttons |= 0x0008; /* Y */
+        if (r[5] & 0x01) buttons |= 0x0010;
+        if (r[5] & 0x02) buttons |= 0x0020;
+        if (r[5] & 0x20) buttons |= 0x0040;
+        if (r[5] & 0x10) buttons |= 0x0080;
+        set_slot_state(gp, dpad, buttons); return 1;
+    }
+    return 0;
+}
+
+void usbgamepad_xinput_report(uint16_t b, int16_t lx, int16_t ly, int connected) {
+    if (!connected) { memset(&xinput_slot, 0, sizeof(xinput_slot)); return; }
+    uint8_t d = 0;
+    if (b & 0x0001) d |= 0x01;
+    if (b & 0x0002) d |= 0x02;
+    if (b & 0x0004) d |= 0x04;
+    if (b & 0x0008) d |= 0x08;
+    if (lx < -8000) d |= 0x04;
+    if (lx >  8000) d |= 0x08;
+    if (ly >  8000) d |= 0x01;
+    if (ly < -8000) d |= 0x02;
+    uint16_t buttons = 0;
+    if (b & 0x1000) buttons |= 0x0001; /* XInput A */
+    if (b & 0x2000) buttons |= 0x0002; /* B */
+    if (b & 0x4000) buttons |= 0x0004; /* X */
+    if (b & 0x8000) buttons |= 0x0008; /* Y */
+    if (b & 0x0100) buttons |= 0x0010;
+    if (b & 0x0200) buttons |= 0x0020;
+    if (b & 0x0010) buttons |= 0x0040; /* Start */
+    if (b & 0x0020) buttons |= 0x0080; /* Back */
+    set_slot_state(&xinput_slot, d, buttons);
+}
+
+void usbgamepad_xinput_umount(void) {
+    memset(&xinput_slot, 0, sizeof(xinput_slot));
+}
+
 int usbgamepad_connected(void) {
     for (int i = 0; i < CFG_TUH_HID; i++)
         if (gp_slots[i].active) return 1;
-    return 0;
+    return xinput_slot.active != 0;
 }
 
 void usbgamepad_get(int *x, int *y, uint8_t *buttons) {
@@ -250,6 +400,10 @@ void usbgamepad_get(int *x, int *y, uint8_t *buttons) {
         if (!gp_slots[i].active) continue;
         dpad |= gp_slots[i].dpad;
         btn  |= gp_slots[i].buttons;
+    }
+    if (xinput_slot.active) {
+        dpad |= xinput_slot.dpad;
+        btn  |= xinput_slot.buttons;
     }
 
     int jx = 0, jy = 0;

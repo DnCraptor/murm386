@@ -68,10 +68,13 @@ extern "C" {
 #define CFG_TUH_ENUMERATION_BUFSIZE 256
 
 // Max number of devices (hub + devices behind it)
-#define CFG_TUH_DEVICE_MAX 4
+#define CFG_TUH_DEVICE_MAX 6
 
 // Enable hub support for USB keyboards connected via hub
 #define CFG_TUH_HUB 1
+
+// Xbox/XInput host class (Xbox 360/One/OG and compatible controllers).
+#define CFG_TUH_XINPUT 1
 
 // Max number of HID interfaces
 #define CFG_TUH_HID 4

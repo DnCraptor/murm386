@@ -28,7 +28,22 @@
 static struct {
     uint8_t report_count;
     tuh_hid_report_info_t report_info[MAX_REPORT];
+    uint16_t vid, pid;
 } hid_info[CFG_TUH_HID];
+
+/* Track mounted HID interfaces by (device address, interface instance).
+ * A TinyUSB HID instance number is only unique within one USB device, so the
+ * re-arm watchdog must not key on instance alone when several devices are
+ * attached through a hub. */
+#define HID_WATCH_SLOTS CFG_TUH_HID
+typedef struct {
+    uint8_t dev_addr;
+    uint8_t instance;
+    bool mounted;
+} hid_watch_slot_t;
+
+static hid_watch_slot_t hid_watch[HID_WATCH_SLOTS];
+static uint32_t hid_rearm_next_ms;
 
 // Previous keyboard report for detecting key changes
 static hid_keyboard_report_t prev_kbd_report = { 0, 0, {0} };
@@ -220,11 +235,14 @@ static void process_key_repeat(void) {
 // Process mouse report
 //--------------------------------------------------------------------
 
-static void process_mouse_report(hid_mouse_report_t const *report) {
+static void process_mouse_report(hid_mouse_report_t const *report, uint16_t len) {
     // Accumulate mouse movement (will be consumed by usbhid_get_mouse_event)
     mouse_state.dx += report->x;
     mouse_state.dy += report->y;
-    mouse_state.dz += report->wheel;
+    /* Boot-protocol mice may send only buttons/x/y (3 bytes).  Do not
+     * read a non-existent wheel byte: that produces phantom scroll events. */
+    if (len >= 4)
+        mouse_state.dz += report->wheel;
     mouse_state.buttons = report->buttons;
     mouse_state.has_event = true;
 }
@@ -265,10 +283,63 @@ static void process_generic_report(uint8_t dev_addr, uint8_t instance, uint8_t c
             process_kbd_report((hid_keyboard_report_t const *)report, &prev_kbd_report);
             prev_kbd_report = *(hid_keyboard_report_t const *)report;
         } else if (rpt_info->usage == HID_USAGE_DESKTOP_MOUSE) {
-            process_mouse_report((hid_mouse_report_t const *)report);
+            process_mouse_report((hid_mouse_report_t const *)report, len);
         } else if (rpt_info->usage == HID_USAGE_DESKTOP_JOYSTICK ||
                    rpt_info->usage == HID_USAGE_DESKTOP_GAMEPAD) {
             usbgamepad_report(instance, report, len);
+        }
+    }
+}
+
+static void hid_watch_mount(uint8_t dev_addr, uint8_t instance) {
+    int free_slot = -1;
+    for (int i = 0; i < HID_WATCH_SLOTS; ++i) {
+        if (hid_watch[i].mounted) {
+            if (hid_watch[i].dev_addr == dev_addr &&
+                hid_watch[i].instance == instance)
+                return;
+        } else if (free_slot < 0) {
+            free_slot = i;
+        }
+    }
+    if (free_slot >= 0) {
+        hid_watch[free_slot].dev_addr = dev_addr;
+        hid_watch[free_slot].instance = instance;
+        hid_watch[free_slot].mounted = true;
+    }
+}
+
+static void hid_watch_umount(uint8_t dev_addr, uint8_t instance) {
+    for (int i = 0; i < HID_WATCH_SLOTS; ++i) {
+        if (hid_watch[i].mounted &&
+            hid_watch[i].dev_addr == dev_addr &&
+            hid_watch[i].instance == instance) {
+            hid_watch[i].mounted = false;
+            return;
+        }
+    }
+}
+
+/* Recover a HID interface when a previous tuh_hid_receive_report() failed to
+ * arm its interrupt-IN endpoint. receive_ready() is true only when no transfer
+ * is pending, so this does not disturb a normally armed keyboard/mouse/gamepad.
+ * Keep this in main-loop context; never call it from a TinyUSB callback. */
+static void hid_rearm_watchdog(void) {
+    const uint32_t now = to_ms_since_boot(get_absolute_time());
+    if ((int32_t)(now - hid_rearm_next_ms) < 0)
+        return;
+    hid_rearm_next_ms = now + 100u;
+
+    for (int i = 0; i < HID_WATCH_SLOTS; ++i) {
+        if (!hid_watch[i].mounted)
+            continue;
+        const uint8_t dev_addr = hid_watch[i].dev_addr;
+        const uint8_t instance = hid_watch[i].instance;
+        if (tuh_hid_receive_ready(dev_addr, instance)) {
+            if (tuh_hid_receive_report(dev_addr, instance)) {
+                DBG_PRINT("USB HID re-armed: dev=%d inst=%d\n",
+                          dev_addr, instance);
+            }
         }
     }
 }
@@ -297,7 +368,18 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const *desc_re
     {
         uint16_t vid = 0, pid = 0;
         tuh_vid_pid_get(dev_addr, &vid, &pid);
+        if (instance < CFG_TUH_HID) {
+            hid_info[instance].vid = vid;
+            hid_info[instance].pid = pid;
+        }
         usbgamepad_set_ids(instance, vid, pid);
+
+        /* 0810:0001 advertises boot keyboard/mouse interfaces but actually
+         * carries joystick reports. BOOT protocol makes this dongle silent. */
+        if (vid == 0x0810 && pid == 0x0001 &&
+            itf_protocol != HID_ITF_PROTOCOL_NONE) {
+            tuh_hid_set_protocol(dev_addr, instance, HID_PROTOCOL_REPORT);
+        }
     }
 
     // Parse generic report descriptor for non-boot protocol devices
@@ -305,6 +387,8 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const *desc_re
         hid_info[instance].report_count = tuh_hid_parse_report_descriptor(
             hid_info[instance].report_info, MAX_REPORT, desc_report, desc_len);
     }
+
+    hid_watch_mount(dev_addr, instance);
 
     // Request to receive reports
     if (!tuh_hid_receive_report(dev_addr, instance)) {
@@ -317,6 +401,7 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
     uint8_t const itf_protocol = tuh_hid_interface_protocol(dev_addr, instance);
 
     DBG_PRINT("USB HID device unmounted: dev=%d inst=%d\n", dev_addr, instance);
+    hid_watch_umount(dev_addr, instance);
 
     if (itf_protocol == HID_ITF_PROTOCOL_KEYBOARD) {
         keyboard_connected = 0;
@@ -333,6 +418,18 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t const *report, uint16_t len) {
     uint8_t const itf_protocol = tuh_hid_interface_protocol(dev_addr, instance);
 
+    if (report == NULL || len == 0) {
+        tuh_hid_receive_report(dev_addr, instance);
+        return;
+    }
+
+    /* Special pads must be intercepted before boot keyboard/mouse dispatch
+     * and before generic Report-ID parsing. */
+    if (usbgamepad_report_special(instance, report, len)) {
+        tuh_hid_receive_report(dev_addr, instance);
+        return;
+    }
+
     switch (itf_protocol) {
         case HID_ITF_PROTOCOL_KEYBOARD:
             process_kbd_report((hid_keyboard_report_t const *)report, &prev_kbd_report);
@@ -340,7 +437,7 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
             break;
 
         case HID_ITF_PROTOCOL_MOUSE:
-            process_mouse_report((hid_mouse_report_t const *)report);
+            process_mouse_report((hid_mouse_report_t const *)report, len);
             break;
 
         default:
@@ -361,6 +458,9 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
 void usbhid_init(void) {
     // Initialize TinyUSB Host
     tuh_init(BOARD_TUH_RHPORT);
+
+    memset(hid_watch, 0, sizeof(hid_watch));
+    hid_rearm_next_ms = 0;
 
     // Clear keyboard state
     memset(&prev_kbd_report, 0, sizeof(prev_kbd_report));
@@ -395,6 +495,7 @@ void usbhid_task(void) {
     // Process USB events
     tuh_task();
     usbserial_task();
+    hid_rearm_watchdog();
 
     // Process key repeat (typematic)
     process_key_repeat();
