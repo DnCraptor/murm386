@@ -41,7 +41,8 @@ uint8_t ata_hdd_count(void);
 #define RAW_SD_HDD_FIRST 2
 
 typedef struct {
-    uint8_t raw_sd;       /* 1 = whole physical SD card, 0 = file-backed ATA image */
+    uint8_t raw_sd;       /* 1 = whole physical SD card */
+    uint8_t raw_usb;      /* 1 = boot-detected USB MSC disk */
     int8_t ata_slot;       /* 0..3 for ATA image, -1 for raw SD */
     uint16_t cyls;
     uint16_t heads;
@@ -51,6 +52,9 @@ typedef struct {
 
 void disk_set_raw_sd_hdd(uint8_t mode);
 uint8_t disk_raw_sd_hdd_enabled(void);
+void disk_set_raw_usb_hdd(uint32_t sectors);
+uint8_t disk_raw_usb_hdd_enabled(void);
+uint8_t disk_raw_usb_gpt_projected(void);
 
 /* Whole-SD-card raw sector access for the USB MSC fallback (used when no
    floppy/ATA image is attached). Only usable while the SD raw HDD option is

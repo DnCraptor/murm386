@@ -13,6 +13,7 @@ target_sources(usbhid INTERFACE
     ${CMAKE_CURRENT_LIST_DIR}/usbkbd_wrapper.c
     ${CMAKE_CURRENT_LIST_DIR}/usbmouse_wrapper.c
     ${CMAKE_CURRENT_LIST_DIR}/usbserial.c
+    ${CMAKE_CURRENT_LIST_DIR}/usbmsc_host.c
     ${CMAKE_CURRENT_LIST_DIR}/usbmsc_device.c
 )
 

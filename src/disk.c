@@ -13,15 +13,21 @@
 #include "mem.h"
 #include "ems.h"
 #include "vga.h"
+#include "usbmsc_host.h"
 
 extern FATFS fs;
 
 int hdcount = 0;
 
-static uint8_t sectorbuffer[512];
+static uint8_t sectorbuffer[512] __attribute__((aligned(4)));
 
 static uint8_t raw_sd_hdd_mode = RAW_SD_HDD_OFF;
 static uint32_t raw_sd_hdd_sectors = 0;
+static uint32_t raw_usb_hdd_sectors = 0;
+static uint8_t raw_usb_gpt_projection = 0;
+static uint8_t raw_usb_mbr_type = 0;
+static uint32_t raw_usb_part_lba = 0;
+static uint32_t raw_usb_part_sectors = 0;
 
 struct struct_fdd {
     FIL fil;
@@ -372,6 +378,171 @@ uint8_t disk_raw_sd_hdd_enabled(void) {
     return raw_sd_hdd_mode != RAW_SD_HDD_OFF;
 }
 
+static uint16_t usb_le16(const uint8_t *p) {
+    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+
+static uint32_t usb_le32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static uint64_t usb_le64(const uint8_t *p) {
+    return (uint64_t)usb_le32(p) | ((uint64_t)usb_le32(p + 4) << 32);
+}
+
+static void usb_put_le32(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16);
+    p[3] = (uint8_t)(v >> 24);
+}
+
+static bool usb_guid_nonzero(const uint8_t *p) {
+    uint8_t v = 0;
+    for (unsigned i = 0; i < 16; ++i) v |= p[i];
+    return v != 0;
+}
+
+/* Validate a FAT BPB and return the corresponding legacy MBR type. */
+static uint8_t usb_fat_mbr_type(const uint8_t *b, uint32_t part_sectors) {
+    if (b[510] != 0x55 || b[511] != 0xAA) return 0;
+    if (b[0] != 0xEB && b[0] != 0xE9) return 0;
+
+    uint32_t bps = usb_le16(b + 11);
+    uint32_t spc = b[13];
+    uint32_t reserved = usb_le16(b + 14);
+    uint32_t fats = b[16];
+    uint32_t root_entries = usb_le16(b + 17);
+    uint32_t total = usb_le16(b + 19);
+    if (!total) total = usb_le32(b + 32);
+    uint32_t fat_sectors = usb_le16(b + 22);
+    if (!fat_sectors) fat_sectors = usb_le32(b + 36);
+
+    if (bps != 512u || !spc || (spc & (spc - 1u)) || !reserved || !fats ||
+        !total || !fat_sectors || total > part_sectors)
+        return 0;
+
+    uint32_t root_sectors = ((root_entries * 32u) + 511u) / 512u;
+    uint64_t overhead = (uint64_t)reserved + (uint64_t)fats * fat_sectors + root_sectors;
+    if (overhead >= total) return 0;
+    uint32_t clusters = (uint32_t)(((uint64_t)total - overhead) / spc);
+
+    if (clusters < 4085u) return 0x01;       /* FAT12 */
+    if (clusters < 65525u) return 0x0E;      /* FAT16 LBA */
+    return 0x0C;                             /* FAT32 LBA */
+}
+
+static bool usb_try_gpt_projection(uint32_t sectors) {
+    uint8_t *b = sectorbuffer;
+    if (sectors < 3u || !usbmsc_host_read(0, b, 1)) return false;
+    if (b[510] != 0x55 || b[511] != 0xAA) return false;
+
+    bool protective = false;
+    for (unsigned i = 0; i < 4; ++i) {
+        const uint8_t *e = b + 446u + i * 16u;
+        if (e[4] == 0xEE) {
+            protective = true;
+            break;
+        }
+    }
+    if (!protective) return false;
+
+    if (!usbmsc_host_read(1, b, 1)) return false;
+    if (memcmp(b, "EFI PART", 8) != 0) return false;
+
+    uint32_t header_size = usb_le32(b + 12);
+    uint64_t entries_lba64 = usb_le64(b + 72);
+    uint32_t entry_count = usb_le32(b + 80);
+    uint32_t entry_size = usb_le32(b + 84);
+    if (header_size < 92u || header_size > 512u ||
+        entries_lba64 >= sectors || entries_lba64 > 0xFFFFFFFFu ||
+        !entry_count || entry_size < 128u || entry_size > 512u ||
+        (entry_size & 127u) || (512u % entry_size))
+        return false;
+
+    uint32_t entries_lba = (uint32_t)entries_lba64;
+    uint32_t per_sector = 512u / entry_size;
+    if (entry_count > 256u) entry_count = 256u; /* more than enough for BIOS/DOS use */
+
+    uint32_t loaded_lba = 0xFFFFFFFFu;
+    for (uint32_t i = 0; i < entry_count; ++i) {
+        uint32_t entry_lba = entries_lba + i / per_sector;
+        if (entry_lba >= sectors) break;
+        if (entry_lba != loaded_lba) {
+            if (!usbmsc_host_read(entry_lba, b, 1)) return false;
+            loaded_lba = entry_lba;
+        }
+
+        const uint8_t *e = b + (i % per_sector) * entry_size;
+        if (!usb_guid_nonzero(e)) continue;
+
+        uint64_t first64 = usb_le64(e + 32);
+        uint64_t last64 = usb_le64(e + 40);
+        if (first64 > last64 || last64 >= sectors || first64 > 0xFFFFFFFFu)
+            continue;
+        uint64_t count64 = last64 - first64 + 1u;
+        if (!count64 || count64 > 0xFFFFFFFFu) continue;
+
+        uint32_t first = (uint32_t)first64;
+        uint32_t count = (uint32_t)count64;
+        if (!usbmsc_host_read(first, b, 1)) continue;
+        uint8_t type = usb_fat_mbr_type(b, count);
+        if (!type) continue;
+
+        raw_usb_gpt_projection = 1;
+        raw_usb_mbr_type = type;
+        raw_usb_part_lba = first;
+        raw_usb_part_sectors = count;
+        return true;
+    }
+    return false;
+}
+
+static void usb_mbr_chs(uint32_t lba, uint8_t *head, uint8_t *sect_cyl, uint8_t *cyl) {
+    const uint32_t heads = 255u, sects = 63u;
+    uint32_t c = lba / (heads * sects);
+    uint32_t r = lba % (heads * sects);
+    uint32_t h = r / sects;
+    uint32_t s = (r % sects) + 1u;
+    if (c > 1023u) { c = 1023u; h = 254u; s = 63u; }
+    *head = (uint8_t)h;
+    *sect_cyl = (uint8_t)(s | ((c >> 2) & 0xC0u));
+    *cyl = (uint8_t)c;
+}
+
+static void usb_make_projected_mbr(uint8_t *b) {
+    memset(b, 0, 512);
+    uint8_t *e = b + 446;
+    e[0] = 0x00;
+    usb_mbr_chs(raw_usb_part_lba, &e[1], &e[2], &e[3]);
+    e[4] = raw_usb_mbr_type;
+    uint32_t last = raw_usb_part_lba + raw_usb_part_sectors - 1u;
+    usb_mbr_chs(last, &e[5], &e[6], &e[7]);
+    usb_put_le32(e + 8, raw_usb_part_lba);
+    usb_put_le32(e + 12, raw_usb_part_sectors);
+    b[510] = 0x55;
+    b[511] = 0xAA;
+}
+
+void disk_set_raw_usb_hdd(uint32_t sectors) {
+    raw_usb_hdd_sectors = sectors;
+    raw_usb_gpt_projection = 0;
+    raw_usb_mbr_type = 0;
+    raw_usb_part_lba = 0;
+    raw_usb_part_sectors = 0;
+    if (sectors)
+        usb_try_gpt_projection(sectors);
+}
+
+uint8_t disk_raw_usb_hdd_enabled(void) {
+    return raw_usb_hdd_sectors != 0;
+}
+
+uint8_t disk_raw_usb_gpt_projected(void) {
+    return raw_usb_gpt_projection;
+}
+
 uint32_t disk_raw_sd_sectors(void) {
     return raw_sd_hdd_mode != RAW_SD_HDD_OFF ? raw_sd_hdd_sectors : 0u;
 }
@@ -399,7 +570,9 @@ bool disk_raw_sd_sync(void) {
 }
 
 uint8_t bios_hdd_count(void) {
-    return (uint8_t)(ata_hdd_count() + (raw_sd_hdd_mode != RAW_SD_HDD_OFF ? 1u : 0u));
+    return (uint8_t)(ata_hdd_count() +
+                     (raw_sd_hdd_mode != RAW_SD_HDD_OFF ? 1u : 0u) +
+                     (raw_usb_hdd_sectors ? 1u : 0u));
 }
 
 bool bios_hdd_get_info(uint8_t bios_index, bios_hdd_info_t *info) {
@@ -425,6 +598,25 @@ bool bios_hdd_get_info(uint8_t bios_index, bios_hdd_info_t *info) {
         info->heads = 255;
         info->sects = 63;
         info->total_sectors = raw_sd_hdd_sectors;
+        return true;
+    }
+
+    /* USB MSC is intentionally appended after the configured ATA/SD list.
+       Presence and geometry are frozen at boot; unplugging later makes I/O
+       fail but does not renumber BIOS drives underneath DOS. */
+    uint8_t usb_index = (uint8_t)(ata_count +
+                        (raw_sd_hdd_mode != RAW_SD_HDD_OFF ? 1u : 0u));
+    if (raw_usb_hdd_sectors && bios_index == usb_index) {
+        const uint32_t track = 255u * 63u;
+        uint32_t cyls = (raw_usb_hdd_sectors + track - 1u) / track;
+        if (cyls == 0) cyls = 1;
+        if (cyls > 0xFFFFu) cyls = 0xFFFFu;
+
+        info->raw_usb = 1;
+        info->cyls = (uint16_t)cyls;
+        info->heads = 255;
+        info->sects = 63;
+        info->total_sectors = raw_usb_hdd_sectors;
         return true;
     }
 
@@ -502,6 +694,15 @@ bool bios_hdd_read(uint8_t bios_index, uint32_t lba, void *buf, uint16_t count) 
         return false;
     }
 
+    if (info.raw_usb) {
+        if (raw_usb_gpt_projection && lba == 0) {
+            usb_make_projected_mbr((uint8_t *)buf);
+            if (count == 1) return true;
+            return usbmsc_host_read(1u, (uint8_t *)buf + 512u, (uint16_t)(count - 1u));
+        }
+        return usbmsc_host_read(lba, buf, count);
+    }
+
     if (info.raw_sd) {
         DRESULT r = disk_read(0, (BYTE *)buf, (LBA_t)lba, count);
 #ifdef FDOS_RAWSD_DIAG
@@ -545,6 +746,11 @@ bool bios_hdd_write(uint8_t bios_index, uint32_t lba, const void *buf, uint16_t 
     if (!count || !bios_hdd_get_info(bios_index, &info)) return false;
     if (lba >= info.total_sectors || count > info.total_sectors - lba) return false;
 
+    if (info.raw_usb) {
+        if (raw_usb_gpt_projection && lba == 0)
+            return false; /* virtual MBR is read-only; never overwrite GPT LBA0 */
+        return usbmsc_host_write(lba, buf, count);
+    }
     if (info.raw_sd)
         return disk_write(0, (const BYTE *)buf, (LBA_t)lba, count) == RES_OK;
 
@@ -558,6 +764,7 @@ bool bios_hdd_write(uint8_t bios_index, uint32_t lba, const void *buf, uint16_t 
 bool bios_hdd_sync(uint8_t bios_index) {
     bios_hdd_info_t info;
     if (!bios_hdd_get_info(bios_index, &info)) return false;
+    if (info.raw_usb) return usbmsc_host_sync();
     if (info.raw_sd) return disk_ioctl(0, CTRL_SYNC, NULL) == RES_OK;
     return f_sync(&ata[(uint8_t)info.ata_slot].fil) == FR_OK;
 }

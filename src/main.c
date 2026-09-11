@@ -41,6 +41,7 @@
 #include "ps2kbd_wrapper.h"
 #ifdef USB_HID_ENABLED
 #include "usbkbd_wrapper.h"
+#include "usbmsc_host.h"
 #include "usbmouse_wrapper.h"
 #include "usbgamepad.h"
 #include "usbmsc_device.h"
@@ -1617,6 +1618,22 @@ static bool init_emulator(void) {
      * every access goes to the card as before.
      */
     dc_init();
+
+#ifdef USB_HID_ENABLED
+    /* Freeze USB MSC presence at boot. The early HOST window above already
+       pumps enumeration; allow a short final window for sticks behind hubs.
+       A later hot-plug is deliberately not added to the BIOS HDD list, so DOS
+       drive numbering cannot change underneath a running guest. */
+    if (config_get_usb_mode() == USB_MODE_HOST) {
+        usbmsc_host_wait_ready(500u);
+        disk_set_raw_usb_hdd(usbmsc_host_sector_count());
+        if (disk_raw_usb_hdd_enabled())
+            DBG_PRINT("  USB BIOS disk: %lu sectors (appended)\n",
+                      (unsigned long)usbmsc_host_sector_count());
+    } else {
+        disk_set_raw_usb_hdd(0);
+    }
+#endif
 
     // Create PC instance
     DBG_PRINT("\nCreating PC instance...\n");

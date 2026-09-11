@@ -44,6 +44,7 @@ typedef struct BiosDisk_s {
     uint8_t hdd;            /* Non-zero for fixed disks. */
     uint8_t hdd_index;      /* Dense BIOS HDD index: 0 == 80h. */
     uint8_t raw_sd;         /* Whole physical SD card backend. */
+    uint8_t raw_usb;        /* Boot-detected USB MSC backend. */
     uint8_t ata_slot;       /* Physical ATA slot 0..3, 0xFF for raw SD/FDD. */
     uint16_t cyls;
     uint16_t heads;
@@ -106,6 +107,7 @@ static bool int13_get_disk(uint8_t drive, BiosDisk *d)
     d->hdd = (drive & 0x80) ? 1 : 0;
     d->hdd_index = 0xFF;
     d->raw_sd = 0;
+    d->raw_usb = 0;
     d->ata_slot = 0xFF;
     d->cyls = 0;
     d->heads = 0;
@@ -129,6 +131,7 @@ static bool int13_get_disk(uint8_t drive, BiosDisk *d)
 
     d->hdd_index = hdd;
     d->raw_sd = info.raw_sd;
+    d->raw_usb = info.raw_usb;
     d->ata_slot = info.ata_slot < 0 ? 0xFF : (uint8_t)info.ata_slot;
     d->cyls = info.cyls;
     d->heads = info.heads;
@@ -189,7 +192,7 @@ static bool int13_transfer_lba(CPU* cpu, const BiosDisk *d, uint32_t lba, uint16
         return true;
     }
 
-    if (d->raw_sd) {
+    if (d->raw_sd || d->raw_usb) {
         uint8_t *buf = disk_sector_buffer();
 
         for (uint16_t i = 0; i < count; i++) {
@@ -299,7 +302,7 @@ static bool int13_rw_chs(CPU* cpu, uint8_t write, uint8_t verify)
         return true;
     }
     
-    if (!d.raw_sd && !d.f) {
+    if (!d.raw_sd && !d.raw_usb && !d.f) {
         int13_set_status(cpu, drive, INT13_ST_TIMEOUT);
         return true;
     }
@@ -611,7 +614,7 @@ static bool bios_13h_0Ch(CPU* cpu)
         return true;
     }
 
-    if (!d.raw_sd && (!d.f || f_lseek(d.f, lba * 512u) != FR_OK)) {
+    if (!d.raw_sd && !d.raw_usb && (!d.f || f_lseek(d.f, lba * 512u) != FR_OK)) {
         int13_set_status(cpu, drive, INT13_ST_SEEK_FAILED);
         return true;
     }

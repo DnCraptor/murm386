@@ -93,7 +93,7 @@ extern "C" {
 
 // Disable remaining unused host classes
 #define CFG_TUH_VENDOR 0
-#define CFG_TUH_MSC 0
+#define CFG_TUH_MSC 1
 
 //--------------------------------------------------------------------
 // DEVICE CONFIGURATION

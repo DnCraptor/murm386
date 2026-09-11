@@ -1685,6 +1685,9 @@ static void bios_post_hdd_text(char *dst, size_t dst_size, uint8_t bios_index)
     if (info.raw_sd) {
         snprintf(dst, dst_size, "HDD %02Xh  : RAW-SD %lu MB",
                  0x80u + bios_index, mib);
+    } else if (info.raw_usb) {
+        snprintf(dst, dst_size, "HDD %02Xh  : USB-MSC %lu MB",
+                 0x80u + bios_index, mib);
     } else {
         unsigned controller = (unsigned)info.ata_slot >> 1;
         unsigned device = (unsigned)info.ata_slot & 1u;
@@ -2198,6 +2201,8 @@ void bios_post(PC *pc) {
 
         /* Hardware table is shown on every POST, cold or warm. */
         bios_post_components(pc, psram_size);
+        if (disk_raw_usb_gpt_projected())
+            bios_puts(pc->cpu, "WARNING: USB GPT projected as MBR for DOS compatibility\r\n");
 
         /* Memory test and its result tone are cold-POST features only. */
         if (cold_post) {
