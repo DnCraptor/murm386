@@ -369,7 +369,7 @@ static void draw_modem_flash_screen(const char *status, int percent)
     osd_fill(MODEM_X + 1, MODEM_Y + 1, MODEM_W - 2, MODEM_H - 2, ' ', OSD_ATTR_NORMAL);
     osd_print_center(MODEM_Y, " ESP32 Modem Firmware ", OSD_ATTR(OSD_YELLOW, OSD_BLUE));
 
-    const char *filename = config_get_esp_firmware();
+    const char *filename = get_display_filename(DRIVE_ESP_FW);
     char shown[MODEM_W - 8];
     if (filename) {
         strncpy(shown, filename, sizeof(shown) - 1);
@@ -653,10 +653,11 @@ static void select_file(void) {
         if (!name) return;
     }
 
-    if (drive_idx == DRIVE_ESP_FW)
-        modem_flash_requested = (name != NULL);
-
     set_pending_filename(drive_idx, name);
+
+    if (drive_idx == DRIVE_ESP_FW)
+        modem_flash_requested = pending_changed[DRIVE_ESP_FW] &&
+                                pending_filename[DRIVE_ESP_FW] != NULL;
 
     menu_state = MENU_MAIN;
     draw_main_menu();
@@ -761,43 +762,59 @@ static void apply_remaining_and_close(void)
 
 static void apply_and_close(void)
 {
-    /* Selecting a modem image is only a pending choice until this action row
-     * is activated. Persist the desired image before accessing the modem. */
-    if (pending_changed[DRIVE_ESP_FW]) {
-        const char *old = config_get_esp_firmware();
-        char *old_copy = old ? strdup(old) : NULL;
-
-        config_set_esp_firmware(pending_filename[DRIVE_ESP_FW]);
-        if (!config_save_all()) {
-            config_set_esp_firmware(old_copy);
-            free(old_copy);
-            draw_modem_result_screen(false, "Cannot save firmware selection");
-            return;
-        }
-        free(old_copy);
-
-        free(pending_filename[DRIVE_ESP_FW]);
-        pending_filename[DRIVE_ESP_FW] = NULL;
-        pending_changed[DRIVE_ESP_FW] = false;
-        update_reboot_required();
-    }
+    const bool modem_selection_changed = pending_changed[DRIVE_ESP_FW];
+    const char *modem_image = modem_selection_changed
+                              ? pending_filename[DRIVE_ESP_FW]
+                              : config_get_esp_firmware();
 
     /* [none] means: stop managing ESP32 firmware. Never erase or otherwise
      * modify the modem merely because management was disabled. */
-    if (!modem_flash_requested || !modem_firmware_selected() || config_get_usb_mode() != USB_MODE_HOST) {
+    if (modem_selection_changed && !modem_image) {
+        config_set_esp_firmware(NULL);
+        pending_changed[DRIVE_ESP_FW] = false;
+        modem_flash_requested = false;
         apply_remaining_and_close();
         return;
     }
 
-    menu_state = MENU_MODEM_FLASH;
-    draw_modem_flash_screen("Preparing firmware update...", -1);
+    /* A selected image is flashed only as an explicit Disk Manager action and
+     * only when it is a real change from the configured filename. Keep the
+     * pending selection intact on failure so Flash and Exit can be retried. */
+    if (modem_flash_requested && modem_selection_changed && modem_image &&
+        config_get_usb_mode() == USB_MODE_HOST) {
+        menu_state = MENU_MODEM_FLASH;
+        draw_modem_flash_screen("Preparing firmware update...", -1);
 
-    char detail[96];
-    espflash_result_t fr = espflash_update_selected(modem_flash_progress,
-                                                      modem_flash_stage,
-                                                      NULL, detail, sizeof(detail));
-    draw_modem_result_screen(fr == ESPFLASH_OK || fr == ESPFLASH_NOT_NEEDED,
-                             detail[0] ? detail : espflash_result_string(fr));
+        char detail[96];
+        espflash_result_t fr = espflash_update_file(modem_image,
+                                                     modem_flash_progress,
+                                                     modem_flash_stage,
+                                                     NULL, detail, sizeof(detail));
+        if (fr == ESPFLASH_OK) {
+            config_set_esp_firmware(modem_image);
+            free(pending_filename[DRIVE_ESP_FW]);
+            pending_filename[DRIVE_ESP_FW] = NULL;
+            pending_changed[DRIVE_ESP_FW] = false;
+            modem_flash_requested = false;
+            update_reboot_required();
+        }
+        draw_modem_result_screen(fr == ESPFLASH_OK,
+                                 detail[0] ? detail : espflash_result_string(fr));
+        return;
+    }
+
+    /* If flashing cannot/should not be performed (for example USB DEVICE
+     * mode), keep the filename selection as configuration only. */
+    if (modem_selection_changed) {
+        config_set_esp_firmware(modem_image);
+        free(pending_filename[DRIVE_ESP_FW]);
+        pending_filename[DRIVE_ESP_FW] = NULL;
+        pending_changed[DRIVE_ESP_FW] = false;
+        modem_flash_requested = false;
+        update_reboot_required();
+    }
+
+    apply_remaining_and_close();
 }
 
 // --------------------------------------------------------------------------

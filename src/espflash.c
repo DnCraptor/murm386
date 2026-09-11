@@ -1,7 +1,6 @@
 #include "espflash.h"
 
 #include "board_config.h"
-#include "config_save.h"
 #include "ff.h"
 #include "usbserial.h"
 #include "pico/time.h"
@@ -592,20 +591,6 @@ static espflash_result_t program_file(const char *filename,
                      detail, detail_size))
         goto out;
 
-    uint8_t installed_md5[16];
-    if (status) status("Checking installed firmware...", user);
-    if (!esp_flash_md5(0u, image_size, installed_md5, raw_packet, slip_packet, response,
-                       detail, detail_size))
-        goto out;
-    if (memcmp(installed_md5, expected_md5, 16) == 0) {
-        if (status) status("Firmware already matches.", user);
-        if (!reset_normal(detail, detail_size))
-            goto out;
-        result = ESPFLASH_NOT_NEEDED;
-        set_detail(detail, detail_size, "Firmware already matches physical ESP32 flash");
-        goto out;
-    }
-
     const uint32_t block_count = (image_size + ESP_FLASH_BLOCK - 1u) / ESP_FLASH_BLOCK;
     uint8_t begin_data[16];
     put_le32(begin_data + 0, image_size);
@@ -687,93 +672,19 @@ out:
     return result;
 }
 
-espflash_result_t espflash_selected_matches(bool *matches,
-                                             espflash_status_cb_t status,
-                                             void *user,
-                                             char *detail,
-                                             size_t detail_size)
+espflash_result_t espflash_update_file(const char *filename,
+                                        espflash_progress_cb_t progress,
+                                        espflash_status_cb_t status,
+                                        void *user,
+                                        char *detail,
+                                        size_t detail_size)
 {
-    if (matches) *matches = false;
-    const char *desired = config_get_esp_firmware();
-    if (!desired || !desired[0]) {
-        set_detail(detail, detail_size, "No managed modem firmware selected");
-        return ESPFLASH_FILE_ERROR;
-    }
-    if (config_get_usb_mode() != USB_MODE_HOST) {
-        set_detail(detail, detail_size, "USB HOST mode is required");
-        return ESPFLASH_NO_DEVICE;
-    }
-
-    char path[FF_LFN_BUF + 1 + sizeof(SD_DATA_DIR_SLASH)];
-    int n = snprintf(path, sizeof(path), "/%s/%s", SD_DATA_DIR, desired);
-    if (n < 0 || (size_t)n >= sizeof(path)) { set_detail(detail, detail_size, "Firmware path is too long"); return ESPFLASH_FILE_ERROR; }
-    FIL file; memset(&file, 0, sizeof(file));
-    if (f_open(&file, path, FA_READ) != FR_OK) { set_detail(detail, detail_size, "Cannot open modem firmware"); return ESPFLASH_FILE_ERROR; }
-    uint32_t image_size = (uint32_t)f_size(&file);
-    if (image_size <= 0x1000u) { f_close(&file); set_detail(detail, detail_size, "Firmware image is too small"); return ESPFLASH_BAD_IMAGE; }
-    uint8_t magic=0; UINT br=0;
-    if (f_lseek(&file, 0x1000u) != FR_OK || f_read(&file, &magic, 1, &br) != FR_OK || br != 1 || magic != 0xE9u) {
-        f_close(&file); set_detail(detail, detail_size, "Not a merged ESP32 image (0x1000 != E9)"); return ESPFLASH_BAD_IMAGE;
-    }
-    uint8_t expected[16];
-    if (status) status("Hashing firmware image...", user);
-    if (!file_md5(&file, image_size, expected, detail, detail_size)) { f_close(&file); return ESPFLASH_FILE_ERROR; }
-    f_close(&file);
-
-    if (status) status("Acquiring USB modem...", user);
-    if (!usbserial_program_begin(3000u)) { set_detail(detail, detail_size, "USB modem/CH340 is not connected"); return ESPFLASH_NO_DEVICE; }
-    if (status) status("Saving video memory...", user);
-    const size_t scratch_need = ESP_PACKET_RAW_MAX + ESP_PACKET_SLIP_MAX + ESP_RESPONSE_MAX;
-    uint8_t *scratch = NULL;
-    espflash_result_t result=ESPFLASH_PROTOCOL_ERROR;
-    if (!gfx_scratch_acquire(scratch_need, &scratch, detail, detail_size))
-        goto check_out;
-    uint8_t *raw = scratch;
-    uint8_t *slip = raw + ESP_PACKET_RAW_MAX;
-    uint8_t *resp = slip + ESP_PACKET_SLIP_MAX;
-    if (status) status("Entering bootloader...", user);
-    if (!enter_rom_loader(status, user, detail, detail_size)) goto check_out;
-    uint8_t sync_data[36]={0x07,0x07,0x12,0x20}; memset(sync_data+4,0x55,32);
-    if (status) status("Synchronizing with ESP32 ROM...", user);
-    bool synced=false;
-    for (int attempt=0; attempt<7 && !synced; ++attempt) {
-        synced=esp_command(ESP_CMD_SYNC,sync_data,sizeof(sync_data),0,300u,raw,slip,resp,detail,detail_size);
-        if (!synced) usbserial_program_delay_ms(50);
-    }
-    if (!synced) { result=ESPFLASH_SYNC_ERROR; goto check_out; }
-    uint8_t attach[8]={0};
-    if (status) status("Attaching SPI flash...", user);
-    if (!esp_command(ESP_CMD_SPI_ATTACH,attach,sizeof(attach),0,1000u,raw,slip,resp,detail,detail_size)) goto check_out;
-    uint8_t installed[16];
-    if (status) status("Checking installed firmware...", user);
-    if (!esp_flash_md5(0u,image_size,installed,raw,slip,resp,detail,detail_size)) goto check_out;
-    if (!reset_normal(detail, detail_size)) goto check_out;
-    if (matches) *matches = memcmp(installed, expected, 16) == 0;
-    set_detail(detail, detail_size, (matches && *matches) ? "Firmware matches physical ESP32 flash" : "Different firmware is installed");
-    result=ESPFLASH_OK;
-check_out:
-    usbserial_program_set_control_lines(0x00); usbserial_program_end();
-    if (scratch)
-        gfx_scratch_release(scratch, scratch_need);
-    return result;
-}
-
-espflash_result_t espflash_update_selected(espflash_progress_cb_t progress,
-                                            espflash_status_cb_t status,
-                                            void *user,
-                                            char *detail,
-                                            size_t detail_size)
-{
-    const char *desired = config_get_esp_firmware();
-    if (!desired || !desired[0]) { set_detail(detail, detail_size, "No managed modem firmware selected"); return ESPFLASH_FILE_ERROR; }
-    if (config_get_usb_mode() != USB_MODE_HOST) { set_detail(detail, detail_size, "USB HOST mode is required"); return ESPFLASH_NO_DEVICE; }
-    return program_file(desired, progress, status, user, detail, detail_size);
+    return program_file(filename, progress, status, user, detail, detail_size);
 }
 
 const char *espflash_result_string(espflash_result_t result)
 {
     switch (result) {
-        case ESPFLASH_NOT_NEEDED:   return "not needed";
         case ESPFLASH_OK:           return "ok";
         case ESPFLASH_NO_DEVICE:    return "USB modem not available";
         case ESPFLASH_FILE_ERROR:   return "firmware file error";

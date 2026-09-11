@@ -68,8 +68,6 @@ bool ega128_paging_flush(void);
 #include "settingsui.h"
 #include "video_profile.h"
 #include "config_save.h"
-#include "espflash.h"
-#include "../drivers/usbhid/usbserial.h"
 #include "vga_osd.h"
 #include "profile_subsys.h"
 #include "remote_mem.h"
@@ -1869,157 +1867,6 @@ static void show_welcome_screen(void) {
     osd_hide();
 }
 
-static bool boot_modem_get_key(int *keycode)
-{
-    int is_down = 0;
-    int key = 0;
-#ifdef BOARD_HAS_PS2
-    ps2kbd_tick();
-    if (ps2kbd_get_key(&is_down, &key) && is_down) {
-        *keycode = key;
-        return true;
-    }
-#endif
-#ifdef USB_HID_ENABLED
-    usbkbd_tick();
-    while (usbkbd_get_key(&is_down, &key)) {
-        if (is_down) {
-            *keycode = key;
-            return true;
-        }
-    }
-#endif
-    return false;
-}
-
-static void boot_modem_wait_any_key(void)
-{
-    int key;
-    while (!boot_modem_get_key(&key))
-        sleep_ms(10);
-}
-
-static void boot_modem_draw_progress(uint32_t done, uint32_t total, void *user)
-{
-    (void)user;
-    int percent = total ? (int)(((uint64_t)done * 100u) / total) : 0;
-    char line[32];
-    snprintf(line, sizeof(line), "Writing: %3d%%", percent);
-    osd_fill(16, 16, 48, 1, ' ', OSD_ATTR_NORMAL);
-    osd_print_center(16, line, OSD_ATTR_HIGHLIGHT);
-}
-
-static void boot_modem_draw_stage(const char *status, void *user)
-{
-    (void)user;
-    osd_fill(10, 14, 60, 3, ' ', OSD_ATTR_NORMAL);
-    if (status && status[0])
-        osd_print_center(14, status, OSD_ATTR(OSD_YELLOW, OSD_BLUE));
-}
-
-static void show_pending_modem_update(void)
-{
-    const char *desired = config_get_esp_firmware();
-    if (!desired || !desired[0])
-        return;
-
-    if (config_get_usb_mode() != USB_MODE_HOST)
-        return;
-
-    /* TinyUSB host enumeration is asynchronous. Only probe a configured
-       firmware when a supported USB serial modem is actually present. */
-    if (!usbserial_connected()) {
-        absolute_time_t discover_deadline = make_timeout_time_ms(750);
-        while (!usbserial_connected() && !time_reached(discover_deadline)) {
-            usbhid_task();
-            sleep_ms(1);
-        }
-    }
-    if (!usbserial_connected())
-        return;
-
-    osd_clear();
-    osd_draw_box(8, 6, 64, 14, OSD_ATTR_BORDER);
-    osd_fill(9, 7, 62, 12, ' ', OSD_ATTR_NORMAL);
-    osd_print_center(6, " ESP32 Modem Firmware ", OSD_ATTR(OSD_YELLOW, OSD_BLUE));
-    osd_print_center(11, "Checking physical modem flash...", OSD_ATTR(OSD_YELLOW, OSD_BLUE));
-    osd_show();
-
-    bool matches = false;
-    char detail[96];
-    espflash_result_t cr = espflash_selected_matches(&matches,
-                                                      boot_modem_draw_stage,
-                                                      NULL,
-                                                      detail, sizeof(detail));
-    if (cr != ESPFLASH_OK) {
-        DBG_PRINT("ESP32 modem firmware probe failed: %s\n", detail);
-        osd_hide();
-        return;
-    }
-    if (matches) {
-        osd_hide();
-        return;
-    }
-
-    char next[56];
-    snprintf(next, sizeof(next), "Selected: %s", desired);
-    osd_fill(9, 7, 62, 12, ' ', OSD_ATTR_NORMAL);
-    osd_print_center(9, "Connected modem firmware differs", OSD_ATTR(OSD_YELLOW, OSD_BLUE));
-    osd_print_center(12, next, OSD_ATTR_NORMAL);
-    osd_print_center(16, "Enter - Flash", OSD_ATTR_HIGHLIGHT);
-    osd_print_center(17, "Esc   - Skip", OSD_ATTR_HIGHLIGHT);
-
-    int key;
-    absolute_time_t quiet = make_timeout_time_ms(100);
-    while (!time_reached(quiet)) {
-        if (boot_modem_get_key(&key))
-            quiet = make_timeout_time_ms(100);
-        sleep_ms(5);
-    }
-
-    while (true) {
-        if (!boot_modem_get_key(&key)) {
-            sleep_ms(10);
-            continue;
-        }
-        if (key == KEY_ESC) {
-            osd_hide();
-            return;
-        }
-        if (key != KEY_ENTER)
-            continue;
-
-        osd_fill(10, 9, 60, 9, ' ', OSD_ATTR_NORMAL);
-        char desired_shown[56];
-        strncpy(desired_shown, desired, sizeof(desired_shown) - 1);
-        desired_shown[sizeof(desired_shown) - 1] = '\0';
-        osd_print_center(11, desired_shown, OSD_ATTR_NORMAL);
-        osd_print_center(14, "Preparing firmware update...", OSD_ATTR(OSD_YELLOW, OSD_BLUE));
-
-        espflash_result_t fr = espflash_update_selected(boot_modem_draw_progress,
-                                                         boot_modem_draw_stage,
-                                                         NULL, detail, sizeof(detail));
-        bool ok = (fr == ESPFLASH_OK || fr == ESPFLASH_NOT_NEEDED);
-        osd_fill(10, 9, 60, 9, ' ', OSD_ATTR_NORMAL);
-        osd_print_center(12,
-                         fr == ESPFLASH_NOT_NEEDED ? "Firmware already matches."
-                                                  : ok ? "Firmware updated successfully."
-                                                       : "Firmware update did not complete.",
-                         ok ? OSD_ATTR(OSD_LIGHTGREEN, OSD_BLUE)
-                            : OSD_ATTR(OSD_WHITE, OSD_RED));
-        if (detail[0]) {
-            char shown[56];
-            strncpy(shown, detail, sizeof(shown) - 1);
-            shown[sizeof(shown) - 1] = '\0';
-            osd_print_center(14, shown, OSD_ATTR_NORMAL);
-        }
-        osd_print_center(18, "Press any key", OSD_ATTR_HIGHLIGHT);
-        boot_modem_wait_any_key();
-        osd_hide();
-        return;
-    }
-}
-
 //=============================================================================
 // Main Entry Point
 //=============================================================================
@@ -2208,10 +2055,6 @@ static void __attribute__((noinline, noreturn)) main_after_hardware(void)
             sleep_ms(1000);
         }
     }
-
-    /* Determine modem firmware state from the physical ESP32 flash itself.
-       If it differs from the selected image, ask before programming. */
-    show_pending_modem_update();
 
     // Start the core-0 cycle counter before emulation begins.
     prof_init();

@@ -24,13 +24,13 @@ endif()
 # Enable LTEMM support (performance degradation is expected)
 option(EMM "Enable LTEMM support" OFF)
 
-option(NO_PAGING "Disable guest-RAM paging and use direct QSPI PSRAM access" OFF)
+option(NO_PAGING "Disable guest-RAM paging and use direct QSPI PSRAM access" ON)
 if(NO_PAGING)
     add_compile_definitions(NO_PAGING=1)
 endif()
 
 # Video adapter profile: one mutually exclusive build mode.
-set(VIDEO_MODE "RUNTIME" CACHE STRING "Video adapter: RUNTIME, MCGA, EGA128, VGA128 or VGA256")
+set(VIDEO_MODE "VGA256" CACHE STRING "Video adapter: RUNTIME, MCGA, EGA128, VGA128 or VGA256")
 set_property(CACHE VIDEO_MODE PROPERTY STRINGS RUNTIME MCGA EGA128 VGA128 VGA256)
 string(TOUPPER "${VIDEO_MODE}" VIDEO_MODE)
 
