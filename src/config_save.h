@@ -87,6 +87,13 @@ void config_set_nes_joystick(int enabled);
  * alongside the NES pad: both feed the one emulated stick. */
 int config_get_usb_joystick(void);
 void config_set_usb_joystick(int enabled);
+/* Host PS/2/USB mouse translated to the same DOS analog game port.
+ * ONLY suppresses the normal mouse event stream; BOTH feeds both paths. */
+#define MOUSE_JOYSTICK_DISABLED 0
+#define MOUSE_JOYSTICK_ONLY     1
+#define MOUSE_JOYSTICK_BOTH     2
+int config_get_mouse_joystick(void);
+void config_set_mouse_joystick(int mode);
 
 int config_get_cpu_freq(void);
 void config_set_cpu_freq(int mhz);

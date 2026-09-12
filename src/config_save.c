@@ -40,6 +40,7 @@ static int cfg_mouse = 1;
 static int cfg_nes_mouse = 0;
 static int cfg_nes_joystick = 0;
 static int cfg_usb_joystick = 0;
+static int cfg_mouse_joystick = 0;
 static int cfg_cpu_freq = CPU_CLOCK_MHZ;
 static int cfg_psram_freq = PSRAM_MAX_FREQ_MHZ;
 static int cfg_psram_size_mb = 0;
@@ -267,9 +268,21 @@ void config_set_mouse(int enabled) {
 
 int config_get_usb_joystick(void) { return cfg_usb_joystick; }
 void config_set_usb_joystick(int enabled) {
-    pc->joystick_enabled = enabled || cfg_nes_joystick;
+    pc->joystick_enabled = enabled || cfg_nes_joystick || cfg_mouse_joystick;
     if (cfg_usb_joystick != enabled) {
         cfg_usb_joystick = enabled;
+        cfg_changed = true;
+    }
+}
+
+int config_get_mouse_joystick(void) { return cfg_mouse_joystick; }
+void config_set_mouse_joystick(int mode) {
+    if (mode < MOUSE_JOYSTICK_DISABLED || mode > MOUSE_JOYSTICK_BOTH)
+        mode = MOUSE_JOYSTICK_DISABLED;
+    pc->joystick_enabled = (mode != MOUSE_JOYSTICK_DISABLED) ||
+                           cfg_nes_joystick || cfg_usb_joystick;
+    if (cfg_mouse_joystick != mode) {
+        cfg_mouse_joystick = mode;
         cfg_changed = true;
     }
 }
@@ -279,7 +292,7 @@ void config_set_nes_joystick(int enabled) {
     /* Applied live, like the other device toggles: the game port appears
      * or disappears without a restart. With it off, reads of 0x201 fall
      * back to 0xF0, which is what an empty adapter returns. */
-    pc->joystick_enabled = enabled || cfg_usb_joystick;
+    pc->joystick_enabled = enabled || cfg_usb_joystick || cfg_mouse_joystick;
     if (cfg_nes_joystick != enabled) {
         cfg_nes_joystick = enabled;
         cfg_changed = true;
@@ -522,6 +535,8 @@ bool config_save_all(void) {
     write_line(&fp, line);
     snprintf(line, sizeof(line), "usb_joystick=%d\r\n", cfg_usb_joystick);
     write_line(&fp, line);
+    snprintf(line, sizeof(line), "mouse_joystick=%d\r\n", cfg_mouse_joystick);
+    write_line(&fp, line);
     snprintf(line, sizeof(line), "usb=%s\r\n",
              cfg_usb_mode == USB_MODE_DEVICE ? "DEVICE" : "HOST");
     write_line(&fp, line);
@@ -599,6 +614,11 @@ int parse_frank_386_ini(void* user, const char* section,
         cfg_mouse = atoi(value);
     } else if (strcmp(name, "usb_joystick") == 0) {
         cfg_usb_joystick = atoi(value);
+    } else if (strcmp(name, "mouse_joystick") == 0) {
+        cfg_mouse_joystick = atoi(value);
+        if (cfg_mouse_joystick < MOUSE_JOYSTICK_DISABLED ||
+            cfg_mouse_joystick > MOUSE_JOYSTICK_BOTH)
+            cfg_mouse_joystick = MOUSE_JOYSTICK_DISABLED;
     } else if (strcmp(name, "usb") == 0) {
         cfg_usb_mode = (strcasecmp(value, "DEVICE") == 0)
                      ? USB_MODE_DEVICE : USB_MODE_HOST;

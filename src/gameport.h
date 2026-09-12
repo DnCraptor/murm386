@@ -43,8 +43,11 @@ typedef enum {
     GP_AXIS_MAX = 1     /* right / down */
 } gp_axis_t;
 
-/* Feed the emulated stick. `buttons` bit 0 = button 1, bit 1 = button 2. */
+/* Feed a digital stick. `buttons` bit 0 = button 1, bit 1 = button 2. */
 void gameport_set(int x, int y, uint8_t buttons);
+
+/* Feed an analog stick. X/Y span the full signed 16-bit range; 0 is centre. */
+void gameport_set_analog(int16_t x, int16_t y, uint8_t buttons);
 
 /* Port 0x201. A write of any value fires the one-shots. */
 void gameport_write(void);

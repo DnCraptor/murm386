@@ -721,6 +721,57 @@ typedef struct {
     int setting;
 } MouseScaleState;
 
+typedef struct {
+    int16_t x, y;
+    uint8_t buttons;
+    uint32_t last_event_us;
+    bool was_enabled;
+} MouseJoystickState;
+
+static MouseJoystickState mouse_joystick_state;
+
+static int16_t mouse_joystick_axis_from_delta(int16_t delta)
+{
+    /* Mouse motion is relative. Treat report velocity as stick deflection.
+     * A one-mickey sensor jitter is a dead zone; 16 mickeys/report reaches
+     * full travel. */
+    if (delta >= -1 && delta <= 1)
+        return 0;
+    int32_t value = (int32_t)delta * 2048;
+    if (value < -32768) value = -32768;
+    if (value >  32767) value =  32767;
+    return (int16_t)value;
+}
+
+static uint8_t mouse_joystick_buttons(uint8_t mouse_buttons)
+{
+    /* Keep the normal mouse buttons untouched, but swap them on the game
+     * port: right mouse button is joystick button 1, left is button 2.
+     * This prevents an ordinary left-click confirmation from also looking
+     * like the primary joystick button. */
+    return (uint8_t)(((mouse_buttons & 0x01u) << 1) |
+                     ((mouse_buttons & 0x02u) >> 1));
+}
+
+static void mouse_joystick_event(int16_t dx, int16_t dy, uint8_t buttons)
+{
+    /* This function is called for a real mouse report.  Zero deltas are
+     * meaningful: they are the report that returns the virtual stick to
+     * centre after the physical mouse stops. */
+    mouse_joystick_state.x = mouse_joystick_axis_from_delta(dx);
+    mouse_joystick_state.y = mouse_joystick_axis_from_delta(dy);
+    mouse_joystick_state.buttons = mouse_joystick_buttons(buttons);
+    mouse_joystick_state.last_event_us = time_us_32();
+}
+
+static void mouse_joystick_set_digital(int x, int y, uint8_t buttons)
+{
+    mouse_joystick_state.x = x < 0 ? INT16_MIN : (x > 0 ? INT16_MAX : 0);
+    mouse_joystick_state.y = y < 0 ? INT16_MIN : (y > 0 ? INT16_MAX : 0);
+    mouse_joystick_state.buttons = buttons & 0x03u;
+    mouse_joystick_state.last_event_us = time_us_32();
+}
+
 static void mouse_scale_delta(MouseScaleState *st, int16_t *dx, int16_t *dy)
 {
     static const uint8_t num[9] = { 1, 1, 1, 2, 1, 3, 2, 3, 4 };
@@ -760,19 +811,22 @@ static void poll_keyboard(void) {
         }
     }
 
-    // Poll PS/2 mouse (only if PS/2/USB mouse enabled, not NES mouse)
-    if (pc && config_get_mouse() && !pc->paused) {
+    // Poll PS/2 mouse when used either as a PC mouse or as a game-port stick.
+    if (pc && (config_get_mouse() || config_get_mouse_joystick()) && !pc->paused) {
         int16_t dx, dy;
         int8_t dz;
         uint8_t buttons;
-        if (ps2_mouse_get_state(&dx, &dy, &dz, &buttons)) {
-            if (pc->mouse) {
-                static MouseScaleState mouse_scale = { .setting = -1 };
-                int16_t my = config_get_mouse_invert_y() ? -dy : dy;
-                mouse_scale_delta(&mouse_scale, &dx, &my);
-                ps2_mouse_event(pc->mouse, dx, my, dz, buttons);
-            }
-        }
+        bool mouse_event = ps2_mouse_get_state(&dx, &dy, &dz, &buttons);
+        const int mouse_joy_mode = config_get_mouse_joystick();
+        static MouseScaleState mouse_scale = { .setting = -1 };
+        int16_t my = config_get_mouse_invert_y() ? -dy : dy;
+        if (mouse_event && mouse_joy_mode != MOUSE_JOYSTICK_DISABLED)
+            mouse_joystick_event(dx, my, buttons);
+        if (mouse_event)
+            mouse_scale_delta(&mouse_scale, &dx, &my);
+        if (mouse_event && config_get_mouse() && pc->mouse &&
+            mouse_joy_mode != MOUSE_JOYSTICK_ONLY)
+            ps2_mouse_event(pc->mouse, dx, my, dz, buttons);
     }
 #endif // BOARD_HAS_PS2
 
@@ -788,17 +842,20 @@ static void poll_keyboard(void) {
         }
     }
 
-    // Poll USB mouse (only if PS/2/USB mouse enabled, not NES mouse)
-    if (pc && config_get_mouse() && !pc->paused) {
+    // Poll USB mouse when used either as a PC mouse or as a game-port stick.
+    if (pc && (config_get_mouse() || config_get_mouse_joystick()) && !pc->paused) {
         int16_t dx, dy;
         int8_t dz;
         uint8_t buttons;
         if (usbmouse_get_event(&dx, &dy, &dz, &buttons)) {
-            if (pc->mouse) {
-                static MouseScaleState mouse_scale = { .setting = -1 };
-                mouse_scale_delta(&mouse_scale, &dx, &dy);
+            const int mouse_joy_mode = config_get_mouse_joystick();
+            static MouseScaleState mouse_scale = { .setting = -1 };
+            if (mouse_joy_mode != MOUSE_JOYSTICK_DISABLED)
+                mouse_joystick_event(dx, dy, buttons);
+            mouse_scale_delta(&mouse_scale, &dx, &dy);
+            if (config_get_mouse() && pc->mouse &&
+                mouse_joy_mode != MOUSE_JOYSTICK_ONLY)
                 ps2_mouse_event(pc->mouse, dx, dy, dz, buttons);
-            }
         }
     }
 #endif
@@ -878,8 +935,26 @@ static void poll_keyboard(void) {
         if (pad & DPAD_B) buttons |= 0x01;  // left
         if (pad & DPAD_A) buttons |= 0x02;  // right
 
+        /* When Mouse as Joystick is also enabled, duplicate the NES pad into
+         * the game-port channel as a digital stick.  Keep the established
+         * direct-joystick convention here: A = joystick button 1,
+         * B = joystick button 2.  The mouse channel remains B=left, A=right. */
+        const int mouse_joy_mode = config_get_mouse_joystick();
+        if (mouse_joy_mode != MOUSE_JOYSTICK_DISABLED) {
+            int jx = 0, jy = 0;
+            uint8_t joy_buttons = 0;
+            if (pad & DPAD_LEFT)  jx = -1;
+            if (pad & DPAD_RIGHT) jx =  1;
+            if (pad & DPAD_UP)    jy = -1;
+            if (pad & DPAD_DOWN)  jy =  1;
+            if (pad & DPAD_A)     joy_buttons |= 0x01u;
+            if (pad & DPAD_B)     joy_buttons |= 0x02u;
+            mouse_joystick_set_digital(jx, jy, joy_buttons);
+        }
+
         // Button transitions stay immediate even between movement ticks.
-        if (dx || dy || buttons != prev_buttons) {
+        if ((dx || dy || buttons != prev_buttons) &&
+            mouse_joy_mode != MOUSE_JOYSTICK_ONLY) {
             static MouseScaleState mouse_scale = { .setting = -1 };
             mouse_scale_delta(&mouse_scale, &dx, &dy);
             ps2_mouse_event(pc->mouse, dx, dy, 0, buttons);
@@ -887,6 +962,30 @@ static void poll_keyboard(void) {
         prev_buttons = buttons;
     }
 #endif
+
+    /* Host mouse -> analog joystick translator.  A zero report centres it
+     * immediately; mice that stop reporting after the last non-zero delta
+     * are forced back to centre after 20 ms. */
+    if (pc && !pc->paused &&
+        config_get_mouse_joystick() != MOUSE_JOYSTICK_DISABLED) {
+        if (!mouse_joystick_state.was_enabled) {
+            mouse_joystick_state.x = 0;
+            mouse_joystick_state.y = 0;
+            mouse_joystick_state.buttons = 0;
+            mouse_joystick_state.last_event_us = 0;
+        }
+        mouse_joystick_state.was_enabled = true;
+        if (mouse_joystick_state.last_event_us &&
+            (uint32_t)(time_us_32() - mouse_joystick_state.last_event_us) > 20000u) {
+            mouse_joystick_state.x = 0;
+            mouse_joystick_state.y = 0;
+        }
+        gameport_set_analog(mouse_joystick_state.x,
+                            mouse_joystick_state.y,
+                            mouse_joystick_state.buttons);
+    } else {
+        mouse_joystick_state.was_enabled = false;
+    }
 }
 
 //=============================================================================
@@ -1677,7 +1776,7 @@ static bool init_emulator(void) {
     pc->mpu401_enabled = config_get_mpu401();
     pc->dss_enabled = config_get_dss();
     pc->mouse_enabled = config_get_mouse() || config_get_nes_mouse();
-    pc->joystick_enabled = config_get_nes_joystick() || config_get_usb_joystick();
+    pc->joystick_enabled = config_get_nes_joystick() || config_get_usb_joystick() || config_get_mouse_joystick();
     DBG_PRINT("  Audio: PC Speaker=%d, Adlib=%d, SB16=%d, MPU401=%d, Tandy=%d, Covox=%d, DSS=%d, Mouse=%d\n",
               pc->pcspk_enabled, pc->adlib_enabled, pc->sb16_enabled, pc->mpu401_enabled,
               pc->tandy_enabled, pc->covox_enabled, pc->dss_enabled, pc->mouse_enabled);

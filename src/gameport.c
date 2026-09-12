@@ -31,9 +31,23 @@ static uint32_t gp_duration(int axis) {
     return GP_COUNT_CENTRE;
 }
 
+static uint32_t gp_duration_analog(int16_t axis) {
+    /* -32768..32767 -> the full emulated potentiometer travel.  The
+     * constants are symmetric, so zero maps exactly to centre. */
+    const uint32_t pos = (uint32_t)((int32_t)axis + 32768);
+    const uint32_t span = GP_COUNT_MAX - GP_COUNT_MIN;
+    return GP_COUNT_MIN + (pos * span + 32767u) / 65535u;
+}
+
 void gameport_set(int x, int y, uint8_t buttons) {
     gp_dur_x = gp_duration(x);
     gp_dur_y = gp_duration(y);
+    gp_buttons = buttons;
+}
+
+void gameport_set_analog(int16_t x, int16_t y, uint8_t buttons) {
+    gp_dur_x = gp_duration_analog(x);
+    gp_dur_y = gp_duration_analog(y);
     gp_buttons = buttons;
 }
 

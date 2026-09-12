@@ -47,6 +47,7 @@ typedef enum {
     SETTING_NES_MOUSE,
     SETTING_NES_JOYSTICK,
     SETTING_USB_JOYSTICK,
+    SETTING_MOUSE_JOYSTICK,
     SETTING_USB_MODEM,
     SETTING_MOUSE_INVERT_Y,
     SETTING_CPU_FREQ,
@@ -393,6 +394,13 @@ static void cycle_option(int direction) {
             config_set_usb_joystick(config_get_usb_joystick() ? 0 : 1);
             break;
 
+        case SETTING_MOUSE_JOYSTICK: {
+            int mode = config_get_mouse_joystick();
+            mode = (mode + direction + 3) % 3;
+            config_set_mouse_joystick(mode);
+            break;
+        }
+
         case SETTING_USB_MODEM:
             config_set_usb_modem(config_get_usb_modem() ? 0 : 1);
             break;
@@ -479,6 +487,7 @@ static void draw_settings_menu(void) {
         "NES Mouse:",
         "NES Joystick:",
         "USB Joystick:",
+        "Mouse as Joystick:",
         "USB modem:",
         "Invert Mouse Y:",
         "RP2350 Freq:",
@@ -563,6 +572,14 @@ static void draw_settings_menu(void) {
             case SETTING_USB_JOYSTICK:
                 snprintf(value, sizeof(value), "< %s >", config_get_usb_joystick() ? "Enabled" : "Disabled");
                 break;
+            case SETTING_MOUSE_JOYSTICK: {
+                static const char *names[] = { "Disabled", "Only", "Both" };
+                int mode = config_get_mouse_joystick();
+                if (mode < MOUSE_JOYSTICK_DISABLED || mode > MOUSE_JOYSTICK_BOTH)
+                    mode = MOUSE_JOYSTICK_DISABLED;
+                snprintf(value, sizeof(value), "< %s >", names[mode]);
+                break;
+            }
             case SETTING_USB_MODEM:
                 snprintf(value, sizeof(value), "< %s >", config_get_usb_modem() ? "COM1" : "None");
                 break;
