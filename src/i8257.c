@@ -351,6 +351,12 @@ static void __not_in_flash_func(i8257_channel_run)(I8257State *d, int ichan)
     if (n == (r->base[COUNT] + 1) << ncont) {
         ldebug("transfer done\n");
         d->status |= (1 << ichan);
+        /* 8237 auto-initialize reloads the current address/count from the
+         * programmed base after terminal count.  SB16's streaming callback
+         * normally wraps before reaching this path, but devices such as the
+         * Covox Sound Master need the real terminal-count semantics. */
+        if (r->mode & 0x10)
+            i8257_init_chan(d, ichan);
     }
 }
 

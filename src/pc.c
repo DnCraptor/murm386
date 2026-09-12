@@ -3,6 +3,7 @@
 #include "mem.h"
 #include "ide.h"
 #include "dss.h"
+#include "csm.h"
 #include "misc.h"
 #include "profile_subsys.h"
 #include "codeprofile.h"
@@ -215,6 +216,9 @@ static __always_inline u8 _pc_io_read(void *o, int addr)
 	cp_io_read();
 	PC *pc = o;
 	u8 val;
+
+    if ((addr & 0xffe0) == CSM_IO_BASE)
+        return csm_read((uint16_t)addr);
 
 	switch(addr) {
 	case 0x20: case 0x21: case 0xa0: case 0xa1:
@@ -690,6 +694,26 @@ static void pc_io_write(void *o, int addr, u8 val)
 	cp_io_write();
 	debug_write("W8: %ph -> %02Xh\n", addr, val);
 	PC *pc = o;
+    if ((addr & 0xffe0) == CSM_IO_BASE) {
+        /* Keep the pre-existing Sound Master PSG path alive in parallel
+         * with the AY8930 shadow used by csm.c for AYDMA.  In HW-AY mode
+         * these calls also forward compatible PSG register traffic to
+         * the physical AY-3-8910. */
+        if (pc->covox_enabled == COVOX_SOUND_MASTER) {
+            switch ((uint16_t)(addr - CSM_IO_BASE) & 0x1f) {
+            case 0:
+                csm_psg_select_register(val);
+                break;
+            case 1:
+                csm_psg_write_data(val);
+                break;
+            default:
+                break;
+            }
+        }
+        csm_write((uint16_t)addr, val);
+        return;
+    }
 	switch(addr) {
 	case 0x80: case 0xed:
 		/* used by linux, for io delay */
@@ -1049,6 +1073,7 @@ static void __not_in_flash_func(pc_service_impl)(PC *pc)
     kbd_step(pc->i8042);
     i8257_dma_run(pc->isa_dma);
     i8257_dma_run(pc->isa_hdma);
+    csm_service();
     if (pc->fdc) fdc_tick(pc->fdc);
     PROF_ADD(t_dev, devices);
 
@@ -1520,6 +1545,7 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	pc->sb16 = sb16_new(0x220, 5,
 			    pc->isa_dma, pc->isa_hdma,
 			    pc->pic, set_irq);
+    csm_init(pc->isa_dma, pc->pic);
 	pc->pcspk = pcspk_init(pc->pit);
 	sn76489_reset();
 

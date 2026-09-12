@@ -27,6 +27,7 @@
 #include "adlib.h"
 #include "board_config.h"
 #include "config_save.h"
+#include "csm.h"
 #include "csm_psg.h"
 #if HAS_AUDIO_HWAY
 #include "ay_hw.h"
@@ -403,6 +404,11 @@ bool __not_in_flash_func(timer_callback)(repeating_timer_t *rt) {
     int l_v = 0;
     if (pc->pcspk_enabled) {
         b_v = pcspk_sample(pc->pcspk);
+    }
+    {
+        int16_t sample = csm_getsample();
+        r_v += sample;
+        l_v += sample;
     }
     if (pc->covox_enabled != COVOX_DISABLED) {
         /* 8-bit unsigned DAC -> signed mixer.  Keep the arithmetic wide:

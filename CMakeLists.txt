@@ -420,6 +420,7 @@ set(EMU_CORE_SOURCES
     src/pcspk.c      # PC Speaker
     src/sn76489.c    # Tandy 3-Voice Sound (SN76489)
     src/dss.c        # Disney Sound Source
+    src/csm.c        # Covox Sound Master AYDMA/DAC
     # FM OPL synthesis engine
     src/emu8950/emu8950.c
     src/emu8950/emuadpcm.c
