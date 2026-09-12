@@ -573,7 +573,7 @@ static void draw_settings_menu(void) {
                 snprintf(value, sizeof(value), "< %s >", config_get_mpu401() ? "Enabled" : "Disabled");
                 break;
             case SETTING_COVOX: {
-                static const char *names[] = { "Disabled", "Speech Thing (LPT2)", "Sound Master (220h)" };
+                static const char *names[] = { "Disabled", "Speech Thing (LPT2)", "Sound Master (240h)" };
                 int mode = config_get_covox();
                 if (mode < COVOX_DISABLED || mode > COVOX_SOUND_MASTER)
                     mode = COVOX_DISABLED;
