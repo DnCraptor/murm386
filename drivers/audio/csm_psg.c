@@ -1,9 +1,10 @@
 #include "csm_psg.h"
-#include "audio.h"
 #include "ay_hw.h"
 
-#include <pico/platform.h>
+#include <stdbool.h>
 #include <string.h>
+
+bool audio_is_hway(void);
 
 /* AY-3-8910 compatible-mode core ported from the current pico-speccy
  * AySound implementation.  Covox Sound Master used AY-3-8930, but this
@@ -23,16 +24,36 @@ static const uint8_t ay_volume_table[32] = {
 };
 
 typedef struct {
-    uint8_t regs[16];
+    uint8_t regs_a[16];
+    uint8_t regs_b[16];
     uint8_t selected_register;
-    int cnt_a, cnt_b, cnt_c, cnt_n, cnt_e;
-    int bit_a, bit_b, bit_c, bit_n;
-    int env_pos;
-    int seed;
+    uint8_t mode;
+
+    int32_t tone_count[3];
+    uint8_t tone_phase[3];
+    uint8_t tone_output[3];
+
+    int32_t noise_count;
+    uint32_t noise_rng;
+    uint8_t noise_output;
+    uint16_t noise_value;
+
+    int32_t env_count[3];
+    uint8_t env_pos[3];
 } CsmPsg;
 
 static CsmPsg psg;
 static uint8_t hw_channel_c_output = 1;
+
+static inline int psg_is_expanded(void)
+{
+    return (psg.mode & 0x0e) == 0x0a;
+}
+
+static inline int psg_bank_b(void)
+{
+    return psg_is_expanded() && (psg.mode & 0x01);
+}
 
 /* Exact pre-generated envelope table from current pico-speccy AySound. */
 static const uint8_t envelope_table[16][128] = {
@@ -54,133 +75,435 @@ static const uint8_t envelope_table[16][128] = {
 {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}
 };
 
+static const uint8_t duty_high_steps[9] = {1, 2, 4, 8, 16, 24, 28, 30, 31};
+
+static void psg_reset_generators(void)
+{
+    memset(psg.tone_count, 0, sizeof(psg.tone_count));
+    memset(psg.tone_phase, 0, sizeof(psg.tone_phase));
+    memset(psg.tone_output, 0, sizeof(psg.tone_output));
+    memset(psg.env_count, 0, sizeof(psg.env_count));
+    memset(psg.env_pos, 0, sizeof(psg.env_pos));
+    psg.noise_count = 0;
+    psg.noise_value = 0;
+    psg.noise_rng = 0xffff;
+    psg.noise_output = 0;
+}
+
+static void psg_hw_silence_primary(void)
+{
+    if (!audio_is_hway())
+        return;
+
+    /* In expanded mode the first physical AY-3-8910 cannot represent the
+     * AY8930 state.  Silence it; the software AY8930 is then emitted as PCM
+     * through the second chip by the normal HW audio mixer path. */
+    ay_hw_psg_select_register(7);
+    ay_hw_psg_write_data(0x3f);
+    for (uint8_t r = 8; r <= 10; ++r) {
+        ay_hw_psg_select_register(r);
+        ay_hw_psg_write_data(0);
+    }
+}
+
+static uint8_t psg_hw_value(uint8_t reg, uint8_t value)
+{
+    if (reg == 1 || reg == 3 || reg == 5)
+        value &= 0x0f;
+    else if (reg == 6)
+        value &= 0x1f;
+    else if (reg >= 8 && reg <= 10)
+        value &= 0x1f;
+    else if (reg == 13)
+        value &= 0x0f;
+
+    if (reg == 7 && !hw_channel_c_output)
+        value |= 0x24;
+    return value;
+}
+
+static void psg_hw_resync_compatible(void)
+{
+    if (!audio_is_hway() || psg_is_expanded())
+        return;
+
+    /* The physical chip was intentionally frozen while expanded mode was
+     * active.  Reconstruct it in one bus transaction.  Doing sixteen
+     * select/write pairs through separately locked helpers lets the 44.1-kHz
+     * core-1 PCM IRQ repeatedly take the same spinlock between operations and
+     * can starve core0 exactly when software leaves expanded mode. */
+    uint8_t regs[16];
+    for (uint8_t r = 0; r < 16; ++r)
+        regs[r] = psg_hw_value(r, psg.regs_a[r]);
+    ay_hw_psg_write_registers(regs);
+
+    if (psg.selected_register < 16)
+        ay_hw_psg_select_register(psg.selected_register);
+}
+
+static void psg_mode_write(uint8_t value)
+{
+    const int was_expanded = psg_is_expanded();
+    const uint8_t old_mode = psg.mode;
+    const uint8_t new_mode = (value >> 4) & 0x0f;
+    const int will_expand = (new_mode & 0x0e) == 0x0a;
+
+    psg.mode = new_mode;
+
+    /* MAME follows the AY8930 datasheet here: crossing the compatibility /
+     * expanded boundary clears both banks 0..12.  R13 is shared and its
+     * high nibble carries mode/bank while the low nibble is envelope A. */
+    if (was_expanded != will_expand) {
+        /* AY8930 mode changes clear the register banks, but the mixer/
+         * enable register R7 is retained.  The working 86Box CSM model
+         * preserves it explicitly; clearing it here can spuriously enable
+         * channel-C timing and therefore restart AYDMA. */
+        const uint8_t enable = psg.regs_a[7];
+        memset(psg.regs_a, 0, 13);
+        memset(psg.regs_b, 0, 13);
+        psg.regs_a[7] = enable;
+        psg_reset_generators();
+    }
+
+    psg.regs_a[13] = value;
+    psg.regs_b[13] = value;
+    psg.env_pos[0] = 0;
+    psg.env_count[0] = 0;
+
+    if (!was_expanded && will_expand)
+        psg_hw_silence_primary();
+    else if (was_expanded && !will_expand)
+        psg_hw_resync_compatible();
+    else if (!will_expand && old_mode != new_mode && audio_is_hway()) {
+        ay_hw_psg_select_register(13);
+        ay_hw_psg_write_data(value & 0x0f);
+    }
+}
+
 void csm_psg_reset(void)
 {
     memset(&psg, 0, sizeof(psg));
-    psg.regs[7] = 0xff;
+    psg.regs_a[7] = 0xff;
+    psg.regs_a[15] = 0xe0;
     psg.selected_register = 0xff;
-    psg.seed = 0xffff;
+    psg_reset_generators();
     hw_channel_c_output = 1;
 }
 
 void csm_psg_select_register(uint8_t reg)
 {
     psg.selected_register = reg;
-    if (audio_is_hway())
+    if (audio_is_hway() && !psg_is_expanded())
         ay_hw_psg_select_register(reg);
 }
 
 void csm_psg_write_data(uint8_t value)
 {
-    uint8_t hw_value = value;
-
-    if (psg.selected_register < 16) {
-        psg.regs[psg.selected_register] = value;
-        if (psg.selected_register == 13) {
-            psg.env_pos = 0;
-            psg.cnt_e = 0;
-        }
-        /* On the original Sound Master, Port B bit 7 gates channel C
-         * outside the AY8930. A bare HW AY-3-8910 has no such external
-         * gate, so disable both tone and noise for C in the value sent
-         * to the physical chip while that external gate would be closed. */
-        if (psg.selected_register == 7 && !hw_channel_c_output)
-            hw_value |= 0x24;
-    }
-
-    if (audio_is_hway())
-        ay_hw_psg_write_data(hw_value);
-}
-
-void csm_psg_set_channel_c_output(int enabled)
-{
-    uint8_t new_state = enabled ? 1 : 0;
-    if (hw_channel_c_output == new_state)
+    const uint8_t reg = psg.selected_register;
+    if (reg >= 16)
         return;
 
-    hw_channel_c_output = new_state;
+    if (reg == 13) {
+        const int was_expanded = psg_is_expanded();
+        const int will_expand = ((((value >> 4) & 0x0f) & 0x0e) == 0x0a);
 
-    if (audio_is_hway()) {
-        uint8_t selected = psg.selected_register;
-        uint8_t mixer = psg.regs[7];
-        if (!hw_channel_c_output)
-            mixer |= 0x24;
+        /* Do not send A0/B0 expanded-mode commands to a physical 8910. */
+        if (audio_is_hway() && !was_expanded && !will_expand) {
+            ay_hw_psg_select_register(13);
+            ay_hw_psg_write_data(value & 0x0f);
+        }
+        psg_mode_write(value);
+        return;
+    }
 
-        ay_hw_psg_select_register(7);
-        ay_hw_psg_write_data(mixer);
+    if (psg_bank_b()) {
+        switch (reg) {
+        case 0: case 1: case 2: case 3:
+        case 9: case 10:
+            psg.regs_b[reg] = value;
+            break;
+        case 4: case 5: case 6: case 7: case 8:
+            psg.regs_b[reg] = value & 0x0f;
+            if (reg == 4) { psg.env_pos[1] = 0; psg.env_count[1] = 0; }
+            if (reg == 5) { psg.env_pos[2] = 0; psg.env_count[2] = 0; }
+            break;
+        default:
+            /* AY8930 bank-B reserved registers read as zero. */
+            psg.regs_b[reg] = 0;
+            break;
+        }
+        return;
+    }
+
+    if (psg_is_expanded()) {
+        switch (reg) {
+        case 8: case 9: case 10:
+            psg.regs_a[reg] = value & 0x3f;
+            break;
+        default:
+            psg.regs_a[reg] = value;
+            break;
+        }
+    } else {
+        switch (reg) {
+        case 1: case 3: case 5:
+            psg.regs_a[reg] = value & 0x0f;
+            break;
+        case 6:
+            psg.regs_a[reg] = value & 0x1f;
+            break;
+        case 8: case 9: case 10:
+            psg.regs_a[reg] = value & 0x1f;
+            break;
+        default:
+            psg.regs_a[reg] = value;
+            break;
+        }
+    }
+
+    if (reg == 13) {
+        psg.env_pos[0] = 0;
+        psg.env_count[0] = 0;
+    }
+
+    if (audio_is_hway() && !psg_is_expanded()) {
+        ay_hw_psg_select_register(reg);
+        ay_hw_psg_write_data(psg_hw_value(reg, psg.regs_a[reg]));
+    }
+}
+
+void csm_psg_force_channel_c_output(void)
+{
+    if (psg.regs_a[15] & 0x80)
+        return;
+
+    psg.regs_a[15] |= 0x80;
+    if (audio_is_hway() && !psg_is_expanded()) {
+        const uint8_t selected = psg.selected_register;
+        ay_hw_psg_select_register(15);
+        ay_hw_psg_write_data(psg.regs_a[15]);
         if (selected < 16)
             ay_hw_psg_select_register(selected);
     }
 }
 
-uint8_t csm_psg_read_data(void)
+void csm_psg_set_channel_c_output(int enabled)
 {
-    uint8_t r = psg.selected_register;
-    if (r >= 16)
-        return 0xff;
-    if (r >= 14 && ((psg.regs[7] >> (r - 8)) & 1) == 0)
-        return 0xff;
+    const uint8_t new_state = enabled ? 1 : 0;
+    if (hw_channel_c_output == new_state)
+        return;
 
-    switch (r) {
-    case 1: case 3: case 5: return psg.regs[r] & 0x0f;
-    case 6: return psg.regs[r] & 0x1f;
-    case 8: case 9: case 10: return psg.regs[r] & 0x1f;
-    case 13: return psg.regs[r] & 0x0f;
-    default: return psg.regs[r];
+    hw_channel_c_output = new_state;
+
+    if (audio_is_hway() && !psg_is_expanded()) {
+        const uint8_t selected = psg.selected_register;
+        ay_hw_psg_select_register(7);
+        ay_hw_psg_write_data(psg_hw_value(7, psg.regs_a[7]));
+        if (selected < 16)
+            ay_hw_psg_select_register(selected);
     }
 }
 
-uint8_t csm_psg_sample(void)
+int csm_psg_is_expanded(void)
 {
-    const int tone_a = psg.regs[0] | ((psg.regs[1] & 0x0f) << 8);
-    const int tone_b = psg.regs[2] | ((psg.regs[3] & 0x0f) << 8);
-    const int tone_c = psg.regs[4] | ((psg.regs[5] & 0x0f) << 8);
-    const int noise2 = (psg.regs[6] & 0x1f) * 2;
-    const int env_freq = psg.regs[11] | (psg.regs[12] << 8);
-    const int env_style = psg.regs[13] & 0x0f;
-    const int r7ta = !(psg.regs[7] & 0x01);
-    const int r7tb = !(psg.regs[7] & 0x02);
-    const int r7tc = !(psg.regs[7] & 0x04);
-    const int r7na = !(psg.regs[7] & 0x08);
-    const int r7nb = !(psg.regs[7] & 0x10);
-    const int r7nc = !(psg.regs[7] & 0x20);
-    const int vola = psg.regs[8] & 0x0f;
-    const int volb = psg.regs[9] & 0x0f;
-    const int volc = psg.regs[10] & 0x0f;
-    const int enva = psg.regs[8] & 0x10;
-    const int envb = psg.regs[9] & 0x10;
-    const int envc = psg.regs[10] & 0x10;
+    return psg_is_expanded();
+}
 
-    if (!enva && !envb && !envc && vola == 0 && volb == 0 && volc == 0)
-        return 0;
+int csm_psg_is_bank_b(void)
+{
+    return psg_bank_b();
+}
 
-    /* Same normalization used by pico-speccy prepare_generation(). */
-    const int amp_global = AYEMU_TACTS_PER_SAMPLE * (ay_volume_table[31] * 3) / AYEMU_MAX_AMP;
-    const int inv_amp = amp_global > 0 ? ((1 << 16) + amp_global - 1) / amp_global : 0;
+uint8_t csm_psg_get_bank_a_register(uint8_t reg)
+{
+    return reg < 16 ? psg.regs_a[reg] : 0;
+}
+
+uint8_t csm_psg_read_data(void)
+{
+    const uint8_t r = psg.selected_register;
+    if (r >= 16)
+        return 0xff;
+
+    if (r == 13)
+        return psg_is_expanded() ? psg.regs_a[13] : (psg.regs_a[13] & 0x0f);
+
+    if (psg_bank_b()) {
+        switch (r) {
+        case 0: case 1: case 2: case 3:
+        case 9: case 10:
+            return psg.regs_b[r];
+        case 4: case 5: case 6: case 7: case 8:
+            return psg.regs_b[r] & 0x0f;
+        default:
+            return 0;
+        }
+    }
+
+    if (!psg_is_expanded()) {
+        switch (r) {
+        case 1: case 3: case 5: return psg.regs_a[r] & 0x0f;
+        case 6: return psg.regs_a[r] & 0x1f;
+        case 8: case 9: case 10: return psg.regs_a[r] & 0x1f;
+        default: break;
+        }
+    }
+
+    /* Sound Master I/O ports have no readable external peripheral attached.
+     * Preserve the pull-state behaviour already used by csm.c/86Box. */
+    if (r == 14 && !(psg.regs_a[7] & 0x40))
+        return psg.regs_a[14] == 0xff ? 0xff : 0x00;
+    if (r == 15 && !(psg.regs_a[7] & 0x80))
+        return psg.regs_a[15] == 0xff ? 0xff : 0xf0;
+
+    return psg.regs_a[r];
+}
+
+static inline uint16_t tone_period(int ch)
+{
+    uint16_t p = (uint16_t)psg.regs_a[ch * 2] |
+                 ((uint16_t)psg.regs_a[ch * 2 + 1] << 8);
+    if (!psg_is_expanded())
+        p &= 0x0fff;
+    return p ? p : 1;
+}
+
+static inline uint16_t envelope_period(int ch)
+{
+    uint16_t p;
+    if (!psg_is_expanded() || ch == 0)
+        p = (uint16_t)psg.regs_a[11] | ((uint16_t)psg.regs_a[12] << 8);
+    else if (ch == 1)
+        p = (uint16_t)psg.regs_b[0] | ((uint16_t)psg.regs_b[1] << 8);
+    else
+        p = (uint16_t)psg.regs_b[2] | ((uint16_t)psg.regs_b[3] << 8);
+    return p ? p : 1;
+}
+
+static inline uint8_t envelope_shape(int ch)
+{
+    if (!psg_is_expanded() || ch == 0)
+        return psg.regs_a[13] & 0x0f;
+    return psg.regs_b[ch == 1 ? 4 : 5] & 0x0f;
+}
+
+static inline uint8_t duty_index(int ch)
+{
+    uint8_t duty = psg.regs_b[6 + ch] & 0x0f;
+    return duty <= 8 ? duty : 8;
+}
+
+static void psg_tick_tones(void)
+{
+    for (int ch = 0; ch < 3; ++ch) {
+        const int period = tone_period(ch);
+        if (psg_is_expanded()) {
+            /* MAME advances the 32-step duty phase 32x faster in expanded
+             * mode.  Relative to our existing compatibility tick, +16 keeps
+             * the 50% waveform at the same fundamental period. */
+            psg.tone_count[ch] += 16;
+            while (psg.tone_count[ch] >= period) {
+                psg.tone_count[ch] -= period;
+                psg.tone_phase[ch] = (psg.tone_phase[ch] + 1) & 31;
+            }
+            psg.tone_output[ch] =
+                psg.tone_phase[ch] < duty_high_steps[duty_index(ch)];
+        } else {
+            if (++psg.tone_count[ch] >= period) {
+                psg.tone_count[ch] = 0;
+                psg.tone_output[ch] ^= 1;
+            }
+        }
+    }
+}
+
+static void psg_noise_rng_tick(void)
+{
+    /* Preserve the pico-speccy/legacy polynomial used by this core. */
+    psg.noise_rng = (psg.noise_rng * 2u + 1u) ^
+                    (((psg.noise_rng >> 16) ^ (psg.noise_rng >> 13)) & 1u);
+}
+
+static void psg_tick_noise(void)
+{
+    const int period = psg_is_expanded() ?
+        (psg.regs_a[6] ? psg.regs_a[6] : 1) :
+        ((psg.regs_a[6] & 0x1f) ? ((psg.regs_a[6] & 0x1f) * 2) : 1);
+
+    if (++psg.noise_count < period)
+        return;
+    psg.noise_count = 0;
+
+    if (psg_is_expanded()) {
+        const uint8_t limit =
+            ((uint8_t)psg.noise_rng & psg.regs_b[9]) | psg.regs_b[10];
+        if (++psg.noise_value >= limit) {
+            psg.noise_value = 0;
+            psg.noise_output ^= 1;
+            psg_noise_rng_tick();
+        }
+    } else {
+        psg_noise_rng_tick();
+        psg.noise_output = (psg.noise_rng >> 16) & 1;
+    }
+}
+
+static void psg_tick_envelopes(void)
+{
+    const int n = psg_is_expanded() ? 3 : 1;
+    for (int ch = 0; ch < n; ++ch) {
+        const int period = envelope_period(ch);
+        if (++psg.env_count[ch] >= period) {
+            psg.env_count[ch] = 0;
+            if (++psg.env_pos[ch] > 127)
+                psg.env_pos[ch] = 64;
+        }
+    }
+}
+
+int16_t csm_psg_sample(void)
+{
+    const int expanded = psg_is_expanded();
     int mix = 0;
 
     for (int m = 0; m < AYEMU_TACTS_PER_SAMPLE; ++m) {
-        if (++psg.cnt_a >= tone_a) { psg.cnt_a = 0; psg.bit_a ^= 1; }
-        if (++psg.cnt_b >= tone_b) { psg.cnt_b = 0; psg.bit_b ^= 1; }
-        if (++psg.cnt_c >= tone_c) { psg.cnt_c = 0; psg.bit_c ^= 1; }
-        if (++psg.cnt_n >= noise2) {
-            psg.cnt_n = 0;
-            psg.seed = (psg.seed * 2 + 1) ^ (((psg.seed >> 16) ^ (psg.seed >> 13)) & 1);
-            psg.bit_n = (psg.seed >> 16) & 1;
-        }
-        if (++psg.cnt_e >= env_freq) {
-            psg.cnt_e = 0;
-            if (++psg.env_pos > 127) psg.env_pos = 64;
-        }
+        psg_tick_tones();
+        psg_tick_noise();
+        psg_tick_envelopes();
 
-        uint8_t env = envelope_table[env_style][psg.env_pos];
-        if ((psg.bit_a | !r7ta) & (psg.bit_n | !r7na))
-            mix += ay_volume_table[enva ? env : rampa_ay_table[vola]];
-        if ((psg.bit_b | !r7tb) & (psg.bit_n | !r7nb))
-            mix += ay_volume_table[envb ? env : rampa_ay_table[volb]];
-        if ((psg.bit_c | !r7tc) & (psg.bit_n | !r7nc))
-            mix += ay_volume_table[envc ? env : rampa_ay_table[volc]];
+        for (int ch = 0; ch < 3; ++ch) {
+            const uint8_t volreg = psg.regs_a[8 + ch];
+            const int tone_enable = !(psg.regs_a[7] & (1u << ch));
+            const int noise_enable = !(psg.regs_a[7] & (1u << (ch + 3)));
+            const int gate = (psg.tone_output[ch] | !tone_enable) &
+                             (psg.noise_output | !noise_enable);
+
+            uint8_t level;
+            if (volreg & (expanded ? 0x20 : 0x10)) {
+                const int ech = expanded ? ch : 0;
+                level = envelope_table[envelope_shape(ech)][psg.env_pos[ech]];
+            } else if (expanded) {
+                level = volreg & 0x1f;
+            } else {
+                level = rampa_ay_table[volreg & 0x0f];
+            }
+
+            /* Signed mixer domain: a PSG square wave must be -A/+A here,
+             * not 0/+A.  The latter has only half the AC amplitude after
+             * the final DAC/output coupling and was the remaining ~2x loss. */
+            const int amp = ay_volume_table[level];
+            mix += gate ? amp : -amp;
+        }
     }
 
-    return (uint8_t)((mix * inv_amp) >> 16);
+    /* One full-scale channel uses almost the full int16 range.  Keep only
+     * modest headroom; simultaneous loud channels saturate, and the normal
+     * master volume remains the intended way to avoid overload. */
+    const int one_channel_full = AYEMU_TACTS_PER_SAMPLE * ay_volume_table[31];
+    int32_t sample = (mix * 30000) / one_channel_full;
+    if (sample > 32767)
+        sample = 32767;
+    else if (sample < -32768)
+        sample = -32768;
+    return (int16_t)sample;
 }

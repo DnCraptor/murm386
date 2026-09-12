@@ -726,7 +726,7 @@ static void pc_io_write(void *o, int addr, u8 val)
             }
         }
         csm_write((uint16_t)addr, val);
-        if (pc->covox_enabled == COVOX_SOUND_MASTER)
+        if (COVOX_IS_SOUND_MASTER(pc->covox_enabled))
             csm_psg_set_channel_c_output(csm_channel_c_output_enabled());
         return;
     }

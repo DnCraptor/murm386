@@ -1,4 +1,5 @@
 #include "csm.h"
+#include "csm_psg.h"
 #include <string.h>
 
 /*
@@ -32,10 +33,7 @@ typedef struct CsmState {
     PicState2 *pic;
 
     uint8_t index;
-    uint8_t regs[16];
-    uint8_t regs_bankb[16];
-    uint8_t extended_mode;
-    uint8_t extended_bank;
+    uint8_t regs[16]; /* bank-A DMA/control cache; PSG model is authoritative */
 
     uint8_t dma_enabled;
     uint8_t dma_running;
@@ -53,7 +51,7 @@ static CsmState csm;
 
 static inline int csm_irq_enabled(void)
 {
-    return (csm.regs[15] & 0x40) == 0;
+    return (csm_psg_get_bank_a_register(15) & 0x40) == 0;
 }
 
 static void csm_set_irq(int level)
@@ -77,32 +75,25 @@ static void csm_mode_bits_changed(void)
      * switch Port B back to PSG after DMA.  86Box uses period <= 1 as the
      * hardware-compatible heuristic observed from that software. */
     if (csm.dma_interval <= 1)
-        csm.regs[15] |= 0x80;
+        csm_psg_force_channel_c_output();
 
-    csm.dma_enabled = (((csm.regs[15] & 0x20) == 0) &&
-                       ((csm.regs[15] & 0x80) == 0) &&
+    const uint8_t r7 = csm_psg_get_bank_a_register(7);
+    const uint8_t r15 = csm_psg_get_bank_a_register(15);
+
+    csm.dma_enabled = (((r15 & 0x20) == 0) &&
+                       ((r15 & 0x80) == 0) &&
                        (csm.dma_interval > 1));
 
-    if ((csm.regs[7] & 0x04) || !csm.dma_enabled) {
+    if ((r7 & 0x04) || !csm.dma_enabled) {
         csm_stop_dma();
         csm.phase = 0;
         return;
     }
 
     csm.dma_running = 1;
-    csm.dma_mult = ((csm.regs[10] & 0x10) || csm.regs[10] == 0) ? 1 : 2;
+    const uint8_t r10 = csm_psg_get_bank_a_register(10);
+    csm.dma_mult = ((r10 & 0x10) || r10 == 0) ? 1 : 2;
     csm.phase = 0;
-}
-
-static void csm_clear_ay_regs(void)
-{
-    uint8_t mode = csm.regs[13] & 0xf0;
-    uint8_t mixer = csm.regs[7];
-
-    memset(csm.regs, 0, sizeof(csm.regs));
-    memset(csm.regs_bankb, 0, sizeof(csm.regs_bankb));
-    csm.regs[7] = mixer;
-    csm.regs[13] = mode;
 }
 
 static int csm_dma_transfer(void *opaque, int nchan, int dma_pos, int dma_len)
@@ -139,10 +130,13 @@ static int csm_dma_transfer(void *opaque, int nchan, int dma_pos, int dma_len)
         if (csm_irq_enabled())
             csm_set_irq(1);
 
-        /* Auto-init is reloaded by i8257_channel_run() after this callback
-         * returns terminal count.  Non-auto-init stops until reprogrammed. */
-        if (!(csm.dma->regs[CSM_DMA_CHAN].mode & 0x10))
-            csm.dma_running = 0;
+        /* DMA_OVER stops the Sound Master's own AYDMA clock.  The 8237 may
+         * auto-initialize its address/count independently, but that must not
+         * make the CSM continue clocking a new block without another PSG
+         * programming event.  This matches the working 86Box CSM model. */
+        csm.dma_running = 0;
+        csm.phase = 0;
+        i8257_dma_release_DREQ((IsaDma *)csm.dma, CSM_DMA_CHAN);
 
         return dma_len;
     }
@@ -158,7 +152,6 @@ void csm_init(I8257State *dma, PicState2 *pic)
     csm.pcm_sample = 0x80;
     csm.dma_interval = 1;
     csm.dma_mult = 1;
-    csm.regs[15] = 0xe0;
     csm.io_base = CSM_IO_BASE_DEFAULT;
 
     /* DMA1 is shared with SB16.  Do not claim it merely because the CSM
@@ -196,85 +189,18 @@ void csm_deactivate(void)
 
 static void csm_write_ay(uint8_t reg, uint8_t data)
 {
-    switch (reg) {
-    case 0:
-    case 2:
-    case 4:
-    case 6:
-    case 7:
-    case 11:
-    case 12:
-        if (!csm.extended_bank)
-            csm.regs[reg] = data;
-        else
-            csm.regs_bankb[reg] = data;
-        break;
+    (void)data;
 
-    case 1:
-    case 3:
-    case 5:
-        if (!csm.extended_mode)
-            csm.regs[reg] = data & 0x0f;
-        else if (!csm.extended_bank)
-            csm.regs[reg] = data;
-        else
-            csm.regs_bankb[reg] = data;
-        break;
+    /* csm_psg_write_data() has already updated the authoritative AY8930
+     * model.  Mirror only bank-A control bytes needed by AYDMA. */
+    for (uint8_t r = 0; r < 16; ++r)
+        csm.regs[r] = csm_psg_get_bank_a_register(r);
 
-    case 8:
-    case 9:
-    case 10:
-        if (!csm.extended_mode)
-            csm.regs[reg] = data & 0x1f;
-        else if (!csm.extended_bank)
-            csm.regs[reg] = data & 0x3f;
-        else
-            csm.regs_bankb[reg] = data;
-        break;
+    csm.dma_interval = ((uint16_t)csm.regs[5] << 8) | csm.regs[4];
+    if (!csm.dma_interval)
+        csm.dma_interval = 1;
 
-    case 13:
-        if ((data & 0xe0) == 0xa0) {
-            if (!csm.extended_mode)
-                csm_clear_ay_regs();
-            csm.extended_mode = 1;
-            csm.extended_bank = (data & 0x10) ? 1 : 0;
-            csm.regs[13] = data;
-        } else {
-            if (csm.extended_mode)
-                csm_clear_ay_regs();
-            csm.extended_mode = 0;
-            csm.extended_bank = 0;
-            csm.regs[13] = data & 0x0f;
-        }
-        break;
-
-    case 14:
-    case 15:
-        if (!csm.extended_bank)
-            csm.regs[reg] = data;
-        else
-            csm.regs_bankb[reg] = data;
-        break;
-
-    default:
-        return;
-    }
-
-    if (!csm.extended_bank) {
-        if (reg == 4) {
-            csm.dma_interval = ((uint16_t)csm.regs[5] << 8) | data;
-            if (!csm.dma_interval)
-                csm.dma_interval = 1;
-        } else if (reg == 5) {
-            /* Match 86Box's known-good AYDMA interpretation exactly: the
-             * raw byte written forms the high DMA-period byte. */
-            csm.dma_interval = ((uint16_t)data << 8) | csm.regs[4];
-            if (!csm.dma_interval)
-                csm.dma_interval = 1;
-        }
-    }
-
-    if (!csm.extended_bank && (reg == 7 || reg == 14 || reg == 15))
+    if (reg == 4 || reg == 5 || reg == 7 || reg == 10 || reg == 13 || reg == 14 || reg == 15)
         csm_mode_bits_changed();
 }
 
@@ -305,26 +231,7 @@ uint8_t csm_read(uint16_t port)
 {
     switch ((uint16_t)(port - csm.io_base) & 0x1f) {
     case 1:
-        if (csm.index <= 13) {
-            if (!csm.extended_bank || csm.index == 13)
-                return csm.regs[csm.index];
-            return csm.regs_bankb[csm.index];
-        }
-        if (csm.index == 14) {
-            if (csm.extended_bank)
-                return csm.regs_bankb[14];
-            if (csm.regs[14] == 0xff)
-                return 0xff;
-            return (csm.regs[7] & 0x40) ? csm.regs[14] : 0;
-        }
-        if (csm.index == 15) {
-            if (csm.extended_bank)
-                return csm.regs_bankb[15];
-            if (csm.regs[15] == 0xff)
-                return 0xff;
-            return (csm.regs[7] & 0x80) ? csm.regs[15] : 0xf0;
-        }
-        return csm.index;
+        return csm_psg_read_data();
     case 4:
     case 5:
     case 14:
@@ -336,7 +243,7 @@ uint8_t csm_read(uint16_t port)
 
 int csm_channel_c_output_enabled(void)
 {
-    return (csm.regs[15] & 0x80) != 0;
+    return (csm_psg_get_bank_a_register(15) & 0x80) != 0;
 }
 
 void csm_service(void)

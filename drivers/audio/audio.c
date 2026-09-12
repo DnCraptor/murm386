@@ -417,11 +417,12 @@ bool __not_in_flash_func(timer_callback)(repeating_timer_t *rt) {
         r_v += sample;
         l_v += sample;
     }
-    if (COVOX_IS_SOUND_MASTER(pc->covox_enabled) && !audio_is_hway()) {
-        /* pico-speccy AY mixer is unipolar 8-bit (0..255 mix domain).
-         * Expand that domain to the 16-bit mixer without altering its PSG
-         * generation algorithm. */
-        int16_t sample = (int16_t)((uint16_t)csm_psg_sample() << 7);
+    if (COVOX_IS_SOUND_MASTER(pc->covox_enabled) &&
+        (!audio_is_hway() || csm_psg_is_expanded())) {
+        /* AY8930 synthesis already returns a 16-bit mixer sample.  Keep the
+         * signal at that precision here; HW AY mode quantizes only at the
+         * final ay_hw_write_pcm() backend. */
+        int16_t sample = csm_psg_sample();
         r_v += sample;
         l_v += sample;
     }

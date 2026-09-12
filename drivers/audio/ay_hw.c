@@ -139,6 +139,22 @@ void ay_hw_psg_write_data(uint8_t value)
     critical_section_exit(&ay_bus_cs);
 }
 
+void ay_hw_psg_write_registers(const uint8_t regs[16])
+{
+    if (!regs)
+        return;
+
+    /* Restore a complete PSG image atomically relative to core1 PCM. */
+    critical_section_enter_blocking(&ay_bus_cs);
+    control_high(AY_CS0);
+    control_low(AY_CS1);
+    for (uint8_t r = 0; r < 16; ++r) {
+        ay_select_register(r);
+        ay_write_data(regs[r]);
+    }
+    critical_section_exit(&ay_bus_cs);
+}
+
 void __not_in_flash_func(ay_hw_write_pcm)(uint8_t sample)
 {
     /* simple resampling
@@ -172,5 +188,6 @@ void ay_hw_init(void) {}
 void ay_hw_write_pcm(uint8_t sample) { (void)sample; }
 void ay_hw_psg_select_register(uint8_t reg) { (void)reg; }
 void ay_hw_psg_write_data(uint8_t value) { (void)value; }
+void ay_hw_psg_write_registers(const uint8_t regs[16]) { (void)regs; }
 
 #endif
