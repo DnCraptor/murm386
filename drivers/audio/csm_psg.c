@@ -32,6 +32,7 @@ typedef struct {
 } CsmPsg;
 
 static CsmPsg psg;
+static uint8_t hw_channel_c_output = 1;
 
 /* Exact pre-generated envelope table from current pico-speccy AySound. */
 static const uint8_t envelope_table[16][128] = {
@@ -59,6 +60,7 @@ void csm_psg_reset(void)
     psg.regs[7] = 0xff;
     psg.selected_register = 0xff;
     psg.seed = 0xffff;
+    hw_channel_c_output = 1;
 }
 
 void csm_psg_select_register(uint8_t reg)
@@ -70,16 +72,44 @@ void csm_psg_select_register(uint8_t reg)
 
 void csm_psg_write_data(uint8_t value)
 {
-    if (audio_is_hway())
-        ay_hw_psg_write_data(value);
+    uint8_t hw_value = value;
 
-    if (psg.selected_register >= 16)
+    if (psg.selected_register < 16) {
+        psg.regs[psg.selected_register] = value;
+        if (psg.selected_register == 13) {
+            psg.env_pos = 0;
+            psg.cnt_e = 0;
+        }
+        /* On the original Sound Master, Port B bit 7 gates channel C
+         * outside the AY8930. A bare HW AY-3-8910 has no such external
+         * gate, so disable both tone and noise for C in the value sent
+         * to the physical chip while that external gate would be closed. */
+        if (psg.selected_register == 7 && !hw_channel_c_output)
+            hw_value |= 0x24;
+    }
+
+    if (audio_is_hway())
+        ay_hw_psg_write_data(hw_value);
+}
+
+void csm_psg_set_channel_c_output(int enabled)
+{
+    uint8_t new_state = enabled ? 1 : 0;
+    if (hw_channel_c_output == new_state)
         return;
 
-    psg.regs[psg.selected_register] = value;
-    if (psg.selected_register == 13) {
-        psg.env_pos = 0;
-        psg.cnt_e = 0;
+    hw_channel_c_output = new_state;
+
+    if (audio_is_hway()) {
+        uint8_t selected = psg.selected_register;
+        uint8_t mixer = psg.regs[7];
+        if (!hw_channel_c_output)
+            mixer |= 0x24;
+
+        ay_hw_psg_select_register(7);
+        ay_hw_psg_write_data(mixer);
+        if (selected < 16)
+            ay_hw_psg_select_register(selected);
     }
 }
 

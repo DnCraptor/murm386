@@ -46,6 +46,7 @@ typedef struct CsmState {
     uint64_t phase;
 
     volatile uint8_t irq_asserted;
+    uint16_t io_base;
 } CsmState;
 
 static CsmState csm;
@@ -158,10 +159,39 @@ void csm_init(I8257State *dma, PicState2 *pic)
     csm.dma_interval = 1;
     csm.dma_mult = 1;
     csm.regs[15] = 0xe0;
+    csm.io_base = CSM_IO_BASE_DEFAULT;
 
-    i8257_dma_register_channel((IsaDma *)dma, CSM_DMA_CHAN,
-                               csm_dma_transfer, &csm);
+    /* DMA1 is shared with SB16.  Do not claim it merely because the CSM
+     * state object exists; the settings layer binds the selected device. */
     csm_mode_bits_changed();
+}
+
+void csm_set_io_base(uint16_t base)
+{
+    if (base != 0x0220 && base != 0x0240)
+        base = CSM_IO_BASE_DEFAULT;
+    csm.io_base = base;
+}
+
+uint16_t csm_get_io_base(void)
+{
+    return csm.io_base;
+}
+
+void csm_bind_dma(void)
+{
+    if (!csm.dma)
+        return;
+    i8257_dma_register_channel((IsaDma *)csm.dma, CSM_DMA_CHAN,
+                               csm_dma_transfer, &csm);
+}
+
+void csm_deactivate(void)
+{
+    csm_stop_dma();
+    csm.phase = 0;
+    if (csm.irq_asserted)
+        csm_set_irq(0);
 }
 
 static void csm_write_ay(uint8_t reg, uint8_t data)
@@ -203,7 +233,7 @@ static void csm_write_ay(uint8_t reg, uint8_t data)
         break;
 
     case 13:
-        if ((data & 0xa0) == 0xa0) {
+        if ((data & 0xe0) == 0xa0) {
             if (!csm.extended_mode)
                 csm_clear_ay_regs();
             csm.extended_mode = 1;
@@ -250,7 +280,7 @@ static void csm_write_ay(uint8_t reg, uint8_t data)
 
 void csm_write(uint16_t port, uint8_t value)
 {
-    switch ((uint16_t)(port - CSM_IO_BASE) & 0x1f) {
+    switch ((uint16_t)(port - csm.io_base) & 0x1f) {
     case 0:
         csm.index = value;
         break;
@@ -273,7 +303,7 @@ void csm_write(uint16_t port, uint8_t value)
 
 uint8_t csm_read(uint16_t port)
 {
-    switch ((uint16_t)(port - CSM_IO_BASE) & 0x1f) {
+    switch ((uint16_t)(port - csm.io_base) & 0x1f) {
     case 1:
         if (csm.index <= 13) {
             if (!csm.extended_bank || csm.index == 13)
@@ -302,6 +332,11 @@ uint8_t csm_read(uint16_t port)
     default:
         return 0x00;
     }
+}
+
+int csm_channel_c_output_enabled(void)
+{
+    return (csm.regs[15] & 0x80) != 0;
 }
 
 void csm_service(void)

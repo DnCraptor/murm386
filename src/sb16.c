@@ -1623,13 +1623,19 @@ SB16State *sb16_new(
 //        error_setg(errp, "warning: Could not create auxiliary timer");
 //    }
 
-    i8257_dma_register_channel(s->isa_hdma, s->hdma, SB_read_DMA, s);
-
-    i8257_dma_register_channel(s->isa_dma, s->dma, SB_read_DMA, s);
+    sb16_bind_dma(s);
 
     s->can_write = 1;
 
     return s;
+}
+
+void sb16_bind_dma(SB16State *s)
+{
+    if (!s)
+        return;
+    i8257_dma_register_channel(s->isa_hdma, s->hdma, SB_read_DMA, s);
+    i8257_dma_register_channel(s->isa_dma, s->dma, SB_read_DMA, s);
 }
 
 // call sb16_getsample 44100 times per second

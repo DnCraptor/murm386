@@ -363,9 +363,18 @@ static void cycle_option(int direction) {
             break;
 
         case SETTING_COVOX: {
-            int mode = config_get_covox();
-            mode = (mode + direction + 3) % 3;
-            config_set_covox(mode);
+            /* Keep legacy numeric value 2 == Sound Master 240h in the INI,
+             * but present the more useful 220h variant first in the menu. */
+            static const int modes[] = {
+                COVOX_DISABLED, COVOX_ENABLED,
+                COVOX_SOUND_MASTER_220, COVOX_SOUND_MASTER_240
+            };
+            int current = config_get_covox();
+            int idx = 0;
+            for (int i = 0; i < 4; ++i)
+                if (modes[i] == current) { idx = i; break; }
+            idx = (idx + direction + 4) % 4;
+            config_set_covox(modes[idx]);
             break;
         }
 
@@ -573,11 +582,14 @@ static void draw_settings_menu(void) {
                 snprintf(value, sizeof(value), "< %s >", config_get_mpu401() ? "Enabled" : "Disabled");
                 break;
             case SETTING_COVOX: {
-                static const char *names[] = { "Disabled", "Speech Thing (LPT2)", "Sound Master (240h)" };
-                int mode = config_get_covox();
-                if (mode < COVOX_DISABLED || mode > COVOX_SOUND_MASTER)
-                    mode = COVOX_DISABLED;
-                snprintf(value, sizeof(value), "< %s >", names[mode]);
+                const char *name = "Disabled";
+                switch (config_get_covox()) {
+                case COVOX_ENABLED:          name = "Speech Thing (LPT2)"; break;
+                case COVOX_SOUND_MASTER_220: name = "Sound Master (220h)"; break;
+                case COVOX_SOUND_MASTER_240: name = "Sound Master (240h)"; break;
+                default: break;
+                }
+                snprintf(value, sizeof(value), "< %s >", name);
                 break;
             }
             case SETTING_DSS:

@@ -417,7 +417,7 @@ bool __not_in_flash_func(timer_callback)(repeating_timer_t *rt) {
         r_v += sample;
         l_v += sample;
     }
-    if (pc->covox_enabled == COVOX_SOUND_MASTER && !audio_is_hway()) {
+    if (COVOX_IS_SOUND_MASTER(pc->covox_enabled) && !audio_is_hway()) {
         /* pico-speccy AY mixer is unipolar 8-bit (0..255 mix domain).
          * Expand that domain to the 16-bit mixer without altering its PSG
          * generation algorithm. */

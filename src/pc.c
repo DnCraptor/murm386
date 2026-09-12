@@ -217,7 +217,8 @@ static __always_inline u8 _pc_io_read(void *o, int addr)
 	PC *pc = o;
 	u8 val;
 
-    if ((addr & 0xffe0) == CSM_IO_BASE)
+    if (COVOX_IS_SOUND_MASTER(pc->covox_enabled) &&
+        (addr & 0xffe0) == csm_get_io_base())
         return csm_read((uint16_t)addr);
 
 	switch(addr) {
@@ -290,16 +291,16 @@ static __always_inline u8 _pc_io_read(void *o, int addr)
 		if (pc->adlib_enabled) return adlib_read(pc->adlib, addr);
 		return 0xff;
 	case 0x240:
-		if (pc->covox_enabled == COVOX_SOUND_MASTER) return 0xff;
+		if (pc->covox_enabled == COVOX_SOUND_MASTER_240) return 0xff;
 		return 0xff;
 	case 0x241:
-		if (pc->covox_enabled == COVOX_SOUND_MASTER) return csm_psg_read_data();
+		if (pc->covox_enabled == COVOX_SOUND_MASTER_240) return csm_psg_read_data();
 		return 0xff;
 	case 0x242:
-		if (pc->covox_enabled == COVOX_SOUND_MASTER) return pc->covox_sample;
+		if (pc->covox_enabled == COVOX_SOUND_MASTER_240) return pc->covox_sample;
 		return 0xff;
 	case 0x243: case 0x244:
-		if (pc->covox_enabled == COVOX_SOUND_MASTER) return 0xff;
+		if (pc->covox_enabled == COVOX_SOUND_MASTER_240) return 0xff;
 		return 0xff;
 	case 0x228: case 0x229:
 	case 0x388: case 0x389: case 0x38a: case 0x38b:
@@ -432,7 +433,19 @@ static __always_inline u16 _pc_io_read16(void *o, int addr)
 	/* NE2000 networking removed */
 	case 0x310:
 		return 0xffff;
-	case 0x220: case 0x228: case 0x388: case 0x38a:
+	case 0x220:
+		if (pc->covox_enabled == COVOX_SOUND_MASTER_220) {
+			u16 lo = _pc_io_read(o, addr);
+			u16 hi = _pc_io_read(o, addr + 1);
+			return lo | (hi << 8);
+		}
+		if (pc->adlib_enabled) {
+			u16 lo = _pc_io_read(o, addr);
+			u16 hi = _pc_io_read(o, addr + 1);
+			return lo | (hi << 8);
+		}
+		return 0xFFFF;
+	case 0x228: case 0x388: case 0x38a:
 		if (pc->adlib_enabled) {
 			u16 lo = _pc_io_read(o, addr);
 			u16 hi = _pc_io_read(o, addr + 1);
@@ -440,7 +453,7 @@ static __always_inline u16 _pc_io_read16(void *o, int addr)
 		}
 		return 0xFFFF;
 	case 0x240:
-		if (pc->covox_enabled == COVOX_SOUND_MASTER) {
+		if (pc->covox_enabled == COVOX_SOUND_MASTER_240) {
 			u16 lo = _pc_io_read(o, addr);
 			u16 hi = _pc_io_read(o, addr + 1);
 			return lo | (hi << 8);
@@ -694,13 +707,14 @@ static void pc_io_write(void *o, int addr, u8 val)
 	cp_io_write();
 	debug_write("W8: %ph -> %02Xh\n", addr, val);
 	PC *pc = o;
-    if ((addr & 0xffe0) == CSM_IO_BASE) {
+    if (COVOX_IS_SOUND_MASTER(pc->covox_enabled) &&
+        (addr & 0xffe0) == csm_get_io_base()) {
         /* Keep the pre-existing Sound Master PSG path alive in parallel
          * with the AY8930 shadow used by csm.c for AYDMA.  In HW-AY mode
          * these calls also forward compatible PSG register traffic to
          * the physical AY-3-8910. */
-        if (pc->covox_enabled == COVOX_SOUND_MASTER) {
-            switch ((uint16_t)(addr - CSM_IO_BASE) & 0x1f) {
+        if (COVOX_IS_SOUND_MASTER(pc->covox_enabled)) {
+            switch ((uint16_t)(addr - csm_get_io_base()) & 0x1f) {
             case 0:
                 csm_psg_select_register(val);
                 break;
@@ -712,6 +726,8 @@ static void pc_io_write(void *o, int addr, u8 val)
             }
         }
         csm_write((uint16_t)addr, val);
+        if (pc->covox_enabled == COVOX_SOUND_MASTER)
+            csm_psg_set_channel_c_output(csm_channel_c_output_enabled());
         return;
     }
 	switch(addr) {
@@ -796,16 +812,16 @@ static void pc_io_write(void *o, int addr, u8 val)
 		if (pc->adlib_enabled) adlib_write(pc->adlib, addr, val);
 		return;
 	case 0x240:
-		if (pc->covox_enabled == COVOX_SOUND_MASTER) { csm_psg_select_register(val); return; }
+		if (pc->covox_enabled == COVOX_SOUND_MASTER_240) { csm_psg_select_register(val); return; }
 		return;
 	case 0x241:
-		if (pc->covox_enabled == COVOX_SOUND_MASTER) { csm_psg_write_data(val); return; }
+		if (pc->covox_enabled == COVOX_SOUND_MASTER_240) { csm_psg_write_data(val); return; }
 		return;
 	case 0x242:
-		if (pc->covox_enabled == COVOX_SOUND_MASTER) { pc->covox_sample = val; return; }
+		if (pc->covox_enabled == COVOX_SOUND_MASTER_240) { pc->covox_sample = val; return; }
 		return;
 	case 0x243: case 0x244:
-		if (pc->covox_enabled == COVOX_SOUND_MASTER) return; /* DMA/control: not emulated yet */
+		if (pc->covox_enabled == COVOX_SOUND_MASTER_240) return; /* legacy fallback */
 		return;
 	case 0x228: case 0x229:
 	case 0x388: case 0x389: case 0x38a: case 0x38b:
@@ -945,14 +961,25 @@ static void pc_io_write16(void *o, int addr, u16 val)
 	case 0x170:
 		ide_data_writew(pc->ide2, val);
 		return;
-	case 0x220: case 0x228: case 0x388: case 0x38a:
+	case 0x220:
+		if (pc->covox_enabled == COVOX_SOUND_MASTER_220) {
+			pc_io_write(o, addr, (uint8_t)val);
+			pc_io_write(o, addr + 1, (uint8_t)(val >> 8));
+			return;
+		}
+		if (pc->adlib_enabled) {
+			pc_io_write(o, addr, (uint8_t)val);
+			pc_io_write(o, addr + 1, (uint8_t)(val >> 8));
+		}
+		return;
+	case 0x228: case 0x388: case 0x38a:
 		if (pc->adlib_enabled) {
 			pc_io_write(o, addr, (uint8_t)val);
 			pc_io_write(o, addr + 1, (uint8_t)(val >> 8));
 		}
 		return;
 	case 0x240:
-		if (pc->covox_enabled == COVOX_SOUND_MASTER) {
+		if (pc->covox_enabled == COVOX_SOUND_MASTER_240) {
 			pc_io_write(o, addr, (uint8_t)val);
 			pc_io_write(o, addr + 1, (uint8_t)(val >> 8));
 		}

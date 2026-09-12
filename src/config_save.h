@@ -68,9 +68,15 @@ void config_set_tandy(int enabled);
 int config_get_dss(void);
 void config_set_dss(int enabled);
 
-#define COVOX_DISABLED     0
-#define COVOX_ENABLED      1
-#define COVOX_SOUND_MASTER 2
+#define COVOX_DISABLED          0
+#define COVOX_ENABLED           1
+/* Keep value 2 as the legacy/default Sound Master setting so existing
+ * config.ini files continue to mean 240h. */
+#define COVOX_SOUND_MASTER_240  2
+#define COVOX_SOUND_MASTER_220  3
+#define COVOX_SOUND_MASTER      COVOX_SOUND_MASTER_240
+#define COVOX_IS_SOUND_MASTER(mode) \
+    ((mode) == COVOX_SOUND_MASTER_240 || (mode) == COVOX_SOUND_MASTER_220)
 int config_get_covox(void);
 void config_set_covox(int mode);
 

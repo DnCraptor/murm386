@@ -19,6 +19,8 @@
 #include "pc.h"
 #include "video_profile.h"
 #include "csm_psg.h"
+#include "csm.h"
+#include "sb16.h"
 
 // Current configuration values (minimal storage)
 static int cfg_cpu_gen = EMU_CPU_GEN;
@@ -208,7 +210,19 @@ void config_set_pcspeaker(int enabled) {
 
 int config_get_adlib(void) { return cfg_adlib; }
 void config_set_adlib(int enabled) {
-    pc->adlib_enabled = enabled;
+    enabled = enabled ? 1 : 0;
+    if (enabled && COVOX_IS_SOUND_MASTER(cfg_covox)) {
+        cfg_covox = COVOX_DISABLED;
+        csm_deactivate();
+        if (pc) {
+            pc->covox_enabled = COVOX_DISABLED;
+            pc->covox_sample = 128;
+            csm_psg_reset();
+        }
+        cfg_changed = true;
+    }
+    if (pc)
+        pc->adlib_enabled = enabled;
     if (cfg_adlib != enabled) {
         cfg_adlib = enabled;
         cfg_changed = true;
@@ -217,7 +231,22 @@ void config_set_adlib(int enabled) {
 
 int config_get_soundblaster(void) { return cfg_soundblaster; }
 void config_set_soundblaster(int enabled) {
-    pc->sb16_enabled = enabled;
+    enabled = enabled ? 1 : 0;
+    if (enabled && COVOX_IS_SOUND_MASTER(cfg_covox)) {
+        cfg_covox = COVOX_DISABLED;
+        csm_deactivate();
+        if (pc) {
+            pc->covox_enabled = COVOX_DISABLED;
+            pc->covox_sample = 128;
+            csm_psg_reset();
+        }
+        cfg_changed = true;
+    }
+    if (pc) {
+        pc->sb16_enabled = enabled;
+        if (enabled)
+            sb16_bind_dma(pc->sb16);
+    }
     if (cfg_soundblaster != enabled) {
         cfg_soundblaster = enabled;
         cfg_changed = true;
@@ -235,8 +264,30 @@ void config_set_tandy(int enabled) {
 
 int config_get_covox(void) { return cfg_covox; }
 void config_set_covox(int mode) {
-    if (mode < COVOX_DISABLED || mode > COVOX_SOUND_MASTER)
+    if (mode < COVOX_DISABLED || mode > COVOX_SOUND_MASTER_220)
         mode = COVOX_DISABLED;
+
+    if (COVOX_IS_SOUND_MASTER(mode)) {
+        /* Sound Master owns the 220h/240h block and DMA1.  Do not leave
+         * AdLib or SB16 active behind it: SB16 also registers DMA1. */
+        if (cfg_adlib) {
+            cfg_adlib = 0;
+            cfg_changed = true;
+        }
+        if (cfg_soundblaster) {
+            cfg_soundblaster = 0;
+            cfg_changed = true;
+        }
+        if (pc) {
+            pc->adlib_enabled = 0;
+            pc->sb16_enabled = 0;
+        }
+        csm_set_io_base(mode == COVOX_SOUND_MASTER_220 ? 0x0220 : 0x0240);
+        csm_bind_dma();
+    } else if (COVOX_IS_SOUND_MASTER(cfg_covox)) {
+        csm_deactivate();
+    }
+
     if (pc && pc->covox_enabled != mode) {
         pc->covox_enabled = mode;
         pc->covox_sample = 128;
@@ -627,7 +678,7 @@ int parse_frank_386_ini(void* user, const char* section,
         cfg_tandy = atoi(value);
     } else if (strcmp(name, "covox") == 0) {
         cfg_covox = atoi(value);
-        if (cfg_covox < COVOX_DISABLED || cfg_covox > COVOX_SOUND_MASTER)
+        if (cfg_covox < COVOX_DISABLED || cfg_covox > COVOX_SOUND_MASTER_220)
             cfg_covox = COVOX_DISABLED;
     } else if (strcmp(name, "mpu401") == 0) {
         cfg_mpu401 = atoi(value);

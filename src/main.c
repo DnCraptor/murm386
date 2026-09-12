@@ -1776,7 +1776,10 @@ static bool init_emulator(void) {
     config_set_fpu(config.fpu);
     config_set_bios_file(config.bios);
     config_set_raw_sd_hdd(config.raw_sd_hdd);
-    // Hardware settings are loaded from [murm-286] section via parse_frank_386_ini
+    // Hardware settings are loaded from [murm-286] section via parse_frank_386_ini.
+    // Re-apply Covox once so a saved Sound Master selection establishes its
+    // I/O base and removes stale AdLib/SB conflicts from older configs.
+    config_set_covox(config_get_covox());
     config_clear_changes();
 
     // Apply audio/mouse enable settings from config to PC instance
