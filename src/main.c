@@ -1777,6 +1777,7 @@ static bool init_emulator(void) {
     pc->dss_enabled = config_get_dss();
     pc->mouse_enabled = config_get_mouse() || config_get_nes_mouse();
     pc->joystick_enabled = config_get_nes_joystick() || config_get_usb_joystick() || config_get_mouse_joystick();
+    gameport_set_button_swap(config_get_joystick_swap_buttons());
     DBG_PRINT("  Audio: PC Speaker=%d, Adlib=%d, SB16=%d, MPU401=%d, Tandy=%d, Covox=%d, DSS=%d, Mouse=%d\n",
               pc->pcspk_enabled, pc->adlib_enabled, pc->sb16_enabled, pc->mpu401_enabled,
               pc->tandy_enabled, pc->covox_enabled, pc->dss_enabled, pc->mouse_enabled);

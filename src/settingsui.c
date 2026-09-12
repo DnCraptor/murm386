@@ -48,6 +48,7 @@ typedef enum {
     SETTING_NES_JOYSTICK,
     SETTING_USB_JOYSTICK,
     SETTING_MOUSE_JOYSTICK,
+    SETTING_JOYSTICK_BUTTONS,
     SETTING_USB_MODEM,
     SETTING_MOUSE_INVERT_Y,
     SETTING_CPU_FREQ,
@@ -401,6 +402,10 @@ static void cycle_option(int direction) {
             break;
         }
 
+        case SETTING_JOYSTICK_BUTTONS:
+            config_set_joystick_swap_buttons(config_get_joystick_swap_buttons() ? 0 : 1);
+            break;
+
         case SETTING_USB_MODEM:
             config_set_usb_modem(config_get_usb_modem() ? 0 : 1);
             break;
@@ -488,6 +493,7 @@ static void draw_settings_menu(void) {
         "NES Joystick:",
         "USB Joystick:",
         "Mouse as Joystick:",
+        "Joystick buttons:",
         "USB modem:",
         "Invert Mouse Y:",
         "RP2350 Freq:",
@@ -580,6 +586,9 @@ static void draw_settings_menu(void) {
                 snprintf(value, sizeof(value), "< %s >", names[mode]);
                 break;
             }
+            case SETTING_JOYSTICK_BUTTONS:
+                snprintf(value, sizeof(value), "< %s >", config_get_joystick_swap_buttons() ? "Swapped" : "Normal");
+                break;
             case SETTING_USB_MODEM:
                 snprintf(value, sizeof(value), "< %s >", config_get_usb_modem() ? "COM1" : "None");
                 break;

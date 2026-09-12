@@ -95,6 +95,10 @@ void config_set_usb_joystick(int enabled);
 int config_get_mouse_joystick(void);
 void config_set_mouse_joystick(int mode);
 
+/* Swap game-port button 1 and button 2 for every joystick source. */
+int config_get_joystick_swap_buttons(void);
+void config_set_joystick_swap_buttons(int enabled);
+
 int config_get_cpu_freq(void);
 void config_set_cpu_freq(int mhz);
 

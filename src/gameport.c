@@ -22,6 +22,7 @@ static uint32_t gp_count;
 static uint32_t gp_dur_x = GP_COUNT_CENTRE;
 static uint32_t gp_dur_y = GP_COUNT_CENTRE;
 static uint8_t  gp_buttons;       /* bit 0 = button 1, bit 1 = button 2 */
+static bool     gp_swap_buttons;
 static bool     gp_running;
 
 
@@ -51,6 +52,10 @@ void gameport_set_analog(int16_t x, int16_t y, uint8_t buttons) {
     gp_buttons = buttons;
 }
 
+void gameport_set_button_swap(bool enabled) {
+    gp_swap_buttons = enabled;
+}
+
 void gameport_write(void) {
     gp_count = 0;
     gp_running = true;
@@ -60,8 +65,11 @@ uint8_t gameport_read(void) {
     /* Buttons are active low and are readable without firing the
      * one-shots — plenty of games poll only the buttons. */
     uint8_t v = 0xf0;
-    if (gp_buttons & 1u) v &= (uint8_t)~0x10u;
-    if (gp_buttons & 2u) v &= (uint8_t)~0x20u;
+    uint8_t buttons = gp_buttons;
+    if (gp_swap_buttons)
+        buttons = (uint8_t)(((buttons & 1u) << 1) | ((buttons & 2u) >> 1));
+    if (buttons & 1u) v &= (uint8_t)~0x10u;
+    if (buttons & 2u) v &= (uint8_t)~0x20u;
 
     if (gp_running) {
         const uint32_t count = gp_count++;

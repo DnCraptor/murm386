@@ -49,6 +49,9 @@ void gameport_set(int x, int y, uint8_t buttons);
 /* Feed an analog stick. X/Y span the full signed 16-bit range; 0 is centre. */
 void gameport_set_analog(int16_t x, int16_t y, uint8_t buttons);
 
+/* Globally exchange joystick button 1 and button 2. */
+void gameport_set_button_swap(bool enabled);
+
 /* Port 0x201. A write of any value fires the one-shots. */
 void gameport_write(void);
 uint8_t gameport_read(void);

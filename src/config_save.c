@@ -8,6 +8,7 @@
  */
 
 #include "config_save.h"
+#include "gameport.h"
 #include "board_config.h"
 #include "disk.h"
 #include "ff.h"
@@ -41,6 +42,7 @@ static int cfg_nes_mouse = 0;
 static int cfg_nes_joystick = 0;
 static int cfg_usb_joystick = 0;
 static int cfg_mouse_joystick = 0;
+static int cfg_joystick_swap_buttons = 0;
 static int cfg_cpu_freq = CPU_CLOCK_MHZ;
 static int cfg_psram_freq = PSRAM_MAX_FREQ_MHZ;
 static int cfg_psram_size_mb = 0;
@@ -283,6 +285,16 @@ void config_set_mouse_joystick(int mode) {
                            cfg_nes_joystick || cfg_usb_joystick;
     if (cfg_mouse_joystick != mode) {
         cfg_mouse_joystick = mode;
+        cfg_changed = true;
+    }
+}
+
+int config_get_joystick_swap_buttons(void) { return cfg_joystick_swap_buttons; }
+void config_set_joystick_swap_buttons(int enabled) {
+    enabled = !!enabled;
+    gameport_set_button_swap(enabled);
+    if (cfg_joystick_swap_buttons != enabled) {
+        cfg_joystick_swap_buttons = enabled;
         cfg_changed = true;
     }
 }
@@ -537,6 +549,8 @@ bool config_save_all(void) {
     write_line(&fp, line);
     snprintf(line, sizeof(line), "mouse_joystick=%d\r\n", cfg_mouse_joystick);
     write_line(&fp, line);
+    snprintf(line, sizeof(line), "joystick_swap_buttons=%d\r\n", cfg_joystick_swap_buttons);
+    write_line(&fp, line);
     snprintf(line, sizeof(line), "usb=%s\r\n",
              cfg_usb_mode == USB_MODE_DEVICE ? "DEVICE" : "HOST");
     write_line(&fp, line);
@@ -619,6 +633,8 @@ int parse_frank_386_ini(void* user, const char* section,
         if (cfg_mouse_joystick < MOUSE_JOYSTICK_DISABLED ||
             cfg_mouse_joystick > MOUSE_JOYSTICK_BOTH)
             cfg_mouse_joystick = MOUSE_JOYSTICK_DISABLED;
+    } else if (strcmp(name, "joystick_swap_buttons") == 0) {
+        cfg_joystick_swap_buttons = !!atoi(value);
     } else if (strcmp(name, "usb") == 0) {
         cfg_usb_mode = (strcasecmp(value, "DEVICE") == 0)
                      ? USB_MODE_DEVICE : USB_MODE_HOST;
