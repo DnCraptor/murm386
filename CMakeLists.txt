@@ -303,6 +303,7 @@ target_link_libraries(video_driver pico_stdlib hardware_dma hardware_pio hardwar
 add_library(audio_driver
     drivers/audio/audio.c
     drivers/audio/ay_hw.c
+    drivers/audio/csm_psg.c
 )
 target_include_directories(audio_driver PUBLIC drivers/audio src)
 target_compile_definitions(audio_driver PRIVATE

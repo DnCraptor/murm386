@@ -68,8 +68,11 @@ void config_set_tandy(int enabled);
 int config_get_dss(void);
 void config_set_dss(int enabled);
 
+#define COVOX_DISABLED     0
+#define COVOX_ENABLED      1
+#define COVOX_SOUND_MASTER 2
 int config_get_covox(void);
-void config_set_covox(int enabled);
+void config_set_covox(int mode);
 
 int config_get_mpu401(void);
 void config_set_mpu401(int enabled);

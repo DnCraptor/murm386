@@ -19,6 +19,7 @@
 #include "bulk_bounce.h"
 #include "psram_init.h"
 #include "config_save.h"
+#include "csm_psg.h"
 
 extern bool SELECT_VGA;
 
@@ -281,7 +282,25 @@ static __always_inline u8 _pc_io_read(void *o, int addr)
 	case 0x61:
 		val = pcspk_ioport_read(pc->pcspk);
 		return val;
-	case 0x220: case 0x221: case 0x222: case 0x223:
+	case 0x220:
+		if (pc->covox_enabled == COVOX_SOUND_MASTER) return 0xff;
+		if (pc->adlib_enabled) return adlib_read(pc->adlib, addr);
+		return 0xff;
+	case 0x221:
+		if (pc->covox_enabled == COVOX_SOUND_MASTER) return csm_psg_read_data();
+		if (pc->adlib_enabled) return adlib_read(pc->adlib, addr);
+		return 0xff;
+	case 0x222:
+		if (pc->covox_enabled == COVOX_SOUND_MASTER) return pc->covox_sample;
+		if (pc->adlib_enabled) return adlib_read(pc->adlib, addr);
+		return 0xff;
+	case 0x223:
+		if (pc->covox_enabled == COVOX_SOUND_MASTER) return 0xff;
+		if (pc->adlib_enabled) return adlib_read(pc->adlib, addr);
+		return 0xff;
+	case 0x224:
+		if (pc->covox_enabled == COVOX_SOUND_MASTER) return 0xff;
+		break;
 	case 0x228: case 0x229:
 	case 0x388: case 0x389: case 0x38a: case 0x38b:
 		if (pc->adlib_enabled)
@@ -414,6 +433,11 @@ static __always_inline u16 _pc_io_read16(void *o, int addr)
 	case 0x310:
 		return 0xffff;
 	case 0x220: case 0x228: case 0x388: case 0x38a:
+		if (addr == 0x220 && pc->covox_enabled == COVOX_SOUND_MASTER) {
+			u16 lo = _pc_io_read(o, addr);
+			u16 hi = _pc_io_read(o, addr + 1);
+			return lo | (hi << 8);
+		}
 		if (pc->adlib_enabled) {
 			u16 lo = _pc_io_read(o, addr);
 			u16 hi = _pc_io_read(o, addr + 1);
@@ -746,7 +770,22 @@ static void pc_io_write(void *o, int addr, u8 val)
 	case 0x61:
 		pcspk_ioport_write(pc->pcspk, val);
 		return;
-	case 0x220: case 0x221: case 0x222: case 0x223:
+	case 0x220:
+		if (pc->covox_enabled == COVOX_SOUND_MASTER) { csm_psg_select_register(val); return; }
+		if (pc->adlib_enabled) adlib_write(pc->adlib, addr, val);
+		return;
+	case 0x221:
+		if (pc->covox_enabled == COVOX_SOUND_MASTER) { csm_psg_write_data(val); return; }
+		if (pc->adlib_enabled) adlib_write(pc->adlib, addr, val);
+		return;
+	case 0x222:
+		if (pc->covox_enabled == COVOX_SOUND_MASTER) { pc->covox_sample = val; return; }
+		if (pc->adlib_enabled) adlib_write(pc->adlib, addr, val);
+		return;
+	case 0x223:
+		if (pc->covox_enabled == COVOX_SOUND_MASTER) return; /* DMA/control: not emulated yet */
+		if (pc->adlib_enabled) adlib_write(pc->adlib, addr, val);
+		return;
 	case 0x228: case 0x229:
 	case 0x388: case 0x389: case 0x38a: case 0x38b:
 		if (pc->adlib_enabled)
@@ -812,6 +851,7 @@ static void pc_io_write(void *o, int addr, u8 val)
 		i8257_write_pageh(pc->isa_hdma, addr - 0x488, val);
 		return;
 	case 0x224:
+		if (pc->covox_enabled == COVOX_SOUND_MASTER) return; /* DMA/control: not emulated yet */
 		if (pc->sb16_enabled) {
 			sb16_mixer_write_indexb(pc->sb16, addr, val);
 		}
@@ -838,7 +878,7 @@ static void pc_io_write(void *o, int addr, u8 val)
 	 * 0x278 = LPT2 data. */
 	case 0x278:
 		pc->lpt_data[1] = val;              /* latch! */
-		if (pc->covox_enabled) pc->covox_sample = val;
+		if (pc->covox_enabled == COVOX_ENABLED) pc->covox_sample = val;
 		return;
 	case 0x27A:
 		pc->lpt_ctrl[1] = val & 0x1F;
@@ -886,6 +926,11 @@ static void pc_io_write16(void *o, int addr, u16 val)
 		ide_data_writew(pc->ide2, val);
 		return;
 	case 0x220: case 0x228: case 0x388: case 0x38a:
+		if (addr == 0x220 && pc->covox_enabled == COVOX_SOUND_MASTER) {
+			pc_io_write(o, addr, (uint8_t)val);
+			pc_io_write(o, addr + 1, (uint8_t)(val >> 8));
+			return;
+		}
 		if (pc->adlib_enabled) {
 			pc_io_write(o, addr, (uint8_t)val);
 			pc_io_write(o, addr + 1, (uint8_t)(val >> 8));
@@ -1489,7 +1534,8 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	pc->tandy_enabled = 0;
 	pc->covox_enabled = 1;
 	pc->mpu401_enabled = 1;
-	pc->covox_sample  = 0;
+	pc->covox_sample  = 128;
+	csm_psg_reset();
 	pc->dss_enabled = 0;
 	pc->mouse_enabled = 1;
 
@@ -1768,11 +1814,11 @@ snprintf(left, sizeof(left), "Video    : %s [%s]",
 
     snprintf(serial, sizeof(serial), "Serial   : %s",
              pc->enable_serial ? "03F8h" : "none");
-    if (pc->dss_enabled && pc->covox_enabled)
+    if (pc->dss_enabled && pc->covox_enabled == COVOX_ENABLED)
         snprintf(parallel, sizeof(parallel), "Parallel : 0378h 0278h");
     else if (pc->dss_enabled)
         snprintf(parallel, sizeof(parallel), "Parallel : 0378h");
-    else if (pc->covox_enabled)
+    else if (pc->covox_enabled == COVOX_ENABLED)
         snprintf(parallel, sizeof(parallel), "Parallel : 0278h");
     else
         snprintf(parallel, sizeof(parallel), "Parallel : none");

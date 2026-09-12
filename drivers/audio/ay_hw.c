@@ -3,6 +3,7 @@
 
 #include <pico/stdlib.h>
 #include <hardware/clocks.h>
+#include <pico/critical_section.h>
 
 #if HAS_AUDIO_HWAY
 
@@ -24,6 +25,7 @@
 static uint16_t control_bits;
 static uint8_t last_pcm;
 static bool last_pcm_valid;
+static critical_section_t ay_bus_cs;
 
 static inline void ay_wait_to_adjust(uint32_t wait_nops)
 {
@@ -97,6 +99,7 @@ void ay_hw_init(void)
     gpio_put(HWAY_LATCH_PIN, 0);
     gpio_put(HWAY_CLOCK_PIN, 0);
     gpio_put(HWAY_DATA_PIN, 0);
+    critical_section_init(&ay_bus_cs);
 
     /* Match the PICO-BK HWAY reset sequence exactly: control_bits starts
      * at zero, AY_Enable is driven low first, then the reference idle
@@ -113,6 +116,27 @@ void ay_hw_init(void)
      * PCM sample.  Do the same here; do not rely on AY/595 state persisting
      * between timer callbacks. */
     last_pcm_valid = false;
+}
+
+void ay_hw_psg_select_register(uint8_t reg)
+{
+    /* Guest I/O runs on core 0 while PCM runs from the core-1 audio timer.
+     * Serialize only the physical 595 transaction; PSG register semantics
+     * remain exactly the pico-speccy/PICO-BK ones. */
+    critical_section_enter_blocking(&ay_bus_cs);
+    control_high(AY_CS0);
+    control_low(AY_CS1);
+    ay_select_register(reg);
+    critical_section_exit(&ay_bus_cs);
+}
+
+void ay_hw_psg_write_data(uint8_t value)
+{
+    critical_section_enter_blocking(&ay_bus_cs);
+    control_high(AY_CS0);
+    control_low(AY_CS1);
+    ay_write_data(value);
+    critical_section_exit(&ay_bus_cs);
 }
 
 void __not_in_flash_func(ay_hw_write_pcm)(uint8_t sample)
@@ -132,17 +156,21 @@ void __not_in_flash_func(ay_hw_write_pcm)(uint8_t sample)
      *   R7  <- 0x80 (port B output);
      *   R15 <- PCM sample.
      */
+    critical_section_enter_blocking(&ay_bus_cs);
     control_high(AY_CS1);
     control_low(AY_CS0);
     ay_select_register(7);
     ay_write_data(0x80);
     ay_select_register(15);
     ay_write_data(sample);
+    critical_section_exit(&ay_bus_cs);
 }
 
 #else
 
 void ay_hw_init(void) {}
 void ay_hw_write_pcm(uint8_t sample) { (void)sample; }
+void ay_hw_psg_select_register(uint8_t reg) { (void)reg; }
+void ay_hw_psg_write_data(uint8_t value) { (void)value; }
 
 #endif

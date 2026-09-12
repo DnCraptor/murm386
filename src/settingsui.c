@@ -362,9 +362,12 @@ static void cycle_option(int direction) {
             config_set_mpu401(config_get_mpu401() ? 0 : 1);
             break;
 
-        case SETTING_COVOX:
-            config_set_covox(config_get_covox() ? 0 : 1);
+        case SETTING_COVOX: {
+            int mode = config_get_covox();
+            mode = (mode + direction + 3) % 3;
+            config_set_covox(mode);
             break;
+        }
 
         case SETTING_DSS:
             config_set_dss(config_get_dss() ? 0 : 1);
@@ -502,8 +505,8 @@ static void draw_settings_menu(void) {
         "SoundBlaster:",
         "Roland MPU-401:",
         "Tandy Sound:",
-        "Covox (LPT2):",
-        "Disney Sound Source:",
+        "Covox:",
+        "Disney Sound Source (LPT1):",
         "PS/2 or USB Mouse:",
         "Mouse speed:",
         "NES Mouse:",
@@ -569,9 +572,14 @@ static void draw_settings_menu(void) {
             case SETTING_MPU401:
                 snprintf(value, sizeof(value), "< %s >", config_get_mpu401() ? "Enabled" : "Disabled");
                 break;
-            case SETTING_COVOX:
-                snprintf(value, sizeof(value), "< %s >", config_get_covox() ? "Enabled" : "Disabled");
+            case SETTING_COVOX: {
+                static const char *names[] = { "Disabled", "Speech Thing (LPT2)", "Sound Master (220h)" };
+                int mode = config_get_covox();
+                if (mode < COVOX_DISABLED || mode > COVOX_SOUND_MASTER)
+                    mode = COVOX_DISABLED;
+                snprintf(value, sizeof(value), "< %s >", names[mode]);
                 break;
+            }
             case SETTING_DSS:
                 snprintf(value, sizeof(value), "< %s >", config_get_dss() ? "Enabled" : "Disabled");
                 break;

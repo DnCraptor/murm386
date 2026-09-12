@@ -26,6 +26,8 @@
 #include "dss.h"
 #include "adlib.h"
 #include "board_config.h"
+#include "config_save.h"
+#include "csm_psg.h"
 #if HAS_AUDIO_HWAY
 #include "ay_hw.h"
 #endif
@@ -210,6 +212,13 @@ uint8_t audio_get_volume(void) {
     return 16 - prev;
 }
 
+bool audio_is_hway(void) {
+#if HAS_AUDIO_HWAY
+    return audio_use_hway;
+#else
+    return false;
+#endif
+}
 
 void audio_init(void) {
 #if HAS_AUDIO_HWAY
@@ -395,8 +404,18 @@ bool __not_in_flash_func(timer_callback)(repeating_timer_t *rt) {
     if (pc->pcspk_enabled) {
         b_v = pcspk_sample(pc->pcspk);
     }
-    if (pc->covox_enabled && pc->covox_sample) {
-        int16_t sample = ((int16_t)pc->covox_sample - 127) << 8;
+    if (pc->covox_enabled != COVOX_DISABLED) {
+        /* 8-bit unsigned DAC -> signed mixer.  Keep the arithmetic wide:
+         * 255 must stay positive, and 0 is a valid DAC level. */
+        int32_t sample = ((int32_t)pc->covox_sample - 128) << 8;
+        r_v += sample;
+        l_v += sample;
+    }
+    if (pc->covox_enabled == COVOX_SOUND_MASTER && !audio_is_hway()) {
+        /* pico-speccy AY mixer is unipolar 8-bit (0..255 mix domain).
+         * Expand that domain to the 16-bit mixer without altering its PSG
+         * generation algorithm. */
+        int16_t sample = (int16_t)((uint16_t)csm_psg_sample() << 7);
         r_v += sample;
         l_v += sample;
     }

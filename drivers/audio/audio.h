@@ -63,6 +63,7 @@ void audio_set_boot_output(int output);
 void audio_set_enabled(bool);
 void audio_set_volume(uint8_t);
 uint8_t audio_get_volume(void);
+bool audio_is_hway(void);
 void audio_init(void);
 void audio_play_tone(unsigned hz, unsigned ms);
 

@@ -18,6 +18,7 @@
 #include <strings.h>
 #include "pc.h"
 #include "video_profile.h"
+#include "csm_psg.h"
 
 // Current configuration values (minimal storage)
 static int cfg_cpu_gen = EMU_CPU_GEN;
@@ -233,10 +234,16 @@ void config_set_tandy(int enabled) {
 }
 
 int config_get_covox(void) { return cfg_covox; }
-void config_set_covox(int enabled) {
-    pc->covox_enabled = enabled;
-    if (cfg_covox != enabled) {
-        cfg_covox = enabled;
+void config_set_covox(int mode) {
+    if (mode < COVOX_DISABLED || mode > COVOX_SOUND_MASTER)
+        mode = COVOX_DISABLED;
+    if (pc && pc->covox_enabled != mode) {
+        pc->covox_enabled = mode;
+        pc->covox_sample = 128;
+        csm_psg_reset();
+    }
+    if (cfg_covox != mode) {
+        cfg_covox = mode;
         cfg_changed = true;
     }
 }
@@ -620,6 +627,8 @@ int parse_frank_386_ini(void* user, const char* section,
         cfg_tandy = atoi(value);
     } else if (strcmp(name, "covox") == 0) {
         cfg_covox = atoi(value);
+        if (cfg_covox < COVOX_DISABLED || cfg_covox > COVOX_SOUND_MASTER)
+            cfg_covox = COVOX_DISABLED;
     } else if (strcmp(name, "mpu401") == 0) {
         cfg_mpu401 = atoi(value);
     } else if (strcmp(name, "dss") == 0) {
