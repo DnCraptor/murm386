@@ -528,6 +528,24 @@ static inline char get_rp2350_package_letter(void) {
 #endif
 
 
+/*
+ * Hardware AY-3-8910 PCM backend.  The Murmulator AY interface uses the
+ * same three-pin audio connector as I2S: I2S DATA becomes the 74HC595
+ * latch, BCLK becomes shift clock and LRCLK becomes shift data.
+ *
+ * PICO-PC has no usable I2S backend in this tree, but the reference
+ * hardware AY wiring still occupies the corresponding audio pins 26..28.
+ */
+#if defined(I2S_DATA_PIN) && defined(I2S_CLOCK_PIN_BASE)
+#define HWAY_LATCH_PIN I2S_DATA_PIN
+#define HWAY_CLOCK_PIN I2S_CLOCK_PIN_BASE
+#define HWAY_DATA_PIN  (I2S_CLOCK_PIN_BASE + 1)
+#elif defined(BOARD_PC)
+#define HWAY_LATCH_PIN 26
+#define HWAY_CLOCK_PIN 27
+#define HWAY_DATA_PIN  28
+#endif
+
 // Runtime audio backend availability derived from the selected board pins.
 #if defined(I2S_DATA_PIN) && defined(I2S_CLOCK_PIN_BASE)
 #define HAS_AUDIO_I2S 1
@@ -538,6 +556,11 @@ static inline char get_rp2350_package_letter(void) {
 #define HAS_AUDIO_PWM 1
 #else
 #define HAS_AUDIO_PWM 0
+#endif
+#if defined(HWAY_LATCH_PIN) && defined(HWAY_CLOCK_PIN) && defined(HWAY_DATA_PIN)
+#define HAS_AUDIO_HWAY 1
+#else
+#define HAS_AUDIO_HWAY 0
 #endif
 
 //=============================================================================

@@ -1444,6 +1444,13 @@ static bool init_hardware(void) {
             vga_hw_set_boot_output(false);
             f_close(&fp);
         }
+#if HAS_AUDIO_HWAY
+        if (f_open(&fp, "/.config/286/force_hway", FA_READ) == FR_OK) {
+            audio_set_boot_output(AUDIO_OUTPUT_HWAY);
+            f_close(&fp);
+        }
+        else
+#endif
 #if HAS_AUDIO_I2S && HAS_AUDIO_PWM
         if (f_open(&fp, "/.config/286/force_i2s", FA_READ) == FR_OK) {
             audio_set_boot_output(AUDIO_OUTPUT_I2S);
@@ -1453,6 +1460,12 @@ static bool init_hardware(void) {
             audio_set_boot_output(AUDIO_OUTPUT_PWM);
             f_close(&fp);
         }
+#elif HAS_AUDIO_I2S
+        if (f_open(&fp, "/.config/286/force_i2s", FA_READ) == FR_OK)
+            f_close(&fp);
+#elif HAS_AUDIO_PWM
+        if (f_open(&fp, "/.config/286/force_pwm", FA_READ) == FR_OK)
+            f_close(&fp);
 #endif
     }
 

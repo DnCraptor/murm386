@@ -26,6 +26,9 @@
 #include "dss.h"
 #include "adlib.h"
 #include "board_config.h"
+#if HAS_AUDIO_HWAY
+#include "ay_hw.h"
+#endif
 #include <pico/time.h>
 
 #if HAS_AUDIO_PWM
@@ -176,10 +179,11 @@ static pwm_config pwm;
 #endif
 
 static bool audio_use_i2s = false;
+static bool audio_use_hway = false;
 static int boot_audio_output = AUDIO_OUTPUT_AUTO;
 
 void audio_set_boot_output(int output) {
-    if (output >= AUDIO_OUTPUT_AUTO && output <= AUDIO_OUTPUT_I2S)
+    if (output >= AUDIO_OUTPUT_AUTO && output <= AUDIO_OUTPUT_HWAY)
         boot_audio_output = output;
 }
 
@@ -208,6 +212,17 @@ uint8_t audio_get_volume(void) {
 
 
 void audio_init(void) {
+#if HAS_AUDIO_HWAY
+    audio_use_hway = (boot_audio_output == AUDIO_OUTPUT_HWAY);
+    if (audio_use_hway) {
+        ay_hw_init();
+        ay_hw_write_pcm(128);
+        return;
+    }
+#else
+    audio_use_hway = false;
+#endif
+
 #if HAS_AUDIO_I2S && HAS_AUDIO_PWM
     if (boot_audio_output == AUDIO_OUTPUT_AUTO) {
         if (link_i2s_code == 0xFF) {
@@ -284,6 +299,20 @@ void audio_play_tone(unsigned hz, unsigned ms) {
     if (!hz || !ms)
         return;
 
+#if HAS_AUDIO_HWAY
+    if (audio_use_hway) {
+        const uint32_t half_period_us = 500000u / hz;
+        const uint32_t half_cycles = (hz * ms * 2u) / 1000u;
+        int32_t amp = 127 >> volume;
+        if (amp < 1) amp = 1;
+        for (uint32_t i = 0; i < half_cycles; ++i) {
+            ay_hw_write_pcm((uint8_t)(128 + ((i & 1u) ? -amp : amp)));
+            sleep_us(half_period_us);
+        }
+        ay_hw_write_pcm(128);
+        return;
+    }
+#endif
 #if HAS_AUDIO_I2S
     if (audio_use_i2s) {
     const uint32_t sample_rate = SOUND_FREQUENCY;
@@ -391,6 +420,22 @@ bool __not_in_flash_func(timer_callback)(repeating_timer_t *rt) {
     }
     r_v += dss_v;
     l_v += dss_v;
+#if HAS_AUDIO_HWAY
+    if (audio_use_hway) {
+        if (b_v) { r_v = l_v = 32767; }
+        if (r_v > 32767) r_v = 32767;
+        if (r_v < -32768) r_v = -32768;
+        if (l_v > 32767) l_v = 32767;
+        if (l_v < -32768) l_v = -32768;
+        int32_t mono = ((int32_t)r_v + (int32_t)l_v) / 2;
+        mono >>= volume;
+        int32_t pcm = (mono + 32768) >> 8;
+        if (pcm < 0) pcm = 0;
+        if (pcm > 255) pcm = 255;
+        ay_hw_write_pcm((uint8_t)pcm);
+        return true;
+    }
+#endif
 #if HAS_AUDIO_I2S
     if (audio_use_i2s) {
         if (b_v) { r_v = l_v = 32767; }

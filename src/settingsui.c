@@ -119,6 +119,7 @@ static int audio_output_setting = AUDIO_OUTPUT_AUTO;
 #define VIDEO_MARKER_HDMI "/.config/286/force_dvi"
 #define AUDIO_MARKER_PWM  "/.config/286/force_pwm"
 #define AUDIO_MARKER_I2S  "/.config/286/force_i2s"
+#define AUDIO_MARKER_HWAY "/.config/286/force_hway"
 
 // Original values (to detect changes)
 static int orig_cpu, orig_fpu, orig_video_adapter;
@@ -149,44 +150,51 @@ static VideoOutputSetting load_video_output_setting(void) {
 }
 
 static int load_audio_output_setting(void) {
-#if !HAS_AUDIO_I2S
-    return AUDIO_OUTPUT_PWM;
-#elif !HAS_AUDIO_PWM
-    return AUDIO_OUTPUT_I2S;
-#else
     FILINFO fno;
+#if HAS_AUDIO_HWAY
+    if (f_stat(AUDIO_MARKER_HWAY, &fno) == FR_OK)
+        return AUDIO_OUTPUT_HWAY;
+#endif
+#if HAS_AUDIO_I2S
     if (f_stat(AUDIO_MARKER_I2S, &fno) == FR_OK)
         return AUDIO_OUTPUT_I2S;
+#endif
+#if HAS_AUDIO_PWM
     if (f_stat(AUDIO_MARKER_PWM, &fno) == FR_OK)
         return AUDIO_OUTPUT_PWM;
+#endif
+#if HAS_AUDIO_I2S && HAS_AUDIO_PWM
     return AUDIO_OUTPUT_AUTO;
+#elif HAS_AUDIO_I2S
+    return AUDIO_OUTPUT_I2S;
+#else
+    return AUDIO_OUTPUT_PWM;
 #endif
 }
 
-#if HAS_AUDIO_I2S && HAS_AUDIO_PWM
+#if HAS_AUDIO_HWAY
 static void save_audio_output_setting(int setting) {
     FIL fp;
 
     audio_output_setting = setting;
-    if (setting == AUDIO_OUTPUT_AUTO) {
-        (void)f_unlink(AUDIO_MARKER_PWM);
-        (void)f_unlink(AUDIO_MARKER_I2S);
+    (void)f_unlink(AUDIO_MARKER_PWM);
+    (void)f_unlink(AUDIO_MARKER_I2S);
+    (void)f_unlink(AUDIO_MARKER_HWAY);
+    if (setting == AUDIO_OUTPUT_AUTO)
         return;
-    }
 
     (void)f_mkdir(VIDEO_MARKER_DIR1);
     (void)f_mkdir(VIDEO_MARKER_DIR2);
 
-    const char *create_path;
-    if (setting == AUDIO_OUTPUT_I2S) {
-        (void)f_unlink(AUDIO_MARKER_PWM);
-        create_path = AUDIO_MARKER_I2S;
-    } else {
-        (void)f_unlink(AUDIO_MARKER_I2S);
+    const char *create_path = NULL;
+    if (setting == AUDIO_OUTPUT_PWM)
         create_path = AUDIO_MARKER_PWM;
-    }
+    else if (setting == AUDIO_OUTPUT_I2S)
+        create_path = AUDIO_MARKER_I2S;
+    else if (setting == AUDIO_OUTPUT_HWAY)
+        create_path = AUDIO_MARKER_HWAY;
 
-    if (f_open(&fp, create_path, FA_CREATE_ALWAYS | FA_WRITE) == FR_OK)
+    if (create_path && f_open(&fp, create_path, FA_CREATE_ALWAYS | FA_WRITE) == FR_OK)
         f_close(&fp);
 }
 #endif
@@ -448,10 +456,19 @@ static void cycle_option(int direction) {
             break;
 
         case SETTING_AUDIO_OUTPUT: {
+#if HAS_AUDIO_HWAY
 #if HAS_AUDIO_I2S && HAS_AUDIO_PWM
-            int value = audio_output_setting;
-            value = (value + direction + 3) % 3;
-            save_audio_output_setting(value);
+            static const int outputs[] = { AUDIO_OUTPUT_AUTO, AUDIO_OUTPUT_PWM,
+                                           AUDIO_OUTPUT_I2S, AUDIO_OUTPUT_HWAY };
+#elif HAS_AUDIO_I2S
+            static const int outputs[] = { AUDIO_OUTPUT_I2S, AUDIO_OUTPUT_HWAY };
+#else
+            static const int outputs[] = { AUDIO_OUTPUT_PWM, AUDIO_OUTPUT_HWAY };
+#endif
+            const int output_count = (int)(sizeof(outputs) / sizeof(outputs[0]));
+            int pos = find_option_index(outputs, output_count, audio_output_setting);
+            pos = (pos + direction + output_count) % output_count;
+            save_audio_output_setting(outputs[pos]);
 #endif
             break;
         }
@@ -613,9 +630,15 @@ static void draw_settings_menu(void) {
                 snprintf(value, sizeof(value), "< %d MHz >", config_get_flash_freq());
                 break;
             case SETTING_AUDIO_OUTPUT: {
-#if HAS_AUDIO_I2S && HAS_AUDIO_PWM
-                static const char *names[] = { "Autodetect", "PWM", "I2S" };
-                snprintf(value, sizeof(value), "< %s >", names[audio_output_setting]);
+#if HAS_AUDIO_HWAY
+                const char *name = "?";
+                switch (audio_output_setting) {
+                    case AUDIO_OUTPUT_AUTO: name = "Autodetect"; break;
+                    case AUDIO_OUTPUT_PWM:  name = "PWM"; break;
+                    case AUDIO_OUTPUT_I2S:  name = "I2S"; break;
+                    case AUDIO_OUTPUT_HWAY: name = "HW AY-3-8910"; break;
+                }
+                snprintf(value, sizeof(value), "< %s >", name);
 #elif HAS_AUDIO_I2S
                 snprintf(value, sizeof(value), "  I2S");
 #else

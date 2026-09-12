@@ -57,6 +57,7 @@ void i2s_decrease_volume(i2s_config_t *i2s_config);
 #define AUDIO_OUTPUT_AUTO 0
 #define AUDIO_OUTPUT_PWM  1
 #define AUDIO_OUTPUT_I2S  2
+#define AUDIO_OUTPUT_HWAY 3
 
 void audio_set_boot_output(int output);
 void audio_set_enabled(bool);

@@ -15,7 +15,7 @@ endif()
 cmake_minimum_required(VERSION 3.13)
 
 # Board configuration variant (M1, M2, PC, Z2 or C2)
-set(BOARD "M2" CACHE STRING "Board variant: M1, M2, PC, Z2 or C2")
+set(BOARD "M1" CACHE STRING "Board variant: M1, M2, PC, Z2 or C2")
 # Alias for backwards compatibility
 if(DEFINED BOARD_VARIANT AND NOT DEFINED BOARD)
     set(BOARD ${BOARD_VARIANT})
@@ -302,6 +302,7 @@ target_link_libraries(video_driver pico_stdlib hardware_dma hardware_pio hardwar
 #=============================================================================
 add_library(audio_driver
     drivers/audio/audio.c
+    drivers/audio/ay_hw.c
 )
 target_include_directories(audio_driver PUBLIC drivers/audio src)
 target_compile_definitions(audio_driver PRIVATE
@@ -793,7 +794,7 @@ message(STATUS "  CPU Speed:      ${CPU_SPEED} MHz")
 message(STATUS "  CPU Voltage:    ${CPU_VOLTAGE}")
 message(STATUS "  PSRAM Speed:    ${PSRAM_SPEED} MHz")
 message(STATUS "  NO_PAGING:      ${NO_PAGING}")
-message(STATUS "  Audio Output:   runtime AUTO/PWM/I2S (board-dependent)")
+message(STATUS "  Audio Output:   runtime AUTO/PWM/I2S/HW AY-3-8910 (board-dependent)")
 message(STATUS "  USB:            runtime HOST/DEVICE")
 message(STATUS "  Debug Output:   ${DEBUG_ENABLED}")
 message(STATUS "  Video Mode:     ${VIDEO_MODE}")
