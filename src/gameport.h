@@ -13,8 +13,9 @@
  * timer wired as a one-shot whose period is set by the stick's
  * potentiometer. Writing any value to 0x201 fires all four one-shots;
  * the game then reads 0x201 in a tight loop and counts how long each
- * axis bit stays high. Position is measured as *time*, so the emulation
- * has to reproduce the timing rather than return a coordinate.
+ * axis bit stays high. In the emulator the observable quantity is the
+ * number of guest port reads before the bit falls; using host wall-clock
+ * time would make the result depend on emulation overhead.
  *
  * Read layout at 0x201:
  *   bit 0  X axis, joystick A      bit 4  button A1  (0 = pressed)
