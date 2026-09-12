@@ -2,6 +2,7 @@
 #include "board_config.h"
 
 #include <pico/stdlib.h>
+#include <hardware/clocks.h>
 
 #if HAS_AUDIO_HWAY
 
@@ -24,25 +25,36 @@ static uint16_t control_bits;
 static uint8_t last_pcm;
 static bool last_pcm_valid;
 
+static inline void ay_wait_to_adjust(uint32_t wait_nops)
+{
+    for (uint32_t i = 0; i < wait_nops; ++i)
+        __asm volatile("nop");
+}
+
 static void __not_in_flash_func(ay_shift16)(uint16_t data)
 {
+    /* Keep the 74HC595 timing identical to the current pico-speccy
+     * reference: about 30 MHz maximum shift clock, with explicit setup/
+     * hold time around every edge. */
+    static uint32_t wait_nops;
+    if (wait_nops == 0)
+        wait_nops = clock_get_hz(clk_sys) / (30000000u * 5u);
+
+    gpio_put(HWAY_CLOCK_PIN, 0);
+    ay_wait_to_adjust(wait_nops);
+
     for (int i = 0; i < 16; ++i) {
-        gpio_put(HWAY_CLOCK_PIN, 0);
-        gpio_put(HWAY_CLOCK_PIN, 0);
-        gpio_put(HWAY_CLOCK_PIN, 0);
         gpio_put(HWAY_DATA_PIN, (data & 0x8000u) != 0);
         data <<= 1;
+
         gpio_put(HWAY_CLOCK_PIN, 1);
-        gpio_put(HWAY_CLOCK_PIN, 1);
-        gpio_put(HWAY_CLOCK_PIN, 1);
+        ay_wait_to_adjust(wait_nops);
+        gpio_put(HWAY_CLOCK_PIN, 0);
+        ay_wait_to_adjust(wait_nops);
     }
+
     gpio_put(HWAY_LATCH_PIN, 1);
-    gpio_put(HWAY_LATCH_PIN, 1);
-    gpio_put(HWAY_LATCH_PIN, 1);
-    busy_wait_us_32(1);
-    gpio_put(HWAY_CLOCK_PIN, 0);
-    gpio_put(HWAY_CLOCK_PIN, 0);
-    gpio_put(HWAY_LATCH_PIN, 0);
+    ay_wait_to_adjust(wait_nops);
     gpio_put(HWAY_LATCH_PIN, 0);
 }
 
@@ -56,7 +68,7 @@ static inline void control_low(uint16_t mask)
     control_bits &= (uint16_t)~mask;
 }
 
-static void ay_select_register(uint8_t reg)
+static void __not_in_flash_func(ay_select_register)(uint8_t reg)
 {
     control_high(AY_BDIR | AY_BC1);
     ay_shift16(control_bits | reg);
@@ -86,28 +98,45 @@ void ay_hw_init(void)
     gpio_put(HWAY_CLOCK_PIN, 0);
     gpio_put(HWAY_DATA_PIN, 0);
 
-    /* Reference HWAY control state, with the separate beeper held low. */
-    control_bits = AY_CS_SAA1099 | AY_ENABLE | AY_SAVE |
+    /* Match the PICO-BK HWAY reset sequence exactly: control_bits starts
+     * at zero, AY_Enable is driven low first, then the reference idle
+     * state is latched with Beeper high as well. */
+    control_bits = 0;
+    control_low(AY_ENABLE);
+    ay_shift16(control_bits);
+
+    control_bits = AY_CS_SAA1099 | AY_ENABLE | AY_SAVE | AY_BEEPER |
                    AY_CS1 | AY_CS0 | AY_BDIR | AY_BC1;
     ay_shift16(control_bits);
 
-    /* Select the second AY, configure port B, then leave register 15
-     * selected so each PCM sample needs only the data-write strobe. */
-    control_high(AY_CS1);
-    control_low(AY_CS0);
-    ay_select_register(7);
-    ay_write_data(0x80);
-    ay_select_register(15);
-
+    /* The PICO-BK Covox path re-selects/configures the AY on every changed
+     * PCM sample.  Do the same here; do not rely on AY/595 state persisting
+     * between timer callbacks. */
     last_pcm_valid = false;
 }
 
 void __not_in_flash_func(ay_hw_write_pcm)(uint8_t sample)
 {
+    /* simple resampling
+    static uint8_t n = 0;
+    if (++n < 5)
+        return;
+    n = 0;*/
     if (last_pcm_valid && sample == last_pcm)
         return;
     last_pcm = sample;
     last_pcm_valid = true;
+
+    /* Exact PICO-BK HWAY Covox transaction:
+     *   select second AY;
+     *   R7  <- 0x80 (port B output);
+     *   R15 <- PCM sample.
+     */
+    control_high(AY_CS1);
+    control_low(AY_CS0);
+    ay_select_register(7);
+    ay_write_data(0x80);
+    ay_select_register(15);
     ay_write_data(sample);
 }
 

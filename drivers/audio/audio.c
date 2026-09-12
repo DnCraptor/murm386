@@ -428,7 +428,12 @@ bool __not_in_flash_func(timer_callback)(repeating_timer_t *rt) {
         if (l_v > 32767) l_v = 32767;
         if (l_v < -32768) l_v = -32768;
         int32_t mono = ((int32_t)r_v + (int32_t)l_v) / 2;
-        mono >>= volume;
+        /* HW AY is only an 8-bit DAC.  Reusing the PWM/I2S power-of-two
+         * attenuation here collapses the signal to one LSB around volume 10
+         * and to silence below it.  Scale the signed signal linearly while it
+         * is still 16-bit, then bias/quantize it to unsigned 8-bit.
+         * `volume` is attenuation (0 = max, 16 = mute). */
+        mono = (mono * (16 - (int32_t)volume)) / 16;
         int32_t pcm = (mono + 32768) >> 8;
         if (pcm < 0) pcm = 0;
         if (pcm > 255) pcm = 255;
