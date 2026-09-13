@@ -466,12 +466,27 @@ int16_t csm_psg_sample(void)
     const int expanded = psg_is_expanded();
     int mix = 0;
 
+    /* Sound Master routing: R15 bit7 = 0 sends tone generator C to the AYDMA
+     * sample clock instead of the PSG audio output.  Prince of Persia drives
+     * AYDMA with R7 bit2 = 0 (tone C oscillating as the DMA clock) and
+     * R15 bit7 = 0 (channel C removed from the audible mix).  Tone C then runs
+     * at the DMA sample period (R4/R5), so leaving it in this software mixer
+     * emits a steady high-frequency squeal on top of the DAC playback.  Gate
+     * it out on the same routing bit the HW-AY path already honours via
+     * hw_channel_c_output. */
+    const int channel_c_audible = (psg.regs_a[15] & 0x80) != 0;
+
     for (int m = 0; m < AYEMU_TACTS_PER_SAMPLE; ++m) {
         psg_tick_tones();
         psg_tick_noise();
         psg_tick_envelopes();
 
         for (int ch = 0; ch < 3; ++ch) {
+            /* Channel C is the AYDMA clock, not an audible voice, whenever
+             * the Sound Master routes it away from the PSG output. */
+            if (ch == 2 && !channel_c_audible)
+                continue;
+
             const uint8_t volreg = psg.regs_a[8 + ch];
             const int tone_enable = !(psg.regs_a[7] & (1u << ch));
             const int noise_enable = !(psg.regs_a[7] & (1u << (ch + 3)));
