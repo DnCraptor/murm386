@@ -890,10 +890,11 @@ static void poll_keyboard(void) {
      * pad so that on boards with both, whichever is actually moving
      * wins the last word each poll. */
     if (pc && !pc->paused && config_get_usb_joystick() && usbgamepad_connected()) {
-        int jx = 0, jy = 0;
-        uint8_t jb = 0;
-        usbgamepad_get(&jx, &jy, &jb);
-        gameport_set(jx, jy, jb);
+        int ax = 0, ay = 0, bx = 0, by = 0;
+        uint8_t ab = 0, bb = 0;
+        (void)usbgamepad_get(0, &ax, &ay, &ab);
+        const int b_present = usbgamepad_get(1, &bx, &by, &bb);
+        gameport_set_pair(ax, ay, ab, b_present, bx, by, bb);
     }
 #endif
 

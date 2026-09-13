@@ -125,31 +125,47 @@ static void csm_stop_dma(void)
 
 static void csm_mode_bits_changed(void)
 {
-    /* Broderbund software observed on real hardware does not explicitly
-     * switch Port B back to PSG after DMA.  86Box uses period <= 1 as the
-     * hardware-compatible heuristic observed from that software. */
-    if (csm.dma_interval <= 1)
-        csm_psg_force_channel_c_output();
-
     const uint8_t r7 = csm_psg_get_bank_a_register(7);
     const uint8_t r15 = csm_psg_get_bank_a_register(15);
 
+    /* AYDMA is armed purely by the Port B routing bits, exactly as the
+     * hardware does: R15 bit5 (DMA enable) and bit7 (channel C -> DMA output).
+     * The channel-C period R4/R5 only sets the DMA clock RATE -- a 0/1 period
+     * means "fastest clock", never "DMA off".  The old `interval > 1` gate
+     * (and the interval<=1 Port-B force) broke Prince of Persia's Sound Master
+     * autodetect: its 4-byte probe arms DMA+IRQ via R15 while R4/R5 are still
+     * 0, so the probe was silently disabled here, no terminal-count IRQ fired,
+     * and Prince recorded "no IRQ" ([3326]=0) and skipped all IRQ setup -- so
+     * later DAC blocks played once but the IRQ-driven block chain never ran. */
     csm.dma_enabled = (((r15 & 0x20) == 0) &&
-                       ((r15 & 0x80) == 0) &&
-                       (csm.dma_interval > 1));
+                       ((r15 & 0x80) == 0));
+
+    /* Keep the pacing period >= 2 so the mixer's sample-clock threshold can
+     * never be zero (which would spin core1); the DMA still runs, just at the
+     * fastest representable rate. */
+    if (csm.dma_interval < 2)
+        csm.dma_interval = 2;
 
     if ((r7 & 0x04) || !csm.dma_enabled) {
         csm_stop_dma();
         return;
     }
 
-    const int was_running = csm.dma_running;
+    /* Re-arm on any start that is not interrupting a block still being
+     * fetched.  A block that already hit producer terminal count is finished
+     * on the 8237 side even while core1 is still draining its FIFO tail, so
+     * gating on dma_running alone loses the restart: Prince programs the next
+     * block from its terminal-count ISR, before the tail-drain has cleared
+     * dma_running, and the start would then skip the FIFO reset / DREQ hold
+     * and strand producer_done. */
+    const int in_flight = csm.dma_running &&
+                          !__atomic_load_n(&csm.producer_done, __ATOMIC_ACQUIRE);
     csm.dma_running = 1;
     const uint8_t r10 = csm_psg_get_bank_a_register(10);
     csm.dma_mult = ((r10 & 0x10) || r10 == 0) ? 1 : 2;
     csm_publish_audio_cfg();
 
-    if (!was_running) {
+    if (!in_flight) {
         __atomic_store_n(&csm.consumer_done, 0, __ATOMIC_RELEASE);
         __atomic_store_n(&csm.irq_pending, 0, __ATOMIC_RELEASE);
         csm_fifo_reset();
@@ -172,6 +188,12 @@ static int csm_dma_transfer(void *opaque, int nchan, int dma_pos, int dma_len)
     if (dma_pos >= dma_len) {
         __atomic_store_n(&csm.producer_done, 1, __ATOMIC_RELEASE);
         i8257_dma_release_DREQ((IsaDma *)csm.dma, CSM_DMA_CHAN);
+        /* 8237 terminal count == Sound Master DMA_OVER: latch the IRQ now, on
+         * core0, exactly as hardware/86Box do.  dma_running is left set so
+         * core1 can still play out the final FIFO byte; csm_service() retires
+         * the consumer once it drains. */
+        if (csm_irq_enabled())
+            csm_set_irq(1);
         return dma_len;
     }
 
@@ -224,6 +246,12 @@ static int csm_dma_transfer(void *opaque, int nchan, int dma_pos, int dma_len)
     if (dma_pos >= dma_len) {
         __atomic_store_n(&csm.producer_done, 1, __ATOMIC_RELEASE);
         i8257_dma_release_DREQ((IsaDma *)csm.dma, CSM_DMA_CHAN);
+        /* 8237 terminal count == Sound Master DMA_OVER: latch the IRQ now, on
+         * core0, exactly as hardware/86Box do.  dma_running is left set so
+         * core1 can still play out the final FIFO byte; csm_service() retires
+         * the consumer once it drains. */
+        if (csm_irq_enabled())
+            csm_set_irq(1);
         return dma_len;
     }
 
@@ -316,8 +344,12 @@ void csm_write(uint16_t port, uint8_t value)
         __atomic_store_n(&csm.pcm_sample, value, __ATOMIC_RELEASE);
         break;
     case 3:
-        if (csm.dma_enabled)
-            csm_set_irq(0);
+        /* Base+3 is the Sound Master IRQ acknowledge / latch-clear port.
+         * Prince writes it to ACK inside its ISR and to clear a stale latch
+         * before enabling the IRQ, so it must ALWAYS deassert.  Gating on
+         * dma_enabled can strand the edge-triggered PIC line asserted and
+         * silently drop the next completion IRQ. */
+        csm_set_irq(0);
         break;
     default:
         break;
@@ -345,13 +377,17 @@ int csm_channel_c_output_enabled(void)
 
 void csm_service(void)
 {
-    /* Core1 only reports that the final FIFO byte reached the DAC.  Keep all
-     * CSM control-state and PSG/IRQ decisions on core0. */
+    /* The completion IRQ is latched at terminal count in csm_dma_transfer().
+     * Here we only retire the consumer after it has drained the FIFO tail, and
+     * only for the block that actually finished (producer_done still set): a
+     * late consumer_done from a block already superseded by a restart is
+     * dropped so it cannot tear the new block down, and no second IRQ is
+     * raised. */
     if (__atomic_exchange_n(&csm.consumer_done, 0, __ATOMIC_ACQ_REL)) {
-        csm.dma_running = 0;
-        csm_publish_audio_cfg();
-        if (csm_irq_enabled())
-            csm_set_irq(1);
+        if (__atomic_load_n(&csm.producer_done, __ATOMIC_ACQUIRE)) {
+            csm.dma_running = 0;
+            csm_publish_audio_cfg();
+        }
     }
 
     if (__atomic_exchange_n(&csm.irq_pending, 0, __ATOMIC_ACQ_REL)) {

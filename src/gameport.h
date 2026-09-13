@@ -49,6 +49,11 @@ void gameport_set(int x, int y, uint8_t buttons);
 /* Feed an analog stick. X/Y span the full signed 16-bit range; 0 is centre. */
 void gameport_set_analog(int16_t x, int16_t y, uint8_t buttons);
 
+/* Feed both DOS game-port sticks. Joystick B is present only when
+ * `b_present` is true; otherwise its axis bits remain low. */
+void gameport_set_pair(int ax, int ay, uint8_t a_buttons,
+                       int b_present, int bx, int by, uint8_t b_buttons);
+
 /* Globally exchange joystick button 1 and button 2. */
 void gameport_set_button_swap(bool enabled);
 

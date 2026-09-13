@@ -4,12 +4,9 @@
  * Maps ported from FRANK NES (murmnes).
  */
 #include "usbgamepad.h"
+#include "tusb_config.h"
 
 #include <string.h>
-
-#ifndef CFG_TUH_HID
-#define CFG_TUH_HID 4
-#endif
 
 /*
  * Different HID gamepads lay out their reports differently, so each
@@ -169,24 +166,33 @@ typedef struct {
     uint8_t active;
 } gp_slot_t;
 
-static gp_slot_t gp_slots[CFG_TUH_HID];
+static gp_slot_t gp_slots[CFG_TUH_DEVICE_MAX][CFG_TUH_HID];
 
-void usbgamepad_set_ids(uint8_t instance, uint16_t vid, uint16_t pid) {
-    if (instance >= CFG_TUH_HID) return;
-    gp_slots[instance].vid = vid;
-    gp_slots[instance].pid = pid;
-    gp_slots[instance].map = find_hid_map(vid, pid);
+static gp_slot_t *hid_slot(uint8_t dev_addr, uint8_t instance) {
+    if (dev_addr == 0 || dev_addr > CFG_TUH_DEVICE_MAX || instance >= CFG_TUH_HID)
+        return NULL;
+    return &gp_slots[dev_addr - 1][instance];
 }
 
-void usbgamepad_umount(uint8_t instance) {
-    if (instance >= CFG_TUH_HID) return;
-    memset(&gp_slots[instance], 0, sizeof(gp_slots[instance]));
+void usbgamepad_set_ids(uint8_t dev_addr, uint8_t instance,
+                         uint16_t vid, uint16_t pid) {
+    gp_slot_t *gp = hid_slot(dev_addr, instance);
+    if (!gp) return;
+    gp->vid = vid;
+    gp->pid = pid;
+    gp->map = find_hid_map(vid, pid);
 }
 
-void usbgamepad_report(uint8_t instance, const uint8_t *report, uint16_t len) {
-    if (instance >= CFG_TUH_HID || report == NULL || len < 2) return;
+void usbgamepad_umount(uint8_t dev_addr, uint8_t instance) {
+    gp_slot_t *gp = hid_slot(dev_addr, instance);
+    if (!gp) return;
+    memset(gp, 0, sizeof(*gp));
+}
 
-    gp_slot_t *gp = &gp_slots[instance];
+void usbgamepad_report(uint8_t dev_addr, uint8_t instance,
+                       const uint8_t *report, uint16_t len) {
+    gp_slot_t *gp = hid_slot(dev_addr, instance);
+    if (!gp || report == NULL || len < 2) return;
     const gamepad_map_t *m = gp->map ? gp->map : &fallback_hid_map;
     gp->active = 1;
 
@@ -237,7 +243,7 @@ void usbgamepad_report(uint8_t instance, const uint8_t *report, uint16_t len) {
     gp->buttons = buttons;
 }
 
-static gp_slot_t xinput_slot;
+static gp_slot_t xinput_slots[CFG_TUH_DEVICE_MAX][CFG_TUH_XINPUT];
 
 static void set_slot_state(gp_slot_t *gp, uint8_t dpad, uint16_t buttons) {
     gp->dpad = dpad;
@@ -268,9 +274,10 @@ static uint8_t axes_to_dpad(uint8_t x, uint8_t y) {
     return d;
 }
 
-int usbgamepad_report_special(uint8_t instance, const uint8_t *report, uint16_t len) {
-    if (instance >= CFG_TUH_HID || !report || !len) return 0;
-    gp_slot_t *gp = &gp_slots[instance];
+int usbgamepad_report_special(uint8_t dev_addr, uint8_t instance,
+                              const uint8_t *report, uint16_t len) {
+    gp_slot_t *gp = hid_slot(dev_addr, instance);
+    if (!gp || !report || !len) return 0;
     const uint16_t vid = gp->vid, pid = gp->pid;
     uint8_t dpad = 0;
     uint16_t buttons = 0;
@@ -360,8 +367,14 @@ int usbgamepad_report_special(uint8_t instance, const uint8_t *report, uint16_t 
     return 0;
 }
 
-void usbgamepad_xinput_report(uint16_t b, int16_t lx, int16_t ly, int connected) {
-    if (!connected) { memset(&xinput_slot, 0, sizeof(xinput_slot)); return; }
+void usbgamepad_xinput_report(uint8_t dev_addr, uint8_t instance,
+                               uint16_t b, int16_t lx, int16_t ly,
+                               int connected) {
+    if (dev_addr == 0 || dev_addr > CFG_TUH_DEVICE_MAX ||
+        instance >= CFG_TUH_XINPUT)
+        return;
+    gp_slot_t *gp = &xinput_slots[dev_addr - 1][instance];
+    if (!connected) { memset(gp, 0, sizeof(*gp)); return; }
     uint8_t d = 0;
     if (b & 0x0001) d |= 0x01;
     if (b & 0x0002) d |= 0x02;
@@ -372,53 +385,66 @@ void usbgamepad_xinput_report(uint16_t b, int16_t lx, int16_t ly, int connected)
     if (ly >  8000) d |= 0x01;
     if (ly < -8000) d |= 0x02;
     uint16_t buttons = 0;
-    if (b & 0x1000) buttons |= 0x0001; /* XInput A */
-    if (b & 0x2000) buttons |= 0x0002; /* B */
-    if (b & 0x4000) buttons |= 0x0004; /* X */
-    if (b & 0x8000) buttons |= 0x0008; /* Y */
+    if (b & 0x1000) buttons |= 0x0001;
+    if (b & 0x2000) buttons |= 0x0002;
+    if (b & 0x4000) buttons |= 0x0004;
+    if (b & 0x8000) buttons |= 0x0008;
     if (b & 0x0100) buttons |= 0x0010;
     if (b & 0x0200) buttons |= 0x0020;
-    if (b & 0x0010) buttons |= 0x0040; /* Start */
-    if (b & 0x0020) buttons |= 0x0080; /* Back */
-    set_slot_state(&xinput_slot, d, buttons);
+    if (b & 0x0010) buttons |= 0x0040;
+    if (b & 0x0020) buttons |= 0x0080;
+    set_slot_state(gp, d, buttons);
 }
 
-void usbgamepad_xinput_umount(void) {
-    memset(&xinput_slot, 0, sizeof(xinput_slot));
+void usbgamepad_xinput_umount(uint8_t dev_addr, uint8_t instance) {
+    if (dev_addr == 0 || dev_addr > CFG_TUH_DEVICE_MAX ||
+        instance >= CFG_TUH_XINPUT)
+        return;
+    memset(&xinput_slots[dev_addr - 1][instance], 0,
+           sizeof(xinput_slots[dev_addr - 1][instance]));
+}
+
+static int nth_active_slot(unsigned wanted, gp_slot_t **out) {
+    unsigned n = 0;
+    for (unsigned d = 0; d < CFG_TUH_DEVICE_MAX; ++d) {
+        for (unsigned i = 0; i < CFG_TUH_HID; ++i) {
+            if (!gp_slots[d][i].active) continue;
+            if (n++ == wanted) { *out = &gp_slots[d][i]; return 1; }
+        }
+        for (unsigned i = 0; i < CFG_TUH_XINPUT; ++i) {
+            if (!xinput_slots[d][i].active) continue;
+            if (n++ == wanted) { *out = &xinput_slots[d][i]; return 1; }
+        }
+    }
+    return 0;
 }
 
 int usbgamepad_connected(void) {
-    for (int i = 0; i < CFG_TUH_HID; i++)
-        if (gp_slots[i].active) return 1;
-    return xinput_slot.active != 0;
+    gp_slot_t *gp;
+    return nth_active_slot(0, &gp);
 }
 
-void usbgamepad_get(int *x, int *y, uint8_t *buttons) {
-    uint8_t dpad = 0;
-    uint16_t btn = 0;
-    for (int i = 0; i < CFG_TUH_HID; i++) {
-        if (!gp_slots[i].active) continue;
-        dpad |= gp_slots[i].dpad;
-        btn  |= gp_slots[i].buttons;
-    }
-    if (xinput_slot.active) {
-        dpad |= xinput_slot.dpad;
-        btn  |= xinput_slot.buttons;
+int usbgamepad_get(unsigned pad_index, int *x, int *y, uint8_t *buttons) {
+    gp_slot_t *gp = NULL;
+    if (!nth_active_slot(pad_index, &gp)) {
+        if (x) *x = 0;
+        if (y) *y = 0;
+        if (buttons) *buttons = 0;
+        return 0;
     }
 
     int jx = 0, jy = 0;
-    if (dpad & 0x04) jx = -1;
-    if (dpad & 0x08) jx =  1;
-    if (dpad & 0x01) jy = -1;
-    if (dpad & 0x02) jy =  1;
+    if (gp->dpad & 0x04) jx = -1;
+    if (gp->dpad & 0x08) jx =  1;
+    if (gp->dpad & 0x01) jy = -1;
+    if (gp->dpad & 0x02) jy =  1;
 
-    /* A/B are what a two-button DOS stick expects; X/Y alias onto them
-     * so either pair works on pads that have four face buttons. */
     uint8_t jb = 0;
-    if (btn & (0x0001 | 0x0008)) jb |= 0x01;   /* A or Y */
-    if (btn & (0x0002 | 0x0004)) jb |= 0x02;   /* B or X */
+    if (gp->buttons & (0x0001 | 0x0008)) jb |= 0x01;
+    if (gp->buttons & (0x0002 | 0x0004)) jb |= 0x02;
 
     if (x) *x = jx;
     if (y) *y = jy;
     if (buttons) *buttons = jb;
+    return 1;
 }

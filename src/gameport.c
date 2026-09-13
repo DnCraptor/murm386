@@ -19,9 +19,10 @@
 #define GP_COUNT_MAX     1100u
 
 static uint32_t gp_count;
-static uint32_t gp_dur_x = GP_COUNT_CENTRE;
-static uint32_t gp_dur_y = GP_COUNT_CENTRE;
-static uint8_t  gp_buttons;       /* bit 0 = button 1, bit 1 = button 2 */
+static uint32_t gp_dur[4] = {
+    GP_COUNT_CENTRE, GP_COUNT_CENTRE, 0, 0
+};
+static uint8_t  gp_buttons;       /* bits 0/1 = A1/A2, bits 2/3 = B1/B2 */
 static bool     gp_swap_buttons;
 static bool     gp_running;
 
@@ -41,15 +42,34 @@ static uint32_t gp_duration_analog(int16_t axis) {
 }
 
 void gameport_set(int x, int y, uint8_t buttons) {
-    gp_dur_x = gp_duration(x);
-    gp_dur_y = gp_duration(y);
-    gp_buttons = buttons;
+    gp_dur[0] = gp_duration(x);
+    gp_dur[1] = gp_duration(y);
+    gp_dur[2] = 0;
+    gp_dur[3] = 0;
+    gp_buttons = buttons & 0x03u;
 }
 
 void gameport_set_analog(int16_t x, int16_t y, uint8_t buttons) {
-    gp_dur_x = gp_duration_analog(x);
-    gp_dur_y = gp_duration_analog(y);
-    gp_buttons = buttons;
+    gp_dur[0] = gp_duration_analog(x);
+    gp_dur[1] = gp_duration_analog(y);
+    gp_dur[2] = 0;
+    gp_dur[3] = 0;
+    gp_buttons = buttons & 0x03u;
+}
+
+void gameport_set_pair(int ax, int ay, uint8_t a_buttons,
+                       int b_present, int bx, int by, uint8_t b_buttons) {
+    gp_dur[0] = gp_duration(ax);
+    gp_dur[1] = gp_duration(ay);
+    if (b_present) {
+        gp_dur[2] = gp_duration(bx);
+        gp_dur[3] = gp_duration(by);
+        gp_buttons = (a_buttons & 0x03u) | ((b_buttons & 0x03u) << 2);
+    } else {
+        gp_dur[2] = 0;
+        gp_dur[3] = 0;
+        gp_buttons = a_buttons & 0x03u;
+    }
 }
 
 void gameport_set_button_swap(bool enabled) {
@@ -67,18 +87,23 @@ uint8_t gameport_read(void) {
     uint8_t v = 0xf0;
     uint8_t buttons = gp_buttons;
     if (gp_swap_buttons)
-        buttons = (uint8_t)(((buttons & 1u) << 1) | ((buttons & 2u) >> 1));
-    if (buttons & 1u) v &= (uint8_t)~0x10u;
-    if (buttons & 2u) v &= (uint8_t)~0x20u;
+        buttons = (uint8_t)(((buttons & 0x01u) << 1) |
+                            ((buttons & 0x02u) >> 1) |
+                            ((buttons & 0x04u) << 1) |
+                            ((buttons & 0x08u) >> 1));
+    if (buttons & 0x01u) v &= (uint8_t)~0x10u;
+    if (buttons & 0x02u) v &= (uint8_t)~0x20u;
+    if (buttons & 0x04u) v &= (uint8_t)~0x40u;
+    if (buttons & 0x08u) v &= (uint8_t)~0x80u;
 
     if (gp_running) {
         const uint32_t count = gp_count++;
-        if (count < gp_dur_x) v |= 0x01u;
-        if (count < gp_dur_y) v |= 0x02u;
-        /* Joystick B is not present: its bits stay low, which is how a
-         * one-stick adapter reads. Games probing for a second stick see
-         * an immediate timeout and move on. */
-        if (gp_count >= gp_dur_x && gp_count >= gp_dur_y)
+        if (count < gp_dur[0]) v |= 0x01u;
+        if (count < gp_dur[1]) v |= 0x02u;
+        if (count < gp_dur[2]) v |= 0x04u;
+        if (count < gp_dur[3]) v |= 0x08u;
+        if (gp_count >= gp_dur[0] && gp_count >= gp_dur[1] &&
+            gp_count >= gp_dur[2] && gp_count >= gp_dur[3])
             gp_running = false;
     }
     return v;

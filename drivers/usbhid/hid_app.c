@@ -25,11 +25,13 @@
 #define MAX_REPORT 4
 
 // Per-device HID info for generic report parsing
-static struct {
+typedef struct {
     uint8_t report_count;
     tuh_hid_report_info_t report_info[MAX_REPORT];
     uint16_t vid, pid;
-} hid_info[CFG_TUH_HID];
+} hid_info_t;
+
+static hid_info_t hid_info[CFG_TUH_DEVICE_MAX][CFG_TUH_HID];
 
 /* Track mounted HID interfaces by (device address, interface instance).
  * A TinyUSB HID instance number is only unique within one USB device, so the
@@ -254,8 +256,11 @@ static void process_mouse_report(hid_mouse_report_t const *report, uint16_t len)
 static void process_generic_report(uint8_t dev_addr, uint8_t instance, uint8_t const *report, uint16_t len) {
     (void)dev_addr;
 
-    uint8_t const rpt_count = hid_info[instance].report_count;
-    tuh_hid_report_info_t *rpt_info_arr = hid_info[instance].report_info;
+    if (dev_addr == 0 || dev_addr > CFG_TUH_DEVICE_MAX || instance >= CFG_TUH_HID)
+        return;
+    hid_info_t *hi = &hid_info[dev_addr - 1][instance];
+    uint8_t const rpt_count = hi->report_count;
+    tuh_hid_report_info_t *rpt_info_arr = hi->report_info;
     tuh_hid_report_info_t *rpt_info = NULL;
 
     if (rpt_count == 1 && rpt_info_arr[0].report_id == 0) {
@@ -286,7 +291,7 @@ static void process_generic_report(uint8_t dev_addr, uint8_t instance, uint8_t c
             process_mouse_report((hid_mouse_report_t const *)report, len);
         } else if (rpt_info->usage == HID_USAGE_DESKTOP_JOYSTICK ||
                    rpt_info->usage == HID_USAGE_DESKTOP_GAMEPAD) {
-            usbgamepad_report(instance, report, len);
+            usbgamepad_report(dev_addr, instance, report, len);
         }
     }
 }
@@ -368,11 +373,11 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const *desc_re
     {
         uint16_t vid = 0, pid = 0;
         tuh_vid_pid_get(dev_addr, &vid, &pid);
-        if (instance < CFG_TUH_HID) {
-            hid_info[instance].vid = vid;
-            hid_info[instance].pid = pid;
+        if (dev_addr > 0 && dev_addr <= CFG_TUH_DEVICE_MAX && instance < CFG_TUH_HID) {
+            hid_info[dev_addr - 1][instance].vid = vid;
+            hid_info[dev_addr - 1][instance].pid = pid;
         }
-        usbgamepad_set_ids(instance, vid, pid);
+        usbgamepad_set_ids(dev_addr, instance, vid, pid);
 
         /* 0810:0001 advertises boot keyboard/mouse interfaces but actually
          * carries joystick reports. BOOT protocol makes this dongle silent. */
@@ -383,9 +388,12 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const *desc_re
     }
 
     // Parse generic report descriptor for non-boot protocol devices
-    if (itf_protocol == HID_ITF_PROTOCOL_NONE && instance < CFG_TUH_HID) {
-        hid_info[instance].report_count = tuh_hid_parse_report_descriptor(
-            hid_info[instance].report_info, MAX_REPORT, desc_report, desc_len);
+    if (itf_protocol == HID_ITF_PROTOCOL_NONE &&
+        dev_addr > 0 && dev_addr <= CFG_TUH_DEVICE_MAX && instance < CFG_TUH_HID) {
+        hid_info[dev_addr - 1][instance].report_count =
+            tuh_hid_parse_report_descriptor(
+                hid_info[dev_addr - 1][instance].report_info,
+                MAX_REPORT, desc_report, desc_len);
     }
 
     hid_watch_mount(dev_addr, instance);
@@ -411,7 +419,9 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
         DBG_PRINT("  USB Mouse disconnected\n");
     }
 
-    usbgamepad_umount(instance);
+    usbgamepad_umount(dev_addr, instance);
+    if (dev_addr > 0 && dev_addr <= CFG_TUH_DEVICE_MAX && instance < CFG_TUH_HID)
+        memset(&hid_info[dev_addr - 1][instance], 0, sizeof(hid_info[0][0]));
 }
 
 // Invoked when report is received
@@ -425,7 +435,7 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
 
     /* Special pads must be intercepted before boot keyboard/mouse dispatch
      * and before generic Report-ID parsing. */
-    if (usbgamepad_report_special(instance, report, len)) {
+    if (usbgamepad_report_special(dev_addr, instance, report, len)) {
         tuh_hid_receive_report(dev_addr, instance);
         return;
     }
