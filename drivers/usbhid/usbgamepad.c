@@ -119,7 +119,7 @@ static const gamepad_map_t known_hid_maps[] = {
 // SNES-clone layout, since most cheap pads look like that.
 static const gamepad_map_t fallback_hid_map = {
     .vid = 0, .pid = 0,
-    .dpad_mode = DPAD_AXIS, .dpad_x = 3, .dpad_y = 4,
+    .dpad_mode = DPAD_AXIS, .dpad_x = 0, .dpad_y = 1,
     .a      = { .byte = 5, .mask = 0x20 },
     .b      = { .byte = 5, .mask = 0x40 },
     .x      = { .byte = 5, .mask = 0x10 },
@@ -328,6 +328,24 @@ int usbgamepad_report_special(uint8_t dev_addr, uint8_t instance,
         if (r[5] & 0x02) buttons |= 0x0020;
         if (r[5] & 0x20) buttons |= 0x0040; /* Start */
         if (r[5] & 0x10) buttons |= 0x0080; /* Back */
+        set_slot_state(gp, dpad, buttons); return 1;
+    }
+
+    /* Generic DirectInput-style 2563:0575: digital hat plus analog LX/LY.
+     * pico-speccy uses both; the old table-only path looked at the hat only,
+     * so games calibrating the analog axes never saw stick travel. */
+    if (vid == 0x2563 && pid == 0x0575) {
+        if (len < 7) return 1;
+        const uint8_t *r = report;
+        dpad = axes_to_dpad(r[3], r[4]) | hat_to_dpad(r[2]);
+        if (r[0] & 0x04) buttons |= 0x0001;
+        if (r[0] & 0x02) buttons |= 0x0002;
+        if (r[0] & 0x08) buttons |= 0x0004;
+        if (r[0] & 0x01) buttons |= 0x0008;
+        if (r[0] & 0x10) buttons |= 0x0010;
+        if (r[0] & 0x20) buttons |= 0x0020;
+        if (r[1] & 0x02) buttons |= 0x0040;
+        if (r[1] & 0x01) buttons |= 0x0080;
         set_slot_state(gp, dpad, buttons); return 1;
     }
 

@@ -28,9 +28,9 @@
  * .wrap_target
  *   irq    wait 0      side 1      ; idle with CLK HIGH, wait for CPU
  *   set    pins, 1     side 1 [10] ; LATCH HIGH, 11µs pulse
- *   set    x, 7        side 1      ; 8 buttons to read
+ *   set    x, 15       side 1      ; 16 button clocks (SNES-compatible)
  *   set    pins, 0     side 0      ; LATCH LOW, CLK LOW — first bit available
- *   in     pins, 1     side 0 [4]  ; read data bit, CLK LOW
+ *   in     pins, 2     side 0 [4]  ; read both DATA pins, CLK LOW
  *   set    pins, 0     side 1 [4]  ; CLK HIGH (rising edge advances register)
  *   jmp    x--, 3      side 1      ; loop (jumps to "set pins,0 side 0")
  * .wrap
@@ -38,9 +38,9 @@
 static const uint16_t nespad_program_instructions[] = {
     0xD020, /*  0: irq    wait 0          side 1       */
     0xFA01, /*  1: set    pins, 1         side 1 [10]  */
-    0xF027, /*  2: set    x, 7            side 1       */
+    0xF02F, /*  2: set    x, 15           side 1       */
     0xE000, /*  3: set    pins, 0         side 0       */
-    0x4401, /*  4: in     pins, 1         side 0 [4]   */
+    0x4402, /*  4: in     pins, 2         side 0 [4]   */
     0xF400, /*  5: set    pins, 0         side 1 [4]   */
     0x1043, /*  6: jmp    x--, 3          side 1       */
 };
@@ -84,17 +84,20 @@ bool nespad_begin(uint32_t cpu_khz, uint8_t clkPin, uint8_t dataPin,
 
     pio_gpio_init(pio, clkPin);
     pio_gpio_init(pio, dataPin);
+    pio_gpio_init(pio, dataPin + 1);
     pio_gpio_init(pio, latPin);
 
     gpio_set_pulls(dataPin, true, false);
+    gpio_set_pulls(dataPin + 1, true, false);
 
     pio_sm_set_pindirs_with_mask(pio, sm,
                                   (1u << clkPin) | (1u << latPin),
                                   (1u << clkPin) | (1u << dataPin) |
+                                      (1u << (dataPin + 1)) |
                                       (1u << latPin));
 
-    /* Right-shift, autopush at 8 bits */
-    sm_config_set_in_shift(&c, true, true, 8);
+    /* Two DATA pins x 16 clocks -> one 32-bit interleaved word. */
+    sm_config_set_in_shift(&c, true, true, 32);
     sm_config_set_clkdiv_int_frac(&c, cpu_khz / 1000, 0); /* 1 MHz */
 
     pio_set_irq0_source_enabled(pio, (enum pio_interrupt_source)(pis_interrupt0 + sm), false);
@@ -136,25 +139,12 @@ void nespad_read_finish(void)
     if (pio_sm_is_rx_fifo_empty(pio, sm))
         return; /* timeout — keep previous state */
 
-    uint32_t raw = pio->rxf[sm];
-
-    /* 8-bit result in upper byte (right-shift autopush at 8 bits).
-     * Bit order: 0x01=A, 0x02=B, 0x04=Sel, 0x08=Start,
-     * 0x10=Up, 0x20=Down, 0x40=Left, 0x80=Right. */
-    uint8_t buttons = (raw >> 24) ^ 0xFF;
-
-    uint32_t state = 0;
-    if (buttons & 0x01) state |= DPAD_A;
-    if (buttons & 0x02) state |= DPAD_B;
-    if (buttons & 0x04) state |= DPAD_SELECT;
-    if (buttons & 0x08) state |= DPAD_START;
-    if (buttons & 0x10) state |= DPAD_UP;
-    if (buttons & 0x20) state |= DPAD_DOWN;
-    if (buttons & 0x40) state |= DPAD_LEFT;
-    if (buttons & 0x80) state |= DPAD_RIGHT;
-
-    nespad_state = state;
-    nespad_state2 = 0;
+    /* Each clock shifts DATA1 then DATA2 into the ISR. After 16 clocks the
+     * 32-bit word is interleaved exactly like pico-speccy: even bits are
+     * joystick 1, odd bits joystick 2. Inputs are active low. */
+    const uint32_t raw = pio->rxf[sm] ^ 0xFFFFFFFFu;
+    nespad_state  = raw & 0x00555555u;
+    nespad_state2 = (raw >> 1) & 0x00555555u;
 }
 
 /* Convenience: trigger + block. Use start/finish for overlapped reads. */

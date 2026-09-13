@@ -870,18 +870,30 @@ static void poll_keyboard(void) {
 #ifdef NESPAD_GPIO_CLK
     if (pc && !pc->paused && config_get_nes_joystick()) {
         nespad_read();
-        const uint32_t pad = nespad_state;
-        int jx = 0, jy = 0;
-        if (pad & DPAD_LEFT)  jx = -1;
-        if (pad & DPAD_RIGHT) jx =  1;
-        if (pad & DPAD_UP)    jy = -1;
-        if (pad & DPAD_DOWN)  jy =  1;
-        /* A and B are the two buttons every DOS game expects; SNES pads
-         * also offer X/Y, mapped alongside so either pair works. */
-        uint8_t jb = 0;
-        if (pad & (DPAD_A | DPAD_Y)) jb |= 0x01;
-        if (pad & (DPAD_B | DPAD_X)) jb |= 0x02;
-        gameport_set(jx, jy, jb);
+        const uint32_t pad1 = nespad_state;
+        const uint32_t pad2 = nespad_state2;
+        int ax = 0, ay = 0, bx = 0, by = 0;
+        uint8_t ab = 0, bb = 0;
+
+        if (pad1 & DPAD_LEFT)  ax = -1;
+        if (pad1 & DPAD_RIGHT) ax =  1;
+        if (pad1 & DPAD_UP)    ay = -1;
+        if (pad1 & DPAD_DOWN)  ay =  1;
+        if (pad1 & (DPAD_A | DPAD_Y)) ab |= 0x01;
+        if (pad1 & (DPAD_B | DPAD_X)) ab |= 0x02;
+
+        if (pad2 & DPAD_LEFT)  bx = -1;
+        if (pad2 & DPAD_RIGHT) bx =  1;
+        if (pad2 & DPAD_UP)    by = -1;
+        if (pad2 & DPAD_DOWN)  by =  1;
+        if (pad2 & (DPAD_A | DPAD_Y)) bb |= 0x01;
+        if (pad2 & (DPAD_B | DPAD_X)) bb |= 0x02;
+
+        /* The second DATA line is a real second physical port, not an alias
+         * of joystick A. With NES joystick mode enabled both hardware ports
+         * are exposed as DOS joystick A/B; an idle pad legitimately has a
+         * zero state, so state==0 cannot be used as presence detection. */
+        gameport_set_pair(ax, ay, ab, 1, bx, by, bb);
     }
 #endif
 
