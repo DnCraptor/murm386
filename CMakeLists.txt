@@ -506,7 +506,9 @@ if(EMM)
     )
 endif()
 if(CPU_TARGET STREQUAL "386")
-    target_compile_definitions(${BUILD_NAME} PRIVATE I386_MODE=1)
+    target_compile_definitions(${BUILD_NAME} PRIVATE I386_MODE=1 EMU_CPU_GEN=3)
+else()
+    target_compile_definitions(${BUILD_NAME} PRIVATE EMU_CPU_GEN=2)
 endif()
 
 # --- Нативный стек core0 -----------------------------------------------
@@ -560,15 +562,11 @@ target_compile_definitions(${BUILD_NAME} PRIVATE
 
     # Emulator configuration (8MB PSRAM)
     EMU_VGA_MEM_SIZE_KB=${EMU_VGA_MEM_SIZE_KB}
-    EMU_CPU_GEN=2
 
     # Disable features for initial port
 #    NO_FPU=1
     # NO_SOUND=1  # Sound enabled with I2S output
     NO_NETWORK=1
-
-    # Performance optimizations
-    I386_ENABLE_INLINE=1
 
     SOUND_FREQUENCY=44100
 

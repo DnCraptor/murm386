@@ -2077,6 +2077,12 @@ int main(void) {
         extern uint8_t __text_buffer_area_source__[];
         memcpy(__text_buffer_area__, __text_buffer_area_source__,
                (size_t)(__text_buffer_area_end__ - __text_buffer_area__));
+#ifdef I386_MODE
+        extern uint8_t __ram_4_ext_code_start__[], __ram_4_ext_code_end__[];
+        extern uint8_t __ram_4_ext_code_source__[];
+        memcpy(__ram_4_ext_code_start__, __ram_4_ext_code_source__,
+               (size_t)(__ram_4_ext_code_end__ - __ram_4_ext_code_start__));
+#endif
     }
 
     // Initialize stdio (USB Serial or UART depending on USB HID mode)
@@ -2139,6 +2145,7 @@ int main(void) {
     /* 256 KiB video profiles use RAM_4_EXT for their 40 KiB guest page cache.
        Smaller runtime adapters leave it free for the FatFs cache.
        NO_PAGING never uses a guest page cache, so RAM_4_EXT is free too. */
+#ifndef I386_MODE
 #if defined(NO_PAGING)
     if (true)
 #else
@@ -2151,6 +2158,7 @@ int main(void) {
         uintptr_t top = (uintptr_t)&__ram_4_ext_region_end__;
         sdcard_enable_ff_cache_arena(0u, (void *)bottom, (size_t)(top - bottom));
     }
+#endif
 
 #if defined(VIDEO_RUNTIME) || defined(EGA128) || defined(VGA128) || defined(MCGA)
     /* With direct QSPI guest RAM the ram_pages tail of GFX_BUFFER is unused.

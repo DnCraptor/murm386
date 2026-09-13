@@ -247,6 +247,19 @@ SECTIONS
 
     __ram_4_ext_region_start__ = ORIGIN(RAM_4_EXT);
     __ram_4_ext_region_end__ = ORIGIN(RAM_4_EXT) + LENGTH(RAM_4_EXT);
+
+    /* Executable hot code in RAM_4_EXT. The SDK crt0 does not initialize
+       this custom region, so main() copies its FLASH load image before use. */
+    .ram_4_ext_code : {
+        . = ALIGN(4);
+        __ram_4_ext_code_start__ = .;
+        KEEP(*(.ram_4_ext_code))
+        KEEP(*(.ram_4_ext_code.*))
+        . = ALIGN(4);
+        __ram_4_ext_code_end__ = .;
+    } > RAM_4_EXT AT > FLASH
+    __ram_4_ext_code_source__ = LOADADDR(.ram_4_ext_code);
+
     .ram_4_ext (NOLOAD) : {
         __ram_4_ext_start__ = .;
         KEEP(*(.bss.ram_4_ext))

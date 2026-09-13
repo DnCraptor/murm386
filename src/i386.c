@@ -118,7 +118,8 @@ bool cpu_load32(CPUI386 *cpu, int seg, uword addr, u32 *res);
 bool cpu_store32(CPUI386 *cpu, int seg, uword addr, u32 val);
 
 #define IRAM_ATTR __not_in_flash()
-#define IRAM_ATTR_CPU_EXEC1 __not_in_flash()
+#define IRAM_ATTR_CPU_EXEC1
+/// __not_in_flash()
 
 #ifndef __wasm__
 #define I386_OPT2
