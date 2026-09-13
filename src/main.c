@@ -1458,7 +1458,11 @@ static bool init_hardware(void) {
             f_close(&fp);
         }
 #if HAS_AUDIO_HWAY
-        if (f_open(&fp, "/.config/286/force_hway", FA_READ) == FR_OK) {
+        if (f_open(&fp, "/.config/286/force_hway8930", FA_READ) == FR_OK) {
+            audio_set_boot_output(AUDIO_OUTPUT_HWAY8930);
+            f_close(&fp);
+        }
+        else if (f_open(&fp, "/.config/286/force_hway", FA_READ) == FR_OK) {
             audio_set_boot_output(AUDIO_OUTPUT_HWAY);
             f_close(&fp);
         }

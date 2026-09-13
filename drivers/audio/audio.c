@@ -186,7 +186,7 @@ static bool audio_use_hway = false;
 static int boot_audio_output = AUDIO_OUTPUT_AUTO;
 
 void audio_set_boot_output(int output) {
-    if (output >= AUDIO_OUTPUT_AUTO && output <= AUDIO_OUTPUT_HWAY)
+    if (output >= AUDIO_OUTPUT_AUTO && output <= AUDIO_OUTPUT_HWAY8930)
         boot_audio_output = output;
 }
 
@@ -221,9 +221,18 @@ bool audio_is_hway(void) {
 #endif
 }
 
+bool audio_is_hway8930(void) {
+#if HAS_AUDIO_HWAY
+    return boot_audio_output == AUDIO_OUTPUT_HWAY8930;
+#else
+    return false;
+#endif
+}
+
 void audio_init(void) {
 #if HAS_AUDIO_HWAY
-    audio_use_hway = (boot_audio_output == AUDIO_OUTPUT_HWAY);
+    audio_use_hway = (boot_audio_output == AUDIO_OUTPUT_HWAY ||
+                      boot_audio_output == AUDIO_OUTPUT_HWAY8930);
     if (audio_use_hway) {
         ay_hw_init();
         ay_hw_write_pcm(128);
@@ -417,14 +426,24 @@ bool __not_in_flash_func(timer_callback)(repeating_timer_t *rt) {
         r_v += sample;
         l_v += sample;
     }
-    if (COVOX_IS_SOUND_MASTER(pc->covox_enabled) &&
-        (!audio_is_hway() || csm_psg_is_expanded())) {
-        /* AY8930 synthesis already returns a 16-bit mixer sample.  Keep the
-         * signal at that precision here; HW AY mode quantizes only at the
-         * final ay_hw_write_pcm() backend. */
-        int16_t sample = csm_psg_sample();
-        r_v += sample;
-        l_v += sample;
+    if (COVOX_IS_SOUND_MASTER(pc->covox_enabled)) {
+        /*
+         * Keep the AY8930 model clocked even when a real AY8930 supplies the
+         * audible PSG output.  In expanded mode channel C is also the AYDMA
+         * timing source, so suppressing csm_psg_sample() here changes device
+         * state/timing even if its returned audio sample is not mixed.
+         */
+        if (!audio_is_hway()) {
+            int16_t sample = csm_psg_sample();
+            r_v += sample;
+            l_v += sample;
+        } else if (csm_psg_is_expanded()) {
+            int16_t sample = csm_psg_sample();
+            if (!audio_is_hway8930()) {
+                r_v += sample;
+                l_v += sample;
+            }
+        }
     }
     if (pc->tandy_enabled) {
         int16_t sample = sn76489_sample(); // 16-bit

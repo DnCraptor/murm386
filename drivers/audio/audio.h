@@ -58,12 +58,14 @@ void i2s_decrease_volume(i2s_config_t *i2s_config);
 #define AUDIO_OUTPUT_PWM  1
 #define AUDIO_OUTPUT_I2S  2
 #define AUDIO_OUTPUT_HWAY 3
+#define AUDIO_OUTPUT_HWAY8930 4
 
 void audio_set_boot_output(int output);
 void audio_set_enabled(bool);
 void audio_set_volume(uint8_t);
 uint8_t audio_get_volume(void);
 bool audio_is_hway(void);
+bool audio_is_hway8930(void);
 void audio_init(void);
 void audio_play_tone(unsigned hz, unsigned ms);
 

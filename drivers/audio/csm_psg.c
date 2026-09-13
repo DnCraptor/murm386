@@ -5,6 +5,7 @@
 #include <string.h>
 
 bool audio_is_hway(void);
+bool audio_is_hway8930(void);
 
 /* AY-3-8910 compatible-mode core ported from the current pico-speccy
  * AySound implementation.  Covox Sound Master used AY-3-8930, but this
@@ -92,7 +93,7 @@ static void psg_reset_generators(void)
 
 static void psg_hw_silence_primary(void)
 {
-    if (!audio_is_hway())
+    if (!audio_is_hway() || audio_is_hway8930())
         return;
 
     /* In expanded mode the first physical AY-3-8910 cannot represent the
@@ -124,7 +125,7 @@ static uint8_t psg_hw_value(uint8_t reg, uint8_t value)
 
 static void psg_hw_resync_compatible(void)
 {
-    if (!audio_is_hway() || psg_is_expanded())
+    if (!audio_is_hway() || audio_is_hway8930() || psg_is_expanded())
         return;
 
     /* The physical chip was intentionally frozen while expanded mode was
@@ -174,7 +175,8 @@ static void psg_mode_write(uint8_t value)
         psg_hw_silence_primary();
     else if (was_expanded && !will_expand)
         psg_hw_resync_compatible();
-    else if (!will_expand && old_mode != new_mode && audio_is_hway()) {
+    else if (!will_expand && old_mode != new_mode &&
+             audio_is_hway() && !audio_is_hway8930()) {
         ay_hw_psg_select_register(13);
         ay_hw_psg_write_data(value & 0x0f);
     }
@@ -193,7 +195,8 @@ void csm_psg_reset(void)
 void csm_psg_select_register(uint8_t reg)
 {
     psg.selected_register = reg;
-    if (audio_is_hway() && !psg_is_expanded())
+    if (audio_is_hway() &&
+        (!psg_is_expanded() || audio_is_hway8930()))
         ay_hw_psg_select_register(reg);
 }
 
@@ -207,14 +210,23 @@ void csm_psg_write_data(uint8_t value)
         const int was_expanded = psg_is_expanded();
         const int will_expand = ((((value >> 4) & 0x0f) & 0x0e) == 0x0a);
 
-        /* Do not send A0/B0 expanded-mode commands to a physical 8910. */
-        if (audio_is_hway() && !was_expanded && !will_expand) {
+        if (audio_is_hway8930()) {
+            /* A real AY8930 understands the mode/bank command verbatim. */
+            ay_hw_psg_select_register(13);
+            ay_hw_psg_write_data(value);
+        } else if (audio_is_hway() && !was_expanded && !will_expand) {
+            /* A physical AY-3-8910 only receives compatible R13 writes. */
             ay_hw_psg_select_register(13);
             ay_hw_psg_write_data(value & 0x0f);
         }
         psg_mode_write(value);
         return;
     }
+
+    /* In HW AY8930 mode every guest PSG data write is forwarded verbatim.
+     * The real chip handles bank A/B and expanded-mode register semantics. */
+    if (audio_is_hway8930())
+        ay_hw_psg_write_data(value);
 
     if (psg_bank_b()) {
         switch (reg) {
@@ -266,7 +278,7 @@ void csm_psg_write_data(uint8_t value)
         psg.env_count[0] = 0;
     }
 
-    if (audio_is_hway() && !psg_is_expanded()) {
+    if (audio_is_hway() && !audio_is_hway8930() && !psg_is_expanded()) {
         ay_hw_psg_select_register(reg);
         ay_hw_psg_write_data(psg_hw_value(reg, psg.regs_a[reg]));
     }
@@ -278,7 +290,8 @@ void csm_psg_force_channel_c_output(void)
         return;
 
     psg.regs_a[15] |= 0x80;
-    if (audio_is_hway() && !psg_is_expanded()) {
+    if (audio_is_hway8930() ||
+        (audio_is_hway() && !psg_is_expanded())) {
         const uint8_t selected = psg.selected_register;
         ay_hw_psg_select_register(15);
         ay_hw_psg_write_data(psg.regs_a[15]);
@@ -295,7 +308,7 @@ void csm_psg_set_channel_c_output(int enabled)
 
     hw_channel_c_output = new_state;
 
-    if (audio_is_hway() && !psg_is_expanded()) {
+    if (audio_is_hway() && !audio_is_hway8930() && !psg_is_expanded()) {
         const uint8_t selected = psg.selected_register;
         ay_hw_psg_select_register(7);
         ay_hw_psg_write_data(psg_hw_value(7, psg.regs_a[7]));

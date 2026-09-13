@@ -119,12 +119,14 @@ static int audio_output_setting = AUDIO_OUTPUT_AUTO;
 #define VIDEO_MARKER_HDMI "/.config/286/force_dvi"
 #define AUDIO_MARKER_PWM  "/.config/286/force_pwm"
 #define AUDIO_MARKER_I2S  "/.config/286/force_i2s"
-#define AUDIO_MARKER_HWAY "/.config/286/force_hway"
+#define AUDIO_MARKER_HWAY     "/.config/286/force_hway"
+#define AUDIO_MARKER_HWAY8930 "/.config/286/force_hway8930"
 
 // Original values (to detect changes)
 static int orig_cpu, orig_fpu, orig_video_adapter;
 static int orig_pcspeaker, orig_adlib, orig_soundblaster, orig_tandy, orig_covox, orig_dss, orig_mouse, orig_nes_mouse, orig_nes_joystick, orig_mpu401;
 static int orig_cpu_freq, orig_psram_freq, orig_flash_freq, orig_volume, orig_voltage, orig_mouse_invert_y, orig_mouse_sensitivity, orig_usb_modem;
+static int orig_audio_output;
 
 // UI dimensions
 #define MENU_X      10
@@ -152,6 +154,8 @@ static VideoOutputSetting load_video_output_setting(void) {
 static int load_audio_output_setting(void) {
     FILINFO fno;
 #if HAS_AUDIO_HWAY
+    if (f_stat(AUDIO_MARKER_HWAY8930, &fno) == FR_OK)
+        return AUDIO_OUTPUT_HWAY8930;
     if (f_stat(AUDIO_MARKER_HWAY, &fno) == FR_OK)
         return AUDIO_OUTPUT_HWAY;
 #endif
@@ -180,6 +184,7 @@ static void save_audio_output_setting(int setting) {
     (void)f_unlink(AUDIO_MARKER_PWM);
     (void)f_unlink(AUDIO_MARKER_I2S);
     (void)f_unlink(AUDIO_MARKER_HWAY);
+    (void)f_unlink(AUDIO_MARKER_HWAY8930);
     if (setting == AUDIO_OUTPUT_AUTO)
         return;
 
@@ -193,11 +198,21 @@ static void save_audio_output_setting(int setting) {
         create_path = AUDIO_MARKER_I2S;
     else if (setting == AUDIO_OUTPUT_HWAY)
         create_path = AUDIO_MARKER_HWAY;
+    else if (setting == AUDIO_OUTPUT_HWAY8930)
+        create_path = AUDIO_MARKER_HWAY8930;
 
     if (create_path && f_open(&fp, create_path, FA_CREATE_ALWAYS | FA_WRITE) == FR_OK)
         f_close(&fp);
 }
 #endif
+
+static bool settingsui_has_changes(void) {
+    return config_has_changes() || audio_output_setting != orig_audio_output;
+}
+
+static bool audio_output_requires_restart(void) {
+    return audio_output_setting != orig_audio_output;
+}
 
 static void save_video_output_setting(VideoOutputSetting setting) {
     FIL fp;
@@ -256,6 +271,7 @@ void settingsui_open(void) {
     orig_mouse_sensitivity = config_get_mouse_sensitivity();
     orig_usb_modem = config_get_usb_modem();
     audio_output_setting = load_audio_output_setting();
+    orig_audio_output = audio_output_setting;
     video_output_setting = load_video_output_setting();
 
     settings_state = SETTINGS_MAIN;
@@ -268,7 +284,7 @@ void settingsui_open(void) {
 
 void settingsui_close(void) {
     // Restore original values if not confirmed
-    if (settings_state == SETTINGS_MAIN && config_has_changes()) {
+    if (settings_state == SETTINGS_MAIN && settingsui_has_changes()) {
         config_set_cpu_gen(orig_cpu);
         config_set_video_adapter(orig_video_adapter);
         config_set_fpu(orig_fpu);
@@ -280,6 +296,10 @@ void settingsui_close(void) {
         config_set_mouse_sensitivity(orig_mouse_sensitivity);
         config_set_usb_modem(orig_usb_modem);
         audio_set_volume(orig_volume);
+#if HAS_AUDIO_HWAY
+        if (audio_output_setting != orig_audio_output)
+            save_audio_output_setting(orig_audio_output);
+#endif
         config_clear_changes();
     }
     settings_state = SETTINGS_CLOSED;
@@ -471,11 +491,14 @@ static void cycle_option(int direction) {
 #if HAS_AUDIO_HWAY
 #if HAS_AUDIO_I2S && HAS_AUDIO_PWM
             static const int outputs[] = { AUDIO_OUTPUT_AUTO, AUDIO_OUTPUT_PWM,
-                                           AUDIO_OUTPUT_I2S, AUDIO_OUTPUT_HWAY };
+                                           AUDIO_OUTPUT_I2S, AUDIO_OUTPUT_HWAY,
+                                           AUDIO_OUTPUT_HWAY8930 };
 #elif HAS_AUDIO_I2S
-            static const int outputs[] = { AUDIO_OUTPUT_I2S, AUDIO_OUTPUT_HWAY };
+            static const int outputs[] = { AUDIO_OUTPUT_I2S, AUDIO_OUTPUT_HWAY,
+                                           AUDIO_OUTPUT_HWAY8930 };
 #else
-            static const int outputs[] = { AUDIO_OUTPUT_PWM, AUDIO_OUTPUT_HWAY };
+            static const int outputs[] = { AUDIO_OUTPUT_PWM, AUDIO_OUTPUT_HWAY,
+                                           AUDIO_OUTPUT_HWAY8930 };
 #endif
             const int output_count = (int)(sizeof(outputs) / sizeof(outputs[0]));
             int pos = find_option_index(outputs, output_count, audio_output_setting);
@@ -656,7 +679,8 @@ static void draw_settings_menu(void) {
                     case AUDIO_OUTPUT_AUTO: name = "Autodetect"; break;
                     case AUDIO_OUTPUT_PWM:  name = "PWM"; break;
                     case AUDIO_OUTPUT_I2S:  name = "I2S"; break;
-                    case AUDIO_OUTPUT_HWAY: name = "HW AY-3-8910"; break;
+                    case AUDIO_OUTPUT_HWAY:     name = "HW AY-3-8910"; break;
+                    case AUDIO_OUTPUT_HWAY8930: name = "HW AY8930"; break;
                 }
                 snprintf(value, sizeof(value), "< %s >", name);
 #elif HAS_AUDIO_I2S
@@ -678,7 +702,7 @@ static void draw_settings_menu(void) {
     }
 
     // Show if changes pending
-    if (config_has_changes()) {
+    if (settingsui_has_changes()) {
         osd_print_center(MENU_Y + MENU_H - 4, "* Changes pending - Enter to apply", OSD_ATTR_HIGHLIGHT);
     }
 
@@ -752,7 +776,7 @@ bool settingsui_handle_key(int keycode, bool is_down) {
                     break;
 
                 case KEY_ENTER:
-                    if (config_has_changes()) {
+                    if (settingsui_has_changes()) {
                         settings_state = SETTINGS_CONFIRM_SAVE_RESTART;
                         draw_confirm_dialog();
                     } else {
@@ -761,7 +785,10 @@ bool settingsui_handle_key(int keycode, bool is_down) {
                     break;
 
                 case KEY_ESC:
-                    if (config_has_changes()) {
+                    if (audio_output_requires_restart()) {
+                        settings_state = SETTINGS_CONFIRM_SAVE_RESTART;
+                        draw_confirm_dialog();
+                    } else if (config_has_changes()) {
                         settings_state = SETTINGS_CONFIRM_SAVE;
                         draw_confirm_dialog2();
                     } else {
