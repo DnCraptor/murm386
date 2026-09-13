@@ -275,6 +275,8 @@ void i8257_write_cont(void *opaque, hwaddr nport, uint64_t data,
 #endif
 }
 
+static void i8257_channel_run(I8257State *d, int ichan);
+
 uint64_t i8257_read_cont(void *opaque, hwaddr nport, unsigned size)
 {
     I8257State *d = opaque;
@@ -283,6 +285,23 @@ uint64_t i8257_read_cont(void *opaque, hwaddr nport, unsigned size)
     iport = (nport >> d->dshift) & 0x0f;
     switch (iport) {
     case 0x00:                  /* status */
+        /*
+         * Match 86Box 8237 status semantics: a peripheral may have asserted
+         * DREQ while the guest is polling terminal count. Service each
+         * pending hardware request once before sampling status so a TC
+         * reached by that transfer is visible in this very read.
+         *
+         * Do not run software Request Register requests here; 86Box only
+         * services external peripheral requests on the status-read path.
+         */
+        for (int ichan = 0; ichan < 4; ++ichan) {
+            const uint8_t mask = (uint8_t)(1u << ichan);
+            if (!(d->mask & mask) &&
+                (__atomic_load_n(&d->dreq, __ATOMIC_ACQUIRE) & mask) &&
+                d->regs[ichan].transfer_handler)
+                i8257_channel_run(d, ichan);
+        }
+
         val = (d->status & 0x0f) |
               ((d->request | __atomic_load_n(&d->dreq, __ATOMIC_ACQUIRE)) << 4);
         d->status = 0;
