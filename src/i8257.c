@@ -203,14 +203,12 @@ void i8257_write_cont(void *opaque, hwaddr nport, uint64_t data,
         d->command = data;
         break;
 
-    case 0x01:
+    case 0x01:                  /* request */
         ichan = data & 3;
-        if (data & 4) {
-            d->status |= 1 << (ichan + 4);
-        }
-        else {
-            d->status &= ~(1 << (ichan + 4));
-        }
+        if (data & 4)
+            d->request |= 1 << ichan;
+        else
+            d->request &= ~(1 << ichan);
         d->status &= ~(1 << ichan);
         i8257_dma_run(d);
         break;
@@ -250,6 +248,7 @@ void i8257_write_cont(void *opaque, hwaddr nport, uint64_t data,
         d->flip_flop = 0;
         d->mask = ~0;
         d->status = 0;
+        d->request = 0;
         d->command = 0;
         break;
 
@@ -284,8 +283,9 @@ uint64_t i8257_read_cont(void *opaque, hwaddr nport, unsigned size)
     iport = (nport >> d->dshift) & 0x0f;
     switch (iport) {
     case 0x00:                  /* status */
-        val = d->status;
-        d->status &= 0xf0;
+        val = (d->status & 0x0f) |
+              ((d->request | __atomic_load_n(&d->dreq, __ATOMIC_ACQUIRE)) << 4);
+        d->status = 0;
         break;
     case 0x01:                  /* mask */
         val = d->mask;
@@ -310,7 +310,7 @@ static bool i8257_dma_has_autoinitialization(IsaDma *obj, int nchan)
 void __not_in_flash_func(i8257_dma_hold_DREQ)(IsaDma *obj, int nchan)
 {
     I8257State *d = I8257(obj);
-    d->status |= 1 << ((nchan & 3) + 4);
+    __atomic_fetch_or(&d->dreq, (uint8_t)(1u << (nchan & 3)), __ATOMIC_RELEASE);
     // НЕ вызываем i8257_dma_run — это сделает pc_step
 }
 
@@ -321,7 +321,7 @@ void __not_in_flash_func(i8257_dma_release_DREQ)(IsaDma *obj, int nchan)
     int ichan;
 
     ichan = nchan & 3;
-    d->status &= ~(1 << (ichan + 4));
+    __atomic_fetch_and(&d->dreq, (uint8_t)~(1u << ichan), __ATOMIC_RELEASE);
     // НЕ вызываем i8257_dma_run — это сделает pc_step
 }
 
@@ -351,12 +351,15 @@ static void __not_in_flash_func(i8257_channel_run)(I8257State *d, int ichan)
     if (n == (r->base[COUNT] + 1) << ncont) {
         ldebug("transfer done\n");
         d->status |= (1 << ichan);
+        d->request &= ~(1 << ichan);
         /* 8237 auto-initialize reloads the current address/count from the
          * programmed base after terminal count.  SB16's streaming callback
          * normally wraps before reaching this path, but devices such as the
          * Covox Sound Master need the real terminal-count semantics. */
         if (r->mode & 0x10)
             i8257_init_chan(d, ichan);
+        else
+            d->mask |= (1 << ichan);
     }
 }
 
@@ -378,7 +381,9 @@ void __not_in_flash_func(i8257_dma_run)(void *opaque)
 
         mask = 1 << ichan;
 
-        if ((0 == (d->mask & mask)) && (0 != (d->status & (mask << 4)))) {
+        uint8_t pending = d->request |
+                          __atomic_load_n(&d->dreq, __ATOMIC_ACQUIRE);
+        if ((0 == (d->mask & mask)) && (0 != (pending & mask))) {
             i8257_channel_run(d, ichan);
             rearm = 1;
         }

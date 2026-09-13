@@ -19,14 +19,17 @@
  * 237102/(N*mult) Hz.  The fixed-point accumulator below reproduces that
  * timing against murm386's 44.1-kHz mixer without a second high-rate IRQ.
  *
- * The 8237 transfer itself stays on core0.  The 44.1-kHz mixer on core1
- * only generates DREQ pulses; each pulse is serviced as exactly one DMA byte
- * by pc_step()/core0.  This keeps 8237 terminal-count timing aligned with
- * the AYDMA sample clock.
+ * The 8237 transfer itself stays on core0 and fills a small FIFO under DREQ
+ * flow control, like murm386's working SB16 path.  The 44.1-kHz mixer on
+ * core1 consumes that FIFO at the AYDMA sample clock.  The final DMA byte is
+ * deliberately not prefetched until all earlier samples have reached the DAC,
+ * keeping 8237 terminal count aligned with the audible block boundary.
  */
 
 #define CSM_CLOCK_NUM 237102u
 #define CSM_MIX_RATE  44100u
+#define CSM_FIFO_LEN  256u
+#define CSM_FIFO_MASK (CSM_FIFO_LEN - 1u)
 
 typedef struct CsmState {
     I8257State *dma;
@@ -41,13 +44,60 @@ typedef struct CsmState {
     uint16_t dma_interval;
 
     volatile uint8_t pcm_sample;
-    uint64_t phase;
+
+    /* Published by core0 as one coherent snapshot.  The 64-bit audio_phase
+     * and audio_seen_epoch below are owned exclusively by core1. */
+    volatile uint32_t audio_cfg;
+    volatile uint32_t audio_epoch;
+    uint64_t audio_phase;
+    uint32_t audio_seen_epoch;
+    uint8_t audio_blocked;
+
+    uint8_t fifo[CSM_FIFO_LEN];
+    volatile uint32_t fifo_p;
+    volatile uint32_t fifo_q;
+    volatile uint8_t producer_done;
+    volatile uint8_t consumer_done;
+    volatile uint8_t irq_pending;
 
     volatile uint8_t irq_asserted;
     uint16_t io_base;
 } CsmState;
 
 static CsmState csm;
+
+#define CSM_AUDIO_CFG_RUNNING       0x00000001u
+#define CSM_AUDIO_CFG_INTERVAL_SHIFT 1u
+#define CSM_AUDIO_CFG_MULT_SHIFT    17u
+
+static inline void csm_publish_audio_cfg(void)
+{
+    uint32_t cfg = 0;
+    if (csm.dma_running && csm.dma_enabled && csm.dma_interval > 1) {
+        cfg = CSM_AUDIO_CFG_RUNNING |
+              ((uint32_t)csm.dma_interval << CSM_AUDIO_CFG_INTERVAL_SHIFT) |
+              ((uint32_t)csm.dma_mult << CSM_AUDIO_CFG_MULT_SHIFT);
+    }
+    __atomic_store_n(&csm.audio_cfg, cfg, __ATOMIC_RELEASE);
+    __atomic_add_fetch(&csm.audio_epoch, 1u, __ATOMIC_RELEASE);
+}
+
+static inline uint32_t csm_fifo_p(void)
+{
+    return __atomic_load_n(&csm.fifo_p, __ATOMIC_ACQUIRE);
+}
+
+static inline uint32_t csm_fifo_q(void)
+{
+    return __atomic_load_n(&csm.fifo_q, __ATOMIC_ACQUIRE);
+}
+
+static inline void csm_fifo_reset(void)
+{
+    uint32_t q = csm_fifo_q();
+    __atomic_store_n(&csm.fifo_p, q, __ATOMIC_RELEASE);
+    __atomic_store_n(&csm.producer_done, 0, __ATOMIC_RELEASE);
+}
 
 static inline int csm_irq_enabled(void)
 {
@@ -65,6 +115,10 @@ static void csm_set_irq(int level)
 static void csm_stop_dma(void)
 {
     csm.dma_running = 0;
+    __atomic_store_n(&csm.consumer_done, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&csm.irq_pending, 0, __ATOMIC_RELEASE);
+    csm_fifo_reset();
+    csm_publish_audio_cfg();
     if (csm.dma)
         i8257_dma_release_DREQ((IsaDma *)csm.dma, CSM_DMA_CHAN);
 }
@@ -86,60 +140,100 @@ static void csm_mode_bits_changed(void)
 
     if ((r7 & 0x04) || !csm.dma_enabled) {
         csm_stop_dma();
-        csm.phase = 0;
         return;
     }
 
+    const int was_running = csm.dma_running;
     csm.dma_running = 1;
     const uint8_t r10 = csm_psg_get_bank_a_register(10);
     csm.dma_mult = ((r10 & 0x10) || r10 == 0) ? 1 : 2;
-    csm.phase = 0;
+    csm_publish_audio_cfg();
+
+    if (!was_running) {
+        __atomic_store_n(&csm.consumer_done, 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&csm.irq_pending, 0, __ATOMIC_RELEASE);
+        csm_fifo_reset();
+        if (csm.dma)
+            i8257_dma_hold_DREQ((IsaDma *)csm.dma, CSM_DMA_CHAN);
+    }
 }
 
 static int csm_dma_transfer(void *opaque, int nchan, int dma_pos, int dma_len)
 {
     (void)opaque;
 
-    if (nchan != CSM_DMA_CHAN || !csm.dma_running || !csm.dma_enabled || dma_len <= 0) {
+    if (nchan != CSM_DMA_CHAN || !csm.dma_running || !csm.dma_enabled ||
+        __atomic_load_n(&csm.producer_done, __ATOMIC_ACQUIRE) || dma_len <= 0) {
         if (csm.dma)
             i8257_dma_release_DREQ((IsaDma *)csm.dma, CSM_DMA_CHAN);
         return dma_pos;
     }
 
     if (dma_pos >= dma_len) {
+        __atomic_store_n(&csm.producer_done, 1, __ATOMIC_RELEASE);
         i8257_dma_release_DREQ((IsaDma *)csm.dma, CSM_DMA_CHAN);
         return dma_len;
     }
 
-    /* One AYDMA clock pulse corresponds to exactly one 8237 transfer.
-     * Do not prefetch: Prince of Persia observes DMA terminal-count/status
-     * for synchronization, so fetching a block ahead makes TC happen much
-     * earlier than the sample actually reaches the DAC. */
-    uint8_t sample = 0x80;
-    int copied = i8257_dma_read_memory((IsaDma *)csm.dma, nchan,
-                                       &sample, dma_pos, 1);
-    i8257_dma_release_DREQ((IsaDma *)csm.dma, CSM_DMA_CHAN);
-
-    if (copied <= 0)
+    uint32_t p = csm_fifo_p();
+    uint32_t q = csm_fifo_q();
+    uint32_t used = q - p;
+    if (used >= CSM_FIFO_LEN - 1u) {
+        i8257_dma_release_DREQ((IsaDma *)csm.dma, CSM_DMA_CHAN);
         return dma_pos;
+    }
 
-    __atomic_store_n(&csm.pcm_sample, sample, __ATOMIC_RELEASE);
-    ++dma_pos;
+    int remain = dma_len - dma_pos;
+    uint32_t free_count = (CSM_FIFO_LEN - 1u) - used;
 
-    if (dma_pos >= dma_len) {
-        if (csm_irq_enabled())
-            csm_set_irq(1);
+    /* Keep the final DMA byte out of the prefetch queue until every earlier
+     * sample has actually reached the DAC.  This makes the generic 8237
+     * terminal-count transition coincide with the final AYDMA sample to
+     * within one sample clock instead of occurring a FIFO ahead. */
+    int count;
+    if (remain == 1) {
+        if (used != 0) {
+            i8257_dma_release_DREQ((IsaDma *)csm.dma, CSM_DMA_CHAN);
+            return dma_pos;
+        }
+        count = 1;
+    } else {
+        count = remain - 1;
+        if ((uint32_t)count > free_count)
+            count = (int)free_count;
+    }
 
-        /* DMA_OVER stops the Sound Master's own AYDMA clock.  The 8237 may
-         * auto-initialize its address/count independently, but that must not
-         * make the CSM continue clocking a new block without another PSG
-         * programming event.  This matches the working 86Box CSM model. */
-        csm.dma_running = 0;
-        csm.phase = 0;
+    if (count <= 0) {
         i8257_dma_release_DREQ((IsaDma *)csm.dma, CSM_DMA_CHAN);
+        return dma_pos;
+    }
 
+    uint8_t tmp[CSM_FIFO_LEN];
+    int copied = i8257_dma_read_memory((IsaDma *)csm.dma, nchan,
+                                       tmp, dma_pos, count);
+    if (copied <= 0) {
+        i8257_dma_release_DREQ((IsaDma *)csm.dma, CSM_DMA_CHAN);
+        return dma_pos;
+    }
+
+    for (int i = 0; i < copied; ++i)
+        csm.fifo[(q + (uint32_t)i) & CSM_FIFO_MASK] = tmp[i];
+    __atomic_store_n(&csm.fifo_q, q + (uint32_t)copied, __ATOMIC_RELEASE);
+
+    dma_pos += copied;
+    if (dma_pos >= dma_len) {
+        __atomic_store_n(&csm.producer_done, 1, __ATOMIC_RELEASE);
+        i8257_dma_release_DREQ((IsaDma *)csm.dma, CSM_DMA_CHAN);
         return dma_len;
     }
+
+    /* Like SB16, DREQ is only FIFO flow control.  Leave it asserted while
+     * there is producer space; otherwise core1 re-asserts it after consuming
+     * samples. */
+    p = csm_fifo_p();
+    q = csm_fifo_q();
+    if ((q - p) >= CSM_FIFO_LEN - 1u)
+        i8257_dma_release_DREQ((IsaDma *)csm.dma, CSM_DMA_CHAN);
 
     return dma_pos;
 }
@@ -182,7 +276,6 @@ void csm_bind_dma(void)
 void csm_deactivate(void)
 {
     csm_stop_dma();
-    csm.phase = 0;
     if (csm.irq_asserted)
         csm_set_irq(0);
 }
@@ -200,7 +293,11 @@ static void csm_write_ay(uint8_t reg, uint8_t data)
     if (!csm.dma_interval)
         csm.dma_interval = 1;
 
-    if (reg == 4 || reg == 5 || reg == 7 || reg == 10 || reg == 13 || reg == 14 || reg == 15)
+    /* Only bank A R7/R14/R15 control the Sound Master DMA/IRQ routing.
+     * In AY8930 expanded bank B, R7 is a duty-cycle register and R14/R15
+     * are not CSM control ports.  Treating those writes as bank-A control
+     * changes can spuriously start/stop AYDMA while the PSG is playing. */
+    if (!csm_psg_is_bank_b() && (reg == 7 || reg == 14 || reg == 15))
         csm_mode_bits_changed();
 }
 
@@ -248,25 +345,59 @@ int csm_channel_c_output_enabled(void)
 
 void csm_service(void)
 {
-    /* DMA transfers are now paced one byte per AYDMA clock pulse, so there
-     * is no deferred FIFO terminal-count work to service here. */
+    /* Core1 only reports that the final FIFO byte reached the DAC.  Keep all
+     * CSM control-state and PSG/IRQ decisions on core0. */
+    if (__atomic_exchange_n(&csm.consumer_done, 0, __ATOMIC_ACQ_REL)) {
+        csm.dma_running = 0;
+        csm_publish_audio_cfg();
+        if (csm_irq_enabled())
+            csm_set_irq(1);
+    }
+
+    if (__atomic_exchange_n(&csm.irq_pending, 0, __ATOMIC_ACQ_REL)) {
+        if (csm_irq_enabled())
+            csm_set_irq(1);
+    }
 }
 
 int16_t csm_getsample(void)
 {
-    if (csm.dma_running && csm.dma_interval > 1) {
-        uint64_t threshold = (uint64_t)CSM_MIX_RATE * csm.dma_interval *
-                             csm.dma_mult;
-        csm.phase += CSM_CLOCK_NUM;
+    uint32_t epoch = __atomic_load_n(&csm.audio_epoch, __ATOMIC_ACQUIRE);
+    if (epoch != csm.audio_seen_epoch) {
+        csm.audio_seen_epoch = epoch;
+        csm.audio_phase = 0;
+        csm.audio_blocked = 0;
+    }
 
-        while (csm.phase >= threshold) {
-            csm.phase -= threshold;
+    uint32_t cfg = __atomic_load_n(&csm.audio_cfg, __ATOMIC_ACQUIRE);
+    if ((cfg & CSM_AUDIO_CFG_RUNNING) && !csm.audio_blocked) {
+        uint16_t interval = (uint16_t)(cfg >> CSM_AUDIO_CFG_INTERVAL_SHIFT);
+        uint8_t mult = (uint8_t)((cfg >> CSM_AUDIO_CFG_MULT_SHIFT) & 0x03u);
+        uint64_t threshold = (uint64_t)CSM_MIX_RATE * interval * mult;
+        csm.audio_phase += CSM_CLOCK_NUM;
 
-            /* Each AYDMA sample clock generates one DMA request.  The
-             * existing i8257 implementation only latches DREQ here; core0
-             * performs the memory transfer from pc_step(). */
-            if (csm.dma_enabled && csm.dma_running)
-                i8257_dma_hold_DREQ((IsaDma *)csm.dma, CSM_DMA_CHAN);
+        while (csm.audio_phase >= threshold && !csm.audio_blocked) {
+            csm.audio_phase -= threshold;
+
+            uint32_t p = csm_fifo_p();
+            uint32_t q = csm_fifo_q();
+            if (p != q) {
+                uint8_t sample = csm.fifo[p & CSM_FIFO_MASK];
+                __atomic_store_n(&csm.pcm_sample, sample, __ATOMIC_RELEASE);
+                __atomic_store_n(&csm.fifo_p, p + 1u, __ATOMIC_RELEASE);
+
+                p++;
+                if (__atomic_load_n(&csm.producer_done, __ATOMIC_ACQUIRE) && p == q) {
+                    /* Do not mutate core0-owned dma_running/PSG state here. */
+                    csm.audio_blocked = 1;
+                    csm.audio_phase = 0;
+                    __atomic_store_n(&csm.consumer_done, 1, __ATOMIC_RELEASE);
+                    break;
+                }
+
+                if (!__atomic_load_n(&csm.producer_done, __ATOMIC_ACQUIRE))
+                    i8257_dma_hold_DREQ((IsaDma *)csm.dma, CSM_DMA_CHAN);
+            }
         }
     }
 

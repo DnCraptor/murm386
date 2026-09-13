@@ -22,7 +22,9 @@ typedef struct I8257State {
     int32_t pageh_base;
     int32_t dshift;
 
-    uint8_t status;
+    uint8_t status;      /* terminal-count latch, bits 0..3 */
+    uint8_t request;     /* software Request Register, bits 0..3 */
+    uint8_t dreq;        /* external DREQ input levels, bits 0..3 */
     uint8_t command;
     uint8_t mask;
     uint8_t flip_flop;
