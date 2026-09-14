@@ -788,6 +788,16 @@ static bool IRAM_ATTR translate(CPUI386 *cpu, OptAddr *res, int rwm, int seg, uw
 	assert(seg != -1);
 	uword laddr = cpu->seg[seg].base + addr;
 
+	/* Common DOS/real-mode case: with neither protected mode nor paging
+	 * active there is no segment protection or address translation to do.
+	 * Avoid the segcheck() + translate_laddr() call chain on every memory
+	 * operand. */
+	if (likely(!(cpu->cr0 & (1u | CR0_PG)))) {
+		res->res = ADDR_OK1;
+		res->addr1 = laddr;
+		return true;
+	}
+
 	TRYL(segcheck(cpu, rwm, seg, addr, size));
 
 	return translate_laddr(cpu, res, rwm, laddr, size, cpl);
@@ -832,18 +842,36 @@ static bool IRAM_ATTR translate8r(CPUI386 *cpu, OptAddr *res, int seg, uword add
 	return true;
 }
 
-static inline bool translate8(CPUI386 *cpu, OptAddr *res, int rwm, int seg, uword addr)
+static inline __attribute__((always_inline))
+bool translate8(CPUI386 *cpu, OptAddr *res, int rwm, int seg, uword addr)
 {
+	if (likely(!(cpu->cr0 & 1u))) {
+		res->res = ADDR_OK1;
+		res->addr1 = cpu->seg[seg].base + addr;
+		return true;
+	}
 	return translate(cpu, res, rwm, seg, addr, 1, cpu->cpl);
 }
 
-static inline bool translate16(CPUI386 *cpu, OptAddr *res, int rwm, int seg, uword addr)
+static inline __attribute__((always_inline))
+bool translate16(CPUI386 *cpu, OptAddr *res, int rwm, int seg, uword addr)
 {
+	if (likely(!(cpu->cr0 & 1u))) {
+		res->res = ADDR_OK1;
+		res->addr1 = cpu->seg[seg].base + addr;
+		return true;
+	}
 	return translate(cpu, res, rwm, seg, addr, 2, cpu->cpl);
 }
 
-static inline bool translate32(CPUI386 *cpu, OptAddr *res, int rwm, int seg, uword addr)
+static inline __attribute__((always_inline))
+bool translate32(CPUI386 *cpu, OptAddr *res, int rwm, int seg, uword addr)
 {
+	if (likely(!(cpu->cr0 & 1u))) {
+		res->res = ADDR_OK1;
+		res->addr1 = cpu->seg[seg].base + addr;
+		return true;
+	}
 	return translate(cpu, res, rwm, seg, addr, 4, cpu->cpl);
 }
 
@@ -970,8 +998,7 @@ LOADSTORE(32)
 /* Refill: load 16 bytes (4 x u32) from the 16-byte-aligned block that
  * contains paddr.  Caller guarantees paddr is in plain RAM and within the
  * current ifetch page. */
-static inline void __attribute__((always_inline))
-prefetch_fill(CPUI386 *cpu, uword paddr)
+static void __attribute__((noinline, noclone)) __not_in_flash_func(prefetch_fill)(CPUI386 *cpu, uword paddr)
 {
 	u32 base = paddr & ~(u32)15;
 	cp_note(base);
@@ -1159,7 +1186,8 @@ static bool IRAM_ATTR fetch32(CPUI386 *cpu, u32 *val)
 }
 #endif // PREFETCH_ENABLED
 
-static bool IRAM_ATTR fetch8(CPUI386 *cpu, u8 *val)
+static inline __attribute__((always_inline))
+bool fetch8(CPUI386 *cpu, u8 *val)
 {
 	TRY(peek8(cpu, val));
 	cpu->next_ip++;
@@ -1167,7 +1195,7 @@ static bool IRAM_ATTR fetch8(CPUI386 *cpu, u8 *val)
 }
 
 /* insts decode && execute */
-static inline bool modsib32(CPUI386 *cpu, int mod, int rm, uword *addr, int *seg)
+static IRAM_ATTR bool modsib32(CPUI386 *cpu, int mod, int rm, uword *addr, int *seg)
 {
 	if (rm == 4) {
 		u8 sib;
@@ -1206,7 +1234,7 @@ static inline bool modsib32(CPUI386 *cpu, int mod, int rm, uword *addr, int *seg
 	return true;
 }
 
-static inline bool modsib16(CPUI386 *cpu, int mod, int rm, uword *addr, int *seg)
+static IRAM_ATTR bool modsib16(CPUI386 *cpu, int mod, int rm, uword *addr, int *seg)
 {
 	if (rm == 6 && mod == 0) {
 		u16 imm16;
