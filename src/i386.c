@@ -885,34 +885,40 @@ static inline u8 __attribute__((always_inline)) load8(CPUI386 *cpu, OptAddr *res
 	return pload8(res->addr1);
 }
 
-static u16 IRAM_ATTR load16(CPUI386 *cpu, OptAddr *res)
+static u16 IRAM_ATTR load16_slow(CPUI386 *cpu, OptAddr *res)
+{
+	return pload8(res->addr1) | (pload8(res->addr2) << 8);
+}
+
+static inline __attribute__((always_inline)) u16 load16(CPUI386 *cpu, OptAddr *res)
 {
 	if (likely(res->res == ADDR_OK1))
 		return pload16(res->addr1);
-	else
-		return pload8(res->addr1) | (pload8(res->addr2) << 8);
+	return load16_slow(cpu, res);
 }
 
-static u32 IRAM_ATTR load32(CPUI386 *cpu, OptAddr *res)
+static u32 IRAM_ATTR load32_slow(CPUI386 *cpu, OptAddr *res)
 {
 	register u32 a1 = res->addr1;
-	if (likely(res->res == ADDR_OK1)) {
-		return pload32(a1);
-	} else {
-		switch(a1 & 0xf) {
-		case 0xf: {
-			register u32 a2 = res->addr2;
-			return (u32)pload8(a1) | ((u32)pload16(a2) << 8) | ((u32)pload8(a2 + 2) << 24);
-		}
-		case 0xe:
-			return (u32)pload16(a1) | ((u32)pload16(res->addr2) << 16);
-		case 0xd:
-			return (u32)pload8(a1) | ((u32)pload16(a1 + 1) << 8) | ((u32)pload8(res->addr2) << 24);
-		default:
-			__builtin_unreachable();
-		}
+	switch(a1 & 0xf) {
+	case 0xf: {
+		register u32 a2 = res->addr2;
+		return (u32)pload8(a1) | ((u32)pload16(a2) << 8) | ((u32)pload8(a2 + 2) << 24);
 	}
-	assert(false);
+	case 0xe:
+		return (u32)pload16(a1) | ((u32)pload16(res->addr2) << 16);
+	case 0xd:
+		return (u32)pload8(a1) | ((u32)pload16(a1 + 1) << 8) | ((u32)pload8(res->addr2) << 24);
+	default:
+		__builtin_unreachable();
+	}
+}
+
+static inline __attribute__((always_inline)) u32 load32(CPUI386 *cpu, OptAddr *res)
+{
+	if (likely(res->res == ADDR_OK1))
+		return pload32(res->addr1);
+	return load32_slow(cpu, res);
 }
 
 inline static void __attribute__((always_inline)) store8(CPUI386 *cpu, OptAddr *res, u8 val)
@@ -920,44 +926,53 @@ inline static void __attribute__((always_inline)) store8(CPUI386 *cpu, OptAddr *
 	pstore8(res->addr1, val);
 }
 
-static void IRAM_ATTR store16(CPUI386 *cpu, OptAddr *res, u16 val)
+static void IRAM_ATTR store16_slow(CPUI386 *cpu, OptAddr *res, u16 val)
+{
+	pstore8(res->addr1, val);
+	pstore8(res->addr2, val >> 8);
+}
+
+static inline __attribute__((always_inline)) void store16(CPUI386 *cpu, OptAddr *res, u16 val)
+{
+	if (likely(res->res == ADDR_OK1)) {
+		pstore16(res->addr1, val);
+		return;
+	}
+	store16_slow(cpu, res, val);
+}
+
+static void IRAM_ATTR store32_slow(CPUI386 *cpu, OptAddr *res, u32 val)
 {
 	register u32 a1 = res->addr1;
-	if (likely(res->res == ADDR_OK1)) {
-		pstore16(a1, val);
-	} else {
+	switch(a1 & 0xf) {
+	case 0xf: {
 		pstore8(a1, val);
-		pstore8(res->addr2, val >> 8);
+		register u32 a2 = res->addr2;
+		pstore16(a2, val >> 8);
+		pstore8(a2 + 2, val >> 24);
+		break;
+	}
+	case 0xe:
+		pstore16(a1, val);
+		pstore16(res->addr2, val >> 16);
+		break;
+	case 0xd:
+		pstore8(a1, val);
+		pstore16(a1 + 1, val >> 8);
+		pstore8(res->addr2, val >> 24);
+		break;
+	default:
+		__builtin_unreachable();
 	}
 }
 
-static void IRAM_ATTR store32(CPUI386 *cpu, OptAddr *res, u32 val)
+static inline __attribute__((always_inline)) void store32(CPUI386 *cpu, OptAddr *res, u32 val)
 {
-	register u32 a1 = res->addr1;
 	if (likely(res->res == ADDR_OK1)) {
-		pstore32(a1, val);
-	} else {
-		switch(a1 & 0xf) {
-		case 0xf: {
-			pstore8(a1, val);
-			register u32 a2 = res->addr2;
-			pstore16(a2, val >> 8);
-			pstore8(a2 + 2, val >> 24);
-			break;
-		}
-		case 0xe:
-			pstore16(a1, val);
-			pstore16(res->addr2, val >> 16);
-			break;
-		case 0xd:
-			pstore8(a1, val);
-			pstore16(a1 + 1, val >> 8);
-			pstore8(res->addr2, val >> 24);
-			break;
-		default:
-			__builtin_unreachable();
-		}
+		pstore32(res->addr1, val);
+		return;
 	}
+	store32_slow(cpu, res, val);
 }
 
 #define LOADSTORE(BIT) \
