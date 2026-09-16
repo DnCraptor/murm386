@@ -540,9 +540,9 @@ static bool cpu_far_call_waiter(CPU* cpu, bios_callback_params_t* params) {
 /*
    cpu_far_call(cpu, seg, off) - synchronously CALL FAR seg:off in
    guest (x86) code and wait for it to RETF back, by hand: push a
-   return CS:IP that lands inside the emulator's fake-BIOS trap page
+   return CS:IP that aliases the native callback sentinel at physical FFEFF
    (see bios/bios_FFh.c), set CS:IP to the target, and single-step the
-   CPU until that trap fires and reports the RETF happened.
+   CPU until its 0F FF FF escape fires and reports the RETF happened.
 
    This is the CALL/RETF analogue of bios_intcall()'s INT/IRET
    mechanism (bios/bios_intcall.c) - reused here because DOS device
@@ -1244,8 +1244,8 @@ STATIC void PSPInit(void)
   p.ps_reentry = MK_FP(0, 0x30 * 4);
 
   write86(0x00c0, 0xea);
-  writew86(0x00c1, 0x0030);
-  writew86(0x00c3, 0xffe0);
+  writew86(0x00c1, NATIVE_BIOS_STUB_OFF_FOR(0x30));
+  writew86(0x00c3, NATIVE_BIOS_STUB_SEG);
 
   p.ps_unix[0] = 0xcd;
   p.ps_unix[1] = 0x21;
@@ -2603,13 +2603,13 @@ STATIC void init_kernel(CPU* cpu)
  *   ... затем vectors[] переустанавливает настоящие обработчики
  *   (0x20,21,22,24,25,26,27,28,2a,2f) и int0/1/3/6, 0x1b, 0x29.
  *
- * В этом порту "настоящие обработчики" - это трап-страница FFE0:NN,
- * уже прописанная bios_post()/cpu_install_dos_handlers(), поэтому здесь
+ * В этом порту "настоящие обработчики" - guest-visible native BIOS
+ * escape-stubs F000:Cxxx, уже прописанные bios_post()/cpu_install_dos_handlers(),
+ * поэтому здесь
  * остаётся ровно недостающая часть: дефолтные ПУСТЫЕ обработчики для
  * векторов, которые ядро обязано обслужить IRET'ом, пока их не
  * перехватят программы. Без этого Ctrl-C уводил INT 23h в
- * no_handler-трап ("no_handled FFE0:0023"), а любой вызов INT 2Ah/2Eh
- * и т.п. печатал ту же диагностику.
+ * no_handler, а любой вызов INT 2Ah/2Eh и т.п. печатал ту же диагностику.
  *
  * Пустой обработчик = FFF0:0006 (reusable IRET, pc.c).
  * INT 24h = F000:FF44 "mov al,FAIL; iret" - байты кладёт pc.c, ставит
@@ -2628,7 +2628,7 @@ STATIC void setup_int_vectors(void)
       break;
     case 0x25: case 0x26: case 0x27: case 0x28: case 0x29: case 0x2f:
     case 0x33:
-      /* нативные обработчики порта (FFE0-страница) - эквивалент
+      /* нативные обработчики порта (F000:Cxxx escape-stubs) - эквивалент
          upstream vectors[] / резидентного драйвера мыши: не трогать */
       break;
     case 0x30: case 0x31:

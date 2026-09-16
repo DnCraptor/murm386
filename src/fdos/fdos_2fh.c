@@ -215,8 +215,8 @@ typedef struct umb {
  *                and SeaBIOS also puts its tables / option ROM copies there
  *   F0000-FFFFF  BIOS ROM (fake one in native mode) - never UMB.
  *                Fake BIOS layout: F0000 strings, FA000-FC5FF ROM fonts,
- *                FC600/FE000 strings, FEFC7 DPT, FFE00-FFEFF INT trap markers
- *                (any CS:IP with (lin>>8)==0xFFE is trapped in i286_step),
+ *                FC600/FE000 strings, FC700-FC9FF native BIOS escape stubs,
+ *                FEFC7 DPT, FFEFF callback sentinel (0F FF FF),
  *                FFF06 IRET, FFF10 INT15/C0h table, FFF30-FFF6F DPT/DPTE,
  *                FFF70-FFF82 executable stubs, FFFF0/FFFF5-FFFFF reset+date.
  *

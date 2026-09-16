@@ -1134,8 +1134,8 @@ void __not_in_flash_func(pc_step)(PC *pc, size_t max_ops)
      *
      * Вложенные нативные вызовы гостевого кода (bios_intcall(): CON-вывод
      * посимвольно, INT 16h-опросы) крутят pc_step() до native_done;
-     * типичный вложенный обработчик - считанные инструкции (трап-страница
-     * возвращает в нативный код сразу). Завершившийся установкой
+     * типичный вложенный обработчик - считанные инструкции (native BIOS
+     * escape-stub возвращает в нативный код сразу). Завершившийся установкой
      * native_done burst выходит, НЕ заходя в платформенную преамбулу
      * (USB-poll, DMA, FDC, редрав) - иначе она исполнялась бы на каждый
      * символ вывода (двухпорядковый регресс скорости нативного CON
@@ -2192,11 +2192,30 @@ void bios_post(PC *pc) {
 	i8254_ioport_write(pc->pit, 0x40, 0x00);
 	i8254_ioport_write(pc->pit, 0x40, 0x00);
 
-// init IVT: fake processing markers: 0xFFExx
+// Native BIOS entry table.  Keep real guest-visible vectors so TSRs may
+// hook an INT, save the old vector and chain to it with JMP/CALL FAR.
+// The CPU cores intercept 0F FF <id> only from this ROM table and FFEFF callback sentinel.
     for (uint16_t ipa = 0; ipa <= 0xFF; ++ipa) {
-		pstore16(ipa*4, ipa);
-		pstore16(ipa*4 + 2, 0xFFE0);
-	}
+        uint32_t stub = NATIVE_BIOS_STUB_PHYS + NATIVE_BIOS_STUB_SIZE * ipa;
+        pstore8(stub + 0, 0x0F);
+        pstore8(stub + 1, 0xFF);
+        pstore8(stub + 2, (uint8_t)ipa);
+        if (ipa == 0xFF) {
+            /* INT FFh is the callback dispatcher itself.  bios_FFh matches
+               the logical CS:IP against callback expected_cs/expected_ip,
+               so preserve its historical guest-visible vector. */
+            pstore16(ipa * 4, 0x00FF);
+            pstore16(ipa * 4 + 2, 0xFFE0);
+        } else {
+            pstore16(ipa * 4, NATIVE_BIOS_STUB_OFF_FOR(ipa));
+            pstore16(ipa * 4 + 2, NATIVE_BIOS_STUB_SEG);
+        }
+    }
+    /* Native callback return sentinel.  bios_FFh distinguishes nested
+       callbacks by the logical CS:IP restored from the guest stack. */
+    pstore8(NATIVE_BIOS_CALLBACK_PHYS + 0, 0x0F);
+    pstore8(NATIVE_BIOS_CALLBACK_PHYS + 1, 0xFF);
+    pstore8(NATIVE_BIOS_CALLBACK_PHYS + 2, 0xFF);
  // reusable IRET
     pstore8(0xFFF06, 0xCF);
 // IRQ1 INT 15h/4Fh keyboard intercept stub: 0xFFF70..0xFFF7A
@@ -2337,9 +2356,9 @@ void bios_post(PC *pc) {
 	 *
 	 * bios_33h() reports AX=0000h for reset/status while disabled.
 	 */
-	pstore16(0x33*4, 0x0033); pstore16(0x33*4 + 2, 0xFFE0);
+	pstore16(0x33*4, NATIVE_BIOS_STUB_OFF_FOR(0x33)); pstore16(0x33*4 + 2, NATIVE_BIOS_STUB_SEG);
 	if (pc->mouse_enabled) {
-		pstore16(0x74*4, 0x0074); pstore16(0x74*4 + 2, 0xFFE0);
+		pstore16(0x74*4, NATIVE_BIOS_STUB_OFF_FOR(0x74)); pstore16(0x74*4 + 2, NATIVE_BIOS_STUB_SEG);
 	} else {
 		point2iret(0x74);
 	}
@@ -2367,34 +2386,24 @@ void bios_post(PC *pc) {
     pstore8(0xFFFFF, 0x01);                          /* submodel/revision    */
 
 /* --- Канонические IBM PC/AT точки входа BIOS в F000 ---------------------
- * Вектора, указывающие прямо в трап-страницу FFE0:NN, ломают программы,
- * которые трассируют прерывания через TF/INT 1 (Norton Utilities и т.п.):
- * трассировщик пошагово идёт по обработчику, пока CS:IP не попадёт в
- * "настоящий" ROM BIOS (обычно сравнивают с F000:xxxx или каноническими
- * адресами вроде INT 13h = F000:E3FE). Попадание на FFE0-страницу
- * исполняет ВЕСЬ обработчик нативно за один "шаг" - условие завершения
- * трассировки не наступает никогда, и утилита зависает в бесконечном
- * INT 1. Даём каждому классическому вектору настоящую 5-байтовую точку
- * входа JMP FAR FFE0:NN по каноническому смещению IBM AT: первый же шаг
- * трассировки видит CS=F000 и завершается, а исполнение всё равно
- * попадает в нативный диспетчер.
+ * Для классических BIOS-векторов сохраняем настоящие F000:xxxx entry points:
+ * программы с TF/INT 1 (Norton Utilities и т.п.) ожидают увидеть ROM BIOS,
+ * прежде чем передать управление оригинальному обработчику.  Каждый entry
+ * делает JMP FAR на обычный guest-visible native escape-stub F000:Cxxx; уже
+ * там 0F FF <id> передаёт управление rp2350_bios_handler().
+ *
+ * Старого специального окна FFE00-FFEFF больше нет.  FFEFF остаётся
+ * отдельным callback sentinel: в нём лежит 0F FF FF, а bios_FFh различает
+ * вложенные callback-и по логическому CS:IP.  Ранее перенесённые INT 08h/1Ah
+ * пока оставлены на FDA5h/FD6Eh: для этого исправления менять их не требуется.
  *
  * INT 19h (E05Bh) намеренно пропущен: смещение занято ROM-identity
  * строками выше. INT 1Ch остаётся FFF0:0006 (каноничный F000:FF53 занят
- * DPTE-таблицами по FFF50-FFF6F).
- *
- * ВАЖНО - тень трап-страницы: диспетчер ядер перехватывает исполнение по
- * условию (phys >> 8) == 0xFFE, то есть ЛЮБОЙ линейный адрес
- * 0xFFE00-0xFFEFF. Сегмент F000 со смещениями FE00h-FEFFh отображается
- * ровно в это окно, поэтому канонические IBM-адреса INT 08h (FEA5h) и
- * INT 1Ah (FE6Eh) использовать НЕЛЬЗЯ: первый же тик таймера уходил в
- * handlers[0xA5] = no_handler. Эти два стаба смещены на страницу ниже
- * (FDA5h/FD6Eh) - для трассировщиков значим сегмент F000, а не точное
- * смещение. Никакие другие смещения таблицы в окно FExx не попадают. */
+ * DPTE-таблицами по FFF50-FFF6F). */
     {
         static const struct { uint8_t intno; uint16_t off; } rom_entry[] = {
             { 0x05, 0xFF54 },   /* print screen                    */
-            { 0x08, 0xFDA5 },   /* IRQ0 timer (канонич. FEA5h - в тени) */
+            { 0x08, 0xFEA5 },   /* IRQ0 timer                      */
             { 0x09, 0xE987 },   /* IRQ1 keyboard                   */
             { 0x10, 0xF065 },   /* video                           */
             { 0x11, 0xF84D },   /* equipment list                  */
@@ -2404,13 +2413,13 @@ void bios_post(PC *pc) {
             { 0x15, 0xF859 },   /* system services                 */
             { 0x16, 0xE82E },   /* keyboard services               */
             { 0x17, 0xEFD2 },   /* printer (сразу за DPT @ EFC7)   */
-            { 0x1A, 0xFD6E },   /* time of day (канонич. FE6Eh - в тени) */
+            { 0x1A, 0xFE6E },   /* time of day                     */
         };
         for (unsigned i = 0; i < sizeof(rom_entry)/sizeof(rom_entry[0]); ++i) {
             uint32_t phys = 0xF0000u + rom_entry[i].off;
-            pstore8 (phys,     0xEA);              /* JMP FAR FFE0:00NN */
-            pstore16(phys + 1, rom_entry[i].intno);
-            pstore16(phys + 3, 0xFFE0);
+            pstore8 (phys,     0xEA);              /* JMP FAR native stub */
+            pstore16(phys + 1, NATIVE_BIOS_STUB_OFF_FOR(rom_entry[i].intno));
+            pstore16(phys + 3, NATIVE_BIOS_STUB_SEG);
             pstore16(rom_entry[i].intno * 4,     rom_entry[i].off);
             pstore16(rom_entry[i].intno * 4 + 2, 0xF000);
         }

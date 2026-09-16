@@ -197,41 +197,41 @@ void cpu_install_bios_handlers(CPU* cpu) {
 
 void cpu_install_dos_handlers(CPU* cpu) {
     handlers[0x20] = fdos_20h; // old-style (CP/M) terminate
-	pstore16(0x20*4, 0x0020);
-	pstore16(0x20*4 + 2, 0xFFE0);
+	pstore16(0x20*4, NATIVE_BIOS_STUB_OFF_FOR(0x20));
+	pstore16(0x20*4 + 2, NATIVE_BIOS_STUB_SEG);
 
     handlers[0x21] = fdos_21h; // main DOS handler
-	pstore16(0x21*4, 0x0021);
-	pstore16(0x21*4 + 2, 0xFFE0);
+	pstore16(0x21*4, NATIVE_BIOS_STUB_OFF_FOR(0x21));
+	pstore16(0x21*4 + 2, NATIVE_BIOS_STUB_SEG);
 
     handlers[0x25] = fdos_25h; // absolute disk read
-	pstore16(0x25*4, 0x0025);
-	pstore16(0x25*4 + 2, 0xFFE0);
+	pstore16(0x25*4, NATIVE_BIOS_STUB_OFF_FOR(0x25));
+	pstore16(0x25*4 + 2, NATIVE_BIOS_STUB_SEG);
 
     handlers[0x26] = fdos_26h; // absolute disk write
-	pstore16(0x26*4, 0x0026);
-	pstore16(0x26*4 + 2, 0xFFE0);
+	pstore16(0x26*4, NATIVE_BIOS_STUB_OFF_FOR(0x26));
+	pstore16(0x26*4 + 2, NATIVE_BIOS_STUB_SEG);
 
     handlers[0x27] = fdos_27h; // old-style TSR
-	pstore16(0x27*4, 0x0027);
-	pstore16(0x27*4 + 2, 0xFFE0);
+	pstore16(0x27*4, NATIVE_BIOS_STUB_OFF_FOR(0x27));
+	pstore16(0x27*4 + 2, NATIVE_BIOS_STUB_SEG);
 
     handlers[0x28] = fdos_28h; // DOS idle
-	pstore16(0x28*4, 0x0028);
-	pstore16(0x28*4 + 2, 0xFFE0);
+	pstore16(0x28*4, NATIVE_BIOS_STUB_OFF_FOR(0x28));
+	pstore16(0x28*4 + 2, NATIVE_BIOS_STUB_SEG);
     
     handlers[0x29] = fdos_29h; // fast console output.
-	pstore16(0x29*4, 0x0029);
-	pstore16(0x29*4 + 2, 0xFFE0);
+	pstore16(0x29*4, NATIVE_BIOS_STUB_OFF_FOR(0x29));
+	pstore16(0x29*4 + 2, NATIVE_BIOS_STUB_SEG);
 
     handlers[0x2F] = fdos_2fh; // XMS
-	pstore16(0x2f*4, 0x002f);
-	pstore16(0x2f*4 + 2, 0xFFE0);
+	pstore16(0x2f*4, NATIVE_BIOS_STUB_OFF_FOR(0x2f));
+	pstore16(0x2f*4 + 2, NATIVE_BIOS_STUB_SEG);
 
     /*
      * CP/M CALL-5 gateway. This is NOT a software INT 30h: PSP:0005h does
      * CALL FAR 0000:00C0, and 0000:00C0 (written in PSPInit) is a JMP FAR to
-     * FFE0:0030. Landing on that fake-BIOS page dispatches here. fdos_30h()
+     * the handler-30h native escape stub. Landing there dispatches here. fdos_30h()
      * consumes the far-call frame itself and returns false, so the common
      * IRET path is not applied.
      */
@@ -1142,20 +1142,6 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
         } else if (cpu->i286_hltstate) {
             break;
         }
-        if (!cpu->bios) {
-            u32 ip32 = (((u32)CPU_CS << 4) + CPU_IP);
-            if ((ip32 >> 8) == 0xFFE) {
-            //    printf("fake BIOS trap phys=%05lx int=%02x CS:IP=%04x:%04x\n",
-            //           (unsigned long)ip32, (uint8_t)ip32, CPU_CS, CPU_IP);
-                if (rp2350_bios_handler(cpu, (uint8_t)ip32)) { // normal flow IRET is expected
-                    SET_IP ( 0x0006 );
-                    CPU_CS = 0xFFF0; // reusable IRET (pc.c)
-                }
-                else {// internal using INT in JMP style (INT 19h...)
-                    continue; // to allow to recheck IRQ before next step
-                }
-            }
-        }
         /* The shadow belongs to the next real guest instruction, not to a
            host-side interpreter pass which can leave through the BIOS-trap
            continue above without decoding an opcode. Consume it only now. */
@@ -1366,6 +1352,33 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 break;
 #else
             case 0x0F: {
+                /* Native BIOS escape.  Outside the native ROM stub table (or
+                   the callback sentinel at FFEFF) 0F FF keeps its normal
+                   undefined-opcode behaviour. */
+                if (!cpu->bios && getmem8(CPU_CS, CPU_IP) == 0xFF) {
+                    u32 phys = ((u32)CPU_CS << 4) + firstip;
+                    bool in_stub_table =
+                        phys >= NATIVE_BIOS_STUB_PHYS &&
+                        phys < NATIVE_BIOS_STUB_PHYS + NATIVE_BIOS_STUB_SIZE * 256u &&
+                        ((phys - NATIVE_BIOS_STUB_PHYS) % NATIVE_BIOS_STUB_SIZE) == 0;
+                    if (in_stub_table || phys == NATIVE_BIOS_CALLBACK_PHYS) {
+                        uint8_t intnum = in_stub_table
+                            ? (uint8_t)((phys - NATIVE_BIOS_STUB_PHYS) / NATIVE_BIOS_STUB_SIZE)
+                            : 0xFF;
+                        StepIP(2); /* consume FF + embedded handler id */
+                        SET_IP(firstip);
+                        if (rp2350_bios_handler(cpu, intnum)) {
+                            /* The old FFE trap immediately executed the reusable
+                               IRET in the same guest instruction slot. */
+                            SET_IP(pop(cpu));
+                            CPU_CS = pop(cpu);
+                            decodeflagsword(cpu, pop(cpu) & cpu->flags_mask);
+                            break;
+                        }
+                        continue;
+                    }
+                }
+
                 /*
                  * The 286 core is real-mode-only.  In native BIOS/FDOS mode we
                  * can nevertheless decode the 0F 01 system group far enough to

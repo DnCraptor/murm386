@@ -3937,7 +3937,31 @@ static bool verrw_helper(CPUI386 *cpu, int sel, int wr, int *zf)
 #define WBINVD()
 
 // 586 and later...
-#define UD0() THROW0(EX_UD);
+#define UD0() do { \
+    u32 phys = cpu->seg[SEG_CS].base + cpu->ip; \
+    bool in_stub_table = \
+        phys >= NATIVE_BIOS_STUB_PHYS && \
+        phys < NATIVE_BIOS_STUB_PHYS + NATIVE_BIOS_STUB_SIZE * 256u && \
+        ((phys - NATIVE_BIOS_STUB_PHYS) % NATIVE_BIOS_STUB_SIZE) == 0; \
+    if (!cpu->bios && (!(cpu->cr0 & 1) || (cpu->flags & VM)) && \
+        (in_stub_table || phys == NATIVE_BIOS_CALLBACK_PHYS)) { \
+        u8 embedded_id; \
+        TRY(fetch8(cpu, &embedded_id)); \
+        u8 intnum = in_stub_table \
+            ? (u8)((phys - NATIVE_BIOS_STUB_PHYS) / NATIVE_BIOS_STUB_SIZE) \
+            : 0xFF; \
+        if (embedded_id != intnum) THROW0(EX_UD); \
+        cpu->next_ip = cpu->ip; \
+        PREFETCH_RESET \
+        if (rp2350_bios_handler((CPU*)cpu, intnum)) { \
+            IRET(); \
+        } else { \
+            return true; \
+        } \
+    } else { \
+        THROW0(EX_UD); \
+    } \
+} while (0)
 
 #if defined(I386_ENABLE_SSE3)
 #define CPUID_SIMD_FEATURE2 0x1
@@ -4119,21 +4143,6 @@ static bool IRAM_ATTR_CPU_EXEC1 cpu_exec1(CPUI386 *cpu, int stepcount)
   uword addr;
   for (; stepcount > 0; stepcount--) {
 	if (cpu->native_done) break;
-
-	if (!cpu->bios && (!(cpu->cr0 & 1) || (cpu->flags & VM))) {
-		u32 phys = cpu->seg[SEG_CS].base + (cpu->next_ip & 0xffffu);
-		if ((phys >> 8) == 0xFFE) {
-			if (rp2350_bios_handler((CPU*)cpu, (uint8_t)phys)) {
-				TRY1(set_seg(cpu, SEG_CS, 0xFFF0));
-				cpu->ip = 0x0006;
-	            cpu->next_ip = cpu->ip;
-    	        PREFETCH_RESET
-			} else {
-				cpu->cycle++;
-				return true;
-			}
-		}
-	}
 
 	bool code16 = cpu->code16;
 	uword sp_mask = cpu->sp_mask;

@@ -2806,7 +2806,7 @@ bool __hfa_func(fdos_20h)(CPU* _cpu) {
  * CP/M-compatible DOS CALL 5 entry.
  *
  * PSP:0005h contains  9Ah C0h 00h 00h 00h  = CALL FAR 0000:00C0, and
- * 0000:00C0 is a JMP FAR to the native fake-BIOS page FFE0:0030, which the
+ * 0000:00C0 is a JMP FAR to the native BIOS escape-stub for handler 30h, which the
  * dispatcher routes here. PSPInit() (kernel.c) writes both. This is a
  * FAR-CALL entry, not a software interrupt: on entry the guest stack holds
  *

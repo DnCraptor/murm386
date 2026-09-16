@@ -240,6 +240,18 @@ void cpu_install_dos_handlers(CPU*);
 #endif
 
 bool rp2350_bios_handler(CPU* cpu, uint8_t intnum);
+
+/* Native BIOS entry stubs live in ordinary guest-visible ROM.  Each stub is
+ *   0F FF <handler-id>
+ * and is intercepted by both CPU cores only when fetched from this table
+ * or from the dedicated FFEFF callback sentinel. */
+#define NATIVE_BIOS_STUB_SEG   0xF000u
+#define NATIVE_BIOS_STUB_OFF   0xC700u
+#define NATIVE_BIOS_STUB_PHYS  0xFC700u
+#define NATIVE_BIOS_STUB_SIZE  3u
+#define NATIVE_BIOS_STUB_OFF_FOR(id) \
+    ((uint16_t)(NATIVE_BIOS_STUB_OFF + NATIVE_BIOS_STUB_SIZE * (uint8_t)(id)))
+#define NATIVE_BIOS_CALLBACK_PHYS 0xFFEFFu
 typedef bool (*handler_t)(CPU*);
 extern handler_t handlers[256];
 

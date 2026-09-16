@@ -38,8 +38,9 @@ static void dpb_watch_ff_checkpoint(CPU* cpu, const char *where,
 #define dpb_watch_ff_checkpoint(...)
 #endif
 
-// assigned to 0xFFEFF address (FFE0: 00FF)
-// used as callback, no direct vector is used for this in IVT
+// assigned to physical 0xFFEFF (normally FFE0:00FF, with aliases used for nesting)
+// and reached through the 0F FF FF callback escape; IVT[FF] intentionally
+// remains FFE0:00FF because callback matching depends on the logical CS:IP
 // in case such address in CS:IP, it means: it was restored from x86 stack,
 // pushed by some bios_XXh function to return back
 bool bios_FFh(CPU* cpu) { // W/A BIOS callback

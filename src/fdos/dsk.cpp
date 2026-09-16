@@ -104,13 +104,13 @@ STATIC void fdos_bios_13h(CPU *cpu, const char *owner)
    * hooked.  Do not force the normal native BIOS path through bios_intcall()
    * merely because that point in boot has been reached: nested guest calls
    * add callback state and are unnecessary while IVT[13h] still points at
-   * the native FFE0:0013 trap.  Honor a real guest hook when the vector
+   * the native canonical F000:E3FE entry.  Honor a real guest hook when the vector
    * actually changes.
    */
   const UWORD int13_ip = getmem16(0, 0x13u * 4u);
   const UWORD int13_cs = getmem16(0, 0x13u * 4u + 2u);
   const BOOL guest_hooked = disk_guest_int13 &&
-                            (int13_cs != 0xFFE0u || int13_ip != 0x0013u);
+                            (int13_cs != 0xF000u || int13_ip != 0xE3FEu);
 
   if (guest_hooked)
   {
