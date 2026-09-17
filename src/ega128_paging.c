@@ -395,11 +395,7 @@ bool ega128_paging_init(void)
     }
 #endif
 
-    FRESULT fr = f_mkdir("tmp");
-    if (fr != FR_OK && fr != FR_EXIST)
-        return false;
-
-    fr = f_open(&pagefile, "tmp/pagefile.sys",
+    FRESULT fr = f_open(&pagefile, "tmp/pagefile.sys",
                 FA_READ | FA_WRITE | FA_CREATE_ALWAYS);
     if (fr != FR_OK)
         return false;

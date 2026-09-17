@@ -1420,6 +1420,7 @@ static bool init_hardware(void) {
     DBG_PRINT("Initializing SD card...\n");
     FRESULT res = f_mount(&fatfs, "", 1);
     if (res == FR_OK) {
+        f_mkdir("tmp"); // to avoid it on any action
         FIL fp;
         // just early stiky mark:
         if (f_open(&fp, "/.config/286/force_vga", FA_READ) == FR_OK) {
