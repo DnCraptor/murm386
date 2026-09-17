@@ -173,9 +173,14 @@ void ejectdisk(uint8_t drivenum, bool is_fdd) {
 
 uint8_t insertdisk(uint8_t drivenum, bool is_fdd, bool is_cd, const char *pathname) {
     if ((is_fdd && drivenum >= 2) || drivenum >= 4) return false;
-    // Build full path (files are in the SD_DATA_DIR directory)
+    // Qualified paths are used as-is. Bare names retain the historical
+    // default-directory behaviour for backward-compatible config.ini files.
     char path[FF_LFN_BUF + 1 + sizeof(SD_DATA_DIR_SLASH)];
-    snprintf(path, sizeof(path), SD_DATA_DIR_SLASH "%s", pathname);
+    if (strchr(pathname, '/') || strchr(pathname, '\\') ||
+        (pathname[0] && pathname[1] == ':'))
+        snprintf(path, sizeof(path), "%s", pathname);
+    else
+        snprintf(path, sizeof(path), SD_DATA_DIR_SLASH "%s", pathname);
 
     /* CD-ROMs are read-only; regular disks need write access */
     BYTE fmode = is_cd ? FA_READ : (FA_READ | FA_WRITE);

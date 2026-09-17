@@ -114,12 +114,9 @@ static char *diag_str(char *p, const char *s)
    rest of SCRATCH_Y and then SCRATCH_X - which is core1's stack. */
 extern uint32_t __StackBottom;
 extern uint32_t __StackTop;
-/* Bottom of the TEXT_BUFFER region (0x2003D000) and the hard floor for the
-   non-relocated core0 stack. It may legitimately extend down from CORE0_STACK
-   through CORE0_STACK_EXT and into TEXT_BUFFER, but must never drop below this.
-   Direct-QSPI reduced-VRAM builds instead move SP into GFX_BUFFER and reclaim
-   CORE0_STACK_EXT+CORE0_STACK as the FatFs cache. */
-extern uint32_t __text_buffer_area__;
+/* Bottom of CORE0_STACK_EXT (0x2003D000) and the hard floor for the
+   non-relocated core0 stack. Direct-QSPI reduced-VRAM builds instead move SP
+   into GFX_BUFFER and reclaim CORE0_STACK_EXT+CORE0_STACK as the FatFs cache. */
 
 static uint32_t *diag_lo, *diag_hi;
 
@@ -386,7 +383,7 @@ void diag_init(void)
     scb_hw->shcsr |= (1u << 16) | (1u << 17) | (1u << 18);
 
     /* ARMv8-M stack limit: turn a silent overflow into a precise UsageFault.
-       The runtime floor is TEXT_BUFFER for the normal stack, or the end of
+       The runtime floor is CORE0_STACK_EXT for the normal stack, or the end of
        active video RAM when the unused GFX_BUFFER tail is the core0 stack. */
     __asm volatile ("msr msplim, %0"
                     :: "r" ((uint32_t)core0_stack_floor_runtime));

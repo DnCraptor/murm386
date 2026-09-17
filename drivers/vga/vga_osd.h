@@ -13,9 +13,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-// OSD dimensions (full screen, reuses VGA text buffer)
+// OSD dimensions (full screen, stored at the start of gfx_buffer while active)
 #define OSD_COLS 80
 #define OSD_ROWS 25
+#define OSD_BUFFER_SIZE (OSD_COLS * OSD_ROWS * 2u)
 
 // OSD colors (CGA-style 4-bit: IRGB for foreground, RGB for background)
 #define OSD_BLACK       0x00

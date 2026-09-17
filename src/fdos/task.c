@@ -5613,7 +5613,7 @@ COUNT DosExeLoader(dos_far_ptr namep, exec_blk * exp, COUNT mode, COUNT fd)
 static uint32_t native_stack_free(void)
 {
 #if defined(__arm__) || defined(__thumb__)
-  /* Runtime floor follows the selected core0 stack: normally TEXT_BUFFER,
+  /* Runtime floor follows the selected core0 stack: normally CORE0_STACK_EXT,
      or the unused tail of GFX_BUFFER when reduced VRAM uses direct QSPI RAM. */
   uint32_t sp;
   __asm volatile ("mov %0, sp" : "=r" (sp));

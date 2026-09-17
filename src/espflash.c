@@ -2,63 +2,16 @@
 
 #include "board_config.h"
 #include "ff.h"
+#include "gfx_scratch.h"
 #include "usbserial.h"
+#include "vga_osd.h"
 #include "pico/time.h"
 
 #include <string.h>
 
-extern uint8_t gfx_buffer[];
 static void set_detail(char *detail, size_t detail_size, const char *text);
 
 #define ESP_GFX_BACKUP_PATH "tmp/espflash.vram"
-
-static bool gfx_scratch_acquire(size_t bytes, uint8_t **scratch,
-                                char *detail, size_t detail_size)
-{
-    FRESULT fr = f_mkdir("tmp");
-    if (fr != FR_OK && fr != FR_EXIST) {
-        set_detail(detail, detail_size, "Cannot create tmp for VRAM backup");
-        return false;
-    }
-
-    FIL backup;
-    memset(&backup, 0, sizeof(backup));
-    fr = f_open(&backup, ESP_GFX_BACKUP_PATH, FA_CREATE_ALWAYS | FA_WRITE);
-    if (fr != FR_OK) {
-        set_detail(detail, detail_size, "Cannot create VRAM backup file");
-        return false;
-    }
-
-    UINT bw = 0;
-    fr = f_write(&backup, gfx_buffer, (UINT)bytes, &bw);
-    FRESULT close_fr = f_close(&backup);
-    if (fr != FR_OK || close_fr != FR_OK || bw != bytes) {
-        f_unlink(ESP_GFX_BACKUP_PATH);
-        set_detail(detail, detail_size, "Cannot save VRAM scratch area");
-        return false;
-    }
-
-    *scratch = gfx_buffer;
-    return true;
-}
-
-static void gfx_scratch_release(uint8_t *scratch, size_t bytes)
-{
-    if (scratch != gfx_buffer)
-        return;
-
-    FIL backup;
-    memset(&backup, 0, sizeof(backup));
-    if (f_open(&backup, ESP_GFX_BACKUP_PATH, FA_READ) == FR_OK) {
-        UINT br = 0;
-        if (f_read(&backup, gfx_buffer, (UINT)bytes, &br) == FR_OK && br == bytes) {
-            f_close(&backup);
-            f_unlink(ESP_GFX_BACKUP_PATH);
-            return;
-        }
-        f_close(&backup);
-    }
-}
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -498,7 +451,12 @@ static espflash_result_t program_file(const char *filename,
         return ESPFLASH_FILE_ERROR;
     }
 
-    int n = snprintf(path, sizeof(path), "/%s/%s", SD_DATA_DIR, filename);
+    int n;
+    if (strchr(filename, '/') || strchr(filename, '\\') ||
+        (filename[0] && filename[1] == ':'))
+        n = snprintf(path, sizeof(path), "%s", filename);
+    else
+        n = snprintf(path, sizeof(path), "/%s/%s", SD_DATA_DIR, filename);
     if (n < 0 || (size_t)n >= sizeof(path)) {
         set_detail(detail, detail_size, "Firmware path is too long");
         return ESPFLASH_FILE_ERROR;
@@ -548,7 +506,8 @@ static espflash_result_t program_file(const char *filename,
     const size_t scratch_need = ESP_PACKET_RAW_MAX + ESP_PACKET_SLIP_MAX +
                                 ESP_RESPONSE_MAX + ESP_FLASH_BLOCK;
     uint8_t *scratch = NULL;
-    if (!gfx_scratch_acquire(scratch_need, &scratch, detail, detail_size)) {
+    if (!gfx_scratch_acquire(OSD_BUFFER_SIZE, scratch_need, ESP_GFX_BACKUP_PATH, &scratch)) {
+        set_detail(detail, detail_size, "Cannot save VRAM scratch area");
         usbserial_program_end();
         f_close(&file);
         return ESPFLASH_PROTOCOL_ERROR;
@@ -668,7 +627,8 @@ out:
     usbserial_program_set_control_lines(0x00);
     usbserial_program_end();
     f_close(&file);
-    gfx_scratch_release(scratch, scratch_need);
+    if (!gfx_scratch_release(OSD_BUFFER_SIZE, scratch_need, ESP_GFX_BACKUP_PATH))
+        set_detail(detail, detail_size, "Cannot restore VRAM scratch area");
     return result;
 }
 

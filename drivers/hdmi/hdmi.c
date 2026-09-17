@@ -38,7 +38,6 @@ extern uint32_t palette_a[256];
 
 #define GFX_BUFFER_SIZE (256u * 1024u)
 extern uint8_t gfx_buffer[GFX_BUFFER_SIZE];
-extern uint8_t text_buffer_sram[80 * 25 * 2];
 extern int text_cols;
 // Stride in *character cells* (uint32_t per cell in gfx_buffer text layout).
 // For VGA CRTC Offset (0x13): cells_per_row = cr13 * 2 (80-col -> 40*2, 40-col -> 20*2).
@@ -389,8 +388,8 @@ void __time_critical_func(osd_render_line_hdmi)(uint32_t line, uint8_t *output_b
 
     if (char_row >= OSD_ROWS) return;
 
-    // Get pointer to this row in OSD buffer (reuses text_buffer_sram)
-    uint8_t *row_data = &text_buffer_sram[char_row * OSD_COLS * 2];
+    // Get pointer to this row in the OSD buffer
+    uint8_t *row_data = &gfx_buffer[char_row * OSD_COLS * 2];
 
     // Render each character
     // Bit order matches render_text_line: bits 1,0 are leftmost pair, etc.

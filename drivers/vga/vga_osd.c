@@ -14,11 +14,37 @@
 #include <stdio.h>
 #include <pico.h>
 #include <pico/stdlib.h>  // For __time_critical_func
+#include "gfx_scratch.h"
 
-// OSD reuses the VGA text buffer (emulation is paused when OSD is visible)
-// This is defined in vga_hw.c - we access it via extern
-extern uint8_t text_buffer_sram[80 * 25 * 2];
-#define osd_buffer text_buffer_sram
+extern uint8_t gfx_buffer[];
+#define osd_buffer gfx_buffer
+#define OSD_GFX_BACKUP_PATH "tmp/osd.vram"
+
+static bool osd_buffer_acquired = false;
+static bool osd_buffer_backup_valid = false;
+
+static bool osd_acquire_buffer(void) {
+    if (osd_buffer_acquired) return true;
+
+    uint8_t *scratch = NULL;
+    osd_buffer_backup_valid = gfx_scratch_acquire(
+        0, OSD_BUFFER_SIZE, OSD_GFX_BACKUP_PATH, &scratch);
+
+    // The backup is best-effort.  OSD must remain usable without an SD card;
+    // in that case the overwritten gfx_buffer contents are simply discarded.
+    osd_buffer_acquired = true;
+    return true;
+}
+
+static void osd_release_buffer(void) {
+    if (!osd_buffer_acquired) return;
+
+    if (osd_buffer_backup_valid &&
+        !gfx_scratch_release(0, OSD_BUFFER_SIZE, OSD_GFX_BACKUP_PATH))
+        printf("OSD: failed to restore gfx_buffer\n");
+    osd_buffer_backup_valid = false;
+    osd_buffer_acquired = false;
+}
 
 // OSD visibility flag
 static bool osd_visible = false;
@@ -60,13 +86,18 @@ static uint8_t __time_critical_func(color_to_output)(uint8_t color_idx) {
 }
 
 void osd_init(void) {
-    osd_clear();
     osd_visible = false;
+    osd_buffer_acquired = false;
+    osd_buffer_backup_valid = false;
 }
 
 extern bool SELECT_VGA;
 extern uint32_t conv_color[1224], conv_color2[1024];
 void osd_show(void) {
+    if (!osd_acquire_buffer()) {
+        printf("OSD: cannot acquire gfx_buffer scratch area\n");
+        return;
+    }
     if (SELECT_VGA) {
         osd_visible = true;
     } else { // hdmi only
@@ -88,6 +119,7 @@ void osd_hide(void) {
             conv_color2[i] = t;
         }
     }
+    osd_release_buffer();
 }
 
 bool __time_critical_func(osd_is_visible)(void) {
@@ -95,6 +127,7 @@ bool __time_critical_func(osd_is_visible)(void) {
 }
 
 void osd_clear(void) {
+    if (!osd_acquire_buffer()) return;
     // Fill with spaces and default attribute
     for (int i = 0; i < OSD_COLS * OSD_ROWS; i++) {
         osd_buffer[i * 2] = ' ';
@@ -104,6 +137,7 @@ void osd_clear(void) {
 
 void osd_putchar(int x, int y, char ch, uint8_t attr) {
     if (x < 0 || x >= OSD_COLS || y < 0 || y >= OSD_ROWS) return;
+    if (!osd_acquire_buffer()) return;
 
     int idx = (y * OSD_COLS + x) * 2;
     osd_buffer[idx] = (uint8_t)ch;
@@ -229,7 +263,7 @@ void __time_critical_func(osd_render_line_vga)(uint32_t line, uint32_t *output_b
 
     if (char_row >= OSD_ROWS) return;
 
-    // Get pointer to this row in OSD buffer (reuses text_buffer_sram)
+    // Get pointer to this row in the OSD buffer
     uint8_t *row_data = &osd_buffer[char_row * OSD_COLS * 2];
 
     // Output starts at SHIFT_PICTURE offset (VGA_SHIFT_PICTURE pixels)

@@ -47,9 +47,6 @@ static const DriveInfo drive_table[DRIVE_TOTAL] = {
     { " BIOS",   "System"   },  // DRIVE_BIOS
 };
 
-// File listing (reduced size to save SRAM)
-#define MAX_FILES        24
-
 // Menu state
 static MenuState menu_state   = MENU_CLOSED;
 static int selected_row       = 0;  // Current row in main menu (0..DRIVE_TOTAL-1)
@@ -69,7 +66,13 @@ static bool modem_flash_requested = false;
 // keeps reflecting the *running* mode until then. Initialised in diskui_open().
 static int pending_raw_sd;                 // RAW_SD_HDD_*
 static int pending_usb_mode;               // USB_MODE_HOST / USB_MODE_DEVICE
-static char *file_list[MAX_FILES];
+typedef struct {
+    DIR dir;
+    FILINFO fno;
+    char *dir_path;
+} BrowserState;
+
+static BrowserState *browser;
 static int  file_count   = 0;
 static int  plasma_frame = 0;  // Animation frame counter
 
@@ -97,7 +100,7 @@ static void select_file(void);
 static void eject_pending(void);
 static void apply_and_close(void);
 static void reset_pending(void);
-static void clear_file_list(void);
+static void browser_close(void);
 static int first_attached_drive(void);
 static void usb_device_exit_to_host(void);
 static void cycle_sd_card(int direction);
@@ -113,6 +116,10 @@ static void apply_remaining_and_close(void);
 static void update_reboot_required(void);
 static bool filenames_equal(const char *a, const char *b);
 static void set_pending_filename(int drive_idx, char *name);
+static void set_browser_start_dir(int drive_idx);
+static char *browser_join_path(const char *name);
+static bool browser_get_entry(int index, const char **name, bool *is_dir, bool *is_special);
+static void browser_parent_dir(void);
 
 // --------------------------------------------------------------------------
 // Helpers
@@ -215,13 +222,14 @@ static void reset_pending(void) {
     modem_flash_requested = false;
 }
 
-static void clear_file_list(void) {
-    for (int i = 0; i < MAX_FILES; i++) {
-        free(file_list[i]);
-        file_list[i] = NULL;
-    }
+static void browser_close(void) {
+    if (!browser) return;
+    free(browser->dir_path);
+    free(browser);
+    browser = NULL;
     file_count = 0;
 }
+
 
 
 /*
@@ -299,6 +307,7 @@ void diskui_init(void) {
     selected_row  = 0;
     selected_file = 0;
     file_count    = 0;
+    browser       = NULL;
     reset_pending();
 }
 
@@ -336,6 +345,7 @@ void diskui_open(void) {
 
 void diskui_close(void) {
     menu_state = MENU_CLOSED;
+    browser_close();
     reset_pending();
     osd_hide();
 }
@@ -540,100 +550,211 @@ static void draw_file_browser(void) {
              drive_table[selected_row].label);
     osd_print_center(FILE_Y, title, OSD_ATTR(OSD_YELLOW, OSD_BLUE));
 
-    int visible_files = FILE_VISIBLE;
-    for (int i = 0; i < visible_files && (file_scroll_offset + i) < file_count; i++) {
+    for (int i = 0; i < FILE_VISIBLE && (file_scroll_offset + i) < file_count; i++) {
         int file_idx = file_scroll_offset + i;
         int y = FILE_Y + 1 + i;
         uint8_t attr = (file_idx == selected_file) ? OSD_ATTR_SELECTED : OSD_ATTR_NORMAL;
+        const char *name;
+        bool is_dir, is_special;
 
         osd_fill(FILE_X + 2, y, FILE_W - 4, 1, ' ', attr);
-
-        if (file_idx == selected_file) {
+        if (file_idx == selected_file)
             osd_print(FILE_X + 2, y, ">", attr);
+
+        if (browser_get_entry(file_idx, &name, &is_dir, &is_special)) {
+            char displayed[FILE_W - 7];
+            if (is_dir && !is_special)
+                snprintf(displayed, sizeof(displayed), "[%s]", name);
+            else {
+                strncpy(displayed, name, sizeof(displayed) - 1);
+                displayed[sizeof(displayed) - 1] = '\0';
+            }
+            osd_print(FILE_X + 4, y, displayed, attr);
         }
-        char displayed[FILE_W - 7];
-        strncpy(displayed, file_list[file_idx], sizeof(displayed) - 1);
-        displayed[sizeof(displayed) - 1] = '\0';
-        osd_print(FILE_X + 4, y, displayed, attr);
     }
 
-    if (file_scroll_offset > 0) {
+    if (file_scroll_offset > 0)
         osd_putchar(FILE_X + FILE_W - 3, FILE_Y + 1, '\x1e', OSD_ATTR_HIGHLIGHT);
-    }
-    if (file_scroll_offset + visible_files < file_count) {
+    if (file_scroll_offset + FILE_VISIBLE < file_count)
         osd_putchar(FILE_X + FILE_W - 3, FILE_Y + FILE_H - 2, '\x1f', OSD_ATTR_HIGHLIGHT);
-    }
 
     if (file_count == 0) {
         osd_print_center(FILE_Y + FILE_H / 2,
-                         (selected_row == DRIVE_BIOS) ? "No BIOS files found in " SD_DATA_DIR_SLASH :
-                         (selected_row == DRIVE_ESP_FW) ? "No modem firmware found in " SD_DATA_DIR_SLASH :
-                         "No disk images found in " SD_DATA_DIR_SLASH,
+                         (selected_row == DRIVE_BIOS) ? "No BIOS files found" :
+                         (selected_row == DRIVE_ESP_FW) ? "No modem firmware found" :
+                         "No disk images found",
                          OSD_ATTR_DISABLED);
     }
 
     int help_y = FILE_Y + FILE_H - 2;
     osd_fill(FILE_X + 1, help_y, FILE_W - 2, 1, ' ', OSD_ATTR_NORMAL);
-    osd_print(FILE_X + 2, help_y, "\x18/\x19: Navigate   Enter: Select   Esc: Cancel", OSD_ATTR_HIGHLIGHT);
+    osd_print(FILE_X + 2, help_y, "\x18/\x19: Navigate  Enter: Open/Select  Esc: Cancel", OSD_ATTR_HIGHLIGHT);
+
+    char path_line[FILE_W - 5];
+    const char *dir_path = (browser && browser->dir_path) ? browser->dir_path : "/";
+    strncpy(path_line, dir_path, sizeof(path_line) - 1);
+    path_line[sizeof(path_line) - 1] = '\0';
+    osd_fill(FILE_X + 2, FILE_Y + FILE_H - 3, FILE_W - 4, 1, ' ', OSD_ATTR_NORMAL);
+    osd_print(FILE_X + 2, FILE_Y + FILE_H - 3, path_line, OSD_ATTR_DISABLED);
 }
 
 // --------------------------------------------------------------------------
 // File scanning
 // --------------------------------------------------------------------------
 
-static void scan_disk_images(int drive_idx) {
-    DIR dir;
-    FILINFO fno;
-    FRESULT res;
+static bool path_has_directory(const char *path) {
+    if (!path || !path[0]) return false;
+    return strchr(path, '/') != NULL || strchr(path, '\\') != NULL ||
+           (path[0] && path[1] == ':');
+}
 
-    clear_file_list();
-
-    if (drive_idx == DRIVE_BIOS) {
-        file_list[file_count] = strdup("[native]");
-        if (file_list[file_count])
-            file_count++;
-    } else if (drive_idx == DRIVE_ESP_FW) {
-        file_list[file_count] = strdup("[none]");
-        if (file_list[file_count])
-            file_count++;
+static bool browser_set_dir(const char *path) {
+    if (!browser) {
+        browser = calloc(1, sizeof(*browser));
+        if (!browser) return false;
     }
 
-    res = f_opendir(&dir, SD_DATA_DIR);
-    if (res != FR_OK) return;
+    char *copy = strdup(path);
+    if (!copy) return false;
+    free(browser->dir_path);
+    browser->dir_path = copy;
+    return true;
+}
 
-    while (file_count < MAX_FILES) {
-        res = f_readdir(&dir, &fno);
-        if (res != FR_OK || fno.fname[0] == 0) break;
+static void set_browser_start_dir(int drive_idx) {
+    const char *current = get_display_filename(drive_idx);
+    char *dir = NULL;
 
-        if (fno.fattrib & AM_DIR) continue;
+    browser_close();
 
-        char *ext = strrchr(fno.fname, '.');
-        if (!ext) continue;
-
-        if (ext_accepted_for_drive(ext, drive_idx)) {
-            char *name = strdup(fno.fname);
-            if (name)
-                file_list[file_count++] = name;
-        }
-    }
-
-    f_closedir(&dir);
-
-    // Sort alphabetically, keeping the BIOS Native item first.
-    int sort_start = ((drive_idx == DRIVE_BIOS && file_count > 0 &&
-                       strcasecmp(file_list[0], "[native]") == 0) ||
-                      (drive_idx == DRIVE_ESP_FW && file_count > 0 &&
-                       strcasecmp(file_list[0], "[none]") == 0)) ? 1 : 0;
-    for (int i = sort_start; i < file_count - 1; i++) {
-        for (int j = sort_start; j < file_count - i + sort_start - 1; j++) {
-            if (strcasecmp(file_list[j], file_list[j + 1]) > 0) {
-                char *temp = file_list[j];
-                file_list[j] = file_list[j + 1];
-                file_list[j + 1] = temp;
+    if (current && path_has_directory(current)) {
+        dir = strdup(current);
+        if (dir) {
+            char *slash = strrchr(dir, '/');
+            char *backslash = strrchr(dir, '\\');
+            if (!slash || (backslash && backslash > slash)) slash = backslash;
+            if (slash) {
+                if (slash == dir)
+                    dir[1] = '\0';
+                else
+                    *slash = '\0';
+            } else {
+                free(dir);
+                dir = NULL;
             }
         }
     }
 
+    if (dir) {
+        browser_set_dir(dir);
+        free(dir);
+    } else {
+        char default_dir[sizeof(SD_DATA_DIR) + 1];
+        snprintf(default_dir, sizeof(default_dir), "/%s", SD_DATA_DIR);
+        browser_set_dir(default_dir);
+    }
+}
+
+static char *browser_join_path(const char *name) {
+    if (!browser || !browser->dir_path || !name) return NULL;
+    size_t dir_len = strlen(browser->dir_path);
+    size_t name_len = strlen(name);
+    bool root = dir_len == 1 && browser->dir_path[0] == '/';
+    size_t size = dir_len + (root ? 0 : 1) + name_len + 1;
+    char *out = malloc(size);
+    if (!out) return NULL;
+    if (root)
+        snprintf(out, size, "/%s", name);
+    else
+        snprintf(out, size, "%s/%s", browser->dir_path, name);
+    return out;
+}
+
+static void browser_parent_dir(void) {
+    if (!browser || !browser->dir_path || strcmp(browser->dir_path, "/") == 0) return;
+    char *parent = strdup(browser->dir_path);
+    if (!parent) return;
+    char *slash = strrchr(parent, '/');
+    if (!slash || slash == parent)
+        strcpy(parent, "/");
+    else
+        *slash = '\0';
+    browser_set_dir(parent);
+    free(parent);
+}
+
+static int browser_special_count(int drive_idx) {
+    int count = 0;
+    if (drive_idx == DRIVE_BIOS || drive_idx == DRIVE_ESP_FW) count++;
+    if (browser && browser->dir_path && strcmp(browser->dir_path, "/") != 0) count++;
+    return count;
+}
+
+static bool browser_get_entry(int index, const char **name, bool *is_dir, bool *is_special) {
+    int pos = 0;
+    int drive_idx = selected_row;
+
+    if (!browser || !browser->dir_path || index < 0) return false;
+
+    if (drive_idx == DRIVE_BIOS) {
+        if (index == pos) {
+            *name = "[native]"; *is_dir = false; *is_special = true; return true;
+        }
+        pos++;
+    } else if (drive_idx == DRIVE_ESP_FW) {
+        if (index == pos) {
+            *name = "[none]"; *is_dir = false; *is_special = true; return true;
+        }
+        pos++;
+    }
+
+    if (strcmp(browser->dir_path, "/") != 0) {
+        if (index == pos) {
+            *name = "[..]"; *is_dir = true; *is_special = true; return true;
+        }
+        pos++;
+    }
+
+    if (f_opendir(&browser->dir, browser->dir_path) != FR_OK) return false;
+    while (f_readdir(&browser->dir, &browser->fno) == FR_OK && browser->fno.fname[0]) {
+        bool dir = (browser->fno.fattrib & AM_DIR) != 0;
+        if (strcmp(browser->fno.fname, ".") == 0 || strcmp(browser->fno.fname, "..") == 0)
+            continue;
+        if (!dir) {
+            char *ext = strrchr(browser->fno.fname, '.');
+            if (!ext || !ext_accepted_for_drive(ext, drive_idx)) continue;
+        }
+        if (pos++ == index) {
+            *name = browser->fno.fname;
+            *is_dir = dir;
+            *is_special = false;
+            f_closedir(&browser->dir);
+            return true;
+        }
+    }
+    f_closedir(&browser->dir);
+    return false;
+}
+
+static void scan_disk_images(int drive_idx) {
+    int count = browser_special_count(drive_idx);
+
+    if (browser && browser->dir_path && f_opendir(&browser->dir, browser->dir_path) == FR_OK) {
+        while (f_readdir(&browser->dir, &browser->fno) == FR_OK && browser->fno.fname[0]) {
+            bool is_dir = (browser->fno.fattrib & AM_DIR) != 0;
+            if (strcmp(browser->fno.fname, ".") == 0 || strcmp(browser->fno.fname, "..") == 0)
+                continue;
+            if (is_dir) {
+                count++;
+                continue;
+            }
+            char *ext = strrchr(browser->fno.fname, '.');
+            if (ext && ext_accepted_for_drive(ext, drive_idx)) count++;
+        }
+        f_closedir(&browser->dir);
+    }
+
+    file_count = count;
     selected_file = 0;
     file_scroll_offset = 0;
 }
@@ -646,10 +767,31 @@ static void select_file(void) {
     if (file_count == 0 || selected_file >= file_count) return;
 
     int drive_idx = selected_row;
+    const char *entry_name;
+    bool is_dir, is_special;
+    if (!browser_get_entry(selected_file, &entry_name, &is_dir, &is_special)) return;
+
+    if (is_special && is_dir) {
+        browser_parent_dir();
+        scan_disk_images(drive_idx);
+        draw_file_browser();
+        return;
+    }
+
+    if (is_dir) {
+        char *path = browser_join_path(entry_name);
+        if (!path) return;
+        bool changed = browser_set_dir(path);
+        free(path);
+        if (!changed) return;
+        scan_disk_images(drive_idx);
+        draw_file_browser();
+        return;
+    }
+
     char *name = NULL;
-    if (!((drive_idx == DRIVE_BIOS && strcasecmp(file_list[selected_file], "[native]") == 0) ||
-          (drive_idx == DRIVE_ESP_FW && strcasecmp(file_list[selected_file], "[none]") == 0))) {
-        name = strdup(file_list[selected_file]);
+    if (!is_special) {
+        name = browser_join_path(entry_name);
         if (!name) return;
     }
 
@@ -659,6 +801,7 @@ static void select_file(void) {
         modem_flash_requested = pending_changed[DRIVE_ESP_FW] &&
                                 pending_filename[DRIVE_ESP_FW] != NULL;
 
+    browser_close();
     menu_state = MENU_MAIN;
     draw_main_menu();
 }
@@ -846,6 +989,7 @@ bool diskui_handle_key(int keycode, bool is_down) {
                     if (selected_row == DRIVE_USB_MODE) { toggle_usb_mode(); break; }
                     const char *filename = get_display_filename(selected_row);
                     if (selected_row == DRIVE_BIOS || selected_row == DRIVE_ESP_FW || !filename) {
+                        set_browser_start_dir(selected_row);
                         scan_disk_images(selected_row);
                         menu_state = MENU_FILE_BROWSER;
                         draw_file_browser();
@@ -923,6 +1067,7 @@ bool diskui_handle_key(int keycode, bool is_down) {
                     break;
 
                 case KEY_ESC:
+                    browser_close();
                     menu_state = MENU_MAIN;
                     draw_main_menu();
                     break;

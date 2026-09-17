@@ -30,8 +30,7 @@ MEMORY
     /* SRAM0..3 blocks */
     RAM(rwx) : ORIGIN = 0x20000000, LENGTH = 204k /* main RAM, core0 stack protected */
     RAM_4_EXT(rwx) : ORIGIN = 0x20033000, LENGTH = 40k  /* 256K paging cache; otherwise FatFs arena#0 on 286 / stack reserve on 386 */
-    TEXT_BUFFER(rwx) : ORIGIN = 0x2003D000, LENGTH = 4k  /* OSD fast SRAM, core0 stack extention (partly protected) */
-    CORE0_STACK_EXT(rwx) : ORIGIN = 0x2003E000, LENGTH = 4k  /* CONFIG-only scratch; reclaimed as FatFs cache after init */
+    CORE0_STACK_EXT(rwx) : ORIGIN = 0x2003D000, LENGTH = 8k  /* CONFIG scratch + core0 stack extension; reclaimed as FatFs cache after init */
     CORE0_STACK(rwx) : ORIGIN = 0x2003f000, LENGTH = 4k  /* core0 stack; reclaimed as FatFs cache after direct-QSPI SP relocation */
 
     /* SRAM4..7 blocks */
@@ -89,18 +88,6 @@ SECTIONS
        in .core0_stack_ext behave like normal .data instead of powering up with
        garbage. */
     __stack_ext_area_source__ = LOADADDR(.stack_ext_area);
-
-    .text_buffer_area : {
-        __text_buffer_area__ = .;
-        KEEP (*(.text_buffer))
-        KEEP (*(.text_buffer.*))
-        __text_buffer_area_end__ = .;
-    } > TEXT_BUFFER AT > FLASH
-    /* Init source for .text_buffer, mirrors __scratch_x_source__. Copied to
-       RAM once at boot (see main()), so `= {0}` / initialized variables placed
-       in .text_buffer behave like normal .data instead of powering up with
-       garbage. */
-    __text_buffer_area_source__ = LOADADDR(.text_buffer_area);
 
     .text : {
         KEEP (*(.reset))

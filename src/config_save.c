@@ -512,6 +512,17 @@ static bool write_key_value(FIL *fp, const char *key, const char *value) {
     return write_line(fp, key) && write_line(fp, value) && write_line(fp, "\r\n");
 }
 
+static bool write_file_key_value(FIL *fp, const char *key, const char *value) {
+    if (!value || !value[0]) return false;
+    if (strchr(value, '/') || strchr(value, '\\') || (value[0] && value[1] == ':'))
+        return write_key_value(fp, key, value);
+
+    char path[FF_LFN_BUF + 1 + sizeof(SD_DATA_DIR_SLASH)];
+    int n = snprintf(path, sizeof(path), "/%s/%s", SD_DATA_DIR, value);
+    if (n < 0 || (size_t)n >= sizeof(path)) return false;
+    return write_key_value(fp, key, path);
+}
+
 bool config_save_all(void) {
     FIL fp;
     FRESULT res;
@@ -540,10 +551,10 @@ bool config_save_all(void) {
 
     // BIOS files
     if (cfg_bios)
-        write_key_value(&fp, "bios=", cfg_bios);
+        write_file_key_value(&fp, "bios=", cfg_bios);
     else
         write_line(&fp, "bios=native\r\n");
-    write_line(&fp, "vga_bios=vgabios.bin\r\n");
+    write_line(&fp, "vga_bios=/" SD_DATA_DIR_SLASH "vgabios.bin\r\n");
 
     // Disks (must be in [pc] section)
     write_line(&fp, "\n; Disk images\r\n");
@@ -554,7 +565,7 @@ bool config_save_all(void) {
         if (fname && fname[0]) {
             char key[5];
             snprintf(key, sizeof(key), "fd%c=", 'a' + i);
-            write_key_value(&fp, key, fname);
+            write_file_key_value(&fp, key, fname);
         }
     }
     for (int i = 0; i < 4; i++) {
@@ -562,7 +573,7 @@ bool config_save_all(void) {
         if (fname && fname[0]) {
             char key[5];
             snprintf(key, sizeof(key), ata_is_cdrom(i) ? "cd%c=" : "hd%c=", 'a' + i);
-            write_key_value(&fp, key, fname);
+            write_file_key_value(&fp, key, fname);
         }
     }
 
@@ -616,7 +627,7 @@ bool config_save_all(void) {
              cfg_usb_modem ? "COM1" : "NONE");
     write_line(&fp, line);
     if (cfg_esp_firmware)
-        write_key_value(&fp, "esp_firmware=", cfg_esp_firmware);
+        write_file_key_value(&fp, "esp_firmware=", cfg_esp_firmware);
     else
         write_line(&fp, "esp_firmware=none\r\n");
     snprintf(line, sizeof(line), "cpu_freq=%d\r\n", cfg_cpu_freq);

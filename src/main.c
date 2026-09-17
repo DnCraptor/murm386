@@ -416,7 +416,10 @@ int load_rom(void *phys_mem, const char *file, uword addr, int backward) {
     UINT bytes_read;
 
     char path[FF_LFN_BUF + 1 + sizeof(SD_DATA_DIR_SLASH)];
-    snprintf(path, sizeof(path), SD_DATA_DIR_SLASH "%s", file);
+    if (strchr(file, '/') || strchr(file, '\\') || (file[0] && file[1] == ':'))
+        snprintf(path, sizeof(path), "%s", file);
+    else
+        snprintf(path, sizeof(path), SD_DATA_DIR_SLASH "%s", file);
 
     res = f_open(&fp, path, FA_READ);
     if (res != FR_OK) {
@@ -570,24 +573,6 @@ static void usb_role_toggle_and_reboot(void)
 }
 #endif
 
-#if CONTROL_STACK
-/* Refuse to open an OSD dialog (Win+F11/F12) when the core0 stack has grown so
-   deep that rendering it would descend into TEXT_BUFFER and corrupt
-   text_buffer_sram (the OSD text buffer). __stack_ext_area__ is the top of
-   TEXT_BUFFER; OSD_STACK_HEADROOM reserves room for the OSD render call chain
-   above it. Companion to the DosExec() guard in task.c (same CONTROL_STACK
-   toggle, same "keep a reserve" idea). */
-extern uint8_t __stack_ext_area__[];
-#ifndef OSD_STACK_HEADROOM
-#define OSD_STACK_HEADROOM 2048u
-#endif
-static inline bool osd_stack_ok(void) {
-    uint32_t sp;
-    __asm volatile ("mov %0, sp" : "=r" (sp));
-    return sp >= (uint32_t)(uintptr_t)&__stack_ext_area__ + OSD_STACK_HEADROOM;
-}
-#endif
-
 // Process a single keycode, handling host and UI hotkeys
 // Returns true if key should be passed to emulator, false if consumed
 static bool process_keycode(int is_down, int keycode) {
@@ -636,12 +621,6 @@ static bool process_keycode(int is_down, int keycode) {
 
     // Win+F12: enter Disk Manager, or switch to it from Settings.
     if (is_down && keycode == KEY_F12 && win_key_pressed) {
-#if CONTROL_STACK
-        if (!osd_stack_ok()) {
-            DBG_PRINT("OSD (Win+F12) refused: native stack low\n");
-            return false;
-        }
-#endif
         if (settingsui_is_open()) {
             settingsui_close();
             diskui_open();
@@ -657,12 +636,6 @@ static bool process_keycode(int is_down, int keycode) {
 
     // Win+F11: enter Settings, or switch to it from Disk Manager.
     if (is_down && keycode == KEY_F11 && win_key_pressed) {
-#if CONTROL_STACK
-        if (!osd_stack_ok()) {
-            DBG_PRINT("OSD (Win+F11) refused: native stack low\n");
-            return false;
-        }
-#endif
         if (diskui_is_open()) {
             diskui_close();
             settingsui_open();
@@ -1821,7 +1794,11 @@ static bool init_emulator(void) {
     if (config.bios && config.bios[0]) {
         char bios_path[FF_LFN_BUF + 1 + sizeof(SD_DATA_DIR_SLASH)];
         FIL fp;
-        snprintf(bios_path, sizeof(bios_path), SD_DATA_DIR_SLASH "%s", config.bios);
+        if (strchr(config.bios, '/') || strchr(config.bios, '\\') ||
+            (config.bios[0] && config.bios[1] == ':'))
+            snprintf(bios_path, sizeof(bios_path), "%s", config.bios);
+        else
+            snprintf(bios_path, sizeof(bios_path), SD_DATA_DIR_SLASH "%s", config.bios);
         if (f_open(&fp, bios_path, FA_READ) != FR_OK) {
             char detail[64];
             snprintf(detail, sizeof(detail), "File: %s", bios_path);
@@ -2056,9 +2033,9 @@ static void __attribute__((naked, noreturn)) core0_stack_switch_and_continue(uin
 #endif
 
 int main(void) {
-    extern uint8_t __text_buffer_area__[];
+    extern uint8_t __Core0StackExtRegionStart;
     extern uint8_t __StackTop;
-    core0_stack_floor_runtime = (uintptr_t)&__text_buffer_area__;
+    core0_stack_floor_runtime = (uintptr_t)&__Core0StackExtRegionStart;
     core0_stack_top_runtime = (uintptr_t)&__StackTop;
     core0_stack_uses_gfx_buffer = false;
 
@@ -2073,10 +2050,6 @@ int main(void) {
         extern uint8_t __stack_ext_area_source__[];
         memcpy(__stack_ext_area__, __stack_ext_area_source__,
                (size_t)(__stack_ext_area_end__ - __stack_ext_area__));
-        extern uint8_t __text_buffer_area__[], __text_buffer_area_end__[];
-        extern uint8_t __text_buffer_area_source__[];
-        memcpy(__text_buffer_area__, __text_buffer_area_source__,
-               (size_t)(__text_buffer_area_end__ - __text_buffer_area__));
 #ifdef I386_MODE
         extern uint8_t __ram_4_ext_code_start__[], __ram_4_ext_code_end__[];
         extern uint8_t __ram_4_ext_code_source__[];

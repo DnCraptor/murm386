@@ -90,7 +90,7 @@ endif()
 # and the I386_MODE compile definition, so the binary name can no longer
 # disagree with the core actually compiled in (it used to always say
 # "386" while I386_MODE was left commented out - i.e. a 286 build).
-set(CPU_TARGET "386" CACHE STRING "Emulated CPU core: 286 or 386")
+set(CPU_TARGET "286" CACHE STRING "Emulated CPU core: 286 or 386")
 set_property(CACHE CPU_TARGET PROPERTY STRINGS 286 386)
 if(NOT CPU_TARGET STREQUAL "286" AND NOT CPU_TARGET STREQUAL "386")
     message(FATAL_ERROR "CPU_TARGET must be 286 or 386, got '${CPU_TARGET}'")
@@ -454,6 +454,7 @@ add_executable(${BUILD_NAME}
     src/diskui.c
     src/settingsui.c
     src/config_save.c
+    src/gfx_scratch.c
     src/espflash.c
     src/ps2kbd_mrmltr.cpp
     src/ps2kbd_wrapper.cpp

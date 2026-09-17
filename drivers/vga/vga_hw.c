@@ -158,8 +158,6 @@ static int dma_ctrl_chan = -1;
 // PIO state
 static uint vga_sm = 0;
 
-// Text buffer in SRAM (non-static to allow OSD reuse when paused)
-uint8_t text_buffer_sram[80 * 25 * 2] __attribute__((aligned(4))) __attribute__((section(".text_buffer")));
 static volatile int update_requested = 0;  // Set by update call
 
 #define GFX_BUFFER_SIZE (256u * 1024u)
@@ -903,7 +901,7 @@ static void __not_in_flash_func(render_line)(uint32_t line, uint32_t *output_buf
     // --- Активная зона 640×400 ---
     line -= active_start;
     // If OSD is visible, it takes over the display completely
-    // (it reuses text_buffer_sram so we can't render normal text)
+    // (it temporarily occupies the start of gfx_buffer, with the guest bytes backed up)
     if (osd_is_visible()) {
         osd_render_line_vga(line, output_buffer);
         return;
