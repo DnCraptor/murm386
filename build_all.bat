@@ -3,15 +3,15 @@ setlocal EnableExtensions EnableDelayedExpansion
 set "ROOT=%~dp0"
 cd /d "%ROOT%"
 
-set "CPU_TARGET=286"
+set "CPU_TARGETS=286 386"
 if not "%~1"=="" if not "%~1:~0,1%"=="-" (
-    set "CPU_TARGET=%~1"
-    shift
-)
-if not "!CPU_TARGET!"=="286" (
-    echo CPU target '!CPU_TARGET!' is not enabled in build_all: the 386 branch is currently untested. 1>&2
+    if "%~1"=="286" set "CPU_TARGETS=286"& shift& goto cpu_arg_done
+    if "%~1"=="386" set "CPU_TARGETS=386"& shift& goto cpu_arg_done
+    if /I "%~1"=="all" set "CPU_TARGETS=286 386"& shift& goto cpu_arg_done
+    echo Invalid CPU target '%~1'. Use 286, 386 or all. 1>&2
     exit /b 2
 )
+:cpu_arg_done
 
 set "EXTRA_ARGS="
 :collect_args
@@ -25,29 +25,33 @@ shift
 goto collect_args
 :args_done
 set /a COUNT=0
-set "TOTAL=20"
+set "TOTAL=0"
+for %%C in (!CPU_TARGETS!) do set /a TOTAL+=20
 
-for %%B in (M1 M2 PC Z2 C2) do (
-    call :build_one %%B RUNTIME OFF
-    if errorlevel 1 exit /b !errorlevel!
-    call :build_one %%B RUNTIME ON
-    if errorlevel 1 exit /b !errorlevel!
-    call :build_one %%B VGA256 OFF NP
-    if errorlevel 1 exit /b !errorlevel!
-    call :build_one %%B VGA256 ON NP
-    if errorlevel 1 exit /b !errorlevel!
+for %%C in (!CPU_TARGETS!) do (
+    for %%B in (M1 M2 PC Z2 C2) do (
+        call :build_one %%C %%B RUNTIME OFF
+        if errorlevel 1 exit /b !errorlevel!
+        call :build_one %%C %%B RUNTIME ON
+        if errorlevel 1 exit /b !errorlevel!
+        call :build_one %%C %%B VGA256 OFF NP
+        if errorlevel 1 exit /b !errorlevel!
+        call :build_one %%C %%B VGA256 ON NP
+        if errorlevel 1 exit /b !errorlevel!
+    )
 )
 echo.
-echo All %TOTAL% supported 286 variants ^(with and without EMM^) built. UF2 files are under bin/^<build-type^>/.
+echo All %TOTAL% requested CPU variants ^(with and without EMM^) built. UF2 files are under bin/^<build-type^>/.
 exit /b 0
 
 :build_one
 set /a COUNT+=1
-set "B=%~1"
-set "V=%~2"
-set "E=%~3"
-set "P=%~4"
-set "TAG=!B!-286-!V!"
+set "C=%~1"
+set "B=%~2"
+set "V=%~3"
+set "E=%~4"
+set "P=%~5"
+set "TAG=!B!-!C!-!V!"
 set "EMM_ARG="
 set "PAGING_ARG="
 if /I "!E!"=="ON" (
@@ -60,5 +64,5 @@ if /I "!P!"=="NP" (
 )
 echo.
 echo [!COUNT!/%TOTAL%] !TAG!
-call "%ROOT%build.bat" --board !B! --video !V! --build-dir "%ROOT%build\all\!TAG!" !EMM_ARG! !PAGING_ARG! %EXTRA_ARGS%
+call "%ROOT%build.bat" --cpu !C! --board !B! --video !V! --build-dir "%ROOT%build\all\!TAG!" !EMM_ARG! !PAGING_ARG! %EXTRA_ARGS%
 exit /b %errorlevel%

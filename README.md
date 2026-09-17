@@ -1,8 +1,8 @@
 # murm286/386 RP2350 "PC" firmware
 
-RP2350-based PC/AT-compatible firmware with a 286-class x86 core, native FreeDOS kernel integration, VGA/HDMI output, SD-card storage, PS/2/USB input and multiple audio backends.
+RP2350-based PC/AT-compatible firmware with 286 and 386-class x86 cores, native FreeDOS kernel integration, VGA/HDMI output, SD/USB storage, PS/2/USB input and multiple audio backends.
 
-The current production target is **286**. A 386 core still exists in the tree, but it has not been regression-tested for a long time and is intentionally excluded from the normal build scripts.
+Version **1.18.0** restores the 386 core to the Windows release build path. See [WHATS_NEW.md](WHATS_NEW.md) for the short overview and [RELEASE_NOTES-1.18.0.md](RELEASE_NOTES-1.18.0.md) for detailed release notes.
 
 ## Current status
 
@@ -18,8 +18,8 @@ The authoritative GPIO map is `src/board_config.h`. Board-specific Pico SDK head
 
 ## CPU and DOS
 
-- Production CPU target: **286** (`CPU_TARGET=286`).
-- The emulator core also contains 386 support, but this branch is currently considered experimental/untested.
+- Supported CPU targets: **286** (`CPU_TARGET=286`) and **386** (`CPU_TARGET=386`, `I386_MODE=1`).
+- The Windows build wrappers expose both targets; the Unix shell wrappers still default to the 286 release path.
 - The DOS environment uses the RP2350 port of the FreeDOS kernel in `src/fdos/`.
 - The native command shell is FCOM (`src/fdos/fcom/`).
 - BIOS and DOS services are integrated into the firmware; the project is no longer the old “SeaBIOS + external VGA BIOS” layout described by earlier versions of this README.
@@ -81,7 +81,7 @@ USB host/device role is a runtime configuration; there is no longer a build-time
 
 ## SD card layout
 
-Production builds use the CPU target as their data directory. For the currently supported 286 build this is:
+Builds use the CPU target as their data directory. For example, a 286 build uses:
 
 ```text
 SD root/
@@ -101,7 +101,8 @@ The recommended entry points are:
 
 - Linux/macOS/WSL: `./build.sh`
 - Windows: `build.bat`
-- the complete supported 286 production matrix: `build_all.sh` / `build_all.bat`
+- Windows 286+386 release matrix: `build_all.bat`
+- Unix 286 release matrix: `build_all.sh`
 
 Examples:
 
@@ -109,10 +110,11 @@ Examples:
 ./build.sh -M1 -RUNTIME -504 -p 66 --clean
 ./build.sh -M2 -RUNTIME --hdmi
 ./build.sh -M2 -VGA256 --no-paging
-./build_all.sh 286
+build.bat --cpu 386 -M1 -RUNTIME -504 -p 66 --clean
+build_all.bat all
 ```
 
-The single-build scripts always pass `CPU_TARGET=286` intentionally. The all-build scripts accept `286` as an explicit CPU-target argument for forward compatibility, but currently reject `386` because that branch is not considered tested. `build_all` builds both `EMM=OFF` and `EMM=ON` variants. For each board/EMM combination it builds one `RUNTIME` paging firmware and one `VGA256 --no-paging` firmware: **20 builds** total. Audio output is runtime-selected and does not multiply the build matrix.
+On Windows, `build.bat` defaults to 286 and accepts `--cpu 286|386` (or `-286` / `-386`). `build_all.bat` defaults to both CPU targets; an optional first argument `286`, `386` or `all` can restrict the matrix. For each CPU target it builds both `EMM=OFF` and `EMM=ON` variants and, for each board/EMM combination, one `RUNTIME` paging firmware plus one `VGA256 --no-paging` firmware: **20 builds per CPU target, 40 for `all`**. The Unix shell wrappers remain on the existing 286-only path. Audio output is runtime-selected and does not multiply the build matrix.
 
 The single-build wrappers default to `RUNTIME` with paging enabled. `--no-paging` is reserved for the separate `VGA256` direct-QSPI memory model.
 
@@ -123,7 +125,7 @@ See [README-host-build.md](README-host-build.md) for toolchain setup, script opt
 CMake encodes the important build parameters in the firmware name. Typical output looks like:
 
 ```text
-m1p2-286-RUNTIME-504MHz-1.6V-P66-v1.16.uf2
+m1p2-386-RUNTIME-504MHz-1.6V-P66-v1.18.uf2
 ```
 
 Outputs are written under:

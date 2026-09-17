@@ -2,11 +2,11 @@
 setlocal EnableExtensions EnableDelayedExpansion
 
 rem Build one supported murm386/FRANK RP2350 firmware variant.
-rem Production scripts intentionally build the 286 core only.
 
 set "ROOT=%~dp0"
 cd /d "%ROOT%"
 
+set "CPU_TARGET=286"
 set "BOARD=M1"
 set "VIDEO_MODE=MCGA"
 set "CPU_SPEED=504"
@@ -34,6 +34,8 @@ if /I "%~1"=="--debug" set "DEBUG=ON"& shift& goto parse
 if /I "%~1"=="--diag" set "DIAG=ON"& shift& goto parse
 if /I "%~1"=="--emm" set "EMM=ON"& shift& goto parse
 if /I "%~1"=="--no-paging" set "NO_PAGING=ON"& shift& goto parse
+if /I "%~1"=="-286" set "CPU_TARGET=286"& shift& goto parse
+if /I "%~1"=="-386" set "CPU_TARGET=386"& shift& goto parse
 
 if /I "%~1"=="-M1" set "BOARD=M1"& shift& goto parse
 if /I "%~1"=="-M2" set "BOARD=M2"& shift& goto parse
@@ -49,6 +51,7 @@ if "%~1"=="-252" set "CPU_SPEED=252"& shift& goto parse
 if "%~1"=="-378" set "CPU_SPEED=378"& shift& goto parse
 if "%~1"=="-504" set "CPU_SPEED=504"& shift& goto parse
 
+if /I "%~1"=="--cpu" goto cpu_arg
 if /I "%~1"=="-b" goto board_arg
 if /I "%~1"=="--board" goto board_arg
 if /I "%~1"=="-v" goto video_arg
@@ -65,6 +68,9 @@ if /I "%~1"=="--jobs" goto jobs_arg
 echo Unknown option: %~1 1>&2
 goto usage_error
 
+:cpu_arg
+if "%~2"=="" goto missing_arg
+set "CPU_TARGET=%~2"& shift& shift& goto parse
 :board_arg
 if "%~2"=="" goto missing_arg
 set "BOARD=%~2"& shift& shift& goto parse
@@ -92,6 +98,8 @@ echo Missing argument for %~1 1>&2
 goto usage_error
 
 :validate
+for %%C in (286 386) do if /I "!CPU_TARGET!"=="%%C" set "CPU_TARGET=%%C"& set "CPU_OK=1"
+if not defined CPU_OK echo Invalid CPU target: !CPU_TARGET! 1>&2& exit /b 2
 for %%B in (M1 M2 PC Z2 C2) do if /I "!BOARD!"=="%%B" set "BOARD=%%B"& set "BOARD_OK=1"
 if not defined BOARD_OK echo Invalid board: !BOARD! 1>&2& exit /b 2
 for %%V in (RUNTIME MCGA EGA128 VGA128 VGA256) do if /I "!VIDEO_MODE!"=="%%V" set "VIDEO_MODE=%%V"& set "VIDEO_OK=1"
@@ -124,7 +132,7 @@ if not defined NINJA_EXE (
 )
 
 echo murm386 build
-echo   CPU target : 286
+echo   CPU target : !CPU_TARGET!
 echo   Board      : !BOARD!
 echo   Video mode : !VIDEO_MODE!
 echo   RP2350     : !CPU_SPEED! MHz
@@ -136,7 +144,7 @@ echo   Build dir  : !BUILD_DIR!
 echo   Ninja      : !NINJA_EXE!
 echo.
 
-cmake -G Ninja "-DCMAKE_MAKE_PROGRAM:FILEPATH=!NINJA_EXE!" -S "%ROOT%." -B "!BUILD_DIR!" -DCMAKE_BUILD_TYPE=!BUILD_TYPE! -DCPU_TARGET=286 -DBOARD=!BOARD! -DVIDEO_MODE=!VIDEO_MODE! -DCPU_SPEED=!CPU_SPEED! -DPSRAM_SPEED=!PSRAM_SPEED! -DFORCE_HDMI=!FORCE_HDMI! -DFORCE_VGA=!FORCE_VGA! -DDEBUG_ENABLED=!DEBUG! -DDIAG_ENABLED=!DIAG! -DEMM=!EMM! -DNO_PAGING=!NO_PAGING!
+cmake -G Ninja "-DCMAKE_MAKE_PROGRAM:FILEPATH=!NINJA_EXE!" -S "%ROOT%." -B "!BUILD_DIR!" -DCMAKE_BUILD_TYPE=!BUILD_TYPE! -DCPU_TARGET=!CPU_TARGET! -DBOARD=!BOARD! -DVIDEO_MODE=!VIDEO_MODE! -DCPU_SPEED=!CPU_SPEED! -DPSRAM_SPEED=!PSRAM_SPEED! -DFORCE_HDMI=!FORCE_HDMI! -DFORCE_VGA=!FORCE_VGA! -DDEBUG_ENABLED=!DEBUG! -DDIAG_ENABLED=!DIAG! -DEMM=!EMM! -DNO_PAGING=!NO_PAGING!
 if errorlevel 1 exit /b %errorlevel%
 if defined JOBS (
     cmake --build "!BUILD_DIR!" --config "!BUILD_TYPE!" --parallel !JOBS!
@@ -156,8 +164,9 @@ exit /b 2
 :usage
 echo Usage: build.bat [options]
 echo.
-echo Supported production CPU target: 286
+echo Supported CPU targets: 286, 386
 echo.
+echo       --cpu 286^|386  ^(short forms: -286, -386^)
 echo   -b, --board M1^|M2^|PC^|Z2^|C2
 echo   -v, --video RUNTIME^|MCGA^|EGA128^|VGA128^|VGA256
 echo   -c, --clock MHz
