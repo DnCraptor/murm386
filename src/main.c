@@ -2142,10 +2142,25 @@ int main(void) {
         }
     }
 
-    /* 256 KiB video profiles use RAM_4_EXT for their 40 KiB guest page cache.
-       Smaller runtime adapters leave it free for the FatFs cache.
-       NO_PAGING never uses a guest page cache, so RAM_4_EXT is free too. */
-#ifndef I386_MODE
+    /* 256 KiB paged video profiles use RAM_4_EXT for their 40 KiB guest
+       page cache. Otherwise the 286 build keeps the existing FatFs arena 0
+       there. The 386 build deliberately leaves arena 0 disabled and uses
+       the free tail of RAM_4_EXT as emergency core0 stack instead.
+
+       Use __ram_4_ext_end__, not the region start, as the floor: this keeps
+       any code/data explicitly linked into RAM_4_EXT protected if such a
+       section is added again later. */
+#ifdef I386_MODE
+#if defined(NO_PAGING)
+    if (true)
+#else
+    if (!video_profile_has_256k_vram())
+#endif
+    {
+        extern uint8_t __ram_4_ext_end__;
+        core0_stack_floor_runtime = (uintptr_t)&__ram_4_ext_end__;
+    }
+#else
 #if defined(NO_PAGING)
     if (true)
 #else
@@ -2165,7 +2180,8 @@ int main(void) {
        Reuse that SRAM as a large core0 stack without adding checks to the
        guest-memory hot paths. Once SP has moved, the old CORE0_STACK becomes
        FatFs cache arena 1. Paging/fallback builds keep the original stack;
-       arena 0 in RAM_4_EXT remains active whenever paging does not reserve it. */
+       on 286, arena 0 in RAM_4_EXT remains active whenever paging does not
+       reserve it. On 386 the same free RAM_4_EXT space extends the stack. */
     if (!video_profile_has_256k_vram() &&
         guest_ram_base == (uint8_t *)PSRAM_BASE_ADDR && !ega128_paging_active()) {
         extern uint8_t gfx_buffer[];

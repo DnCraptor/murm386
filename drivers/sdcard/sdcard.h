@@ -45,9 +45,10 @@ extern "C" {
 /* Enable or resize the FatFs write-through cache in SRAM that is no longer
  * used by core0 stack/config scratch. The caller owns the region and must
  * guarantee that it is no longer live for its previous purpose. */
-/* Configure one direct-addressable cache arena. Arena 0 is reserved for
- * RAM_4_EXT, arena 1 for the reclaimable old core0 stack region, and arena 2
- * for the largest currently-free conventional-DOS MCB payload. */
+/* Configure one direct-addressable cache arena. Arena 0 is RAM_4_EXT on 286
+ * when not reserved by video paging; 386 leaves arena 0 disabled for stack
+ * headroom. Arena 1 is the reclaimable old core0 stack region, and arena 2
+ * is the largest currently-free conventional-DOS MCB payload. */
 void sdcard_enable_ff_cache_arena(unsigned arena, void *storage, size_t bytes);
 void sdcard_enable_ff_stack_cache(void *storage, size_t bytes);
 void sdcard_enable_ff_dos_cache(void *storage, size_t bytes);

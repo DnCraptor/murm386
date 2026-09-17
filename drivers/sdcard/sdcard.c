@@ -66,8 +66,10 @@ BYTE CardType;			/* Card type flags */
 /*
  * Small direct-mapped FatFs disk-I/O cache backed by direct-addressable arenas.
  *
- * Arena 0 is the persistent RAM_4_EXT region in non-VGA256 builds. Arena 1
- * is the old core0 stack region after SP has moved into GFX_BUFFER. Arena 2
+ * Arena 0 is the persistent RAM_4_EXT region in 286 builds when video paging
+ * does not reserve it. The 386 build keeps arena 0 disabled and can use that
+ * free RAM as additional core0 stack. Arena 1 is the old core0 stack region
+ * after SP has moved into GFX_BUFFER. Arena 2
  * borrows the payload of the largest free conventional-DOS MCB while guest
  * RAM has a stable native mapping. Keeping
  * the tag/epoch next to each 512-byte payload means growing the cache does not
