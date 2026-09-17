@@ -27,7 +27,8 @@ typedef enum {
     DRIVE_USB_MODE = 7,  // USB HOST/DEVICE toggle
     DRIVE_ESP_FW = 8,    // USB modem firmware image
     DRIVE_BIOS = 9,
-    DRIVE_TOTAL = 10
+    DRIVE_NATIVE_DOS = 10, // Native BIOS boot target: native FreeDOS / guest boot media
+    DRIVE_TOTAL = 11
 } DiskUIDrive;
 
 // Drive info for UI display

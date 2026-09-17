@@ -454,14 +454,16 @@ static void cycle_option(int direction) {
             config_set_mouse_invert_y(config_get_mouse_invert_y() ? 0 : 1);
             break;
 
-        case SETTING_CPU_FREQ:
-            if (!SELECT_VGA) break;  // locked to 504 MHz on HDMI
-            options = cpu_freq_options;
-            count = cpu_freq_option_count;
-            idx = find_option_index(options, count, config_get_cpu_freq());
+        case SETTING_CPU_FREQ: {
+            int first = SELECT_VGA ? 0 : find_option_index(cpu_freq_options, cpu_freq_option_count, 504);
+            int value = config_get_cpu_freq();
+            if (!SELECT_VGA && value < 504) value = 504;
+            idx = find_option_index(cpu_freq_options + first, cpu_freq_option_count - first, value);
+            count = cpu_freq_option_count - first;
             idx = (idx + direction + count) % count;
-            config_set_cpu_freq(options[idx]);
+            config_set_cpu_freq(cpu_freq_options[first + idx]);
             break;
+        }
 
         case SETTING_VOLTAGE:
             options = voltage_options;
@@ -655,12 +657,12 @@ static void draw_settings_menu(void) {
             case SETTING_MOUSE_INVERT_Y:
                 snprintf(value, sizeof(value), "< %s >", config_get_mouse_invert_y() ? "Yes" : "No");
                 break;
-            case SETTING_CPU_FREQ:
-                if (!SELECT_VGA)
-                    snprintf(value, sizeof(value), "  504 MHz (HDMI)");
-                else
-                    snprintf(value, sizeof(value), "< %d MHz >", config_get_cpu_freq());
+            case SETTING_CPU_FREQ: {
+                int mhz = config_get_cpu_freq();
+                if (!SELECT_VGA && mhz < 504) mhz = 504;
+                snprintf(value, sizeof(value), "< %d MHz >", mhz);
                 break;
+            }
             case SETTING_VOLTAGE: {
                 int idx = find_option_index(voltage_options, voltage_option_count, config_get_voltage());
                 snprintf(value, sizeof(value), "< %s >", voltage_labels[idx]);

@@ -1,6 +1,7 @@
 #include "286/cpu.h"
 #include "bios.h"
 #include "fdos/fdos.h"
+#include "config_save.h"
 #include "disk.h"
 #include "bulk_bounce.h"
 #include <ff.h>
@@ -167,13 +168,13 @@ static void boot_from(CPU* cpu, uint8_t dl, bool native)
     SET_IP ( BOOT_ADDR );
     SET_SS ( 0x0000 );
     CPU_SP = BOOT_ADDR;
-/// TODO: support to select native BIOS + guest DOS
-//    if (native) {
-        // Native FreeDOS kernel
+    if (native) {
+        /* Native FreeDOS kernel.  Guest mode returns to bios_19h(), whose
+         * false result transfers execution directly to 0000:7C00. */
         _boot(cpu);
         kernel(cpu);
         __unreachable();
-//    }
+    }
 }
 
 /* TODO:
@@ -222,21 +223,28 @@ bool bios_19h(CPU* cpu) {
     }
     drop_bios_callback(cpu, &params);
     params.done = false;
+
+    const bool native = config_get_native_dos() != 0;
+
     /* Classic boot order used here: floppy A:, then first fixed disk C:.
     * No POST is done here; INT 19h is only bootstrap. */
     if (fdd_is_inserted(0) && read_boot_sector(fdd_get_file(0))) {
-        boot_from(cpu, 0x00, false);
+        boot_from(cpu, 0x00, native);
         return false;
     }
     if (bios_hdd_count() && read_bios_hdd_boot_sector(0)) {
-        boot_from(cpu, 0x80, false);
+        boot_from(cpu, 0x80, native);
         return false;
     }
     if (ata_is_inserted(0) && ata_is_cdrom(0) && read_iso_boot_sector(ata_get_file(0))) {
-        boot_from(cpu, 0x80, false);
+        boot_from(cpu, 0x80, native);
         return false;
     }
-//    bios_18h(cpu); // ROM Basic, or System halted
+    if (!native)
+        return bios_18h(cpu);
+
+    /* Preserve the historical native-DOS fallback when no bootable media
+     * was found: start FreeDOS with A: as the current boot drive. */
     bios_printf(cpu, "No boot media, native DOS is selected\n");
     boot_from(cpu, 0x00, true);
     __unreachable();

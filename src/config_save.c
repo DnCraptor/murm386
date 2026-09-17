@@ -26,6 +26,7 @@
 static int cfg_cpu_gen = EMU_CPU_GEN;
 static int cfg_fpu = 0;
 static char *cfg_bios = NULL;  /* NULL = Native BIOS */
+static int cfg_native_dos = 1;   /* Native BIOS boots native FreeDOS by default */
 static int cfg_raw_sd_hdd = RAW_SD_HDD_LAST;
 static int cfg_usb_mode = USB_MODE_HOST;
 static int cfg_usb_modem = 0;
@@ -114,6 +115,15 @@ void config_set_fpu(int enabled) {
 
 const char *config_get_bios_file(void) {
     return cfg_bios;
+}
+
+int config_get_native_dos(void) { return cfg_native_dos; }
+void config_set_native_dos(int enabled) {
+    enabled = !!enabled;
+    if (cfg_native_dos != enabled) {
+        cfg_native_dos = enabled;
+        cfg_changed = true;
+    }
 }
 
 int config_get_raw_sd_hdd(void) { return cfg_raw_sd_hdd; }
@@ -594,6 +604,8 @@ bool config_save_all(void) {
         snprintf(line, sizeof(line), "video=%s\r\n", video_values[v]);
         write_line(&fp, line);
     }
+    snprintf(line, sizeof(line), "native_dos=%d\r\n", cfg_native_dos);
+    write_line(&fp, line);
     snprintf(line, sizeof(line), "pcspeaker=%d\r\n", cfg_pcspeaker);
     write_line(&fp, line);
     snprintf(line, sizeof(line), "adlib=%d\r\n", cfg_adlib);
@@ -670,7 +682,9 @@ int parse_frank_386_ini(void* user, const char* section,
     // Accept both new and legacy section names
     if (strcmp(section, "murm-286") != 0 && strcmp(section, "murm386") != 0) return 1;
 
-    if (strcmp(name, "video") == 0) {
+    if (strcmp(name, "native_dos") == 0) {
+        cfg_native_dos = !!atoi(value);
+    } else if (strcmp(name, "video") == 0) {
         VideoAdapterProfile profile;
         if (video_profile_parse(value, &profile)) {
 #if defined(NO_PAGING)

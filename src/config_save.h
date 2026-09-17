@@ -33,6 +33,8 @@ void config_set_fpu(int enabled);
 
 const char *config_get_bios_file(void);
 void config_set_bios_file(const char *filename);
+int config_get_native_dos(void);
+void config_set_native_dos(int enabled);
 int config_get_raw_sd_hdd(void);
 void config_set_raw_sd_hdd(int mode);
 
