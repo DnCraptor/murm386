@@ -687,6 +687,33 @@ static void __time_critical_func(render_gfx_line_ega640)(uint32_t line, uint8_t 
     }
 }
 
+// VBE 102h: 800x600x16 planar.  HDMI scanout is physically 640x480;
+// reduce the native logical image by exactly 5:4 and encode two 16-color
+// pixels in each HDMI palette index.
+static void __time_critical_func(render_gfx_line_vbe4_800)(uint32_t line,
+                                                            uint8_t *output_buffer) {
+    if (gfx_width != 800 || gfx_height != 600 || line >= 480u) {
+        nf_memset(output_buffer, 0, SCREEN_WIDTH);
+        return;
+    }
+
+    uint32_t src_line = (line * 5u) >> 2;
+    uint32_t stride = gfx_line_offset > 0 ? (uint32_t)gfx_line_offset * 2u : 100u;
+    uint32_t offset = frame_vram_offset + src_line * stride;
+    offset &= 0xffffu;
+    const uint32_t *src32 = (const uint32_t *)(gfx_buffer + (offset << 2));
+
+    for (uint32_t x = 0; x < 640u; x += 2u) {
+        uint32_t sx0 = (x * 5u) >> 2;
+        uint32_t sx1 = ((x + 1u) * 5u) >> 2;
+        uint32_t p0 = ega_pack8_from_planes(src32[sx0 >> 3]);
+        uint32_t p1 = ega_pack8_from_planes(src32[sx1 >> 3]);
+        uint8_t c0 = (uint8_t)((p0 >> (28u - ((sx0 & 7u) << 2))) & 0x0fu);
+        uint8_t c1 = (uint8_t)((p1 >> (28u - ((sx1 & 7u) << 2))) & 0x0fu);
+        ob((c0 << 4) | c1);
+    }
+}
+
 // VBE 100h packed 8bpp.  HDMI scanline storage has SCREEN_WIDTH (320)
 // palette indexes; each index is expanded to two output pixels.  Sampling
 // every second source pixel avoids overrunning the 320-byte DMA line buffer.
@@ -747,6 +774,11 @@ static void __time_critical_func(render_line)(uint32_t line, uint8_t *output_buf
         if (submode == 8) {
             // VGA/MCGA mode 11h: 640x480x2
             render_gfx_line_mono640(line, output_buffer);
+            return;
+        }
+        if (submode == 9) {
+            // VBE 102h: 800x600x16 planar, scaled to physical 640x480
+            render_gfx_line_vbe4_800(line, output_buffer);
             return;
         }
 #if defined(VIDEO_RUNTIME) || (!defined(EGA128) && !defined(MCGA))

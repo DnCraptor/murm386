@@ -85,3 +85,6 @@ void vga_hw_set_gfx_mode(int submode, int width, int height, int line_offset);
 // no volatile intermediates, no synchronisation lag.
 #include "../../src/vga.h"
 void vga_hw_set_vga_state(VGAState *s);
+
+// forward declaration
+void* nf_memset(void *ptr, int value, size_t len);

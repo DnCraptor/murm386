@@ -631,6 +631,14 @@ static void vbe_update_vgaregs(VGAState *s)
     if (s->vbe_regs[VBE_DISPI_INDEX_BPP] == 4) {
         shift_control = 0;
         s->sr/*_vbe*/[VGA_SEQ_CLOCK_MODE] &= ~8; /* no double line */
+        /* VBE planar 4bpp uses the normal VGA latch/write-mode path.
+         * Mode 13h is our BIOS baseline, so explicitly undo its chain-4
+         * addressing before exposing the A0000 64 KiB planar aperture. */
+        s->sr/*_vbe*/[VGA_SEQ_MEMORY_MODE] =
+            (s->sr[VGA_SEQ_MEMORY_MODE] | VGA_SR04_EXT_MEM | VGA_SR04_SEQ_MODE) &
+            ~VGA_SR04_CHN_4M;
+        s->sr/*_vbe*/[VGA_SEQ_PLANE_WRITE] = VGA_SR02_ALL_PLANES;
+        s->gr[VGA_GFX_MODE] &= ~0x10; /* disable odd/even addressing */
     } else {
         shift_control = 2;
         /* set chain 4 mode */
@@ -2595,11 +2603,14 @@ int __time_critical_func(vga_get_graphics_mode)(VGAState *s, int *width, int *he
     }
 
 #if defined(VIDEO_RUNTIME) || (!defined(EGA128) && !defined(VGA128) && !defined(MCGA))
-    // Minimal hardware-renderer fast path for banked VBE packed 8bpp.
-    if (video_profile_is_vga256() && vbe_enabled(s) && s->vbe_regs[VBE_DISPI_INDEX_BPP] == 8) {
+    // Hardware-renderer fast paths for VBE modes.
+    if (video_profile_is_vga256() && vbe_enabled(s)) {
         if (width)  *width  = s->vbe_regs[VBE_DISPI_INDEX_XRES];
         if (height) *height = s->vbe_regs[VBE_DISPI_INDEX_YRES];
-        return 7;
+        if (s->vbe_regs[VBE_DISPI_INDEX_BPP] == 8)
+            return 7;  // VBE packed 8bpp
+        if (s->vbe_regs[VBE_DISPI_INDEX_BPP] == 4)
+            return 9;  // VBE planar 4bpp
     }
 #endif
 

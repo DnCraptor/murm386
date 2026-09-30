@@ -15,7 +15,7 @@ endif()
 cmake_minimum_required(VERSION 3.13)
 
 # Board configuration variant (M1, M2, PC, Z2 or C2)
-set(BOARD "M2" CACHE STRING "Board variant: M1, M2, PC, Z2 or C2")
+set(BOARD "M1" CACHE STRING "Board variant: M1, M2, PC, Z2 or C2")
 # Alias for backwards compatibility
 if(DEFINED BOARD_VARIANT AND NOT DEFINED BOARD)
     set(BOARD ${BOARD_VARIANT})
@@ -90,7 +90,7 @@ endif()
 # and the I386_MODE compile definition, so the binary name can no longer
 # disagree with the core actually compiled in (it used to always say
 # "386" while I386_MODE was left commented out - i.e. a 286 build).
-set(CPU_TARGET "386" CACHE STRING "Emulated CPU core: 286 or 386")
+set(CPU_TARGET "286" CACHE STRING "Emulated CPU core: 286 or 386")
 set_property(CACHE CPU_TARGET PROPERTY STRINGS 286 386)
 if(NOT CPU_TARGET STREQUAL "286" AND NOT CPU_TARGET STREQUAL "386")
     message(FATAL_ERROR "CPU_TARGET must be 286 or 386, got '${CPU_TARGET}'")
