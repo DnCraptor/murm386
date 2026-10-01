@@ -113,14 +113,18 @@ typedef enum {
 static VideoOutputSetting video_output_setting = VIDEO_OUTPUT_AUTO;
 static int audio_output_setting = AUDIO_OUTPUT_AUTO;
 
-#define VIDEO_MARKER_DIR1 "/.config"
-#define VIDEO_MARKER_DIR2 "/.config/286"
-#define VIDEO_MARKER_VGA  "/.config/286/force_vga"
-#define VIDEO_MARKER_HDMI "/.config/286/force_dvi"
-#define AUDIO_MARKER_PWM  "/.config/286/force_pwm"
-#define AUDIO_MARKER_I2S  "/.config/286/force_i2s"
-#define AUDIO_MARKER_HWAY     "/.config/286/force_hway"
-#define AUDIO_MARKER_HWAY8930 "/.config/286/force_hway8930"
+#define VIDEO_MARKER_VGA  CONFIG_BOARD_DIR "/force_vga"
+#define VIDEO_MARKER_HDMI CONFIG_BOARD_DIR "/force_dvi"
+#define AUDIO_MARKER_PWM  CONFIG_BOARD_DIR "/force_pwm"
+#define AUDIO_MARKER_I2S  CONFIG_BOARD_DIR "/force_i2s"
+#define AUDIO_MARKER_HWAY     CONFIG_BOARD_DIR "/force_hway"
+#define AUDIO_MARKER_HWAY8930 CONFIG_BOARD_DIR "/force_hway8930"
+
+static void ensure_marker_dirs(void) {
+    (void)f_mkdir(CONFIG_ROOT_DIR);
+    (void)f_mkdir(CONFIG_CPU_DIR);
+    (void)f_mkdir(CONFIG_BOARD_DIR);
+}
 
 // Original values (to detect changes)
 static int orig_cpu, orig_fpu, orig_video_adapter;
@@ -188,8 +192,7 @@ static void save_audio_output_setting(int setting) {
     if (setting == AUDIO_OUTPUT_AUTO)
         return;
 
-    (void)f_mkdir(VIDEO_MARKER_DIR1);
-    (void)f_mkdir(VIDEO_MARKER_DIR2);
+    ensure_marker_dirs();
 
     const char *create_path = NULL;
     if (setting == AUDIO_OUTPUT_PWM)
@@ -224,8 +227,7 @@ static void save_video_output_setting(VideoOutputSetting setting) {
         return;
     }
 
-    (void)f_mkdir(VIDEO_MARKER_DIR1);
-    (void)f_mkdir(VIDEO_MARKER_DIR2);
+    ensure_marker_dirs();
 
     const char *create_path;
     if (setting == VIDEO_OUTPUT_VGA) {

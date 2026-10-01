@@ -617,4 +617,10 @@ static inline char get_rp2350_package_letter(void) {
 #define SD_DATA_DIR_SLASH SD_DATA_DIR "/"
 #endif
 
+/* Persistent configuration is isolated by both emulated CPU and board. */
+#define CONFIG_ROOT_DIR  ".config"
+#define CONFIG_CPU_DIR   CONFIG_ROOT_DIR "/" SD_DATA_DIR
+#define CONFIG_BOARD_DIR CONFIG_CPU_DIR "/" BOARD_VARIANT_STR
+#define CONFIG_FILE_PATH CONFIG_BOARD_DIR "/config.ini"
+
 #endif // BOARD_CONFIG_H

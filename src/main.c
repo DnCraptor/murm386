@@ -1073,9 +1073,9 @@ static int load_config_from_sd() {
 
     // Debug: List 386 directory contents
     DBG_PRINT("Checking SD card contents...\n");
-    res = f_opendir(&dir, ".config/" SD_DATA_DIR);
+    res = f_opendir(&dir, CONFIG_BOARD_DIR);
     if (res == FR_OK) {
-        DBG_PRINT("  .config/" SD_DATA_DIR_SLASH " directory found, contents:\n");
+        DBG_PRINT("  " CONFIG_BOARD_DIR "/ directory found, contents:\n");
         while (f_readdir(&dir, &fno) == FR_OK && fno.fname[0] != 0) {
             DBG_PRINT("    %s%s (%lu bytes)\n",
                    fno.fname,
@@ -1084,7 +1084,7 @@ static int load_config_from_sd() {
         }
         f_closedir(&dir);
     } else {
-        DBG_PRINT("  .config/" SD_DATA_DIR_SLASH " directory not found (error %d)\n", res);
+        DBG_PRINT("  " CONFIG_BOARD_DIR "/ directory not found (error %d)\n", res);
         // Try root directory
         res = f_opendir(&dir, "");
         if (res == FR_OK) {
@@ -1097,7 +1097,7 @@ static int load_config_from_sd() {
     }
 
     char path[256];
-    snprintf(path, sizeof(path), ".config/" SD_DATA_DIR_SLASH "config.ini");
+    snprintf(path, sizeof(path), "%s", CONFIG_FILE_PATH);
 
     res = f_open(&fp, path, FA_READ);
     if (res != FR_OK) {
@@ -1423,39 +1423,39 @@ static bool init_hardware(void) {
         f_mkdir("tmp"); // to avoid it on any action
         FIL fp;
         // just early stiky mark:
-        if (f_open(&fp, "/.config/286/force_vga", FA_READ) == FR_OK) {
+        if (f_open(&fp, CONFIG_BOARD_DIR "/force_vga", FA_READ) == FR_OK) {
             vga_hw_set_boot_output(true);
             f_close(&fp);
         }
-        else if (f_open(&fp, "/.config/286/force_dvi", FA_READ) == FR_OK) {
+        else if (f_open(&fp, CONFIG_BOARD_DIR "/force_dvi", FA_READ) == FR_OK) {
             vga_hw_set_boot_output(false);
             f_close(&fp);
         }
 #if HAS_AUDIO_HWAY
-        if (f_open(&fp, "/.config/286/force_hway8930", FA_READ) == FR_OK) {
+        if (f_open(&fp, CONFIG_BOARD_DIR "/force_hway8930", FA_READ) == FR_OK) {
             audio_set_boot_output(AUDIO_OUTPUT_HWAY8930);
             f_close(&fp);
         }
-        else if (f_open(&fp, "/.config/286/force_hway", FA_READ) == FR_OK) {
+        else if (f_open(&fp, CONFIG_BOARD_DIR "/force_hway", FA_READ) == FR_OK) {
             audio_set_boot_output(AUDIO_OUTPUT_HWAY);
             f_close(&fp);
         }
         else
 #endif
 #if HAS_AUDIO_I2S && HAS_AUDIO_PWM
-        if (f_open(&fp, "/.config/286/force_i2s", FA_READ) == FR_OK) {
+        if (f_open(&fp, CONFIG_BOARD_DIR "/force_i2s", FA_READ) == FR_OK) {
             audio_set_boot_output(AUDIO_OUTPUT_I2S);
             f_close(&fp);
         }
-        else if (f_open(&fp, "/.config/286/force_pwm", FA_READ) == FR_OK) {
+        else if (f_open(&fp, CONFIG_BOARD_DIR "/force_pwm", FA_READ) == FR_OK) {
             audio_set_boot_output(AUDIO_OUTPUT_PWM);
             f_close(&fp);
         }
 #elif HAS_AUDIO_I2S
-        if (f_open(&fp, "/.config/286/force_i2s", FA_READ) == FR_OK)
+        if (f_open(&fp, CONFIG_BOARD_DIR "/force_i2s", FA_READ) == FR_OK)
             f_close(&fp);
 #elif HAS_AUDIO_PWM
-        if (f_open(&fp, "/.config/286/force_pwm", FA_READ) == FR_OK)
+        if (f_open(&fp, CONFIG_BOARD_DIR "/force_pwm", FA_READ) == FR_OK)
             f_close(&fp);
 #endif
     }
@@ -1515,7 +1515,7 @@ static bool init_hardware(void) {
         FIL fp;
         char *content = NULL;
 
-        if (f_open(&fp, ".config/" SD_DATA_DIR_SLASH "config.ini", FA_READ) == FR_OK) {
+        if (f_open(&fp, CONFIG_FILE_PATH, FA_READ) == FR_OK) {
             FSIZE_t size = f_size(&fp);
             content = malloc(size + 1);
             if (content) {

@@ -62,34 +62,38 @@ static bool cfg_hw_changed = false;
 extern PC *pc;
 
 // INI file path
-#define CONFIG_PATH ".config/" SD_DATA_DIR_SLASH "config.ini"
+#define CONFIG_PATH CONFIG_FILE_PATH
 
 bool config_ensure_data_dir(void) {
     FILINFO info;
+
+    /* Runtime data (BIOS/disk images) stays in /<CPU>. */
     FRESULT res = f_stat(SD_DATA_DIR, &info);
-
-    if (res == FR_OK)
-        return (info.fattrib & AM_DIR) != 0;
-
-    if (res != FR_NO_FILE && res != FR_NO_PATH)
-        return false;
-
-    res = f_mkdir(SD_DATA_DIR);
-    if (res == FR_OK)
-        return true;
-    f_mkdir("config");
-    f_mkdir("config/286");
-
-    /*
-     * Another path may have created it between f_stat() and f_mkdir().
-     * Accept FR_EXIST only when the existing object really is a directory.
-     */
-    if (res == FR_EXIST) {
-        res = f_stat(SD_DATA_DIR, &info);
-        return res == FR_OK && (info.fattrib & AM_DIR) != 0;
+    if (res != FR_OK || !(info.fattrib & AM_DIR)) {
+        if (res != FR_NO_FILE && res != FR_NO_PATH)
+            return false;
+        res = f_mkdir(SD_DATA_DIR);
+        if (res != FR_OK && res != FR_EXIST)
+            return false;
     }
 
-    return false;
+    /* Persistent settings live in /.config/<CPU>/<BOARD>/. */
+    const char *dirs[] = { CONFIG_ROOT_DIR, CONFIG_CPU_DIR, CONFIG_BOARD_DIR };
+    for (unsigned i = 0; i < sizeof(dirs) / sizeof(dirs[0]); ++i) {
+        res = f_stat(dirs[i], &info);
+        if (res == FR_OK) {
+            if (!(info.fattrib & AM_DIR))
+                return false;
+            continue;
+        }
+        if (res != FR_NO_FILE && res != FR_NO_PATH)
+            return false;
+        res = f_mkdir(dirs[i]);
+        if (res != FR_OK && res != FR_EXIST)
+            return false;
+    }
+
+    return true;
 }
 
 void config_init_from_current(void) {
