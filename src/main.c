@@ -1279,6 +1279,14 @@ static void __no_inline_not_in_flash_func(reconfigure_clocks)(int cpu_mhz, int p
     DBG_PRINT("Clock reconfiguration complete: %lu MHz\n", clock_get_hz(clk_sys) / 1000000);
 }
 
+/* Video backends may need an exact clk_sys for a physical timing (for example
+ * HDMI 800x600 TMDS at 400 MHz).  Route those temporary changes through the
+ * same complete reclock path as the configurator so PSRAM and peripherals stay
+ * coherent. */
+void __no_inline_not_in_flash_func(video_reconfigure_clock)(int cpu_mhz) {
+    reconfigure_clocks(cpu_mhz, PSRAM_MAX_FREQ_MHZ, get_psram_pin(), FLASH_MAX_FREQ_MHZ);
+}
+
 //=============================================================================
 // Hardware Initialization
 //=============================================================================

@@ -92,7 +92,7 @@ void osd_init(void) {
 }
 
 extern bool SELECT_VGA;
-extern uint32_t conv_color[1224], conv_color2[1024];
+extern uint32_t conv_color[], conv_color2[1024];
 void osd_show(void) {
     if (!osd_acquire_buffer()) {
         printf("OSD: cannot acquire gfx_buffer scratch area\n");

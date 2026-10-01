@@ -59,13 +59,26 @@ static const struct pio_program pio_vga_program = {
 #define VGA_SHIFT_PICTURE 144
 #endif
 
-#define VGA_CLK 25175000.0f
+#define VGA_CLK_640 25175000.0f
+#define VGA_CLK_800 40000000.0f
+#define VGA_LINE_SIZE_MAX 1056
+#define VGA_LINE_SIZE_640 800
 
-#define LINE_SIZE       800
-#define N_LINES_TOTAL   525
-#define N_LINES_VISIBLE 480
-#define LINE_VS_BEGIN   490
-#define LINE_VS_END     491
+static uint32_t physical_line_size = 800;
+static uint32_t physical_lines_total = 525;
+static uint32_t physical_lines_visible = 480;
+static uint32_t physical_line_vs_begin = 490;
+static uint32_t physical_line_vs_end = 491;
+static uint32_t physical_hsync_size = 96;
+static uint32_t physical_active_x = VGA_SHIFT_PICTURE;
+static float physical_pixel_clock = VGA_CLK_640;
+static bool physical_svga_800 = false;
+
+#define LINE_SIZE       physical_line_size
+#define N_LINES_TOTAL   physical_lines_total
+#define N_LINES_VISIBLE physical_lines_visible
+#define LINE_VS_BEGIN   physical_line_vs_begin
+#define LINE_VS_END     physical_line_vs_end
 
 // Default active area for 400-line modes (text, CGA, EGA ≤400, mode 13h)
 #define DEFAULT_ACTIVE_START  40
@@ -116,7 +129,7 @@ static inline void __time_critical_func(render_diag_border_vga)(
         return;
 
     static const char hex[] = "0123456789ABCDEF";
-    uint8_t *out = (uint8_t *)output_buffer + VGA_SHIFT_PICTURE;
+    uint8_t *out = (uint8_t *)output_buffer + physical_active_x;
     const uint8_t fg = 0xC0u | 0x3fu;
     const uint8_t bg = 0xC0u;
     const int x0 = 8;
@@ -134,14 +147,19 @@ static inline void __time_critical_func(render_diag_border_vga)(
 }
 #endif
 
-#define HS_SIZE             96
-#define SHIFT_PICTURE       VGA_SHIFT_PICTURE  // Where active video starts (from board_config.h)
+#define HS_SIZE             physical_hsync_size
+#define SHIFT_PICTURE       physical_active_x
 
-// Sync encoding in bits 6-7
-#define TMPL_LINE           0xC0
-#define TMPL_HS             0x80
-#define TMPL_VS             0x40
-#define TMPL_VHS            0x00
+// Sync encoding in bits 6-7.  640x480 uses negative H/V polarity;
+// standard 800x600@60 uses positive H/V polarity.
+static uint8_t physical_tmpl_line = 0xC0;
+static uint8_t physical_tmpl_hs   = 0x80;
+static uint8_t physical_tmpl_vs   = 0x40;
+static uint8_t physical_tmpl_vhs  = 0x00;
+#define TMPL_LINE physical_tmpl_line
+#define TMPL_HS   physical_tmpl_hs
+#define TMPL_VS   physical_tmpl_vs
+#define TMPL_VHS  physical_tmpl_vhs
 
 // ============================================================================
 // Module State
@@ -295,29 +313,15 @@ static void init_palettes(void) {
     // Standard 16-color text palette (CGA colors)
     // Each entry is 6-bit: RRGGBB
     static const uint8_t cga_colors[16] = {
-        0x00 | TMPL_LINE,  // 0: Black
-        0x02 | TMPL_LINE,  // 1: Blue
-        0x08 | TMPL_LINE,  // 2: Green
-        0x0A | TMPL_LINE,  // 3: Cyan
-        0x20 | TMPL_LINE,  // 4: Red
-        0x22 | TMPL_LINE,  // 5: Magenta
-        0x28 | TMPL_LINE,  // 6: Brown (dark yellow)
-        0x2A | TMPL_LINE,  // 7: Light Gray
-        0x15 | TMPL_LINE,  // 8: Dark Gray
-        0x17 | TMPL_LINE,  // 9: Light Blue
-        0x1D | TMPL_LINE,  // 10: Light Green
-        0x1F | TMPL_LINE,  // 11: Light Cyan
-        0x35 | TMPL_LINE,  // 12: Light Red
-        0x37 | TMPL_LINE,  // 13: Light Magenta
-        0x3D | TMPL_LINE,  // 14: Yellow
-        0x3F | TMPL_LINE,  // 15: White
+        0x00, 0x02, 0x08, 0x0A, 0x20, 0x22, 0x28, 0x2A,
+        0x15, 0x17, 0x1D, 0x1F, 0x35, 0x37, 0x3D, 0x3F,
     };
     
     // Store only foreground/background colors.  The four two-pixel
     // combinations are assembled in registers by vga_text_pair().
     for (int i = 0; i < 128; i++) {
-        uint8_t fg = cga_colors[i & 0x0F];
-        uint8_t bg = cga_colors[(i >> 4) & 0x07];
+        uint8_t fg = cga_colors[i & 0x0F] | TMPL_LINE;
+        uint8_t bg = cga_colors[(i >> 4) & 0x07] | TMPL_LINE;
         vga_text_attr_colors[i] = (uint16_t)fg | ((uint16_t)bg << 8);
     }
 
@@ -783,29 +787,25 @@ static void __time_critical_func(render_gfx_line_ega)(uint32_t line, uint32_t *o
     }
 }
 
-// VBE 102h: 800x600x16 planar.  The physical VGA/HDMI backends in this
-// project run at 640x480, so render the complete logical framebuffer with an
-// exact 5:4 nearest-neighbour reduction in both axes.  VRAM remains native
-// 800x600 planar; only scanout is scaled.
+// VBE 102h: native physical 800x600x16 planar.  One uint32_t in
+// gfx_buffer contains the four VGA plane bytes for eight adjacent pixels.
 static void __time_critical_func(render_gfx_line_vbe4_800)(uint32_t line,
                                                             uint32_t *output_buffer) {
     uint8_t *out = (uint8_t *)output_buffer + SHIFT_PICTURE;
-    if (gfx_width != 800 || gfx_height != 600 || line >= 480u) {
-        nf_memset(out, TMPL_LINE, 640);
+    if (gfx_width != 800 || gfx_height != 600 || line >= 600u) {
+        nf_memset(out, TMPL_LINE, 800);
         return;
     }
 
-    uint32_t src_line = (line * 5u) >> 2;  // 480 -> 600
-    uint32_t stride = gfx_line_offset > 0 ? (uint32_t)gfx_line_offset * 2u : 100u;
-    uint32_t offset = frame_vram_offset + src_line * stride;
+    const uint32_t stride = 100u;
+    uint32_t offset = (uint32_t)frame_vram_offset + line * stride;
     offset &= 0xffffu;
     const uint32_t *src32 = (const uint32_t *)(gfx_buffer + (offset << 2));
 
-    for (uint32_t x = 0; x < 640u; ++x) {
-        uint32_t sx = (x * 5u) >> 2;       // 640 -> 800
-        uint32_t pixels = ega_pack8_from_planes(src32[sx >> 3]);
-        uint8_t idx = (uint8_t)((pixels >> (28u - ((sx & 7u) << 2))) & 0x0fu);
-        out[x] = ega_palette[idx];
+    for (uint32_t x = 0; x < 100u; ++x) {
+        uint32_t pixels = ega_pack8_from_planes(src32[x]);
+        for (int shift = 28; shift >= 0; shift -= 4)
+            *out++ = ega_palette[(pixels >> shift) & 0x0fu];
     }
 }
 
@@ -1236,17 +1236,18 @@ static void __isr  __not_in_flash_func(dma_handler_vga)(void) {
     if (prepare_line >= N_LINES_TOTAL)
         prepare_line -= N_LINES_TOTAL;
 
+    uint32_t render_buf = prepare_line & 1u;
+    uint8_t *scan = (uint8_t *)lines_pattern[render_buf];
+    dma_channel_set_read_addr(dma_ctrl_chan, &lines_pattern[render_buf], false);
     if (prepare_line >= N_LINES_VISIBLE) {
-        uint32_t sync_buf =
-            (prepare_line >= LINE_VS_BEGIN && prepare_line <= LINE_VS_END) ? 1u : 0u;
-        dma_channel_set_read_addr(dma_ctrl_chan, &lines_pattern[sync_buf], false);
+        bool vs = prepare_line >= LINE_VS_BEGIN && prepare_line <= LINE_VS_END;
+        memset(scan, vs ? TMPL_VS : TMPL_LINE, LINE_SIZE);
+        memset(scan, vs ? TMPL_VHS : TMPL_HS, HS_SIZE);
     } else {
-        uint32_t render_buf = 2u + (prepare_line & 1u);
-
-        dma_channel_set_read_addr(dma_ctrl_chan, &lines_pattern[render_buf], false);
+        memset(scan, TMPL_LINE, LINE_SIZE);
+        memset(scan, TMPL_HS, HS_SIZE);
         render_line(prepare_line, lines_pattern[render_buf]);
 #if LOAD_BAR_ENABLE
-        // Load bar goes into the inactive region below active_end (e.g. lines 440-479)
         render_load_bar(prepare_line, lines_pattern[render_buf]);
 #endif
     }
@@ -1297,19 +1298,19 @@ static void hdmi_boost_clock(void) {
 /* Recalculate and apply VGA PIO clock divider after a sysclk change. */
 void vga_hw_reclock(void) {
     if (!SELECT_VGA) return;
-    float clk_div = (float)clock_get_hz(clk_sys) / VGA_CLK;
+    float clk_div = (float)clock_get_hz(clk_sys) / physical_pixel_clock;
     uint32_t div_int  = (uint32_t)clk_div;
     uint32_t div_frac = (uint32_t)((clk_div - (float)div_int) * 256.0f);
     VGA_PIO->sm[vga_sm].clkdiv = (div_int << 16) | (div_frac << 8);
 #if LOAD_BAR_ENABLE
-    frame_period_us = (uint32_t)((float)(LINE_SIZE * N_LINES_TOTAL) * 1000000.0f / VGA_CLK);
+    frame_period_us = (uint32_t)((float)(LINE_SIZE * N_LINES_TOTAL) * 1000000.0f / physical_pixel_clock);
 #endif
 }
 
-static uint32_t vga_line0[LINE_SIZE / 4] __scratch_y("vga_line0") = { 0 };
-static uint32_t vga_line1[LINE_SIZE / 4] __scratch_y("vga_line1") = { 0 };
-static uint32_t vga_line2[LINE_SIZE / 4] __scratch_y("vga_line2") = { 0 };
-static uint32_t vga_line3[LINE_SIZE / 4] __scratch_y("vga_line3") = { 0 };
+// Two ping-pong scanlines are enough: the ISR always prepares N+2 while N+1
+// is being transmitted.  2 * 1056 = 2112 bytes, below the old 3200-byte budget.
+static uint32_t vga_line0[VGA_LINE_SIZE_MAX / 4] __scratch_y("vga_line0") = { 0 };
+static uint32_t vga_line1[VGA_LINE_SIZE_MAX / 4] __scratch_y("vga_line1") = { 0 };
 
 void vga_hw_set_boot_output(bool select_vga)
 {
@@ -1367,12 +1368,12 @@ void vga_hw_init(void) {
 
     // Calculate clock divider
     float sys_clk = (float)clock_get_hz(clk_sys);
-    float clk_div = sys_clk / VGA_CLK;
+    float clk_div = sys_clk / physical_pixel_clock;
 
 #if LOAD_BAR_ENABLE
     // Frame period: LINE_SIZE pixels per line, N_LINES_TOTAL lines, at VGA_CLK px/s
     // Use float to avoid 32-bit overflow (800*525*1e6 ≈ 4.2e11)
-    frame_period_us = (uint32_t)((float)(LINE_SIZE * N_LINES_TOTAL) * 1000000.0f / VGA_CLK);
+    frame_period_us = (uint32_t)((float)(LINE_SIZE * N_LINES_TOTAL) * 1000000.0f / physical_pixel_clock);
 
     DBG_PRINT("  System clock: %.1f MHz\n", sys_clk / 1e6f);
     DBG_PRINT("  Clock divider: %.4f\n", clk_div);
@@ -1380,8 +1381,6 @@ void vga_hw_init(void) {
 #endif    
     lines_pattern[0] = vga_line0;
     lines_pattern[1] = vga_line1;
-    lines_pattern[2] = vga_line2;
-    lines_pattern[3] = vga_line3;
     
     // Initialize line templates
     uint8_t *base = (uint8_t *)lines_pattern[0];
@@ -1392,10 +1391,6 @@ void vga_hw_init(void) {
     memset(base, TMPL_VS, LINE_SIZE);
     memset(base, TMPL_VHS, HS_SIZE);
     
-    // Initialize both active line buffers with the sync template
-    for (int i = 2; i < 4; i++) {
-        memcpy(lines_pattern[i], lines_pattern[0], LINE_SIZE);
-    }
 
     // Initialize PIO
     uint offset = pio_add_program(VGA_PIO, &pio_vga_program);
@@ -1566,26 +1561,90 @@ void vga_hw_set_palette16(const uint8_t *palette16_data) {
     }
 }
 
-// Set graphics sub-mode: 1=CGA4, 2=EGA, 3=VGA256, 4=CGA2, 5=ModeX, 7=VBE packed8, 8=mono640, 9=VBE planar4
-void __time_critical_func(vga_hw_set_gfx_mode)(int submode, int width, int height, int line_offset) {
+void hdmi_set_physical_800x600(bool enable);
+
+
+static void __not_in_flash_func(vga_set_physical_800x600)(bool enable) {
+    if (!SELECT_VGA || physical_svga_800 == enable) return;
+
+    irq_set_enabled(VIDEO_DMA_IRQ, false);
+    dma_channel_abort(dma_data_chan);
+    dma_channel_abort(dma_ctrl_chan);
+    pio_sm_set_enabled(VGA_PIO, vga_sm, false);
+
+    if (enable) {
+        physical_line_size = 1056;
+        physical_lines_total = 628;
+        physical_lines_visible = 600;
+        physical_line_vs_begin = 601;
+        physical_line_vs_end = 604;
+        physical_hsync_size = 128;
+        physical_active_x = 216;
+        physical_pixel_clock = VGA_CLK_800;
+        physical_tmpl_line = 0x00;
+        physical_tmpl_hs = 0x40;
+        physical_tmpl_vs = 0x80;
+        physical_tmpl_vhs = 0xC0;
+    } else {
+        physical_line_size = 800;
+        physical_lines_total = 525;
+        physical_lines_visible = 480;
+        physical_line_vs_begin = 490;
+        physical_line_vs_end = 491;
+        physical_hsync_size = 96;
+        physical_active_x = VGA_SHIFT_PICTURE;
+        physical_pixel_clock = VGA_CLK_640;
+        physical_tmpl_line = 0xC0;
+        physical_tmpl_hs = 0x80;
+        physical_tmpl_vs = 0x40;
+        physical_tmpl_vhs = 0x00;
+    }
+
+    init_palettes();
+    for (int i = 0; i < 2; ++i) {
+        uint8_t *base = (uint8_t *)lines_pattern[i];
+        memset(base, TMPL_LINE, LINE_SIZE);
+        memset(base, TMPL_HS, HS_SIZE);
+    }
+
+    vga_hw_reclock();
+    dma_channel_set_trans_count(dma_data_chan, LINE_SIZE / 4, false);
+    dma_channel_set_trans_count(dma_ctrl_chan, 1, false);
+    dma_channel_set_read_addr(dma_data_chan, lines_pattern[0], false);
+    dma_channel_set_read_addr(dma_ctrl_chan, &lines_pattern[0], false);
+    pio_sm_clear_fifos(VGA_PIO, vga_sm);
+    pio_sm_restart(VGA_PIO, vga_sm);
+    pio_sm_set_enabled(VGA_PIO, vga_sm, true);
+    if (VIDEO_DMA_IRQ == DMA_IRQ_0) dma_channel_set_irq0_enabled(dma_ctrl_chan, true);
+    else dma_channel_set_irq1_enabled(dma_ctrl_chan, true);
+    irq_set_enabled(VIDEO_DMA_IRQ, true);
+    dma_start_channel_mask(1u << dma_data_chan);
+    physical_svga_800 = enable;
+}
+
+// Set graphics sub-mode.  Submode 9 is VBE 102h and switches the physical
+// output to native 800x600 rather than scaling it into 640x480.
+void vga_hw_set_gfx_mode(int submode, int width, int height, int line_offset) {
     gfx_submode = submode;
     gfx_width = width;
     gfx_height = height;
     gfx_line_offset = line_offset > 0 ? line_offset : (width / 8);
     gfx_sram_stride = (width / 8) + 1;
 
-    // Adjust active display area based on mode requirements
-    if (height > 400 || (submode == 5 && height > 200)) {
-        // 480-line modes: mode 12h (height=480) or Mode X 320×240 (height=240, doubled)
+    bool want_800 = (submode == 9 && width == 800 && height == 600);
+    if (SELECT_VGA) vga_set_physical_800x600(want_800);
+    else hdmi_set_physical_800x600(want_800);
+
+    if (want_800 || height > 400 || (submode == 5 && height > 200)) {
         active_start = 0;
-        active_end = N_LINES_VISIBLE;  // 480
+        active_end = N_LINES_VISIBLE;
     } else {
         active_start = DEFAULT_ACTIVE_START;
         active_end = DEFAULT_ACTIVE_END;
     }
 }
 
-extern uint32_t conv_color[1224], conv_color2[1024];
+extern uint32_t conv_color[], conv_color2[1024];
 
 void __not_in_flash_func(vga_hw_process_deferred)(void) {
     if (!frame_update_request)

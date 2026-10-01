@@ -35,6 +35,19 @@ extern uint32_t palette_a[256];
 
 #define SCREEN_WIDTH (320)
 #define SCREEN_HEIGHT (240)
+#define HDMI_LINE_BYTES_MAX 528u
+#define HDMI_LINE_DWORDS_MAX ((HDMI_LINE_BYTES_MAX + 3u) / 4u)
+
+static uint32_t hdmi_line_bytes = 400;
+static uint32_t hdmi_lines_total = 525;
+static uint32_t hdmi_lines_visible = 480;
+static uint32_t hdmi_vsync_begin = 490;
+static uint32_t hdmi_vsync_end = 491;
+static uint32_t hdmi_active_offset = 72;
+static uint32_t hdmi_active_bytes = 320;
+static uint32_t hdmi_hsync_bytes = 48;
+static float hdmi_tmds_clock = 252000000.0f;
+static bool hdmi_svga_800 = false;
 
 #define GFX_BUFFER_SIZE (256u * 1024u)
 extern uint8_t gfx_buffer[GFX_BUFFER_SIZE];
@@ -131,11 +144,11 @@ static int dma_chan_pal_conv;
 static uint32_t* __scratch_y("hdmi_ptr_3") dma_lines[4] = { NULL,NULL,NULL,NULL };
 static uint32_t* __scratch_y("hdmi_ptr_4") DMA_BUF_ADDR[4];
 // Extra 2 line buffers (buffers 0-1 are in conv_color, 2-3 are here)
-static uint32_t hdmi_extra_line_buf[2][100];
+static uint32_t hdmi_extra_line_buf[2][HDMI_LINE_DWORDS_MAX];
 
 //ДМА палитра для конвертации
 //в хвосте этой памяти выделяется dma_data
-alignas(4096) uint32_t conv_color[1224];
+alignas(4096) uint32_t conv_color[1024 + 2 * HDMI_LINE_DWORDS_MAX];
 uint32_t conv_color2[1024]; // backup to fast restore pallete
 bool required_to_repair_text_pal = false;
 
@@ -687,30 +700,26 @@ static void __time_critical_func(render_gfx_line_ega640)(uint32_t line, uint8_t 
     }
 }
 
-// VBE 102h: 800x600x16 planar.  HDMI scanout is physically 640x480;
-// reduce the native logical image by exactly 5:4 and encode two 16-color
-// pixels in each HDMI palette index.
+// VBE 102h: native 800x600x16 planar.  HDMI palette indexes encode two
+// adjacent 4-bit pixels, so 800 physical pixels occupy 400 line bytes.
 static void __time_critical_func(render_gfx_line_vbe4_800)(uint32_t line,
                                                             uint8_t *output_buffer) {
-    if (gfx_width != 800 || gfx_height != 600 || line >= 480u) {
-        nf_memset(output_buffer, 0, SCREEN_WIDTH);
+    if (gfx_width != 800 || gfx_height != 600 || line >= 600u) {
+        nf_memset(output_buffer, 0, 400);
         return;
     }
 
-    uint32_t src_line = (line * 5u) >> 2;
-    uint32_t stride = gfx_line_offset > 0 ? (uint32_t)gfx_line_offset * 2u : 100u;
-    uint32_t offset = frame_vram_offset + src_line * stride;
+    const uint32_t stride = 100u;
+    uint32_t offset = (uint32_t)frame_vram_offset + line * stride;
     offset &= 0xffffu;
     const uint32_t *src32 = (const uint32_t *)(gfx_buffer + (offset << 2));
 
-    for (uint32_t x = 0; x < 640u; x += 2u) {
-        uint32_t sx0 = (x * 5u) >> 2;
-        uint32_t sx1 = ((x + 1u) * 5u) >> 2;
-        uint32_t p0 = ega_pack8_from_planes(src32[sx0 >> 3]);
-        uint32_t p1 = ega_pack8_from_planes(src32[sx1 >> 3]);
-        uint8_t c0 = (uint8_t)((p0 >> (28u - ((sx0 & 7u) << 2))) & 0x0fu);
-        uint8_t c1 = (uint8_t)((p1 >> (28u - ((sx1 & 7u) << 2))) & 0x0fu);
-        ob((c0 << 4) | c1);
+    for (uint32_t x = 0; x < 100u; ++x) {
+        uint32_t p = ega_pack8_from_planes(src32[x]);
+        *output_buffer++ = (uint8_t)((((p >> 28) & 0xfu) << 4) | ((p >> 24) & 0xfu));
+        *output_buffer++ = (uint8_t)((((p >> 20) & 0xfu) << 4) | ((p >> 16) & 0xfu));
+        *output_buffer++ = (uint8_t)((((p >> 12) & 0xfu) << 4) | ((p >>  8) & 0xfu));
+        *output_buffer++ = (uint8_t)((((p >>  4) & 0xfu) << 4) | ((p >>  0) & 0xfu));
     }
 }
 
@@ -809,7 +818,7 @@ static void __time_critical_func(dma_handler_HDMI)() {
 
     dma_hw->ints0 = 1u << dma_chan_ctrl;
 
-    if (line >= 524) {
+    if (line + 1u >= hdmi_lines_total) {
         line = 0;
         frame_update_request = 1;
     } else {
@@ -821,7 +830,7 @@ static void __time_critical_func(dma_handler_HDMI)() {
     // Bit 0 (DISP_ENABLE): 0 = active display, 1 = blanking interval
     // Bit 3 (V_RETRACE):   1 = vertical retrace, 0 = active display
     if (vga_state) {
-        if (line >= 480) {
+        if (line >= hdmi_lines_visible) {
             vga_state->st01 |= ST01_V_RETRACE;
         } else {
             vga_state->st01 &= ~ST01_V_RETRACE;
@@ -836,17 +845,17 @@ static void __time_critical_func(dma_handler_HDMI)() {
 
     uint8_t* activ_buf = (uint8_t *)dma_lines[render_buf];
 
-    if (line < 480) { //область изображения
-        uint8_t* output_buffer = activ_buf + 72;
+    if (line < hdmi_lines_visible) { // visible area
+        uint8_t* output_buffer = activ_buf + hdmi_active_offset;
         if (line < (uint32_t)active_start) {
-            nf_memset(output_buffer, 0, SCREEN_WIDTH);
+            nf_memset(output_buffer, 0, hdmi_active_bytes);
 #if DIAG
             render_diag_border_hdmi(line, output_buffer);
 #endif
             goto f;
         }
         if (line >= (uint32_t)active_end) {
-            nf_memset(output_buffer, 0, SCREEN_WIDTH);
+            nf_memset(output_buffer, 0, hdmi_active_bytes);
             goto f;
         }
         render_line(line - active_start, output_buffer);
@@ -855,30 +864,32 @@ f:
         //для выравнивания синхры
         // --|_|---|_|---|_|----
         //---|___________|-----
-        nf_memset(activ_buf + 48, HDMI_CTRL_0, 24);
-        nf_memset(activ_buf, HDMI_CTRL_1, 48);
-        nf_memset(activ_buf + 392, HDMI_CTRL_0, 8);
+        nf_memset(activ_buf, HDMI_CTRL_1, hdmi_hsync_bytes);
+        nf_memset(activ_buf + hdmi_hsync_bytes, HDMI_CTRL_0,
+                  hdmi_active_offset - hdmi_hsync_bytes);
+        nf_memset(activ_buf + hdmi_active_offset + hdmi_active_bytes, HDMI_CTRL_0,
+                  hdmi_line_bytes - hdmi_active_offset - hdmi_active_bytes);
     }
     else {
-        if ((line >= 490) && (line < 492)) {
+        if (line >= hdmi_vsync_begin && line <= hdmi_vsync_end) {
             //кадровый синхроимпульс
             //для выравнивания синхры
             // --|_|---|_|---|_|----
             //---|___________|-----
-            nf_memset(activ_buf + 48, HDMI_CTRL_2, 352);
-            nf_memset(activ_buf, HDMI_CTRL_3, 48);
+            nf_memset(activ_buf, HDMI_CTRL_2, hdmi_line_bytes);
+            nf_memset(activ_buf, HDMI_CTRL_3, hdmi_hsync_bytes);
         }
         else {
             //ССИ без изображения
             //для выравнивания синхры
-            nf_memset(activ_buf + 48, HDMI_CTRL_0, 352);
-            nf_memset(activ_buf, HDMI_CTRL_1, 48);
+            nf_memset(activ_buf, HDMI_CTRL_0, hdmi_line_bytes);
+            nf_memset(activ_buf, HDMI_CTRL_1, hdmi_hsync_bytes);
         };
 
         // Line N_LINES_TOTAL-4 (521): late in vblank, just before DMA needs line 0.
         // Wolf3D has already written the new page address to CRTC by now.
         // Read cr[] and ar[] directly — no intermediate volatile copies.
-        if (line == 521) {
+        if (line + 4u == hdmi_lines_total) {
             if (vga_state) {
                 const uint8_t *cr = vga_state->cr;
                 frame_vram_offset = (uint16_t)((cr[0x0c] << 8) | cr[0x0d]);
@@ -886,7 +897,7 @@ f:
                 int lc = (int)cr[0x18]
                        | (((int)cr[0x07] & 0x10) << 4)
                        | (((int)cr[0x09] & 0x40) << 3);
-                frame_line_compare = (lc > 0 && lc < 480) ? lc : -1;
+                frame_line_compare = (lc > 0 && lc < (int)hdmi_lines_visible) ? lc : -1;
             }
         }
     }
@@ -1065,13 +1076,13 @@ static inline bool hdmi_init() {
     sm_config_set_out_shift(&c_c, true, true, 30);
     sm_config_set_fifo_join(&c_c, PIO_FIFO_JOIN_TX);
 
-    sm_config_set_clkdiv(&c_c, clock_get_hz(clk_sys) / 252000000.0f);
+    sm_config_set_clkdiv(&c_c, clock_get_hz(clk_sys) / hdmi_tmds_clock);
     pio_sm_init(PIO_VIDEO, SM_video, offs_prg0, &c_c);
     pio_sm_set_enabled(PIO_VIDEO, SM_video, true);
 
     //настройки DMA — 4 line buffers (2 in conv_color, 2 separate)
     dma_lines[0] = &conv_color[1024];
-    dma_lines[1] = &conv_color[1124];
+    dma_lines[1] = &conv_color[1024 + HDMI_LINE_DWORDS_MAX];
     dma_lines[2] = hdmi_extra_line_buf[0];
     dma_lines[3] = hdmi_extra_line_buf[1];
 
@@ -1095,7 +1106,7 @@ static inline bool hdmi_init() {
         &cfg_dma,
         &PIO_VIDEO_ADDR->txf[SM_conv], // Write address
         &dma_lines[0][0], // read address
-        400, //
+        hdmi_line_bytes, //
         false // Don't start yet
     );
 
@@ -1185,6 +1196,54 @@ static inline bool hdmi_init() {
 
     return true;
 };
+
+void __not_in_flash_func(hdmi_set_physical_800x600)(bool enable) {
+    if (SM_video < 0 || hdmi_svga_800 == enable) return;
+
+    irq_set_enabled(VIDEO_DMA_IRQ, false);
+    dma_channel_abort(dma_chan);
+    dma_channel_abort(dma_chan_ctrl);
+    pio_sm_set_enabled(PIO_VIDEO, SM_video, false);
+
+    if (enable) {
+        hdmi_line_bytes = 528;          /* (128 + 88 + 800 + 40) / 2 */
+        hdmi_lines_total = 628;
+        hdmi_lines_visible = 600;
+        hdmi_vsync_begin = 601;
+        hdmi_vsync_end = 604;
+        hdmi_hsync_bytes = 64;          /* 128 pixels */
+        hdmi_active_offset = 108;       /* (128 sync + 88 back) / 2 */
+        hdmi_active_bytes = 400;
+        hdmi_tmds_clock = 400000000.0f;
+    } else {
+        hdmi_line_bytes = 400;
+        hdmi_lines_total = 525;
+        hdmi_lines_visible = 480;
+        hdmi_vsync_begin = 490;
+        hdmi_vsync_end = 491;
+        hdmi_hsync_bytes = 48;
+        hdmi_active_offset = 72;
+        hdmi_active_bytes = 320;
+        hdmi_tmds_clock = 252000000.0f;
+    }
+
+    pio_sm_set_clkdiv(PIO_VIDEO, SM_video,
+                      (float)clock_get_hz(clk_sys) / hdmi_tmds_clock);
+    for (int i = 0; i < 4; ++i)
+        nf_memset(dma_lines[i], HDMI_CTRL_0, hdmi_line_bytes);
+    dma_channel_set_trans_count(dma_chan, hdmi_line_bytes, false);
+    dma_channel_set_trans_count(dma_chan_ctrl, 1, false);
+    dma_channel_set_read_addr(dma_chan, dma_lines[0], false);
+    dma_channel_set_read_addr(dma_chan_ctrl, &DMA_BUF_ADDR[0], false);
+    pio_sm_clear_fifos(PIO_VIDEO, SM_video);
+    pio_sm_restart(PIO_VIDEO, SM_video);
+    pio_sm_set_enabled(PIO_VIDEO, SM_video, true);
+    if (VIDEO_DMA_IRQ == DMA_IRQ_0) dma_channel_set_irq0_enabled(dma_chan_ctrl, true);
+    else dma_channel_set_irq1_enabled(dma_chan_ctrl, true);
+    irq_set_enabled(VIDEO_DMA_IRQ, true);
+    dma_start_channel_mask(1u << dma_chan);
+    hdmi_svga_800 = enable;
+}
 
 // DC balance XOR mask — inverts differential pairs for alternating pixels.
 // Flips TMDS bits 0-7 and bit 9 (DC balance flag) but NOT bit 8 (encoding method).
