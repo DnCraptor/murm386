@@ -1041,7 +1041,9 @@ static void load_default_config(void) {
 
     // CPU configuration
     config.cpu_gen = EMU_CPU_GEN;
-    config.fpu = 1;
+    /* config_save.c owns the user-visible defaults.  pc_new() consumes
+       PCConfig before the two copies are synchronized below. */
+    config.fpu = config_get_fpu();
 
     // Display configuration
     config.width = 640;
