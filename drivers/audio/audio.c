@@ -499,18 +499,19 @@ bool __not_in_flash_func(timer_callback)(repeating_timer_t *rt) {
     }
 #endif
 #if HAS_AUDIO_PWM
+#ifdef BEEPER_PIN
+    b_v = b_v ? (4095 >> volume) : 0;
+    pwm_set_gpio_level(BEEPER_PIN, b_v);
+#else
+    /* No separate beeper output. Mix the PC speaker into both PWM channels before volume scaling/quantization. */
+    if (b_v) { r_v = l_v = 32767; }
+#endif
     r_v >>= volume;
     l_v >>= volume;
     uint16_t ur_v = (r_v + 32768) >> 4;
     uint16_t ul_v = (l_v + 32768) >> 4;
     if (ur_v > 4095) ur_v = 4095;
     if (ul_v > 4095) ul_v = 4095;
-#ifdef BEEPER_PIN
-    b_v = b_v ? (4095 >> volume) : 0;
-    pwm_set_gpio_level(BEEPER_PIN, b_v);
-#else
-    if (b_v) { r_v = l_v = 32767; }
-#endif
     pwm_set_gpio_level(PWM_RIGHT_PIN, ur_v);
     pwm_set_gpio_level(PWM_LEFT_PIN, ul_v);
 #endif
