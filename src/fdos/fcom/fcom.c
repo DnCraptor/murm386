@@ -273,6 +273,15 @@ public:
   __attribute__((always_inline)) const T *operator&() const { return static_cast<const T *>(*this); }
   static constexpr size_t size() { return N; }
 
+  __attribute__((always_inline)) void commit() {
+#if !defined(NO_PAGING)
+    if (dirty_) {
+      guest_write_block(addr_, buffer_, sizeof(buffer_));
+      dirty_ = false;
+    }
+#endif
+  }
+
 private:
 #if !defined(NO_PAGING)
   __attribute__((always_inline)) void load() const {
@@ -846,7 +855,8 @@ static void show_prompt(CPU *cpu, UWORD command_psp, const fcom_guest_ref &g)
   char *env_format = fcom_env_alloc_value(command_psp, "PROMPT", 256u);
   const char *format = env_format;
   auto text = g.text();
-  char *dst = text;
+  char *text_base = text;
+  char *dst = text_base;
   size_t left = decltype(g.text())::size();
 
   if (format == NULL || *format == '\0')
@@ -919,10 +929,14 @@ static void show_prompt(CPU *cpu, UWORD command_psp, const fcom_guest_ref &g)
   }
 
   *dst = '\0';
+  /* fcom_write() reads the guest buffer through DOS.  In pageable builds
+   * text is a write-back proxy, so make the completed prompt visible before
+   * entering INT 21h instead of waiting for the proxy destructor. */
+  text.commit();
   (void)fcom_write(cpu, command_psp,
                    FCOM_WORK_OFFSET +
                      (UWORD)offsetof(struct fcom_guest_layout, text),
-                   (UWORD)(dst - g.text()));
+                   (UWORD)(dst - text_base));
   free(env_format);
 }
 
