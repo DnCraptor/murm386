@@ -197,7 +197,7 @@ static uint8_t cga_palette[4];
 // Current video mode (0=blank, 1=text, 2=graphics)
 int current_mode = 1;  // Default text mode
 
-// Graphics sub-mode: 1=CGA4, 2=EGA, 3=VGA256, 4=CGA2, 5=ModeX, 7=VBE packed8, 8=mono640, 9=VBE planar4
+// Graphics sub-mode: 1=CGA4, 2=EGA, 3=VGA256, 4=CGA2, 5=ModeX, 7=VBE packed8, 8=mono640
 int gfx_submode = 3;
 int gfx_width = 320;
 int gfx_height = 200;
@@ -783,32 +783,6 @@ static void __time_critical_func(render_gfx_line_ega)(uint32_t line, uint32_t *o
     }
 }
 
-// VBE 102h: 800x600x16 planar.  The physical VGA/HDMI backends in this
-// project run at 640x480, so render the complete logical framebuffer with an
-// exact 5:4 nearest-neighbour reduction in both axes.  VRAM remains native
-// 800x600 planar; only scanout is scaled.
-static void __time_critical_func(render_gfx_line_vbe4_800)(uint32_t line,
-                                                            uint32_t *output_buffer) {
-    uint8_t *out = (uint8_t *)output_buffer + SHIFT_PICTURE;
-    if (gfx_width != 800 || gfx_height != 600 || line >= 480u) {
-        nf_memset(out, TMPL_LINE, 640);
-        return;
-    }
-
-    uint32_t src_line = (line * 5u) >> 2;  // 480 -> 600
-    uint32_t stride = gfx_line_offset > 0 ? (uint32_t)gfx_line_offset * 2u : 100u;
-    uint32_t offset = frame_vram_offset + src_line * stride;
-    offset &= 0xffffu;
-    const uint32_t *src32 = (const uint32_t *)(gfx_buffer + (offset << 2));
-
-    for (uint32_t x = 0; x < 640u; ++x) {
-        uint32_t sx = (x * 5u) >> 2;       // 640 -> 800
-        uint32_t pixels = ega_pack8_from_planes(src32[sx >> 3]);
-        uint8_t idx = (uint8_t)((pixels >> (28u - ((sx & 7u) << 2))) & 0x0fu);
-        out[x] = ega_palette[idx];
-    }
-}
-
 // 80 cols: one uint16 = 2 pixels (left in low byte, right in high byte)
 // 40 cols: need true 2x horizontal scaling per pixel: A B -> A A B B
 static void __time_critical_func(out16_2x_per_pixel)(uint16_t **pp, uint16_t v) {
@@ -951,9 +925,6 @@ static void __not_in_flash_func(render_line)(uint32_t line, uint32_t *output_buf
         } else if (gfx_submode == 8) {
             // VGA/MCGA mode 11h: 640x480x2
             render_gfx_line_mono640(line, output_buffer);
-        } else if (gfx_submode == 9) {
-            // VBE 102h: 800x600x16 planar, scaled to physical 640x480
-            render_gfx_line_vbe4_800(line, output_buffer);
 #if defined(VIDEO_RUNTIME) || (!defined(EGA128) && !defined(MCGA))
         } else if (gfx_submode == 5) {
             // VGA 256-color planar (Mode X)
@@ -1025,7 +996,7 @@ static void vga_hw_new_frame_deferred(void) {
         vga_hw_set_gfx_mode(gfx_submode, gfx_w, gfx_h, line_offset);
 
         // For EGA mode, also update the 16-color palette
-        if (gfx_submode == 2 || gfx_submode == 6 || gfx_submode == 9) {
+        if (gfx_submode == 2 || gfx_submode == 6) {
             uint8_t ega_pal[48];
             vga_get_palette16(vga_state, ega_pal);
             vga_hw_set_palette16(ega_pal);
@@ -1548,7 +1519,7 @@ void vga_hw_set_palette16(const uint8_t *palette16_data) {
         if (SELECT_VGA) {
             ega_palette[i] = vga_color_to_output(r6, g6, b6);
         } else {
-            if (gfx_submode == 2 || gfx_submode == 9) {
+            if (gfx_submode == 2) {
                 for (int j = 0; j < 16; j++) {
                     uint8_t rj = palette16_data[j * 3 + 0];
                     uint8_t gj = palette16_data[j * 3 + 1];
@@ -1566,7 +1537,7 @@ void vga_hw_set_palette16(const uint8_t *palette16_data) {
     }
 }
 
-// Set graphics sub-mode: 1=CGA4, 2=EGA, 3=VGA256, 4=CGA2, 5=ModeX, 7=VBE packed8, 8=mono640, 9=VBE planar4
+// Set graphics sub-mode: 1=CGA4, 2=EGA, 3=VGA256, 4=CGA2, 5=ModeX, 7=VBE packed8, 8=mono640
 void __time_critical_func(vga_hw_set_gfx_mode)(int submode, int width, int height, int line_offset) {
     gfx_submode = submode;
     gfx_width = width;

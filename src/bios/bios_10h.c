@@ -17,7 +17,7 @@
  * 08h = VGA with analog color display.
  *
  * The native BIOS exposes a VGA-compatible adapter plus a deliberately small
- * VBE 1.2 extension (including 100h packed and 102h 800x600x4 planar).  The legacy display
+ * VBE 1.2 extension (currently mode 100h, 640x400x8 banked).  The legacy display
  * combination code still reports a normal VGA color display, which is what DOS
  * software expects from AX=1A00h.
  */
@@ -44,7 +44,6 @@
 #define BIOS10_VBE_OEM_OFF             0x9050
 #define BIOS10_VBE_WINFUNC_OFF         0x9060
 #define BIOS10_VBE_MODE_640x400x8      0x0100
-#define BIOS10_VBE_MODE_800x600x4      0x0102
 #define BIOS10_VBE_MODE_320x200x15     0x010D
 #define BIOS10_VBE_MODE_320x200x16     0x010E
 #define BIOS10_VBE_MODE_320x200x24     0x010F
@@ -923,7 +922,6 @@ typedef struct {
     uint16_t yres;
     uint16_t bytes_per_scanline;
     uint8_t bpp;
-    uint8_t planes;
     uint8_t banks;
     uint8_t memory_model;
     uint8_t red_size, red_pos;
@@ -933,15 +931,13 @@ typedef struct {
 } Bios10VbeMode;
 
 static const Bios10VbeMode bios10_vbe_modes[] = {
-    { BIOS10_VBE_MODE_640x400x8,  640, 400, 640, 8,  1, 4, 4,
+    { BIOS10_VBE_MODE_640x400x8,  640, 400, 640, 8,  4, 4,
       0, 0, 0, 0, 0, 0, 0, 0 },
-    { BIOS10_VBE_MODE_800x600x4,  800, 600, 100, 4,  4, 1, 3,
-      0, 0, 0, 0, 0, 0, 0, 0 },
-    { BIOS10_VBE_MODE_320x200x15, 320, 200, 640, 15, 1, 2, 6,
+    { BIOS10_VBE_MODE_320x200x15, 320, 200, 640, 15, 2, 6,
       5, 10, 5, 5, 5, 0, 1, 15 },
-    { BIOS10_VBE_MODE_320x200x16, 320, 200, 640, 16, 1, 2, 6,
+    { BIOS10_VBE_MODE_320x200x16, 320, 200, 640, 16, 2, 6,
       5, 11, 6, 5, 5, 0, 0, 0 },
-    { BIOS10_VBE_MODE_320x200x24, 320, 200, 960, 24, 1, 3, 6,
+    { BIOS10_VBE_MODE_320x200x24, 320, 200, 960, 24, 3, 6,
       8, 16, 8, 8, 8, 0, 0, 0 },
 };
 
@@ -1049,13 +1045,13 @@ static bool bios_10h_4F01h(CPU *cpu)
     writew86(dst + 0x14, m->yres);
     write86 (dst + 0x16, 8);      /* character cell width */
     write86 (dst + 0x17, 16);     /* character cell height */
-    write86 (dst + 0x18, m->planes);
+    write86 (dst + 0x18, 1);      /* planes */
     write86 (dst + 0x19, m->bpp);
     write86 (dst + 0x1A, m->banks);
     write86 (dst + 0x1B, m->memory_model);
     write86 (dst + 0x1C, 64);     /* bank size, KiB */
 
-    uint32_t image_bytes = (uint32_t)m->bytes_per_scanline * m->yres * m->planes;
+    uint32_t image_bytes = (uint32_t)m->bytes_per_scanline * m->yres;
     uint8_t pages = (uint8_t)((256u * 1024u) / image_bytes);
     write86(dst + 0x1D, pages ? (uint8_t)(pages - 1) : 0);
     write86(dst + 0x1E, 0);
@@ -1157,25 +1153,13 @@ static bool bios_10h_4F05h(CPU *cpu)
     }
 
     switch (CPU_BH) {
-    case 0x00: { /* set window */
-        uint16_t x = bios10_vbe_reg_read(cpu, VBE_DISPI_INDEX_XRES);
-        uint16_t y = bios10_vbe_reg_read(cpu, VBE_DISPI_INDEX_YRES);
-        uint16_t bpp = bios10_vbe_reg_read(cpu, VBE_DISPI_INDEX_BPP);
-        uint8_t banks = BIOS10_VBE_TOTAL_64K_BLOCKS;
-        for (uint8_t i = 0; i < sizeof(bios10_vbe_modes) / sizeof(bios10_vbe_modes[0]); ++i) {
-            const Bios10VbeMode *m = &bios10_vbe_modes[i];
-            if (m->xres == x && m->yres == y && m->bpp == bpp) {
-                banks = m->banks;
-                break;
-            }
-        }
-        if (CPU_DX >= banks) {
+    case 0x00: /* set window */
+        if (CPU_DX >= BIOS10_VBE_TOTAL_64K_BLOCKS) {
             bios10_vbe_fail(cpu);
             return true;
         }
         bios10_vbe_reg_write(cpu, VBE_DISPI_INDEX_BANK, CPU_DX);
         break;
-    }
     case 0x01: /* get window */
         CPU_DX = bios10_vbe_reg_read(cpu, VBE_DISPI_INDEX_BANK);
         break;
