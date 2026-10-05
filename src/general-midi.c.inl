@@ -319,7 +319,13 @@ int16_t __not_in_flash_func(midi_sample)(void) {
         }
     } while (active_voices);
 
-    return sample >> 2;
+    /* One voice is velocity (<= 127) * sine (<= 127): up to about 16000,
+     * typically 8000..10000.  The old ">> 2" left the synthesizer far
+     * quieter than AdLib and Sound Blaster; keep the full level and
+     * saturate when many voices sound at once. */
+    if (sample > 32767) sample = 32767;
+    else if (sample < -32768) sample = -32768;
+    return (int16_t) sample;
 }
 
 // Optimized pitch bend calculation with lookup table or approximation

@@ -143,8 +143,12 @@ int16_t __not_in_flash_func(sn76489_sample)(void) {
             noise_counter -= noise_frequency;
     }
 
+    /* Bipolar output: a square wave swings around zero, so the level is
+     * twice the old one-sided swing and no DC offset is added to the mix. */
     if (noise_lfsr_seed & 1) {
         mixed_sample += volume_table_scaled[noise_volume];
+    } else {
+        mixed_sample -= volume_table_scaled[noise_volume];
     }
 
     /* Tone */
@@ -160,11 +164,19 @@ int16_t __not_in_flash_func(sn76489_sample)(void) {
             }
         }
 
-        if (tone_output_state[channel_index] && !channel_mute[channel_index]) {
-            mixed_sample += volume_table_scaled[tone_volume[channel_index]];
+        if (!channel_mute[channel_index]) {
+            if (tone_output_state[channel_index])
+                mixed_sample += volume_table_scaled[tone_volume[channel_index]];
+            else
+                mixed_sample -= volume_table_scaled[tone_volume[channel_index]];
         }
     }
 
-    // Final mixing and scaling (single operation instead of per-channel)
-    return (int16_t) (mixed_sample >> 2); // Divide by 4 for proper scaling
+    /* The old ">> 2" gave one voice 0..1020 - far below one AdLib voice
+     * (about +-16000) in the same mixer.  x3: one voice +-12240; three
+     * voices at full volume just touch the int16 limit, so saturate. */
+    mixed_sample *= 3;
+    if (mixed_sample > 32767) mixed_sample = 32767;
+    else if (mixed_sample < -32768) mixed_sample = -32768;
+    return (int16_t) mixed_sample;
 }
