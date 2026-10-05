@@ -1094,6 +1094,17 @@ bool rp2350_bios_handler(CPU* cpu, uint8_t intnum) {
     print_line2("BIOS", 0, 8);
 #endif
     dpb_watch_native_checkpoint(cpu, "entry", intnum);
+    /* The 386 core keeps arithmetic flags lazily (cc.mask) and folds them
+     * into cpu->flags only inside get_flags().  The handlers set ZF/CF
+     * through the cpu->flags.bits macros and then read them back with
+     * cpu_getflags(), which would refold the stale lazy state over them.
+     * Fold the pending state first.  An INT instruction already did that
+     * when it pushed FLAGS, but code that emulates INT with PUSHF + far
+     * CALL/RETF to the vector (Turbo Pascal Dos.Intr, debuggers, TSRs that
+     * chain) reaches the stub with flags still lazy: Intr($16) with AH=01h
+     * then got ZF from the last "shl bx,1" inside Intr - always "a key is
+     * waiting" - and the following AH=00h blocked until a key was pressed. */
+    (void)cpu_getflags(cpu);
     bool res = handlers[intnum](cpu);
     dpb_watch_native_checkpoint(cpu, "exit", intnum);
     return res;
