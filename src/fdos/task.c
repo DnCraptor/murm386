@@ -5334,6 +5334,16 @@ STATIC int load_transfer(UWORD ds, exec_blk * exp, UWORD fcbcode, COUNT mode)
      fcbcode pushed onto that stack, matching INT21/4B AL=1. */
   exp->exec.stack.offset -= 2;
   pstore16(task_guest_linear(exp->exec.stack), fcbcode);
+  /* Like upstream load_transfer(), AL=01h also makes the loaded program
+     the current process (DTA at its PSP:80h). A debugger such as the
+     Turbo C 2.0 IDE takes the child PSP from AH=51h, sets PSP:0Ah and
+     far-jumps to the program; on termination exec_return_user() then
+     sees the child as current and resumes its parent (the debugger) at
+     PSP:0Ah. With the debugger still current, its own EXEC ended
+     instead, and the IDE was terminated together with the program. */
+  task_idata_write16(offsetof(struct dos_data, cu_psp), ds);
+  task_idata_write_far(offsetof(struct dos_data, dta),
+                       MK_FP(ds, offsetof(psp, ps_cmd)));
   return SUCCESS;
 }
 
