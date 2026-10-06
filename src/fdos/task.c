@@ -4611,6 +4611,58 @@ static void exec_leave_child(uint32_t saved_linear,
   cpu->native_done = outer_native_done;
 }
 
+/*
+ * Upstream return_user() for a process that this EXEC did not start.
+ *
+ * Termination is only observed by the innermost EXEC's pc_step() loop, but
+ * the terminating process need not be that EXEC's child: Turbo Pascal's IDE
+ * runs a program in a PSP made by AH=55h/26h and a far jump, a debugger
+ * after EXEC AL=01h jumps to the loaded program itself. Real DOS does not
+ * care: it frees the current process, makes its parent current and resumes
+ * the parent at the terminate address (PSP:0Ah, INT 22h) through the
+ * register frame of the parent's last INT 21h (parent PSP:2Eh), with
+ * IF set. Unwinding the EXEC instead terminated the IDE together with its
+ * program and returned to the IDE's own parent (FCOM, VC).
+ *
+ * Returns false if the parent cannot be resumed this way; the caller then
+ * falls back to ending its EXEC as before.
+ */
+static bool exec_return_user(void)
+{
+  const UWORD psp_seg = task_idata_read16(offsetof(struct dos_data, cu_psp));
+  const UWORD parent =
+      pload16(task_guest_seg_linear(psp_seg) + offsetof(psp, ps_parent));
+  dos_far_ptr frame;
+  dos_far_ptr ret;
+  struct int21_guest_iregs r;
+
+  if (parent == 0 || parent == psp_seg)
+    return false;
+  frame = task_guest_read_far(task_guest_seg_linear(parent) +
+                              offsetof(psp, ps_stack));
+  if (FP_SEG(frame) == 0 && FP_OFF(frame) == 0)
+    return false;
+  ret = fdos_psp_vector(psp_seg, 0x22);
+
+  exec_release_child(psp_seg);
+  task_idata_write16(offsetof(struct dos_data, cu_psp), parent);
+  task_idata_write_far(offsetof(struct dos_data, dta),
+                       MK_FP(parent, offsetof(psp, ps_cmd)));
+
+  task_guest_read(task_guest_linear(frame), &r, sizeof(r));
+  CPU_AX = r.ax; CPU_BX = r.bx; CPU_CX = r.cx; CPU_DX = r.dx;
+  CPU_SI = r.si; CPU_DI = r.di; CPU_BP = r.bp;
+  SET_DS(r.ds); SET_ES(r.es);
+  SET_SS(FP_SEG(frame));
+  CPU_SP = (UWORD)(FP_OFF(frame) + sizeof(r));
+  SET_CS(FP_SEG(ret)); SET_IP(FP_OFF(ret));
+  cpu_setflags(cpu, 0x0200, (uword)~0x0200u);
+
+  terminate_flag = false;
+  cpu->native_done = false;
+  return true;
+}
+
 enum exec_process_kind
 {
   EXEC_PROCESS_GUEST,
@@ -5180,8 +5232,17 @@ static COUNT exec_run_process(const struct exec_process_start *start)
   }
   else
   {
-    while (!terminate_flag)
-      pc_step(pc, 4096);
+    for (;;)
+    {
+      while (!terminate_flag)
+        pc_step(pc, 4096);
+      /* Our own child ended: leave the EXEC. Anything else ended (a process
+         started without EXEC): resume its parent and keep running. */
+      if (task_idata_read16(offsetof(struct dos_data, cu_psp)) ==
+              start->child_psp ||
+          !exec_return_user())
+        break;
+    }
   }
 
   exec_leave_child(saved_linear, start->child_psp);

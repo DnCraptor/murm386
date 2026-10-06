@@ -944,6 +944,10 @@ bool __hfa_func(fdos_21h)(CPU* _cpu) {
     regs_ref.flags() = (uint32_t(regs_ref.flags()) & ~0x0041u) | (flags_on_stack & 0x0041u);
 
     psp_ref current_psp((seg)(UWORD)idata.cu_psp());
+    /* An outermost call (InDOS was 0) is a process calling DOS; a nested one
+       is DOS re-entered from inside a call (INT 24h handler, device driver).
+       Only the nested one may give PSP:2Eh back on exit - see below. */
+    const bool nested_call = idata.indos() != 0;
     old_ps_stack = current_psp.stack();
     old_user_r = idata.user_r();
     old_prev_user_r = idata.prev_user_r();
@@ -2732,7 +2736,14 @@ exit_dispatch:
     dpb_watch_int21_checkpoint(cpu, "exit");
     writew86(stk_lin(entry_ss, entry_sp, 4), flags_on_stack);
     dpb_watch_int21_checkpoint(cpu, "after-flags-write");
-    current_psp.stack(old_ps_stack);
+    /* Upstream keeps PSP:2Eh pointing at the frame of the process's LAST
+       outermost INT 21h after it returns (entry.asm restores only user_r).
+       return_user() resumes a parent through exactly that frame when a
+       process which was not started by EXEC terminates: Turbo Pascal's
+       Run (child PSP via AH=55h/26h, then a far jump), EXEC AL=01h
+       debuggers. Restore the outer frame only for nested calls. */
+    if (nested_call)
+      current_psp.stack(old_ps_stack);
     idata.user_r(old_user_r);
     idata.prev_user_r(old_prev_user_r);
     CPU_SP = entry_sp;
