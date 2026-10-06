@@ -255,6 +255,10 @@ uint8_t Ps2Kbd_Mrmltr::hidCodePage1(uint8_t ps2code) {
   case 0x75: return HID_KEY_ARROW_UP;
   case 0x7a: return HID_KEY_PAGE_DOWN;
   case 0x7d: return HID_KEY_PAGE_UP;
+  /* Ctrl+Pause (Break): the keyboard sends E0 7E instead of the E1 Pause
+     sequence; the host still sees Ctrl held, so i8042 turns it into the AT
+     Break code E0 46. */
+  case 0x7e: return HID_KEY_PAUSE;
 
   default:
     return HID_KEY_NONE;
@@ -289,9 +293,16 @@ void Ps2Kbd_Mrmltr::handleActions() {
     release = _actions[0].release;
   }
   else {
-    // TODO get the HID code for extended PS/2 codes
-    hidCode = HID_KEY_NONE;
-    release = false;
+    /* E1-prefixed codes: the only one is Pause, E1 14 77 on press and
+       E1 F0 14 F0 77 on release. */
+    if (_actions[0].code == 0x14 && _actions[1].code == 0x77) {
+      hidCode = HID_KEY_PAUSE;
+      release = _actions[0].release;
+    }
+    else {
+      hidCode = HID_KEY_NONE;
+      release = false;
+    }
   }
 
   if (hidCode != HID_KEY_NONE) {

@@ -551,6 +551,35 @@ static const uint8_t linux_input_to_keycode_set1[INPUT_MAKE_KEY_MAX - INPUT_MAKE
 void ps2_put_keycode(PS2KbdState *s, int is_down, int keycode)
 {
     int critical = !is_down;
+    /* Ctrl state for the Pause key below: on an AT keyboard Ctrl+Pause is a
+       different key, Break, with its own scan codes. */
+    static bool lctrl_down, rctrl_down;
+
+    if (keycode == 29)
+        lctrl_down = is_down;
+    else if (keycode == 97)
+        rctrl_down = is_down;
+
+    /* Linux KEY_PAUSE (119). An AT keyboard sends the whole sequence on
+       press and nothing on release: Ctrl+Pause is Break, E0 46 E0 C6 (the
+       BIOS turns it into Ctrl+Break and INT 1Bh); plain Pause is
+       E1 1D 45 E1 9D C5. */
+    if (keycode == 119) {
+        static const uint8_t brk[]   = { 0xe0, 0x46, 0xe0, 0xc6 };
+        static const uint8_t pause[] = { 0xe1, 0x1d, 0x45, 0xe1, 0x9d, 0xc5 };
+        const uint8_t *seq = (lctrl_down || rctrl_down) ? brk : pause;
+        size_t n = (lctrl_down || rctrl_down) ? sizeof(brk) : sizeof(pause);
+
+        if (!is_down)
+            return;
+        if (s->delay) {
+            s->delay = false;
+            ps2_kbd_queue(s, s->delay_keycode, s->delay_critical);
+        }
+        for (size_t i = 0; i < n; ++i)
+            ps2_kbd_queue(s, seq[i], 0);
+        return;
+    }
 
     /* Linux KEY_SYSRQ (99) is the HID PrintScreen key.  AT set-1 does
        not encode PrintScreen as an ordinary E0-prefixed key: it uses

@@ -282,6 +282,10 @@ static bool bios_09h_phase2(CPU* cpu, bios_callback_params_t* params)
                 writew86(0x41C, buf_start + 2);
                 writew86(0x400 + buf_start, 0x0000);
                 write86(0x471, 0x80);  /* break_flag */
+                /* IBM/SeaBIOS: Ctrl+Break calls INT 1Bh. DOS hooks it to
+                   set its own break flag (^C), and so do programs such as
+                   GW-BASIC; without the call they never see Break. */
+                bios_intcall(cpu, 0x1B, "INT9/CTRL-BREAK/INT1B");
             }
             goto eoi_return;
         } else {
