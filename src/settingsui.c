@@ -45,6 +45,7 @@ typedef enum {
     SETTING_MOUSE,
     SETTING_MOUSE_SENSITIVITY,
     SETTING_NES_MOUSE,
+    SETTING_NUMPAD_MOUSE,
     SETTING_NES_JOYSTICK,
     SETTING_USB_JOYSTICK,
     SETTING_MOUSE_JOYSTICK,
@@ -426,6 +427,12 @@ static void cycle_option(int direction) {
             }
             break;
 
+        case SETTING_NUMPAD_MOUSE:
+            /* Not exclusive: it feeds the same emulated mouse as a real
+             * PS/2 or USB mouse and the NES pad. */
+            config_set_numpad_mouse(config_get_numpad_mouse() ? 0 : 1);
+            break;
+
         case SETTING_NES_JOYSTICK:
             config_set_nes_joystick(config_get_nes_joystick() ? 0 : 1);
             if (config_get_nes_joystick()) config_set_nes_mouse(0);
@@ -546,6 +553,7 @@ static void draw_settings_menu(void) {
         "PS/2 or USB Mouse:",
         "Mouse speed:",
         "NES Mouse:",
+        "NumPad Mouse (NumLock off):",
         "NES Joystick:",
         "USB Joystick:",
         "Mouse as Joystick:",
@@ -635,6 +643,9 @@ static void draw_settings_menu(void) {
             }
             case SETTING_NES_MOUSE:
                 snprintf(value, sizeof(value), "< %s >", config_get_nes_mouse() ? "Enabled" : "Disabled");
+                break;
+            case SETTING_NUMPAD_MOUSE:
+                snprintf(value, sizeof(value), "< %s >", config_get_numpad_mouse() ? "Enabled" : "Disabled");
                 break;
             case SETTING_NES_JOYSTICK:
                 snprintf(value, sizeof(value), "< %s >", config_get_nes_joystick() ? "Enabled" : "Disabled");

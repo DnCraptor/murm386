@@ -575,6 +575,82 @@ static void usb_role_toggle_and_reboot(void)
 
 // Process a single keycode, handling host and UI hotkeys
 // Returns true if key should be passed to emulator, false if consumed
+/*
+ * NumPad mouse: with the setting on, the numeric keypad drives the emulated
+ * PS/2 mouse for machines without a real one.  8/2/4/6 (and 5 as down) move
+ * the cursor, 7/9/1/3 move diagonally, keypad Enter is the left button and
+ * keypad 0 the right one.  It works only while the guest's NumLock is off
+ * (BDA 40:17h bit 5, which both BIOSes keep), so NumLock is a quick way to
+ * get the digits back without opening the settings.
+ *
+ * Whether a key belongs to the mouse is decided on its press and remembered,
+ * so its release always goes the same way: toggling NumLock or the setting
+ * while a key is held can never leave a key stuck in the guest.
+ */
+enum {
+    NUMPAD_KEY_7 = 71, NUMPAD_KEY_8 = 72, NUMPAD_KEY_9 = 73,
+    NUMPAD_KEY_4 = 75, NUMPAD_KEY_5 = 76, NUMPAD_KEY_6 = 77,
+    NUMPAD_KEY_1 = 79, NUMPAD_KEY_2 = 80, NUMPAD_KEY_3 = 81,
+    NUMPAD_KEY_0 = 82, NUMPAD_KEY_ENTER = 96
+};
+enum {
+    NPM_LEFT = 1u << 0, NPM_RIGHT = 1u << 1, NPM_UP = 1u << 2,
+    NPM_DOWN = 1u << 3, NPM_BTN_L = 1u << 4, NPM_BTN_R = 1u << 5
+};
+
+typedef struct {
+    uint8_t held[11];    /* direction/button bits of each held keypad key */
+    uint16_t owned;      /* keypad keys whose press went to the mouse */
+} NumpadMouseKeys;
+
+static NumpadMouseKeys numpad_mouse_keys;
+
+static int numpad_mouse_index(int keycode, uint8_t *bits)
+{
+    static const struct { uint8_t keycode, bits; } map[11] = {
+        { NUMPAD_KEY_7, NPM_LEFT | NPM_UP },   { NUMPAD_KEY_8, NPM_UP },
+        { NUMPAD_KEY_9, NPM_RIGHT | NPM_UP },  { NUMPAD_KEY_4, NPM_LEFT },
+        { NUMPAD_KEY_5, NPM_DOWN },            { NUMPAD_KEY_6, NPM_RIGHT },
+        { NUMPAD_KEY_1, NPM_LEFT | NPM_DOWN }, { NUMPAD_KEY_2, NPM_DOWN },
+        { NUMPAD_KEY_3, NPM_RIGHT | NPM_DOWN },
+        { NUMPAD_KEY_0, NPM_BTN_R },           { NUMPAD_KEY_ENTER, NPM_BTN_L }
+    };
+    for (int i = 0; i < 11; ++i) {
+        if (map[i].keycode == keycode) {
+            *bits = map[i].bits;
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* true: the key was taken by the NumPad mouse and must not reach the guest */
+static bool numpad_mouse_key(int is_down, int keycode)
+{
+    uint8_t bits;
+    const int i = numpad_mouse_index(keycode, &bits);
+    if (i < 0)
+        return false;
+
+    const uint16_t mask = (uint16_t)(1u << i);
+    if (!is_down) {
+        if (!(numpad_mouse_keys.owned & mask))
+            return false;
+        numpad_mouse_keys.owned &= (uint16_t)~mask;
+        numpad_mouse_keys.held[i] = 0;
+        return true;
+    }
+
+    if (!(numpad_mouse_keys.owned & mask)) {   /* a new press, not a repeat */
+        if (!config_get_numpad_mouse() || !pc || !pc->mouse ||
+            (pload8(0x417) & 0x20u))
+            return false;
+        numpad_mouse_keys.owned |= mask;
+    }
+    numpad_mouse_keys.held[i] = bits;
+    return true;
+}
+
 static bool process_keycode(int is_down, int keycode) {
     /*
      * Track Ctrl/Alt before any modal OSD handling.  Ctrl+Alt+Del is a
@@ -686,6 +762,9 @@ static bool process_keycode(int is_down, int keycode) {
         return false;  // Don't pass to emulator
     }
 
+    if (numpad_mouse_key(is_down, keycode))
+        return false;  // Keypad key drives the emulated mouse
+
     return true;  // Pass to emulator
 }
 
@@ -769,6 +848,73 @@ static void mouse_scale_delta(MouseScaleState *st, int16_t *dx, int16_t *dy)
     st->rem_y = ay - oy * den[setting];
     *dx = (int16_t)ox;
     *dy = (int16_t)oy;
+}
+
+/*
+ * NumPad mouse motion.  Like a NES pad, a key is level-sensing, so motion is
+ * paced by time, not by poll rate: one step every 20 ms.  A short press moves
+ * one mickey (fine positioning); a held key speeds up after 100 ms by a
+ * quarter mickey per step up to 8 mickeys per step, so the cursor crosses
+ * a 640-pixel screen in about a second.  The common Mouse speed scaler is
+ * applied afterwards, as for every other mouse source.
+ */
+#define NUMPAD_MOUSE_PERIOD_US 20000u
+#define NUMPAD_MOUSE_HOLD      5
+#define NUMPAD_MOUSE_STEP_MIN  4    /* quarter mickeys */
+#define NUMPAD_MOUSE_STEP_MAX  32
+
+static void numpad_mouse_tick(void)
+{
+    static uint64_t next_move_us = 0;
+    static int step_q = NUMPAD_MOUSE_STEP_MIN;
+    static int held_steps = 0;
+    static uint8_t prev_buttons = 0;
+    static MouseScaleState mouse_scale = { .setting = -1 };
+
+    if (!pc || !pc->mouse)
+        return;
+    if (pc->paused) {
+        /* Releases made while an OSD menu is open go to the menu, so forget
+         * the held keys; a held button is released on the next tick. */
+        memset(&numpad_mouse_keys, 0, sizeof(numpad_mouse_keys));
+        return;
+    }
+
+    uint8_t bits = 0;
+    for (int i = 0; i < 11; ++i)
+        bits |= numpad_mouse_keys.held[i];
+    if (!bits && !prev_buttons)
+        return;
+
+    int16_t dx = 0, dy = 0;
+    if (bits & (NPM_LEFT | NPM_RIGHT | NPM_UP | NPM_DOWN)) {
+        const uint64_t now = time_us_64();
+        if (!next_move_us || now >= next_move_us) {
+            if (++held_steps > NUMPAD_MOUSE_HOLD && step_q < NUMPAD_MOUSE_STEP_MAX)
+                ++step_q;
+            const int16_t n = (int16_t)(step_q / 4);
+            if (bits & NPM_LEFT)  dx -= n;
+            if (bits & NPM_RIGHT) dx += n;
+            if (bits & NPM_UP)    dy -= n;
+            if (bits & NPM_DOWN)  dy += n;
+            next_move_us = now + NUMPAD_MOUSE_PERIOD_US;
+        }
+    } else {
+        next_move_us = 0;
+        held_steps = 0;
+        step_q = NUMPAD_MOUSE_STEP_MIN;
+    }
+
+    uint8_t buttons = 0;
+    if (bits & NPM_BTN_L) buttons |= 0x01;
+    if (bits & NPM_BTN_R) buttons |= 0x02;
+
+    if ((dx || dy || buttons != prev_buttons) &&
+        config_get_mouse_joystick() != MOUSE_JOYSTICK_ONLY) {
+        mouse_scale_delta(&mouse_scale, &dx, &dy);
+        ps2_mouse_event(pc->mouse, dx, dy, 0, buttons);
+    }
+    prev_buttons = buttons;
 }
 
 static void poll_keyboard(void) {
@@ -972,6 +1118,8 @@ static void poll_keyboard(void) {
     } else {
         mouse_joystick_state.was_enabled = false;
     }
+
+    numpad_mouse_tick();
 }
 
 //=============================================================================
@@ -1784,7 +1932,8 @@ static bool init_emulator(void) {
     pc->covox_enabled = config_get_covox();
     pc->mpu401_enabled = config_get_mpu401();
     pc->dss_enabled = config_get_dss();
-    pc->mouse_enabled = config_get_mouse() || config_get_nes_mouse();
+    pc->mouse_enabled = config_get_mouse() || config_get_nes_mouse() ||
+                        config_get_numpad_mouse();
     pc->joystick_enabled = config_get_nes_joystick() || config_get_usb_joystick() || config_get_mouse_joystick();
     gameport_set_button_swap(config_get_joystick_swap_buttons());
     DBG_PRINT("  Audio: PC Speaker=%d, Adlib=%d, SB16=%d, MPU401=%d, Tandy=%d, Covox=%d, DSS=%d, Mouse=%d\n",

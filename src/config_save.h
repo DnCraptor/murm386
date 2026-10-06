@@ -90,6 +90,9 @@ void config_set_mouse(int enabled);
 
 int config_get_nes_mouse(void);
 void config_set_nes_mouse(int enabled);
+/* Numeric keypad as a mouse while the guest's NumLock is off. */
+int config_get_numpad_mouse(void);
+void config_set_numpad_mouse(int enabled);
 /* NES pad as a DOS analog joystick on the game port (0x201). Mutually
  * exclusive with nes_mouse: one pad cannot be both at once. */
 int config_get_nes_joystick(void);

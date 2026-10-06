@@ -43,6 +43,7 @@ static int cfg_mpu401 = 1;
 static int cfg_dss = 0;
 static int cfg_mouse = 1;
 static int cfg_nes_mouse = 0;
+static int cfg_numpad_mouse = 0;
 static int cfg_nes_joystick = 0;
 static int cfg_usb_joystick = 0;
 static int cfg_mouse_joystick = 0;
@@ -333,7 +334,7 @@ void config_set_dss(int enabled) {
 
 int config_get_mouse(void) { return cfg_mouse; }
 void config_set_mouse(int enabled) {
-    pc->mouse_enabled = enabled;
+    pc->mouse_enabled = enabled || cfg_nes_mouse || cfg_numpad_mouse;
     if (cfg_mouse != enabled) {
         cfg_mouse = enabled;
         cfg_changed = true;
@@ -390,6 +391,18 @@ void config_set_nes_mouse(int enabled) {
         cfg_changed = true;
     }
     /* NES mouse still needs the emulated i8042 mouse port active */
+    if (enabled) pc->mouse_enabled = 1;
+}
+
+int config_get_numpad_mouse(void) { return cfg_numpad_mouse; }
+void config_set_numpad_mouse(int enabled) {
+    enabled = !!enabled;
+    if (cfg_numpad_mouse != enabled) {
+        cfg_numpad_mouse = enabled;
+        cfg_changed = true;
+    }
+    /* Like the NES mouse it needs the emulated i8042 mouse port; INT 33h is
+     * installed at POST, so a guest booted without any mouse needs a restart. */
     if (enabled) pc->mouse_enabled = 1;
 }
 
@@ -628,6 +641,8 @@ bool config_save_all(void) {
     write_line(&fp, line);
     snprintf(line, sizeof(line), "nes_mouse=%d\r\n", cfg_nes_mouse);
     write_line(&fp, line);
+    snprintf(line, sizeof(line), "numpad_mouse=%d\r\n", cfg_numpad_mouse);
+    write_line(&fp, line);
     snprintf(line, sizeof(line), "nes_joystick=%d\r\n", cfg_nes_joystick);
     write_line(&fp, line);
     snprintf(line, sizeof(line), "usb_joystick=%d\r\n", cfg_usb_joystick);
@@ -739,6 +754,8 @@ int parse_frank_386_ini(void* user, const char* section,
         cfg_nes_joystick = atoi(value);
     } else if (strcmp(name, "nes_mouse") == 0) {
         cfg_nes_mouse = atoi(value);
+    } else if (strcmp(name, "numpad_mouse") == 0) {
+        cfg_numpad_mouse = !!atoi(value);
     } else if (strcmp(name, "cpu_freq") == 0) {
         cfg_cpu_freq = atoi(value);
     } else if (strcmp(name, "psram_freq") == 0) {
