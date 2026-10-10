@@ -452,6 +452,21 @@ static void mouse_hw_init(CPU* cpu)
     m.pkt_idx = 0;
 }
 
+/* Как у драйвера Microsoft: при сбросе вертикаль — по текущему видеорежиму
+   (иначе в EGA 640x350 / VGA 640x480 курсор не опускается ниже строки 199). */
+static int virt_h_for_mode(void)
+{
+    uint8_t mode = pload8(BDA_VIDEO_MODE);
+    if (mode == 0x0F || mode == 0x10) return 350;   /* EGA 640x350 */
+    if (mode == 0x11 || mode == 0x12) return 480;   /* VGA 640x480 */
+    if (mode <= 0x03 || mode == 0x07) {             /* текст: 8 точек на строку */
+        int rows = pload8(BDA_VIDEO_ROWS) + 1;
+        if (rows <= 0 || rows > 60) rows = 25;
+        return rows * 8;
+    }
+    return VIRT_H;                                   /* CGA, 13h и прочие */
+}
+
 /* ------------------------------------------------------------------ */
 void bios_33h_reset(void)
 {
@@ -459,10 +474,11 @@ void bios_33h_reset(void)
     memset(&m, 0, sizeof(m));
     m.installed = was;
 
+    int vh = virt_h_for_mode();
     m.minx = 0; m.maxx = VIRT_W - 1;
-    m.miny = 0; m.maxy = VIRT_H - 1;
+    m.miny = 0; m.maxy = vh - 1;
     m.x = VIRT_W / 2;
-    m.y = VIRT_H / 2;
+    m.y = vh / 2;
 
     m.scr_mask = 0x77FF;
     m.cur_mask = 0x7700;
