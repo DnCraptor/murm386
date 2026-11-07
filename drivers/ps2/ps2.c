@@ -710,6 +710,9 @@ void ps2_mouse_poll(void) {
 }
 
 bool ps2_mouse_get_state(int16_t *dx, int16_t *dy, int8_t *wheel, uint8_t *buttons) {
+    // PS/2 may be skipped at boot (Olimex RP2350pc has no port)
+    if (!mouse_pio_initialized) return false;
+
     // Process any pending data from the ring buffer
     ps2_mouse_poll();
 
@@ -770,18 +773,19 @@ void ps2_mouse_get_errors(uint32_t *frame_err, uint32_t *parity_err, uint32_t *s
 //=============================================================================
 
 bool ps2_kbd_has_data(void) {
+    if (!kbd_initialized) return false;
     return !pio_sm_is_rx_fifo_empty(ps2_pio, kbd_sm);
 }
 
 uint32_t ps2_kbd_get_raw(void) {
-    if (pio_sm_is_rx_fifo_empty(ps2_pio, kbd_sm)) {
+    if (!kbd_initialized || pio_sm_is_rx_fifo_empty(ps2_pio, kbd_sm)) {
         return 0;
     }
     return pio_sm_get(ps2_pio, kbd_sm);
 }
 
 int ps2_kbd_get_byte(void) {
-    if (pio_sm_is_rx_fifo_empty(ps2_pio, kbd_sm)) {
+    if (!kbd_initialized || pio_sm_is_rx_fifo_empty(ps2_pio, kbd_sm)) {
         return -1;
     }
     uint32_t raw = pio_sm_get(ps2_pio, kbd_sm);

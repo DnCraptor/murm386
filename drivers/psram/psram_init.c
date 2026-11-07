@@ -25,12 +25,29 @@
  * Initialize PSRAM hardware with specified frequency.
  * This function MUST run from RAM, not flash, as it reconfigures the XIP controller.
  */
+/*
+ * Highest PSRAM clock this part has been seen to work at. Lowered by
+ * main.c when detection only succeeds at a slower clock, and applied to
+ * every later re-init (clock changes, HDMI boost, config.ini) so they do
+ * not push the part back to the speed that failed.
+ */
+static int psram_freq_cap_mhz = 0;
+
+void psram_set_freq_cap(int mhz) { psram_freq_cap_mhz = mhz; }
+int psram_get_freq_cap(void) { return psram_freq_cap_mhz; }
+
 void __no_inline_not_in_flash_func(psram_init_with_freq)(uint cs_pin, int freq_mhz) {
 #if QSPI_PSRAM_ALLOWED
     const int clock_hz = clock_get_hz(clk_sys);
+    if (psram_freq_cap_mhz > 0 && freq_mhz > psram_freq_cap_mhz)
+        freq_mhz = psram_freq_cap_mhz;
 
     // Configure GPIO for XIP CS1 function
     gpio_set_function(cs_pin, GPIO_FUNC_XIP_CS1);
+
+    // Flash is unreadable while QMI direct mode is on: no interrupt may run
+    // flash code in the meantime (the USB stdio IRQ did, and locked core 0)
+    uint32_t irq = save_and_disable_interrupts();
 
     // Enter direct mode with slow clock for initialization
     qmi_hw->direct_csr = 10 << QMI_DIRECT_CSR_CLKDIV_LSB |
@@ -68,7 +85,10 @@ void __no_inline_not_in_flash_func(psram_init_with_freq)(uint cs_pin, int freq_m
         QMI_M1_TIMING_PAGEBREAK_VALUE_1024 << QMI_M1_TIMING_PAGEBREAK_LSB |
         max_select_val << QMI_M1_TIMING_MAX_SELECT_LSB |
         min_deselect << QMI_M1_TIMING_MIN_DESELECT_LSB |
-        rxdelay << QMI_M1_TIMING_RXDELAY_LSB |
+        /* RXDELAY is 3 bits: keep what it held before (the low bits) and
+         * stop larger values (slow fallback clocks) spilling into
+         * MIN_DESELECT */
+        (rxdelay & 7) << QMI_M1_TIMING_RXDELAY_LSB |
         divisor << QMI_M1_TIMING_CLKDIV_LSB;
 
     // Configure read format: Quad mode, 0xEB fast read command, 6 dummy cycles
@@ -96,6 +116,7 @@ void __no_inline_not_in_flash_func(psram_init_with_freq)(uint cs_pin, int freq_m
 
     // Exit direct mode
     qmi_hw->direct_csr = 0;
+    restore_interrupts(irq);
 
     // Enable writes to M1 (PSRAM) region
     hw_set_bits(&xip_ctrl_hw->ctrl, XIP_CTRL_WRITABLE_M1_BITS);
@@ -106,7 +127,93 @@ void __no_inline_not_in_flash_func(psram_init_with_freq)(uint cs_pin, int freq_m
  * Initialize PSRAM hardware with default frequency.
  * This function MUST run from RAM, not flash, as it reconfigures the XIP controller.
  */
+static uint8_t psram_id[2];
+
+#if QSPI_PSRAM_ALLOWED
+/* One direct-mode transfer with CS1 held for its whole length. In quad
+ * mode only the command byte is sent (to leave QPI mode). */
+/* Boot-only code below lives in CORE0_STACK_EXT (copied from flash at the
+ * top of main()), not in .data: SRAM there is free during boot, while every
+ * byte of .data comes out of the heap pc_new() needs. */
+#ifdef PSRAM_BOOT_IN_STACK_EXT
+#define PSRAM_BOOT_FUNC(name) __attribute__((noinline, section(".core0_stack_ext." #name))) name
+#else
+/* Other link scripts (the C2 slave) have no such section: plain RAM code */
+#define PSRAM_BOOT_FUNC(name) __no_inline_not_in_flash_func(name)
+#endif
+
+static void PSRAM_BOOT_FUNC(psram_direct_xfer)(const uint8_t *tx, uint8_t *rx,
+                                               int n, bool quad) {
+    hw_set_bits(&qmi_hw->direct_csr, QMI_DIRECT_CSR_ASSERT_CS1N_BITS);
+    for (int i = 0; i < n; i++) {
+        uint32_t w = tx[i];
+        if (quad)
+            w |= QMI_DIRECT_TX_OE_BITS |
+                 QMI_DIRECT_TX_IWIDTH_VALUE_Q << QMI_DIRECT_TX_IWIDTH_LSB;
+        qmi_hw->direct_tx = w;
+        while (qmi_hw->direct_csr & QMI_DIRECT_CSR_BUSY_BITS);
+        uint8_t b = (uint8_t)qmi_hw->direct_rx;
+        if (rx) rx[i] = b;
+    }
+    hw_clear_bits(&qmi_hw->direct_csr, QMI_DIRECT_CSR_ASSERT_CS1N_BITS);
+    // CS# high time between commands (tCPH, up to 50 ns on some parts):
+    // at 504 MHz the next hw_set_bits() comes only a few cycles later
+    for (volatile int i = 0; i < 64; i++);
+}
+
+/*
+ * Bring the part to a known state before the first init: leave QPI mode
+ * (it survives a warm reset of the RP2350, the PSRAM keeps its power),
+ * software reset, then read the ID. Same order as the Adafruit/Sparkfun
+ * RP2350 PSRAM setup. Only done once, at boot: a reset does not promise
+ * to keep the contents, and later re-inits run with data in PSRAM.
+ * Ported from rh1tech/frank-386 v1.06 (b786d42).
+ */
+static void PSRAM_BOOT_FUNC(psram_reset_and_read_id)(uint cs_pin) {
+    gpio_set_function(cs_pin, GPIO_FUNC_XIP_CS1);
+    uint32_t irq = save_and_disable_interrupts();
+    qmi_hw->direct_csr = 30 << QMI_DIRECT_CSR_CLKDIV_LSB | QMI_DIRECT_CSR_EN_BITS;
+    while (qmi_hw->direct_csr & QMI_DIRECT_CSR_BUSY_BITS);
+
+    const uint8_t exit_qpi = 0xF5;
+    psram_direct_xfer(&exit_qpi, NULL, 1, true);
+    const uint8_t rst_en = 0x66, rst = 0x99;
+    psram_direct_xfer(&rst_en, NULL, 1, false);
+    psram_direct_xfer(&rst, NULL, 1, false);
+    // tRST is 50 ns; a few hundred cycles of the loop below is plenty
+    for (volatile int i = 0; i < 2000; i++);
+
+    // Read ID: 9Fh, 24-bit address, then MF ID (0Dh on APS6404) and KGD (5Dh = good die).
+    // Filled byte by byte: an initialiser would be copied from .rodata in
+    // flash, and flash cannot be read while direct mode is on.
+    uint8_t tx[6], rx[6];
+    tx[0] = 0x9F; tx[1] = 0; tx[2] = 0; tx[3] = 0; tx[4] = 0xFF; tx[5] = 0xFF;
+    psram_direct_xfer(tx, rx, 6, false);
+    psram_id[0] = rx[4];
+    psram_id[1] = rx[5];
+
+    qmi_hw->direct_csr = 0;
+    restore_interrupts(irq);
+}
+#endif
+
+void psram_get_id(uint8_t *mfid, uint8_t *kgd) {
+    *mfid = psram_id[0];
+    *kgd = psram_id[1];
+}
+
+/* The plain init, exactly as before the frank-386 v1.06 port: boards on
+ * which PSRAM came up this way keep the same bring-up sequence. */
 void __no_inline_not_in_flash_func(psram_init)(uint cs_pin) {
+    psram_init_with_freq(cs_pin, PSRAM_MAX_FREQ_MHZ);
+}
+
+/* Recovery path, only used when the plain init found nothing: leave QPI,
+ * software-reset the part, read its ID, then init again. */
+void PSRAM_BOOT_FUNC(psram_reset_init)(uint cs_pin) {
+#if QSPI_PSRAM_ALLOWED
+    psram_reset_and_read_id(cs_pin);
+#endif
     psram_init_with_freq(cs_pin, PSRAM_MAX_FREQ_MHZ);
 }
 
@@ -130,6 +237,9 @@ size_t psram_usable_size(void) {
     return detected_psram_size;
 }
 
+static uint32_t probe_readback;
+uint32_t psram_probe_readback(void) { return probe_readback; }
+
 size_t psram_detect_size(void) {
     volatile uint32_t *base = (volatile uint32_t *)PSRAM_UNCACHED_BASE_ADDR;
     static const size_t boundaries[] = {
@@ -141,7 +251,8 @@ size_t psram_detect_size(void) {
 
     base[0] = mark0;
     __dmb();
-    if (base[0] != mark0) {
+    probe_readback = base[0];
+    if (probe_readback != mark0) {
         base[0] = old0;
         __dmb();
         detected_psram_size = 0;

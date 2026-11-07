@@ -81,6 +81,13 @@ SECTIONS
         __stack_ext_area__ = .;
         KEEP (*(.core0_stack_ext))
         KEEP (*(.core0_stack_ext.*))
+        /* Boot-only RAM code: the SDK flash command path is used solely by
+           the flash QE fixup at the start of init_hardware(). Kept here
+           instead of .data/.bss so it costs no heap (pc_new() runs out of it
+           otherwise). Anything here is overwritten once this region becomes
+           FatFs cache, so no flash API call may follow init_hardware(). */
+        *hardware_flash/flash.c.o*(.time_critical.*)
+        *hardware_flash/flash.c.o*(.bss.*)
         __stack_ext_area_end__ = .;
     } > CORE0_STACK_EXT AT > FLASH
     /* Init source for .stack_ext_area, mirrors __scratch_x_source__. Copied to

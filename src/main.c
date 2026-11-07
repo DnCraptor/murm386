@@ -18,6 +18,7 @@
 #include "hardware/vreg.h"
 #include "hardware/gpio.h"
 #include "hardware/flash.h"
+#include "hardware/sync.h"
 #include "hardware/watchdog.h"
 #include "hardware/regs/powman.h"
 #include "hardware/structs/powman.h"
@@ -96,6 +97,7 @@ bool ega128_paging_flush(void);
 //=============================================================================
 
 PC *pc = NULL;
+int psram_cs_override = -1;  // see get_psram_pin()
 static PCConfig config;
 volatile bool initialized = false;
 static volatile bool audio_timer_ready = false;
@@ -1320,6 +1322,87 @@ void console_reclock(void) {
 #endif
 }
 
+/*
+ * Make sure the flash chip has its Quad Enable bit set.
+ *
+ * Winbond parts ship with QE=1. Some boards — Waveshare RP2350-PiZero
+ * batches with Puya or XMC flash among them — ship with QE=0, which leaves
+ * the flash's IO2/IO3 as WP#/HOLD# rather than data lines. With PSRAM on
+ * the same QSPI bus such a board locks up or fails the PSRAM test as soon
+ * as it is overclocked (frank-386 #6).
+ *
+ * QE is non-volatile, so this writes the status register at most once
+ * in the chip's life: every later boot reads QE=1 and returns. Only
+ * vendors whose QE is bit 1 of SR2, read with 0x35 and written with
+ * 0x31, are touched — on e.g. Macronix 0x35 means "enter QPI" instead.
+ *
+ * The flash is unreadable while it rewrites a status register, so the
+ * whole sequence — including the busy poll — runs from RAM with
+ * interrupts off. Must run before core 1 is launched.
+ *
+ * Returns -1 if the vendor is not handled, 0 if QE was already set,
+ * 1 if it was set now, and -2 if the write did not take.
+ * Ported from rh1tech/frank-386 v1.06 (a1137cb, b786d42).
+ */
+/* Boot-only: lives in CORE0_STACK_EXT (copied from flash at the top of
+ * main()), not in .data, so it costs no heap. */
+static int __attribute__((noinline, section(".core0_stack_ext.flash_ensure_qe")))
+flash_ensure_qe(uint8_t *jedec_mfr) {
+    uint8_t tx[4], rx[4];
+
+    tx[0] = 0x9F; tx[1] = 0; tx[2] = 0; tx[3] = 0;
+    flash_do_cmd(tx, rx, 4);
+    *jedec_mfr = rx[1];
+    switch (rx[1]) {
+    case 0xEF:  // Winbond
+    case 0xC8:  // GigaDevice
+    case 0x85:  // Puya
+    case 0x68:  // Boya
+    case 0x5E:  // Zbit
+        break;
+    case 0x20:  // XMC, but Micron uses 20h too and has no SR2 QE bit
+        if (rx[2] != 0x40 && rx[2] != 0x70) return -1;  // XM25QH memory types
+        break;
+    default:
+        return -1;
+    }
+
+    tx[0] = 0x35; tx[1] = 0;
+    flash_do_cmd(tx, rx, 2);
+    const uint8_t sr2 = rx[1];
+    if (sr2 & 0x02) return 0;
+
+    tx[0] = 0x06;                       // Write Enable
+    flash_do_cmd(tx, rx, 1);
+    tx[0] = 0x31; tx[1] = sr2 | 0x02;   // Write SR2, keep the other bits
+    flash_do_cmd(tx, rx, 2);
+
+    // Poll WIP. tW is 15 ms worst case; each poll is tens of us.
+    for (int i = 0; i < 100000; i++) {
+        tx[0] = 0x05; tx[1] = 0;
+        flash_do_cmd(tx, rx, 2);
+        if (!(rx[1] & 0x01)) break;
+    }
+
+    tx[0] = 0x35; tx[1] = 0;
+    flash_do_cmd(tx, rx, 2);
+    return (rx[1] & 0x02) ? 1 : -2;
+}
+
+static void flash_qe_fixup(void) {
+    uint8_t mfr;
+    uint32_t irq = save_and_disable_interrupts();
+    int r = flash_ensure_qe(&mfr);
+    restore_interrupts(irq);
+
+    if (r == 1)
+        printf("Flash (JEDEC %02X): Quad Enable bit was off, now set\n", mfr);
+    else if (r == -2)
+        printf("WARNING: flash (JEDEC %02X) did not accept the Quad Enable bit\n", mfr);
+    else
+        DBG_PRINT("Flash JEDEC %02X: QE %s\n", mfr, r == 0 ? "set" : "not checked");
+}
+
 // Flash timing configuration for overclocking
 void __no_inline_not_in_flash_func(set_flash_timings)(int cpu_mhz, int cfg_flash) {
     const int clock_hz = cpu_mhz * 1000000;
@@ -1508,6 +1591,10 @@ static void detect_boot_video_override(void)
 }
 
 static bool init_hardware(void) {
+    // Before the overclock and before PSRAM: on flash shipped with QE=0
+    // both fail (see flash_ensure_qe)
+    flash_qe_fixup();
+
     // Configure clocks (including overclock if enabled)
     configure_clocks();
 
@@ -1516,11 +1603,72 @@ static bool init_hardware(void) {
     uint psram_pin = get_psram_pin();
     DBG_PRINT("  PSRAM CS pin: GPIO%d\n", psram_pin);
     psram_init(psram_pin);
+    size_t early_psram = psram_detect_size();
+    uint8_t psram_mfid = 0, psram_kgd = 0;
+
+    /* The plain init above is the sequence every board booted with before.
+     * Only when it found nothing: bring the part to a known state (leave
+     * QPI, software reset), read its ID and try again (frank-386 #6). */
+    if (early_psram < (1u << 20)) {
+        printf("PSRAM not detected (read back %08lX), resetting the part\n",
+               (unsigned long)psram_probe_readback());
+        psram_reset_init(psram_pin);
+        psram_get_id(&psram_mfid, &psram_kgd);
+        DBG_PRINT("  PSRAM ID: MF %02X KGD %02X%s\n", psram_mfid, psram_kgd,
+                  psram_kgd == 0x5D ? "" : " (expected 5D: no PSRAM on this CS?)");
+        early_psram = psram_detect_size();
+    }
+
+    /* Some boards' PSRAM does not hold the configured clock with the
+     * default sampling delay (frank-386 #6). Rather than fall back to SRAM,
+     * step down until the part answers, and keep that as a cap for every
+     * later re-init (config.ini clocks, HDMI boost). */
+    static const int psram_fallback_mhz[] = { 84, 66, 33 };
+    for (unsigned i = 0; early_psram < (1u << 20) && i < count_of(psram_fallback_mhz); i++) {
+        if (psram_fallback_mhz[i] >= PSRAM_MAX_FREQ_MHZ) continue;
+        printf("PSRAM not detected (read back %08lX), retrying at %d MHz\n",
+               (unsigned long)psram_probe_readback(), psram_fallback_mhz[i]);
+        psram_init_with_freq(psram_pin, psram_fallback_mhz[i]);
+        early_psram = psram_detect_size();
+        if (early_psram >= (1u << 20)) {
+            psram_set_freq_cap(psram_fallback_mhz[i]);
+            printf("WARNING: PSRAM only works at %d MHz or below on this board\n",
+                   psram_fallback_mhz[i]);
+        }
+    }
+#ifdef BOARD_PC
+    /* The PC layout covers two boards: a Pico 2 in the PICO-PC carrier and
+     * the Olimex RP2350pc (RP2350B). Should the PSRAM not be on the pin
+     * chosen above, try the other candidate before giving up. GPIO47 only
+     * exists on the RP2350B, so the carrier's Pico 2 has nothing to try. */
+    if (early_psram < (1u << 20) && board_is_rp2350pc()) {
+        uint alt = (psram_pin == 8) ? 47 : 8;
+        printf("PSRAM not found on GPIO%u, trying GPIO%u\n", psram_pin, alt);
+        gpio_set_function(psram_pin, GPIO_FUNC_NULL);
+        psram_set_freq_cap(0);
+        psram_reset_init(alt);
+        psram_get_id(&psram_mfid, &psram_kgd);
+        DBG_PRINT("  PSRAM ID on GPIO%u: MF %02X KGD %02X\n", alt, psram_mfid, psram_kgd);
+        early_psram = psram_detect_size();
+        if (early_psram >= (1u << 20)) {
+            psram_pin = alt;
+            psram_cs_override = (int)alt;
+            printf("PSRAM found on GPIO%u\n", alt);
+        } else {
+            // Leave the original CS selected, as before this probe
+            gpio_set_function(alt, GPIO_FUNC_NULL);
+            psram_init_with_freq(psram_pin, PSRAM_MAX_FREQ_MHZ);
+        }
+    }
+#endif
+    if (early_psram < (1u << 20))
+        printf("QSPI PSRAM not detected (ID %02X/%02X, read back %08lX)\n",
+               psram_mfid, psram_kgd, (unsigned long)psram_probe_readback());
 
     /* Probe PSRAM before video as before, but do not stop here: the error OSD
      * can only be shown after the video core has completed initialization.
      * Full/cached capacity handling remains below, after clock configuration. */
-    bool psram_missing = psram_detect_size() < (1u << 20);
+    bool psram_missing = early_psram < (1u << 20);
     early_psram_missing = psram_missing;
     __dmb();
 
@@ -1540,13 +1688,17 @@ static bool init_hardware(void) {
 #ifdef BOARD_HAS_PS2
     // Initialize physical input before video so boot-time video override can use it.
     DBG_PRINT("Initializing PS/2 (unified driver)...\n");
-    DBG_PRINT("  Keyboard CLK: GPIO%d, DATA: GPIO%d\n", PS2_PIN_CLK, PS2_PIN_DATA);
-    DBG_PRINT("  Mouse    CLK: GPIO%d, DATA: GPIO%d\n", PS2_MOUSE_CLK, PS2_MOUSE_DATA);
-    if (!ps2_init(PIO_PS2KBD, PS2_PIN_CLK, PS2_MOUSE_CLK)) {
-        printf("WARNING: PS/2 PIO init failed\n");
+    if (board_is_rp2350pc()) {
+        DBG_PRINT("Olimex RP2350pc: no PS/2 port, skipping PS/2\n");
+    } else {
+        DBG_PRINT("  Keyboard CLK: GPIO%d, DATA: GPIO%d\n", PS2_PIN_CLK, PS2_PIN_DATA);
+        DBG_PRINT("  Mouse    CLK: GPIO%d, DATA: GPIO%d\n", PS2_MOUSE_CLK, PS2_MOUSE_DATA);
+        if (!ps2_init(PIO_PS2KBD, PS2_PIN_CLK, PS2_MOUSE_CLK)) {
+            printf("WARNING: PS/2 PIO init failed\n");
+        }
+        ps2kbd_init();
+        ps2_mouse_init_device();
     }
-    ps2kbd_init();
-    ps2_mouse_init_device();
 #else
     DBG_PRINT("PS/2 not present on this board; USB HID is the only input\n");
 #endif
@@ -1558,14 +1710,19 @@ static bool init_hardware(void) {
 #endif
 
 #ifdef NESPAD_GPIO_CLK
-    DBG_PRINT("Initializing NES gamepad...\n");
-    DBG_PRINT("  CLK: GPIO%d, DATA: GPIO%d, LATCH: GPIO%d\n",
-              NESPAD_GPIO_CLK, NESPAD_GPIO_DATA, NESPAD_GPIO_LATCH);
-    if (nespad_begin(clock_get_hz(clk_sys) / 1000,
-                     NESPAD_GPIO_CLK, NESPAD_GPIO_DATA, NESPAD_GPIO_LATCH)) {
-        DBG_PRINT("  NES gamepad initialized\n");
+    if (board_is_rp2350pc()) {
+        // GPIO9, the pad's latch on the PICO-PC, is the SD chip select here
+        DBG_PRINT("Olimex RP2350pc: skipping NES gamepad (pins in use)\n");
     } else {
-        DBG_PRINT("  NES gamepad init failed (PIO unavailable)\n");
+        DBG_PRINT("Initializing NES gamepad...\n");
+        DBG_PRINT("  CLK: GPIO%d, DATA: GPIO%d, LATCH: GPIO%d\n",
+                  NESPAD_GPIO_CLK, NESPAD_GPIO_DATA, NESPAD_GPIO_LATCH);
+        if (nespad_begin(clock_get_hz(clk_sys) / 1000,
+                         NESPAD_GPIO_CLK, NESPAD_GPIO_DATA, NESPAD_GPIO_LATCH)) {
+            DBG_PRINT("  NES gamepad initialized\n");
+        } else {
+            DBG_PRINT("  NES gamepad init failed (PIO unavailable)\n");
+        }
     }
 #endif
 
@@ -1573,6 +1730,9 @@ static bool init_hardware(void) {
 
     // Initialize SD card
     DBG_PRINT("Initializing SD card...\n");
+    DBG_PRINT("  SCK GPIO%d, MOSI GPIO%d, MISO GPIO%d, CS GPIO%d%s\n",
+              SDCARD_PIN_SPI0_SCK, SDCARD_PIN_SPI0_MOSI, SDCARD_PIN_SPI0_MISO,
+              SDCARD_PIN_SPI0_CS, board_is_rp2350pc() ? " (Olimex RP2350pc)" : "");
     FRESULT res = f_mount(&fatfs, "", 1);
     if (res == FR_OK) {
         f_mkdir("tmp"); // to avoid it on any action
@@ -2256,6 +2416,10 @@ int main(void) {
     DBG_PRINT("  Board: M1\n");
 #elif defined(BOARD_M2)
     DBG_PRINT("  Board: M2\n");
+#elif defined(BOARD_PC)
+    DBG_PRINT("  Board: PC (%s)\n", board_is_rp2350pc() ? "Olimex RP2350pc" : "Olimex PICO-PC");
+#elif defined(BOARD_Z2)
+    DBG_PRINT("  Board: Z2 (Waveshare RP2350-PiZero)\n");
 #elif defined(BOARD_C2)
     DBG_PRINT("  Board: C2 (FRANK Core 2 master)\n");
 #else

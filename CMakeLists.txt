@@ -277,6 +277,8 @@ target_include_directories(psram PUBLIC drivers/psram src)
 target_compile_definitions(psram PRIVATE
     BOARD_${BOARD}
     PSRAM_MAX_FREQ_MHZ=${PSRAM_SPEED}
+    # memmap.ld.in has a .core0_stack_ext section for boot-only RAM code
+    PSRAM_BOOT_IN_STACK_EXT=1
 )
 target_link_libraries(psram pico_stdlib hardware_clocks hardware_xip_cache)
 
