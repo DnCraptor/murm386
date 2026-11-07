@@ -149,7 +149,20 @@ static inline void __time_critical_func(render_diag_border_vga)(
 
 // Line pattern buffers:
 // 0 = hsync template, 1 = vsync template, 2-3 = active video (2-line ping-pong)
+// In 800x600 only 0-1 are used, as a ping-pong pair for every line.
 static uint32_t* lines_pattern[4];
+
+/*
+ * Scanline memory for both outputs, in SCRATCH_Y (its own SRAM bank, not
+ * heap). VGA 640x480: 4 x 800 bytes. VGA 800x600: 2 x up to 1056 bytes.
+ * HDMI uses the same block (the outputs are exclusive): 640x480 4 x 400
+ * bytes, 800x600 2 x up to 528 bytes.
+ */
+#define VIDEO_LINES_WORDS   800u
+#define VIDEO_SVGA_BUF_WORDS 264u   // 1056 / 4
+uint32_t video_lines[VIDEO_LINES_WORDS] __scratch_y("video_lines");
+
+void *nf_memset(void *ptr, int value, size_t len);
 
 // DMA channels
 static int dma_data_chan = -1;
@@ -926,6 +939,10 @@ static void __not_in_flash_func(render_line)(uint32_t line, uint32_t *output_buf
         } else if (gfx_submode == 8) {
             // VGA/MCGA mode 11h: 640x480x2
             render_gfx_line_mono640(line, output_buffer);
+        } else if (gfx_submode == 9) {
+            // VBE 102h is shown in physical 800x600 (vga_isr_800); this
+            // only covers the frame before the switch: black
+            nf_memset((uint8_t *)output_buffer + SHIFT_PICTURE, TMPL_LINE, 640);
 #if defined(VIDEO_RUNTIME) || (!defined(EGA128) && !defined(MCGA))
         } else if (gfx_submode == 5) {
             // VGA 256-color planar (Mode X)
@@ -997,8 +1014,8 @@ static void vga_hw_new_frame_deferred(void) {
         }
         vga_hw_set_gfx_mode(gfx_submode, gfx_w, gfx_h, line_offset);
 
-        // For EGA mode, also update the 16-color palette
-        if (gfx_submode == 2 || gfx_submode == 6) {
+        // For EGA mode (and VBE 102h), also update the 16-color palette
+        if (gfx_submode == 2 || gfx_submode == 6 || gfx_submode == 9) {
             uint8_t ega_pal[48];
             vga_get_palette16(vga_state, ega_pal);
             vga_hw_set_palette16(ega_pal);
@@ -1110,8 +1127,215 @@ static void __time_critical_func(render_load_bar)(uint32_t abs_line,
 // Deferred frame update flag (set in ISR, processed outside)
 volatile uint32_t __scratch_y("frame_update_request") frame_update_request = 0;
 
+// ============================================================================
+// Physical 800x600 output for VBE 102h (shared with the HDMI driver)
+// ============================================================================
+/*
+ * video_phys_target / video_phys_cur: 0 = 640x480 (every other mode),
+ * 1 = 800x600@72 (50.4 MHz pixel clock, an integer divider at 504 MHz),
+ * 2 = 800x600@60 (VESA, 40 MHz pixel clock). Both 800x600 timings are VESA
+ * geometry with +/+ sync polarity.
+ *
+ * The per-frame update asks for a mode with video_phys_request(); the
+ * video ISR applies it at its next line without stopping DMA or PIO: it
+ * swaps the PIO divider and the line DMA reload count (taken on the next
+ * trigger) and switches its line buffers. The monitor sees one broken frame
+ * and resyncs, as on any mode change.
+ */
+volatile uint8_t video_phys_target = 0;
+volatile uint8_t video_phys_cur = 0;
+volatile uint32_t video_phys_div = 0;    // PIO clkdiv register for the target
+static uint8_t video_svga_sel = 1;       // menu: 1 = 72 Hz, 2 = 60 Hz
+
+// Current 800x600 timing, in pixels / lines (set by video_svga_timing())
+uint16_t svga_line_px, svga_hs_px, svga_active_x;
+uint16_t svga_lines_total, svga_vs_begin, svga_vs_end;
+
+/* PIO clock divider register for a physical mode: the VGA PIO outputs one
+ * pixel per cycle, the HDMI one bit (1/10 pixel) per cycle. */
+static uint32_t __attribute__((noinline)) video_phys_div_calc(uint8_t t) {
+    float hz;
+    if (SELECT_VGA)
+        hz = (t == 1) ? 50400000.0f : (t == 2) ? 40000000.0f : VGA_CLK;
+    else
+        hz = (t == 1) ? 504000000.0f : (t == 2) ? 400000000.0f : 252000000.0f;
+    float d = (float)clock_get_hz(clk_sys) / hz;
+    uint32_t di = (uint32_t)d;
+    uint32_t df = (uint32_t)((d - (float)di) * 256.0f);
+    return (di << 16) | (df << 8);
+}
+
+static void video_svga_timing(uint8_t t);
+
+/* Flash, not inlined: called from RAM code only when the mode changes. The
+ * 800x600 timing is set here, ahead of the switch; while an 800x600 ISR
+ * still runs with the other refresh, that only spoils the switching frame. */
+void __attribute__((noinline)) video_phys_request(uint8_t t) {
+    if (t)
+        video_svga_timing(t);
+    video_phys_div = video_phys_div_calc(t);
+    __dmb();
+    video_phys_target = t;
+}
+
+void vga_hw_set_svga_refresh(int hz) {
+    video_svga_sel = (hz == 60) ? 2 : 1;
+}
+
+static void video_svga_timing(uint8_t t) {
+    if (t == 2) {           // VESA 800x600@60: 40 MHz
+        svga_line_px = 1056; svga_hs_px = 128; svga_active_x = 128 + 88;
+        svga_lines_total = 628; svga_vs_begin = 601; svga_vs_end = 604;
+    } else {                // VESA 800x600@72 geometry: 50 MHz nominal
+        svga_line_px = 1040; svga_hs_px = 120; svga_active_x = 120 + 64;
+        svga_lines_total = 666; svga_vs_begin = 637; svga_vs_end = 642;
+    }
+}
+
+/* Frame state latched late in vblank (both outputs, all timings). */
+void __not_in_flash_func(video_latch_frame)(int visible) {
+    if (!vga_state) return;
+    const uint8_t *cr = vga_state->cr;
+    // Wolf3D writes cr[0x0c] and cr[0x0d] as two separate OUT
+    // instructions. The ISR may land between them and read a
+    // half-updated 16-bit address.  Re-read until both bytes
+    // are stable (usually only one extra read is needed).
+    uint8_t hi, lo;
+    do {
+        hi = cr[0x0c];
+        lo = cr[0x0d];
+    } while (hi != cr[0x0c]);
+    frame_vram_offset = (uint16_t)((hi << 8) | lo);
+    frame_pixel_panning = vga_state->ar[0x13] & 0x07;
+    int lc = (int)cr[0x18]
+           | (((int)cr[0x07] & 0x10) << 4)
+           | (((int)cr[0x09] & 0x40) << 3);
+    frame_line_compare = (lc > 0 && lc < visible) ? lc : -1;
+}
+
+/* 640x480: buffer pointers and sync templates (init, and back from 800). */
+static void __not_in_flash_func(vga_lines_640_init)(void) {
+    for (int i = 0; i < 4; i++)
+        lines_pattern[i] = video_lines + i * (LINE_SIZE / 4);
+    uint8_t *b = (uint8_t *)lines_pattern[0];
+    nf_memset(b, TMPL_LINE, LINE_SIZE);
+    nf_memset(b, TMPL_HS, HS_SIZE);
+    b = (uint8_t *)lines_pattern[1];
+    nf_memset(b, TMPL_VS, LINE_SIZE);
+    nf_memset(b, TMPL_VHS, HS_SIZE);
+    for (int i = 2; i < 4; i++) {
+        b = (uint8_t *)lines_pattern[i];
+        nf_memset(b, TMPL_LINE, LINE_SIZE);
+        nf_memset(b, TMPL_HS, HS_SIZE);
+    }
+}
+
+#define SVGA_ROLE_ACTIVE 0u
+#define SVGA_ROLE_BLANK  1u
+#define SVGA_ROLE_VSYNC  2u
+static uint8_t vga_svga_role[2];
+static uint32_t vga_svga_line;
+
+/* +/+ polarity: sync bits idle low. Bit 6 = HSYNC, bit 7 = VSYNC. Active
+ * and blank lines share the template; the active part is drawn per line. */
+static void __not_in_flash_func(vga_svga_template)(uint8_t *buf, uint32_t role) {
+    uint8_t base = (role == SVGA_ROLE_VSYNC) ? 0x80 : 0x00;
+    nf_memset(buf, base, svga_line_px);
+    nf_memset(buf, base | 0x40, svga_hs_px);
+}
+
+/* VBE 102h line, 800 pixels: one gfx_buffer dword = the four plane bytes of
+ * 8 pixels; 100 dwords per line. ega_palette carries the 640x480 (-/-) idle
+ * sync bits, masked off here. */
+static void __not_in_flash_func(vga_render_vbe4_800)(uint32_t line, uint8_t *buf) {
+    uint32_t *out = (uint32_t *)(buf + svga_active_x);
+    if (current_mode != 2 || gfx_submode != 9) {
+        nf_memset(out, 0, 800);
+        return;
+    }
+    const uint32_t *src = (const uint32_t *)gfx_buffer;
+    uint32_t off = (uint32_t)frame_vram_offset + line * 100u;
+    for (uint32_t x = 0; x < 100u; ++x) {
+        uint32_t p = ega_pack8_from_planes(src[(off + x) & 0xffffu]);
+        out[0] = ((uint32_t)ega_palette[p >> 28] |
+                  (uint32_t)ega_palette[(p >> 24) & 15u] << 8 |
+                  (uint32_t)ega_palette[(p >> 20) & 15u] << 16 |
+                  (uint32_t)ega_palette[(p >> 16) & 15u] << 24) & 0x3F3F3F3Fu;
+        out[1] = ((uint32_t)ega_palette[(p >> 12) & 15u] |
+                  (uint32_t)ega_palette[(p >> 8) & 15u] << 8 |
+                  (uint32_t)ega_palette[(p >> 4) & 15u] << 16 |
+                  (uint32_t)ega_palette[p & 15u] << 24) & 0x3F3F3F3Fu;
+        out += 2;
+    }
+}
+
+static void __not_in_flash_func(vga_phys_switch)(uint8_t t) {
+    VGA_PIO->sm[vga_sm].clkdiv = video_phys_div;
+    if (t) {
+        lines_pattern[0] = video_lines;
+        lines_pattern[1] = video_lines + VIDEO_SVGA_BUF_WORDS;
+        vga_svga_role[0] = vga_svga_role[1] = 0xFF;
+        vga_svga_line = 0;
+        dma_channel_set_trans_count(dma_data_chan, svga_line_px / 4u, false);
+    } else {
+        vga_lines_640_init();
+        dma_channel_set_trans_count(dma_data_chan, LINE_SIZE / 4, false);
+    }
+    video_phys_cur = t;
+}
+
+/*
+ * 800x600 scanline ISR. Same pipeline as the 640x480 one: at entry line N+1
+ * is being sent and the control source set here is used for N+2. Every
+ * line, blank ones included, goes through two ping-pong buffers (both line
+ * totals are even, so the parity holds across the frame wrap); a buffer
+ * is re-templated only when its role (active/blank/vsync) changes.
+ */
+static void __not_in_flash_func(vga_isr_800)(void) {
+    uint32_t line = vga_svga_line;
+    vga_svga_line = (line + 1u >= svga_lines_total) ? 0u : line + 1u;
+    if (line == 0)
+        frame_update_request = 1;
+
+    if (vga_state) {
+        if (line >= 600u)
+            vga_state->st01 |= ST01_V_RETRACE;
+        else
+            vga_state->st01 &= ~ST01_V_RETRACE;
+        vga_state->st01 &= ~ST01_DISP_ENABLE;
+    }
+    if (line + 4u == svga_lines_total)
+        video_latch_frame(600);
+
+    uint32_t prep = line + 2u;
+    if (prep >= svga_lines_total)
+        prep -= svga_lines_total;
+    uint32_t b = prep & 1u;
+    uint32_t role = (prep < 600u) ? SVGA_ROLE_ACTIVE :
+                    (prep >= svga_vs_begin && prep <= svga_vs_end) ? SVGA_ROLE_VSYNC :
+                    SVGA_ROLE_BLANK;
+    uint8_t *buf = (uint8_t *)lines_pattern[b];
+    dma_channel_set_read_addr(dma_ctrl_chan, &lines_pattern[b], false);
+    if (vga_svga_role[b] != role) {
+        vga_svga_template(buf, role);
+        vga_svga_role[b] = (uint8_t)role;
+    }
+    if (role == SVGA_ROLE_ACTIVE)
+        vga_render_vbe4_800(prep, buf);
+
+    if (vga_state)
+        vga_state->st01 |= ST01_DISP_ENABLE;
+    tsr1_dispatch();
+}
+
 static void __isr  __not_in_flash_func(dma_handler_vga)(void) {
     dma_hw->ints0 = 1u << dma_ctrl_chan;
+    if (video_phys_target != video_phys_cur)
+        vga_phys_switch(video_phys_target);
+    if (video_phys_cur) {
+        vga_isr_800();
+        return;
+    }
     static uint32_t __scratch_y("current_line") current_line = 0;
     uint32_t line = current_line++;
 
@@ -1178,26 +1402,8 @@ static void __isr  __not_in_flash_func(dma_handler_vga)(void) {
     // Latch frame state late in vblank.  The control-channel IRQ is raised
     // only after that channel has already programmed and chained the next
     // data transfer, so this ISR always prepares the line TWO transfers ahead.
-    if (line == N_LINES_TOTAL - 4) {
-        if (vga_state) {
-            const uint8_t *cr = vga_state->cr;
-            // Wolf3D writes cr[0x0c] and cr[0x0d] as two separate OUT
-            // instructions. The ISR may land between them and read a
-            // half-updated 16-bit address.  Re-read until both bytes
-            // are stable (usually only one extra read is needed).
-            uint8_t hi, lo;
-            do {
-                hi = cr[0x0c];
-                lo = cr[0x0d];
-            } while (hi != cr[0x0c]);
-            frame_vram_offset = (uint16_t)((hi << 8) | lo);
-            frame_pixel_panning = vga_state->ar[0x13] & 0x07;
-            int lc = (int)cr[0x18]
-                   | (((int)cr[0x07] & 0x10) << 4)
-                   | (((int)cr[0x09] & 0x40) << 3);
-            frame_line_compare = (lc > 0 && lc < N_LINES_VISIBLE) ? lc : -1;
-        }
-    }
+    if (line == N_LINES_TOTAL - 4)
+        video_latch_frame(N_LINES_VISIBLE);
 
     /*
      * At ISR entry data line N+1 is already being transmitted.  The control
@@ -1270,19 +1476,13 @@ static void hdmi_boost_clock(void) {
 /* Recalculate and apply VGA PIO clock divider after a sysclk change. */
 void vga_hw_reclock(void) {
     if (!SELECT_VGA) return;
-    float clk_div = (float)clock_get_hz(clk_sys) / VGA_CLK;
-    uint32_t div_int  = (uint32_t)clk_div;
-    uint32_t div_frac = (uint32_t)((clk_div - (float)div_int) * 256.0f);
-    VGA_PIO->sm[vga_sm].clkdiv = (div_int << 16) | (div_frac << 8);
+    // Whatever physical mode is on now (640x480 or 800x600)
+    VGA_PIO->sm[vga_sm].clkdiv = video_phys_div_calc(video_phys_cur);
 #if LOAD_BAR_ENABLE
     frame_period_us = (uint32_t)((float)(LINE_SIZE * N_LINES_TOTAL) * 1000000.0f / VGA_CLK);
 #endif
 }
 
-static uint32_t vga_line0[LINE_SIZE / 4] __scratch_y("vga_line0") = { 0 };
-static uint32_t vga_line1[LINE_SIZE / 4] __scratch_y("vga_line1") = { 0 };
-static uint32_t vga_line2[LINE_SIZE / 4] __scratch_y("vga_line2") = { 0 };
-static uint32_t vga_line3[LINE_SIZE / 4] __scratch_y("vga_line3") = { 0 };
 
 void vga_hw_set_boot_output(bool select_vga)
 {
@@ -1351,24 +1551,8 @@ void vga_hw_init(void) {
     DBG_PRINT("  Clock divider: %.4f\n", clk_div);
     DBG_PRINT("  Frame period: %lu us\n", (unsigned long)frame_period_us);
 #endif    
-    lines_pattern[0] = vga_line0;
-    lines_pattern[1] = vga_line1;
-    lines_pattern[2] = vga_line2;
-    lines_pattern[3] = vga_line3;
-    
-    // Initialize line templates
-    uint8_t *base = (uint8_t *)lines_pattern[0];
-    memset(base, TMPL_LINE, LINE_SIZE);
-    memset(base, TMPL_HS, HS_SIZE);
-    
-    base = (uint8_t *)lines_pattern[1];
-    memset(base, TMPL_VS, LINE_SIZE);
-    memset(base, TMPL_VHS, HS_SIZE);
-    
-    // Initialize both active line buffers with the sync template
-    for (int i = 2; i < 4; i++) {
-        memcpy(lines_pattern[i], lines_pattern[0], LINE_SIZE);
-    }
+    // Line buffers and their sync templates
+    vga_lines_640_init();
 
     // Initialize PIO
     uint offset = pio_add_program(VGA_PIO, &pio_vga_program);
@@ -1468,6 +1652,8 @@ static inline void vga_hw_set_mode(int mode) {
     if (mode == 1) {
         active_start = DEFAULT_ACTIVE_START;
         active_end = DEFAULT_ACTIVE_END;
+        if (video_phys_target)
+            video_phys_request(0);   // back to 640x480
     }
     current_mode = mode;
 }
@@ -1521,7 +1707,7 @@ void vga_hw_set_palette16(const uint8_t *palette16_data) {
         if (SELECT_VGA) {
             ega_palette[i] = vga_color_to_output(r6, g6, b6);
         } else {
-            if (gfx_submode == 2) {
+            if (gfx_submode == 2 || gfx_submode == 9) {
                 for (int j = 0; j < 16; j++) {
                     uint8_t rj = palette16_data[j * 3 + 0];
                     uint8_t gj = palette16_data[j * 3 + 1];
@@ -1571,9 +1757,14 @@ void __time_critical_func(vga_hw_set_gfx_mode)(int submode, int width, int heigh
         active_start = DEFAULT_ACTIVE_START;
         active_end = DEFAULT_ACTIVE_END;
     }
+
+    // VBE 102h: physical 800x600 at the refresh chosen in the menu
+    uint8_t want = (submode == 9 && width == 800 && height == 600) ? video_svga_sel : 0;
+    if (want != video_phys_target)
+        video_phys_request(want);
 }
 
-extern uint32_t conv_color[1224], conv_color2[1024];
+extern uint32_t conv_color[1024], conv_color2[1024];
 
 /*
  * While the OSD is up, the per-frame update (geometry, palettes, cursor,
@@ -1589,6 +1780,12 @@ void vga_hw_freeze(bool on) {
     __dmb();
     if (on) {
         while (vga_hw_deferred_busy)
+            tight_loop_contents();
+        // The OSD is drawn in 640x480: wait for the video ISR to leave
+        // 800x600 (asked for by the frozen per-frame update, below). The
+        // timeout covers video not running yet (early boot errors).
+        uint32_t t0 = time_us_32();
+        while (video_phys_cur && time_us_32() - t0 < 100000u)
             tight_loop_contents();
     }
 }
@@ -1620,6 +1817,8 @@ void __not_in_flash_func(vga_hw_process_deferred)(void) {
     vga_hw_deferred_busy = 1;
     __dmb();
     if (vga_hw_frozen) {
+        if (video_phys_target)
+            video_phys_request(0);   // OSD: 640x480
         vga_hw_deferred_busy = 0;
         return;
     }
@@ -1628,7 +1827,7 @@ void __not_in_flash_func(vga_hw_process_deferred)(void) {
 #endif
     if (!SELECT_VGA && required_to_repair_text_pal) {
         required_to_repair_text_pal = false;
-        // Only restore palette entries (0..1023), not the DMA line buffers (1024..1223)
+        // Restore the text pair palette
         memcpy(conv_color, conv_color2, 1024 * sizeof(uint32_t));
     }
     vga_hw_new_frame_deferred();

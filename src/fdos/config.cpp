@@ -458,7 +458,7 @@ STATIC char strcaseequal(const char * d, const char * s)
 
     Migrated from config.c verbatim.
 */
-STATIC struct table * LookUp(struct table *p, BYTE * token)
+STATIC const struct table * LookUp(const struct table *p, BYTE * token)
 {
   while (p->entry[0] != '\0' && !strcaseequal((const char *)p->entry, (const char *)token))
     ++p;
@@ -1027,7 +1027,11 @@ STATIC VOID Numlock(BYTE * pLine)
   keycheck();
 }
 
-extern struct table commands[];
+extern const struct table commands[];
+
+/* commands[] is const (flash, not .data): the one field that changes at
+ * run time, SWITCHES' pass (commands[0]), is kept here instead. */
+static signed char switches_pass = 0;
 
 STATIC VOID CfgSwitches(BYTE * pLine)
 {
@@ -1042,7 +1046,7 @@ STATIC VOID CfgSwitches(BYTE * pLine)
       pLine++;
       switch(toupper(*pLine)) {
       case 'K':
-        if (commands[0].pass == 1)
+        if (switches_pass == 1)
           kbdType = 0; /* force conv keyb */
         break;
       case 'N':
@@ -1087,7 +1091,7 @@ STATIC VOID CfgSwitches(BYTE * pLine)
     }
     pLine = skipwh(pLine+1);
   }
-  commands[0].pass = 1;
+  switches_pass = 1;
 }
 
 STATIC void ClearScreen(unsigned char attr)
@@ -1973,7 +1977,7 @@ STATIC void Device(BYTE * pLine)
   LoadDevice(pLine, lpTop, FALSE);
 }
 
-struct table commands[] = {
+const struct table commands[] = {
   /* first = switches! this one is special; some options will
      always be ran, others depends on F5/F8 and ? processing */
   {"SWITCHES", 0, CfgSwitches},
@@ -2239,7 +2243,7 @@ VOID DoConfig(int nPass)
   for (; !bEof; nCfgLine++)
 #endif
   {
-    struct table *pEntry;
+    const struct table *pEntry;
     pLineStart = szLine;
 
 #ifdef MEMDISK_ARGS
@@ -2309,7 +2313,8 @@ VOID DoConfig(int nPass)
     pEntry = LookUp(commands, szBuf);
 
 	/* should config command be executed on this pass? */
-    if (pEntry->pass >= 0 && pEntry->pass != nPass)
+    signed char pass = (pEntry == commands) ? switches_pass : pEntry->pass;
+    if (pass >= 0 && pass != nPass)
       continue;
 
 	/* pass 0 always executed (rem Menu prompt switches) */

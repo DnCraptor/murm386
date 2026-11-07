@@ -130,12 +130,22 @@ static int dma_chan_pal_conv;
 // 4 line buffers for 2-line-ahead rendering (prevents DMA underflow)
 static uint32_t* __scratch_y("hdmi_ptr_3") dma_lines[4] = { NULL,NULL,NULL,NULL };
 static uint32_t* __scratch_y("hdmi_ptr_4") DMA_BUF_ADDR[4];
-// Extra 2 line buffers (buffers 0-1 are in conv_color, 2-3 are here)
-static uint32_t hdmi_extra_line_buf[2][100];
+// Line buffers live in the VGA driver's SCRATCH_Y block (outputs are
+// exclusive): 640x480 4 x 400 bytes, 800x600 2 x up to 528 bytes.
+extern uint32_t video_lines[];
+#define HDMI_LINE_WORDS      100u
+#define HDMI_SVGA_BUF_WORDS  132u   // 528 / 4
+
+// 800x600 (VBE 102h) state, owned by vga_hw.c
+extern volatile uint8_t video_phys_target, video_phys_cur;
+extern volatile uint32_t video_phys_div;
+extern uint16_t svga_line_px, svga_hs_px, svga_active_x;
+extern uint16_t svga_lines_total, svga_vs_begin, svga_vs_end;
+void video_latch_frame(int visible);
 
 //ДМА палитра для конвертации
 //в хвосте этой памяти выделяется dma_data
-alignas(4096) uint32_t conv_color[1224];
+alignas(4096) uint32_t conv_color[1024];
 uint32_t conv_color2[1024]; // backup to fast restore pallete
 bool required_to_repair_text_pal = false;
 
@@ -765,6 +775,12 @@ static void __time_critical_func(render_line)(uint32_t line, uint8_t *output_buf
             render_gfx_line_mono640(line, output_buffer);
             return;
         }
+        if (submode == 9) {
+            // VBE 102h is shown in physical 800x600 (hdmi_isr_800); this
+            // only covers the frame before the switch: black
+            nf_memset(output_buffer, 0, SCREEN_WIDTH);
+            return;
+        }
 #if defined(VIDEO_RUNTIME) || (!defined(EGA128) && !defined(MCGA))
         if (!video_profile_is_ega() && !video_profile_is_mcga() && submode == 5) {
             // VGA 256-color planar (Mode X)
@@ -787,11 +803,112 @@ static void __time_critical_func(render_line)(uint32_t line, uint8_t *output_buf
     nf_memset(output_buffer, 0x77, SCREEN_WIDTH);
 }
 
+#define SVGA_ROLE_ACTIVE 0u
+#define SVGA_ROLE_BLANK  1u
+#define SVGA_ROLE_VSYNC  2u
+static uint8_t hdmi_svga_role[2];
+static uint32_t hdmi_svga_line;
+
+/* 800x600 is +/+ polarity: idle = CTRL_3 (00), hsync = CTRL_2,
+ * vsync = CTRL_1, both = CTRL_0 (see the b0..b3 table in hdmi_init). */
+static void __not_in_flash_func(hdmi_svga_template)(uint8_t *buf, uint32_t role) {
+    uint32_t n = svga_line_px >> 1, hs = svga_hs_px >> 1;
+    if (role == SVGA_ROLE_VSYNC) {
+        nf_memset(buf, HDMI_CTRL_1, n);
+        nf_memset(buf, HDMI_CTRL_0, hs);
+    } else {
+        nf_memset(buf, HDMI_CTRL_3, n);
+        nf_memset(buf, HDMI_CTRL_2, hs);
+    }
+}
+
+/* VBE 102h line: 800 pixels = 400 pair indexes, (left << 4) | right, as
+ * in EGA 640. Bytes 252..255 are moved to their pair-palette slots like
+ * obp() does, four bytes at a time: a byte is >= 252 iff its bits 7..2
+ * are all set. */
+static void __not_in_flash_func(hdmi_render_vbe4_800)(uint32_t line, uint8_t *out8) {
+    uint32_t *out = (uint32_t *)out8;
+    if (!vga_state || current_mode != 2 || gfx_submode != 9) {
+        nf_memset(out8, 0, 400);
+        return;
+    }
+    const uint32_t *src = (const uint32_t *)gfx_buffer;
+    uint32_t off = (uint32_t)frame_vram_offset + line * 100u;
+    for (uint32_t x = 0; x < 100u; ++x) {
+        uint32_t w = __builtin_bswap32(ega_pack8_from_planes(src[(off + x) & 0xffffu]));
+        uint32_t t = w & (w << 1) & (w << 2) & (w << 3) & (w << 4) & (w << 5) & 0x80808080u;
+        out[x] = w ^ (t >> 1);
+    }
+}
+
+static void __not_in_flash_func(hdmi_phys_switch)(uint8_t t) {
+    PIO_VIDEO->sm[SM_video].clkdiv = video_phys_div;
+    if (t) {
+        DMA_BUF_ADDR[0] = video_lines;
+        DMA_BUF_ADDR[1] = video_lines + HDMI_SVGA_BUF_WORDS;
+        hdmi_svga_role[0] = hdmi_svga_role[1] = 0xFF;
+        hdmi_svga_line = 0;
+        dma_channel_set_trans_count(dma_chan, svga_line_px >> 1, false);
+    } else {
+        for (int i = 0; i < 4; i++)
+            DMA_BUF_ADDR[i] = dma_lines[i];
+        dma_channel_set_trans_count(dma_chan, 400, false);
+    }
+    video_phys_cur = t;
+}
+
+/*
+ * 800x600 scanline ISR. At entry the data channel has just started the
+ * buffer queued last time (line - 1); the buffer queued now (line) is the
+ * other one of the pair, free since line - 2 was read out. It is filled
+ * here and must be ready before line - 1 is fully read: one line period.
+ */
+static void __not_in_flash_func(hdmi_isr_800)(void) {
+    uint32_t line = hdmi_svga_line;
+    hdmi_svga_line = (line + 1u >= svga_lines_total) ? 0u : line + 1u;
+    if (line == 0)
+        frame_update_request = 1;
+
+    if (vga_state) {
+        if (line >= 600u)
+            vga_state->st01 |= ST01_V_RETRACE;
+        else
+            vga_state->st01 &= ~ST01_V_RETRACE;
+        vga_state->st01 &= ~ST01_DISP_ENABLE;
+    }
+
+    uint32_t b = line & 1u;
+    uint32_t role = (line < 600u) ? SVGA_ROLE_ACTIVE :
+                    (line >= svga_vs_begin && line <= svga_vs_end) ? SVGA_ROLE_VSYNC :
+                    SVGA_ROLE_BLANK;
+    uint8_t *buf = (uint8_t *)DMA_BUF_ADDR[b];
+    dma_channel_set_read_addr(dma_chan_ctrl, &DMA_BUF_ADDR[b], false);
+    if (hdmi_svga_role[b] != role) {
+        hdmi_svga_template(buf, role);
+        hdmi_svga_role[b] = (uint8_t)role;
+    }
+    if (role == SVGA_ROLE_ACTIVE)
+        hdmi_render_vbe4_800(line, buf + (svga_active_x >> 1));
+    else if (line + 4u == svga_lines_total)
+        video_latch_frame(600);
+
+    if (vga_state)
+        vga_state->st01 |= ST01_DISP_ENABLE;
+    extern void tsr1_dispatch(void);
+    tsr1_dispatch();
+}
+
 static void __time_critical_func(dma_handler_HDMI)() {
     static uint line = 0;
     irq_inx++;
 
     dma_hw->ints0 = 1u << dma_chan_ctrl;
+    if (video_phys_target != video_phys_cur)
+        hdmi_phys_switch(video_phys_target);
+    if (video_phys_cur) {
+        hdmi_isr_800();
+        return;
+    }
 
     if (line >= 524) {
         line = 0;
@@ -862,17 +979,8 @@ f:
         // Line N_LINES_TOTAL-4 (521): late in vblank, just before DMA needs line 0.
         // Wolf3D has already written the new page address to CRTC by now.
         // Read cr[] and ar[] directly — no intermediate volatile copies.
-        if (line == 521) {
-            if (vga_state) {
-                const uint8_t *cr = vga_state->cr;
-                frame_vram_offset = (uint16_t)((cr[0x0c] << 8) | cr[0x0d]);
-                frame_pixel_panning = vga_state->ar[0x13] & 0x07;
-                int lc = (int)cr[0x18]
-                       | (((int)cr[0x07] & 0x10) << 4)
-                       | (((int)cr[0x09] & 0x40) << 3);
-                frame_line_compare = (lc > 0 && lc < 480) ? lc : -1;
-            }
-        }
+        if (line == 521)
+            video_latch_frame(480);
     }
     if (vga_state) {
         vga_state->st01 |= ST01_DISP_ENABLE; // start invisible line-part
@@ -1054,11 +1162,10 @@ static inline bool hdmi_init() {
     pio_sm_init(PIO_VIDEO, SM_video, offs_prg0, &c_c);
     pio_sm_set_enabled(PIO_VIDEO, SM_video, true);
 
-    //настройки DMA — 4 line buffers (2 in conv_color, 2 separate)
-    dma_lines[0] = &conv_color[1024];
-    dma_lines[1] = &conv_color[1124];
-    dma_lines[2] = hdmi_extra_line_buf[0];
-    dma_lines[3] = hdmi_extra_line_buf[1];
+    //настройки DMA — 4 line buffers (in video_lines, SCRATCH_Y)
+    for (int i = 0; i < 4; i++)
+        dma_lines[i] = video_lines + i * HDMI_LINE_WORDS;
+    video_phys_cur = 0;   // DMA below is set up for 640x480
 
     //основной рабочий канал
     dma_channel_config cfg_dma = dma_channel_get_default_config(dma_chan);

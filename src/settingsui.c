@@ -34,6 +34,7 @@ typedef enum {
     SETTING_VOL= 0,
     SETTING_VIDEO,
     SETTING_STRETCH_350,
+    SETTING_SVGA_REFRESH,
     SETTING_CPU,
     SETTING_FPU,
     SETTING_PCSPEAKER,
@@ -134,6 +135,7 @@ static int orig_pcspeaker, orig_adlib, orig_soundblaster, orig_tandy, orig_covox
 static int orig_cpu_freq, orig_psram_freq, orig_flash_freq, orig_volume, orig_voltage, orig_mouse_invert_y, orig_mouse_sensitivity, orig_usb_modem;
 static int orig_audio_output;
 static int orig_stretch_350;
+static int orig_svga_refresh;
 
 // UI dimensions
 #define MENU_X      10
@@ -276,6 +278,7 @@ void settingsui_open(void) {
     orig_mouse_sensitivity = config_get_mouse_sensitivity();
     orig_usb_modem = config_get_usb_modem();
     orig_stretch_350 = config_get_stretch_350();
+    orig_svga_refresh = config_get_svga_refresh();
     audio_output_setting = load_audio_output_setting();
     orig_audio_output = audio_output_setting;
     video_output_setting = load_video_output_setting();
@@ -302,6 +305,7 @@ void settingsui_close(void) {
         config_set_mouse_sensitivity(orig_mouse_sensitivity);
         config_set_usb_modem(orig_usb_modem);
         config_set_stretch_350(orig_stretch_350);
+        config_set_svga_refresh(orig_svga_refresh);
         audio_set_volume(orig_volume);
 #if HAS_AUDIO_HWAY
         if (audio_output_setting != orig_audio_output)
@@ -350,6 +354,10 @@ static void cycle_option(int direction) {
 
         case SETTING_STRETCH_350:
             config_set_stretch_350(!config_get_stretch_350());
+            break;
+
+        case SETTING_SVGA_REFRESH:
+            config_set_svga_refresh(config_get_svga_refresh() == 60 ? 72 : 60);
             break;
 
         case SETTING_VOL:
@@ -550,6 +558,7 @@ static void draw_settings_menu(void) {
         "Volume:",
         "Video adapter:",
         "Stretch 350-line modes:",
+        "800x600 refresh:",
         "CPU Type:",
         "FPU (387):",
         "PC Speaker:",
@@ -599,6 +608,9 @@ static void draw_settings_menu(void) {
             }
             case SETTING_STRETCH_350:
                 snprintf(value, sizeof(value), "< %s >", config_get_stretch_350() ? "Yes" : "No");
+                break;
+            case SETTING_SVGA_REFRESH:
+                snprintf(value, sizeof(value), "< %d Hz >", config_get_svga_refresh());
                 break;
             case SETTING_VOL:
                 snprintf(value, sizeof(value), "< %d >", audio_get_volume());

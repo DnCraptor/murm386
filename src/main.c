@@ -2205,6 +2205,7 @@ static void __not_in_flash_func(core1_entry)(void) {
     audio_set_volume(config_get_volume());
     audio_set_enabled(true);
     vga_hw_set_stretch_350(config_get_stretch_350());
+    vga_hw_set_svga_refresh(config_get_svga_refresh());
     config_clear_changes();
 
     __dmb();

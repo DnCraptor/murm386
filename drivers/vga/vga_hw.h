@@ -84,6 +84,13 @@ void vga_hw_set_gfx_mode(int submode, int width, int height, int line_offset);
 // 1:1 centred (false, default). Takes effect from the next frame.
 void vga_hw_set_stretch_350(bool on);
 
+// VBE 102h is shown in physical 800x600 at 72 Hz (50.4 MHz pixel clock,
+// integer divider at 504 MHz; default) or 60 Hz (VESA 40 MHz).
+void vga_hw_set_svga_refresh(int hz);
+// Physical output: 0 = 640x480, 1 = 800x600@72, 2 = 800x600@60.
+// Applied by the video ISR at its next line.
+void video_phys_request(uint8_t t);
+
 // OSD support: freeze/unfreeze the per-frame update, switch to the text
 // window geometry, and rebuild everything from the VGA state next frame.
 void vga_hw_freeze(bool on);

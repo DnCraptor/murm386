@@ -23,7 +23,7 @@ extern uint8_t gfx_buffer[];
 
 extern bool SELECT_VGA;
 extern int active_start, active_end;
-extern uint32_t conv_color[1224], conv_color2[1024];
+extern uint32_t conv_color[1024], conv_color2[1024];
 
 /*
  * tmp/osd.vram: the gfx_buffer bytes the OSD overwrites, then the video

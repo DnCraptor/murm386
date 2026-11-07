@@ -140,6 +140,11 @@ void config_set_mouse_sensitivity(int index);
 int config_get_stretch_350(void);
 void config_set_stretch_350(int enabled);
 
+/* VBE 102h physical 800x600 refresh: 72 (default) or 60 Hz. Applied
+ * immediately. */
+int config_get_svga_refresh(void);
+void config_set_svga_refresh(int hz);
+
 // Check if hardware settings changed (requires reboot)
 bool config_hw_changed(void);
 

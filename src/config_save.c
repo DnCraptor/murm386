@@ -59,6 +59,7 @@ static int cfg_voltage = -1;  /* -1 = auto (by cpu_freq) */
 static int cfg_mouse_invert_y = 0;
 static int cfg_mouse_sensitivity = 4;  /* 0..8; 4 = 1x */
 static int cfg_stretch_350 = 0;        /* 350-line modes: 0 = 1:1, 1 = stretched */
+static int cfg_svga_refresh = 72;      /* VBE 102h physical 800x600: 72 or 60 Hz */
 static int cfg_video_adapter = VIDEO_ADAPTER_DEFAULT;
 static bool cfg_hw_changed = false;
 
@@ -493,6 +494,16 @@ void config_set_stretch_350(int enabled) {
     vga_hw_set_stretch_350(enabled);  // live, from the next frame
 }
 
+int config_get_svga_refresh(void) { return cfg_svga_refresh; }
+void config_set_svga_refresh(int hz) {
+    hz = (hz == 60) ? 60 : 72;
+    if (cfg_svga_refresh != hz) {
+        cfg_svga_refresh = hz;
+        cfg_changed = true;
+    }
+    vga_hw_set_svga_refresh(hz);  // live, from the next frame
+}
+
 int config_get_mouse_sensitivity(void) { return cfg_mouse_sensitivity; }
 void config_set_mouse_sensitivity(int index) {
     if (index < 0) index = 0;
@@ -695,6 +706,8 @@ bool config_save_all(void) {
     write_line(&fp, line);
     snprintf(line, sizeof(line), "stretch_350=%d\r\n", cfg_stretch_350);
     write_line(&fp, line);
+    snprintf(line, sizeof(line), "svga_refresh=%d\r\n", cfg_svga_refresh);
+    write_line(&fp, line);
 
     f_close(&fp);
     cfg_changed = false;
@@ -793,6 +806,8 @@ int parse_frank_386_ini(void* user, const char* section,
         cfg_mouse_sensitivity = v < 0 ? 0 : (v > 8 ? 8 : v);
     } else if (strcmp(name, "stretch_350") == 0) {
         cfg_stretch_350 = atoi(value) ? 1 : 0;
+    } else if (strcmp(name, "svga_refresh") == 0) {
+        cfg_svga_refresh = (atoi(value) == 60) ? 60 : 72;
     }
 
     return 1;  // Success
