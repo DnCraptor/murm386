@@ -622,5 +622,6 @@ static inline char get_rp2350_package_letter(void) {
 #define CONFIG_CPU_DIR   CONFIG_ROOT_DIR "/" SD_DATA_DIR
 #define CONFIG_BOARD_DIR CONFIG_CPU_DIR "/" BOARD_VARIANT_STR
 #define CONFIG_FILE_PATH CONFIG_BOARD_DIR "/config.ini"
+#define CONFIG_LEGACY_FILE_PATH SD_DATA_DIR_SLASH "config.ini"
 
 #endif // BOARD_CONFIG_H

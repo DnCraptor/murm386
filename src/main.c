@@ -1252,6 +1252,11 @@ static int load_config_from_sd() {
     res = f_open(&fp, path, FA_READ);
     if (res != FR_OK) {
         DBG_PRINT("Config file not found: %s (error %d)\n", path, res);
+        snprintf(path, sizeof(path), "%s", CONFIG_LEGACY_FILE_PATH);
+        res = f_open(&fp, path, FA_READ);
+    }
+    if (res != FR_OK) {
+        DBG_PRINT("Legacy config file not found: %s (error %d)\n", path, res);
         return -1;
     }
 
@@ -1665,7 +1670,8 @@ static bool init_hardware(void) {
         FIL fp;
         char *content = NULL;
 
-        if (f_open(&fp, CONFIG_FILE_PATH, FA_READ) == FR_OK) {
+        if (f_open(&fp, CONFIG_FILE_PATH, FA_READ) == FR_OK ||
+            f_open(&fp, CONFIG_LEGACY_FILE_PATH, FA_READ) == FR_OK) {
             FSIZE_t size = f_size(&fp);
             content = malloc(size + 1);
             if (content) {
