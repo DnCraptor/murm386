@@ -255,6 +255,23 @@ static void pio_set_x(PIO pio, const int sm, uint32_t v) {
 #define is_hdmi_sync(c) (c >= HDMI_CTRL_0)
 #define ob(x) { register uint8_t c = x; *output_buffer++ = is_hdmi_sync(c) ? (HDMI_CTRL_0 - 1) : c; }
 
+/*
+ * Pixel-pair palette (text, OSD, EGA 640): one index carries two 16-colour
+ * pixels, (left << 4) | right. Indices 252..255 are the TMDS control
+ * symbols, so the pairs (15,12)..(15,15) cannot sit there. ob() showed
+ * them as 251 = (15,11): solid white came out as white/light-cyan dots.
+ *
+ * Those four pairs are stored at 0xBC..0xBF instead (pair ^ 0x40), and
+ * obp() sends them there. The pairs (11,12)..(11,15) give up their slots:
+ * text and OSD can never produce them (one cell has a single colour >= 8),
+ * in EGA graphics they only occur at a light-cyan/bright edge, shown with
+ * the left pixel white. Black stays at 0, so blank fills still work, and
+ * obp() is branchless, about the cost of ob().
+ */
+#define HDMI_PAIR_MOVE 0x40u
+/* Branchless: (c + 4) >> 8 is 1 exactly for c = 252..255 */
+#define obp(x) { register uint32_t c = (uint8_t)(x); *output_buffer++ = (uint8_t)(c ^ (((c + 4u) >> 8) << 6)); }
+
 static void __time_critical_func(render_text_line)(uint32_t line, uint8_t *output_buffer) {
     int char_height = vga_get_char_height(vga_state);
     if (char_height <= 0 || char_height > 32)
@@ -296,20 +313,20 @@ static void __time_critical_func(render_text_line)(uint32_t line, uint8_t *outpu
             register uint8_t bg_color0 = bg_color1 >> 4;
             register uint8_t fg_color1 = fg_color0 << 4;
             if (!double_h) {
-                ob( ((glyph & 0b00000001) ? fg_color1 : bg_color1) | ((glyph & 0b00000010) ? fg_color0 : bg_color0) );
-                ob( ((glyph & 0b00000100) ? fg_color1 : bg_color1) | ((glyph & 0b00001000) ? fg_color0 : bg_color0) );
-                ob( ((glyph & 0b00010000) ? fg_color1 : bg_color1) | ((glyph & 0b00100000) ? fg_color0 : bg_color0) );
-                ob( ((glyph & 0b01000000) ? fg_color1 : bg_color1) | ((glyph & 0b10000000) ? fg_color0 : bg_color0) );
+                obp( ((glyph & 0b00000001) ? fg_color1 : bg_color1) | ((glyph & 0b00000010) ? fg_color0 : bg_color0) );
+                obp( ((glyph & 0b00000100) ? fg_color1 : bg_color1) | ((glyph & 0b00001000) ? fg_color0 : bg_color0) );
+                obp( ((glyph & 0b00010000) ? fg_color1 : bg_color1) | ((glyph & 0b00100000) ? fg_color0 : bg_color0) );
+                obp( ((glyph & 0b01000000) ? fg_color1 : bg_color1) | ((glyph & 0b10000000) ? fg_color0 : bg_color0) );
             } else {
                 // TODO: optimize it
-                ob( ((glyph & 0b00000001) ? fg_color1 : bg_color1) | ((glyph & 0b00000001) ? fg_color0 : bg_color0) );
-                ob( ((glyph & 0b00000010) ? fg_color1 : bg_color1) | ((glyph & 0b00000010) ? fg_color0 : bg_color0) );
-                ob( ((glyph & 0b00000100) ? fg_color1 : bg_color1) | ((glyph & 0b00000100) ? fg_color0 : bg_color0) );
-                ob( ((glyph & 0b00001000) ? fg_color1 : bg_color1) | ((glyph & 0b00001000) ? fg_color0 : bg_color0) );
-                ob( ((glyph & 0b00010000) ? fg_color1 : bg_color1) | ((glyph & 0b00010000) ? fg_color0 : bg_color0) );
-                ob( ((glyph & 0b00100000) ? fg_color1 : bg_color1) | ((glyph & 0b00100000) ? fg_color0 : bg_color0) );
-                ob( ((glyph & 0b01000000) ? fg_color1 : bg_color1) | ((glyph & 0b01000000) ? fg_color0 : bg_color0) );
-                ob( ((glyph & 0b10000000) ? fg_color1 : bg_color1) | ((glyph & 0b10000000) ? fg_color0 : bg_color0) );
+                obp( ((glyph & 0b00000001) ? fg_color1 : bg_color1) | ((glyph & 0b00000001) ? fg_color0 : bg_color0) );
+                obp( ((glyph & 0b00000010) ? fg_color1 : bg_color1) | ((glyph & 0b00000010) ? fg_color0 : bg_color0) );
+                obp( ((glyph & 0b00000100) ? fg_color1 : bg_color1) | ((glyph & 0b00000100) ? fg_color0 : bg_color0) );
+                obp( ((glyph & 0b00001000) ? fg_color1 : bg_color1) | ((glyph & 0b00001000) ? fg_color0 : bg_color0) );
+                obp( ((glyph & 0b00010000) ? fg_color1 : bg_color1) | ((glyph & 0b00010000) ? fg_color0 : bg_color0) );
+                obp( ((glyph & 0b00100000) ? fg_color1 : bg_color1) | ((glyph & 0b00100000) ? fg_color0 : bg_color0) );
+                obp( ((glyph & 0b01000000) ? fg_color1 : bg_color1) | ((glyph & 0b01000000) ? fg_color0 : bg_color0) );
+                obp( ((glyph & 0b10000000) ? fg_color1 : bg_color1) | ((glyph & 0b10000000) ? fg_color0 : bg_color0) );
             }
         }
     }
@@ -405,10 +422,10 @@ void __time_critical_func(osd_render_line_hdmi)(uint32_t line, uint8_t *output_b
         register uint8_t bg_color1 = attr & 0b01110000;
         register uint8_t bg_color0 = bg_color1 >> 4;
         register uint8_t fg_color1 = fg_color0 << 4;
-        ob( ((glyph & 0b00000001) ? fg_color1 : bg_color1) | ((glyph & 0b00000010) ? fg_color0 : bg_color0) );
-        ob( ((glyph & 0b00000100) ? fg_color1 : bg_color1) | ((glyph & 0b00001000) ? fg_color0 : bg_color0) );
-        ob( ((glyph & 0b00010000) ? fg_color1 : bg_color1) | ((glyph & 0b00100000) ? fg_color0 : bg_color0) );
-        ob( ((glyph & 0b01000000) ? fg_color1 : bg_color1) | ((glyph & 0b10000000) ? fg_color0 : bg_color0) );
+        obp( ((glyph & 0b00000001) ? fg_color1 : bg_color1) | ((glyph & 0b00000010) ? fg_color0 : bg_color0) );
+        obp( ((glyph & 0b00000100) ? fg_color1 : bg_color1) | ((glyph & 0b00001000) ? fg_color0 : bg_color0) );
+        obp( ((glyph & 0b00010000) ? fg_color1 : bg_color1) | ((glyph & 0b00100000) ? fg_color0 : bg_color0) );
+        obp( ((glyph & 0b01000000) ? fg_color1 : bg_color1) | ((glyph & 0b10000000) ? fg_color0 : bg_color0) );
     }
 }
 
@@ -678,12 +695,11 @@ static void __time_critical_func(render_gfx_line_ega640)(uint32_t line, uint8_t 
         if (panning > 0) {
             eight_pixels = (eight_pixels << shift1) | (ega_pack8_from_planes(src32[i+1]) >> shift2);
         }
-/// TODO: compose palleter for this case
-        // Lookup each pixel (no doubling)
-        ob ( (eight_pixels >> 24) );
-        ob ( (eight_pixels >> 16) );
-        ob ( (eight_pixels >> 8) );
-        ob ( eight_pixels );
+        // Pixel pairs through the pair palette (see obp)
+        obp ( (eight_pixels >> 24) );
+        obp ( (eight_pixels >> 16) );
+        obp ( (eight_pixels >> 8) );
+        obp ( eight_pixels );
     }
 }
 
@@ -929,7 +945,8 @@ static inline bool hdmi_init() {
 
     // Заполнение палитры — CGA 16 цветов (индексы 0-15)
     // Формат cga_colors: 6-бит RRGGBB (как в VGA DAC)
-    static uint8_t cga_colors[16][3] = {
+    // const: init-time table, no need to keep it in SRAM (.data)
+    static const uint8_t cga_colors[16][3] = {
         { 0,  0,  0},  //  0: Black
         { 0,  0, 42},  //  1: Blue        (0x02 -> b=2/3*63)
         { 0, 42,  0},  //  2: Green
@@ -1170,7 +1187,9 @@ void graphics_set_palette_hdmi2(
     const uint8_t R2, const uint8_t G2, const uint8_t B2,
     uint8_t i
 ) {
-    if is_hdmi_sync(i) return;
+    // Pair palette slots: see obp()
+    if (i >= HDMI_CTRL_0 - HDMI_PAIR_MOVE && i < 256 - HDMI_PAIR_MOVE) return;
+    if (is_hdmi_sync(i)) i -= HDMI_PAIR_MOVE;
     uint64_t* conv_color64 = (uint64_t*)conv_color;
     uint64_t c1 = get_ser_diff_data(tmds_encoder(R1), tmds_encoder(G1), tmds_encoder(B1));
     uint64_t c2 = get_ser_diff_data(tmds_encoder(R2), tmds_encoder(G2), tmds_encoder(B2));

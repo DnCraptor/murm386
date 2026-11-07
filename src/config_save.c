@@ -17,6 +17,7 @@
 #include <string.h>
 #include <strings.h>
 #include "pc.h"
+#include "../drivers/vga/vga_hw.h"
 #include "video_profile.h"
 #include "csm_psg.h"
 #include "csm.h"
@@ -57,6 +58,7 @@ static int cfg_volume = 15;
 static int cfg_voltage = -1;  /* -1 = auto (by cpu_freq) */
 static int cfg_mouse_invert_y = 0;
 static int cfg_mouse_sensitivity = 4;  /* 0..8; 4 = 1x */
+static int cfg_stretch_350 = 0;        /* 350-line modes: 0 = 1:1, 1 = stretched */
 static int cfg_video_adapter = VIDEO_ADAPTER_DEFAULT;
 static bool cfg_hw_changed = false;
 
@@ -481,6 +483,16 @@ void config_set_mouse_invert_y(int enabled) {
     }
 }
 
+int config_get_stretch_350(void) { return cfg_stretch_350; }
+void config_set_stretch_350(int enabled) {
+    enabled = enabled ? 1 : 0;
+    if (cfg_stretch_350 != enabled) {
+        cfg_stretch_350 = enabled;
+        cfg_changed = true;
+    }
+    vga_hw_set_stretch_350(enabled);  // live, from the next frame
+}
+
 int config_get_mouse_sensitivity(void) { return cfg_mouse_sensitivity; }
 void config_set_mouse_sensitivity(int index) {
     if (index < 0) index = 0;
@@ -681,6 +693,8 @@ bool config_save_all(void) {
     write_line(&fp, line);
     snprintf(line, sizeof(line), "mouse_sensitivity=%d\r\n", cfg_mouse_sensitivity);
     write_line(&fp, line);
+    snprintf(line, sizeof(line), "stretch_350=%d\r\n", cfg_stretch_350);
+    write_line(&fp, line);
 
     f_close(&fp);
     cfg_changed = false;
@@ -777,6 +791,8 @@ int parse_frank_386_ini(void* user, const char* section,
     } else if (strcmp(name, "mouse_sensitivity") == 0) {
         int v = atoi(value);
         cfg_mouse_sensitivity = v < 0 ? 0 : (v > 8 ? 8 : v);
+    } else if (strcmp(name, "stretch_350") == 0) {
+        cfg_stretch_350 = atoi(value) ? 1 : 0;
     }
 
     return 1;  // Success

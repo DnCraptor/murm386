@@ -135,6 +135,11 @@ void config_set_mouse_invert_y(int enabled);
 int config_get_mouse_sensitivity(void);
 void config_set_mouse_sensitivity(int index);
 
+/* EGA 350-line modes: 0 = shown 1:1 with black bands (default),
+ * 1 = stretched over 400 lines. Applied immediately. */
+int config_get_stretch_350(void);
+void config_set_stretch_350(int enabled);
+
 // Check if hardware settings changed (requires reboot)
 bool config_hw_changed(void);
 

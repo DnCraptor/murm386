@@ -1492,7 +1492,8 @@ STATIC BOOL LoadCountryInfo(char *filenam, UWORD ctryCode, UWORD codePage)
      CTYINFO is the exception: MS-DOS ships up to 38 bytes there and the
      code below clamps it to sizeof(struct CountrySpecificInfo) instead of
      rejecting the file, so accept up to 38. */
-  static struct subf_tbl table[9] = {
+  /* const: read-only, keeps these 180 bytes out of SRAM (.data) */
+  static const struct subf_tbl table[9] = {
     {"\377       ", -1, 0},                     /* 0, unused */
     {"\377CTYINFO", 5,  38},                    /* 1 */
     {"\377UCASE  ", 0,  NLS_HC_TBL2_SIZE - 2},  /* 2 */

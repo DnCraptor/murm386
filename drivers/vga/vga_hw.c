@@ -268,6 +268,7 @@ void graphics_set_palette_hdmi2(
     uint8_t i
 );
 
+
 // Convert 6-bit VGA DAC values to 16-bit dithered output
 // Returns: low byte = c_hi (conv0), high byte = c_lo (conv1)
 // When output as 16-bit, adjacent pixels get different colors for spatial dithering
@@ -956,9 +957,10 @@ static void __not_in_flash_func(render_line)(uint32_t line, uint32_t *output_buf
 
 static inline void vga_hw_set_mode(int mode);
 
+static int last_vga_mode = -1;
+
 static void vga_hw_new_frame_deferred(void) {
     if (!vga_state) return;
-    static int last_vga_mode = -1;
     // Update cursor
     int cx, cy, cs, ce, cv;
     vga_get_cursor_info(vga_state, &cx, &cy, &cs, &ce, &cv);
@@ -1538,6 +1540,14 @@ void vga_hw_set_palette16(const uint8_t *palette16_data) {
 }
 
 // Set graphics sub-mode: 1=CGA4, 2=EGA, 3=VGA256, 4=CGA2, 5=ModeX, 7=VBE packed8, 8=mono640
+/* Settings menu: stretch 350-line modes over 400 lines (every 8th line
+ * doubled) instead of showing them 1:1 with black bands. Default off. */
+static uint8_t vga_stretch_350 = 0;
+
+void vga_hw_set_stretch_350(bool on) {
+    vga_stretch_350 = on ? 1 : 0;
+}
+
 void __time_critical_func(vga_hw_set_gfx_mode)(int submode, int width, int height, int line_offset) {
     gfx_submode = submode;
     gfx_width = width;
@@ -1550,6 +1560,13 @@ void __time_critical_func(vga_hw_set_gfx_mode)(int submode, int width, int heigh
         // 480-line modes: mode 12h (height=480) or Mode X 320×240 (height=240, doubled)
         active_start = 0;
         active_end = N_LINES_VISIBLE;  // 480
+    } else if (!vga_stretch_350 && height > 200 && height < 400) {
+        // 350-line EGA modes (0Fh/10h) and the like: show them 1:1, centred
+        // in the 400-line window. Stretching 350 source lines over 400
+        // output lines repeats every 8th line, which shows as lines that are
+        // thicker than the rest. The renderers then map line -> src 1:1.
+        active_start = DEFAULT_ACTIVE_START + (int)((400u - (unsigned)height) >> 1);
+        active_end = active_start + height;
     } else {
         active_start = DEFAULT_ACTIVE_START;
         active_end = DEFAULT_ACTIVE_END;
@@ -1558,10 +1575,54 @@ void __time_critical_func(vga_hw_set_gfx_mode)(int submode, int width, int heigh
 
 extern uint32_t conv_color[1224], conv_color2[1024];
 
+/*
+ * While the OSD is up, the per-frame update (geometry, palettes, cursor,
+ * mode switches) is frozen: it would otherwise put the guest mode's
+ * geometry and palette back under the OSD every frame. It runs from a
+ * timer on core 1, the OSD on core 0, hence the busy flag.
+ */
+static volatile uint8_t vga_hw_frozen = 0;
+static volatile uint8_t vga_hw_deferred_busy = 0;
+
+void vga_hw_freeze(bool on) {
+    vga_hw_frozen = on ? 1 : 0;
+    __dmb();
+    if (on) {
+        while (vga_hw_deferred_busy)
+            tight_loop_contents();
+    }
+}
+
+/* OSD geometry: the 640x400 text window, whatever mode the guest is in. */
+void vga_hw_set_osd_geometry(void) {
+    active_start = DEFAULT_ACTIVE_START;
+    active_end = DEFAULT_ACTIVE_END;
+}
+
+/*
+ * Fallback when the state saved by the OSD could not be read back (no SD
+ * card): have the next frame rebuild mode, geometry and palettes from the
+ * emulated VGA state.
+ */
+void vga_hw_refresh_all(void) {
+    last_vga_mode = -1;
+    if (vga_state)
+        vga_state->palette_dirty = 1;
+    if (!SELECT_VGA)
+        required_to_repair_text_pal = true;
+    vga_hw_set_osd_geometry();
+}
+
 void __not_in_flash_func(vga_hw_process_deferred)(void) {
     if (!frame_update_request)
         return;
     frame_update_request = 0;
+    vga_hw_deferred_busy = 1;
+    __dmb();
+    if (vga_hw_frozen) {
+        vga_hw_deferred_busy = 0;
+        return;
+    }
 #if LOAD_BAR_ENABLE
     uint32_t t0 = timer_hw->timerawl;
 #endif
@@ -1578,4 +1639,5 @@ void __not_in_flash_func(vga_hw_process_deferred)(void) {
     if (dt > 32)
         anomaly_ever_seen = 1;
 #endif
+    vga_hw_deferred_busy = 0;
 }

@@ -15,10 +15,28 @@
 #include <pico.h>
 #include <pico/stdlib.h>  // For __time_critical_func
 #include "gfx_scratch.h"
+#include "vga_hw.h"
 
 extern uint8_t gfx_buffer[];
 #define osd_buffer gfx_buffer
 #define OSD_GFX_BACKUP_PATH "tmp/osd.vram"
+
+extern bool SELECT_VGA;
+extern int active_start, active_end;
+extern uint32_t conv_color[1224], conv_color2[1024];
+
+/*
+ * tmp/osd.vram: the gfx_buffer bytes the OSD overwrites, then the video
+ * state the OSD replaces with its own and puts back on exit: the active
+ * window, and on HDMI the palette (the first 1024 words of conv_color;
+ * the rest are DMA line buffers). Kept on the card, not in RAM.
+ */
+static const gfx_scratch_seg_t osd_state_segs[] = {
+    { &active_start, sizeof(active_start) },
+    { &active_end,   sizeof(active_end) },
+    { conv_color,    1024 * sizeof(uint32_t) },   // HDMI only
+};
+#define OSD_STATE_SEGS (SELECT_VGA ? 2 : 3)
 
 static bool osd_buffer_acquired = false;
 static bool osd_buffer_backup_valid = false;
@@ -26,9 +44,14 @@ static bool osd_buffer_backup_valid = false;
 static bool osd_acquire_buffer(void) {
     if (osd_buffer_acquired) return true;
 
+    // No per-frame geometry/palette updates under the OSD from here on;
+    // also makes the state saved below consistent
+    vga_hw_freeze(true);
+
     uint8_t *scratch = NULL;
-    osd_buffer_backup_valid = gfx_scratch_acquire(
-        0, OSD_BUFFER_SIZE, OSD_GFX_BACKUP_PATH, &scratch);
+    osd_buffer_backup_valid = gfx_scratch_acquire_ex(
+        0, OSD_BUFFER_SIZE, OSD_GFX_BACKUP_PATH,
+        osd_state_segs, OSD_STATE_SEGS, &scratch);
 
     // The backup is best-effort.  OSD must remain usable without an SD card;
     // in that case the overwritten gfx_buffer contents are simply discarded.
@@ -39,11 +62,18 @@ static bool osd_acquire_buffer(void) {
 static void osd_release_buffer(void) {
     if (!osd_buffer_acquired) return;
 
-    if (osd_buffer_backup_valid &&
-        !gfx_scratch_release(0, OSD_BUFFER_SIZE, OSD_GFX_BACKUP_PATH))
-        printf("OSD: failed to restore gfx_buffer\n");
+    bool restored = osd_buffer_backup_valid &&
+        gfx_scratch_release_ex(0, OSD_BUFFER_SIZE, OSD_GFX_BACKUP_PATH,
+                               osd_state_segs, OSD_STATE_SEGS);
+    if (!restored) {
+        if (osd_buffer_backup_valid)
+            printf("OSD: failed to restore gfx_buffer\n");
+        // No saved state to put back: rebuild it from the VGA state
+        vga_hw_refresh_all();
+    }
     osd_buffer_backup_valid = false;
     osd_buffer_acquired = false;
+    vga_hw_freeze(false);
 }
 
 // OSD visibility flag
@@ -91,34 +121,22 @@ void osd_init(void) {
     osd_buffer_backup_valid = false;
 }
 
-extern bool SELECT_VGA;
-extern uint32_t conv_color[1224], conv_color2[1024];
 void osd_show(void) {
     if (!osd_acquire_buffer()) {
         printf("OSD: cannot acquire gfx_buffer scratch area\n");
         return;
     }
-    if (SELECT_VGA) {
-        osd_visible = true;
-    } else { // hdmi only
-        for(int i = 0; i < 1024; ++i) {
-            uint32_t t = conv_color[i];
-            conv_color[i] = conv_color2[i];
-            conv_color2[i] = t;
-        }
-        osd_visible = true;
-    }
+    // The OSD's own geometry and palette, not whatever the guest mode had:
+    // the 640x400 text window, and on HDMI the text pair palette, which
+    // conv_color2 keeps untouched. The originals are in tmp/osd.vram.
+    vga_hw_set_osd_geometry();
+    if (!SELECT_VGA)
+        memcpy(conv_color, conv_color2, 1024 * sizeof(uint32_t));
+    osd_visible = true;
 }
 
 void osd_hide(void) {
     osd_visible = false;
-    if (!SELECT_VGA) { // hdmi only
-        for(int i = 0; i < 1024; ++i) {
-            uint32_t t = conv_color[i];
-            conv_color[i] = conv_color2[i];
-            conv_color2[i] = t;
-        }
-    }
     osd_release_buffer();
 }
 

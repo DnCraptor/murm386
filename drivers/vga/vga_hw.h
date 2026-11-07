@@ -80,6 +80,16 @@ void vga_hw_set_palette16(const uint8_t *palette16_data);
 // line_offset is the number of words per scanline (from VGA cr[0x13])
 void vga_hw_set_gfx_mode(int submode, int width, int height, int line_offset);
 
+// Stretch 350-line modes over the 400-line window (true) or show them
+// 1:1 centred (false, default). Takes effect from the next frame.
+void vga_hw_set_stretch_350(bool on);
+
+// OSD support: freeze/unfreeze the per-frame update, switch to the text
+// window geometry, and rebuild everything from the VGA state next frame.
+void vga_hw_freeze(bool on);
+void vga_hw_set_osd_geometry(void);
+void vga_hw_refresh_all(void);
+
 // Give the ISR direct read-only access to VGA register state.
 // Call once after vga_init(). ISR reads cr[], ar[] at the right moment —
 // no volatile intermediates, no synchronisation lag.

@@ -19,8 +19,17 @@ static FIL *open_backup(const char *path, BYTE mode)
     return file;
 }
 
-bool gfx_scratch_acquire(size_t offset, size_t bytes, const char *backup_path,
-                         uint8_t **scratch)
+static bool xfer_all(FIL *file, bool write, void *ptr, size_t bytes)
+{
+    UINT done = 0;
+    FRESULT fr = write ? f_write(file, ptr, (UINT)bytes, &done)
+                       : f_read(file, ptr, (UINT)bytes, &done);
+    return fr == FR_OK && done == bytes;
+}
+
+bool gfx_scratch_acquire_ex(size_t offset, size_t bytes, const char *backup_path,
+                            const gfx_scratch_seg_t *extra, int extra_count,
+                            uint8_t **scratch)
 {
     if (!backup_path || !scratch || !bytes)
         return false;
@@ -29,11 +38,12 @@ bool gfx_scratch_acquire(size_t offset, size_t bytes, const char *backup_path,
     if (!backup)
         return false;
 
-    UINT bw = 0;
-    FRESULT fr = f_write(backup, gfx_buffer + offset, (UINT)bytes, &bw);
+    bool ok = xfer_all(backup, true, gfx_buffer + offset, bytes);
+    for (int i = 0; ok && i < extra_count; i++)
+        ok = xfer_all(backup, true, extra[i].ptr, extra[i].bytes);
     FRESULT close_fr = f_close(backup);
     free(backup);
-    if (fr != FR_OK || close_fr != FR_OK || bw != bytes) {
+    if (!ok || close_fr != FR_OK) {
         f_unlink(backup_path);
         return false;
     }
@@ -42,7 +52,8 @@ bool gfx_scratch_acquire(size_t offset, size_t bytes, const char *backup_path,
     return true;
 }
 
-bool gfx_scratch_release(size_t offset, size_t bytes, const char *backup_path)
+bool gfx_scratch_release_ex(size_t offset, size_t bytes, const char *backup_path,
+                            const gfx_scratch_seg_t *extra, int extra_count)
 {
     if (!backup_path || !bytes)
         return false;
@@ -51,13 +62,25 @@ bool gfx_scratch_release(size_t offset, size_t bytes, const char *backup_path)
     if (!backup)
         return false;
 
-    UINT br = 0;
-    FRESULT fr = f_read(backup, gfx_buffer + offset, (UINT)bytes, &br);
+    bool ok = xfer_all(backup, false, gfx_buffer + offset, bytes);
+    for (int i = 0; ok && i < extra_count; i++)
+        ok = xfer_all(backup, false, extra[i].ptr, extra[i].bytes);
     FRESULT close_fr = f_close(backup);
     free(backup);
-    if (fr != FR_OK || close_fr != FR_OK || br != bytes)
+    if (!ok || close_fr != FR_OK)
         return false;
 
     f_unlink(backup_path);
     return true;
+}
+
+bool gfx_scratch_acquire(size_t offset, size_t bytes, const char *backup_path,
+                         uint8_t **scratch)
+{
+    return gfx_scratch_acquire_ex(offset, bytes, backup_path, NULL, 0, scratch);
+}
+
+bool gfx_scratch_release(size_t offset, size_t bytes, const char *backup_path)
+{
+    return gfx_scratch_release_ex(offset, bytes, backup_path, NULL, 0);
 }
