@@ -62,7 +62,9 @@ static void movw_set(uint16_t *p, uint32_t v)
 
 static int apply(uint8_t *base, uint32_t mem_end, const ezrel *r)
 {
-    if (r->rva < EZ_IMAGE_RVA || r->rva + 4 > mem_end)
+    if (r->rva < EZ_IMAGE_RVA || r->rva > mem_end - 4)
+        return -1;
+    if (r->type == EZ_THM_G0_NC && (r->rva & 1))
         return -1;
     uint8_t *p = base + r->rva;
     uint32_t b = (uint32_t)(uintptr_t)base;
@@ -94,8 +96,19 @@ int win_ez_load(const char *path, win_ez_image *img)
     uint8_t *raw = NULL;
     if (fread(&h, 1, sizeof(h), f) != sizeof(h) || h.magic != EZ_MAGIC || h.version != 1 ||
         h.header_size < sizeof(h) || h.image_mem_size < h.image_file_size ||
-        h.entry_rva < EZ_IMAGE_RVA || h.entry_rva >= EZ_IMAGE_RVA + h.image_mem_size ||
+        h.image_mem_size > UINT32_MAX - EZ_IMAGE_RVA - EZ_BASE_ALIGN ||
+        h.entry_rva < EZ_IMAGE_RVA ||
+        h.entry_rva - EZ_IMAGE_RVA >= h.image_mem_size ||
         (h.reloc_count && h.reloc_entry_size < sizeof(ezrel)))
+        goto out;
+
+    /* Validate file ranges before allocating memory and applying relocations. */
+    long file_end;
+    if (fseek(f, 0, SEEK_END) || (file_end = ftell(f)) < 0 ||
+        (uint64_t)h.header_size + h.image_file_size > (uint64_t)file_end ||
+        (h.reloc_count &&
+         (uint64_t)h.reloc_offset + (uint64_t)h.reloc_count * h.reloc_entry_size >
+             (uint64_t)file_end))
         goto out;
 
     uint32_t total = EZ_IMAGE_RVA + h.image_mem_size;
@@ -111,14 +124,13 @@ int win_ez_load(const char *path, win_ez_image *img)
     if (h.reloc_count) {
         if (fseek(f, (long)h.reloc_offset, SEEK_SET))
             goto out;
-        uint8_t rec[16];
         for (uint32_t i = 0; i < h.reloc_count; i++) {
-            if (fread(rec, 1, h.reloc_entry_size > sizeof(rec) ? sizeof(rec) : h.reloc_entry_size, f) == 0)
-                goto out;
-            if (h.reloc_entry_size > sizeof(rec))
-                fseek(f, (long)(h.reloc_entry_size - sizeof(rec)), SEEK_CUR);
             ezrel r;
-            memcpy(&r, rec, sizeof(r));
+            if (fread(&r, 1, sizeof(r), f) != sizeof(r))
+                goto out;
+            if (h.reloc_entry_size > sizeof(r) &&
+                fseek(f, (long)(h.reloc_entry_size - sizeof(r)), SEEK_CUR))
+                goto out;
             if (apply(base, total, &r)) {
                 rc = -5;
                 goto out;
@@ -128,6 +140,7 @@ int win_ez_load(const char *path, win_ez_image *img)
     img->raw = raw;
     img->base = base;
     img->entry = base + h.entry_rva;
+    img->image_size = h.image_mem_size;
     img->stack_size = h.native_stack_size;
     raw = NULL;
     rc = 0;
@@ -138,10 +151,14 @@ out:
 }
 
 /* __ez_start of sdk/winapp_entry.c: "b 1f; .hword 0; .word WINAPP_MAGIC" */
-int win_ez_entry_is_app(const void *entry)
+int win_ez_entry_is_app(const win_ez_image *img)
 {
-    uintptr_t e = (uintptr_t)entry & ~(uintptr_t)1;
-    if (e & 3)
+    if (!img || !img->base || !img->entry || img->image_size < 8)
+        return 0;
+    uintptr_t e = (uintptr_t)img->entry & ~(uintptr_t)1;
+    uintptr_t base = (uintptr_t)img->base;
+    if ((e & 3) || e < base + EZ_IMAGE_RVA ||
+        e - base - EZ_IMAGE_RVA > img->image_size - 8)
         return 0;
     uint32_t sig;
     memcpy(&sig, (const uint8_t *)e + 4, 4);
@@ -159,8 +176,10 @@ int win_ez_is_app(const char *path)
     if (fread(&h, 1, sizeof(h), f) == sizeof(h) && h.magic == EZ_MAGIC && h.version == 1 &&
         h.header_size >= sizeof(h)) {
         e = h.entry_rva & ~1u;
-        if (!(e & 3) && e >= EZ_IMAGE_RVA && e + 8 <= EZ_IMAGE_RVA + h.image_file_size &&
-            !fseek(f, (long)(h.header_size + e - EZ_IMAGE_RVA + 4), SEEK_SET) &&
+        uint64_t end = (uint64_t)EZ_IMAGE_RVA + h.image_file_size;
+        uint64_t at = (uint64_t)h.header_size + e - EZ_IMAGE_RVA + 4;
+        if (!(e & 3) && e >= EZ_IMAGE_RVA && (uint64_t)e + 8 <= end &&
+            at <= INT32_MAX && !fseek(f, (long)at, SEEK_SET) &&
             fread(&sig, 1, 4, f) != 4)
             sig = 0;
     }
@@ -182,17 +201,21 @@ winapp_info *win_ez_read_info(const char *path)
     const uint32_t hsize = (uint32_t)offsetof(winapp_info, icon);
     if (fread(&h, 1, sizeof(h), f) == sizeof(h) && h.magic == EZ_MAGIC && h.version == 1 &&
         h.header_size >= sizeof(h)) {
-        uint32_t e = h.entry_rva & ~1u, end = EZ_IMAGE_RVA + h.image_file_size;
-        if (!(e & 3) && e >= EZ_IMAGE_RVA && e + 12 <= end &&
-            !fseek(f, (long)(h.header_size + e - EZ_IMAGE_RVA + 4), SEEK_SET) &&
+        uint32_t e = h.entry_rva & ~1u;
+        uint64_t end = (uint64_t)EZ_IMAGE_RVA + h.image_file_size;
+        uint64_t entry_at = (uint64_t)h.header_size + e - EZ_IMAGE_RVA + 4;
+        if (!(e & 3) && e >= EZ_IMAGE_RVA && (uint64_t)e + 12 <= end &&
+            entry_at <= INT32_MAX && !fseek(f, (long)entry_at, SEEK_SET) &&
             fread(w, 1, 8, f) == 8 && w[0] == WINAPP_MAGIC) {
             uint32_t rva = w[1];
-            long at = (long)(h.header_size + rva - EZ_IMAGE_RVA);
-            if (rva >= EZ_IMAGE_RVA && rva + hsize <= end && !(rva & 3) && !fseek(f, at, SEEK_SET) &&
+            uint64_t at = (uint64_t)h.header_size + rva - EZ_IMAGE_RVA;
+            if (rva >= EZ_IMAGE_RVA && (uint64_t)rva + hsize <= end && !(rva & 3) &&
+                at <= INT32_MAX && !fseek(f, (long)at, SEEK_SET) &&
                 fread(&head, 1, hsize, f) == hsize && head.magic == WINAPP_INFO_MAGIC &&
                 head.icon_count <= WINAPP_MAX_ICONS && head.size == WINAPP_INFO_SIZE(head.icon_count) &&
-                rva + head.size <= end && (out = (winapp_info *)win_alloc(head.size)) != NULL) {
-                if (fseek(f, at, SEEK_SET) || fread(out, 1, head.size, f) != head.size) {
+                (uint64_t)rva + head.size <= end &&
+                (out = (winapp_info *)win_alloc(head.size)) != NULL) {
+                if (fseek(f, (long)at, SEEK_SET) || fread(out, 1, head.size, f) != head.size) {
                     win_free(out);
                     out = NULL;
                 } else {

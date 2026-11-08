@@ -173,6 +173,9 @@ static HANDLE mem_realloc(int type, HANDLE h, DWORD bytes, UINT flags)
         m->flags = (m->flags & ~GMEM_MOVEABLE) | (flags & GMEM_MOVEABLE);
         return h;
     }
+    /* A pointer returned by GlobalLock/LocalLock must not move. */
+    if (m->lock && bytes != m->size)
+        return 0;
     void *n = win_realloc(m->p, bytes ? bytes : 1);
     if (!n)
         return 0;
@@ -262,9 +265,16 @@ DWORD WINAPI GetTickCount(void)
 DWORD WINAPI GetCurrentTime(void) { return GetTickCount(); }
 
 /* Windows 3.10 on DOS 7.0 (HIWORD = DOS version, LOWORD = 0x0A03). */
-DWORD WINAPI GetVersion(void) { return 0x0700000AUL | 0x0300; }
+DWORD WINAPI GetVersion(void) { return 0x07000A03UL; }
 
-HMODULE WINAPI GetModuleHandle(LPCSTR name) { (void)name; return 0x10; }
+HMODULE WINAPI GetModuleHandle(LPCSTR name)
+{
+    wtask *t = task_current();
+    /* At this stage an application is one EZ image (one task). */
+    if (!name || !*name || !lstrcmpi(name, t->name))
+        return (HMODULE)t->h;
+    return 0;  /* Named DLLs are not loaded yet. */
+}
 
 void WINAPI FatalExit(int code) { exit(code); }
 
@@ -429,16 +439,31 @@ int WINAPI wsprintf(LPSTR buf, LPCSTR fmt, ...)
 typedef struct { char *name; int refs; } watom;
 static watom atoms[ATOM_MAX];
 
+/* String atoms use only the allocated range, not all 0xC000..0xFFFF. */
+static int atom_is_stored(ATOM a)
+{
+    return a >= ATOM_BASE && (unsigned)(a - ATOM_BASE) < ATOM_MAX;
+}
+
 static int atom_is_int(LPCSTR name, ATOM *out)
 {
     if (IS_INTRESOURCE(name)) {
-        *out = (ATOM)(uintptr_t)name;
+        uintptr_t v = (uintptr_t)name;
+        *out = (ATOM)(v && v < ATOM_BASE ? v : 0);
         return 1;
     }
-    if (name[0] == '#') {
+    if (name[0] == '#' && name[1]) {
         unsigned v = 0;
-        for (const char *p = name + 1; *p >= '0' && *p <= '9'; p++)
-            v = v * 10 + (unsigned)(*p - '0');
+        for (const char *p = name + 1; *p; p++) {
+            if (*p < '0' || *p > '9')
+                return 0;
+            unsigned digit = (unsigned)(*p - '0');
+            if (v > (ATOM_BASE - 1u - digit) / 10u)
+                return 0;
+            v = v * 10u + digit;
+        }
+        if (!v)
+            return 0;
         *out = (ATOM)v;
         return 1;
     }
@@ -467,12 +492,15 @@ ATOM WINAPI AddAtom(LPCSTR name)
         return a;
     a = FindAtom(name);
     if (a) {
-        atoms[a - ATOM_BASE].refs++;
+        if (atom_is_stored(a))
+            atoms[a - ATOM_BASE].refs++;
         return a;
     }
     for (int i = 0; i < ATOM_MAX; i++) {
         if (!atoms[i].name) {
             atoms[i].name = win_strdup(name);
+            if (!atoms[i].name)
+                return 0;
             atoms[i].refs = 1;
             return (ATOM)(ATOM_BASE + i);
         }
@@ -484,6 +512,8 @@ ATOM WINAPI DeleteAtom(ATOM a)
 {
     if (a < ATOM_BASE)
         return 0;
+    if (!atom_is_stored(a))
+        return a;
     watom *e = &atoms[a - ATOM_BASE];
     if (!e->name)
         return a;
@@ -496,7 +526,7 @@ ATOM WINAPI DeleteAtom(ATOM a)
 
 UINT WINAPI GetAtomName(ATOM a, LPSTR buf, int size)
 {
-    if (size <= 0)
+    if (!buf || size <= 0)
         return 0;
     if (a < ATOM_BASE) {
         char tmp[8];
@@ -504,6 +534,8 @@ UINT WINAPI GetAtomName(ATOM a, LPSTR buf, int size)
         lstrcpyn(buf, tmp, size);
         return (UINT)lstrlen(buf);
     }
+    if (!atom_is_stored(a))
+        return 0;
     watom *e = &atoms[a - ATOM_BASE];
     if (!e->name)
         return 0;

@@ -273,10 +273,12 @@ typedef struct wtask {
     win_app_host  app;
     int     (*run)(struct wtask *);
     struct wtask_ctx *ctx;
+    struct wtask *dispatch_owner;  /* logical owner during cross-task SendMessage */
 } wtask;
 
 void   task_init(void);
 wtask *task_current(void);
+wtask *task_set_dispatch_owner(wtask *owner); /* returns previous owner */
 wtask *task_kernel(void);
 wtask *task_from_handle(HTASK h);
 wtask *task_create(const char *name, int (*run)(wtask *), uint32_t stack_size);
@@ -295,13 +297,14 @@ typedef struct {
     void     *raw;              /* allocation to free */
     uint8_t  *base;
     void     *entry;
+    uint32_t  image_size;       /* image memory size, for entry bounds */
     uint32_t  stack_size;       /* from the EZ header, 0 = default */
 } win_ez_image;
 int    win_ez_load(const char *path, win_ez_image *img);
 winapp_info *win_ez_read_info(const char *path);        /* win_alloc'd or NULL */
 winapp_info *win_app_info(const char *path);            /* task.c: also the host's */
 /* the SDK's application entry starts with a branch over WINAPP_MAGIC */
-int    win_ez_entry_is_app(const void *entry);
+int    win_ez_entry_is_app(const win_ez_image *img);
 int    win_ez_is_app(const char *path);    /* the file, without loading it */
 
 /* gdi.c: set by USER, for FillRect(dc, rc, (HBRUSH)(COLOR_xxx + 1)) */

@@ -70,7 +70,16 @@ ATOM WINAPI RegisterClass(const WNDCLASS *wc)
     if (!c)
         return 0;
     c->name = win_strdup(wc->lpszClassName);
+    if (!c->name) {
+        win_free(c);
+        return 0;
+    }
     c->atom = AddAtom(wc->lpszClassName);
+    if (!c->atom) {
+        win_free(c->name);
+        win_free(c);
+        return 0;
+    }
     c->wc = *wc;
     c->wc.lpszClassName = c->name;
     c->next = classes;
@@ -92,12 +101,26 @@ void user_register_builtin(LPCSTR name, WNDPROC proc, UINT style, int extra,
     RegisterClass(&wc);
 }
 
+/* An active window retains w->cls until WM_NCDESTROY finishes. */
+static int class_has_window(wwnd *w, const wclass *c)
+{
+    for (; w; w = w->next) {
+        if (w->cls == c || class_has_window(w->child, c))
+            return 1;
+    }
+    return 0;
+}
+
 BOOL WINAPI UnregisterClass(LPCSTR name, HINSTANCE inst)
 {
-    (void)inst;
+    if (!name)
+        return FALSE;
     for (wclass **pp = &classes; *pp; pp = &(*pp)->next) {
         wclass *c = *pp;
-        if (IS_INTRESOURCE(name) ? c->atom == (ATOM)(uintptr_t)name : !lstrcmpi(c->name, name)) {
+        if (c->wc.hInstance == inst &&
+            (IS_INTRESOURCE(name) ? c->atom == (ATOM)(uintptr_t)name : !lstrcmpi(c->name, name))) {
+            if (class_has_window(U.desktop, c))
+                return FALSE;
             *pp = c->next;
             DeleteAtom(c->atom);
             win_free(c->name);
@@ -1143,8 +1166,14 @@ HWND WINAPI CreateWindowEx(DWORD ex, LPCSTR klass, LPCSTR title, DWORD style,
     w->menu = (style & WS_CHILD) ? 0 : menu;
     w->task = (style & WS_CHILD) ? parent->task : task_current()->h;
     w->cb_extra = c->wc.cbWndExtra;
-    if (w->cb_extra > 0)
+    if (w->cb_extra > 0) {
         w->extra = (uint8_t *)win_alloc((size_t)w->cb_extra);
+        if (!w->extra) {
+            win_handle_free(h);
+            win_free(w);
+            return 0;
+        }
+    }
     wrgn_init(&w->update);
     w->vs.max = w->hs.max = 100;
 
@@ -1170,6 +1199,13 @@ HWND WINAPI CreateWindowEx(DWORD ex, LPCSTR klass, LPCSTR title, DWORD style,
     w->rc = rc;
     nc_calc(w->style, w->exstyle, user_menu_bar_height(w), own_icon(w), &w->rc, &w->client);
     w->text = win_strdup(title ? title : "");
+    if (!w->text) {
+        wrgn_free(&w->update);
+        win_free(w->extra);
+        win_handle_free(h);
+        win_free(w);
+        return 0;
+    }
 
     if (parent && (style & WS_CHILD))
         link_bottom(w);

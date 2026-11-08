@@ -127,7 +127,15 @@ LRESULT WINAPI SendMessage(HWND h, UINT m, WPARAM wp, LPARAM lp)
     wwnd *w = user_wnd(h);
     if (!w || !w->proc)
         return 0;
-    return w->proc(h, m, wp, lp);
+    /* Keep the synchronous call, but attribute API calls inside its
+     * window procedure to the window's owning task, not to the sender. */
+    wtask *owner = task_from_handle(w->task);
+    if (!owner || owner == task_current())
+        return w->proc(h, m, wp, lp);
+    wtask *previous = task_set_dispatch_owner(owner);
+    LRESULT result = w->proc(h, m, wp, lp);
+    task_set_dispatch_owner(previous);
+    return result;
 }
 
 LRESULT WINAPI CallWindowProc(WNDPROC proc, HWND h, UINT m, WPARAM wp, LPARAM lp)
@@ -454,7 +462,7 @@ static int timer_due(HTASK task)
     return 0;
 }
 
-static int timer_message(MSG *m, HWND filter, HTASK task)
+static int timer_message(MSG *m, HWND filter, HTASK task, int remove)
 {
     uint32_t t = now_ms();
     for (int i = 0; i < NTIMERS; i++) {
@@ -463,7 +471,8 @@ static int timer_message(MSG *m, HWND filter, HTASK task)
             continue;
         if (filter && tm->hwnd != filter && !IsChild(filter, tm->hwnd))
             continue;
-        tm->due = t + tm->elapse;
+        if (remove)
+            tm->due = t + tm->elapse;
         m->hwnd = tm->hwnd;
         m->message = WM_TIMER;
         m->wParam = tm->id;
@@ -564,7 +573,7 @@ static int get_one(MSG *out, HWND h, UINT first, UINT last, int remove)
     }
     if (!first || (WM_TIMER >= first && WM_TIMER <= last)) {
         MSG t;
-        if (timer_message(&t, h, me->h)) {
+        if (timer_message(&t, h, me->h, remove)) {
             *out = t;
             return 1;
         }

@@ -37,7 +37,15 @@ static wtask *tasks = &kernel_task;   /* list, kernel first */
 static wtask *cur = &kernel_task;
 static HTASK shell_task;
 
-wtask *task_current(void) { return cur; }
+/* The physical stack remains the sender's during synchronous SendMessage.
+ * The owner is task-local, so task_yield() cannot leak it to another task. */
+wtask *task_current(void) { return cur->dispatch_owner ? cur->dispatch_owner : cur; }
+wtask *task_set_dispatch_owner(wtask *owner)
+{
+    wtask *previous = cur->dispatch_owner;
+    cur->dispatch_owner = owner;
+    return previous;
+}
 wtask *task_kernel(void) { return &kernel_task; }
 wtask *task_from_handle(HTASK h)
 {
@@ -48,7 +56,7 @@ wtask *task_from_handle(HTASK h)
     return (wtask *)win_handle_get(h, WOBJ_TASK);
 }
 
-HTASK WINAPI GetCurrentTask(void) { return cur->h; }
+HTASK WINAPI GetCurrentTask(void) { return task_current()->h; }
 
 BOOL WINAPI IsTask(HTASK h)
 {
@@ -383,7 +391,7 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
     }
 #else
     int rc = win_ez_load(path, &img);
-    if (!rc && !win_ez_entry_is_app(img.entry)) {
+    if (!rc && !win_ez_entry_is_app(&img)) {
         win_free(img.raw);          /* a DOS program or a driver */
         rc = -2;
     }
