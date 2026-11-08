@@ -1,0 +1,9 @@
+# Start-up logo: run with "./winhost scripts/logo.txt PROGMAN" (and
+# winhost800 for the 16-colour one) after copying WINLOGO.BMP and
+# WINLOG16.BMP from apps/compiled into HOSTWIN; remove them afterwards,
+# the other scripts expect no logo.
+wait 50
+snap logo.ppm
+wait 3000
+snap logo_after.ppm
+exit

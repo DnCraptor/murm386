@@ -273,6 +273,8 @@ int main(int argc, char **argv)
     if (win_boot("HOSTWIN/WINN.EXE", &host_snap_display, &host_script_input))
         return 1;
 #endif
+    win_logo_show();                /* HOSTWIN/WINLOGO.BMP, if the test put one there */
+    win_logo_end();
     UINT r = WinExec(argc > 2 ? argv[2] : "DEMO.EXE", SW_SHOWNORMAL);
     if (r < 32) {
         printf("WinExec failed: %u\n", r);

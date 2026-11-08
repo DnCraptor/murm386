@@ -483,6 +483,12 @@ static HGDIOBJ stock_set(int idx, HGDIOBJ h)
 
 static HBITMAP stock_bitmap;    /* 1x1 mono, default for memory DCs */
 
+/* the system palette into the hardware again (after the start-up logo) */
+void gdi_palette_reset(void)
+{
+    syspal_upload(0, 256);
+}
+
 int gdi_init(void)
 {
     syspal_default();

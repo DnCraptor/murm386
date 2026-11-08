@@ -212,8 +212,14 @@ int      user_init(void);                        /* user/dialog.c */
 void     win_set_home(const char *exe_path);
 void     win_path(const char *name, char *out, int size);
 
+/* logo.c */
+void     win_logo_skip(void);
+void     win_logo_show(void);
+void     win_logo_end(void);
+
 /* gdi.c */
 int      gdi_init(void);
+void     gdi_palette_reset(void);
 void     gdi_shutdown(void);
 uint8_t  gdi_color_index(wdc *dc, COLORREF c);
 wdc     *gdi_dc(HDC h);

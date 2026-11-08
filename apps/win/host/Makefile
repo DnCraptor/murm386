@@ -7,7 +7,7 @@ CORE     = $(wildcard ../core/*.c)
 USER     = $(wildcard ../user/*.c)
 HOST     = host_drivers.c
 # GDI test: no USER, so no tasks, files and export tables
-GDICORE  = $(filter-out ../core/exports.c ../core/task.c ../core/file.c,$(CORE))
+GDICORE  = $(filter-out ../core/exports.c ../core/task.c ../core/file.c ../core/logo.c,$(CORE))
 
 # the applications, built in; each WinMain gets its own name
 APPS     = demo.o progman.o notepad.o clock.o calc.o control.o winfile.o taskman.o winmine.o

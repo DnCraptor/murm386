@@ -7,7 +7,7 @@ applications (separate EZ files) as cooperative tasks, as Windows 3.x does.
 Stage 2 will load Win16 NE executables on the 386 core and route their
 imports to the same export tables.
 
-    WINN [program [arguments]]
+    WINN [:] [program [arguments]]
 
 `SYSTEM.INI` next to `WINN.EXE` (see the sample here) names the shell
 (`[boot] shell=`), started first; Windows ends when it ends. Without the key
@@ -78,6 +78,16 @@ asking "Abort, Retry, Fail?".
 After adding an API function, run `sdk/gen_exports.py` (it updates
 `core/exports.c` and `sdk/winapi_stubs.S`, both committed).
 
+## Start-up logo
+
+Between the display switching on and the shell starting, WINN shows
+`WINLOGO.BMP` (256 colours) or `WINLOG16.BMP` (16-colour displays) from
+its directory, centred, scaled down if it is larger than the screen, for
+SYSTEM.INI [boot] `logo.time` milliseconds (2000; 0: none). `WINN :`
+starts without it, as `WIN :` did. The files are 8 bpp BMPs, plain or
+RLE8, of at most 236 colours (they take the free middle of the palette
+while the logo is up); `logo/mklogo.py` makes both from `logo/logo.png`.
+
 ## Settings
 
 `WIN.INI` next to `WINN.EXE` is read at start, as in Windows 3.1:
@@ -137,6 +147,7 @@ use `ucontext`):
     ./winhost scripts/winfile.txt WINFILE    # tree, copy, move, rename, delete in HOSTWIN/DOCS
     ./winhost scripts/taskman.txt PROGMAN    # Task List: Ctrl+Esc, Switch To, Tile, End Task
     ./winhost scripts/winmine.txt WINMINE    # marks, a lost game, Expert, Best Times
+    ./winhost scripts/logo.txt PROGMAN       # the logo (copy the BMPs into HOSTWIN first)
     ./winhost800 scripts/vga800.txt  # the VGA800 driver, built in
     ./test_gdi                       # GDI sample sheet, gdi.ppm
 

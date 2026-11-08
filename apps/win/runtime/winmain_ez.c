@@ -1,13 +1,14 @@
 /*
  * winmain_ez.c - WINN.EXE: the Windows loader.
  *
- *   WINN [program [arguments]]
+ *   WINN [:] [program [arguments]]
  *
  * Starts the drivers named in SYSTEM.INI (or the built-in ones), GDI and
  * USER, then runs the shell given by [boot] shell= (PROGMAN.EXE when the
  * key is missing) and the program from the command line, each as its own
  * task. Windows ends when the first task
- * started (the shell, or the program if there is no shell) ends.
+ * started (the shell, or the program if there is no shell) ends. The
+ * start-up logo (logo.c) is up until then; ":" leaves it out.
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
@@ -42,10 +43,15 @@ static int run(const char *cmd)
 int main(int argc, char **argv)
 {
     static char cmdline[128];
-    for (int i = 1; i < argc; i++) {
+    int first = 1;
+    if (argc > 1 && !strcmp(argv[1], ":")) {
+        win_logo_skip();
+        first = 2;
+    }
+    for (int i = first; i < argc; i++) {
         if (strlen(cmdline) + strlen(argv[i]) + 2 >= sizeof(cmdline))
             break;
-        if (i > 1)
+        if (i > first)
             strcat(cmdline, " ");
         strcat(cmdline, argv[i]);
     }
@@ -55,6 +61,8 @@ int main(int argc, char **argv)
         printf("Windows: display start failed (%d)\n", r);
         return 1;
     }
+    win_logo_show();
+    win_logo_end();
     /* no shell= at all: PROGMAN.EXE, as in Windows 3.x, if it is there;
      * "shell=" with nothing: no shell */
     char shell[80];
