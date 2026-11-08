@@ -90,6 +90,55 @@ int main(void)
         0xcb
     };
     assert(win_ne_entry_calls(strings,sizeof strings,0,8,api,3,&n) && n == 2);
+    /* Both sides of a forward JNZ must be valid; exactly one service is
+     * executed on either path. A direct DS write/read is allowed below the
+     * caller stack, but not if the window reaches its reserved bytes. */
+    const uint16_t branch_ids[] = { 3, 0x1001 };
+    const uint8_t forward[] = {
+        0xc7,0x06,0x20,0x00,0x34,0x12, /* MOV word DS:[20h],1234h */
+        0xa1,0x20,0x00,                /* MOV AX,DS:[20h] */
+        0x3d,0x34,0x12,                /* CMP AX,1234h */
+        0x75,0x07,                     /* JNZ alternative */
+        0x9a,0x00,0x00,0x08,0x00,      /* KERNEL.GetVersion */
+        0xeb,0x05,                     /* JMP return */
+        0x9a,0x10,0x00,0x08,0x00,      /* USER.MessageBox -- wrong argc */
+        0xcb
+    };
+    /* The alternative must also match the API's Pascal stack layout. */
+    assert(!win_ne_entry_calls_data(forward, sizeof forward, 0, 8,
+                                    branch_ids, 2, 0xc0, &n));
+    const uint16_t zero_args[] = { 3, 36 };
+    assert(win_ne_entry_calls_data(forward, sizeof forward, 0, 8,
+                                   zero_args, 2, 0xc0, &n) && n == 1);
+    assert(!win_ne_entry_calls(forward, sizeof forward, 0, 8,
+                               zero_args, 2, &n));
+    assert(!win_ne_entry_calls_data(forward, sizeof forward, 0, 8,
+                                    zero_args, 2, 0x21, &n));
+    uint8_t flow_bad[sizeof forward];
+    memcpy(flow_bad, forward, sizeof forward);
+    flow_bad[13] = 0xff; /* backward JNZ */
+    assert(!win_ne_entry_calls_data(flow_bad, sizeof flow_bad, 0, 8,
+                                    zero_args, 2, 0xc0, &n));
+    memcpy(flow_bad, forward, sizeof forward);
+    flow_bad[20] = 0x00; /* JMP +0 is disallowed */
+    assert(!win_ne_entry_calls_data(flow_bad, sizeof flow_bad, 0, 8,
+                                    zero_args, 2, 0xc0, &n));
+    memcpy(flow_bad, forward, sizeof forward);
+    flow_bad[13] = 0x05; /* target inside JMP's instruction operands */
+    assert(!win_ne_entry_calls_data(flow_bad, sizeof flow_bad, 0, 8,
+                                    zero_args, 2, 0xc0, &n));
+    memcpy(flow_bad, forward, sizeof forward);
+    flow_bad[21] = 0xcb; /* alternative returns without calling an API */
+    assert(!win_ne_entry_calls_data(flow_bad, sizeof flow_bad, 0, 8,
+                                    zero_args, 2, 0xc0, &n));
+    memcpy(flow_bad, forward, sizeof forward);
+    flow_bad[2] = 0xc0; /* direct DS write into the protected stack region */
+    assert(!win_ne_entry_calls_data(flow_bad, sizeof flow_bad, 0, 8,
+                                    zero_args, 2, 0xc0, &n));
+    memcpy(flow_bad, forward, sizeof forward);
+    flow_bad[0] = 0x2e; /* CS override cannot write executable segment */
+    assert(!win_ne_entry_calls_data(flow_bad, sizeof flow_bad, 0, 8,
+                                    zero_args, 2, 0xc0, &n));
     puts("ne entry stack validator: PASS");
     return 0;
 }

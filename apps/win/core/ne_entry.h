@@ -1,14 +1,22 @@
-/* Preflight the bounded Win16 entry before switching the shared CPU to PE. */
+/* Preflight of bounded Win16 code before switching the shared CPU to PE. */
 #ifndef WINN_NE_ENTRY_H
 #define WINN_NE_ENTRY_H
 #include <stdint.h>
 #include <stddef.h>
 
-/* Preflight executes no guest code. It accepts a bounded straight-line
- * subset with register arithmetic, a simple BP frame, and relocations to
- * known FAR API thunks. Branches and memory-addressing instructions are
- * intentionally rejected until protected-mode fault recovery exists.
- * service_ids are indexed by thunk offset / WIN_NE_THUNK_BYTES. */
+/* All reachable paths must end at a RETF after at least one supported API
+ * call. Conditional and unconditional branches are allowed only forward;
+ * memory references must be direct DS:disp16 and stay below data_limit.
+ * Indirect branches, loops and arbitrary/stack-relative addressing remain
+ * disabled until protected-mode exception recovery is implemented.
+ * calls receives the maximum number of API calls on any validated path. */
+int win_ne_entry_calls_data(const uint8_t *p, size_t bytes, size_t ip,
+                            uint16_t thunk_selector, const uint16_t *service_ids,
+                            unsigned thunk_count, size_t data_limit,
+                            unsigned *calls);
+
+/* Legacy straight-line interface for host tests and callers not providing
+ * a verified DATA region: identical rules, but no direct memory accesses. */
 int win_ne_entry_calls(const uint8_t *p, size_t bytes, size_t ip,
                        uint16_t thunk_selector, const uint16_t *service_ids,
                        unsigned thunk_count, unsigned *calls);

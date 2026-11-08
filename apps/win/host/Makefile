@@ -15,7 +15,7 @@ GDICORE  = $(filter-out ../core/exports.c ../core/task.c ../core/file.c ../core/
 # the applications, built in; each WinMain gets its own name
 APPS     = demo.o progman.o notepad.o clock.o calc.o control.o winfile.o taskman.o winmine.o appinfo.o
 
-all: test_gdi test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_entry test_ne_args test_ne_dialog test_ne_registers test_ne_strings test_ne_rm_gate winhost winhost800 HOSTWIN
+all: test_gdi test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_entry test_ne_args test_ne_dialog test_ne_registers test_ne_strings test_ne_flow test_ne_rm_gate winhost winhost800 HOSTWIN
 
 test_gdi: $(GDICORE) $(HOST) test_gdi.c
 	$(CC) $(CFLAGS) $(INC) -o $@ $^
@@ -74,6 +74,13 @@ NESTR-fixture.exe: mkne_strings.py
 
 test_ne_strings: ../core/ne.c ../core/ne_guest.c ../core/ne_entry.c test_ne_strings.c NESTR-fixture.exe
 	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne.c ../core/ne_guest.c ../core/ne_entry.c test_ne_strings.c
+
+# Safe forward Jcc/JMP paths with bounded direct DS access and two API imports.
+NEFLOW-fixture.exe: mkne_flow.py
+	python3 mkne_flow.py $@
+
+test_ne_flow: ../core/ne.c ../core/ne_guest.c ../core/ne_entry.c test_ne_flow.c NEFLOW-fixture.exe
+	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne.c ../core/ne_guest.c ../core/ne_entry.c test_ne_flow.c
 
 # Host-compiled ARM executor with mocked shared DOS CPU and real API marshaller.
 test_ne_rm_gate: ../core/ne_exec.c ../core/ne_guest_api.c test_ne_rm_gate.c
@@ -137,6 +144,6 @@ HOSTWIN:
 	cp HOSTWIN/README.TXT HOSTWIN/DOCS/README.TXT
 
 clean:
-	rm -rf test_gdi test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_entry test_ne_args test_ne_dialog test_ne_registers test_ne_strings test_ne_rm_gate winhost winhost800 *.o *.ppm *.png appinfo.c HOSTWIN
+	rm -rf test_gdi test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_entry test_ne_args test_ne_dialog test_ne_registers test_ne_strings test_ne_flow test_ne_rm_gate winhost winhost800 *.o *.ppm *.png appinfo.c HOSTWIN
 
 .PHONY: all clean HOSTWIN

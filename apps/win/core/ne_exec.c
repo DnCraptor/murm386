@@ -4,8 +4,9 @@
  * The native WINN thread owns the emulator.  This prepares a staged NE
  * with a DATA stack, enters PE in guest code, yields on API OUT, returns
  * from the guest FAR procedure, exits PE and returns to WINN.  The executor
- * accepts ONLY preflighted straight-line Win16 API calls using a bounded
- * PASCAL argument subset; arbitrary NE applications remain disabled.
+ * accepts ONLY preflighted bounded Win16 code (acyclic branches, direct
+ * DATA accesses and supported PASCAL API calls). Arbitrary NE applications
+ * remain disabled until protected-mode fault recovery exists.
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
@@ -62,10 +63,9 @@ static void restore_cpu(CPU *cpu, const win_cpu_snapshot *s)
     cpu->excerr = s->excerr;
 }
 
-/* Permit only a straight-line NE entry: NOP, verified FAR imports,
- * then RETF. A real Win16 application's instructions and ABI are still
- * unsupported. Reject them *before* changing CR0.PE: no PM fault handler
- * has been installed for arbitrary code. */
+/* Permit only a bounded acyclic NE entry, with validated DS accesses and
+ * FAR API imports. Reject arbitrary instructions and backward jumps before
+ * changing CR0.PE: no PM fault handler is installed for arbitrary code. */
 static int valid_basic_entry(const win_ne_guest_image *g, unsigned *calls)
 {
     if (!g->info.cs_index || !g->info.ss_index ||
@@ -79,8 +79,15 @@ static int valid_basic_entry(const win_ne_guest_image *g, unsigned *calls)
         return 0;
     const win_ne_guest_segment *code = &g->segments[g->info.cs_index];
     const uint8_t *p = (const uint8_t *)dos_guest_linear_ptr(code->linear);
-    return win_ne_entry_calls(p, code->size, g->ip, g->thunk_selector,
-                              g->thunk_services, g->thunk_count, calls);
+    /* DS initially points to SS (the NE DATA segment). Keep direct memory
+     * operations below the stack's low-water reservation: FAR calls and
+     * the PM/RM gateway share that stack during native API dispatch. */
+    size_t safe_data = g->sp > 64u ? (size_t)g->sp - 64u : 0u;
+    if (safe_data > g->segments[g->info.ss_index].size)
+        safe_data = g->segments[g->info.ss_index].size;
+    return win_ne_entry_calls_data(p, code->size, g->ip, g->thunk_selector,
+                                   g->thunk_services, g->thunk_count,
+                                   safe_data, calls);
 }
 
 typedef struct {
