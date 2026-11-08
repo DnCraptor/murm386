@@ -73,6 +73,17 @@ After adding an API function, run `sdk/gen_exports.py` (it updates
 
 ## Building
 
+Everything at once, each project in a fresh build directory under
+`build/win`, into `apps/compiled`:
+
+    apps/win/build_win.sh            # or apps\win\build_win.bat
+
+Identical sources give identical files only with the same compiler, Pico SDK
+and build type. The scripts fix the build type (MinSizeRel) and take the SDK
+2.2.0 and the Arm GNU Toolchain 14_2_Rel1 of the Pico VS Code extension (or
+`PICO_SDK_PATH` / `PICO_TOOLCHAIN_PATH`); they end with the compiler, the SDK
+and a SHA-256 of every file, so two builds can be compared. One project:
+
     cmake -S apps/win -B build-win                 # apps/compiled/winn.exe
     cmake --build build-win
     cmake -S apps/windrv/vga800 -B build-vga800    # apps/compiled/VGA800.DRV
