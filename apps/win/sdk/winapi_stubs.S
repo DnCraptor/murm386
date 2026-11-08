@@ -4461,6 +4461,23 @@ GetCaretBlinkTime:
     .ltorg
     .size GetCaretBlinkTime, .-GetCaretBlinkTime
 
+    .section .text.winapi.ArrangeIconicWindows,"ax",%progbits
+    .global ArrangeIconicWindows
+    .type ArrangeIconicWindows, %function
+    .thumb_func
+ArrangeIconicWindows:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =680
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size ArrangeIconicWindows, .-ArrangeIconicWindows
+
     .section .text.winapi.LoadCursor,"ax",%progbits
     .global LoadCursor
     .type LoadCursor, %function
@@ -4698,6 +4715,40 @@ GetTabbedTextExtent:
     bx   r12
     .ltorg
     .size GetTabbedTextExtent, .-GetTabbedTextExtent
+
+    .section .text.winapi.CascadeChildWindows,"ax",%progbits
+    .global CascadeChildWindows
+    .type CascadeChildWindows, %function
+    .thumb_func
+CascadeChildWindows:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =792
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size CascadeChildWindows, .-CascadeChildWindows
+
+    .section .text.winapi.TileChildWindows,"ax",%progbits
+    .global TileChildWindows
+    .type TileChildWindows, %function
+    .thumb_func
+TileChildWindows:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =796
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size TileChildWindows, .-TileChildWindows
 
     .section .text.winapi.GetNextDlgGroupItem,"ax",%progbits
     .global GetNextDlgGroupItem

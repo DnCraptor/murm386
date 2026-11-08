@@ -44,11 +44,25 @@ static HWND client_of(HWND child)
     return w && w->parent ? w->parent->h : 0;
 }
 
-/* the children in id order */
+/* A top-level window that Cascade, Tile and Arrange Icons move on the
+ * desktop: visible, not owned, with a caption. */
+static int arrangeable(wwnd *t)
+{
+    return t && t->parent == U.desktop && !t->destroying && !t->owner && user_is_visible(t) &&
+           ((t->style & WS_CAPTION) == WS_CAPTION || (t->style & WS_MINIMIZE));
+}
+
+/* the children in id order (m NULL: the desktop's windows, top first) */
 static int children(HWND client, mdiinfo *m, wwnd **out, int max)
 {
     wwnd *c = user_wnd(client);
     int n = 0;
+    if (!m) {
+        for (wwnd *t = c ? c->child : NULL; t && n < max; t = t->next)
+            if (arrangeable(t))
+                out[n++] = t;
+        return n;
+    }
     for (UINT id = m->first; c && id < m->first + (UINT)m->count && n < max; id++)
         for (wwnd *t = c->child; t; t = t->next)
             if (t->id == id && !t->destroying) {
@@ -60,6 +74,8 @@ static int children(HWND client, mdiinfo *m, wwnd **out, int max)
 
 static int is_child(HWND client, mdiinfo *m, wwnd *t)
 {
+    if (!m)
+        return arrangeable(t);
     return t && t->parent && t->parent->h == client && !t->destroying &&
            t->id >= m->first && t->id < m->first + (UINT)m->count;
 }
@@ -613,4 +629,44 @@ BOOL WINAPI TranslateMDISysAccel(HWND client, LPMSG msg)
         return FALSE;
     SendMessage(m->active, WM_SYSCOMMAND, cmd, 0);
     return TRUE;
+}
+
+/* ---------------------------------------------------------------- the desktop (Task List) */
+
+/* The arrangements of an MDI client, or of the top-level windows when
+ * parent is the desktop (what the Task List's buttons do). */
+static mdiinfo *arrange_target(HWND parent, int *ok)
+{
+    *ok = parent == GetDesktopWindow();
+    mdiinfo *m = *ok ? NULL : info(parent);
+    if (m)
+        *ok = 1;
+    return m;
+}
+
+void WINAPI CascadeChildWindows(HWND parent, UINT action)
+{
+    int ok;
+    mdiinfo *m = arrange_target(parent, &ok);
+    (void)action;
+    if (ok)
+        cascade(parent, m);
+}
+
+void WINAPI TileChildWindows(HWND parent, UINT action)
+{
+    int ok;
+    mdiinfo *m = arrange_target(parent, &ok);
+    if (ok)
+        tile(parent, m, action);
+}
+
+UINT WINAPI ArrangeIconicWindows(HWND parent)
+{
+    int ok;
+    mdiinfo *m = arrange_target(parent, &ok);
+    if (!ok)
+        return 0;
+    icon_arrange(parent, m);
+    return UM_ICONH + UM_ICONGAP;
 }

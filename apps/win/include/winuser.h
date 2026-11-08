@@ -601,6 +601,9 @@ HWND    WINAPI GetDesktopWindow(void);
 HWND    WINAPI FindWindow(LPCSTR klass, LPCSTR title);
 BOOL    WINAPI EnumWindows(WNDENUMPROC proc, LPARAM lp);
 BOOL    WINAPI EnumChildWindows(HWND parent, WNDENUMPROC proc, LPARAM lp);
+void    WINAPI CascadeChildWindows(HWND parent, UINT action);   /* the desktop or an MDI client */
+void    WINAPI TileChildWindows(HWND parent, UINT action);      /* MDITILE_* */
+UINT    WINAPI ArrangeIconicWindows(HWND parent);
 HWND    WINAPI WindowFromPoint(POINT pt);
 HWND    WINAPI ChildWindowFromPoint(HWND parent, POINT pt);
 void    WINAPI GetWindowRect(HWND hwnd, LPRECT rc);

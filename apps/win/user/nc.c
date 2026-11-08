@@ -894,6 +894,20 @@ void user_syscommand(wwnd *w, UINT cmd, int x, int y)
             SetActiveWindow(pick->h);
         break;
     }
+    case SC_TASKLIST: {
+        /* the Task List: the one already open, or SYSTEM.INI [boot]
+         * taskman.exe (TASKMAN.EXE) started */
+        HWND tl = FindWindow(NULL, "Task List");
+        if (tl && IsWindowVisible(tl)) {
+            SetActiveWindow(tl);
+            break;
+        }
+        char prog[80];
+        GetPrivateProfileString("boot", "taskman.exe", "TASKMAN.EXE", prog, sizeof(prog), "SYSTEM.INI");
+        if (WinExec(prog, SW_SHOWNORMAL) < 32)
+            MessageBeep(0);
+        break;
+    }
     default:
         break;
     }

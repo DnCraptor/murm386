@@ -224,13 +224,21 @@ static void make_main_group(void)
     ngroups = 1;
     WinDirListN(spec, names, sizeof(names));
     for (const char *p = names; *p && gr->n < MAXITEMS; p += lstrlen(p) + 1) {
-        if (!lstrcmpi(p, "PROGMAN.EXE") || !lstrcmpi(p, "WINN.EXE"))
+        if (!lstrcmpi(p, "PROGMAN.EXE") || !lstrcmpi(p, "WINN.EXE") || !lstrcmpi(p, "TASKMAN.EXE"))
             continue;
         wsprintf(path, "%s%s", dir, p);
         if (!IsWinAppN(path))
             continue;
         pm_item *it = &gr->it[gr->n++];
+        /* the names Windows 3.1 gives its own programs */
+        static const char *const known[][2] = {
+            { "WINFILE.EXE", "File Manager" }, { "CONTROL.EXE", "Control Panel" },
+            { "CALC.EXE", "Calculator" },
+        };
         title_of(p, it->desc, sizeof(it->desc));
+        for (unsigned k = 0; k < sizeof(known) / sizeof(known[0]); k++)
+            if (!lstrcmpi(p, known[k][0]))
+                lstrcpyn(it->desc, known[k][1], sizeof(it->desc));
         lstrcpyn(it->cmd, p, sizeof(it->cmd));
         AnsiUpper(it->cmd);
     }

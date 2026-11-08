@@ -1442,7 +1442,7 @@ HANDLE WINAPI RemoveProp(HWND h, LPCSTR name)
 
 void user_init_windows(void)
 {
-    user_register_builtin("#32769", user_desktop_proc, 0, 0, 0, 0);
+    user_register_builtin("#32769", user_desktop_proc, CS_DBLCLKS, 0, 0, 0);
     wclass *c = user_find_class("#32769");
     wwnd *d = (wwnd *)win_alloc(sizeof(*d));
     d->h = win_handle_alloc(WOBJ_WINDOW, d);

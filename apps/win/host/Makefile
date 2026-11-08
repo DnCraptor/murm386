@@ -10,7 +10,7 @@ HOST     = host_drivers.c
 GDICORE  = $(filter-out ../core/exports.c ../core/task.c ../core/file.c,$(CORE))
 
 # the applications, built in; each WinMain gets its own name
-APPS     = demo.o progman.o notepad.o clock.o calc.o control.o winfile.o
+APPS     = demo.o progman.o notepad.o clock.o calc.o control.o winfile.o taskman.o
 
 all: test_gdi winhost winhost800 HOSTWIN
 
@@ -38,6 +38,9 @@ control.o: ../../winapps/control/control.c
 winfile.o: ../../winapps/winfile/winfile.c
 	$(CC) $(CFLAGS) $(INC) -DWinMain=winfile_WinMain -c -o $@ $<
 
+taskman.o: ../../winapps/taskman/taskman.c
+	$(CC) $(CFLAGS) $(INC) -DWinMain=taskman_WinMain -c -o $@ $<
+
 winhost: $(CORE) $(USER) $(HOST) host_main.c $(APPS)
 	$(CC) $(CFLAGS) $(INC) -o $@ $^
 
@@ -49,7 +52,7 @@ winhost800: $(CORE) $(USER) $(HOST) host_main.c $(APPS) ../../windrv/vga800/vga8
 # (the applications themselves are built in), a DOS program and a text file
 HOSTWIN:
 	mkdir -p HOSTWIN
-	touch HOSTWIN/DEMO.EXE HOSTWIN/PROGMAN.EXE HOSTWIN/NOTEPAD.EXE HOSTWIN/CLOCK.EXE HOSTWIN/CALC.EXE HOSTWIN/CONTROL.EXE HOSTWIN/WINFILE.EXE HOSTWIN/WINN.EXE HOSTWIN/NC.EXE
+	touch HOSTWIN/DEMO.EXE HOSTWIN/PROGMAN.EXE HOSTWIN/NOTEPAD.EXE HOSTWIN/CLOCK.EXE HOSTWIN/CALC.EXE HOSTWIN/CONTROL.EXE HOSTWIN/WINFILE.EXE HOSTWIN/TASKMAN.EXE HOSTWIN/WINN.EXE HOSTWIN/NC.EXE
 	mkdir -p HOSTWIN/DOCS
 	printf 'Notepad test file\n\tTabbed line\tand more\nThis is a rather long line that goes on and on past the right edge of the window so that horizontal scrolling is needed to see its end.\nLast line\n' > HOSTWIN/README.TXT
 	mkdir -p HOSTWIN/DOCS/SUB

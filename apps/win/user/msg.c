@@ -175,6 +175,12 @@ void win_ddi_key_event(int vk, int sc, int down)
     }
 
     int alt = key_down(VK_MENU), ctrl = key_down(VK_CONTROL);
+    /* Ctrl+Esc belongs to the system, whatever has the focus: the Task List */
+    if (vk == VK_ESCAPE && ctrl && !alt) {
+        if (down && !was && U.desktop)
+            user_post(U.desktop->h, WM_SYSCOMMAND, SC_TASKLIST, 0);
+        return;
+    }
     wwnd *target = U.focus;
     int sys = (alt && !ctrl) || vk == VK_F10 || (vk == VK_MENU);
     if (!target) {

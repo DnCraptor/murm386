@@ -1,0 +1,62 @@
+# Task List: run with "./winhost scripts/taskman.txt PROGMAN"
+# Ctrl+Esc and a double click on the desktop open it; Switch To, Tile,
+# End Task and Cascade with Clock and Notepad started from the shell.
+wait 100
+dblclick 5 395
+wait 50
+snap tl_desktop.ppm
+key ESC
+wait 30
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type CLOCK
+key RETURN
+wait 50
+# back to the Program Manager through the list, Notepad from there
+keydown CTRL
+key ESC
+keyup CTRL
+wait 50
+key DOWN
+key RETURN
+wait 50
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type NOTEPAD
+key RETURN
+wait 50
+keydown CTRL
+key ESC
+keyup CTRL
+wait 50
+snap tl_list.ppm
+keydown ALT
+key T
+keyup ALT
+wait 50
+snap tl_tile.ppm
+# Notepad (on top, first in the list) ended
+keydown CTRL
+key ESC
+keyup CTRL
+wait 50
+keydown ALT
+key E
+keyup ALT
+wait 50
+keydown CTRL
+key ESC
+keyup CTRL
+wait 50
+keydown ALT
+key C
+keyup ALT
+wait 50
+snap tl_cascade.ppm
+exit

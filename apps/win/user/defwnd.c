@@ -182,6 +182,9 @@ LRESULT CALLBACK user_desktop_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         return HTCLIENT;
     case WM_NCPAINT:
         return 0;
+    case WM_LBUTTONDBLCLK:          /* a double click on the desktop: the Task List */
+        PostMessage(h, WM_SYSCOMMAND, SC_TASKLIST, 0);
+        return 0;
     default:
         return DefWindowProc(h, msg, wp, lp);
     }

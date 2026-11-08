@@ -26,7 +26,7 @@ nothing leaves the program from the command line in that part (`WINN DEMO`).
 | `drivers/dos/` | `VBE8` display driver (VBE 100h 640x400x8, fallback 13h) and `DOS` input driver (keyboard through the BIOS buffer, INT 33h mouse) |
 | `runtime/` | `WINN.EXE` `main()`: drivers, core, shell and command-line program as tasks |
 | `sdk/` | for applications: API stubs by Win16 ordinal, `__ez_start`, `winapp.cmake`; `gen_exports.py` makes the export tables |
-| `../winapps/<name>/` | applications: `progman` (the Program Manager, the default shell), `winfile` (File Manager), `notepad`, `clock`, `calc`, `control` (Control Panel), `demo` (a tour of the API) |
+| `../winapps/<name>/` | applications: `progman` (the Program Manager, the default shell), `winfile` (File Manager), `taskman` (Task List), `notepad`, `clock`, `calc`, `control` (Control Panel), `demo` (a tour of the API) |
 | `../windrv/<name>/` | driver modules; `vga800` is VBE 102h 800x600 in 16 colours |
 | `host/` | the same sources on Linux with a snapshot display and scripted input |
 
@@ -135,6 +135,7 @@ use `ucontext`):
     ./winhost scripts/calc.txt CALC          # arithmetic, memory, Error
     ./winhost scripts/control.txt CONTROL    # colours, pattern, schemes (writes HOSTWIN/*.INI)
     ./winhost scripts/winfile.txt WINFILE    # tree, copy, move, rename, delete in HOSTWIN/DOCS
+    ./winhost scripts/taskman.txt PROGMAN    # Task List: Ctrl+Esc, Switch To, Tile, End Task
     ./winhost800 scripts/vga800.txt  # the VGA800 driver, built in
     ./test_gdi                       # GDI sample sheet, gdi.ppm
 
@@ -143,6 +144,12 @@ directory, with empty stand-ins for their files and a "DOS program". On
 the host, drive `C:` is the harness directory itself.
 
 ## Keyboard
+
+Alt+Tab and Alt+Esc switch between windows; Ctrl+Esc (or a double click on
+the desktop) opens the Task List, `TASKMAN.EXE` or SYSTEM.INI [boot]
+`taskman.exe`, whose Cascade, Tile and Arrange Icons work on the desktop
+through `CascadeChildWindows`, `TileChildWindows` and
+`ArrangeIconicWindows`.
 
 Ctrl+Shift switches between the US and Russian (Windows-1251) layouts.
 Text is ANSI Windows-1251 and is drawn with the CP866 VGA font.

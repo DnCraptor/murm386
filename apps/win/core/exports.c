@@ -9,10 +9,12 @@ extern void AnsiNext(void);
 extern void AnsiPrev(void);
 extern void AnsiUpper(void);
 extern void AppendMenu(void);
+extern void ArrangeIconicWindows(void);
 extern void BeginPaint(void);
 extern void BitBlt(void);
 extern void BringWindowToTop(void);
 extern void CallWindowProc(void);
+extern void CascadeChildWindows(void);
 extern void CheckDlgButton(void);
 extern void CheckMenuItem(void);
 extern void CheckRadioButton(void);
@@ -315,6 +317,7 @@ extern void SwapMouseButton(void);
 extern void SystemParametersInfo(void);
 extern void TabbedTextOut(void);
 extern void TextOut(void);
+extern void TileChildWindows(void);
 extern void TrackPopupMenu(void);
 extern void TranslateAccelerator(void);
 extern void TranslateMDISysAccel(void);
@@ -619,6 +622,7 @@ static const void *const exports_user[484] = {
     [167] = (const void *)ShowCaret,
     [168] = (const void *)SetCaretBlinkTime,
     [169] = (const void *)GetCaretBlinkTime,
+    [170] = (const void *)ArrangeIconicWindows,
     [173] = (const void *)LoadCursor,
     [174] = (const void *)LoadIcon,
     [178] = (const void *)TranslateAccelerator,
@@ -633,6 +637,8 @@ static const void *const exports_user[484] = {
     [193] = (const void *)IsClipboardFormatAvailable,
     [196] = (const void *)TabbedTextOut,
     [197] = (const void *)GetTabbedTextExtent,
+    [198] = (const void *)CascadeChildWindows,
+    [199] = (const void *)TileChildWindows,
     [227] = (const void *)GetNextDlgGroupItem,
     [228] = (const void *)GetNextDlgTabItem,
     [229] = (const void *)GetTopWindow,
