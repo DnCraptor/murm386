@@ -4,8 +4,22 @@ An MIT-licensed implementation of the Windows 3.x API (KERNEL, GDI, USER
 subset) for native ARM programs. `WINN.EXE` is the Windows loader: it holds
 KERNEL, GDI, USER and the built-in drivers, loads driver modules, and runs
 applications (separate EZ files) as cooperative tasks, as Windows 3.x does.
-Stage 2 will load Win16 NE executables on the 386 core and route their
-imports to the same export tables.
+The preliminary 386 NE path is available through ordinary `WinExec` and
+`WINN NEAPP.EXE`. It supports a strictly validated straight-line x86 entry:
+`NOP`, bounded `PUSH DS` / `PUSH imm16`, up to 32 `FAR CALL`s to known Win16
+APIs and `RETF`. The thunks use 16-byte slots, returning through `RETF` or
+`RETF imm16` to clean Win16 PASCAL arguments. Supported functions are
+KERNEL.3 GetVersion, KERNEL.36 GetCurrentTask, KERNEL.90 lstrlen (checked
+selector:offset string), KERNEL.152 GetNumTasks, USER.13 GetTickCount,
+USER.179 GetSystemMetrics and USER.180 GetSysColor. Guest stack reads and
+far pointers are checked against staged NE segment bounds. Invalid pointers
+are reported only after the guest returns to Real Mode. Other Win16 programs
+are rejected before entering Protected Mode; GUI calls that require DOS I/O
+or yield to other tasks are not enabled yet. The native WINN thread remains
+the executor; neither x86 CPU implementation is modified.
+`host/mkne_winexec.py` and `host/mkne_args.py` generate `NEAPP.EXE` and
+`NEARGS.EXE`, both with executable DOS MZ stubs that explain how to launch
+them under WINN if invoked directly from DOS.
 
     WINN [:] [program [arguments]]
 

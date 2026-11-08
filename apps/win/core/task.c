@@ -17,6 +17,11 @@
 #include <stdio.h>
 #include <string.h>
 #include "wincore.h"
+#if defined(__arm__) || defined(__thumb__)
+#include "dos-api.h"
+#include "ne.h"
+#include "ne_exec.h"
+#endif
 
 #if !(defined(__arm__) || defined(__thumb__))
 #define TASK_HOST 1
@@ -249,7 +254,10 @@ static int has_work(wtask *t)
         return 0;
     if (t->state == WTASK_NEW || !t->waiting)
         return 1;
-    if (t == &kernel_task)
+    /* The kernel task normally runs its scheduler without fetching GUI
+     * messages. But it may itself own a modal dialog (e.g. an error from
+     * WINN's startup code). Wake it for its queued messages in that case. */
+    if (t == &kernel_task && t->waiting != WTASK_WAIT_MESSAGE)
         return 0;
     return user_task_has_work(t->h);
 }
@@ -299,7 +307,7 @@ static void reap(void)
  * then ends the rest. */
 void task_kernel_loop(void)
 {
-    kernel_task.waiting = 1;
+    kernel_task.waiting = WTASK_WAIT_IDLE;
     for (;;) {
         reap();
         if (!IsTask(shell_task))
@@ -319,7 +327,7 @@ void task_kernel_loop(void)
         task_yield();
         reap();
     }
-    kernel_task.waiting = 0;
+    kernel_task.waiting = WTASK_WAIT_NONE;
 }
 
 void task_quit_all(void)
@@ -345,6 +353,25 @@ static int run_app(wtask *t)
     h->show = t->show;
     return t->entry(h);
 }
+
+#if defined(__arm__) || defined(__thumb__)
+/* Run the restricted NE entry on the current WINN ARM stack. No native task
+ * switching occurs before the guest has returned to Real Mode. */
+static int run_ne_app(wtask *t)
+{
+    uint32_t result = 0;
+    int rc = win_ne_execute_basic((const char *)t->module, &result);
+    char msg[128];
+    if (rc)
+        wsprintf(msg, "NE program %s: unsupported or failed (%d)", t->name, rc);
+    else
+        wsprintf(msg, "NE program %s completed. DX:AX=%08lx", t->name,
+                 (unsigned long)result);
+    win_logo_end();
+    MessageBox(0, msg, "WINN Win16", MB_OK | (rc ? MB_ICONSTOP : MB_ICONINFORMATION));
+    return rc ? 1 : 0;
+}
+#endif
 
 /* "PROG.EXE args" -> program file and argument text */
 static void split_cmd(LPCSTR cmd, char *prog, int psize, const char **args)
@@ -378,6 +405,7 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
     win_path(prog, path, sizeof(path));
 
     win_ez_image img;
+    int ne_guest = 0;
 #ifdef TASK_HOST
     /* the host test has its applications built in */
     memset(&img, 0, sizeof(img));
@@ -394,6 +422,20 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
     if (!rc && !win_ez_entry_is_app(&img)) {
         win_free(img.raw);          /* a DOS program or a driver */
         rc = -2;
+    }
+    if (rc == -2) {
+        /* NE is an x86 Win16 image, not an ARM EZ image. The entry checker
+         * rejects all unsupported guest instructions before CR0.PE=1. */
+        win_ne_info ni;
+        PC *pc = get_PC();
+        if (pc && pc->cpu && pc->cpu->gen >= 3 &&
+            win_ne_scan(path, &ni, NULL, NULL) == WIN_NE_OK &&
+            ni.target_os == 2 && ni.segment_count == 2 &&
+            ni.cs_index && ni.ss_index && ni.cs_index != ni.ss_index) {
+            ne_guest = 1;
+            memset(&img, 0, sizeof(img));
+            rc = 0;
+        }
     }
 #endif
     if (rc == -1)
@@ -412,14 +454,25 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
         k++;
     }
     name[k] = 0;
-    wtask *t = task_create(name, run_app, img.stack_size ? img.stack_size : 32768);
+    int (*runner)(wtask *) = run_app;
+    void *ne_path = NULL;
+#if defined(__arm__) || defined(__thumb__)
+    if (ne_guest) {
+        ne_path = win_strdup(path);  /* freed by the ordinary task reaper */
+        if (!ne_path)
+            return 8;
+        runner = run_ne_app;
+    }
+#endif
+    wtask *t = task_create(name, runner, img.stack_size ? img.stack_size : 32768);
     if (!t) {
+        win_free(ne_path);
         win_free(img.raw);
         return 8;                   /* out of memory */
     }
-    t->module = img.raw;
-    t->entry = (int (*)(const win_app_host *))img.entry;
-    t->info = win_app_info(path);
+    t->module = ne_guest ? ne_path : img.raw;
+    t->entry = ne_guest ? NULL : (int (*)(const win_app_host *))img.entry;
+    t->info = ne_guest ? NULL : win_app_info(path);
     lstrcpyn(t->cmdline, args, sizeof(t->cmdline));
     t->show = (int)show;
     /* let it start right away, as Windows does */

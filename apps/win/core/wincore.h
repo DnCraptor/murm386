@@ -253,6 +253,9 @@ void     cursor_select_builtin(int id);
 /* ---------------------------------------------------------------- tasks (task.c) */
 
 enum { WTASK_NEW, WTASK_RUNNING, WTASK_DEAD };
+/* The kernel's normal scheduler wait must not wake for GUI messages;
+ * a modal GetMessage on the kernel stack must. */
+enum { WTASK_WAIT_NONE = 0, WTASK_WAIT_IDLE = 1, WTASK_WAIT_MESSAGE = 2 };
 
 struct wtask_ctx;
 
@@ -260,7 +263,7 @@ typedef struct wtask {
     struct wtask *next;
     HTASK     h;
     int       state;
-    int       waiting;          /* blocked in GetMessage/WaitMessage */
+    int       waiting;          /* WTASK_WAIT_*; kernel idle vs modal input */
     int       quit, quit_code;  /* PostQuitMessage */
     int       exit_code;
     char      name[16];

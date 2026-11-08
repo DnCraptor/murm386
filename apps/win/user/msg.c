@@ -585,10 +585,10 @@ static int get_one(MSG *out, HWND h, UINT first, UINT last, int remove)
 static void wait_turn(void)
 {
     wtask *me = task_current();
-    me->waiting = 1;
+    me->waiting = WTASK_WAIT_MESSAGE;
     if (!task_yield() && win_sys.input)
         win_sys.input->idle();
-    me->waiting = 0;
+    me->waiting = WTASK_WAIT_NONE;
 }
 
 BOOL WINAPI GetMessage(LPMSG msg, HWND h, UINT first, UINT last)
