@@ -17,6 +17,16 @@ static UINT dblclk_time = 500;      /* ms; WIN.INI [windows] DoubleClickSpeed */
 void WINAPI SetDoubleClickTime(UINT ms) { dblclk_time = ms ? (ms > 5000 ? 5000 : ms) : 500; }
 UINT WINAPI GetDoubleClickTime(void) { return dblclk_time; }
 
+/* the left and right buttons exchanged at the input, for everyone */
+static BOOL swap_buttons;
+BOOL WINAPI SwapMouseButton(BOOL swap)
+{
+    BOOL was = swap_buttons;
+    swap_buttons = swap != 0;
+    return was;
+}
+int user_buttons_swapped(void) { return swap_buttons; }
+
 #define QSIZE 256
 
 static MSG queue[QSIZE];
@@ -348,6 +358,8 @@ void win_ddi_mouse_event(int x, int y, unsigned buttons)
         if (w && hit != HTERROR)
             post_mouse(w, hit, WM_MOUSEMOVE, x, y);
     }
+    if (swap_buttons)
+        buttons = (buttons & ~3u) | ((buttons & 1u) << 1) | ((buttons >> 1) & 1u);
     unsigned changed = buttons ^ U.buttons;
     for (int b = 0; b < 3; b++) {
         if (!(changed & (1u << b)))

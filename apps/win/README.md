@@ -75,13 +75,20 @@ After adding an API function, run `sdk/gen_exports.py` (it updates
 
 `WIN.INI` next to `WINN.EXE` is read at start, as in Windows 3.1:
 `[colors]` (the system colours, `Name=r g b`), `[Desktop] Pattern` (eight
-row bytes, or `(None)`) and `[windows] DoubleClickSpeed`. Control Panel
-(`CONTROL.EXE`) edits them and applies them at once through `SetSysColors`
-and `SystemParametersInfo` (`SPI_SETDESKPATTERN`, `SPI_SETDOUBLECLICKTIME`,
+row bytes, or `(None)`), `[windows] DoubleClickSpeed` and
+`SwapMouseButtons`. Control Panel (`CONTROL.EXE`) edits them and applies
+them at once through `SetSysColors` and `SystemParametersInfo`
+(`SPI_SETDESKPATTERN`, `SPI_SETDOUBLECLICKTIME`, `SPI_SETMOUSEBUTTONSWAP`,
 `SPIF_UPDATEINIFILE`); its own `CONTROL.INI` keeps the colour schemes
 (`[color schemes]`, 21 colours as hex `RRGGBB` in `COLOR_` order) and the
 patterns (`[Patterns]`, the twelve of Windows 3.1 written on first use).
 Date/Time sets the DOS clock with `SetLocalTimeN`.
+
+In a dialog, Enter presses the button drawn as the default one: the
+focused push button, or else the dialog's default (`DM_GETDEFID`, `IDOK`
+without one). The default follows the focus however it moves (Tab, a
+mouse click, `SetFocus`); a control that asks for Enter in
+`WM_GETDLGCODE` (an open drop-down list, an `ES_WANTRETURN` edit) keeps it.
 
 ## Building
 

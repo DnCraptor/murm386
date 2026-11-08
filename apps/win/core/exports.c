@@ -304,6 +304,7 @@ extern void ShowScrollBar(void);
 extern void ShowWindow(void);
 extern void StretchBlt(void);
 extern void SubtractRect(void);
+extern void SwapMouseButton(void);
 extern void SystemParametersInfo(void);
 extern void TabbedTextOut(void);
 extern void TextOut(void);
@@ -616,6 +617,7 @@ static const void *const exports_user[484] = {
     [180] = (const void *)GetSysColor,
     [181] = (const void *)SetSysColors,
     [183] = (const void *)GetCaretPos,
+    [186] = (const void *)SwapMouseButton,
     [190] = (const void *)GetUpdateRect,
     [191] = (const void *)ChildWindowFromPoint,
     [192] = (const void *)InSendMessage,

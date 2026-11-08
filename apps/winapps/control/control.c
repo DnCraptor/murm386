@@ -6,7 +6,8 @@
  *              [color schemes]), saved to WIN.INI [colors]
  *   Desktop    the desktop pattern (CONTROL.INI [Patterns]), WIN.INI
  *              [Desktop] Pattern
- *   Mouse      the double-click speed, WIN.INI [windows] DoubleClickSpeed
+ *   Mouse      the double-click speed and the swapped buttons, WIN.INI
+ *              [windows] DoubleClickSpeed, SwapMouseButtons
  *   Date/Time  the DOS date and time
  *
  * The colours offered are the 16 of the VGA, which every display driver
@@ -593,6 +594,7 @@ static const DLGITEM_N desk_items[] = {
 #define IDC_SPEED    401
 #define IDC_TEST     402
 #define IDC_SPEEDVAL 403
+#define IDC_SWAP     404
 
 static UINT test_speed, test_last;
 static int  test_on;
@@ -651,6 +653,7 @@ static BOOL CALLBACK MouseProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         SetScrollRange(sb, SB_CTL, 0, 16, FALSE);
         SetScrollPos(sb, SB_CTL, speed_to_pos(test_speed), TRUE);
         show_speed(dlg);
+        CheckDlgButton(dlg, IDC_SWAP, GetSystemMetrics(SM_SWAPBUTTON) ? 1 : 0);
         return TRUE;
     }
     case WM_HSCROLL: {
@@ -676,6 +679,8 @@ static BOOL CALLBACK MouseProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         if (wp == IDOK) {
             EndDialog(dlg, IDOK);
             SystemParametersInfo(SPI_SETDOUBLECLICKTIME, test_speed, NULL, SPIF_UPDATEINIFILE);
+            SystemParametersInfo(SPI_SETMOUSEBUTTONSWAP, IsDlgButtonChecked(dlg, IDC_SWAP) ? 1 : 0,
+                                 NULL, SPIF_UPDATEINIFILE);
             return TRUE;
         }
         if (wp == IDCANCEL) {
@@ -688,7 +693,7 @@ static BOOL CALLBACK MouseProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 }
 
 static const DLGTEMPLATE_N mouse_tpl = {
-    WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME, 8, 40, 30, 180, 80,
+    WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME, 9, 40, 30, 180, 96,
     NULL, NULL, "Mouse", 0, NULL
 };
 static const DLGITEM_N mouse_items[] = {
@@ -698,8 +703,9 @@ static const DLGITEM_N mouse_items[] = {
     { 96, 30, 20, 9, -1, SS_RIGHT | WS_VISIBLE, "STATIC", "Fast" },
     { 36, 42, 50, 9, IDC_SPEEDVAL, SS_CENTER | WS_VISIBLE, "STATIC", "" },
     { 128, 14, 44, 24, IDC_TEST, WS_VISIBLE, "CPTest", "" },
-    { 34, 60, 46, 14, IDOK, BS_DEFPUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "OK" },
-    { 100, 60, 46, 14, IDCANCEL, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "Cancel" },
+    { 6, 56, 168, 10, IDC_SWAP, BS_AUTOCHECKBOX | WS_TABSTOP | WS_VISIBLE, "BUTTON", "&Swap Left/Right Buttons" },
+    { 34, 76, 46, 14, IDOK, BS_DEFPUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "OK" },
+    { 100, 76, 46, 14, IDCANCEL, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "Cancel" },
 };
 
 /* ---------------------------------------------------------------- Date/Time */

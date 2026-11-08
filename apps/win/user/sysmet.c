@@ -169,6 +169,7 @@ static void set_pattern(const char *s)
 void user_load_desktop(void)
 {
     SetDoubleClickTime(GetProfileInt("windows", "DoubleClickSpeed", 500));
+    SwapMouseButton(GetProfileInt("windows", "SwapMouseButtons", 0) != 0);
     char v[64];
     GetProfileString("Desktop", "Pattern", "(None)", v, sizeof(v));
     set_pattern(v);
@@ -202,6 +203,11 @@ BOOL WINAPI SystemParametersInfo(UINT action, UINT param, LPVOID pv, UINT ini)
             WriteProfileString("windows", "DoubleClickSpeed", v);
         }
         return TRUE;
+    case SPI_SETMOUSEBUTTONSWAP:
+        SwapMouseButton(param != 0);
+        if (ini & SPIF_UPDATEINIFILE)
+            WriteProfileString("windows", "SwapMouseButtons", param ? "1" : "0");
+        return TRUE;
     }
     return FALSE;
 }
@@ -227,6 +233,8 @@ int WINAPI GetSystemMetrics(int i)
     case SM_CXSIZE: case SM_CYSIZE: return UM_CAPTION;
     case SM_CXFRAME: case SM_CYFRAME: return UM_FRAME;
     case SM_CXDOUBLECLK: case SM_CYDOUBLECLK: return 4;
+    case SM_MOUSEPRESENT: return 1;
+    case SM_SWAPBUTTON: return user_buttons_swapped();
     default: return 0;
     }
 }

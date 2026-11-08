@@ -52,6 +52,7 @@ typedef struct wwnd {
     HMENU     sysmenu;           /* own copy after GetSystemMenu */
     int       alt_tap;           /* Alt pressed with nothing else yet */
     HTASK     task;              /* owner task; 0 = the desktop */
+    int       dialog;            /* made by the dialog manager */
 } wwnd;
 
 /* Global USER state. */
@@ -102,6 +103,8 @@ void    user_bring_to_top(wwnd *w);
 void    user_icon_slot(wwnd *w, RECT *r);     /* free place for w minimized */
 wwnd   *user_window_from_point(int x, int y, int *hit);
 void    user_set_window_rect(wwnd *w, const RECT *rc, UINT flags);
+void    user_dlg_focus_changed(wwnd *w);
+int     user_buttons_swapped(void);
 
 /* msg.c */
 void    user_post(HWND h, UINT m, WPARAM wp, LPARAM lp);

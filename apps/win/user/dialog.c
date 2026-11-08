@@ -137,6 +137,19 @@ static void set_default_button(HWND dlg, HWND focus)
     }
 }
 
+/* Focus moved to w (by SetFocus, a mouse click, the application): the
+ * default push button follows it, as the dialog manager does it, so that
+ * Enter always presses the button drawn as the default one. */
+void user_dlg_focus_changed(wwnd *w)
+{
+    wwnd *p = w;
+    while (p && !p->dialog)
+        p = (p->style & WS_CHILD) ? p->parent : NULL;
+    if (!p || p == w)
+        return;
+    set_default_button(p->h, w->h);
+}
+
 static void dlg_focus(HWND dlg, HWND c)
 {
     if (!c)
@@ -287,6 +300,7 @@ HWND WINAPI CreateDialogIndirectN(HINSTANCE inst, const DLGTEMPLATE_N *t,
     d->proc = proc;
     d->defid = IDOK;
     memcpy(w->extra + DLG_STATE_OFS, &d, sizeof(d));
+    w->dialog = 1;
 
     HWND first_tab = 0;
     for (int i = 0; i < t->cdit; i++) {

@@ -483,6 +483,8 @@ typedef struct {
 #define SM_CYMENU           15
 #define SM_CXFULLSCREEN     16
 #define SM_CYFULLSCREEN     17
+#define SM_MOUSEPRESENT     19
+#define SM_SWAPBUTTON       23
 #define SM_CXMIN            28
 #define SM_CYMIN            29
 #define SM_CXSIZE           30
@@ -733,11 +735,13 @@ BOOL    WINAPI IsClipboardFormatAvailable(UINT fmt);
 UINT    WINAPI RegisterWindowMessage(LPCSTR name);
 void    WINAPI SetDoubleClickTime(UINT ms);
 UINT    WINAPI GetDoubleClickTime(void);
+BOOL    WINAPI SwapMouseButton(BOOL swap);
 BOOL    WINAPI SystemParametersInfo(UINT action, UINT param, LPVOID pv, UINT ini);
 #define SPI_GETBEEP             1
 #define SPI_SETDESKWALLPAPER    20
 #define SPI_SETDESKPATTERN      21
 #define SPI_SETDOUBLECLICKTIME  32
+#define SPI_SETMOUSEBUTTONSWAP  33
 #define SPIF_UPDATEINIFILE      0x0001
 #define SPIF_SENDWININICHANGE   0x0002
 #define WM_WININICHANGE         0x001A

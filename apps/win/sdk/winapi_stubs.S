@@ -4563,6 +4563,23 @@ GetCaretPos:
     .ltorg
     .size GetCaretPos, .-GetCaretPos
 
+    .section .text.winapi.SwapMouseButton,"ax",%progbits
+    .global SwapMouseButton
+    .type SwapMouseButton, %function
+    .thumb_func
+SwapMouseButton:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =744
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SwapMouseButton, .-SwapMouseButton
+
     .section .text.winapi.GetUpdateRect,"ax",%progbits
     .global GetUpdateRect
     .type GetUpdateRect, %function

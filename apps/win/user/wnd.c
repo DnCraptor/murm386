@@ -899,6 +899,8 @@ HWND WINAPI SetFocus(HWND h)
         SendMessage(o->h, WM_KILLFOCUS, w ? w->h : 0, 0);
     if (w && U.focus == w)
         SendMessage(w->h, WM_SETFOCUS, old, 0);
+    if (w && U.focus == w)
+        user_dlg_focus_changed(w);
     return old;
 }
 

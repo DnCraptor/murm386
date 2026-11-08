@@ -738,9 +738,14 @@ LRESULT CALLBACK user_edit_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     case WM_GETFONT:
         return GetProp(h, MAKEINTATOM(1));
-    case WM_GETDLGCODE:
+    case WM_GETDLGCODE: {
+        /* ES_WANTRETURN: Enter makes a new line instead of pressing the
+         * default button; Tab and Esc still belong to the dialog */
+        const MSG *m = (const MSG *)(intptr_t)lp;
+        int ret = m && m->message == WM_KEYDOWN && m->wParam == VK_RETURN;
         return DLGC_WANTCHARS | DLGC_HASSETSEL | DLGC_WANTARROWS |
-               (multi(h) && (estyle(h) & ES_WANTRETURN) ? DLGC_WANTALLKEYS : 0);
+               (ret && multi(h) && (estyle(h) & ES_WANTRETURN) ? DLGC_WANTALLKEYS : 0);
+    }
     case WM_SETFOCUS:
         if (!e)
             return 0;
