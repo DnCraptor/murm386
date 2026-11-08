@@ -1,0 +1,79 @@
+# File Manager: run with "./winhost scripts/winfile.txt WINFILE"
+# Works in HOSTWIN/DOCS: copies, renames, moves and deletes files there,
+# leaving README.TXT and the SUB directory as they were.
+wait 120
+snap wf_start.ppm
+# the tree: hostwin, opened, then docs; the contents pane
+key DOWN
+key RIGHT
+key DOWN
+wait 20
+key TAB
+type r
+wait 20
+snap wf_docs.ppm
+# copy README.TXT to B.TXT, a new directory, B.TXT moved into it
+key F8
+wait 20
+snap wf_copy.ppm
+type B.TXT
+key RETURN
+wait 30
+keydown ALT
+key F
+keyup ALT
+key E
+wait 20
+type NEWDIR
+key RETURN
+wait 30
+type b
+keydown ALT
+key F
+keyup ALT
+key N
+wait 20
+type C.TXT
+key RETURN
+wait 30
+type c
+key F7
+wait 20
+type NEWDIR
+key RETURN
+wait 30
+snap wf_moved.ppm
+# All File Details, then the new directory deleted with what is in it
+keydown ALT
+key V
+keyup ALT
+key A
+wait 30
+type n
+key DELETE
+wait 20
+key RETURN
+wait 20
+snap wf_confirm.ppm
+key RETURN
+wait 30
+snap wf_deleted.ppm
+keydown ALT
+key V
+keyup ALT
+key N
+wait 20
+# README.TXT opens in Notepad (WIN.INI [Extensions], txt by default)
+type r
+key RETURN
+wait 60
+snap wf_open.ppm
+keydown ALT
+key F4
+keyup ALT
+wait 30
+keydown ALT
+key F4
+keyup ALT
+wait 50
+exit

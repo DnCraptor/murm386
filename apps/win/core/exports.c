@@ -31,6 +31,7 @@ extern void CreateCompatibleBitmap(void);
 extern void CreateCompatibleDC(void);
 extern void CreateDC(void);
 extern void CreateDialogIndirectN(void);
+extern void CreateDirectoryN(void);
 extern void CreateFont(void);
 extern void CreateFontIndirect(void);
 extern void CreateHatchBrush(void);
@@ -51,6 +52,7 @@ extern void DefMDIChildProc(void);
 extern void DefWindowProc(void);
 extern void DeleteAtom(void);
 extern void DeleteDC(void);
+extern void DeleteFileN(void);
 extern void DeleteMenu(void);
 extern void DeleteObject(void);
 extern void DestroyAcceleratorTableN(void);
@@ -102,6 +104,7 @@ extern void GetClipBox(void);
 extern void GetClipboardData(void);
 extern void GetClipboardFormatName(void);
 extern void GetClipboardOwner(void);
+extern void GetCurrentDirectoryN(void);
 extern void GetCurrentTask(void);
 extern void GetCurrentTime(void);
 extern void GetCursorPos(void);
@@ -109,12 +112,14 @@ extern void GetDC(void);
 extern void GetDesktopWindow(void);
 extern void GetDeviceCaps(void);
 extern void GetDialogBaseUnits(void);
+extern void GetDiskFreeSpaceN(void);
 extern void GetDisplayDriverInfoN(void);
 extern void GetDlgCtrlID(void);
 extern void GetDlgItem(void);
 extern void GetDlgItemInt(void);
 extern void GetDlgItemText(void);
 extern void GetDoubleClickTime(void);
+extern void GetDriveType(void);
 extern void GetFileTitle(void);
 extern void GetFocus(void);
 extern void GetKeyState(void);
@@ -219,6 +224,7 @@ extern void MapWindowPoints(void);
 extern void MessageBeep(void);
 extern void MessageBox(void);
 extern void ModifyMenu(void);
+extern void MoveFileN(void);
 extern void MoveTo(void);
 extern void MoveToEx(void);
 extern void MoveWindow(void);
@@ -247,6 +253,7 @@ extern void RegisterClipboardFormat(void);
 extern void RegisterWindowMessage(void);
 extern void ReleaseCapture(void);
 extern void ReleaseDC(void);
+extern void RemoveDirectoryN(void);
 extern void RemoveMenu(void);
 extern void RemoveProp(void);
 extern void ReplaceText(void);
@@ -321,6 +328,7 @@ extern void WaitMessage(void);
 extern void WinDirListAttrN(void);
 extern void WinDirListN(void);
 extern void WinExec(void);
+extern void WinFindFilesN(void);
 extern void WindowFromPoint(void);
 extern void WritePrivateProfileString(void);
 extern void WriteProfileString(void);
@@ -382,6 +390,7 @@ static const void *const exports_kernel[354] = {
     [129] = (const void *)WritePrivateProfileString,
     [134] = (const void *)GetWindowsDirectory,
     [135] = (const void *)GetSystemDirectory,
+    [136] = (const void *)GetDriveType,
     [152] = (const void *)GetNumTasks,
     [166] = (const void *)WinExec,
     [320] = (const void *)IsTask,
@@ -675,7 +684,7 @@ static const void *const exports_user[484] = {
     [483] = (const void *)SystemParametersInfo,
 };
 
-static const void *const exports_winn[11] = {
+static const void *const exports_winn[18] = {
     [1] = (const void *)DialogBoxIndirectN,
     [2] = (const void *)CreateDialogIndirectN,
     [3] = (const void *)CreateAcceleratorTableN,
@@ -686,6 +695,13 @@ static const void *const exports_winn[11] = {
     [8] = (const void *)WinDirListAttrN,
     [9] = (const void *)GetLocalTimeN,
     [10] = (const void *)SetLocalTimeN,
+    [11] = (const void *)WinFindFilesN,
+    [12] = (const void *)DeleteFileN,
+    [13] = (const void *)MoveFileN,
+    [14] = (const void *)CreateDirectoryN,
+    [15] = (const void *)RemoveDirectoryN,
+    [16] = (const void *)GetDiskFreeSpaceN,
+    [17] = (const void *)GetCurrentDirectoryN,
 };
 
 static const void *const exports_commdlg[28] = {

@@ -298,6 +298,7 @@ extern HBRUSH (*gdi_sys_color_brush)(int index);
 
 /* file.c */
 void   win_files_task_ended(HTASK task);
+void   win_files_init(void);
 
 #if !(defined(__arm__) || defined(__thumb__))
 /* host tests: applications built into the harness, by file name */

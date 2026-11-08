@@ -26,7 +26,7 @@ nothing leaves the program from the command line in that part (`WINN DEMO`).
 | `drivers/dos/` | `VBE8` display driver (VBE 100h 640x400x8, fallback 13h) and `DOS` input driver (keyboard through the BIOS buffer, INT 33h mouse) |
 | `runtime/` | `WINN.EXE` `main()`: drivers, core, shell and command-line program as tasks |
 | `sdk/` | for applications: API stubs by Win16 ordinal, `__ez_start`, `winapp.cmake`; `gen_exports.py` makes the export tables |
-| `../winapps/<name>/` | applications: `progman` (the Program Manager, the default shell), `notepad`, `clock`, `calc`, `control` (Control Panel), `demo` (a tour of the API) |
+| `../winapps/<name>/` | applications: `progman` (the Program Manager, the default shell), `winfile` (File Manager), `notepad`, `clock`, `calc`, `control` (Control Panel), `demo` (a tour of the API) |
 | `../windrv/<name>/` | driver modules; `vga800` is VBE 102h 800x600 in 16 colours |
 | `host/` | the same sources on Linux with a snapshot display and scripted input |
 
@@ -67,6 +67,13 @@ checks a file the same way without loading it.
 Tasks switch only in `GetMessage`, `PeekMessage`, `Yield` and `WinExec`.
 Every instance has its own copy of the program, so window classes belong to
 the instance that registered them.
+
+Files and disks beyond KERNEL's `_l*` functions are native WINN calls:
+`WinFindFilesN` (entries with attributes, sizes and times),
+`DeleteFileN`, `MoveFileN`, `CreateDirectoryN`, `RemoveDirectoryN`,
+`GetDiskFreeSpaceN`, `GetCurrentDirectoryN`; `GetDriveType` is KERNEL's.
+DOS critical errors (a drive without a disk) fail the call instead of
+asking "Abort, Retry, Fail?".
 
 After adding an API function, run `sdk/gen_exports.py` (it updates
 `core/exports.c` and `sdk/winapi_stubs.S`, both committed).
@@ -127,11 +134,13 @@ use `ucontext`):
     ./winhost scripts/clock.txt CLOCK        # analog, digital
     ./winhost scripts/calc.txt CALC          # arithmetic, memory, Error
     ./winhost scripts/control.txt CONTROL    # colours, pattern, schemes (writes HOSTWIN/*.INI)
+    ./winhost scripts/winfile.txt WINFILE    # tree, copy, move, rename, delete in HOSTWIN/DOCS
     ./winhost800 scripts/vga800.txt  # the VGA800 driver, built in
     ./test_gdi                       # GDI sample sheet, gdi.ppm
 
 The applications are built into the harness; `HOSTWIN/` is the Windows
-directory, with empty stand-ins for their files and a "DOS program".
+directory, with empty stand-ins for their files and a "DOS program". On
+the host, drive `C:` is the harness directory itself.
 
 ## Keyboard
 

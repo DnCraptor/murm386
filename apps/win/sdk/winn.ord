@@ -10,3 +10,10 @@
 8 WinDirListAttrN
 9 GetLocalTimeN
 10 SetLocalTimeN
+11 WinFindFilesN
+12 DeleteFileN
+13 MoveFileN
+14 CreateDirectoryN
+15 RemoveDirectoryN
+16 GetDiskFreeSpaceN
+17 GetCurrentDirectoryN

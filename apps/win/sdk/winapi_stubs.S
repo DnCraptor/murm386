@@ -670,6 +670,23 @@ GetSystemDirectory:
     .ltorg
     .size GetSystemDirectory, .-GetSystemDirectory
 
+    .section .text.winapi.GetDriveType,"ax",%progbits
+    .global GetDriveType
+    .type GetDriveType, %function
+    .thumb_func
+GetDriveType:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =544
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetDriveType, .-GetDriveType
+
     .section .text.winapi.GetNumTasks,"ax",%progbits
     .global GetNumTasks
     .type GetNumTasks, %function
@@ -5684,6 +5701,125 @@ SetLocalTimeN:
     bx   r12
     .ltorg
     .size SetLocalTimeN, .-SetLocalTimeN
+
+    .section .text.winapi.WinFindFilesN,"ax",%progbits
+    .global WinFindFilesN
+    .type WinFindFilesN, %function
+    .thumb_func
+WinFindFilesN:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #12]
+    ldr  r1, =44
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size WinFindFilesN, .-WinFindFilesN
+
+    .section .text.winapi.DeleteFileN,"ax",%progbits
+    .global DeleteFileN
+    .type DeleteFileN, %function
+    .thumb_func
+DeleteFileN:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #12]
+    ldr  r1, =48
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size DeleteFileN, .-DeleteFileN
+
+    .section .text.winapi.MoveFileN,"ax",%progbits
+    .global MoveFileN
+    .type MoveFileN, %function
+    .thumb_func
+MoveFileN:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #12]
+    ldr  r1, =52
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size MoveFileN, .-MoveFileN
+
+    .section .text.winapi.CreateDirectoryN,"ax",%progbits
+    .global CreateDirectoryN
+    .type CreateDirectoryN, %function
+    .thumb_func
+CreateDirectoryN:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #12]
+    ldr  r1, =56
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size CreateDirectoryN, .-CreateDirectoryN
+
+    .section .text.winapi.RemoveDirectoryN,"ax",%progbits
+    .global RemoveDirectoryN
+    .type RemoveDirectoryN, %function
+    .thumb_func
+RemoveDirectoryN:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #12]
+    ldr  r1, =60
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size RemoveDirectoryN, .-RemoveDirectoryN
+
+    .section .text.winapi.GetDiskFreeSpaceN,"ax",%progbits
+    .global GetDiskFreeSpaceN
+    .type GetDiskFreeSpaceN, %function
+    .thumb_func
+GetDiskFreeSpaceN:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #12]
+    ldr  r1, =64
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetDiskFreeSpaceN, .-GetDiskFreeSpaceN
+
+    .section .text.winapi.GetCurrentDirectoryN,"ax",%progbits
+    .global GetCurrentDirectoryN
+    .type GetCurrentDirectoryN, %function
+    .thumb_func
+GetCurrentDirectoryN:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #12]
+    ldr  r1, =68
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetCurrentDirectoryN, .-GetCurrentDirectoryN
 
     .section .text.winapi.GetOpenFileName,"ax",%progbits
     .global GetOpenFileName

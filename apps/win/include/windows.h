@@ -462,6 +462,10 @@ UINT    WINAPI GetProfileInt(LPCSTR section, LPCSTR key, int def);
 BOOL    WINAPI WritePrivateProfileString(LPCSTR section, LPCSTR key, LPCSTR value, LPCSTR file);
 BOOL    WINAPI WriteProfileString(LPCSTR section, LPCSTR key, LPCSTR value);
 UINT    WINAPI GetWindowsDirectory(LPSTR buf, UINT size);
+UINT    WINAPI GetDriveType(int drive);     /* 0 = A: */
+#define DRIVE_REMOVABLE 2
+#define DRIVE_FIXED     3
+#define DRIVE_REMOTE    4
 UINT    WINAPI GetSystemDirectory(LPSTR buf, UINT size);
 
 /* ---------------------------------------------------------------- files */
@@ -495,6 +499,21 @@ BOOL    WINAPI SetLocalTimeN(const SYSTEMTIME_N *t);
 int     WINAPI WinDirListN(LPCSTR spec, LPSTR buf, int size);
 int     WINAPI WinDirListAttrN(LPCSTR spec, UINT attr, LPSTR buf, int size); /* attr 0x10: subdirectories */
 BOOL    WINAPI IsWinAppN(LPCSTR path);
+
+/* WinFindFilesN entries: DOS attributes, packed DOS date and time */
+typedef struct {
+    char  name[13];
+    BYTE  attr;             /* 0x01 read-only, 0x02 hidden, 0x04 system, 0x10 directory, 0x20 archive */
+    WORD  time, date;
+    DWORD size;
+} WINFIND_N;
+int     WINAPI WinFindFilesN(LPCSTR spec, UINT attr, WINFIND_N *out, int max);
+BOOL    WINAPI DeleteFileN(LPCSTR path);
+BOOL    WINAPI MoveFileN(LPCSTR from, LPCSTR to);
+BOOL    WINAPI CreateDirectoryN(LPCSTR path);
+BOOL    WINAPI RemoveDirectoryN(LPCSTR path);
+BOOL    WINAPI GetDiskFreeSpaceN(int drive, DWORD *free_bytes, DWORD *total_bytes);
+int     WINAPI GetCurrentDirectoryN(LPSTR buf, int size);
 
 /* ---------------------------------------------------------------- tasks */
 

@@ -649,6 +649,7 @@ int WINAPI MessageBox(HWND owner, LPCSTR text, LPCSTR caption, UINT type)
 int user_init(void)
 {
     memset(&U, 0, sizeof(U));
+    win_files_init();               /* disk errors fail, before anything reads a file */
     U.keys[VK_NUMLOCK] = 1;
     U.mouse_x = win_sys.screen.width / 2;
     U.mouse_y = win_sys.screen.height / 2;

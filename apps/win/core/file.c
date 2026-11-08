@@ -1,6 +1,6 @@
 /*
- * file.c - KERNEL file I/O (_lopen & co.) and the native directory and
- * program queries of module WINN.
+ * file.c - KERNEL file I/O (_lopen & co.), GetDriveType, and the native
+ * directory, file and disk functions of module WINN.
  *
  * Files belong to the task that opened them and are closed when it ends,
  * as the per-task PSP does in Windows 3.x. The host build maps everything
@@ -18,6 +18,7 @@
 #include <fcntl.h>
 #include <io.h>
 #include <dos.h>
+#include <dos_guest_ptr.h>
 #define F_RDWR 2
 #else
 #define FILE_HOST 1
@@ -27,6 +28,8 @@
 #include <fnmatch.h>
 #include <sys/stat.h>
 #include <stdio.h>
+#include <sys/statvfs.h>
+#include <time.h>
 #define O_BINARY 0
 #define F_RDWR O_RDWR
 #endif
@@ -58,15 +61,30 @@ static int tracked(HFILE f)
 }
 
 #ifdef FILE_HOST
-/* host tests: DOS paths to Linux ones */
-static const char *host_path(const char *p)
+/* host tests: DOS paths to Linux ones; drive C: is the test directory */
+static const char *host_path_to(const char *p, char *buf, int size)
 {
-    static char buf[256];
-    lstrcpyn(buf, p, sizeof(buf));
+    if (p[0] && p[1] == ':') {
+        p += 2;
+        if (*p == '\\' || *p == '/') {
+            lstrcpyn(buf, ".", size);
+            lstrcpyn(buf + 1, p, size - 1);
+        } else {
+            lstrcpyn(buf, p, size);
+        }
+    } else {
+        lstrcpyn(buf, p, size);
+    }
     for (char *q = buf; *q; q++)
         if (*q == '\\')
             *q = '/';
     return buf;
+}
+
+static const char *host_path(const char *p)
+{
+    static char buf[256];
+    return host_path_to(p, buf, sizeof(buf));
 }
 #define open(p, ...) open(host_path(p), __VA_ARGS__)
 #endif
@@ -145,6 +163,40 @@ static int add_name(LPSTR buf, int size, int *len, const char *name)
     return 1;
 }
 
+#ifdef FILE_HOST
+/* "C:\\DIR\\*.EXE" -> the Linux directory in dir, the pattern returned */
+static const char *host_split(LPCSTR spec, char *dir, int size)
+{
+    const char *pat = spec;
+    for (const char *p = spec; *p; p++)
+        if (*p == '\\' || *p == '/' || *p == ':')
+            pat = p + 1;
+    int dn = (int)(pat - spec);
+    char d[256];
+    if (dn >= (int)sizeof(d))
+        return NULL;
+    memcpy(d, spec, (size_t)dn);
+    d[dn] = 0;
+    host_path_to(d, dir, size);
+    if (!dir[0])
+        lstrcpyn(dir, ".", size);
+    return pat;
+}
+
+/* DOS wildcard match: "NAME.*" also matches "NAME" (no extension) */
+static int host_match(const char *pat, const char *name)
+{
+    int miss = fnmatch(pat, name, FNM_CASEFOLD);
+    int pl = (int)strlen(pat);
+    if (miss && pl >= 2 && !strcmp(pat + pl - 2, ".*") && !strchr(name, '.')) {
+        char p2[64];
+        lstrcpyn(p2, pat, pl - 1 < (int)sizeof(p2) ? pl - 1 : (int)sizeof(p2));
+        miss = fnmatch(p2, name, FNM_CASEFOLD);
+    }
+    return !miss;
+}
+#endif
+
 /* Names of the entries matching spec ("C:\\WINN\\*.EXE"), NUL-separated with
  * a second NUL at the end; returns how many. attr 0: files only;
  * WIN_DIR_DIRS (0x10): subdirectories only ("." and ".." left out). The
@@ -158,35 +210,16 @@ int WINAPI WinDirListAttrN(LPCSTR spec, UINT attr, LPSTR buf, int size)
     int len = 0, count = 0;
 #ifdef FILE_HOST
     char dir[256];
-    const char *pat = spec;
-    for (const char *p = spec; *p; p++)
-        if (*p == '\\' || *p == '/')
-            pat = p + 1;
-    int dn = (int)(pat - spec);
-    if (dn >= (int)sizeof(dir))
+    const char *pat = host_split(spec, dir, sizeof(dir));
+    if (!pat)
         return 0;
-    memcpy(dir, spec, (size_t)dn);
-    dir[dn] = 0;
-    if (!dn)
-        lstrcpy(dir, ".");
-    for (char *p = dir; *p; p++)
-        if (*p == '\\')
-            *p = '/';
     DIR *d = opendir(dir);
     if (d) {
         struct dirent *e;
         while ((e = readdir(d)) != NULL) {
             if (e->d_name[0] == '.')
                 continue;
-            /* DOS: "NAME.*" also matches "NAME" (no extension) */
-            int miss = fnmatch(pat, e->d_name, FNM_CASEFOLD);
-            int pl = (int)strlen(pat);
-            if (miss && pl >= 2 && !strcmp(pat + pl - 2, ".*") && !strchr(e->d_name, '.')) {
-                char p2[64];
-                lstrcpyn(p2, pat, pl - 1 < (int)sizeof(p2) ? pl - 1 : (int)sizeof(p2));
-                miss = fnmatch(p2, e->d_name, FNM_CASEFOLD);
-            }
-            if (miss)
+            if (!host_match(pat, e->d_name))
                 continue;
             char full[512];
             struct stat st;
@@ -226,14 +259,303 @@ BOOL WINAPI IsWinAppN(LPCSTR path)
     for (const char *p = path; *p; p++)
         if (*p == '\\' || *p == '/' || *p == ':')
             base = p + 1;
-    char host[256];
-    lstrcpyn(host, path, sizeof(host));
-    for (char *p = host; *p; p++)
-        if (*p == '\\')
-            *p = '/';
     struct stat st;
-    return win_host_app(base) != NULL && !stat(host, &st);
+    return win_host_app(base) != NULL && !stat(host_path(path), &st);
 #else
     return win_ez_is_app(path);
+#endif
+}
+
+/* ---------------------------------------------------------------- files and disks */
+
+#ifndef FILE_HOST
+/* DOS reads paths and writes the DTA in guest memory: a block of its own,
+ * allocated on first use. */
+#define DB_DTA    0u
+#define DB_PATH1  128u
+#define DB_PATH2  320u
+#define DB_INT24  512u
+#define DB_SIZE   528u
+#define DB_PATHMAX 192
+
+static uint16_t db_seg;
+static unsigned char *db_mem;
+
+static int dos_block(void)
+{
+    if (db_mem)
+        return 1;
+    union REGS r = { 0 };
+    r.h.ah = 0x48;
+    r.w.bx = (uint16_t)(DB_SIZE / 16u);
+    int386(0x21, &r, &r);
+    if (r.x.cflag)
+        return 0;
+    db_seg = r.w.ax;
+    db_mem = (unsigned char *)dos_guest_far_ptr(db_seg, 0);
+    return 1;
+}
+
+/* INT 21h with DS and ES on the block (or on seg); true without carry */
+static int dos_call_seg(union REGS *r, uint16_t seg)
+{
+    struct SREGS s;
+    segread(&s);
+    s.ds = s.es = seg;
+    int386x(0x21, r, r, &s);
+    return !r->x.cflag;
+}
+
+static int dos_call(union REGS *r) { return dos_call_seg(r, db_seg); }
+
+static int dos_path(unsigned ofs, LPCSTR p)
+{
+    int n = p ? lstrlen(p) : -1;
+    if (n < 0 || n >= DB_PATHMAX || !dos_block())
+        return 0;
+    memcpy(db_mem + ofs, p, (size_t)n + 1);
+    return 1;
+}
+
+static BOOL dos_path_op(UINT ah, LPCSTR path)
+{
+    if (!dos_path(DB_PATH1, path))
+        return FALSE;
+    union REGS r = { 0 };
+    r.h.ah = (uint8_t)ah;
+    r.w.dx = DB_PATH1;
+    return dos_call(&r);
+}
+#endif
+
+/* DOS critical errors (a drive without a disk) fail the call instead of
+ * asking "Abort, Retry, Fail?" on a screen in graphics mode: INT 24h points
+ * at "mov al,3 / iret" in the block. DOS puts the old vector back from the
+ * PSP when WINN.EXE ends. */
+void win_files_init(void)
+{
+#ifndef FILE_HOST
+    if (!dos_block())
+        return;
+    db_mem[DB_INT24] = 0xB0;
+    db_mem[DB_INT24 + 1] = 0x03;
+    db_mem[DB_INT24 + 2] = 0xCF;
+    union REGS r = { 0 };
+    r.w.ax = 0x2524;
+    r.w.dx = DB_INT24;
+    dos_call(&r);
+#endif
+}
+
+/* The entries matching spec ("C:\\WINN\\*.*") with their attributes, sizes
+ * and times, "." and ".." left out; attr as for DOS (0x10 adds
+ * directories, 0x02 hidden, 0x04 system files). Returns how many were
+ * stored, at most max. */
+int WINAPI WinFindFilesN(LPCSTR spec, UINT attr, WINFIND_N *out, int max)
+{
+    if (!spec || !out || max <= 0)
+        return 0;
+    int n = 0;
+#ifdef FILE_HOST
+    char dir[256];
+    const char *pat = host_split(spec, dir, sizeof(dir));
+    DIR *d = pat ? opendir(dir) : NULL;
+    if (!d)
+        return 0;
+    struct dirent *e;
+    while (n < max && (e = readdir(d)) != NULL) {
+        if (e->d_name[0] == '.' || strlen(e->d_name) > 12 || !host_match(pat, e->d_name))
+            continue;
+        char full[512];
+        struct stat st;
+        snprintf(full, sizeof(full), "%s/%s", dir, e->d_name);
+        if (stat(full, &st))
+            continue;
+        int isdir = S_ISDIR(st.st_mode) != 0;
+        if (isdir && !(attr & 0x10))
+            continue;
+        WINFIND_N *f = &out[n++];
+        memset(f, 0, sizeof(*f));
+        for (int i = 0; e->d_name[i] && i < 12; i++) {
+            char c = e->d_name[i];
+            f->name[i] = c >= 'a' && c <= 'z' ? (char)(c - 32) : c;
+        }
+        f->attr = (BYTE)(isdir ? 0x10 : 0x20);
+        if (!(st.st_mode & 0200))
+            f->attr |= 0x01;
+        f->size = isdir ? 0 : (DWORD)st.st_size;
+        struct tm *t = localtime(&st.st_mtime);
+        if (t && t->tm_year >= 80) {
+            f->date = (WORD)(((t->tm_year - 80) << 9) | ((t->tm_mon + 1) << 5) | t->tm_mday);
+            f->time = (WORD)((t->tm_hour << 11) | (t->tm_min << 5) | (t->tm_sec / 2));
+        }
+    }
+    closedir(d);
+#else
+    if (!dos_path(DB_PATH1, spec))
+        return 0;
+    union REGS r = { 0 };
+    struct SREGS s;
+    r.h.ah = 0x2F;                          /* the DTA in use, put back after */
+    segread(&s);
+    int386x(0x21, &r, &r, &s);
+    uint16_t old_seg = s.es, old_ofs = r.w.bx;
+    memset(&r, 0, sizeof(r));
+    r.h.ah = 0x1A;
+    r.w.dx = DB_DTA;
+    dos_call(&r);
+    memset(&r, 0, sizeof(r));
+    r.h.ah = 0x4E;
+    r.w.cx = (uint16_t)(attr & 0x16);
+    r.w.dx = DB_PATH1;
+    for (int ok = dos_call(&r); ok && n < max; ) {
+        const unsigned char *dta = db_mem + DB_DTA;
+        if (dta[30] != '.') {
+            WINFIND_N *f = &out[n++];
+            memset(f, 0, sizeof(*f));
+            for (int i = 0; i < 12 && dta[30 + i]; i++)
+                f->name[i] = (char)dta[30 + i];
+            f->attr = dta[21];
+            f->time = (WORD)(dta[22] | (dta[23] << 8));
+            f->date = (WORD)(dta[24] | (dta[25] << 8));
+            f->size = (DWORD)dta[26] | ((DWORD)dta[27] << 8) | ((DWORD)dta[28] << 16) |
+                      ((DWORD)dta[29] << 24);
+        }
+        memset(&r, 0, sizeof(r));
+        r.h.ah = 0x4F;
+        ok = dos_call(&r);
+    }
+    memset(&r, 0, sizeof(r));
+    r.h.ah = 0x1A;
+    r.w.dx = old_ofs;
+    dos_call_seg(&r, old_seg);
+#endif
+    return n;
+}
+
+BOOL WINAPI DeleteFileN(LPCSTR path)
+{
+#ifdef FILE_HOST
+    return path && !unlink(host_path(path));
+#else
+    return dos_path_op(0x41, path);
+#endif
+}
+
+/* Renames or moves a file or directory within one drive. */
+BOOL WINAPI MoveFileN(LPCSTR from, LPCSTR to)
+{
+#ifdef FILE_HOST
+    char a[256], b[256];
+    return from && to && !rename(host_path_to(from, a, sizeof(a)), host_path_to(to, b, sizeof(b)));
+#else
+    if (!dos_path(DB_PATH1, from) || !dos_path(DB_PATH2, to))
+        return FALSE;
+    union REGS r = { 0 };
+    r.h.ah = 0x56;
+    r.w.dx = DB_PATH1;
+    r.w.di = DB_PATH2;
+    return dos_call(&r);
+#endif
+}
+
+BOOL WINAPI CreateDirectoryN(LPCSTR path)
+{
+#ifdef FILE_HOST
+    return path && !mkdir(host_path(path), 0755);
+#else
+    return dos_path_op(0x39, path);
+#endif
+}
+
+BOOL WINAPI RemoveDirectoryN(LPCSTR path)
+{
+#ifdef FILE_HOST
+    return path && !rmdir(host_path(path));
+#else
+    return dos_path_op(0x3A, path);
+#endif
+}
+
+/* Free and total bytes of a drive (0 the current one, 1 A:, ...). */
+BOOL WINAPI GetDiskFreeSpaceN(int drive, DWORD *free_bytes, DWORD *total_bytes)
+{
+#ifdef FILE_HOST
+    struct statvfs v;
+    if (drive != 0 && drive != 3)
+        return FALSE;
+    if (statvfs(".", &v))
+        return FALSE;
+    unsigned long long f = (unsigned long long)v.f_bavail * v.f_frsize;
+    unsigned long long t = (unsigned long long)v.f_blocks * v.f_frsize;
+    if (free_bytes) *free_bytes = f > 0xFFFFFFFFull ? 0xFFFFFFFFu : (DWORD)f;
+    if (total_bytes) *total_bytes = t > 0xFFFFFFFFull ? 0xFFFFFFFFu : (DWORD)t;
+    return TRUE;
+#else
+    union REGS r = { 0 };
+    r.h.ah = 0x36;
+    r.h.dl = (uint8_t)drive;
+    int386(0x21, &r, &r);
+    if (r.w.ax == 0xFFFF)
+        return FALSE;
+    DWORD cluster = (DWORD)r.w.ax * r.w.cx;
+    if (free_bytes) *free_bytes = cluster * r.w.bx;
+    if (total_bytes) *total_bytes = cluster * r.w.dx;
+    return TRUE;
+#endif
+}
+
+/* The current directory with its drive: "C:\\WINN". */
+int WINAPI GetCurrentDirectoryN(LPSTR buf, int size)
+{
+    if (!buf || size < 4)
+        return 0;
+#ifdef FILE_HOST
+    lstrcpyn(buf, "C:\\", size);
+#else
+    union REGS r = { 0 };
+    r.h.ah = 0x19;
+    int386(0x21, &r, &r);
+    int drive = r.h.al;
+    buf[0] = (char)('A' + drive);
+    buf[1] = ':';
+    buf[2] = '\\';
+    buf[3] = 0;
+    if (dos_block()) {
+        memset(&r, 0, sizeof(r));
+        r.h.ah = 0x47;
+        r.h.dl = (uint8_t)(drive + 1);
+        r.w.si = DB_PATH1;
+        if (dos_call(&r))
+            lstrcpyn(buf + 3, (const char *)db_mem + DB_PATH1, size - 3);
+    }
+#endif
+    return lstrlen(buf);
+}
+
+/* KERNEL: 0 no such drive, DRIVE_REMOVABLE, DRIVE_FIXED, DRIVE_REMOTE
+ * (drive 0 is A:). */
+UINT WINAPI GetDriveType(int drive)
+{
+#ifdef FILE_HOST
+    return drive == 2 ? DRIVE_FIXED : 0;
+#else
+    if (drive < 0 || drive >= 26)
+        return 0;
+    union REGS r = { 0 };
+    r.w.ax = 0x4409;                        /* device remote? */
+    r.h.bl = (uint8_t)(drive + 1);
+    int386(0x21, &r, &r);
+    if (r.x.cflag)
+        return r.w.ax == 0x0F ? 0 : DRIVE_FIXED;
+    if (r.w.dx & 0x1000)
+        return DRIVE_REMOTE;
+    memset(&r, 0, sizeof(r));
+    r.w.ax = 0x4408;                        /* removable media? */
+    r.h.bl = (uint8_t)(drive + 1);
+    int386(0x21, &r, &r);
+    if (r.x.cflag)
+        return DRIVE_FIXED;
+    return r.w.ax == 0 ? DRIVE_REMOVABLE : DRIVE_FIXED;
 #endif
 }
