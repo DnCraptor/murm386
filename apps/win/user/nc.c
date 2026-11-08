@@ -219,7 +219,8 @@ static void paint_iconic(wwnd *w, HDC dc)
     int tw = m.right - m.left, th = m.bottom - m.top;
     if (th > tr.bottom - tr.top)
         th = tr.bottom - tr.top;
-    int active = child ? w->active_frame : w == U.active;
+    /* as the caption would be: set by WM_NCACTIVATE before this repaint */
+    int active = w->active_frame;
     RECT hb = { (ww - tw) / 2 - 1, tr.top, (ww + tw) / 2 + 1, tr.top + th };
     if (active)
         fill(dc, hb.left, hb.top, hb.right, hb.bottom, COLOR_ACTIVECAPTION);

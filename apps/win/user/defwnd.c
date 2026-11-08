@@ -111,6 +111,10 @@ LRESULT WINAPI DefWindowProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             if (wp == VK_MENU && w->alt_tap)
                 SendMessage(h, WM_SYSCOMMAND, SC_KEYMENU, 0);
             w->alt_tap = 0;
+        } else if (wp == '\r' && (w->style & WS_MINIMIZE)) {
+            /* Enter on the active icon restores the window */
+            w->alt_tap = 0;
+            PostMessage(h, WM_SYSCOMMAND, SC_RESTORE, 0);
         } else if (wp == ' ' || wp > ' ') {
             w->alt_tap = 0;
             SendMessage(h, WM_SYSCOMMAND, SC_KEYMENU, (LPARAM)(unsigned char)wp);

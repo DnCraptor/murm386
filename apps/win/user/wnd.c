@@ -851,10 +851,19 @@ static void activate_other(wwnd *gone)
     wwnd *cand = NULL;
     if (gone && gone->owner && can_activate(gone->owner))
         cand = gone->owner;
+    /* an open window first; when only icons are left, a window just
+     * minimized stays active as its icon */
+    for (wwnd *t = U.desktop->child; !cand && t; t = t->next)
+        if (t != gone && can_activate(t) && !(t->style & WS_MINIMIZE))
+            cand = t;
+    int alive = gone && !gone->destroying && IsWindow(gone->h);
+    if (!cand && alive && can_activate(gone))
+        return;
     for (wwnd *t = U.desktop->child; !cand && t; t = t->next)
         if (t != gone && can_activate(t))
             cand = t;
-    if (U.active == gone)
+    /* a window still there hears that it lost the activation */
+    if (U.active == gone && !alive)
         U.active = NULL;
     SetActiveWindow(cand ? cand->h : 0);
 }
