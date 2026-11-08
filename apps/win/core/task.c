@@ -155,7 +155,23 @@ static struct wtask_ctx kernel_ctx;
 #ifdef TASK_HOST
 win_app_entry win_host_app(const char *prog) __attribute__((weak));
 win_app_entry win_host_app(const char *prog) { (void)prog; return NULL; }
+const winapp_info *win_host_app_info(const char *prog) __attribute__((weak));
+const winapp_info *win_host_app_info(const char *prog) { (void)prog; return NULL; }
 #endif
+
+/* The name and icon of an application file (the host test's are built in). */
+int win_app_info(const char *path, winapp_info *out)
+{
+#ifdef TASK_HOST
+    const winapp_info *i = win_host_app_info(path);
+    if (!i)
+        return 0;
+    *out = *i;
+    return 1;
+#else
+    return win_ez_read_info(path, out);
+#endif
+}
 
 void task_init(void)
 {
@@ -259,6 +275,9 @@ static void reap(void)
             win_handle_free(t->h);
             win_free(t->stack);
             win_free(t->module);
+            if (t->icon)
+                DestroyIcon(t->icon);
+            win_free(t->info);
             win_free(t);
             continue;
         }
@@ -387,6 +406,12 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
     }
     t->module = img.raw;
     t->entry = (int (*)(const win_app_host *))img.entry;
+    winapp_info inf;
+    if (win_app_info(path, &inf)) {
+        t->info = (winapp_info *)win_alloc(sizeof(inf));
+        if (t->info)
+            *t->info = inf;
+    }
     lstrcpyn(t->cmdline, args, sizeof(t->cmdline));
     t->show = (int)show;
     /* let it start right away, as Windows does */

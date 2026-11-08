@@ -540,7 +540,7 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
         WNDCLASS wc = { 0 };
         wc.lpfnWndProc = CalcProc;
         wc.hInstance = inst;
-        wc.hIcon = LoadIcon(0, IDI_APPLICATION);
+        wc.hIcon = LoadIcon(inst, MAKEINTRESOURCE(1));   /* its own icon */
         wc.hCursor = LoadCursor(0, IDC_ARROW);
         wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
         wc.lpszClassName = "SciCalc";

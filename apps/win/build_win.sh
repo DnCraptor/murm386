@@ -57,7 +57,8 @@ for p in "${PROJECTS[@]}"; do
     mkdir -p "$BUILD_ROOT"
     cmake "${GEN[@]}" -S "$p" -B "$dir" -DCMAKE_BUILD_TYPE="$BUILD_TYPE" "${SDK_ARGS[@]}" >"$dir.log" 2>&1 ||
         { cat "$dir.log"; echo "configure failed: $name" >&2; exit 1; }
-    cmake --build "$dir" "${JOBS[@]}" 2>&1 | tee -a "$dir.log" | grep -E "EZ image|warning|error" || true
+    # (the grep in braces: "|| true" after the pipe would reset PIPESTATUS)
+    cmake --build "$dir" "${JOBS[@]}" 2>&1 | tee -a "$dir.log" | { grep -E "EZ image|warning|error" || true; }
     [[ ${PIPESTATUS[0]} -eq 0 ]] || { echo "build failed: $name (see $dir.log)" >&2; exit 1; }
     # the EZ file this project wrote: the newest file in apps/compiled
     out="$(ls -t "$COMPILED" | head -n 1)"

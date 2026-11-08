@@ -59,6 +59,7 @@ extern void DeleteMenu(void);
 extern void DeleteObject(void);
 extern void DestroyAcceleratorTableN(void);
 extern void DestroyCaret(void);
+extern void DestroyIcon(void);
 extern void DestroyMenu(void);
 extern void DestroyWindow(void);
 extern void DialogBoxIndirectN(void);
@@ -81,6 +82,7 @@ extern void EqualRgn(void);
 extern void ExcludeClipRect(void);
 extern void ExitWindows(void);
 extern void ExtTextOut(void);
+extern void ExtractIconN(void);
 extern void FatalExit(void);
 extern void FillRect(void);
 extern void FillRgn(void);
@@ -89,6 +91,7 @@ extern void FindText(void);
 extern void FindWindow(void);
 extern void FrameRect(void);
 extern void GetActiveWindow(void);
+extern void GetAppInfoN(void);
 extern void GetAsyncKeyState(void);
 extern void GetAtomName(void);
 extern void GetBitmapBits(void);
@@ -683,6 +686,7 @@ static const void *const exports_user[484] = {
     [451] = (const void *)TranslateMDISysAccel,
     [452] = (const void *)CreateWindowEx,
     [454] = (const void *)AdjustWindowRectEx,
+    [457] = (const void *)DestroyIcon,
     [466] = (const void *)DrawFocusRect,
     [471] = (const void *)lstrcmpi,
     [472] = (const void *)AnsiNext,
@@ -690,7 +694,7 @@ static const void *const exports_user[484] = {
     [483] = (const void *)SystemParametersInfo,
 };
 
-static const void *const exports_winn[18] = {
+static const void *const exports_winn[20] = {
     [1] = (const void *)DialogBoxIndirectN,
     [2] = (const void *)CreateDialogIndirectN,
     [3] = (const void *)CreateAcceleratorTableN,
@@ -708,6 +712,8 @@ static const void *const exports_winn[18] = {
     [15] = (const void *)RemoveDirectoryN,
     [16] = (const void *)GetDiskFreeSpaceN,
     [17] = (const void *)GetCurrentDirectoryN,
+    [18] = (const void *)GetAppInfoN,
+    [19] = (const void *)ExtractIconN,
 };
 
 static const void *const exports_commdlg[28] = {

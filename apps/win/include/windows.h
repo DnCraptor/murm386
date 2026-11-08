@@ -514,6 +514,10 @@ BOOL    WINAPI CreateDirectoryN(LPCSTR path);
 BOOL    WINAPI RemoveDirectoryN(LPCSTR path);
 BOOL    WINAPI GetDiskFreeSpaceN(int drive, DWORD *free_bytes, DWORD *total_bytes);
 int     WINAPI GetCurrentDirectoryN(LPSTR buf, int size);
+/* an application file's name for the Program Manager and its icon (what a
+ * Win16 program keeps in its resources); 0 if it has none */
+int     WINAPI GetAppInfoN(LPCSTR path, LPSTR desc, int size);
+HICON   WINAPI ExtractIconN(LPCSTR path);
 
 /* ---------------------------------------------------------------- tasks */
 

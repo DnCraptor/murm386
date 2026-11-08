@@ -675,6 +675,7 @@ void    WINAPI GetCursorPos(LPPOINT pt);
 void    WINAPI SetCursorPos(int x, int y);
 int     WINAPI ShowCursor(BOOL show);
 BOOL    WINAPI DrawIcon(HDC hdc, int x, int y, HICON icon);
+BOOL    WINAPI DestroyIcon(HICON icon);
 
 int     WINAPI GetSystemMetrics(int index);
 DWORD   WINAPI GetSysColor(int index);

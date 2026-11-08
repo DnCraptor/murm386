@@ -64,6 +64,19 @@ from DOS directly, an application only prints that it needs Windows.
 EZ files without it (DOS programs, drivers) with error 11, and `IsWinAppN`
 checks a file the same way without loading it.
 
+What a Win16 program keeps in its resources, its name and its icon, an
+application gives `win_app()`:
+
+    win_app(WINMINE winmine.c DESCRIPTION "Minesweeper" ICON winmine.icon)
+
+The icon is a text file, 32 lines of 32 characters: `.` transparent, `0`-`F`
+the 16 VGA colours. `winapp.cmake` turns both into a `winapp_info` block
+whose address follows the signature in `__ez_start`. `GetAppInfoN` and
+`ExtractIconN` read it from a file without loading the program (the Program
+Manager's names and icons); `LoadIcon(hInstance, MAKEINTRESOURCE(1))` gives
+a running program its own icon, for its class (minimized windows, Alt+Tab);
+`DestroyIcon` frees one that `ExtractIconN` made.
+
 Tasks switch only in `GetMessage`, `PeekMessage`, `Yield` and `WinExec`.
 Every instance has its own copy of the program, so window classes belong to
 the instance that registered them.

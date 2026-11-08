@@ -47,8 +47,10 @@
 #define IDC_MIN     203
 
 typedef struct {
-    char desc[32];
-    char cmd[80];
+    char  desc[32];
+    char  cmd[80];
+    HICON icon;                     /* from the program file, read when first drawn */
+    int   icon_read;
 } pm_item;
 
 typedef struct {
@@ -188,6 +190,54 @@ static void save_settings(void)
     }
 }
 
+/* the program file of a command line: "NOTEPAD X.TXT" -> "C:\\WINN\\NOTEPAD.EXE" */
+static void program_path(const char *cmd, char *out, int size)
+{
+    char prog[80];
+    int n = 0, dir = 0, dot = 0;
+    while (*cmd == ' ')
+        cmd++;
+    for (; cmd[n] && cmd[n] != ' ' && n < (int)sizeof(prog) - 5; n++) {
+        prog[n] = cmd[n];
+        if (cmd[n] == '\\' || cmd[n] == '/' || cmd[n] == ':')
+            dir = 1, dot = 0;
+        else if (cmd[n] == '.')
+            dot = 1;
+    }
+    prog[n] = 0;
+    if (!dot)
+        lstrcat(prog, ".EXE");
+    if (dir) {
+        lstrcpyn(out, prog, size);
+        return;
+    }
+    GetWindowsDirectory(out, (UINT)size);
+    int k = lstrlen(out);
+    if (k && out[k - 1] != '\\' && k < size - 1)
+        lstrcat(out, "\\");
+    k = lstrlen(out);
+    lstrcpyn(out + k, prog, size - k);
+}
+
+static HICON item_icon(pm_item *it)
+{
+    if (!it->icon_read) {
+        char path[160];
+        program_path(it->cmd, path, sizeof(path));
+        it->icon = ExtractIconN(path);
+        it->icon_read = 1;
+    }
+    return it->icon ? it->icon : LoadIcon(0, IDI_APPLICATION);
+}
+
+static void forget_icon(pm_item *it)
+{
+    if (it->icon)
+        DestroyIcon(it->icon);
+    it->icon = 0;
+    it->icon_read = 0;
+}
+
 /* "DEMO.EXE" -> "Demo" */
 static void title_of(const char *file, char *out, int size)
 {
@@ -230,15 +280,9 @@ static void make_main_group(void)
         if (!IsWinAppN(path))
             continue;
         pm_item *it = &gr->it[gr->n++];
-        /* the names Windows 3.1 gives its own programs */
-        static const char *const known[][2] = {
-            { "WINFILE.EXE", "File Manager" }, { "CONTROL.EXE", "Control Panel" },
-            { "CALC.EXE", "Calculator" }, { "WINMINE.EXE", "Minesweeper" },
-        };
-        title_of(p, it->desc, sizeof(it->desc));
-        for (unsigned k = 0; k < sizeof(known) / sizeof(known[0]); k++)
-            if (!lstrcmpi(p, known[k][0]))
-                lstrcpyn(it->desc, known[k][1], sizeof(it->desc));
+        /* the program's own name for itself, else its file name */
+        if (!GetAppInfoN(path, it->desc, sizeof(it->desc)))
+            title_of(p, it->desc, sizeof(it->desc));
         lstrcpyn(it->cmd, p, sizeof(it->cmd));
         AnsiUpper(it->cmd);
     }
@@ -323,14 +367,13 @@ static void paint_group(pm_group *gr, HDC dc)
     GetClientRect(gr->hwnd, &rc);
     FillRect(dc, &rc, (HBRUSH)(COLOR_WINDOW + 1));
     int focus = GetFocus() == gr->hwnd;
-    HICON icon = LoadIcon(0, IDI_APPLICATION);
     SetBkMode(dc, TRANSPARENT);
     for (int i = 0; i < gr->n; i++) {
         RECT c;
         item_rect(gr, i, &c);
         if (c.bottom < 0 || c.top > rc.bottom)
             continue;
-        DrawIcon(dc, c.left + (cell_w - 32) / 2, c.top + 4, icon);
+        DrawIcon(dc, c.left + (cell_w - 32) / 2, c.top + 4, item_icon(&gr->it[i]));
         RECT t = { c.left + 2, c.top + 40, c.right - 2, c.bottom };
         RECT m = t;
         DrawText(dc, gr->it[i].desc, -1, &m, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
@@ -483,8 +526,12 @@ static BOOL CALLBACK ItemProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                     SetFocus(GetDlgItem(dlg, IDC_CMD));
                     return TRUE;
                 }
-                if (!edit_item.desc[0])
-                    title_of(edit_item.cmd, edit_item.desc, sizeof(edit_item.desc));
+                if (!edit_item.desc[0]) {
+                    char path[160];
+                    program_path(edit_item.cmd, path, sizeof(path));
+                    if (!GetAppInfoN(path, edit_item.desc, sizeof(edit_item.desc)))
+                        title_of(edit_item.cmd, edit_item.desc, sizeof(edit_item.desc));
+                }
             } else if (!edit_item.desc[0]) {
                 MessageBox(dlg, "Please type a description.", "Program Manager",
                            MB_OK | MB_ICONEXCLAMATION);
@@ -547,6 +594,8 @@ static void new_item(void)
         return;
     }
     edit_item.desc[0] = edit_item.cmd[0] = 0;
+    edit_item.icon = 0;
+    edit_item.icon_read = 0;
     if (DialogBoxIndirectN(hinst, &item_tpl, item_items, hframe, ItemProc) != IDOK)
         return;
     gr->it[gr->n] = edit_item;
@@ -585,6 +634,11 @@ static void properties(void)
     if (gr->sel >= 0 && !IsIconic(gr->hwnd)) {
         edit_item = gr->it[gr->sel];
         if (DialogBoxIndirectN(hinst, &item_tpl, item_items, hframe, ItemProc) == IDOK) {
+            if (lstrcmpi(edit_item.cmd, gr->it[gr->sel].cmd)) {
+                forget_icon(&gr->it[gr->sel]);      /* another program: its icon */
+                edit_item.icon = 0;
+                edit_item.icon_read = 0;
+            }
             gr->it[gr->sel] = edit_item;
             items_changed(gr);
         }
@@ -608,6 +662,7 @@ static void delete_selected(void)
         wsprintf(msg, "Are you sure you want to delete the item '%s'?", gr->it[gr->sel].desc);
         if (MessageBox(hframe, msg, "Delete", MB_YESNO | MB_ICONQUESTION) != IDYES)
             return;
+        forget_icon(&gr->it[gr->sel]);
         for (int i = gr->sel; i < gr->n - 1; i++)
             gr->it[i] = gr->it[i + 1];
         gr->n--;
@@ -619,6 +674,8 @@ static void delete_selected(void)
         if (MessageBox(hframe, msg, "Delete", MB_YESNO | MB_ICONQUESTION) != IDYES)
             return;
         HWND h = gr->hwnd;
+        for (int i = 0; i < gr->n; i++)
+            forget_icon(&gr->it[i]);
         int g = (int)(gr - groups);
         for (; g < ngroups - 1; g++)
             groups[g] = groups[g + 1];
@@ -835,7 +892,7 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
         WNDCLASS wc = { 0 };
         wc.lpfnWndProc = FrameProc;
         wc.hInstance = inst;
-        wc.hIcon = LoadIcon(0, IDI_APPLICATION);
+        wc.hIcon = LoadIcon(inst, MAKEINTRESOURCE(1));   /* its own icon */
         wc.hCursor = LoadCursor(0, IDC_ARROW);
         wc.hbrBackground = (HBRUSH)(COLOR_APPWORKSPACE + 1);
         wc.lpszClassName = "Progman";

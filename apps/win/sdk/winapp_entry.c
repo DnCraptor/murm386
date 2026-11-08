@@ -7,7 +7,9 @@
  *
  * __ez_start begins with a branch over WINAPP_MAGIC: that word, at entry+4,
  * is how WINN.EXE (WinExec, IsWinAppN) tells a Windows application from a
- * DOS program or a driver before running it.
+ * DOS program or a driver before running it. The next word, entry+8, is the
+ * address of the application's winapp_info (its name and icon), which
+ * winapp.cmake generates as winapp_info.h from DESCRIPTION and ICON.
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
@@ -15,8 +17,14 @@
 #include <stdio.h>
 #include "windows.h"
 #include "winmod.h"
+#include "winapp_info.h"            /* generated: WINAPP_DESCRIPTION, WINAPP_ICON_* */
 
 const void *const *const *__win_api;
+
+const winapp_info __winapp_info = {
+    WINAPP_INFO_MAGIC, sizeof(winapp_info), WINAPP_HAS_ICON, WINAPP_DESCRIPTION,
+    { WINAPP_ICON_XOR }, { WINAPP_ICON_AND },
+};
 
 int __winapp_start(const win_app_host *host);
 
@@ -32,6 +40,7 @@ __asm__(
     "    b    1f\n"
     "    .hword 0\n"
     "    .word 0x4150574E\n"                /* WINAPP_MAGIC */
+    "    .word __winapp_info\n"             /* its name and icon */
     "1:  ldr  r3, =__winapp_start\n"       /* r0 (the host table) untouched */
     "    bx   r3\n"
     "    .ltorg\n"

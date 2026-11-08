@@ -78,4 +78,25 @@ typedef struct win_app_host {
 
 typedef int (*win_app_entry)(const win_app_host *host);
 
+/*
+ * What a Windows 3.x executable says about itself in its resources, before
+ * it runs: its name for the Program Manager and its icon. __ez_start holds
+ * the address of this block after WINAPP_MAGIC (entry+8); the SDK makes it
+ * from win_app(... DESCRIPTION "..." ICON file.icon).
+ *
+ * The icon is 32 x 32 in the 16 VGA colours: xor[] 4 bits a pixel (left
+ * pixel in the high nibble), and[] 1 bit a pixel (1: transparent), both
+ * top row first.
+ */
+#define WINAPP_INFO_MAGIC 0x4941574Eu     /* "NWAI" */
+
+typedef struct winapp_info {
+    uint32_t magic;                 /* WINAPP_INFO_MAGIC */
+    uint16_t size;                  /* sizeof(winapp_info) */
+    uint16_t has_icon;
+    char     description[40];
+    uint8_t  xor_bits[512];
+    uint8_t  and_bits[128];
+} winapp_info;
+
 #endif /* MURM_WINMOD_H */

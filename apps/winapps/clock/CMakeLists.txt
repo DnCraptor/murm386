@@ -25,4 +25,4 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/../../../bin/${CMAKE_BUILD_TYPE}")
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/../../win/sdk/winapp.cmake)
-win_app(CLOCK clock.c)
+win_app(CLOCK clock.c DESCRIPTION "Clock" ICON clock.icon)

@@ -5,3 +5,4 @@ winhost800
 *.ppm
 *.png
 HOSTWIN/
+appinfo.c

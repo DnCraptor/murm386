@@ -17,3 +17,5 @@
 15 RemoveDirectoryN
 16 GetDiskFreeSpaceN
 17 GetCurrentDirectoryN
+18 GetAppInfoN
+19 ExtractIconN

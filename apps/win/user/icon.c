@@ -2,7 +2,9 @@
  * icon.c - cursor and icon handles, built-in shapes, keyboard layout.
  *
  * Cursor and icon handles are WOBJ_CURSOR entries whose object pointer
- * carries a small id: 1..WCUR_COUNT built-in cursors, 101.. built-in icons.
+ * carries a small id: 1..WCUR_COUNT built-in cursors, 101.. built-in icons;
+ * or points at a uicon, an icon made from an application's winapp_info
+ * (ExtractIconN, LoadIcon of the application's instance).
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
@@ -35,9 +37,107 @@ HCURSOR WINAPI LoadCursor(HINSTANCE inst, LPCSTR name)
     }
 }
 
+/* ---------------------------------------------------------------- application icons */
+
+#define UICON_MAGIC 0x4E434955u     /* "UICN" */
+#define ICON_IDS    1000            /* below: built-in ids, not pointers */
+
+typedef struct {
+    uint32_t magic;
+    HBITMAP  color;                 /* black where transparent */
+    HBITMAP  mask;                  /* 1: transparent */
+} uicon;
+
+static const COLORREF vga16[16] = {
+    RGB(0, 0, 0), RGB(128, 0, 0), RGB(0, 128, 0), RGB(128, 128, 0),
+    RGB(0, 0, 128), RGB(128, 0, 128), RGB(0, 128, 128), RGB(192, 192, 192),
+    RGB(128, 128, 128), RGB(255, 0, 0), RGB(0, 255, 0), RGB(255, 255, 0),
+    RGB(0, 0, 255), RGB(255, 0, 255), RGB(0, 255, 255), RGB(255, 255, 255),
+};
+
+static uicon *icon_of(HICON h)
+{
+    void *p = win_handle_get(h, WOBJ_CURSOR);
+    if ((uintptr_t)p < ICON_IDS)
+        return NULL;
+    uicon *u = (uicon *)p;
+    return u->magic == UICON_MAGIC ? u : NULL;
+}
+
+static HICON icon_from_info(const winapp_info *inf)
+{
+    if (!inf || !inf->has_icon)
+        return 0;
+    uicon *u = (uicon *)win_alloc(sizeof(uicon));
+    if (!u)
+        return 0;
+    u->magic = UICON_MAGIC;
+    u->mask = CreateBitmap(32, 32, 1, 1, inf->and_bits);
+    HDC sdc = GetDC(0);
+    u->color = CreateCompatibleBitmap(sdc, 32, 32);
+    HDC m = CreateCompatibleDC(sdc);
+    ReleaseDC(0, sdc);
+    HGDIOBJ old = SelectObject(m, u->color);
+    for (int y = 0; y < 32; y++)
+        for (int x = 0; x < 32; x++) {
+            int c = (inf->xor_bits[y * 16 + x / 2] >> (x & 1 ? 0 : 4)) & 15;
+            int clear = (inf->and_bits[y * 4 + x / 8] >> (7 - (x & 7))) & 1;
+            SetPixel(m, x, y, clear ? RGB(0, 0, 0) : vga16[c]);
+        }
+    SelectObject(m, old);
+    DeleteDC(m);
+    HICON h = win_handle_alloc(WOBJ_CURSOR, u);
+    if (!h || !u->mask || !u->color) {
+        if (h)
+            win_handle_free(h);
+        DeleteObject(u->mask);
+        DeleteObject(u->color);
+        win_free(u);
+        return 0;
+    }
+    return h;
+}
+
+BOOL WINAPI DestroyIcon(HICON icon)
+{
+    uicon *u = icon_of(icon);
+    if (!u)
+        return FALSE;               /* the built-in ones stay */
+    DeleteObject(u->mask);
+    DeleteObject(u->color);
+    u->magic = 0;
+    win_free(u);
+    win_handle_free(icon);
+    return TRUE;
+}
+
+/* WINN: the icon of an application file, 0 if it has none (DestroyIcon) */
+HICON WINAPI ExtractIconN(LPCSTR path)
+{
+    winapp_info inf;
+    return path && win_app_info(path, &inf) ? icon_from_info(&inf) : 0;
+}
+
+/* WINN: an application file's name for the Program Manager */
+int WINAPI GetAppInfoN(LPCSTR path, LPSTR desc, int size)
+{
+    winapp_info inf;
+    if (!path || !desc || size <= 0 || !win_app_info(path, &inf))
+        return 0;
+    lstrcpyn(desc, inf.description, size);
+    return lstrlen(desc);
+}
+
 HICON WINAPI LoadIcon(HINSTANCE inst, LPCSTR name)
 {
-    (void)inst;
+    /* an application's own icon (Win16: its first icon resource) */
+    if (inst && !(IS_INTRESOURCE(name) && (uintptr_t)name >= 32512)) {
+        wtask *t = task_from_handle((HTASK)inst);
+        if (t && t->info && !t->icon)
+            t->icon = icon_from_info(t->info);
+        if (t && t->icon)
+            return t->icon;
+    }
     int id = IS_INTRESOURCE(name) ? (int)(uintptr_t)name - 32512 : 0;
     if (id < 0 || id > 4)
         id = 0;
@@ -131,8 +231,23 @@ void user_draw_icon_id(HDC dc, int x, int y, int id)
 
 BOOL WINAPI DrawIcon(HDC dc, int x, int y, HICON icon)
 {
+    uicon *u = icon_of(icon);
+    if (u) {
+        /* the mask cuts the shape out, the colours go in */
+        HDC m = CreateCompatibleDC(dc);
+        COLORREF fg = SetTextColor(dc, RGB(0, 0, 0)), bk = SetBkColor(dc, RGB(255, 255, 255));
+        HGDIOBJ old = SelectObject(m, u->mask);
+        BitBlt(dc, x, y, 32, 32, m, 0, 0, SRCAND);
+        SelectObject(m, u->color);
+        BitBlt(dc, x, y, 32, 32, m, 0, 0, SRCINVERT);
+        SelectObject(m, old);
+        DeleteDC(m);
+        SetTextColor(dc, fg);
+        SetBkColor(dc, bk);
+        return TRUE;
+    }
     int id = (int)(intptr_t)win_handle_get(icon, WOBJ_CURSOR);
-    if (id < 101)
+    if (id < 101 || id >= ICON_IDS)
         return FALSE;
     user_draw_icon_id(dc, x, y, id);
     return TRUE;

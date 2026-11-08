@@ -5498,6 +5498,23 @@ AdjustWindowRectEx:
     .ltorg
     .size AdjustWindowRectEx, .-AdjustWindowRectEx
 
+    .section .text.winapi.DestroyIcon,"ax",%progbits
+    .global DestroyIcon
+    .type DestroyIcon, %function
+    .thumb_func
+DestroyIcon:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1828
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size DestroyIcon, .-DestroyIcon
+
     .section .text.winapi.DrawFocusRect,"ax",%progbits
     .global DrawFocusRect
     .type DrawFocusRect, %function
@@ -5871,6 +5888,40 @@ GetCurrentDirectoryN:
     bx   r12
     .ltorg
     .size GetCurrentDirectoryN, .-GetCurrentDirectoryN
+
+    .section .text.winapi.GetAppInfoN,"ax",%progbits
+    .global GetAppInfoN
+    .type GetAppInfoN, %function
+    .thumb_func
+GetAppInfoN:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #12]
+    ldr  r1, =72
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetAppInfoN, .-GetAppInfoN
+
+    .section .text.winapi.ExtractIconN,"ax",%progbits
+    .global ExtractIconN
+    .type ExtractIconN, %function
+    .thumb_func
+ExtractIconN:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #12]
+    ldr  r1, =76
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size ExtractIconN, .-ExtractIconN
 
     .section .text.winapi.GetOpenFileName,"ax",%progbits
     .global GetOpenFileName

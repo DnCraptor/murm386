@@ -209,10 +209,8 @@ static void paint_iconic(wwnd *w, HDC dc)
     int bg = child ? COLOR_APPWORKSPACE : COLOR_BACKGROUND;
     fill(dc, 0, 0, ww, wh, bg);
     /* a class without an icon: the window paints it in its client area */
-    if (w->cls->wc.hIcon) {
-        int id = (int)(intptr_t)win_handle_get(w->cls->wc.hIcon, WOBJ_CURSOR);
-        user_draw_icon_id(dc, (ww - UM_ICON) / 2, 2, id ? id : 101);
-    }
+    if (w->cls->wc.hIcon && !DrawIcon(dc, (ww - UM_ICON) / 2, 2, w->cls->wc.hIcon))
+        user_draw_icon_id(dc, (ww - UM_ICON) / 2, 2, 101);
     /* the title wraps at spaces (or anywhere in a long word) to two lines,
      * centred; the active one's lines get the caption colour */
     RECT tr = { 1, UM_ICON + 3, ww - 1, wh };
@@ -783,9 +781,9 @@ static void switch_box(HDC dc, const RECT *box, wwnd *t)
     FrameRect(dc, &r, GetStockObject(BLACK_BRUSH));
     InflateRect(&r, -2, -2);
     FrameRect(dc, &r, GetStockObject(BLACK_BRUSH));
-    int id = t->cls->wc.hIcon ? (int)(intptr_t)win_handle_get(t->cls->wc.hIcon, WOBJ_CURSOR) : 0;
     int ih = box->bottom - box->top;
-    user_draw_icon_id(dc, box->left + 12, box->top + (ih - UM_ICON) / 2, id ? id : 101);
+    if (!t->cls->wc.hIcon || !DrawIcon(dc, box->left + 12, box->top + (ih - UM_ICON) / 2, t->cls->wc.hIcon))
+        user_draw_icon_id(dc, box->left + 12, box->top + (ih - UM_ICON) / 2, 101);
     RECT tr = { box->left + 12 + UM_ICON + 10, box->top, box->right - 8, box->bottom };
     SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, GetSysColor(COLOR_BTNTEXT));

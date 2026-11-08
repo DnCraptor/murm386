@@ -920,7 +920,7 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
         wc.style = CS_DBLCLKS;
         wc.lpfnWndProc = MainProc;
         wc.hInstance = inst;
-        wc.hIcon = LoadIcon(0, IDI_APPLICATION);
+        wc.hIcon = LoadIcon(inst, MAKEINTRESOURCE(1));   /* its own icon */
         wc.hCursor = LoadCursor(0, IDC_ARROW);
         wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
         wc.lpszClassName = "CtlPanelClass";

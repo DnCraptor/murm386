@@ -10,7 +10,7 @@ HOST     = host_drivers.c
 GDICORE  = $(filter-out ../core/exports.c ../core/task.c ../core/file.c ../core/logo.c,$(CORE))
 
 # the applications, built in; each WinMain gets its own name
-APPS     = demo.o progman.o notepad.o clock.o calc.o control.o winfile.o taskman.o winmine.o
+APPS     = demo.o progman.o notepad.o clock.o calc.o control.o winfile.o taskman.o winmine.o appinfo.o
 
 all: test_gdi winhost winhost800 HOSTWIN
 
@@ -44,6 +44,13 @@ taskman.o: ../../winapps/taskman/taskman.c
 winmine.o: ../../winapps/winmine/winmine.c
 	$(CC) $(CFLAGS) $(INC) -DWinMain=winmine_WinMain -c -o $@ $<
 
+# their names and icons, from their CMakeLists.txt and .icon files
+appinfo.c: mkappinfo.py $(wildcard ../../winapps/*/CMakeLists.txt) $(wildcard ../../winapps/*/*.icon)
+	python3 mkappinfo.py ../../winapps > $@
+
+appinfo.o: appinfo.c
+	$(CC) $(CFLAGS) $(INC) -c -o $@ $<
+
 winhost: $(CORE) $(USER) $(HOST) host_main.c $(APPS)
 	$(CC) $(CFLAGS) $(INC) -o $@ $^
 
@@ -62,6 +69,6 @@ HOSTWIN:
 	cp HOSTWIN/README.TXT HOSTWIN/DOCS/README.TXT
 
 clean:
-	rm -rf test_gdi winhost winhost800 *.o *.ppm *.png HOSTWIN
+	rm -rf test_gdi winhost winhost800 *.o *.ppm *.png appinfo.c HOSTWIN
 
 .PHONY: all clean HOSTWIN
