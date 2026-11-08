@@ -490,6 +490,7 @@ typedef struct {
     WORD wHour, wMinute, wSecond, wMilliseconds;
 } SYSTEMTIME_N;
 void    WINAPI GetLocalTimeN(SYSTEMTIME_N *t);
+BOOL    WINAPI SetLocalTimeN(const SYSTEMTIME_N *t);
 
 int     WINAPI WinDirListN(LPCSTR spec, LPSTR buf, int size);
 int     WINAPI WinDirListAttrN(LPCSTR spec, UINT attr, LPSTR buf, int size); /* attr 0x10: subdirectories */

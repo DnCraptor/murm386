@@ -47,6 +47,60 @@ DWORD WINAPI GetSysColor(int i) { return (i >= 0 && i < COLOR_MAX) ? sys_colors[
 HBRUSH user_sys_brush(int i) { return (i >= 0 && i < COLOR_MAX) ? sys_brushes[i] : 0; }
 HBRUSH WINAPI GetSysColorBrush(int i) { return user_sys_brush(i); }
 
+/* WIN.INI [colors] key names, in COLOR_xxx order (as in Windows 3.1) */
+static const char *const color_keys[COLOR_MAX] = {
+    "Scrollbar", "Background", "ActiveTitle", "InactiveTitle", "Menu", "Window",
+    "WindowFrame", "MenuText", "WindowText", "TitleText", "ActiveBorder",
+    "InactiveBorder", "AppWorkspace", "Hilight", "HilightText", "ButtonFace",
+    "ButtonShadow", "GrayText", "ButtonText", "InactiveTitleText", "ButtonHilight",
+};
+
+static void mark_nc(wwnd *w)
+{
+    for (; w; w = w->next) {
+        w->ncpaint = 1;
+        mark_nc(w->child);
+    }
+}
+
+/* "r g b" -> colour; 0 if it is not three numbers */
+static int parse_rgb(const char *s, COLORREF *c)
+{
+    int v[3], k = 0;
+    while (*s && k < 3) {
+        while (*s == ' ' || *s == ',')
+            s++;
+        if (*s < '0' || *s > '9')
+            return 0;
+        int n = 0;
+        while (*s >= '0' && *s <= '9')
+            n = n * 10 + (*s++ - '0');
+        v[k++] = n > 255 ? 255 : n;
+    }
+    if (k < 3)
+        return 0;
+    *c = RGB(v[0], v[1], v[2]);
+    return 1;
+}
+
+/* the colours of WIN.INI [colors], at start-up */
+void user_load_colors(void)
+{
+    int idx[COLOR_MAX], n = 0;
+    COLORREF col[COLOR_MAX];
+    for (int i = 0; i < COLOR_MAX; i++) {
+        char v[32];
+        if (GetProfileString("colors", color_keys[i], "", v, sizeof(v)) && parse_rgb(v, &col[n]))
+            idx[n++] = i;
+    }
+    for (int k = 0; k < n; k++) {
+        sys_colors[idx[k]] = col[k];
+        wbrush *b = (wbrush *)win_handle_get(sys_brushes[idx[k]], WOBJ_BRUSH);
+        if (b)
+            b->color = col[k];
+    }
+}
+
 void WINAPI SetSysColors(int n, const int *idx, const COLORREF *colors)
 {
     for (int k = 0; k < n; k++) {
@@ -59,9 +113,97 @@ void WINAPI SetSysColors(int n, const int *idx, const COLORREF *colors)
             b->color = colors[k];
     }
     SendMessage(0xFFFF, WM_SYSCOLORCHANGE, 0, 0);
-    InvalidateRect(0, NULL, TRUE);
-    for (wwnd *w = U.desktop->child; w; w = w->next)
-        w->ncpaint = 1;
+    mark_nc(U.desktop->child);
+    user_repaint_all();
+}
+
+/* every window, the desktop and the frames */
+void user_repaint_all(void)
+{
+    RECT all = { 0, 0, win_sys.screen.width, win_sys.screen.height };
+    wrgn g;
+    wrgn_init(&g);
+    wrgn_set_rect(&g, &all);
+    user_invalidate_screen(&g);
+    wrgn_free(&g);
+    mark_nc(U.desktop->child);
+}
+
+/* ---------------------------------------------------------------- desktop pattern */
+
+static HBRUSH desk_pattern;         /* 0: plain desktop colour */
+
+HBRUSH user_desktop_pattern(void) { return desk_pattern; }
+
+/* "170 85 170 85 170 85 170 85" (the rows, top first) or "(None)" */
+static void set_pattern(const char *s)
+{
+    if (desk_pattern) {
+        DeleteObject(desk_pattern);
+        desk_pattern = 0;
+    }
+    BYTE rows[16];                  /* 8 rows of one byte, each padded to a word */
+    int k = 0, any = 0;
+    while (s && *s && k < 8) {
+        while (*s == ' ' || *s == ',')
+            s++;
+        if (*s < '0' || *s > '9')
+            break;
+        int n = 0;
+        while (*s >= '0' && *s <= '9')
+            n = n * 10 + (*s++ - '0');
+        rows[2 * k] = (BYTE)n;
+        rows[2 * k + 1] = 0;
+        k++;
+        any |= n & 0xFF;
+    }
+    if (k < 8 || !any)
+        return;
+    HBITMAP bm = CreateBitmap(8, 8, 1, 1, rows);
+    if (bm) {
+        desk_pattern = CreatePatternBrush(bm);
+        DeleteObject(bm);
+    }
+}
+
+void user_load_desktop(void)
+{
+    SetDoubleClickTime(GetProfileInt("windows", "DoubleClickSpeed", 500));
+    char v[64];
+    GetProfileString("Desktop", "Pattern", "(None)", v, sizeof(v));
+    set_pattern(v);
+}
+
+/* ---------------------------------------------------------------- SystemParametersInfo */
+
+BOOL WINAPI SystemParametersInfo(UINT action, UINT param, LPVOID pv, UINT ini)
+{
+    switch (action) {
+    case SPI_GETBEEP:
+        if (pv)
+            *(BOOL *)pv = TRUE;
+        return TRUE;
+    case SPI_SETDESKPATTERN:
+        /* the pattern given, or (pv = -1) the one in WIN.INI again */
+        if ((intptr_t)pv == -1 || !pv) {
+            user_load_desktop();
+        } else {
+            set_pattern((LPCSTR)pv);
+            if (ini & SPIF_UPDATEINIFILE)
+                WriteProfileString("Desktop", "Pattern", (LPCSTR)pv);
+        }
+        user_repaint_all();
+        return TRUE;
+    case SPI_SETDOUBLECLICKTIME:
+        SetDoubleClickTime(param);
+        if (ini & SPIF_UPDATEINIFILE) {
+            char v[12];
+            wsprintf(v, "%u", param);
+            WriteProfileString("windows", "DoubleClickSpeed", v);
+        }
+        return TRUE;
+    }
+    return FALSE;
 }
 
 int WINAPI GetSystemMetrics(int i)

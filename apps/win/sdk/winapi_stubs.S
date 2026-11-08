@@ -2285,6 +2285,40 @@ ReleaseCapture:
     .ltorg
     .size ReleaseCapture, .-ReleaseCapture
 
+    .section .text.winapi.SetDoubleClickTime,"ax",%progbits
+    .global SetDoubleClickTime
+    .type SetDoubleClickTime, %function
+    .thumb_func
+SetDoubleClickTime:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =80
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SetDoubleClickTime, .-SetDoubleClickTime
+
+    .section .text.winapi.GetDoubleClickTime,"ax",%progbits
+    .global GetDoubleClickTime
+    .type GetDoubleClickTime, %function
+    .thumb_func
+GetDoubleClickTime:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =84
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetDoubleClickTime, .-GetDoubleClickTime
+
     .section .text.winapi.SetFocus,"ax",%progbits
     .global SetFocus
     .type SetFocus, %function
@@ -5447,6 +5481,23 @@ AnsiPrev:
     .ltorg
     .size AnsiPrev, .-AnsiPrev
 
+    .section .text.winapi.SystemParametersInfo,"ax",%progbits
+    .global SystemParametersInfo
+    .type SystemParametersInfo, %function
+    .thumb_func
+SystemParametersInfo:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1932
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SystemParametersInfo, .-SystemParametersInfo
+
     .section .text.winapi.DialogBoxIndirectN,"ax",%progbits
     .global DialogBoxIndirectN
     .type DialogBoxIndirectN, %function
@@ -5599,6 +5650,23 @@ GetLocalTimeN:
     bx   r12
     .ltorg
     .size GetLocalTimeN, .-GetLocalTimeN
+
+    .section .text.winapi.SetLocalTimeN,"ax",%progbits
+    .global SetLocalTimeN
+    .type SetLocalTimeN, %function
+    .thumb_func
+SetLocalTimeN:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #12]
+    ldr  r1, =40
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SetLocalTimeN, .-SetLocalTimeN
 
     .section .text.winapi.GetOpenFileName,"ax",%progbits
     .global GetOpenFileName

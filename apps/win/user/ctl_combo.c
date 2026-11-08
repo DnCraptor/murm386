@@ -319,6 +319,12 @@ LRESULT CALLBACK user_combo_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         wwnd *w = user_wnd(h);
         int t = ctype(h);
         DWORD st = w->style;
+        /* WS_VSCROLL is for the list; the combo box itself has no scroll bars */
+        if (st & (WS_VSCROLL | WS_HSCROLL)) {
+            RECT wr = w->rc;
+            w->style &= ~(DWORD)(WS_VSCROLL | WS_HSCROLL);
+            user_set_window_rect(w, &wr, 0);
+        }
         RECT rc;
         GetClientRect(h, &rc);
         c->drop_h = rc.bottom;

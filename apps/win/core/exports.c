@@ -114,6 +114,7 @@ extern void GetDlgCtrlID(void);
 extern void GetDlgItem(void);
 extern void GetDlgItemInt(void);
 extern void GetDlgItemText(void);
+extern void GetDoubleClickTime(void);
 extern void GetFileTitle(void);
 extern void GetFocus(void);
 extern void GetKeyState(void);
@@ -272,7 +273,9 @@ extern void SetCursor(void);
 extern void SetCursorPos(void);
 extern void SetDlgItemInt(void);
 extern void SetDlgItemText(void);
+extern void SetDoubleClickTime(void);
 extern void SetFocus(void);
+extern void SetLocalTimeN(void);
 extern void SetMenu(void);
 extern void SetPaletteEntries(void);
 extern void SetParent(void);
@@ -301,6 +304,7 @@ extern void ShowScrollBar(void);
 extern void ShowWindow(void);
 extern void StretchBlt(void);
 extern void SubtractRect(void);
+extern void SystemParametersInfo(void);
 extern void TabbedTextOut(void);
 extern void TextOut(void);
 extern void TrackPopupMenu(void);
@@ -467,7 +471,7 @@ static const void *const exports_gdi[484] = {
     [483] = (const void *)MoveToEx,
 };
 
-static const void *const exports_user[474] = {
+static const void *const exports_user[484] = {
     [1] = (const void *)MessageBox,
     [6] = (const void *)PostQuitMessage,
     [7] = (const void *)ExitWindows,
@@ -478,6 +482,8 @@ static const void *const exports_user[474] = {
     [17] = (const void *)GetCursorPos,
     [18] = (const void *)SetCapture,
     [19] = (const void *)ReleaseCapture,
+    [20] = (const void *)SetDoubleClickTime,
+    [21] = (const void *)GetDoubleClickTime,
     [22] = (const void *)SetFocus,
     [23] = (const void *)GetFocus,
     [24] = (const void *)RemoveProp,
@@ -664,9 +670,10 @@ static const void *const exports_user[474] = {
     [471] = (const void *)lstrcmpi,
     [472] = (const void *)AnsiNext,
     [473] = (const void *)AnsiPrev,
+    [483] = (const void *)SystemParametersInfo,
 };
 
-static const void *const exports_winn[10] = {
+static const void *const exports_winn[11] = {
     [1] = (const void *)DialogBoxIndirectN,
     [2] = (const void *)CreateDialogIndirectN,
     [3] = (const void *)CreateAcceleratorTableN,
@@ -676,6 +683,7 @@ static const void *const exports_winn[10] = {
     [7] = (const void *)IsWinAppN,
     [8] = (const void *)WinDirListAttrN,
     [9] = (const void *)GetLocalTimeN,
+    [10] = (const void *)SetLocalTimeN,
 };
 
 static const void *const exports_commdlg[28] = {

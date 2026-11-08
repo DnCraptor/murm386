@@ -167,7 +167,15 @@ LRESULT CALLBACK user_desktop_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     case WM_ERASEBKGND: {
         RECT rc;
         GetClientRect(h, &rc);
-        FillRect((HDC)wp, &rc, user_sys_brush(COLOR_BACKGROUND));
+        HBRUSH pat = user_desktop_pattern();
+        if (pat) {
+            /* the pattern's set bits in black, the rest in the desktop colour */
+            SetTextColor((HDC)wp, GetSysColor(COLOR_BACKGROUND));
+            SetBkColor((HDC)wp, RGB(0, 0, 0));
+            FillRect((HDC)wp, &rc, pat);
+        } else {
+            FillRect((HDC)wp, &rc, user_sys_brush(COLOR_BACKGROUND));
+        }
         return 1;
     }
     case WM_NCHITTEST:

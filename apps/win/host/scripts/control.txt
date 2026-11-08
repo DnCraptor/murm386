@@ -1,0 +1,62 @@
+# Control Panel: run with "./winhost scripts/control.txt CONTROL"
+# Writes HOSTWIN/WIN.INI and HOSTWIN/CONTROL.INI; puts the colours and
+# the pattern back at the end.
+wait 100
+snap cp_main.ppm
+# Color: Desktop element, red from the palette, OK
+key RETURN
+wait 50
+snap cp_color.ppm
+click 355 323
+wait 30
+snap cp_color_red.ppm
+click 237 369
+wait 50
+# Desktop: the second pattern (Boxes), OK
+key RIGHT
+key RETURN
+wait 50
+key DOWN
+key DOWN
+wait 30
+snap cp_desktop.ppm
+click 213 275
+wait 50
+snap cp_applied.ppm
+# Mouse and Date/Time, cancelled
+key RIGHT
+key RETURN
+wait 50
+snap cp_mouse.ppm
+key ESC
+wait 30
+key RIGHT
+key RETURN
+wait 50
+snap cp_date.ppm
+key ESC
+wait 30
+# back to the Windows Default scheme and no pattern
+key LEFT
+key LEFT
+key LEFT
+key RETURN
+wait 50
+key DOWN
+wait 30
+snap cp_scheme.ppm
+key RETURN
+wait 50
+key RIGHT
+key RETURN
+wait 50
+key UP
+key UP
+key RETURN
+wait 50
+snap cp_restored.ppm
+keydown ALT
+key F4
+keyup ALT
+wait 50
+exit

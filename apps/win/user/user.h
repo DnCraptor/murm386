@@ -136,6 +136,10 @@ int     user_translate_accel(HWND h, HACCEL a, MSG *m);
 /* sysmet.c */
 HBRUSH  user_sys_brush(int index);
 void    user_init_sysmet(void);
+void    user_load_colors(void);             /* WIN.INI [colors] */
+void    user_load_desktop(void);            /* WIN.INI [Desktop] Pattern */
+HBRUSH  user_desktop_pattern(void);         /* 0: plain colour */
+void    user_repaint_all(void);
 int     user_draw_text(HDC dc, LPCSTR s, int n, RECT *rc, UINT fmt);
 
 /* controls */

@@ -12,6 +12,11 @@
 #include <string.h>
 #include "user.h"
 
+static UINT dblclk_time = 500;      /* ms; WIN.INI [windows] DoubleClickSpeed */
+
+void WINAPI SetDoubleClickTime(UINT ms) { dblclk_time = ms ? (ms > 5000 ? 5000 : ms) : 500; }
+UINT WINAPI GetDoubleClickTime(void) { return dblclk_time; }
+
 #define QSIZE 256
 
 static MSG queue[QSIZE];
@@ -300,7 +305,7 @@ static void mouse_button(int x, int y, int btn, int down)
         uint32_t t = now_ms();
         int dbl = (w->cls->wc.style & CS_DBLCLKS) || hit != HTCLIENT;
         if (dbl && U.last_click_hwnd == w->h && U.last_click_msg == (int)m &&
-            t - U.last_click_time < 500 &&
+            t - U.last_click_time < dblclk_time &&
             (x - U.last_click_x) * (x - U.last_click_x) < 16 &&
             (y - U.last_click_y) * (y - U.last_click_y) < 16) {
             m += 2;                                  /* xBUTTONDBLCLK */

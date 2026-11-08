@@ -731,6 +731,16 @@ UINT    WINAPI RegisterClipboardFormat(LPCSTR name);
 int     WINAPI GetClipboardFormatName(UINT fmt, LPSTR buf, int size);
 BOOL    WINAPI IsClipboardFormatAvailable(UINT fmt);
 UINT    WINAPI RegisterWindowMessage(LPCSTR name);
+void    WINAPI SetDoubleClickTime(UINT ms);
+UINT    WINAPI GetDoubleClickTime(void);
+BOOL    WINAPI SystemParametersInfo(UINT action, UINT param, LPVOID pv, UINT ini);
+#define SPI_GETBEEP             1
+#define SPI_SETDESKWALLPAPER    20
+#define SPI_SETDESKPATTERN      21
+#define SPI_SETDOUBLECLICKTIME  32
+#define SPIF_UPDATEINIFILE      0x0001
+#define SPIF_SENDWININICHANGE   0x0002
+#define WM_WININICHANGE         0x001A
 
 /* MDI */
 #define WM_MDICREATE        0x0220

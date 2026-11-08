@@ -639,6 +639,8 @@ int user_init(void)
     U.mouse_x = win_sys.screen.width / 2;
     U.mouse_y = win_sys.screen.height / 2;
     user_init_sysmet();
+    user_load_colors();
+    user_load_desktop();
     user_init_windows();
     HCURSOR arrow = LoadCursor(0, IDC_ARROW), ibeam = LoadCursor(0, IDC_IBEAM);
     int ex = (int)sizeof(void *);
