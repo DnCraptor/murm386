@@ -7,6 +7,7 @@
 #include <string.h>
 #include <unistd.h>
 #include "../core/ne_guest.h"
+#include "../core/ne_boot.h"
 #include "../core/x86bridge.h"
 
 #define MEM_BYTES 0x90000u
@@ -156,12 +157,13 @@ int main(void)
     assert(code[0] == 0x90 && code[0x7f] == 0);
     assert(r16(code + 0x10) == 0 && r16(code + 0x12) == 0x08);
     assert(r16(code + 0x20) == 0 && r16(code + 0x22) == 0x08);
-    const uint8_t stub[8] = {
-        0xba, (uint8_t)WINX86_BRIDGE_PORT,
-        (uint8_t)(WINX86_BRIDGE_PORT >> 8),
-        0xb8, 0x03, 0x00, 0xef, 0xcb
+    const uint8_t stub[9] = {
+        0xb8, 0x03, 0x00, 0x9a,
+        (uint8_t)WIN_NE_BOOT_GATEWAY_OFFSET,
+        (uint8_t)(WIN_NE_BOOT_GATEWAY_OFFSET >> 8),
+        0x08, 0x00, 0xcb
     };
-    assert(!memcmp(guest + img.thunk_linear, stub, 8));
+    assert(!memcmp(guest + img.thunk_linear, stub, sizeof(stub)));
     assert(guest[img.thunk_linear + WIN_NE_THUNK_BYTES] == 0xcc);
     win_ne_guest_release(&img);
     assert(!nactive && alloc_calls == free_calls && !img.gdt);

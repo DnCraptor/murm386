@@ -29,6 +29,15 @@ unsigned int GetNumTasks(void) { return 2; }
 uint32_t GetTickCount(void) { return 0x34567890UL; }
 int GetSystemMetrics(int id) { return id == 0 ? 640 : -1; }
 uint32_t GetSysColor(int id) { return id == 5 ? 0x00123456u : 0; }
+static unsigned messagebox_calls;
+int MessageBox(uint16_t owner, const char *text, const char *title, unsigned type)
+{
+    assert(owner == 0 && type == 0);
+    assert(!strcmp(text, "Hello from Win16 NE"));
+    assert(!strcmp(title, "NE dialog"));
+    messagebox_calls++;
+    return 1; /* IDOK */
+}
 
 int main(void)
 {
@@ -72,6 +81,19 @@ int main(void)
     assert(win_ne_guest_api(&ctx, &cpu, 90));
     assert(cpu.gprx[regax].r16 == 12 && cpu.gprx[regdx].r16 == 0);
     assert(!ctx.invalid_args);
+    /* MessageBox args are pushed left-to-right (Win16 PASCAL). */
+    memcpy(mem + 0x10, "Hello from Win16 NE", 20);
+    memcpy(mem + 0x40, "NE dialog", 10);
+    put16(0x84, 0);               /* type, last argument */
+    put16(0x86, 0x40); put16(0x88, 0x18); /* caption */
+    put16(0x8a, 0x10); put16(0x8c, 0x18); /* text */
+    put16(0x8e, 0);               /* HWND */
+    assert(win_ne_guest_api(&ctx, &cpu, 0x1001));
+    assert(messagebox_calls == 1 && cpu.gprx[regax].r16 == 1);
+    put16(0x8c, 0xffff);           /* invalid text selector */
+    assert(win_ne_guest_api(&ctx, &cpu, 0x1001));
+    assert(ctx.invalid_args && messagebox_calls == 1);
+    ctx.invalid_args = 0;
     /* Invalid selector: no out-of-bounds read, fault latched. */
     put16(0x86, 0x7777);
     assert(win_ne_guest_api(&ctx, &cpu, 90));

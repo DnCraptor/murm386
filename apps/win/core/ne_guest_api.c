@@ -14,6 +14,7 @@ extern unsigned int GetNumTasks(void);
 extern uint32_t GetTickCount(void);
 extern int GetSystemMetrics(int);
 extern uint32_t GetSysColor(int);
+extern int MessageBox(uint16_t, const char *, const char *, unsigned int);
 
 /* Bounds are those of the NE segment, not of the complete DOS memory map. */
 static int read_segment(win_ne_guest_api_context *ctx, uint16_t selector,
@@ -75,6 +76,22 @@ static int guest_strlen(win_ne_guest_api_context *ctx,
     return 0;
 }
 
+/* Bounded Win16 FAR ANSI string copy. Never pass a guest pointer into a
+ * native USER routine: the DOS-backed NE memory belongs to the emulator. */
+static int guest_copy_string(win_ne_guest_api_context *ctx,
+                             uint16_t selector, uint16_t offset,
+                             char *dst, uint32_t capacity)
+{
+    if (!dst || !capacity) return 0;
+    if (!selector && !offset) { dst[0] = 0; return 1; }
+    for (uint32_t i = 0; i < capacity; i++) {
+        if (!read_segment(ctx, selector, (uint32_t)offset + i, dst + i, 1))
+            return 0;
+        if (!dst[i]) return 1;
+    }
+    return 0; /* unterminated, even when the guest segment is larger */
+}
+
 int win_ne_guest_api(void *opaque, CPU *cpu, uint16_t service)
 {
     if (!cpu) return 0;
@@ -96,6 +113,25 @@ int win_ne_guest_api(void *opaque, CPU *cpu, uint16_t service)
                 if (ctx) ctx->invalid_args = 1;
             }
             value = len;
+        }
+        break;
+    case 0x1001: /* USER.1 MessageBox(HWND, FAR text, FAR caption, UINT) */
+        {
+            uint16_t type, title_off, title_sel, text_off, text_sel, owner;
+            char title[128], message[512];
+            if (!read_stack_word(ctx, cpu, 4, &type) ||
+                !read_stack_word(ctx, cpu, 6, &title_off) ||
+                !read_stack_word(ctx, cpu, 8, &title_sel) ||
+                !read_stack_word(ctx, cpu, 10, &text_off) ||
+                !read_stack_word(ctx, cpu, 12, &text_sel) ||
+                !read_stack_word(ctx, cpu, 14, &owner) ||
+                !guest_copy_string(ctx, title_sel, title_off, title, sizeof(title)) ||
+                !guest_copy_string(ctx, text_sel, text_off, message, sizeof(message))) {
+                if (ctx) ctx->invalid_args = 1;
+                value = 0;
+            } else {
+                value = (uint16_t)MessageBox(owner, message, title, type);
+            }
         }
         break;
     case 0x10b3:  /* USER.179 GetSystemMetrics(int): Win16 WORD argument */

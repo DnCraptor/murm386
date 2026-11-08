@@ -136,6 +136,9 @@ static int service_id(const win_ne_import *imp, uint16_t *id)
         else if ((imp->ordinal == 180 && !imp->procedure[0]) ||
                  (!imp->ordinal && name_eq(imp->procedure, "GetSysColor")))
             *id = 0x10b4u;
+        else if ((imp->ordinal == 1 && !imp->procedure[0]) ||
+                 (!imp->ordinal && name_eq(imp->procedure, "MessageBox")))
+            *id = 0x1001u;
         else
             return 0;
     } else {
@@ -149,6 +152,7 @@ static uint16_t service_args(uint16_t id)
 {
     switch (id) {
     case 90: return 4;             /* KERNEL.lstrlen: far pointer */
+    case 0x1001: return 12;        /* USER.MessageBox(HWND, FAR, FAR, WORD) */
     case 0x10b3: case 0x10b4: return 2; /* USER: int parameter */
     default: return 0;
     }
@@ -232,17 +236,18 @@ int win_ne_guest_load(const char *path, win_ne_guest_image *out,
         for (uint16_t i = 0; i < out->thunk_count; i++) {
             uint16_t id = out->thunk_services[i];
             uint8_t *p = thunks + i * THUNK_BYTES;
-            /* MOV DX,port; MOV AX,service_id; OUT DX,AX;
-             * RETF for no-argument services, RETF imm16 for PASCAL calls.
-             * Unused thunk bytes remain INT3 to reject fall-through. */
+            /* CALL FAR the shared PM->RM->PM bridge. The OUT is executed
+             * in real mode, allowing its native handler to use DOS/BIOS.
+             * RETF imm16 restores the Win16 PASCAL caller's SP. */
             uint16_t args = service_args(id);
-            p[0] = 0xba; put16(p + 1, WINX86_BRIDGE_PORT);
-            p[3] = 0xb8; put16(p + 4, id);
-            p[6] = 0xef;
+            p[0] = 0xb8; put16(p + 1, id); /* mov ax,service */
+            p[3] = 0x9a;                   /* call far PM gateway */
+            put16(p + 4, WIN_NE_BOOT_GATEWAY_OFFSET);
+            put16(p + 6, out->thunk_selector);
             if (args) {
-                p[7] = 0xca; put16(p + 8, args);
+                p[8] = 0xca; put16(p + 9, args);
             } else {
-                p[7] = 0xcb;
+                p[8] = 0xcb;
             }
         }
         if (!io->write(opaque, out->thunk_linear, thunks, sizeof(thunks)))

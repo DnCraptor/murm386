@@ -12,8 +12,9 @@ typedef struct {
     int invalid_args;  /* latched; reported only after the CPU leaves PE */
 } win_ne_guest_api_context;
 
-/* Only the declared zero/one-word/far-pointer Win16 PASCAL signatures.
- * Never calls DOS or switches native tasks with CR0.PE active. */
+/* Marshals the declared Win16 PASCAL signatures. The caller MUST have
+ * switched the shared emulator to the original DOS real-mode context before
+ * invoking this function: MessageBox may run the native message loop. */
 int win_ne_guest_api(void *opaque, CPU *cpu, uint16_t service);
 
 #endif /* WINN_NE_GUEST_API_H */

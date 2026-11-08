@@ -5,21 +5,27 @@ subset) for native ARM programs. `WINN.EXE` is the Windows loader: it holds
 KERNEL, GDI, USER and the built-in drivers, loads driver modules, and runs
 applications (separate EZ files) as cooperative tasks, as Windows 3.x does.
 The preliminary 386 NE path is available through ordinary `WinExec` and
-`WINN NEAPP.EXE`. It supports a strictly validated straight-line x86 entry:
+`WINN NEDIALOG.EXE`. It accepts only a preflighted straight-line x86 entry:
 `NOP`, bounded `PUSH DS` / `PUSH imm16`, up to 32 `FAR CALL`s to known Win16
-APIs and `RETF`. The thunks use 16-byte slots, returning through `RETF` or
-`RETF imm16` to clean Win16 PASCAL arguments. Supported functions are
-KERNEL.3 GetVersion, KERNEL.36 GetCurrentTask, KERNEL.90 lstrlen (checked
-selector:offset string), KERNEL.152 GetNumTasks, USER.13 GetTickCount,
-USER.179 GetSystemMetrics and USER.180 GetSysColor. Guest stack reads and
-far pointers are checked against staged NE segment bounds. Invalid pointers
-are reported only after the guest returns to Real Mode. Other Win16 programs
-are rejected before entering Protected Mode; GUI calls that require DOS I/O
-or yield to other tasks are not enabled yet. The native WINN thread remains
-the executor; neither x86 CPU implementation is modified.
-`host/mkne_winexec.py` and `host/mkne_args.py` generate `NEAPP.EXE` and
-`NEARGS.EXE`, both with executable DOS MZ stubs that explain how to launch
-them under WINN if invoked directly from DOS.
+APIs, and `RETF`. Each 16-byte thunk calls a common guest PM→RM→PM gateway.
+The native callback runs with the original DOS Real Mode CPU context, so
+WINN can service keyboard/mouse BIOS calls and cooperative modal dialogs.
+After the native call, the same Win16 registers and stack are resumed; each
+`RETF imm16` cleans the Win16 PASCAL arguments.
+
+Supported functions: KERNEL.3 GetVersion, KERNEL.36 GetCurrentTask,
+KERNEL.90 lstrlen (checked selector:offset string), KERNEL.152 GetNumTasks,
+USER.13 GetTickCount, USER.179 GetSystemMetrics, USER.180 GetSysColor and
+USER.1 MessageBox. Its FAR ANSI strings are copied into bounded native buffers
+and the owner, pointers and style are read from the guest Pascal stack.
+Other Win16 programs are rejected before Protected Mode. One NE executor
+can be active at a time: a nested NE launch is refused while a native modal
+loop is running. The original ARM WINN thread remains the executor; neither
+x86 CPU implementation is modified.
+
+`host/mkne_winexec.py`, `host/mkne_args.py` and `host/mkne_dialog.py` generate
+`NEAPP.EXE`, `NEARGS.EXE` and `NEDIALOG.EXE`. All three have DOS MZ stubs that
+explain how to launch them under WINN when invoked directly from DOS.
 
     WINN [:] [program [arguments]]
 

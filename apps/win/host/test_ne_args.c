@@ -61,11 +61,11 @@ int main(int argc, char **argv)
 
     for (unsigned i = 0; i < 3; ++i) {
         const uint8_t *t = mem + img.thunk_linear + i * WIN_NE_THUNK_BYTES;
-        assert(t[0] == 0xba && read16(t+1) == WINX86_BRIDGE_PORT);
-        assert(t[3] == 0xb8 && read16(t+4) == img.thunk_services[i]);
-        assert(t[6] == 0xef && t[7] == 0xca);
-        assert(read16(t+8) == (i == 2 ? 4 : 2));
-        assert(t[10] == 0xcc && t[WIN_NE_THUNK_BYTES-1] == 0xcc);
+        assert(t[0] == 0xb8 && read16(t+1) == img.thunk_services[i]);
+        assert(t[3] == 0x9a && read16(t+4) == WIN_NE_BOOT_GATEWAY_OFFSET);
+        assert(read16(t+6) == img.thunk_selector && t[8] == 0xca);
+        assert(read16(t+9) == (i == 2 ? 4 : 2));
+        assert(t[11] == 0xcc && t[WIN_NE_THUNK_BYTES-1] == 0xcc);
     }
     const uint8_t *p = mem + img.segments[1].linear;
     const uint8_t expected[] = {

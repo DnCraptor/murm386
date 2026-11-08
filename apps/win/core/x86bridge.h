@@ -25,8 +25,8 @@ enum {
 
 /* Handler may update guest registers; 1 = handled, 0 = unsupported.
  * The special EXIT token bypasses the handler and ends the guest run.
- * No DOS/BIOS calls or task switches should occur while a protected-mode
- * guest context is installed in the shared emulator CPU.
+ * Native calls using DOS/BIOS are safe only when the caller has explicitly
+ * returned the shared CPU to its original real-mode DOS context.
  */
 typedef int (*winx86_service_fn)(void *opaque, CPU *cpu, uint16_t service);
 

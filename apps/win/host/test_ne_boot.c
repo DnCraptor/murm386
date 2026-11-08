@@ -12,7 +12,7 @@ int main(void)
     uint8_t boot[WIN_NE_BOOT_CAPACITY];
     win_ne_boot_args args = { 0x1234, 8, 0x10, 0x42, 0x18, 0x100, 31, 0x6a30 };
     size_t len = win_ne_boot_make(boot, sizeof(boot), &args);
-    assert(len > 70 && len < WIN_NE_BOOT_CAPACITY);
+    assert(len == WIN_NE_BOOT_CAPACITY);
     /* Real-mode entry at RM_SEG:0000. */
     assert(boot[0] == 0xfa && boot[1] == 0x8c && boot[2] == 0xc8);
     assert(!memcmp(boot + 5, "\x0f\x01\x06", 3)); /* SGDT */
@@ -40,7 +40,24 @@ int main(void)
     assert(boot[rm+13] == 0xba && rd16(boot+rm+14) == WINX86_BRIDGE_PORT);
     assert(boot[rm+16] == 0xb8 && rd16(boot+rm+17) == WINX86_BRIDGE_EXIT);
     assert(boot[rm+19] == 0xef);
-    assert(boot[len] == 0xcc);
+    assert(len == WIN_NE_BOOT_CAPACITY);
+    assert(boot[WIN_NE_BOOT_GATEWAY_OFFSET - WIN_NE_BOOT_OFFSET] == 0x2e);
+    assert(boot[WIN_NE_BOOT_SCRATCH_OFFSET - 1] == 0xcc);
+    assert(boot[WIN_NE_BOOT_SVC_OFFSET] == 0);
+    /* Fixed service gateway: save PM stack, enter RM, OUT, re-enter PM. */
+    const unsigned gw = WIN_NE_BOOT_GATEWAY_OFFSET - WIN_NE_BOOT_OFFSET;
+    assert(boot[gw] == 0x2e && boot[gw+1] == 0xa3);
+    assert(rd16(boot+gw+2) == WIN_NE_BOOT_OFFSET+WIN_NE_BOOT_SVC_OFFSET);
+    assert(boot[gw+9] == 0x60); /* PUSHA */
+    assert(!memcmp(boot+0x99, "\x0f\x20\xc0\x24\xfe\x0f\x22\xc0", 8));
+    assert(boot[0xa1] == 0xea && rd16(boot+0xa2) == 0xa6);
+    assert(rd16(boot+0xa4) == args.rm_segment);
+    assert(boot[0xb4] == 0xba && rd16(boot+0xb5) == WINX86_BRIDGE_PORT);
+    assert(boot[0xba] == 0xef); /* callback invoked in RM */
+    assert(boot[0xcf] == 0xea && rd16(boot+0xd0) ==
+           WIN_NE_BOOT_OFFSET + 0xd4);
+    assert(rd16(boot+0xd2) == args.pm_segment);
+    assert(boot[0xe2] == 0x61 && boot[0xec] == 0xcb); /* POPA, RETF */
     args.ne_sp = 8;
     assert(!win_ne_boot_make(boot,sizeof(boot), &args));
     args.ne_sp = 0x100;

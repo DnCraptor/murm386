@@ -71,7 +71,7 @@ static int valid_basic_entry(const win_ne_guest_image *g, unsigned *calls)
     if (!g->info.cs_index || !g->info.ss_index ||
         g->info.cs_index == g->info.ss_index ||
         g->info.segment_count != 2 || g->thunk_count == 0 ||
-        !g->cs || !g->ss || g->sp < 16 ||
+        !g->cs || !g->ss || g->sp < 64 ||
         (g->segments[g->info.ss_index].flags & 1u) != 1u ||
         (g->segments[g->info.cs_index].flags & 1u) != 0u ||
         g->sp > g->segments[g->info.ss_index].size ||
@@ -82,6 +82,45 @@ static int valid_basic_entry(const win_ne_guest_image *g, unsigned *calls)
     return win_ne_entry_calls(p, code->size, g->ip, g->thunk_selector,
                               g->thunk_services, g->thunk_count, calls);
 }
+
+typedef struct {
+    const win_cpu_snapshot *dos_context;
+    win_ne_guest_api_context *api;
+    uint32_t scratch_linear;
+    uint16_t rm_segment;
+} win_ne_native_gate;
+
+/* OUT is now issued by guest code after switching to RM and restoring
+ * the original GDTR. Save the transient RM continuation, expose the caller's
+ * Win16 stack to the argument marshaller, and run native USER under the
+ * original DOS CPU registers. Native modal loops may call int386() or yield.
+ * Restore the transient RM gateway before returning to the interpreter. */
+static int invoke_native(void *opaque, CPU *cpu, uint16_t service)
+{
+    win_ne_native_gate *gate = (win_ne_native_gate *)opaque;
+    if (!gate || !gate->api || !gate->dos_context ||
+        cpu->ext_accessors->get_seg16(cpu, WIN_CS) != gate->rm_segment)
+        return 0;
+
+    const uint8_t *saved = (const uint8_t *)dos_guest_linear_ptr(
+        gate->scratch_linear + WIN_NE_BOOT_CALL_SP_OFFSET);
+    uint16_t call_sp = (uint16_t)(saved[0] | (uint16_t)saved[1] << 8);
+    /* CALL FAR gateway pushed CS:IP; skip it so the API marshaller sees the
+     * Win16 caller's far return address at [SS:SP], followed by arguments. */
+    CPU guest = *cpu;
+    guest.gprx[regsp].r16 = (uint16_t)(call_sp + 4u);
+
+    win_cpu_snapshot transient;
+    save_cpu(cpu, &transient);
+    restore_cpu(cpu, gate->dos_context);
+    int handled = win_ne_guest_api(gate->api, &guest, service);
+    restore_cpu(cpu, &transient);
+    cpu->gprx[regax].r16 = guest.gprx[regax].r16;
+    cpu->gprx[regdx].r16 = guest.gprx[regdx].r16;
+    return handled;
+}
+
+static int ne_cpu_busy;
 
 static int read_guest(void *opaque, uint32_t linear, void *dst, uint32_t bytes)
 {
@@ -96,16 +135,21 @@ int win_ne_execute_basic(const char *path, uint32_t *value)
 {
     PC *pc = get_PC();
     CPU *cpu = pc ? pc->cpu : NULL;
+    if (ne_cpu_busy)
+        return WIN_NE_EXEC_BUSY; /* A native modal loop can schedule other tasks. */
     if (!cpu || cpu->gen < 3 || !cpu->ext_accessors ||
         !cpu->ext_accessors->step || !cpu->ext_accessors->get_seg16 ||
         !cpu->ext_accessors->set_seg16 || !cpu->ext_accessors->get_flags ||
         !cpu->ext_accessors->set_flags)
         return WIN_NE_EXEC_BAD_CPU;
 
+    ne_cpu_busy = 1;
     win_ne_guest_image g;
     int rc = win_ne_guest_load(path, &g, win_ne_guest_dos_io(), NULL);
-    if (rc)
+    if (rc) {
+        ne_cpu_busy = 0;
         return rc;
+    }
     unsigned calls = 0;
     if (!valid_basic_entry(&g, &calls)) {
         rc = WIN_NE_EXEC_BAD_ENTRY;
@@ -136,7 +180,12 @@ int win_ne_execute_basic(const char *path, uint32_t *value)
     cpu->ip = cpu->next_ip = 0;
     cpu->prefetch_base = (uint32_t)-1;
     win_ne_guest_api_context api = { &g, read_guest, NULL, 0 };
-    rc = winx86_run(cpu, win_ne_guest_api, &api, calls + 4u);
+    win_ne_native_gate gate = {
+        .dos_context = &old, .api = &api,
+        .scratch_linear = linear,
+        .rm_segment = args.rm_segment
+    };
+    rc = winx86_run(cpu, invoke_native, &gate, calls + 4u);
 
     /* Fail closed. When no EXIT trap was observed we cannot prove that the
      * CPU returned to Real Mode. Calling DOS or freeing memory then could
@@ -151,6 +200,7 @@ int win_ne_execute_basic(const char *path, uint32_t *value)
     rc = api.invalid_args ? WIN_NE_EXEC_BAD_ARGS : WIN_NE_OK;
 done:
     win_ne_guest_release(&g);
+    ne_cpu_busy = 0;
     return rc;
 }
 #endif

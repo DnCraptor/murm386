@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "../core/ne_guest.h"
+#include "../core/ne_boot.h"
 #include "../core/x86bridge.h"
 
 #define RAM_SIZE 0x90000u
@@ -63,9 +64,9 @@ int main(int argc, char **argv)
         assert(get_le16(code+off+1) == i * WIN_NE_THUNK_BYTES);
         assert(get_le16(code+off+3) == 8);
         const uint8_t *thunk = mem + g.thunk_linear + i*WIN_NE_THUNK_BYTES;
-        assert(thunk[0] == 0xba && get_le16(thunk+1) == WINX86_BRIDGE_PORT);
-        assert(thunk[3] == 0xb8 && get_le16(thunk+4) == g.thunk_services[i]);
-        assert(thunk[6] == 0xef && thunk[7] == 0xcb);
+        assert(thunk[0] == 0xb8 && get_le16(thunk+1) == g.thunk_services[i]);
+        assert(thunk[3] == 0x9a && get_le16(thunk+4) == WIN_NE_BOOT_GATEWAY_OFFSET);
+        assert(get_le16(thunk+6) == g.thunk_selector && thunk[8] == 0xcb);
     }
     assert(code[15] == 0xcb);
     assert(mem[g.thunk_linear + WIN_NE_GUEST_ACTIVE_THUNKS*WIN_NE_THUNK_BYTES] == 0xcc);
