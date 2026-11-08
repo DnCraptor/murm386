@@ -5923,6 +5923,23 @@ ExtractIconN:
     .ltorg
     .size ExtractIconN, .-ExtractIconN
 
+    .section .text.winapi.ExtractIconExN,"ax",%progbits
+    .global ExtractIconExN
+    .type ExtractIconExN, %function
+    .thumb_func
+ExtractIconExN:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #12]
+    ldr  r1, =80
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size ExtractIconExN, .-ExtractIconExN
+
     .section .text.winapi.GetOpenFileName,"ax",%progbits
     .global GetOpenFileName
     .type GetOpenFileName, %function

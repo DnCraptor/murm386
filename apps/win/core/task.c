@@ -159,17 +159,18 @@ const winapp_info *win_host_app_info(const char *prog) __attribute__((weak));
 const winapp_info *win_host_app_info(const char *prog) { (void)prog; return NULL; }
 #endif
 
-/* The name and icon of an application file (the host test's are built in). */
-int win_app_info(const char *path, winapp_info *out)
+/* The name and icons of an application file, win_alloc'd (the host test's
+ * are built in). */
+winapp_info *win_app_info(const char *path)
 {
 #ifdef TASK_HOST
     const winapp_info *i = win_host_app_info(path);
-    if (!i)
-        return 0;
-    *out = *i;
-    return 1;
+    winapp_info *out = i ? (winapp_info *)win_alloc(i->size) : NULL;
+    if (out)
+        memcpy(out, i, i->size);
+    return out;
 #else
-    return win_ez_read_info(path, out);
+    return win_ez_read_info(path);
 #endif
 }
 
@@ -275,8 +276,9 @@ static void reap(void)
             win_handle_free(t->h);
             win_free(t->stack);
             win_free(t->module);
-            if (t->icon)
-                DestroyIcon(t->icon);
+            for (int i = 0; i < WINAPP_MAX_ICONS; i++)
+                if (t->icons[i])
+                    DestroyIcon(t->icons[i]);
             win_free(t->info);
             win_free(t);
             continue;
@@ -406,12 +408,7 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
     }
     t->module = img.raw;
     t->entry = (int (*)(const win_app_host *))img.entry;
-    winapp_info inf;
-    if (win_app_info(path, &inf)) {
-        t->info = (winapp_info *)win_alloc(sizeof(inf));
-        if (t->info)
-            *t->info = inf;
-    }
+    t->info = win_app_info(path);
     lstrcpyn(t->cmdline, args, sizeof(t->cmdline));
     t->show = (int)show;
     /* let it start right away, as Windows does */

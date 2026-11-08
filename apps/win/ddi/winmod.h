@@ -80,23 +80,32 @@ typedef int (*win_app_entry)(const win_app_host *host);
 
 /*
  * What a Windows 3.x executable says about itself in its resources, before
- * it runs: its name for the Program Manager and its icon. __ez_start holds
+ * it runs: its name for the Program Manager and its icons. __ez_start holds
  * the address of this block after WINAPP_MAGIC (entry+8); the SDK makes it
- * from win_app(... DESCRIPTION "..." ICON file.icon).
+ * from win_app(... DESCRIPTION "..." ICON first.icon second.icon ...).
  *
- * The icon is 32 x 32 in the 16 VGA colours: xor[] 4 bits a pixel (left
- * pixel in the high nibble), and[] 1 bit a pixel (1: transparent), both
- * top row first.
+ * The first icon is the program's; LoadIcon(hInstance, MAKEINTRESOURCE(n))
+ * gives the n-th (1 the first), ExtractIconExN(file, n - 1) reads it from
+ * the file. An icon is 32 x 32 in the 16 VGA colours: xor_bits 4 bits a
+ * pixel (left pixel in the high nibble), and_bits 1 bit a pixel (1:
+ * transparent), both top row first.
  */
 #define WINAPP_INFO_MAGIC 0x4941574Eu     /* "NWAI" */
+#define WINAPP_MAX_ICONS  16
+
+typedef struct winapp_icon {
+    uint8_t  xor_bits[512];
+    uint8_t  and_bits[128];
+} winapp_icon;
 
 typedef struct winapp_info {
     uint32_t magic;                 /* WINAPP_INFO_MAGIC */
-    uint16_t size;                  /* sizeof(winapp_info) */
-    uint16_t has_icon;
+    uint16_t size;                  /* of the whole block, icons included */
+    uint16_t icon_count;
     char     description[40];
-    uint8_t  xor_bits[512];
-    uint8_t  and_bits[128];
+    winapp_icon icon[1];            /* icon_count of them (at least room for one) */
 } winapp_info;
+
+#define WINAPP_INFO_SIZE(n) (sizeof(winapp_info) + ((n) > 1 ? (n) - 1 : 0) * sizeof(winapp_icon))
 
 #endif /* MURM_WINMOD_H */

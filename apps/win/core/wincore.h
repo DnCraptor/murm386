@@ -266,8 +266,8 @@ typedef struct wtask {
     uint8_t  *stack;
     uint32_t  stack_size;
     void     *module;           /* EZ image memory */
-    winapp_info *info;          /* its name and icon, or NULL */
-    HICON     icon;             /* made from info by LoadIcon */
+    winapp_info *info;          /* its name and icons, or NULL */
+    HICON     icons[WINAPP_MAX_ICONS];   /* made from info by LoadIcon */
     win_app_entry entry;
     win_app_host  app;
     int     (*run)(struct wtask *);
@@ -297,8 +297,8 @@ typedef struct {
     uint32_t  stack_size;       /* from the EZ header, 0 = default */
 } win_ez_image;
 int    win_ez_load(const char *path, win_ez_image *img);
-int    win_ez_read_info(const char *path, winapp_info *out);
-int    win_app_info(const char *path, winapp_info *out);   /* task.c: also the host's */
+winapp_info *win_ez_read_info(const char *path);        /* win_alloc'd or NULL */
+winapp_info *win_app_info(const char *path);            /* task.c: also the host's */
 /* the SDK's application entry starts with a branch over WINAPP_MAGIC */
 int    win_ez_entry_is_app(const void *entry);
 int    win_ez_is_app(const char *path);    /* the file, without loading it */

@@ -518,6 +518,7 @@ int     WINAPI GetCurrentDirectoryN(LPSTR buf, int size);
  * Win16 program keeps in its resources); 0 if it has none */
 int     WINAPI GetAppInfoN(LPCSTR path, LPSTR desc, int size);
 HICON   WINAPI ExtractIconN(LPCSTR path);
+HICON   WINAPI ExtractIconExN(LPCSTR path, UINT n);     /* n-th; (UINT)-1: the count */
 
 /* ---------------------------------------------------------------- tasks */
 

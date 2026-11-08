@@ -9,6 +9,7 @@
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include "wincore.h"
@@ -168,15 +169,17 @@ int win_ez_is_app(const char *path)
 }
 
 /* The winapp_info of an application file (its address follows WINAPP_MAGIC
- * at entry+8), read from the file without loading it. 1 if there is one. */
-int win_ez_read_info(const char *path, winapp_info *out)
+ * at entry+8), read from the file without loading it: win_alloc'd, NULL if
+ * there is none. */
+winapp_info *win_ez_read_info(const char *path)
 {
     FILE *f = fopen(path, "rb");
     if (!f)
-        return 0;
+        return NULL;
     ezhdr h;
     uint32_t w[2] = { 0, 0 };
-    int ok = 0;
+    winapp_info head, *out = NULL;
+    const uint32_t hsize = (uint32_t)offsetof(winapp_info, icon);
     if (fread(&h, 1, sizeof(h), f) == sizeof(h) && h.magic == EZ_MAGIC && h.version == 1 &&
         h.header_size >= sizeof(h)) {
         uint32_t e = h.entry_rva & ~1u, end = EZ_IMAGE_RVA + h.image_file_size;
@@ -184,17 +187,22 @@ int win_ez_read_info(const char *path, winapp_info *out)
             !fseek(f, (long)(h.header_size + e - EZ_IMAGE_RVA + 4), SEEK_SET) &&
             fread(w, 1, 8, f) == 8 && w[0] == WINAPP_MAGIC) {
             uint32_t rva = w[1];
-            if (rva >= EZ_IMAGE_RVA && rva <= end - sizeof(*out) && !(rva & 3) &&
-                !fseek(f, (long)(h.header_size + rva - EZ_IMAGE_RVA), SEEK_SET) &&
-                fread(out, 1, sizeof(*out), f) == sizeof(*out) &&
-                out->magic == WINAPP_INFO_MAGIC && out->size >= sizeof(*out)) {
-                out->description[sizeof(out->description) - 1] = 0;
-                ok = 1;
+            long at = (long)(h.header_size + rva - EZ_IMAGE_RVA);
+            if (rva >= EZ_IMAGE_RVA && rva + hsize <= end && !(rva & 3) && !fseek(f, at, SEEK_SET) &&
+                fread(&head, 1, hsize, f) == hsize && head.magic == WINAPP_INFO_MAGIC &&
+                head.icon_count <= WINAPP_MAX_ICONS && head.size == WINAPP_INFO_SIZE(head.icon_count) &&
+                rva + head.size <= end && (out = (winapp_info *)win_alloc(head.size)) != NULL) {
+                if (fseek(f, at, SEEK_SET) || fread(out, 1, head.size, f) != head.size) {
+                    win_free(out);
+                    out = NULL;
+                } else {
+                    out->description[sizeof(out->description) - 1] = 0;
+                }
             }
         }
     }
     fclose(f);
-    return ok;
+    return out;
 }
 
 int win_load_module(const char *path, const win_module_info **info)

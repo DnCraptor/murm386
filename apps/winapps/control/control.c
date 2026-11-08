@@ -835,12 +835,12 @@ static void paint_main(HDC dc)
     int cols = rc.right / CELL_W;
     if (cols < 1)
         cols = 1;
-    HICON icon = LoadIcon(0, IDI_APPLICATION);
     int focus = GetFocus() == hmain;
     SetBkMode(dc, TRANSPARENT);
     for (int i = 0; i < APP_COUNT; i++) {
         int x = (i % cols) * CELL_W, y = 4 + (i / cols) * CELL_H;
-        DrawIcon(dc, x + (CELL_W - 32) / 2, y + 4, icon);
+        /* the applets' icons follow the program's: 2 Color ... 5 Date/Time */
+        DrawIcon(dc, x + (CELL_W - 32) / 2, y + 4, LoadIcon(hinst, MAKEINTRESOURCE(2 + i)));
         RECT t = { x + 2, y + 40, x + CELL_W - 2, y + CELL_H };
         RECT m = t;
         DrawText(dc, app_names[i], -1, &m, DT_CALCRECT | DT_SINGLELINE);

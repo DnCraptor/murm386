@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-mkappinfo.py - the host test's win_host_app_info(): the name and icon of
-each application, from the win_app(NAME ... DESCRIPTION "..." ICON x.icon)
-line of its CMakeLists.txt, as sdk/winapp.cmake makes them for the EZ files.
+mkappinfo.py - the host test's win_host_app_info(): the name and icons
+of each application, from the win_app(NAME ... DESCRIPTION "..." ICON a.icon
+b.icon ...) line of its CMakeLists.txt, as sdk/winapp.cmake makes them for the EZ files.
 
     python3 mkappinfo.py ../../winapps > appinfo.c
 """
@@ -36,15 +36,22 @@ def main():
             continue
         name, rest = m.group(1), m.group(2)
         d = re.search(r'DESCRIPTION\s+"([^"]*)"', rest)
-        i = re.search(r'ICON\s+(\S+)', rest)
+        i = re.search(r'ICON\s+((?:[^\s")]+\.icon\s*)+)', rest)
         desc = d.group(1) if d else name
-        xor, mask = icon_bytes(os.path.join(os.path.dirname(cm), i.group(1))) if i else ([0], [0])
+        files = i.group(1).split() if i else []
+        icons = [icon_bytes(os.path.join(os.path.dirname(cm), f)) for f in files] or [([0], [0])]
         var = 'info_' + name.lower()
-        out.append('static const winapp_info %s = {' % var)
-        out.append('    WINAPP_INFO_MAGIC, sizeof(winapp_info), %d, "%s",' % (1 if i else 0, desc))
-        out.append('    { %s },' % ', '.join(str(v) for v in xor))
-        out.append('    { %s },' % ', '.join(str(v) for v in mask))
-        out.append('};')
+        out.append('static const struct {')
+        out.append('    uint32_t magic;')
+        out.append('    uint16_t size, icon_count;')
+        out.append('    char description[40];')
+        out.append('    winapp_icon icon[%d];' % len(icons))
+        out.append('} %s = {' % var)
+        out.append('    WINAPP_INFO_MAGIC, WINAPP_INFO_SIZE(%d), %d, "%s", {' % (len(icons), len(files), desc))
+        for xor, mask in icons:
+            out.append('    { { %s },' % ', '.join(str(v) for v in xor))
+            out.append('      { %s } },' % ', '.join(str(v) for v in mask))
+        out.append('} };')
         table.append((name, var))
     out.append('')
     out.append('const winapp_info *win_host_app_info(const char *prog)')
@@ -55,7 +62,7 @@ def main():
     out.append('            b = p + 1;')
     for name, var in table:
         out.append('    if (!lstrcmpi(b, "%s.EXE"))' % name)
-        out.append('        return &%s;' % var)
+        out.append('        return (const winapp_info *)&%s;' % var)
     out.append('    return NULL;')
     out.append('}')
     print('\n'.join(out))

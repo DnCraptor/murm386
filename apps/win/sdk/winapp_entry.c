@@ -21,10 +21,18 @@
 
 const void *const *const *__win_api;
 
-const winapp_info __winapp_info = {
-    WINAPP_INFO_MAGIC, sizeof(winapp_info), WINAPP_HAS_ICON, WINAPP_DESCRIPTION,
-    { WINAPP_ICON_XOR }, { WINAPP_ICON_AND },
+/* winapp_info with room for this program's icons */
+const struct {
+    uint32_t magic;
+    uint16_t size, icon_count;
+    char     description[40];
+    winapp_icon icon[WINAPP_ICON_SLOTS];
+} __winapp_info = {
+    WINAPP_INFO_MAGIC, WINAPP_INFO_SIZE(WINAPP_ICON_SLOTS), WINAPP_ICON_COUNT, WINAPP_DESCRIPTION,
+    { WINAPP_ICONS },
 };
+
+_Static_assert(sizeof(__winapp_info) == WINAPP_INFO_SIZE(WINAPP_ICON_SLOTS), "winapp_info layout");
 
 int __winapp_start(const win_app_host *host);
 

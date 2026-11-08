@@ -64,18 +64,22 @@ from DOS directly, an application only prints that it needs Windows.
 EZ files without it (DOS programs, drivers) with error 11, and `IsWinAppN`
 checks a file the same way without loading it.
 
-What a Win16 program keeps in its resources, its name and its icon, an
+What a Win16 program keeps in its resources, its name and its icons, an
 application gives `win_app()`:
 
     win_app(WINMINE winmine.c DESCRIPTION "Minesweeper" ICON winmine.icon)
+    win_app(CONTROL control.c DESCRIPTION "Control Panel"
+            ICON control.icon color.icon desktop.icon mouse.icon datetime.icon)
 
-The icon is a text file, 32 lines of 32 characters: `.` transparent, `0`-`F`
-the 16 VGA colours. `winapp.cmake` turns both into a `winapp_info` block
-whose address follows the signature in `__ez_start`. `GetAppInfoN` and
-`ExtractIconN` read it from a file without loading the program (the Program
-Manager's names and icons); `LoadIcon(hInstance, MAKEINTRESOURCE(1))` gives
-a running program its own icon, for its class (minimized windows, Alt+Tab);
-`DestroyIcon` frees one that `ExtractIconN` made.
+An icon is a text file, 32 lines of 32 characters: `.` transparent, `0`-`F`
+the 16 VGA colours; the first is the program's (up to 16). `winapp.cmake`
+turns them into a `winapp_info` block whose address follows the signature
+in `__ez_start`. `GetAppInfoN`, `ExtractIconN` and `ExtractIconExN` (the
+n-th, or the count) read it from a file without loading the program (the
+Program Manager's names and icons); `LoadIcon(hInstance,
+MAKEINTRESOURCE(n))` gives a running program its n-th icon: 1 for its class
+(minimized windows, Alt+Tab), the Control Panel's applets 2 to 5.
+`DestroyIcon` frees one that `ExtractIcon*N` made.
 
 Tasks switch only in `GetMessage`, `PeekMessage`, `Yield` and `WinExec`.
 Every instance has its own copy of the program, so window classes belong to

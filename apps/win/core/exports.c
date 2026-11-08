@@ -82,6 +82,7 @@ extern void EqualRgn(void);
 extern void ExcludeClipRect(void);
 extern void ExitWindows(void);
 extern void ExtTextOut(void);
+extern void ExtractIconExN(void);
 extern void ExtractIconN(void);
 extern void FatalExit(void);
 extern void FillRect(void);
@@ -694,7 +695,7 @@ static const void *const exports_user[484] = {
     [483] = (const void *)SystemParametersInfo,
 };
 
-static const void *const exports_winn[20] = {
+static const void *const exports_winn[21] = {
     [1] = (const void *)DialogBoxIndirectN,
     [2] = (const void *)CreateDialogIndirectN,
     [3] = (const void *)CreateAcceleratorTableN,
@@ -714,6 +715,7 @@ static const void *const exports_winn[20] = {
     [17] = (const void *)GetCurrentDirectoryN,
     [18] = (const void *)GetAppInfoN,
     [19] = (const void *)ExtractIconN,
+    [20] = (const void *)ExtractIconExN,
 };
 
 static const void *const exports_commdlg[28] = {

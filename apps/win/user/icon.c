@@ -64,15 +64,17 @@ static uicon *icon_of(HICON h)
     return u->magic == UICON_MAGIC ? u : NULL;
 }
 
-static HICON icon_from_info(const winapp_info *inf)
+/* icon n (0 the first) of an application's winapp_info */
+static HICON icon_from_info(const winapp_info *inf, int n)
 {
-    if (!inf || !inf->has_icon)
+    if (!inf || n < 0 || n >= inf->icon_count)
         return 0;
+    const winapp_icon *ic = &inf->icon[n];
     uicon *u = (uicon *)win_alloc(sizeof(uicon));
     if (!u)
         return 0;
     u->magic = UICON_MAGIC;
-    u->mask = CreateBitmap(32, 32, 1, 1, inf->and_bits);
+    u->mask = CreateBitmap(32, 32, 1, 1, ic->and_bits);
     HDC sdc = GetDC(0);
     u->color = CreateCompatibleBitmap(sdc, 32, 32);
     HDC m = CreateCompatibleDC(sdc);
@@ -80,8 +82,8 @@ static HICON icon_from_info(const winapp_info *inf)
     HGDIOBJ old = SelectObject(m, u->color);
     for (int y = 0; y < 32; y++)
         for (int x = 0; x < 32; x++) {
-            int c = (inf->xor_bits[y * 16 + x / 2] >> (x & 1 ? 0 : 4)) & 15;
-            int clear = (inf->and_bits[y * 4 + x / 8] >> (7 - (x & 7))) & 1;
+            int c = (ic->xor_bits[y * 16 + x / 2] >> (x & 1 ? 0 : 4)) & 15;
+            int clear = (ic->and_bits[y * 4 + x / 8] >> (7 - (x & 7))) & 1;
             SetPixel(m, x, y, clear ? RGB(0, 0, 0) : vga16[c]);
         }
     SelectObject(m, old);
@@ -111,32 +113,49 @@ BOOL WINAPI DestroyIcon(HICON icon)
     return TRUE;
 }
 
-/* WINN: the icon of an application file, 0 if it has none (DestroyIcon) */
+/* WINN: icon n (0 the first) of an application file, 0 if there is no such
+ * (free it with DestroyIcon); n (UINT)-1: how many there are. As SHELL's
+ * ExtractIcon of Windows 3.1. */
+HICON WINAPI ExtractIconExN(LPCSTR path, UINT n)
+{
+    winapp_info *inf = path ? win_app_info(path) : NULL;
+    if (!inf)
+        return 0;
+    HICON h = n == (UINT)-1 ? (HICON)(uintptr_t)inf->icon_count : icon_from_info(inf, (int)n);
+    win_free(inf);
+    return h;
+}
+
+/* WINN: the program's icon (the first) of an application file */
 HICON WINAPI ExtractIconN(LPCSTR path)
 {
-    winapp_info inf;
-    return path && win_app_info(path, &inf) ? icon_from_info(&inf) : 0;
+    return ExtractIconExN(path, 0);
 }
 
 /* WINN: an application file's name for the Program Manager */
 int WINAPI GetAppInfoN(LPCSTR path, LPSTR desc, int size)
 {
-    winapp_info inf;
-    if (!path || !desc || size <= 0 || !win_app_info(path, &inf))
+    winapp_info *inf = path && desc && size > 0 ? win_app_info(path) : NULL;
+    if (!inf)
         return 0;
-    lstrcpyn(desc, inf.description, size);
+    lstrcpyn(desc, inf->description, size);
+    win_free(inf);
     return lstrlen(desc);
 }
 
 HICON WINAPI LoadIcon(HINSTANCE inst, LPCSTR name)
 {
-    /* an application's own icon (Win16: its first icon resource) */
+    /* an application's own icons: MAKEINTRESOURCE(n) the n-th, a name the
+     * first (Win16: its icon resources) */
     if (inst && !(IS_INTRESOURCE(name) && (uintptr_t)name >= 32512)) {
         wtask *t = task_from_handle((HTASK)inst);
-        if (t && t->info && !t->icon)
-            t->icon = icon_from_info(t->info);
-        if (t && t->icon)
-            return t->icon;
+        int n = IS_INTRESOURCE(name) && name ? (int)(uintptr_t)name - 1 : 0;
+        if (t && t->info && n >= 0 && n < WINAPP_MAX_ICONS) {
+            if (!t->icons[n])
+                t->icons[n] = icon_from_info(t->info, n);
+            if (t->icons[n])
+                return t->icons[n];
+        }
     }
     int id = IS_INTRESOURCE(name) ? (int)(uintptr_t)name - 32512 : 0;
     if (id < 0 || id > 4)
