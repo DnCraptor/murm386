@@ -484,6 +484,13 @@ LONG    WINAPI _llseek(HFILE f, LONG off, int origin);
 /* Native extensions: the files matching spec as NUL-separated names ending
  * with a second NUL (returns how many), and whether a file is a Windows
  * application. */
+/* The local date and time of day. */
+typedef struct {
+    WORD wYear, wMonth, wDayOfWeek, wDay;   /* month 1-12, day of week 0 = Sunday */
+    WORD wHour, wMinute, wSecond, wMilliseconds;
+} SYSTEMTIME_N;
+void    WINAPI GetLocalTimeN(SYSTEMTIME_N *t);
+
 int     WINAPI WinDirListN(LPCSTR spec, LPSTR buf, int size);
 int     WINAPI WinDirListAttrN(LPCSTR spec, UINT attr, LPSTR buf, int size); /* attr 0x10: subdirectories */
 BOOL    WINAPI IsWinAppN(LPCSTR path);

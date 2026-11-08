@@ -26,7 +26,7 @@ nothing leaves the program from the command line in that part (`WINN DEMO`).
 | `drivers/dos/` | `VBE8` display driver (VBE 100h 640x400x8, fallback 13h) and `DOS` input driver (keyboard through the BIOS buffer, INT 33h mouse) |
 | `runtime/` | `WINN.EXE` `main()`: drivers, core, shell and command-line program as tasks |
 | `sdk/` | for applications: API stubs by Win16 ordinal, `__ez_start`, `winapp.cmake`; `gen_exports.py` makes the export tables |
-| `../winapps/<name>/` | applications: `progman` (the Program Manager, the default shell), `notepad`, `demo` (a tour of the API) |
+| `../winapps/<name>/` | applications: `progman` (the Program Manager, the default shell), `notepad`, `clock`, `demo` (a tour of the API) |
 | `../windrv/<name>/` | driver modules; `vga800` is VBE 102h 800x600 in 16 colours |
 | `host/` | the same sources on Linux with a snapshot display and scripted input |
 
@@ -105,6 +105,7 @@ use `ucontext`):
     rm -f HOSTWIN/PROGMAN.INI
     ./winhost scripts/progman.txt PROGMAN    # the shell: groups (MDI), items, Run, exit
     ./winhost scripts/notepad.txt 'NOTEPAD HOSTWIN\README.TXT'   # editing, Find, Save As, Open
+    ./winhost scripts/clock.txt CLOCK        # analog, digital
     ./winhost800 scripts/vga800.txt  # the VGA800 driver, built in
     ./test_gdi                       # GDI sample sheet, gdi.ppm
 

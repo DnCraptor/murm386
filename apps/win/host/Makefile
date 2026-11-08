@@ -10,7 +10,7 @@ HOST     = host_drivers.c
 GDICORE  = $(filter-out ../core/exports.c ../core/task.c ../core/file.c,$(CORE))
 
 # the applications, built in; each WinMain gets its own name
-APPS     = demo.o progman.o notepad.o
+APPS     = demo.o progman.o notepad.o clock.o
 
 all: test_gdi winhost winhost800 HOSTWIN
 
@@ -26,6 +26,9 @@ progman.o: ../../winapps/progman/progman.c
 notepad.o: ../../winapps/notepad/notepad.c
 	$(CC) $(CFLAGS) $(INC) -DWinMain=notepad_WinMain -c -o $@ $<
 
+clock.o: ../../winapps/clock/clock.c
+	$(CC) $(CFLAGS) $(INC) -DWinMain=clock_WinMain -c -o $@ $<
+
 winhost: $(CORE) $(USER) $(HOST) host_main.c $(APPS)
 	$(CC) $(CFLAGS) $(INC) -o $@ $^
 
@@ -37,7 +40,7 @@ winhost800: $(CORE) $(USER) $(HOST) host_main.c $(APPS) ../../windrv/vga800/vga8
 # (the applications themselves are built in), a DOS program and a text file
 HOSTWIN:
 	mkdir -p HOSTWIN
-	touch HOSTWIN/DEMO.EXE HOSTWIN/PROGMAN.EXE HOSTWIN/NOTEPAD.EXE HOSTWIN/WINN.EXE HOSTWIN/NC.EXE
+	touch HOSTWIN/DEMO.EXE HOSTWIN/PROGMAN.EXE HOSTWIN/NOTEPAD.EXE HOSTWIN/CLOCK.EXE HOSTWIN/WINN.EXE HOSTWIN/NC.EXE
 	mkdir -p HOSTWIN/DOCS
 	printf 'Notepad test file\n\tTabbed line\tand more\nThis is a rather long line that goes on and on past the right edge of the window so that horizontal scrolling is needed to see its end.\nLast line\n' > HOSTWIN/README.TXT
 

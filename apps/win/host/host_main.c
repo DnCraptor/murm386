@@ -19,6 +19,7 @@
 int PASCAL demo_WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show);
 int PASCAL progman_WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show);
 int PASCAL notepad_WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show);
+int PASCAL clock_WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show);
 
 static int demo_entry(const win_app_host *h)
 {
@@ -35,6 +36,11 @@ static int notepad_entry(const win_app_host *h)
     return notepad_WinMain(h->hinstance, 0, (LPSTR)h->cmdline, h->show);
 }
 
+static int clock_entry(const win_app_host *h)
+{
+    return clock_WinMain(h->hinstance, 0, (LPSTR)h->cmdline, h->show);
+}
+
 win_app_entry win_host_app(const char *prog)
 {
     const char *b = prog;
@@ -47,6 +53,8 @@ win_app_entry win_host_app(const char *prog)
         return progman_entry;
     if (!lstrcmpi(b, "NOTEPAD.EXE"))
         return notepad_entry;
+    if (!lstrcmpi(b, "CLOCK.EXE"))
+        return clock_entry;
     return NULL;
 }
 

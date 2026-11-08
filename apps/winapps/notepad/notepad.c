@@ -4,7 +4,8 @@
  * The text is a multi-line EDIT control filling the window (up to 64 KB);
  * files are read and written with _lopen/_lread/_lwrite, chosen with the
  * common Open and Save As dialogs; Find is the common modeless dialog.
- * Lines ending in LF alone are given CR LF when a file is read.
+ * Lines ending in LF alone are given CR LF when a file is read. F5 puts in
+ * the time and date.
  *
  *   NOTEPAD [file]
  */
@@ -23,6 +24,7 @@
 #define IDM_DELETE  205
 #define IDM_SELALL  206
 #define IDM_WRAP    207
+#define IDM_TIME    208
 #define IDM_FIND    301
 #define IDM_FINDNEXT 302
 #define IDM_ABOUT   401
@@ -374,6 +376,16 @@ static LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         case IDM_DELETE: SendMessage(hedit, WM_CLEAR, 0, 0); break;
         case IDM_SELALL: SendMessage(hedit, EM_SETSEL, 0, MAKELPARAM(0, -1)); break;
         case IDM_WRAP:   set_wrap(!wrap); break;
+        case IDM_TIME: {
+            SYSTEMTIME_N t;
+            GetLocalTimeN(&t);
+            char s[40];
+            int h = t.wHour % 12;
+            wsprintf(s, "%d:%02d %s %d/%d/%d", h ? h : 12, t.wMinute, t.wHour < 12 ? "AM" : "PM",
+                     t.wMonth, t.wDay, t.wYear);
+            SendMessage(hedit, EM_REPLACESEL, 0, (LPARAM)(intptr_t)s);
+            break;
+        }
         case IDM_FIND:
             if (hfind) {
                 SetFocus(hfind);
@@ -441,6 +453,7 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     AppendMenu(medit, MF_STRING, IDM_DELETE, "De&lete\tDel");
     AppendMenu(medit, MF_SEPARATOR, 0, NULL);
     AppendMenu(medit, MF_STRING, IDM_SELALL, "Select &All");
+    AppendMenu(medit, MF_STRING, IDM_TIME, "Time/&Date\tF5");
     AppendMenu(medit, MF_SEPARATOR, 0, NULL);
     AppendMenu(medit, MF_STRING, IDM_WRAP, "&Word Wrap");
     HMENU msearch = CreatePopupMenu();
@@ -456,8 +469,9 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
 
     static const ACCEL_N keys[] = {
         { FVIRTKEY, VK_F3, IDM_FINDNEXT },
+        { FVIRTKEY, VK_F5, IDM_TIME },
     };
-    HACCEL acc = CreateAcceleratorTableN(keys, 1);
+    HACCEL acc = CreateAcceleratorTableN(keys, 2);
 
     HWND h = CreateWindow("Notepad", "Notepad", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                           CW_USEDEFAULT, CW_USEDEFAULT, 0, bar, inst, NULL);

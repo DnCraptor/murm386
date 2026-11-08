@@ -1,0 +1,25 @@
+# Clock: run with "./winhost scripts/clock.txt CLOCK"
+wait 100
+snap clock_analog.ppm
+keydown ALT
+key S
+keyup ALT
+key D
+wait 100
+snap clock_digital.ppm
+keydown ALT
+key S
+keyup ALT
+key S
+wait 50
+keydown ALT
+key S
+keyup ALT
+key A
+wait 100
+snap clock_date.ppm
+keydown ALT
+key F4
+keyup ALT
+wait 50
+exit

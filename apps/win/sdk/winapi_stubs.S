@@ -5583,6 +5583,23 @@ WinDirListAttrN:
     .ltorg
     .size WinDirListAttrN, .-WinDirListAttrN
 
+    .section .text.winapi.GetLocalTimeN,"ax",%progbits
+    .global GetLocalTimeN
+    .type GetLocalTimeN, %function
+    .thumb_func
+GetLocalTimeN:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #12]
+    ldr  r1, =36
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetLocalTimeN, .-GetLocalTimeN
+
     .section .text.winapi.GetOpenFileName,"ax",%progbits
     .global GetOpenFileName
     .type GetOpenFileName, %function

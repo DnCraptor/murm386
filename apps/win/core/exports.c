@@ -117,6 +117,7 @@ extern void GetDlgItemText(void);
 extern void GetFileTitle(void);
 extern void GetFocus(void);
 extern void GetKeyState(void);
+extern void GetLocalTimeN(void);
 extern void GetMenu(void);
 extern void GetMenuItemCount(void);
 extern void GetMenuItemID(void);
@@ -665,7 +666,7 @@ static const void *const exports_user[474] = {
     [473] = (const void *)AnsiPrev,
 };
 
-static const void *const exports_winn[9] = {
+static const void *const exports_winn[10] = {
     [1] = (const void *)DialogBoxIndirectN,
     [2] = (const void *)CreateDialogIndirectN,
     [3] = (const void *)CreateAcceleratorTableN,
@@ -674,6 +675,7 @@ static const void *const exports_winn[9] = {
     [6] = (const void *)WinDirListN,
     [7] = (const void *)IsWinAppN,
     [8] = (const void *)WinDirListAttrN,
+    [9] = (const void *)GetLocalTimeN,
 };
 
 static const void *const exports_commdlg[28] = {
