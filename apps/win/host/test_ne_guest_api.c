@@ -16,6 +16,14 @@ static int read_guest(void *opaque, uint32_t addr, void *dst, uint32_t n)
     memcpy(dst, mem + (addr - BASE), n);
     return 1;
 }
+static int write_guest(void *opaque, uint32_t addr, const void *src, uint32_t n)
+{
+    (void)opaque;
+    if (addr < BASE || addr - BASE > sizeof(mem) ||
+        n > sizeof(mem) - (addr - BASE)) return 0;
+    memcpy(mem + (addr - BASE), src, n);
+    return 1;
+}
 static void put16(size_t at, uint16_t n)
 {
     assert(at + 1 < sizeof(mem));
@@ -61,6 +69,7 @@ int main(void)
     img.info.segment_count = 1;
     img.segments = segments;
     img.ss = 0x18;
+    img.io.write = write_guest;
     win_ne_guest_api_context ctx = { &img, read_guest, NULL, 0 };
     cpu.gprx[regsp].r16 = 0x80; /* SS:SP points at caller's far return IP */
     put16(0x80, 0x2222);
@@ -107,6 +116,60 @@ int main(void)
     /* Read spanning the segment boundary must fail before the callback. */
     cpu.gprx[regsp].r16 = 252;
     assert(win_ne_guest_api(&ctx, &cpu, 0x10b3) && ctx.invalid_args);
+
+    /* KERNEL.lstrcpy: two FAR parameters; destination must be writable. */
+    ctx.invalid_args = 0;
+    cpu.gprx[regsp].r16 = 0x80;
+    memcpy(mem + 0xb0, "Copy", 5);
+    memset(mem + 0x90, 0x55, 32);
+    put16(0x84, 0xb0); put16(0x86, 0x18); /* source FAR */
+    put16(0x88, 0x90); put16(0x8a, 0x18); /* destination FAR */
+    assert(win_ne_guest_api(&ctx, &cpu, 88));
+    assert(!ctx.invalid_args && !strcmp((char *)mem+0x90, "Copy"));
+    assert(cpu.gprx[regax].r16 == 0x90 && cpu.gprx[regdx].r16 == 0x18);
+
+    /* KERNEL.lstrcat: append while retaining the destination FAR result. */
+    memcpy(mem + 0xb0, " Win16", 7);
+    assert(win_ne_guest_api(&ctx, &cpu, 89));
+    assert(!strcmp((char *)mem+0x90, "Copy Win16"));
+    assert(cpu.gprx[regax].r16 == 0x90 && cpu.gprx[regdx].r16 == 0x18);
+
+    /* Source and destination overlap: reject, leaving memory unchanged. */
+    put16(0x84, 0x91);
+    assert(win_ne_guest_api(&ctx, &cpu, 88) && ctx.invalid_args);
+    assert(!strcmp((char *)mem+0x90, "Copy Win16"));
+    ctx.invalid_args = 0;
+    put16(0x84, 0xb0);
+    /* Destination too small: reject before the first write. */
+    put16(0x88, 0xfd);
+    mem[0xfd] = 0x5a;
+    assert(win_ne_guest_api(&ctx, &cpu, 88) && ctx.invalid_args);
+    assert(mem[0xfd] == 0x5a);
+    ctx.invalid_args = 0;
+    put16(0x88, 0x90);
+    /* Reject writes to code segments, including a valid readable string. */
+    segments[1].flags = 0;
+    assert(win_ne_guest_api(&ctx, &cpu, 88) && ctx.invalid_args);
+    segments[1].flags = 1;
+    ctx.invalid_args = 0;
+    /* No guest write callback means no modification. */
+    img.io.write = NULL;
+    assert(win_ne_guest_api(&ctx, &cpu, 88) && ctx.invalid_args);
+    assert(!strcmp((char *)mem+0x90, "Copy Win16"));
+    img.io.write = write_guest;
+    ctx.invalid_args = 0;
+
+    /* Long strings cross the 64-byte staging buffer without truncation. */
+    img.io.write = write_guest;
+    ctx.invalid_args = 0;
+    for (unsigned i = 0; i < 80; ++i)
+        mem[0xa0+i] = (uint8_t)('a' + i % 26);
+    mem[0xf0] = 0;
+    put16(0x84, 0xa0); put16(0x86, 0x18); /* source */
+    put16(0x88, 0x10); put16(0x8a, 0x18); /* destination */
+    assert(win_ne_guest_api(&ctx, &cpu, 88) && !ctx.invalid_args);
+    assert(!memcmp(mem + 0x10, mem + 0xa0, 81));
+    assert(cpu.gprx[regax].r16 == 0x10 && cpu.gprx[regdx].r16 == 0x18);
 
     assert(!win_ne_guest_api(&ctx, &cpu, 1));
     assert(!win_ne_guest_api(NULL, NULL, 3));

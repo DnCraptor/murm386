@@ -120,6 +120,12 @@ static int service_id(const win_ne_import *imp, uint16_t *id)
         else if ((imp->ordinal == 152 && !imp->procedure[0]) ||
                  (!imp->ordinal && name_eq(imp->procedure, "GetNumTasks")))
             *id = 152;
+        else if ((imp->ordinal == 88 && !imp->procedure[0]) ||
+                 (!imp->ordinal && name_eq(imp->procedure, "lstrcpy")))
+            *id = 88;
+        else if ((imp->ordinal == 89 && !imp->procedure[0]) ||
+                 (!imp->ordinal && name_eq(imp->procedure, "lstrcat")))
+            *id = 89;
         else if ((imp->ordinal == 90 && !imp->procedure[0]) ||
                  (!imp->ordinal && name_eq(imp->procedure, "lstrlen")))
             *id = 90;
@@ -151,6 +157,7 @@ static int service_id(const win_ne_import *imp, uint16_t *id)
 static uint16_t service_args(uint16_t id)
 {
     switch (id) {
+    case 88: case 89: return 8;    /* KERNEL.lstrcpy/lstrcat: two FAR pointers */
     case 90: return 4;             /* KERNEL.lstrlen: far pointer */
     case 0x1001: return 12;        /* USER.MessageBox(HWND, FAR, FAR, WORD) */
     case 0x10b3: case 0x10b4: return 2; /* USER: int parameter */

@@ -76,6 +76,68 @@ static int guest_strlen(win_ne_guest_api_context *ctx,
     return 0;
 }
 
+/* Guest string functions write only to loaded, writable NE data segments.
+ * The original DOS guest allocator owns the memory; its write callback
+ * works while the bridge has restored the CPU's Real Mode DOS context. */
+static const win_ne_guest_segment *lookup_segment(
+    const win_ne_guest_api_context *ctx, uint16_t selector)
+{
+    if (!ctx || !ctx->image || !ctx->image->segments)
+        return NULL;
+    for (uint16_t i = 1; i <= ctx->image->info.segment_count; i++) {
+        const win_ne_guest_segment *s = &ctx->image->segments[i];
+        if (s->selector == selector)
+            return s;
+    }
+    return NULL;
+}
+
+static int write_segment(win_ne_guest_api_context *ctx, uint16_t selector,
+                         uint32_t offset, const void *src, uint32_t len)
+{
+    const win_ne_guest_segment *s = lookup_segment(ctx, selector);
+    if (!s || !(s->flags & 1u) || !ctx->image->io.write ||
+        !src || offset > s->size || len > s->size - offset)
+        return 0;
+    return ctx->image->io.write(ctx->image->opaque,
+                                s->linear + offset, src, len);
+}
+
+/* Copy a NUL-terminated source using a bounded temporary buffer.  Check the
+ * complete source and destination ranges before writing.  Overlap is
+ * rejected rather than relying on undefined strcpy/strcat semantics. */
+static int guest_string_edit(win_ne_guest_api_context *ctx,
+                             uint16_t dst_sel, uint16_t dst_off,
+                             uint16_t src_sel, uint16_t src_off, int append)
+{
+    const win_ne_guest_segment *dst = lookup_segment(ctx, dst_sel);
+    const win_ne_guest_segment *src = lookup_segment(ctx, src_sel);
+    uint16_t src_len, dst_len = 0;
+    if (!dst || !src || !(dst->flags & 1u) || !ctx->image->io.write ||
+        !guest_strlen(ctx, src_sel, src_off, &src_len))
+        return 0;
+    if (append && !guest_strlen(ctx, dst_sel, dst_off, &dst_len))
+        return 0;
+    uint32_t start = (uint32_t)dst_off + dst_len;
+    uint32_t count = (uint32_t)src_len + 1u;
+    if (start > dst->size || count > dst->size - start)
+        return 0;
+    if (dst_sel == src_sel &&
+        start < (uint32_t)src_off + count &&
+        (uint32_t)src_off < start + count)
+        return 0;
+    uint8_t buf[64];
+    for (uint32_t copied = 0; copied < count;) {
+        uint32_t n = count - copied;
+        if (n > sizeof(buf)) n = sizeof(buf);
+        if (!read_segment(ctx, src_sel, (uint32_t)src_off + copied, buf, n) ||
+            !write_segment(ctx, dst_sel, start + copied, buf, n))
+            return 0;
+        copied += n;
+    }
+    return 1;
+}
+
 /* Bounded Win16 FAR ANSI string copy. Never pass a guest pointer into a
  * native USER routine: the DOS-backed NE memory belongs to the emulator. */
 static int guest_copy_string(win_ne_guest_api_context *ctx,
@@ -104,6 +166,23 @@ int win_ne_guest_api(void *opaque, CPU *cpu, uint16_t service)
     case 36:      value = GetCurrentTask(); break;
     case 152:     value = GetNumTasks(); break;
     case 0x100d:  value = GetTickCount(); dword = 1; break;
+    case 88: case 89: /* KERNEL.lstrcpy/lstrcat: (FAR dst, FAR src) */
+        {
+            uint16_t src_off, src_sel, dst_off, dst_sel;
+            dword = 1;          /* return destination FAR pointer in DX:AX */
+            if (!read_stack_word(ctx, cpu, 4, &src_off) ||
+                !read_stack_word(ctx, cpu, 6, &src_sel) ||
+                !read_stack_word(ctx, cpu, 8, &dst_off) ||
+                !read_stack_word(ctx, cpu, 10, &dst_sel) ||
+                !guest_string_edit(ctx, dst_sel, dst_off,
+                                   src_sel, src_off, service == 89)) {
+                if (ctx) ctx->invalid_args = 1;
+                value = 0;
+            } else {
+                value = ((uint32_t)dst_sel << 16) | dst_off;
+            }
+        }
+        break;
     case 90:      /* KERNEL.90 lstrlen(LPCSTR): 16:16 FAR pointer */
         {
             uint16_t len = 0;

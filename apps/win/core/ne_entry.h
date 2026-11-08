@@ -4,7 +4,11 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* service_ids are indexed by thunk offset / WIN_NE_THUNK_BYTES. */
+/* Preflight executes no guest code. It accepts a bounded straight-line
+ * subset with register arithmetic, a simple BP frame, and relocations to
+ * known FAR API thunks. Branches and memory-addressing instructions are
+ * intentionally rejected until protected-mode fault recovery exists.
+ * service_ids are indexed by thunk offset / WIN_NE_THUNK_BYTES. */
 int win_ne_entry_calls(const uint8_t *p, size_t bytes, size_t ip,
                        uint16_t thunk_selector, const uint16_t *service_ids,
                        unsigned thunk_count, unsigned *calls);
