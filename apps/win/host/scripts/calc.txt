@@ -1,0 +1,33 @@
+# Calculator: run with "./winhost scripts/calc.txt CALC"
+wait 100
+# 12.5 * 4 = 50; sqrt -> 7.0710678118655
+type 12.5*4=
+wait 30
+snap calc_mul.ppm
+type @
+wait 30
+snap calc_sqrt.ppm
+# 1 / 3 = and memory store
+key ESC
+type 1/3=
+keydown CTRL
+key M
+keyup CTRL
+wait 30
+snap calc_div.ppm
+# 2 / 0 = Error, Esc clears
+key ESC
+type 2/0=
+wait 30
+snap calc_err.ppm
+key ESC
+# 0.1 + 0.2 = 0.3 ; click "=" again repeats: 0.5
+type .1+.2=
+click 0 0
+wait 30
+snap calc_add.ppm
+keydown ALT
+key F4
+keyup ALT
+wait 50
+exit

@@ -2,7 +2,8 @@
  * clock.c - CLOCK.EXE: the time of day, analog or digital, as the Clock of
  * Windows 3.1 (Settings: Analog / Digital, Seconds, Date). The face is drawn
  * off screen and copied in one piece, so it does not flicker; the settings
- * and the window position are kept in CLOCK.INI.
+ * and the window position are kept in CLOCK.INI. Minimized, the clock goes
+ * on as its own icon.
  */
 #include "windows.h"
 
@@ -57,7 +58,7 @@ static void draw_analog(HDC dc, int w, int h, const SYSTEMTIME_N *t)
 {
     int cx = w / 2, cy = h / 2;
     /* round on screen: the pixels are square */
-    int r = (w < h ? w : h) / 2 - 4;
+    int r = (w < h ? w : h) / 2 - (w < 64 ? 1 : 4);
     if (r < 8)
         return;
     int rx = r, ry = r;
@@ -65,8 +66,10 @@ static void draw_analog(HDC dc, int w, int h, const SYSTEMTIME_N *t)
     HGDIOBJ ob = SelectObject(dc, marks);
     HGDIOBJ op = SelectObject(dc, GetStockObject(NULL_PEN));
     for (int i = 0; i < 60; i++) {
+        if (r < 30 && i % 5)
+            continue;               /* the icon: hours only */
         POINT p = at(cx, cy, rx, ry, i, 900);
-        int s = i % 5 ? (r > 60 ? 1 : 0) : (r > 60 ? 3 : 2);
+        int s = r < 30 ? 0 : i % 5 ? (r > 60 ? 1 : 0) : (r > 60 ? 3 : 2);
         Rectangle(dc, p.x - s, p.y - s, p.x + s + 2, p.y + s + 2);
     }
     SelectObject(dc, GetStockObject(BLACK_PEN));
@@ -206,7 +209,7 @@ static void render(HDC dc)
         memh = rc.bottom;
     }
     FillRect(mem, &rc, (HBRUSH)(COLOR_WINDOW + 1));
-    if (analog)
+    if (analog || IsIconic(hmain))    /* the icon is always the dial */
         draw_analog(mem, rc.right, rc.bottom, &shown);
     else
         draw_digital(mem, rc.right, rc.bottom, &shown);
@@ -221,7 +224,7 @@ static void tick(int force)
                   (seconds && t.wSecond != shown.wSecond);
     shown = t;
     set_title(&t);
-    if (changed && !IsIconic(hmain)) {
+    if (changed) {
         HDC dc = GetDC(hmain);
         render(dc);
         ReleaseDC(hmain, dc);
@@ -270,8 +273,7 @@ static LRESULT CALLBACK ClockProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(h, &ps);
-        if (!IsIconic(h))
-            render(dc);
+        render(dc);                 /* minimized: the icon */
         EndPaint(h, &ps);
         return 0;
     }
@@ -337,7 +339,7 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
         wc.style = CS_HREDRAW | CS_VREDRAW;
         wc.lpfnWndProc = ClockProc;
         wc.hInstance = inst;
-        wc.hIcon = LoadIcon(0, IDI_APPLICATION);
+        wc.hIcon = 0;               /* minimized, it draws its own icon: the dial */
         wc.hCursor = LoadCursor(0, IDC_ARROW);
         wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
         wc.lpszClassName = "Clock";

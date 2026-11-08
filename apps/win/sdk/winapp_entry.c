@@ -44,7 +44,7 @@ int __winapp_start(const win_app_host *host)
 {
     /* started from DOS directly: the argument is argc, not a pointer */
     if ((uintptr_t)host < 0x10000u) {
-        puts("This program requires Microsoft Windows (run it with WINN.EXE).");
+        puts("This program requires Native Windows (run it with WINN.EXE).");
         return 1;
     }
     if (host->magic != WINAPP_MAGIC || host->version != WINAPP_VERSION)

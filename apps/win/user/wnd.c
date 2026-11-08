@@ -347,12 +347,24 @@ int user_frame_width(DWORD style, DWORD exstyle)
     return 0;
 }
 
-static void nc_calc(DWORD style, DWORD ex, int menu_h, const RECT *win, RECT *cl)
+static int own_icon(const wwnd *w) { return w->cls && !w->cls->wc.hIcon; }
+
+/* own_icon: the class has no icon, so a minimized window draws its icon
+ * itself: its client area is then the icon's place (as in Windows 3.x,
+ * where the Clock keeps going as an icon) */
+static void nc_calc(DWORD style, DWORD ex, int menu_h, int self_icon, const RECT *win, RECT *cl)
 {
     *cl = *win;
     if (style & WS_MINIMIZE) {
-        cl->right = cl->left;
-        cl->bottom = cl->top;
+        if (self_icon) {
+            cl->left = win->left + (win->right - win->left - UM_ICON) / 2;
+            cl->top = win->top + 2;
+            cl->right = cl->left + UM_ICON;
+            cl->bottom = cl->top + UM_ICON;
+        } else {
+            cl->right = cl->left;
+            cl->bottom = cl->top;
+        }
         return;
     }
     int f = user_frame_width(style, ex);
@@ -370,7 +382,7 @@ static void nc_calc(DWORD style, DWORD ex, int menu_h, const RECT *win, RECT *cl
 
 void user_nc_rects(const wwnd *w, RECT *client)
 {
-    nc_calc(w->style, w->exstyle, user_menu_bar_height(w), &w->rc, client);
+    nc_calc(w->style, w->exstyle, user_menu_bar_height(w), own_icon(w), &w->rc, client);
 }
 
 void WINAPI AdjustWindowRectEx(LPRECT rc, DWORD style, BOOL menu, DWORD ex)
@@ -641,7 +653,7 @@ void user_set_window_rect(wwnd *w, const RECT *rc, UINT flags)
     (void)flags;
     RECT oc = w->client;
     w->rc = *rc;
-    nc_calc(w->style, w->exstyle, user_menu_bar_height(w), &w->rc, &w->client);
+    nc_calc(w->style, w->exstyle, user_menu_bar_height(w), own_icon(w), &w->rc, &w->client);
     int dx = w->client.left - oc.left, dy = w->client.top - oc.top;
     if (dx || dy)
         offset_tree(w, dx, dy);
@@ -1154,7 +1166,7 @@ HWND WINAPI CreateWindowEx(DWORD ex, LPCSTR klass, LPCSTR title, DWORD style,
     if (parent != U.desktop)
         OffsetRect(&rc, parent->client.left, parent->client.top);
     w->rc = rc;
-    nc_calc(w->style, w->exstyle, user_menu_bar_height(w), &w->rc, &w->client);
+    nc_calc(w->style, w->exstyle, user_menu_bar_height(w), own_icon(w), &w->rc, &w->client);
     w->text = win_strdup(title ? title : "");
 
     if (parent && (style & WS_CHILD))

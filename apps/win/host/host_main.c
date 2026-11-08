@@ -20,6 +20,7 @@ int PASCAL demo_WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show);
 int PASCAL progman_WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show);
 int PASCAL notepad_WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show);
 int PASCAL clock_WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show);
+int PASCAL calc_WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show);
 
 static int demo_entry(const win_app_host *h)
 {
@@ -41,6 +42,11 @@ static int clock_entry(const win_app_host *h)
     return clock_WinMain(h->hinstance, 0, (LPSTR)h->cmdline, h->show);
 }
 
+static int calc_entry(const win_app_host *h)
+{
+    return calc_WinMain(h->hinstance, 0, (LPSTR)h->cmdline, h->show);
+}
+
 win_app_entry win_host_app(const char *prog)
 {
     const char *b = prog;
@@ -55,6 +61,8 @@ win_app_entry win_host_app(const char *prog)
         return notepad_entry;
     if (!lstrcmpi(b, "CLOCK.EXE"))
         return clock_entry;
+    if (!lstrcmpi(b, "CALC.EXE"))
+        return calc_entry;
     return NULL;
 }
 
@@ -125,7 +133,23 @@ static void type_char(char c)
     else if (c == ',') vk = 0xBC;
     else if (c == '!') { vk = '1'; shift = 1; }
     else if (c == '-') vk = 0xBD;
-    else return;
+    else {
+        /* the rest of the US layout: unshifted / shifted on these keys */
+        static const char plain[] = "/=;\\'[]`", shifted[] = "?+:|\"{}~";
+        static const int vks[] = { 0xBF, 0xBB, 0xBA, 0xDC, 0xDE, 0xDB, 0xDD, 0xC0 };
+        static const char digit_shift[] = ")!@#$%^&*(";
+        vk = 0;
+        for (int i = 0; plain[i]; i++)
+            if (c == plain[i]) vk = vks[i];
+            else if (c == shifted[i]) { vk = vks[i]; shift = 1; }
+        for (int i = 0; i < 10; i++)
+            if (c == digit_shift[i]) { vk = '0' + i; shift = 1; }
+        if (c == '<') { vk = 0xBC; shift = 1; }
+        if (c == '>') { vk = 0xBE; shift = 1; }
+        if (c == '_') { vk = 0xBD; shift = 1; }
+        if (!vk)
+            return;
+    }
     if (shift) key(VK_SHIFT, 1);
     key(vk, 1);
     key(vk, 0);
