@@ -401,7 +401,7 @@ static int is_word(char c) { return c != ' ' && c != '\t' && c != '\r' && c != '
 
 static void key_down(HWND h, wedit *e, int vk)
 {
-    int shift = GetKeyState(VK_SHIFT) < 0 || (GetKeyState(VK_SHIFT) & 0x8000);
+    int shift = GetKeyState(VK_SHIFT) < 0;
     int ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
     int ro = (estyle(h) & ES_READONLY) != 0;
     int p = e->caret, l = line_of(e, p);

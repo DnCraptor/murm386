@@ -22,7 +22,7 @@ nothing leaves the program from the command line in that part (`WINN DEMO`).
 | `ddi/winddi.h` | driver interface: display (DIB surface + palette) and input |
 | `ddi/winmod.h` | loadable driver modules: entry point and the tables exchanged with the core |
 | `core/` | handle table, KERNEL subset (memory, strings, atoms, INI files, files, tasks), regions, 1/8 bpp raster engine, GDI, fonts, software cursor, module loader, export tables |
-| `user/` | windows, messages, painting, non-client area, menus and accelerators, controls (BUTTON, STATIC, EDIT, LISTBOX, COMBOBOX, SCROLLBAR), dialogs, MessageBox |
+| `user/` | windows, messages, painting, non-client area, menus and accelerators, controls (BUTTON, STATIC, EDIT, LISTBOX, COMBOBOX, SCROLLBAR), dialogs, MessageBox, MDI (MDICLIENT, DefFrameProc, DefMDIChildProc) |
 | `drivers/dos/` | `VBE8` display driver (VBE 100h 640x400x8, fallback 13h) and `DOS` input driver (keyboard through the BIOS buffer, INT 33h mouse) |
 | `runtime/` | `WINN.EXE` `main()`: drivers, core, shell and command-line program as tasks |
 | `sdk/` | for applications: API stubs by Win16 ordinal, `__ez_start`, `winapp.cmake`; `gen_exports.py` makes the export tables |
@@ -90,7 +90,7 @@ use `ucontext`):
     ./winhost scripts/menus.txt      # menus, combo box, scroll bar
     ./winhost scripts/tasks.txt      # two DEMO tasks
     rm -f hostwin/PROGMAN.INI
-    ./winhost scripts/progman.txt PROGMAN    # the shell: groups, items, Run, exit
+    ./winhost scripts/progman.txt PROGMAN    # the shell: groups (MDI), items, Run, exit
     ./winhost800 scripts/vga800.txt  # the VGA800 driver, built in
     ./test_gdi                       # GDI sample sheet, gdi.ppm
 
@@ -104,6 +104,6 @@ Text is ANSI Windows-1251 and is drawn with the CP866 VGA font.
 
 ## Not yet
 
-Resources (stage 2 brings the NE loader), clipboard, printing, MDI (the
-Program Manager shows its groups one under another), `.GRP` files
-(`PROGMAN.INI` holds the groups as text).
+Resources (stage 2 brings the NE loader), clipboard, printing, `.GRP`
+files (`PROGMAN.INI` holds the groups as text). A maximized MDI child keeps
+its own caption instead of merging it into the frame's menu bar.

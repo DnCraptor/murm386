@@ -650,5 +650,6 @@ int user_init(void)
     user_register_builtin("COMBOBOX", user_combo_proc, CS_DBLCLKS, ex, arrow, 0);
     user_register_builtin("#32770", user_dialog_proc, 0, DLG_EXTRA, arrow, 0);
     user_register_builtin("#32768", user_menu_popup_proc, 0, 0, arrow, 0);
+    user_register_builtin("MDICLIENT", user_mdiclient_proc, 0, (int)sizeof(void *), arrow, 0);
     return 0;
 }

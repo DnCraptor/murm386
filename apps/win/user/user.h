@@ -145,6 +145,7 @@ LRESULT CALLBACK user_desktop_proc(HWND, UINT, WPARAM, LPARAM);
 LRESULT CALLBACK user_menu_popup_proc(HWND, UINT, WPARAM, LPARAM);
 LRESULT CALLBACK user_scrollbar_proc(HWND, UINT, WPARAM, LPARAM);
 LRESULT CALLBACK user_combo_proc(HWND, UINT, WPARAM, LPARAM);
+LRESULT CALLBACK user_mdiclient_proc(HWND, UINT, WPARAM, LPARAM);
 
 /* control helpers */
 HFONT   user_ctl_font(HWND h);

@@ -43,6 +43,8 @@ extern void CreateSolidBrush(void);
 extern void CreateWindow(void);
 extern void CreateWindowEx(void);
 extern void DefDlgProc(void);
+extern void DefFrameProc(void);
+extern void DefMDIChildProc(void);
 extern void DefWindowProc(void);
 extern void DeleteAtom(void);
 extern void DeleteDC(void);
@@ -284,6 +286,7 @@ extern void TabbedTextOut(void);
 extern void TextOut(void);
 extern void TrackPopupMenu(void);
 extern void TranslateAccelerator(void);
+extern void TranslateMDISysAccel(void);
 extern void TranslateMessage(void);
 extern void UnionRect(void);
 extern void UnregisterClass(void);
@@ -620,6 +623,9 @@ static const void *const exports_user[474] = {
     [430] = (const void *)lstrcmp,
     [431] = (const void *)AnsiUpper,
     [432] = (const void *)AnsiLower,
+    [445] = (const void *)DefFrameProc,
+    [447] = (const void *)DefMDIChildProc,
+    [451] = (const void *)TranslateMDISysAccel,
     [452] = (const void *)CreateWindowEx,
     [454] = (const void *)AdjustWindowRectEx,
     [466] = (const void *)DrawFocusRect,

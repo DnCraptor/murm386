@@ -182,11 +182,12 @@ void win_ddi_key_event(int vk, int sc, int down)
 
 int WINAPI GetKeyState(int vk)
 {
+    /* a 16-bit value in Win16: "down" is the sign bit, so "< 0" tests it */
     uint8_t s = U.keys[vk & 0xFF];
-    return ((s & 0x80) ? 0x8000 : 0) | (s & 1);
+    return (int16_t)(((s & 0x80) ? 0x8000 : 0) | (s & 1));
 }
 
-int WINAPI GetAsyncKeyState(int vk) { return GetKeyState(vk) & 0x8000; }
+int WINAPI GetAsyncKeyState(int vk) { return (int16_t)(GetKeyState(vk) & 0x8000); }
 
 BOOL WINAPI TranslateMessage(const MSG *msg)
 {
@@ -471,6 +472,27 @@ static void pump_input(void)
 }
 
 /* One pass; 1 = message, 0 = nothing, -1 = WM_QUIT. */
+/* A button went down in a child window: its parents hear of it
+ * (WM_PARENTNOTIFY, position in each parent's client coordinates), as the
+ * message is taken from the queue, on the receiving task. */
+static void parent_notify(const MSG *m)
+{
+    UINT msg = m->message;
+    if (msg >= WM_NCMOUSEMOVE && msg <= WM_NCMBUTTONDBLCLK)
+        msg += WM_MOUSEMOVE - WM_NCMOUSEMOVE;
+    if (msg != WM_LBUTTONDOWN && msg != WM_RBUTTONDOWN && msg != WM_MBUTTONDOWN)
+        return;
+    for (wwnd *w = user_wnd(m->hwnd); w && (w->style & WS_CHILD) && w->parent &&
+         !(w->exstyle & WS_EX_NOPARENTNOTIFY); w = w->parent) {
+        wwnd *p = w->parent;
+        HWND ph = p->h;
+        SendMessage(ph, WM_PARENTNOTIFY, msg,
+                    MAKELPARAM(m->pt.x - p->client.left, m->pt.y - p->client.top));
+        if (!IsWindow(ph) || !IsWindow(w->h))
+            break;
+    }
+}
+
 static int get_one(MSG *out, HWND h, UINT first, UINT last, int remove)
 {
     pump_input();
@@ -491,8 +513,10 @@ static int get_one(MSG *out, HWND h, UINT first, UINT last, int remove)
             last_key = *m;
             last_char = qchar[(q_head + i) % QSIZE];
         }
-        if (remove)
+        if (remove) {
             q_remove(i);
+            parent_notify(out);
+        }
         return 1;
     }
     if (me->quit) {

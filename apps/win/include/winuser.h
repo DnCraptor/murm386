@@ -705,6 +705,40 @@ DWORD   WINAPI GetDialogBaseUnits(void);
 #define WM_NEXTDLGCTL       0x0028
 #define WM_QUERYOPEN        0x0013
 #define WM_CHILDACTIVATE    0x0022
+
+/* MDI */
+#define WM_MDICREATE        0x0220
+#define WM_MDIDESTROY       0x0221
+#define WM_MDIACTIVATE      0x0222
+#define WM_MDIRESTORE       0x0223
+#define WM_MDINEXT          0x0224
+#define WM_MDIMAXIMIZE      0x0225
+#define WM_MDITILE          0x0226
+#define WM_MDICASCADE       0x0227
+#define WM_MDIICONARRANGE   0x0228
+#define WM_MDIGETACTIVE     0x0229
+#define WM_MDISETMENU       0x0230
+#define MDITILE_VERTICAL    0x0000
+#define MDITILE_HORIZONTAL  0x0001
+#define MDITILE_SKIPDISABLED 0x0002
+#define MDIS_ALLCHILDSTYLES 0x0001
+
+typedef struct tagCLIENTCREATESTRUCT {
+    HMENU hWindowMenu;          /* "Window" popup: the children are listed in it */
+    UINT  idFirstChild;         /* their command ids start here */
+} CLIENTCREATESTRUCT, *LPCLIENTCREATESTRUCT;
+
+typedef struct tagMDICREATESTRUCT {
+    LPCSTR szClass, szTitle;
+    HINSTANCE hOwner;
+    int x, y, cx, cy;
+    LONG style;
+    LPARAM lParam;
+} MDICREATESTRUCT, *LPMDICREATESTRUCT;
+
+LRESULT WINAPI DefFrameProc(HWND h, HWND client, UINT msg, WPARAM wp, LPARAM lp);
+LRESULT WINAPI DefMDIChildProc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+BOOL    WINAPI TranslateMDISysAccel(HWND client, LPMSG msg);
 #define WM_CANCELMODE       0x001F
 #define WM_DEADCHAR         0x0103
 #define WM_SYSDEADCHAR      0x0107
@@ -788,6 +822,8 @@ DWORD   WINAPI GetDialogBaseUnits(void);
 #define SB_ENDSCROLL        8
 
 #define SC_NEXTWINDOW       0xF040
+#define SC_PREVWINDOW       0xF050
+#define SC_ARRANGE          0xF110
 #define SC_KEYMENU          0xF100
 #define SC_TASKLIST         0xF130
 

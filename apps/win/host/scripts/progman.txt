@@ -11,7 +11,7 @@ wait 50
 type Games
 key RETURN
 wait 50
-# File > New Program Item, into the new group
+# File > New Program Item, into the new (active) group
 keydown ALT
 key F
 keyup ALT
@@ -20,13 +20,51 @@ wait 50
 type Second Demo
 key TAB
 type DEMO.EXE
-wait 30
-snap pm_item.ppm
 key RETURN
 wait 50
 snap pm_groups.ppm
+# Window > Tile
+keydown SHIFT
+key F4
+keyup SHIFT
+wait 50
+snap pm_tile.ppm
+# click into Main (left half): it becomes active; Window menu lists both
+click 100 150
+wait 50
+keydown ALT
+key W
+keyup ALT
+wait 50
+snap pm_winmenu.ppm
+key ESC
+key ESC
+# maximize Main with its caption button
+dblclick 150 74
+wait 50
+snap pm_max.ppm
+# Ctrl+F6: Games, maximized in turn
+keydown CTRL
+key F6
+keyup CTRL
+wait 50
+snap pm_next.ppm
+# restore, cascade
+dblclick 150 74
+wait 50
+keydown SHIFT
+key F5
+keyup SHIFT
+wait 50
+snap pm_cascade.ppm
+# Ctrl+F4 on a group minimizes it
+keydown CTRL
+key F4
+keyup CTRL
+wait 50
+snap pm_min.ppm
 # double click Demo in Main
-dblclick 72 112
+dblclick 64 120
 wait 200
 snap pm_demo.ppm
 keydown ALT
@@ -53,5 +91,4 @@ wait 50
 snap pm_exit.ppm
 key RETURN
 wait 100
-snap pm_after.ppm
 exit

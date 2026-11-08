@@ -3,19 +3,24 @@
  * when SYSTEM.INI says nothing else, as in Windows 3.x. Closing it ends the
  * Windows session.
  *
- * Program groups and their items live in PROGMAN.INI (text, not the .GRP
- * files of Windows 3.x):
+ * An MDI frame: every program group is a child window with its items as
+ * icons; groups can be moved, sized, minimized, maximized, cascaded and
+ * tiled (Window menu).
+ *
+ * Groups and items live in PROGMAN.INI (text, not the .GRP files of
+ * Windows 3.x):
  *
  *   [Settings]
  *   Window=left top right bottom maximized
  *   MinOnRun=0
  *   [Group1]
  *   Name=Main
+ *   Window=left top right bottom state      (0 normal, 1 maximized, 2 minimized)
  *   Item1=Demo,DEMO.EXE
  *
  * On the first start the Main group gets every Windows application found
- * next to WINN.EXE. Groups are shown one under another in the main window
- * (no MDI yet); items use the standard application icon (no resources yet).
+ * next to WINN.EXE. Items use the standard application icon (no resources
+ * yet).
  */
 #include "windows.h"
 
@@ -32,6 +37,10 @@
 #define IDM_EXIT    107
 #define IDM_MINRUN  108
 #define IDM_ABOUT   109
+#define IDM_CASCADE 110
+#define IDM_TILE    111
+#define IDM_ARRANGE 112
+#define IDM_FIRSTCHILD 1000
 
 #define IDC_DESC    201
 #define IDC_CMD     202
@@ -46,17 +55,20 @@ typedef struct {
     char    name[32];
     int     n;
     pm_item it[MAXITEMS];
-    int     top, height;            /* layout, in document coordinates */
+    HWND    hwnd;
+    int     sel;                    /* selected item, -1 none */
+    int     scroll, doc_h, cols;
+    RECT    normal;                 /* restored position, client coordinates */
+    int     state;                  /* 0 normal, 1 maximized, 2 minimized */
 } pm_group;
 
 static HINSTANCE hinst;
-static HWND      hmain;
+static HWND      hframe, hclient;
 static pm_group  groups[MAXGROUPS];
 static int       ngroups, saved_groups;
-static int       cur_g, cur_i = -1;
 static int       min_on_run;
-static int       line_h = 16, cell_w = 80, cell_h = 80, hdr_h = 20, cols = 1;
-static int       scroll_y, doc_h;
+static int       line_h = 16, cell_w = 80, cell_h = 80;
+static int       creating = -1;     /* group whose window is being made */
 
 /* ---------------------------------------------------------------- PROGMAN.INI */
 
@@ -77,6 +89,25 @@ static void split_item(const char *v, pm_item *it)
     lstrcpyn(it->cmd, v + i, sizeof(it->cmd));
 }
 
+/* "a b c d [e]" -> numbers; returns how many */
+static int numbers(const char *s, int *v, int max)
+{
+    int k = 0;
+    while (*s && k < max) {
+        while (*s == ' ')
+            s++;
+        int neg = *s == '-', n = 0;
+        if (neg)
+            s++;
+        if (*s < '0' || *s > '9')
+            break;
+        while (*s >= '0' && *s <= '9')
+            n = n * 10 + (*s++ - '0');
+        v[k++] = neg ? -n : n;
+    }
+    return k;
+}
+
 static void load_groups(void)
 {
     char sec[16], key[16], val[128];
@@ -88,14 +119,32 @@ static void load_groups(void)
         pm_group *gr = &groups[ngroups++];
         lstrcpyn(gr->name, val, sizeof(gr->name));
         gr->n = 0;
+        gr->sel = -1;
+        gr->state = 0;
+        SetRectEmpty(&gr->normal);
+        int v[5];
+        GetPrivateProfileString(sec, "Window", "", val, sizeof(val), INI);
+        if (numbers(val, v, 5) >= 4 && v[2] - v[0] >= 60 && v[3] - v[1] >= 40) {
+            SetRect(&gr->normal, v[0], v[1], v[2], v[3]);
+            gr->state = numbers(val, v, 5) == 5 ? v[4] : 0;
+        }
         for (int i = 0; i < MAXITEMS; i++) {
             wsprintf(key, "Item%d", i + 1);
             if (!GetPrivateProfileString(sec, key, "", val, sizeof(val), INI))
                 break;
             split_item(val, &gr->it[gr->n++]);
         }
+        if (gr->n)
+            gr->sel = 0;
     }
     saved_groups = ngroups;
+}
+
+static void group_state(pm_group *gr)
+{
+    if (!gr->hwnd)
+        return;
+    gr->state = IsIconic(gr->hwnd) ? 2 : IsZoomed(gr->hwnd) ? 1 : 0;
 }
 
 static void save_groups(void)
@@ -107,9 +156,15 @@ static void save_groups(void)
     }
     for (int g = 0; g < ngroups; g++) {
         pm_group *gr = &groups[g];
+        group_state(gr);
         wsprintf(sec, "Group%d", g + 1);
         WritePrivateProfileString(sec, NULL, NULL, INI);
         WritePrivateProfileString(sec, "Name", gr->name, INI);
+        if (!IsRectEmpty(&gr->normal)) {
+            wsprintf(val, "%d %d %d %d %d", gr->normal.left, gr->normal.top,
+                     gr->normal.right, gr->normal.bottom, gr->state);
+            WritePrivateProfileString(sec, "Window", val, INI);
+        }
         for (int i = 0; i < gr->n; i++) {
             wsprintf(key, "Item%d", i + 1);
             wsprintf(val, "%s,%s", gr->it[i].desc, gr->it[i].cmd);
@@ -119,29 +174,16 @@ static void save_groups(void)
     saved_groups = ngroups;
 }
 
+static RECT frame_normal;           /* restored frame position */
+
 static void save_settings(void)
 {
     char val[48];
     wsprintf(val, "%d", min_on_run);
     WritePrivateProfileString("Settings", "MinOnRun", val, INI);
-    if (!IsIconic(hmain)) {
-        RECT r;
-        GetWindowRect(hmain, &r);
-        int max = IsZoomed(hmain) ? 1 : 0;
-        if (max) {                  /* keep the restored position */
-            char old[48];
-            GetPrivateProfileString("Settings", "Window", "", old, sizeof(old), INI);
-            int k = lstrlen(old);
-            while (k && old[k - 1] != ' ')
-                k--;
-            if (k) {
-                old[k] = '1';
-                old[k + 1] = 0;
-                WritePrivateProfileString("Settings", "Window", old, INI);
-                return;
-            }
-        }
-        wsprintf(val, "%d %d %d %d %d", r.left, r.top, r.right, r.bottom, max);
+    if (!IsRectEmpty(&frame_normal)) {
+        wsprintf(val, "%d %d %d %d %d", frame_normal.left, frame_normal.top,
+                 frame_normal.right, frame_normal.bottom, IsZoomed(hframe) ? 1 : 0);
         WritePrivateProfileString("Settings", "Window", val, INI);
     }
 }
@@ -178,6 +220,7 @@ static void make_main_group(void)
     pm_group *gr = &groups[0];
     lstrcpy(gr->name, "Main");
     gr->n = 0;
+    gr->sel = -1;
     ngroups = 1;
     WinDirListN(spec, names, sizeof(names));
     for (const char *p = names; *p && gr->n < MAXITEMS; p += lstrlen(p) + 1) {
@@ -191,165 +234,165 @@ static void make_main_group(void)
         lstrcpyn(it->cmd, p, sizeof(it->cmd));
         AnsiUpper(it->cmd);
     }
+    if (gr->n)
+        gr->sel = 0;
     save_groups();
 }
 
-/* ---------------------------------------------------------------- layout */
+/* ---------------------------------------------------------------- groups */
 
-static void layout(void)
+static pm_group *group_of(HWND h)
 {
-    RECT rc;
-    GetClientRect(hmain, &rc);
-    int w = rc.right - 12;
-    cols = (w - 4) / cell_w;
-    if (cols < 1)
-        cols = 1;
-    int y = 6;
-    for (int g = 0; g < ngroups; g++) {
-        int rows = (groups[g].n + cols - 1) / cols;
-        if (rows < 1)
-            rows = 1;
-        groups[g].top = y;
-        groups[g].height = hdr_h + 4 + rows * cell_h + 2;
-        y += groups[g].height + 6;
-    }
-    doc_h = y;
-    int view = rc.bottom;
-    int max = doc_h > view ? doc_h - view : 0;
-    if (scroll_y > max)
-        scroll_y = max;
-    SetScrollRange(hmain, SB_VERT, 0, max, FALSE);
-    SetScrollPos(hmain, SB_VERT, scroll_y, TRUE);
+    for (int g = 0; g < ngroups; g++)
+        if (groups[g].hwnd == h)
+            return &groups[g];
+    return NULL;
 }
 
-static void group_rect(int g, RECT *r)
+static pm_group *active_group(void)
 {
-    RECT rc;
-    GetClientRect(hmain, &rc);
-    SetRect(r, 6, groups[g].top - scroll_y, rc.right - 6, groups[g].top - scroll_y + groups[g].height);
+    HWND a = (HWND)LOWORD(SendMessage(hclient, WM_MDIGETACTIVE, 0, 0));
+    return a ? group_of(a) : NULL;
 }
 
-static void item_rect(int g, int i, RECT *r)
+static void layout(pm_group *gr)
 {
-    RECT gr;
-    group_rect(g, &gr);
-    int x = gr.left + 2 + (i % cols) * cell_w;
-    int y = gr.top + hdr_h + 4 + (i / cols) * cell_h;
+    RECT rc;
+    GetClientRect(gr->hwnd, &rc);
+    gr->cols = (rc.right - 4) / cell_w;
+    if (gr->cols < 1)
+        gr->cols = 1;
+    int rows = (gr->n + gr->cols - 1) / gr->cols;
+    gr->doc_h = 4 + rows * cell_h;
+    int max = gr->doc_h > rc.bottom ? gr->doc_h - rc.bottom : 0;
+    if (gr->scroll > max)
+        gr->scroll = max;
+    SetScrollRange(gr->hwnd, SB_VERT, 0, max, FALSE);
+    SetScrollPos(gr->hwnd, SB_VERT, gr->scroll, TRUE);
+}
+
+static void item_rect(pm_group *gr, int i, RECT *r)
+{
+    int x = 2 + (i % gr->cols) * cell_w;
+    int y = 4 + (i / gr->cols) * cell_h - gr->scroll;
     SetRect(r, x, y, x + cell_w, y + cell_h);
 }
 
-static void scroll_to(int y)
+static void scroll_to(pm_group *gr, int y)
 {
     RECT rc;
-    GetClientRect(hmain, &rc);
-    int max = doc_h > rc.bottom ? doc_h - rc.bottom : 0;
+    GetClientRect(gr->hwnd, &rc);
+    int max = gr->doc_h > rc.bottom ? gr->doc_h - rc.bottom : 0;
     if (y > max) y = max;
     if (y < 0) y = 0;
-    if (y == scroll_y)
+    if (y == gr->scroll)
         return;
-    scroll_y = y;
-    SetScrollPos(hmain, SB_VERT, scroll_y, TRUE);
-    InvalidateRect(hmain, NULL, TRUE);
+    gr->scroll = y;
+    SetScrollPos(gr->hwnd, SB_VERT, y, TRUE);
+    InvalidateRect(gr->hwnd, NULL, TRUE);
 }
 
-static void ensure_visible(void)
+static void set_sel(pm_group *gr, int i)
 {
-    if (cur_g >= ngroups)
+    if (i == gr->sel)
+        return;
+    gr->sel = i;
+    InvalidateRect(gr->hwnd, NULL, FALSE);
+    if (i < 0)
         return;
     RECT r, rc;
-    if (cur_i >= 0)
-        item_rect(cur_g, cur_i, &r);
-    else
-        group_rect(cur_g, &r);
-    GetClientRect(hmain, &rc);
+    item_rect(gr, i, &r);
+    GetClientRect(gr->hwnd, &rc);
     if (r.top < 0)
-        scroll_to(scroll_y + r.top - 6);
+        scroll_to(gr, gr->scroll + r.top - 4);
     else if (r.bottom > rc.bottom)
-        scroll_to(scroll_y + r.bottom - rc.bottom + 6);
+        scroll_to(gr, gr->scroll + r.bottom - rc.bottom + 4);
 }
 
-static void set_sel(int g, int i)
-{
-    if (g == cur_g && i == cur_i)
-        return;
-    cur_g = g;
-    cur_i = i;
-    InvalidateRect(hmain, NULL, FALSE);
-    ensure_visible();
-}
-
-/* ---------------------------------------------------------------- painting */
-
-static void paint(HDC dc)
+static void paint_group(pm_group *gr, HDC dc)
 {
     RECT rc;
-    GetClientRect(hmain, &rc);
-    FillRect(dc, &rc, (HBRUSH)(COLOR_APPWORKSPACE + 1));
-    int active = GetFocus() == hmain;
+    GetClientRect(gr->hwnd, &rc);
+    FillRect(dc, &rc, (HBRUSH)(COLOR_WINDOW + 1));
+    int focus = GetFocus() == gr->hwnd;
     HICON icon = LoadIcon(0, IDI_APPLICATION);
     SetBkMode(dc, TRANSPARENT);
-    for (int g = 0; g < ngroups; g++) {
-        pm_group *gr = &groups[g];
-        RECT r;
-        group_rect(g, &r);
-        if (r.bottom < 0 || r.top > rc.bottom)
+    for (int i = 0; i < gr->n; i++) {
+        RECT c;
+        item_rect(gr, i, &c);
+        if (c.bottom < 0 || c.top > rc.bottom)
             continue;
-        FillRect(dc, &r, (HBRUSH)(COLOR_WINDOW + 1));
-        FrameRect(dc, &r, GetStockObject(BLACK_BRUSH));
-        RECT h = { r.left + 1, r.top + 1, r.right - 1, r.top + hdr_h };
-        int hot = g == cur_g && active;
-        FillRect(dc, &h, (HBRUSH)((hot ? COLOR_ACTIVECAPTION : COLOR_INACTIVECAPTION) + 1));
-        RECT l = { r.left, r.top + hdr_h, r.right, r.top + hdr_h + 1 };
-        FillRect(dc, &l, GetStockObject(BLACK_BRUSH));
-        SetTextColor(dc, GetSysColor(hot ? COLOR_CAPTIONTEXT : COLOR_INACTIVECAPTIONTEXT));
-        DrawText(dc, gr->name, -1, &h, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-        if (!gr->n) {
-            RECT e = { r.left, r.top + hdr_h + 4, r.right, r.bottom };
-            SetTextColor(dc, GetSysColor(COLOR_GRAYTEXT));
-            DrawText(dc, "(empty)", -1, &e, DT_CENTER | DT_SINGLELINE | DT_NOPREFIX);
+        DrawIcon(dc, c.left + (cell_w - 32) / 2, c.top + 4, icon);
+        RECT t = { c.left + 2, c.top + 40, c.right - 2, c.bottom };
+        RECT m = t;
+        DrawText(dc, gr->it[i].desc, -1, &m, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+        int tw = m.right - m.left;
+        m.left = t.left + ((t.right - t.left) - tw) / 2;
+        m.right = m.left + tw;
+        if (m.bottom > t.bottom)
+            m.bottom = t.bottom;
+        int sel = i == gr->sel && focus;
+        if (sel) {
+            RECT b = { m.left - 1, m.top, m.right + 1, m.bottom };
+            FillRect(dc, &b, (HBRUSH)(COLOR_HIGHLIGHT + 1));
         }
-        for (int i = 0; i < gr->n; i++) {
-            RECT c;
-            item_rect(g, i, &c);
-            DrawIcon(dc, c.left + (cell_w - 32) / 2, c.top + 4, icon);
-            RECT t = { c.left + 2, c.top + 40, c.right - 2, c.bottom };
-            RECT m = t;
-            DrawText(dc, gr->it[i].desc, -1, &m, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
-            int tw = m.right - m.left;
-            m.left = t.left + ((t.right - t.left) - tw) / 2;
-            m.right = m.left + tw;
-            if (m.bottom > t.bottom)
-                m.bottom = t.bottom;
-            int sel = g == cur_g && i == cur_i;
-            if (sel) {
-                RECT b = { m.left - 1, m.top, m.right + 1, m.bottom };
-                FillRect(dc, &b, (HBRUSH)((active ? COLOR_HIGHLIGHT : COLOR_BTNFACE) + 1));
-            }
-            SetTextColor(dc, GetSysColor(sel && active ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT));
-            DrawText(dc, gr->it[i].desc, -1, &t, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX);
-        }
+        SetTextColor(dc, GetSysColor(sel ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT));
+        DrawText(dc, gr->it[i].desc, -1, &t, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX);
     }
 }
 
-static int hit(int x, int y, int *gi)
+static int hit_item(pm_group *gr, int x, int y)
 {
-    for (int g = 0; g < ngroups; g++) {
-        RECT r;
-        group_rect(g, &r);
-        POINT p = { x, y };
-        if (!PtInRect(&r, p))
-            continue;
-        *gi = g;
-        for (int i = 0; i < groups[g].n; i++) {
-            RECT c;
-            item_rect(g, i, &c);
-            if (PtInRect(&c, p))
-                return i;
-        }
-        return -1;
+    POINT p = { x, y };
+    for (int i = 0; i < gr->n; i++) {
+        RECT c;
+        item_rect(gr, i, &c);
+        if (PtInRect(&c, p))
+            return i;
     }
-    *gi = -1;
     return -1;
+}
+
+/* the group's restored position, in client coordinates */
+static void remember_normal(pm_group *gr)
+{
+    if (!gr->hwnd || IsIconic(gr->hwnd) || IsZoomed(gr->hwnd))
+        return;
+    RECT r;
+    GetWindowRect(gr->hwnd, &r);
+    POINT a = { r.left, r.top }, b = { r.right, r.bottom };
+    ScreenToClient(hclient, &a);
+    ScreenToClient(hclient, &b);
+    SetRect(&gr->normal, a.x, a.y, b.x, b.y);
+}
+
+static HWND open_group_window(int g, int activate_it)
+{
+    pm_group *gr = &groups[g];
+    MDICREATESTRUCT cs;
+    cs.szClass = "PMGroup";
+    cs.szTitle = gr->name;
+    cs.hOwner = hinst;
+    if (!IsRectEmpty(&gr->normal)) {
+        cs.x = gr->normal.left;
+        cs.y = gr->normal.top;
+        cs.cx = gr->normal.right - gr->normal.left;
+        cs.cy = gr->normal.bottom - gr->normal.top;
+    } else {
+        RECT rc;
+        GetClientRect(hclient, &rc);
+        int d = 22;
+        cs.x = cs.y = (g % 6) * d;
+        cs.cx = rc.right * 2 / 3;
+        cs.cy = rc.bottom / 2;
+    }
+    cs.style = WS_VSCROLL | (gr->state == 2 ? WS_MINIMIZE : gr->state == 1 ? WS_MAXIMIZE : 0);
+    cs.lParam = 0;
+    creating = g;
+    HWND h = (HWND)SendMessage(hclient, WM_MDICREATE, 0, (LPARAM)(intptr_t)&cs);
+    creating = -1;
+    (void)activate_it;
+    return h;
 }
 
 /* ---------------------------------------------------------------- commands */
@@ -359,7 +402,7 @@ static void run(const char *cmd, int minimized)
     UINT r = WinExec(cmd, minimized ? SW_SHOWMINNOACTIVE : SW_SHOWNORMAL);
     if (r >= 32) {
         if (min_on_run)
-            ShowWindow(hmain, SW_MINIMIZE);
+            ShowWindow(hframe, SW_MINIMIZE);
         return;
     }
     char msg[160];
@@ -367,7 +410,7 @@ static void run(const char *cmd, int minimized)
              r == 2 ? "the file was not found" :
              r == 8 ? "there is not enough memory" :
              r == 11 ? "it is not a Windows application" : "it cannot be started");
-    MessageBox(hmain, msg, "Program Manager", MB_OK | MB_ICONEXCLAMATION);
+    MessageBox(hframe, msg, "Program Manager", MB_OK | MB_ICONEXCLAMATION);
 }
 
 static const DLGTEMPLATE_N item_tpl = {
@@ -476,127 +519,136 @@ static BOOL CALLBACK RunProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
     return FALSE;
 }
 
-static void changed(void)
+static void items_changed(pm_group *gr)
 {
     save_groups();
-    layout();
-    InvalidateRect(hmain, NULL, TRUE);
-    ensure_visible();
+    layout(gr);
+    InvalidateRect(gr->hwnd, NULL, TRUE);
 }
 
 static void new_item(void)
 {
-    if (!ngroups) {
-        MessageBox(hmain, "Create a program group first.", "Program Manager", MB_OK | MB_ICONINFORMATION);
+    pm_group *gr = active_group();
+    if (!gr) {
+        MessageBox(hframe, "Open or create a program group first.", "Program Manager",
+                   MB_OK | MB_ICONINFORMATION);
         return;
     }
-    pm_group *gr = &groups[cur_g];
     if (gr->n >= MAXITEMS) {
-        MessageBox(hmain, "This group is full.", "Program Manager", MB_OK | MB_ICONEXCLAMATION);
+        MessageBox(hframe, "This group is full.", "Program Manager", MB_OK | MB_ICONEXCLAMATION);
         return;
     }
     edit_item.desc[0] = edit_item.cmd[0] = 0;
-    if (DialogBoxIndirectN(hinst, &item_tpl, item_items, hmain, ItemProc) != IDOK)
+    if (DialogBoxIndirectN(hinst, &item_tpl, item_items, hframe, ItemProc) != IDOK)
         return;
     gr->it[gr->n] = edit_item;
-    cur_i = gr->n++;
-    changed();
+    gr->n++;
+    items_changed(gr);
+    set_sel(gr, gr->n - 1);
 }
 
 static void new_group(void)
 {
     if (ngroups >= MAXGROUPS) {
-        MessageBox(hmain, "There are too many groups.", "Program Manager", MB_OK | MB_ICONEXCLAMATION);
+        MessageBox(hframe, "There are too many groups.", "Program Manager", MB_OK | MB_ICONEXCLAMATION);
         return;
     }
     edit_item.desc[0] = 0;
-    if (DialogBoxIndirectN(hinst, &group_tpl, group_items, hmain, ItemProc) != IDOK)
+    if (DialogBoxIndirectN(hinst, &group_tpl, group_items, hframe, ItemProc) != IDOK)
         return;
     pm_group *gr = &groups[ngroups];
     lstrcpyn(gr->name, edit_item.desc, sizeof(gr->name));
     gr->n = 0;
-    cur_g = ngroups++;
-    cur_i = -1;
-    changed();
+    gr->sel = -1;
+    gr->state = 0;
+    gr->scroll = 0;
+    SetRectEmpty(&gr->normal);
+    gr->hwnd = 0;
+    ngroups++;
+    open_group_window(ngroups - 1, 1);
+    save_groups();
 }
 
 static void properties(void)
 {
-    if (!ngroups)
+    pm_group *gr = active_group();
+    if (!gr)
         return;
-    pm_group *gr = &groups[cur_g];
-    if (cur_i >= 0) {
-        edit_item = gr->it[cur_i];
-        if (DialogBoxIndirectN(hinst, &item_tpl, item_items, hmain, ItemProc) == IDOK) {
-            gr->it[cur_i] = edit_item;
-            changed();
+    if (gr->sel >= 0 && !IsIconic(gr->hwnd)) {
+        edit_item = gr->it[gr->sel];
+        if (DialogBoxIndirectN(hinst, &item_tpl, item_items, hframe, ItemProc) == IDOK) {
+            gr->it[gr->sel] = edit_item;
+            items_changed(gr);
         }
     } else {
         lstrcpyn(edit_item.desc, gr->name, sizeof(edit_item.desc));
-        if (DialogBoxIndirectN(hinst, &group_tpl, group_items, hmain, ItemProc) == IDOK) {
+        if (DialogBoxIndirectN(hinst, &group_tpl, group_items, hframe, ItemProc) == IDOK) {
             lstrcpyn(gr->name, edit_item.desc, sizeof(gr->name));
-            changed();
+            SetWindowText(gr->hwnd, gr->name);
+            save_groups();
         }
     }
 }
 
 static void delete_selected(void)
 {
-    if (!ngroups)
+    pm_group *gr = active_group();
+    if (!gr)
         return;
-    pm_group *gr = &groups[cur_g];
     char msg[96];
-    if (cur_i >= 0) {
-        wsprintf(msg, "Are you sure you want to delete the item '%s'?", gr->it[cur_i].desc);
-        if (MessageBox(hmain, msg, "Delete", MB_YESNO | MB_ICONQUESTION) != IDYES)
+    if (gr->sel >= 0 && !IsIconic(gr->hwnd)) {
+        wsprintf(msg, "Are you sure you want to delete the item '%s'?", gr->it[gr->sel].desc);
+        if (MessageBox(hframe, msg, "Delete", MB_YESNO | MB_ICONQUESTION) != IDYES)
             return;
-        for (int i = cur_i; i < gr->n - 1; i++)
+        for (int i = gr->sel; i < gr->n - 1; i++)
             gr->it[i] = gr->it[i + 1];
         gr->n--;
-        if (cur_i >= gr->n)
-            cur_i = gr->n - 1;
+        if (gr->sel >= gr->n)
+            gr->sel = gr->n - 1;
+        items_changed(gr);
     } else {
         wsprintf(msg, "Are you sure you want to delete the group '%s'?", gr->name);
-        if (MessageBox(hmain, msg, "Delete", MB_YESNO | MB_ICONQUESTION) != IDYES)
+        if (MessageBox(hframe, msg, "Delete", MB_YESNO | MB_ICONQUESTION) != IDYES)
             return;
-        for (int g = cur_g; g < ngroups - 1; g++)
+        HWND h = gr->hwnd;
+        int g = (int)(gr - groups);
+        for (; g < ngroups - 1; g++)
             groups[g] = groups[g + 1];
         ngroups--;
-        if (cur_g >= ngroups)
-            cur_g = ngroups ? ngroups - 1 : 0;
+        SendMessage(hclient, WM_MDIDESTROY, h, 0);
+        save_groups();
     }
-    changed();
 }
 
 static void open_selected(void)
 {
-    if (cur_g < ngroups && cur_i >= 0)
-        run(groups[cur_g].it[cur_i].cmd, 0);
+    pm_group *gr = active_group();
+    if (!gr)
+        return;
+    if (IsIconic(gr->hwnd)) {
+        SendMessage(hclient, WM_MDIRESTORE, gr->hwnd, 0);
+        return;
+    }
+    if (gr->sel >= 0)
+        run(gr->it[gr->sel].cmd, 0);
 }
 
 static void exit_windows(void)
 {
-    if (MessageBox(hmain, "This will end your Windows session.", "Exit Windows",
+    if (MessageBox(hframe, "This will end your Windows session.", "Exit Windows",
                    MB_OKCANCEL | MB_ICONINFORMATION) == IDOK)
         ExitWindows(0, 0);
 }
 
-static void key(int vk)
+static void key(pm_group *gr, int vk)
 {
-    if (!ngroups)
-        return;
-    int n = groups[cur_g].n;
-    int i = cur_i;
+    int n = gr->n, i = gr->sel, cols = gr->cols;
     switch (vk) {
     case VK_RETURN: open_selected(); return;
     case VK_DELETE: delete_selected(); return;
-    case VK_TAB:                    /* next group (Shift: previous) */
-        if (GetKeyState(VK_SHIFT) < 0)
-            set_sel((cur_g + ngroups - 1) % ngroups, -1);
-        else
-            set_sel((cur_g + 1) % ngroups, -1);
-        if (groups[cur_g].n)
-            set_sel(cur_g, 0);
+    case VK_TAB:                    /* Ctrl+Tab: next group, as Ctrl+F6 */
+        if (GetKeyState(VK_CONTROL) < 0)
+            SendMessage(hclient, WM_MDINEXT, gr->hwnd, GetKeyState(VK_SHIFT) < 0);
         return;
     case VK_LEFT:  i = i > 0 ? i - 1 : 0; break;
     case VK_RIGHT: i = i + 1 < n ? i + 1 : n - 1; break;
@@ -607,96 +659,136 @@ static void key(int vk)
     default: return;
     }
     if (n)
-        set_sel(cur_g, i < 0 ? 0 : i);
+        set_sel(gr, i < 0 ? 0 : i);
 }
 
-/* ---------------------------------------------------------------- window */
+/* ---------------------------------------------------------------- windows */
 
-static LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+static LRESULT CALLBACK GroupProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+    pm_group *gr = group_of(h);
+    if (!gr && msg == WM_CREATE && creating >= 0) {
+        gr = &groups[creating];
+        gr->hwnd = h;
+    }
+    if (gr) {
+        switch (msg) {
+        case WM_CREATE:
+            return 0;
+        case WM_SIZE:
+            if (wp != SIZE_MINIMIZED) {
+                layout(gr);
+                InvalidateRect(h, NULL, TRUE);
+            }
+            remember_normal(gr);
+            break;
+        case WM_MOVE:
+            remember_normal(gr);
+            break;
+        case WM_SETFOCUS:
+        case WM_KILLFOCUS:
+            InvalidateRect(h, NULL, FALSE);
+            break;
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC dc = BeginPaint(h, &ps);
+            if (!IsIconic(h))
+                paint_group(gr, dc);
+            EndPaint(h, &ps);
+            return 0;
+        }
+        case WM_LBUTTONDOWN:
+        case WM_LBUTTONDBLCLK: {
+            int i = hit_item(gr, (short)LOWORD(lp), (short)HIWORD(lp));
+            set_sel(gr, i);
+            if (msg == WM_LBUTTONDBLCLK && i >= 0)
+                run(gr->it[i].cmd, 0);
+            return 0;
+        }
+        case WM_KEYDOWN:
+            key(gr, (int)wp);
+            return 0;
+        case WM_VSCROLL: {
+            RECT rc;
+            GetClientRect(h, &rc);
+            switch (wp) {
+            case SB_LINEUP:   scroll_to(gr, gr->scroll - line_h); break;
+            case SB_LINEDOWN: scroll_to(gr, gr->scroll + line_h); break;
+            case SB_PAGEUP:   scroll_to(gr, gr->scroll - rc.bottom); break;
+            case SB_PAGEDOWN: scroll_to(gr, gr->scroll + rc.bottom); break;
+            case SB_THUMBTRACK:
+            case SB_THUMBPOSITION: scroll_to(gr, (short)LOWORD(lp)); break;
+            }
+            return 0;
+        }
+        case WM_CLOSE:              /* closing a group minimizes it, as in Windows 3.x */
+            SendMessage(h, WM_SYSCOMMAND, SC_MINIMIZE, 0);
+            return 0;
+        case WM_DESTROY:
+            gr->hwnd = 0;
+            break;
+        }
+    }
+    return DefMDIChildProc(h, msg, wp, lp);
+}
+
+static LRESULT CALLBACK FrameProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
     case WM_CREATE: {
-        hmain = h;
+        hframe = h;
         HDC dc = GetDC(h);
         TEXTMETRIC tm;
         GetTextMetrics(dc, &tm);
         ReleaseDC(h, dc);
         line_h = tm.tmHeight;
-        hdr_h = line_h + 4;
         cell_h = 40 + 2 * line_h + 4;
-        return 0;
+        CLIENTCREATESTRUCT cc;
+        cc.hWindowMenu = GetSubMenu(GetMenu(h), 2);
+        cc.idFirstChild = IDM_FIRSTCHILD;
+        hclient = CreateWindow("MDICLIENT", NULL, WS_CHILD | WS_CLIPCHILDREN | WS_VISIBLE,
+                               0, 0, 0, 0, h, (HMENU)1, hinst, (LPVOID)&cc);
+        return hclient ? 0 : -1;
     }
     case WM_SIZE:
-        layout();
-        InvalidateRect(h, NULL, TRUE);
-        return 0;
-    case WM_SETFOCUS:
-    case WM_KILLFOCUS:
-        InvalidateRect(h, NULL, FALSE);
-        return 0;
-    case WM_ERASEBKGND:
-        return 1;                   /* paint() fills everything */
-    case WM_PAINT: {
-        PAINTSTRUCT ps;
-        HDC dc = BeginPaint(h, &ps);
-        paint(dc);
-        EndPaint(h, &ps);
-        return 0;
-    }
-    case WM_LBUTTONDOWN:
-    case WM_LBUTTONDBLCLK: {
-        int g, i = hit((short)LOWORD(lp), (short)HIWORD(lp), &g);
-        if (g >= 0)
-            set_sel(g, i);
-        if (msg == WM_LBUTTONDBLCLK && g >= 0 && i >= 0)
-            open_selected();
-        return 0;
-    }
-    case WM_KEYDOWN:
-        key((int)wp);
-        return 0;
-    case WM_VSCROLL: {
-        RECT rc;
-        GetClientRect(h, &rc);
-        switch (wp) {
-        case SB_LINEUP:   scroll_to(scroll_y - line_h); break;
-        case SB_LINEDOWN: scroll_to(scroll_y + line_h); break;
-        case SB_PAGEUP:   scroll_to(scroll_y - rc.bottom); break;
-        case SB_PAGEDOWN: scroll_to(scroll_y + rc.bottom); break;
-        case SB_THUMBTRACK:
-        case SB_THUMBPOSITION: scroll_to((short)LOWORD(lp)); break;
-        case SB_TOP:      scroll_to(0); break;
-        case SB_BOTTOM:   scroll_to(doc_h); break;
-        }
-        return 0;
-    }
+    case WM_MOVE:
+        if (!IsIconic(h) && !IsZoomed(h))
+            GetWindowRect(h, &frame_normal);
+        break;
     case WM_INITMENUPOPUP: {
         HMENU m = (HMENU)wp;
-        int has_item = ngroups && cur_i >= 0;
-        EnableMenuItem(m, IDM_OPEN, has_item ? MF_ENABLED : MF_GRAYED);
-        EnableMenuItem(m, IDM_PROPS, ngroups ? MF_ENABLED : MF_GRAYED);
-        EnableMenuItem(m, IDM_DELETE, ngroups ? MF_ENABLED : MF_GRAYED);
-        EnableMenuItem(m, IDM_NEWITEM, ngroups ? MF_ENABLED : MF_GRAYED);
+        pm_group *gr = active_group();
+        int has_item = gr && gr->sel >= 0 && !IsIconic(gr->hwnd);
+        EnableMenuItem(m, IDM_OPEN, gr ? MF_ENABLED : MF_GRAYED);
+        EnableMenuItem(m, IDM_PROPS, gr ? MF_ENABLED : MF_GRAYED);
+        EnableMenuItem(m, IDM_DELETE, gr ? MF_ENABLED : MF_GRAYED);
+        EnableMenuItem(m, IDM_NEWITEM, gr ? MF_ENABLED : MF_GRAYED);
+        (void)has_item;
         CheckMenuItem(m, IDM_MINRUN, min_on_run ? MF_CHECKED : MF_UNCHECKED);
         return 0;
     }
     case WM_COMMAND:
         switch (wp) {
-        case IDM_OPEN:    open_selected(); break;
-        case IDM_NEWITEM: new_item(); break;
-        case IDM_NEWGRP:  new_group(); break;
-        case IDM_PROPS:   properties(); break;
-        case IDM_DELETE:  delete_selected(); break;
+        case IDM_OPEN:    open_selected(); return 0;
+        case IDM_NEWITEM: new_item(); return 0;
+        case IDM_NEWGRP:  new_group(); return 0;
+        case IDM_PROPS:   properties(); return 0;
+        case IDM_DELETE:  delete_selected(); return 0;
         case IDM_RUN:
             edit_item.cmd[0] = 0;
             if (DialogBoxIndirectN(hinst, &run_tpl, run_items, h, RunProc) == IDOK)
                 run(edit_item.cmd, run_min);
-            break;
-        case IDM_EXIT:    exit_windows(); break;
+            return 0;
+        case IDM_EXIT:    exit_windows(); return 0;
         case IDM_MINRUN:
             min_on_run = !min_on_run;
             save_settings();
-            break;
+            return 0;
+        case IDM_CASCADE: SendMessage(hclient, WM_MDICASCADE, 0, 0); return 0;
+        case IDM_TILE:    SendMessage(hclient, WM_MDITILE, MDITILE_VERTICAL, 0); return 0;
+        case IDM_ARRANGE: SendMessage(hclient, WM_MDIICONARRANGE, 0, 0); return 0;
         case IDM_ABOUT: {
             char drv[64], text[256];
             UINT colors = GetDisplayDriverInfoN(drv, sizeof(drv));
@@ -707,22 +799,24 @@ static LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
                      GetNumTasks());
             ReleaseDC(h, dc);
             MessageBox(h, text, "About Program Manager", MB_OK | MB_ICONINFORMATION);
-            break;
+            return 0;
         }
         }
-        return 0;
+        break;
     case WM_CLOSE:                  /* the shell: closing it ends Windows */
         exit_windows();
         return 0;
     case WM_ENDSESSION:
-        if (wp)
+        if (wp) {
+            save_groups();
             save_settings();
+        }
         return 0;
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
     }
-    return DefWindowProc(h, msg, wp, lp);
+    return DefFrameProc(h, hclient, msg, wp, lp);
 }
 
 int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
@@ -731,13 +825,18 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     hinst = inst;
     if (!prev) {
         WNDCLASS wc = { 0 };
-        wc.style = CS_DBLCLKS;
-        wc.lpfnWndProc = MainProc;
+        wc.lpfnWndProc = FrameProc;
         wc.hInstance = inst;
         wc.hIcon = LoadIcon(0, IDI_APPLICATION);
         wc.hCursor = LoadCursor(0, IDC_ARROW);
         wc.hbrBackground = (HBRUSH)(COLOR_APPWORKSPACE + 1);
         wc.lpszClassName = "Progman";
+        if (!RegisterClass(&wc))
+            return 1;
+        wc.style = CS_DBLCLKS;
+        wc.lpfnWndProc = GroupProc;
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        wc.lpszClassName = "PMGroup";
         if (!RegisterClass(&wc))
             return 1;
     }
@@ -758,46 +857,57 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     AppendMenu(file, MF_STRING, IDM_EXIT, "E&xit Windows...");
     HMENU opts = CreatePopupMenu();
     AppendMenu(opts, MF_STRING, IDM_MINRUN, "&Minimize on Use");
+    HMENU win = CreatePopupMenu();
+    AppendMenu(win, MF_STRING, IDM_CASCADE, "&Cascade\tShift+F5");
+    AppendMenu(win, MF_STRING, IDM_TILE, "&Tile\tShift+F4");
+    AppendMenu(win, MF_STRING, IDM_ARRANGE, "&Arrange Icons");
     HMENU help = CreatePopupMenu();
     AppendMenu(help, MF_STRING, IDM_ABOUT, "&About Program Manager...");
     HMENU bar = CreateMenu();
     AppendMenu(bar, MF_POPUP, (UINT)file, "&File");
     AppendMenu(bar, MF_POPUP, (UINT)opts, "&Options");
+    AppendMenu(bar, MF_POPUP, (UINT)win, "&Window");
     AppendMenu(bar, MF_POPUP, (UINT)help, "&Help");
+
+    static const ACCEL_N keys[] = {
+        { FVIRTKEY | FSHIFT, VK_F5, IDM_CASCADE },
+        { FVIRTKEY | FSHIFT, VK_F4, IDM_TILE },
+    };
+    HACCEL acc = CreateAcceleratorTableN(keys, 2);
 
     /* the saved position, or most of the screen */
     int x = 20, y = 20, w = GetSystemMetrics(SM_CXSCREEN) - 40, hgt = GetSystemMetrics(SM_CYSCREEN) - 60;
     int max = 0;
     char pos[48];
+    int v[5];
     if (GetPrivateProfileString("Settings", "Window", "", pos, sizeof(pos), INI)) {
-        int v[5] = { 0 }, k = 0;
-        for (const char *p = pos; *p && k < 5;) {
-            while (*p == ' ')
-                p++;
-            int neg = *p == '-', n = 0;
-            if (neg)
-                p++;
-            if (*p < '0' || *p > '9')
-                break;
-            while (*p >= '0' && *p <= '9')
-                n = n * 10 + (*p++ - '0');
-            v[k++] = neg ? -n : n;
-        }
+        int k = numbers(pos, v, 5);
         if (k >= 4 && v[2] - v[0] >= 100 && v[3] - v[1] >= 60) {
             x = v[0]; y = v[1]; w = v[2] - v[0]; hgt = v[3] - v[1];
             max = k == 5 && v[4];
         }
     }
-    HWND h = CreateWindow("Progman", "Program Manager", WS_OVERLAPPEDWINDOW | WS_VSCROLL,
+    HWND h = CreateWindow("Progman", "Program Manager", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                           x, y, w, hgt, 0, bar, inst, NULL);
-    if (ngroups && groups[0].n)
-        cur_i = 0;
+    if (!h)
+        return 1;
     ShowWindow(h, max ? SW_SHOWMAXIMIZED : show);
+    /* the groups: minimized ones first, the first group ends on top, active */
+    for (int g = ngroups - 1; g >= 0; g--)
+        if (groups[g].state == 2)
+            open_group_window(g, 0);
+    for (int g = ngroups - 1; g >= 0; g--)
+        if (groups[g].state != 2)
+            open_group_window(g, 0);
     UpdateWindow(h);
+
     MSG m;
     while (GetMessage(&m, 0, 0, 0)) {
+        if (TranslateMDISysAccel(hclient, &m) || TranslateAccelerator(h, acc, &m))
+            continue;
         TranslateMessage(&m);
         DispatchMessage(&m);
     }
+    DestroyAcceleratorTableN(acc);
     return (int)m.wParam;
 }

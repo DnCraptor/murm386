@@ -914,13 +914,20 @@ HWND WINAPI GetCapture(void) { return U.capture ? U.capture->h : 0; }
 
 /* ---------------------------------------------------------------- show */
 
-static void icon_slot(RECT *r)
+/* Where a window being minimized goes: the next free place in the bottom
+ * row(s) of the screen, or of its parent's client area for a child. */
+static void icon_slot(wwnd *w, RECT *r)
 {
     int n = 0;
-    for (wwnd *t = U.desktop->child; t; t = t->next)
-        if (t->style & WS_MINIMIZE)
+    wwnd *p = (w->style & WS_CHILD) && w->parent ? w->parent : U.desktop;
+    for (wwnd *t = p->child; t; t = t->next)
+        if (t != w && (t->style & WS_MINIMIZE))
             n++;
     int sw = win_sys.screen.width, sh = win_sys.screen.height;
+    if (p != U.desktop) {
+        sw = p->client.right - p->client.left;
+        sh = p->client.bottom - p->client.top;
+    }
     int per_row = sw / 76 ? sw / 76 : 1;
     r->left = 4 + (n % per_row) * 76;
     r->top = sh - UM_ICONH - 4 - (n / per_row) * (UM_ICONH + 4);
@@ -956,7 +963,7 @@ BOOL WINAPI ShowWindow(HWND h, int cmd)
                 rect_to_parent(w, &w->normal);
             }
             RECT r;
-            icon_slot(&r);
+            icon_slot(w, &r);
             w->style |= WS_MINIMIZE;
             w->style &= ~WS_MAXIMIZE;
             SetWindowPos(h, 0, r.left, r.top, UM_ICONW, UM_ICONH,

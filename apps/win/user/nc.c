@@ -204,14 +204,17 @@ void user_draw_icon_id(HDC dc, int x, int y, int id);
 static void paint_iconic(wwnd *w, HDC dc)
 {
     int ww = w->rc.right - w->rc.left, wh = w->rc.bottom - w->rc.top;
-    fill(dc, 0, 0, ww, wh, COLOR_BACKGROUND);
+    /* on the desktop, or in an MDI client's work space */
+    int child = (w->style & WS_CHILD) != 0;
+    int bg = child ? COLOR_APPWORKSPACE : COLOR_BACKGROUND;
+    fill(dc, 0, 0, ww, wh, bg);
     int id = w->cls->wc.hIcon ? (int)(intptr_t)win_handle_get(w->cls->wc.hIcon, WOBJ_CURSOR) : 0;
     user_draw_icon_id(dc, (ww - UM_ICON) / 2, 2, id ? id : 101);
     RECT tr = { 0, UM_ICON + 4, ww, wh };
-    int active = w == U.active;
+    int active = child ? w->active_frame : w == U.active;
     SetBkMode(dc, OPAQUE);
-    SetBkColor(dc, GetSysColor(active ? COLOR_ACTIVECAPTION : COLOR_BACKGROUND));
-    SetTextColor(dc, GetSysColor(active ? COLOR_CAPTIONTEXT : COLOR_CAPTIONTEXT));
+    SetBkColor(dc, GetSysColor(active ? COLOR_ACTIVECAPTION : bg));
+    SetTextColor(dc, GetSysColor(active ? COLOR_CAPTIONTEXT : child ? COLOR_WINDOWTEXT : COLOR_CAPTIONTEXT));
     user_draw_text(dc, w->text, -1, &tr, DT_CENTER | DT_SINGLELINE | DT_NOPREFIX);
 }
 

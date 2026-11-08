@@ -5090,6 +5090,57 @@ AnsiLower:
     .ltorg
     .size AnsiLower, .-AnsiLower
 
+    .section .text.winapi.DefFrameProc,"ax",%progbits
+    .global DefFrameProc
+    .type DefFrameProc, %function
+    .thumb_func
+DefFrameProc:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1780
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size DefFrameProc, .-DefFrameProc
+
+    .section .text.winapi.DefMDIChildProc,"ax",%progbits
+    .global DefMDIChildProc
+    .type DefMDIChildProc, %function
+    .thumb_func
+DefMDIChildProc:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1788
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size DefMDIChildProc, .-DefMDIChildProc
+
+    .section .text.winapi.TranslateMDISysAccel,"ax",%progbits
+    .global TranslateMDISysAccel
+    .type TranslateMDISysAccel, %function
+    .thumb_func
+TranslateMDISysAccel:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1804
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size TranslateMDISysAccel, .-TranslateMDISysAccel
+
     .section .text.winapi.CreateWindowEx,"ax",%progbits
     .global CreateWindowEx
     .type CreateWindowEx, %function
