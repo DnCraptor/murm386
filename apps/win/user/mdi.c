@@ -7,8 +7,9 @@
  * child windows whose ids run from idFirstChild on, renumbered when one
  * goes, and listed in the frame's Window menu. One of them is active: its
  * caption follows the frame's, it has the focus while the frame has it.
- * A maximized child fills the client area with its caption still showing
- * (no merge into the frame's menu bar); the frame title then carries the
+ * A maximized child fills the client area with its caption and frame just
+ * outside it; its system menu and restore button go into the frame's menu
+ * bar (Alt+- opens that system menu), and the frame title carries the
  * child's in brackets.
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
@@ -26,6 +27,8 @@ typedef struct mdiinfo {
     int    count;
     int    menu_items;              /* items we appended (with the separator) */
     char  *title;                   /* the frame's own title */
+    HWND   merged;                  /* the maximized child in the menu bar */
+    HMENU  merged_menu;             /* ... of this menu */
 } mdiinfo;
 
 static mdiinfo *info(HWND client)
@@ -107,8 +110,29 @@ static void update_menu(HWND client, mdiinfo *m)
     }
 }
 
+void user_menu_mdi_merge(HMENU bar, HWND child);
+
+/* the maximized active child's items in the frame's menu bar, or none */
+static void sync_merge(mdiinfo *m)
+{
+    wwnd *a = user_wnd(m->active);
+    HWND want = a && (a->style & WS_MAXIMIZE) && (a->style & WS_SYSMENU) ? m->active : 0;
+    HMENU bar = m->frame ? GetMenu(m->frame) : 0;
+    if (want == m->merged && bar == m->merged_menu)
+        return;
+    if (m->merged_menu)
+        user_menu_mdi_merge(m->merged_menu, 0);
+    if (bar && want)
+        user_menu_mdi_merge(bar, want);
+    m->merged = bar ? want : 0;
+    m->merged_menu = want ? bar : 0;
+    if (m->frame)
+        DrawMenuBar(m->frame);
+}
+
 static void update_title(mdiinfo *m)
 {
+    sync_merge(m);
     if (!m->frame || !m->title)
         return;
     wwnd *a = user_wnd(m->active);
@@ -335,6 +359,7 @@ static void mdi_destroy(HWND client, mdiinfo *m, HWND child)
             }
         int was_max = (c->style & WS_MAXIMIZE) != 0;
         activate(client, m, next ? next->h : 0);
+        sync_merge(m);              /* its system menu is not in the bar any more */
         if (was_max && next && !(next->style & WS_MINIMIZE))
             ShowWindow(next->h, SW_SHOWMAXIMIZED);
     }
@@ -405,6 +430,8 @@ LRESULT CALLBACK user_mdiclient_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     }
     case WM_DESTROY:
         if (m) {
+            if (m->merged_menu)
+                user_menu_mdi_merge(m->merged_menu, 0);
             win_free(m->title);
             win_free(m);
             memset(w->extra, 0, sizeof(m));
@@ -460,9 +487,15 @@ LRESULT CALLBACK user_mdiclient_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             m->menu_items = 0;
             m->winmenu = (HMENU)HIWORD(lp);
         }
-        if (LOWORD(lp))
+        if (LOWORD(lp)) {
+            if (m->merged_menu)             /* the items move to the new bar */
+                user_menu_mdi_merge(m->merged_menu, 0);
+            m->merged = 0;
+            m->merged_menu = 0;
             SetMenu(m->frame, (HMENU)LOWORD(lp));
+        }
         update_menu(h, m);
+        sync_merge(m);
         if (wp)
             DrawMenuBar(m->frame);
         return (LRESULT)old;
@@ -565,6 +598,25 @@ LRESULT WINAPI DefMDIChildProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         case WM_MDIACTIVATE:
             return 0;
+        case WM_GETMINMAXINFO: {
+            /* maximized, the caption goes above the client area, out of sight */
+            DefWindowProc(h, msg, wp, lp);
+            wwnd *c = user_wnd(h);
+            MINMAXINFO *mm = (MINMAXINFO *)(intptr_t)lp;
+            if (c && user_has_caption(c->style)) {
+                mm->ptMaxPosition.y -= UM_CAPTION + 1;
+                mm->ptMaxSize.y += UM_CAPTION + 1;
+                mm->ptMaxTrackSize.y = mm->ptMaxSize.y;
+            }
+            return 0;
+        }
+        case WM_SYSCHAR:
+            /* Alt+-: the child's system menu (maximized, the one in the bar) */
+            if (wp == '-' && !IsZoomed(h)) {
+                SendMessage(h, WM_SYSCOMMAND, SC_KEYMENU, '-');
+                return 0;
+            }
+            break;
         case WM_SYSCOMMAND:
             switch (wp & 0xFFF0) {
             case SC_NEXTWINDOW:

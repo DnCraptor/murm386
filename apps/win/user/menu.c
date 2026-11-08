@@ -18,12 +18,17 @@
 #define ARROW_W  16
 #define BAR_PAD  8
 
+/* the items a maximized MDI child puts into the frame's menu bar */
+enum { MK_NONE, MK_CHILDSYS, MK_RESTORE };
+
 typedef struct {
     UINT  flags;
     UINT  id;
     HMENU sub;
     char *text;
     RECT  rc;           /* bar: relative to the bar; popup: popup client */
+    int   kind;         /* MK_*: its commands are system commands of target */
+    HWND  target;
 } mitem;
 
 typedef struct {
@@ -59,7 +64,7 @@ BOOL WINAPI DestroyMenu(HMENU h)
     if (!m)
         return FALSE;
     for (int i = 0; i < m->n; i++) {
-        if (m->it[i].flags & MF_POPUP)
+        if ((m->it[i].flags & MF_POPUP) && !m->it[i].kind)   /* a child's system menu is its own */
             DestroyMenu(m->it[i].sub);
         win_free(m->it[i].text);
     }
@@ -330,6 +335,32 @@ HMENU WINAPI GetSystemMenu(HWND h, BOOL revert)
     return w->sysmenu;
 }
 
+/* A maximized MDI child's system menu at the left of the frame's menu bar,
+ * its restore button at the right (child 0: taken away again). */
+void user_menu_mdi_merge(HMENU bar, HWND child)
+{
+    wmenu *m = menu_get(bar);
+    if (!m)
+        return;
+    for (int i = m->n - 1; i >= 0; i--)
+        if (m->it[i].kind) {
+            win_free(m->it[i].text);
+            memmove(&m->it[i], &m->it[i + 1], sizeof(mitem) * (size_t)(m->n - i - 1));
+            m->n--;
+        }
+    if (!child)
+        return;
+    HMENU sm = GetSystemMenu(child, FALSE);
+    if (!InsertMenu(bar, 0, MF_BYPOSITION | MF_POPUP, (UINT)sm, ""))
+        return;
+    m->it[0].kind = MK_CHILDSYS;
+    m->it[0].target = child;
+    if (AppendMenu(bar, MF_STRING, SC_RESTORE, "")) {
+        m->it[m->n - 1].kind = MK_RESTORE;
+        m->it[m->n - 1].target = child;
+    }
+}
+
 /* State of the system menu items follows the window. */
 static void sysmenu_update(wwnd *w, HMENU m)
 {
@@ -374,14 +405,26 @@ static void layout_bar(wmenu *m, int width)
         int w = text_part_width(dc, it->text ? it->text : "", ln) + 2 * BAR_PAD;
         if (it->flags & MF_SEPARATOR)
             w = BAR_PAD;
+        if (it->kind)
+            w = UM_MENU + 2;
         if ((it->flags & MF_HELP) && help < 0)
             help = i;
         SetRect(&it->rc, x, 0, x + w, UM_MENU);
         x += w;
     }
-    if (help >= 0 && x < width) {
-        int shift = width - x;
-        for (int i = help; i < m->n; i++)
+    /* the restore button keeps to the right edge, the rest of a help
+     * item's run goes just left of it */
+    int right = width;
+    if (m->n && m->it[m->n - 1].kind == MK_RESTORE) {
+        mitem *r = &m->it[m->n - 1];
+        int w = r->rc.right - r->rc.left;
+        SetRect(&r->rc, width - w, 0, width, UM_MENU);
+        right = width - w;
+        x -= w;
+    }
+    if (help >= 0 && x < right) {
+        int shift = right - x;
+        for (int i = help; i < m->n && !m->it[i].kind; i++)
             OffsetRect(&m->it[i].rc, shift, 0);
     }
     ReleaseDC(0, dc);
@@ -432,6 +475,30 @@ static void draw_item(HDC dc, wmenu *m, int i, int selected, int ox, int oy)
             RECT l = { r.left, (r.top + r.bottom) / 2, r.right, (r.top + r.bottom) / 2 + 1 };
             FillRect(dc, &l, user_sys_brush(COLOR_MENUTEXT));
         }
+        return;
+    }
+    if (it->kind == MK_CHILDSYS) {          /* the child's system menu box */
+        FillRect(dc, &r, user_sys_brush(COLOR_MENU));
+        RECT b = { r.left + 1, r.top + 1, r.left + 1 + UM_MENU - 2, r.bottom - 1 };
+        FillRect(dc, &b, user_sys_brush(selected ? COLOR_HIGHLIGHT : COLOR_BTNFACE));
+        FrameRect(dc, &b, user_sys_brush(COLOR_WINDOWFRAME));
+        int cy = (b.top + b.bottom) / 2, x0 = b.left + 4, x1 = b.right - 4;
+        RECT sh = { x0 + 1, cy, x1 + 1, cy + 2 }, bar = { x0, cy - 1, x1, cy + 1 };
+        FillRect(dc, &sh, user_sys_brush(COLOR_BTNSHADOW));
+        FillRect(dc, &bar, user_sys_brush(selected ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWFRAME));
+        return;
+    }
+    if (it->kind == MK_RESTORE) {           /* the child's restore button */
+        FillRect(dc, &r, user_sys_brush(COLOR_MENU));
+        RECT b = { r.right - UM_MENU, r.top + 1, r.right - 1, r.bottom - 1 };
+        user_draw_3d(dc, &b, selected);
+        if (selected)
+            OffsetRect(&b, 1, 1);
+        RECT u = b, d = b;
+        u.bottom = (b.top + b.bottom) / 2 + 1;
+        d.top = (b.top + b.bottom) / 2 - 1;
+        user_draw_arrow(dc, &u, 0, RGB(0, 0, 0));
+        user_draw_arrow(dc, &d, 1, RGB(0, 0, 0));
         return;
     }
     FillRect(dc, &r, user_sys_brush(selected ? COLOR_HIGHLIGHT : COLOR_MENU));
@@ -518,6 +585,7 @@ static struct {
     int    done;
     UINT   cmd;
     int    have_cmd;
+    HWND   target;      /* a merged MDI child item: its system command */
     int    mouse_down_outside;
 } T;
 
@@ -639,6 +707,12 @@ static void open_sub(int l, int select_first)
     mitem *it = &v->m->it[v->sel];
     if (!(it->flags & MF_POPUP) || item_disabled(it))
         return;
+    if (it->kind == MK_CHILDSYS) {
+        wwnd *c = user_wnd(it->target);
+        if (!c)
+            return;
+        sysmenu_update(c, it->sub);
+    }
     close_above(l);
     int x, y, alt_x;
     if (!v->wnd) {          /* below the bar item */
@@ -695,6 +769,10 @@ static void choose(int l, int i)
     T.cmd = it->id;
     T.have_cmd = 1;
     T.done = 1;
+    /* under a merged child item of the bar: the child's system command */
+    mlevel *b = &T.lv[0];
+    if (!b->wnd && b->sel >= 0 && b->m->it[b->sel].kind)
+        T.target = b->m->it[b->sel].target;
 }
 
 static void on_mouse(UINT msg)
@@ -732,6 +810,8 @@ static void on_mouse(UINT msg)
     }
     if (up && !is_bar)
         choose(l, item);
+    else if (up && is_bar && v->sel == item && !(v->m->it[item].flags & MF_POPUP))
+        choose(l, item);            /* a command right on the bar */
 }
 
 static int mnemonic_of(const char *s)
@@ -863,6 +943,11 @@ static void track_loop(void)
             if (first_up && mm == WM_LBUTTONUP) {
                 first_up = 0;
                 int item, l = hit_level(U.mouse_x, U.mouse_y, &item);
+                if (l == 0 && !T.lv[0].wnd && item >= 0 && item == T.lv[0].sel &&
+                    !(T.lv[0].m->it[item].flags & MF_POPUP)) {
+                    choose(0, item);  /* a command right on the bar */
+                    continue;
+                }
                 if (l < 0 || !T.lv[l].wnd)
                     continue;      /* release on the bar keeps the menu open */
             }
@@ -890,7 +975,9 @@ static void track_loop(void)
             redraw_item(0, s);
         }
         SendMessage(T.owner->h, WM_MENUSELECT, 0, MAKELPARAM(0xFFFF, 0));
-        if (T.have_cmd)
+        if (T.have_cmd && T.target && IsWindow(T.target))
+            PostMessage(T.target, WM_SYSCOMMAND, T.cmd, 0);
+        else if (T.have_cmd)
             PostMessage(T.owner->h, T.is_sys ? WM_SYSCOMMAND : WM_COMMAND, T.cmd, 0);
     }
     T.depth = 0;
@@ -930,9 +1017,18 @@ void user_menu_track_bar(wwnd *w, int x, int y)
 /* Keyboard entry: Alt alone or F10 (ch 0), Alt+letter. */
 void user_menu_key(wwnd *w, int ch)
 {
-    if (ch == ' ') {
-        user_menu_track_sys(w, 1);
+    if (ch == ' ' || (ch == '-' && (w->style & WS_CHILD))) {
+        user_menu_track_sys(w, 1);      /* Alt+-: an MDI child's own */
         return;
+    }
+    if (ch == '-') {
+        wmenu *bm = menu_get(w->menu);
+        if (bm && bm->n && bm->it[0].kind == MK_CHILDSYS && start_bar(w)) {
+            set_sel(0, 0);
+            open_sub(0, 1);
+            track_loop();
+            return;
+        }
     }
     if (!start_bar(w)) {
         if (!ch && (w->style & WS_SYSMENU))

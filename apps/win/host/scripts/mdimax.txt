@@ -1,0 +1,25 @@
+# Maximized MDI child: run with "./winhost scripts/mdimax.txt PROGMAN"
+# Alt+- opens the Main group's system menu, Maximize; its system menu and
+# restore button go into the menu bar; Alt+- opens that menu; the restore
+# button puts the group back.
+wait 100
+keydown ALT
+type -
+keyup ALT
+wait 20
+snap mx_childsys.ppm
+key X
+wait 30
+snap mx_max.ppm
+keydown ALT
+type -
+keyup ALT
+wait 20
+snap mx_merged_sys.ppm
+key ESC
+key ESC
+wait 20
+click 610 51
+wait 30
+snap mx_restored.ppm
+exit

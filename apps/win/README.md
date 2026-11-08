@@ -165,6 +165,7 @@ use `ucontext`):
     ./winhost scripts/control.txt CONTROL    # colours, pattern, schemes (writes HOSTWIN/*.INI)
     ./winhost scripts/winfile.txt WINFILE    # tree, copy, move, rename, delete in HOSTWIN/DOCS
     ./winhost scripts/taskman.txt PROGMAN    # Task List: Ctrl+Esc, Switch To, Tile, End Task
+    ./winhost scripts/mdimax.txt PROGMAN     # a maximized group in the menu bar, Alt+-
     ./winhost scripts/winmine.txt WINMINE    # marks, a lost game, Expert, Best Times
     ./winhost scripts/logo.txt PROGMAN       # the logo (copy the BMPs into HOSTWIN first)
     ./winhost800 scripts/vga800.txt  # the VGA800 driver, built in
@@ -188,5 +189,4 @@ Text is ANSI Windows-1251 and is drawn with the CP866 VGA font.
 ## Not yet
 
 Resources (stage 2 brings the NE loader), printing, `.GRP`
-files (`PROGMAN.INI` holds the groups as text). A maximized MDI child keeps
-its own caption instead of merging it into the frame's menu bar.
+files (`PROGMAN.INI` holds the groups as text), DLLs (`LoadLibrary`).
