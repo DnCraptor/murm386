@@ -24,6 +24,7 @@ int PASCAL calc_WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show);
 int PASCAL control_WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show);
 int PASCAL winfile_WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show);
 int PASCAL taskman_WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show);
+int PASCAL winmine_WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show);
 
 static int demo_entry(const win_app_host *h)
 {
@@ -65,6 +66,11 @@ static int taskman_entry(const win_app_host *h)
     return taskman_WinMain(h->hinstance, 0, (LPSTR)h->cmdline, h->show);
 }
 
+static int winmine_entry(const win_app_host *h)
+{
+    return winmine_WinMain(h->hinstance, 0, (LPSTR)h->cmdline, h->show);
+}
+
 win_app_entry win_host_app(const char *prog)
 {
     const char *b = prog;
@@ -87,6 +93,8 @@ win_app_entry win_host_app(const char *prog)
         return winfile_entry;
     if (!lstrcmpi(b, "TASKMAN.EXE"))
         return taskman_entry;
+    if (!lstrcmpi(b, "WINMINE.EXE"))
+        return winmine_entry;
     return NULL;
 }
 

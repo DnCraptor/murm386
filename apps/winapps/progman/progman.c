@@ -233,7 +233,7 @@ static void make_main_group(void)
         /* the names Windows 3.1 gives its own programs */
         static const char *const known[][2] = {
             { "WINFILE.EXE", "File Manager" }, { "CONTROL.EXE", "Control Panel" },
-            { "CALC.EXE", "Calculator" },
+            { "CALC.EXE", "Calculator" }, { "WINMINE.EXE", "Minesweeper" },
         };
         title_of(p, it->desc, sizeof(it->desc));
         for (unsigned k = 0; k < sizeof(known) / sizeof(known[0]); k++)

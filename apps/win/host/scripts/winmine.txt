@@ -1,0 +1,203 @@
+# Minesweeper: run with "./winhost scripts/winmine.txt WINMINE"
+# Marks (a flag, a "?"), then every square of the Beginner field opened
+# in turn until a mine goes off (the field is random), then a new game.
+wait 100
+rdown 117 163
+rup 117 163
+rdown 117 163
+rup 117 163
+rdown 133 163
+rup 133 163
+wait 10
+snap wm_marks.ppm
+click 101 163
+wait 3
+click 117 163
+wait 3
+click 133 163
+wait 3
+click 149 163
+wait 3
+click 165 163
+wait 3
+click 181 163
+wait 3
+click 197 163
+wait 3
+click 213 163
+wait 3
+click 229 163
+wait 3
+click 101 179
+wait 3
+click 117 179
+wait 3
+click 133 179
+wait 3
+click 149 179
+wait 3
+click 165 179
+wait 3
+click 181 179
+wait 3
+click 197 179
+wait 3
+click 213 179
+wait 3
+click 229 179
+wait 3
+click 101 195
+wait 3
+click 117 195
+wait 3
+click 133 195
+wait 3
+click 149 195
+wait 3
+click 165 195
+wait 3
+click 181 195
+wait 3
+click 197 195
+wait 3
+click 213 195
+wait 3
+click 229 195
+wait 3
+click 101 211
+wait 3
+click 117 211
+wait 3
+click 133 211
+wait 3
+click 149 211
+wait 3
+click 165 211
+wait 3
+click 181 211
+wait 3
+click 197 211
+wait 3
+click 213 211
+wait 3
+click 229 211
+wait 3
+click 101 227
+wait 3
+click 117 227
+wait 3
+click 133 227
+wait 3
+click 149 227
+wait 3
+click 165 227
+wait 3
+click 181 227
+wait 3
+click 197 227
+wait 3
+click 213 227
+wait 3
+click 229 227
+wait 3
+click 101 243
+wait 3
+click 117 243
+wait 3
+click 133 243
+wait 3
+click 149 243
+wait 3
+click 165 243
+wait 3
+click 181 243
+wait 3
+click 197 243
+wait 3
+click 213 243
+wait 3
+click 229 243
+wait 3
+click 101 259
+wait 3
+click 117 259
+wait 3
+click 133 259
+wait 3
+click 149 259
+wait 3
+click 165 259
+wait 3
+click 181 259
+wait 3
+click 197 259
+wait 3
+click 213 259
+wait 3
+click 229 259
+wait 3
+click 101 275
+wait 3
+click 117 275
+wait 3
+click 133 275
+wait 3
+click 149 275
+wait 3
+click 165 275
+wait 3
+click 181 275
+wait 3
+click 197 275
+wait 3
+click 213 275
+wait 3
+click 229 275
+wait 3
+click 101 291
+wait 3
+click 117 291
+wait 3
+click 133 291
+wait 3
+click 149 291
+wait 3
+click 165 291
+wait 3
+click 181 291
+wait 3
+click 197 291
+wait 3
+click 213 291
+wait 3
+click 229 291
+wait 3
+wait 20
+snap wm_lost.ppm
+click 165 126
+wait 20
+snap wm_new.ppm
+keydown ALT
+key G
+keyup ALT
+key E
+wait 50
+snap wm_expert.ppm
+keydown ALT
+key G
+keyup ALT
+key T
+wait 30
+snap wm_best.ppm
+key RETURN
+wait 20
+keydown ALT
+key G
+keyup ALT
+key B
+wait 30
+keydown ALT
+key F4
+keyup ALT
+wait 30
+exit
