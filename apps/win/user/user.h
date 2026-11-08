@@ -78,8 +78,9 @@ extern wuser U;
 #define UM_SCROLL     17
 #define UM_MENU       18      /* menu bar line, black line below extra */
 #define UM_ICON       32
-#define UM_ICONW      72      /* minimized window: icon and title */
-#define UM_ICONH      52
+#define UM_ICONW      76      /* minimized window: icon and a title of up to two lines */
+#define UM_ICONH      70
+#define UM_ICONGAP    4       /* free space between icon places */
 
 /* wnd.c */
 wwnd   *user_wnd(HWND h);
@@ -98,6 +99,7 @@ void    user_register_builtin(LPCSTR name, WNDPROC proc, UINT style, int extra,
                               HCURSOR cur, HBRUSH bg);
 void    user_init_windows(void);
 void    user_bring_to_top(wwnd *w);
+void    user_icon_slot(wwnd *w, RECT *r);     /* free place for w minimized */
 wwnd   *user_window_from_point(int x, int y, int *hit);
 void    user_set_window_rect(wwnd *w, const RECT *rc, UINT flags);
 
@@ -116,6 +118,7 @@ LRESULT user_nc_hittest(wwnd *w, int x, int y);
 void    user_nc_paint(wwnd *w);
 void    user_nc_button(wwnd *w, UINT msg, int hit, int x, int y);
 void    user_syscommand(wwnd *w, UINT cmd, int x, int y);
+void    user_alt_tab(wwnd *w);            /* fast switching, Alt held */
 void    user_draw_3d(HDC dc, const RECT *rc, int pressed);
 void    user_draw_arrow(HDC dc, const RECT *rc, int dir, COLORREF c);
 void    user_scroll_set(wwnd *w, int bar, int min, int max, int pos, int redraw);

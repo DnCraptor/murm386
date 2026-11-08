@@ -101,7 +101,9 @@ LRESULT WINAPI DefWindowProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             w->alt_tap = wp == VK_MENU;
             if (wp == VK_F4 && (lp & (1L << 29)))
                 PostMessage(h, WM_SYSCOMMAND, SC_CLOSE, 0);
-            else if ((wp == VK_TAB || wp == VK_ESCAPE) && (lp & (1L << 29)))
+            else if (wp == VK_TAB && (lp & (1L << 29)))
+                user_alt_tab(w);
+            else if (wp == VK_ESCAPE && (lp & (1L << 29)))
                 PostMessage(h, WM_SYSCOMMAND, SC_NEXTWINDOW, 0);
             else if (wp == VK_F10)
                 SendMessage(h, WM_SYSCOMMAND, SC_KEYMENU, 0);

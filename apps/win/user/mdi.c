@@ -165,29 +165,31 @@ static void avail_rect(HWND client, mdiinfo *m, RECT *rc, int leave_icons)
     int n = children(client, m, list, 64);
     for (int i = 0; i < n; i++)
         if (list[i]->style & WS_MINIMIZE) {
-            rc->bottom -= UM_ICONH + 4;
+            rc->bottom -= UM_ICONH + UM_ICONGAP;
             break;
         }
     if (rc->bottom < rc->top + 40)
         rc->bottom = rc->top + 40;
 }
 
+/* Arrange Icons: every minimized child again, from the first place on */
 static void icon_arrange(HWND client, mdiinfo *m)
 {
-    RECT rc;
-    GetClientRect(client, &rc);
     wwnd *list[64];
-    int n = children(client, m, list, 64), k = 0;
-    int per_row = (rc.right - 4) / 76;
-    if (per_row < 1)
-        per_row = 1;
+    int n = children(client, m, list, 64);
+    for (int i = 0; i < n; i++)          /* out of the way first */
+        if (list[i]->style & WS_MINIMIZE)
+            SetWindowPos(list[i]->h, 0, -1000, -1000, 0, 0,
+                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW);
     for (int i = 0; i < n; i++) {
         if (!(list[i]->style & WS_MINIMIZE))
             continue;
-        int x = 4 + (k % per_row) * 76, y = rc.bottom - UM_ICONH - 4 - (k / per_row) * (UM_ICONH + 4);
-        SetWindowPos(list[i]->h, 0, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-        k++;
+        RECT r;
+        user_icon_slot(list[i], &r);
+        SetWindowPos(list[i]->h, 0, r.left, r.top, r.right - r.left, r.bottom - r.top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
     }
+    InvalidateRect(client, NULL, TRUE);
 }
 
 static void restore_max(wwnd **list, int n)
@@ -457,7 +459,6 @@ LRESULT CALLBACK user_mdiclient_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         wwnd *a = user_wnd(m->active);
         if (a && (a->style & WS_MAXIMIZE))
             ShowWindow(m->active, SW_SHOWMAXIMIZED);   /* follow the new size */
-        icon_arrange(h, m);
         return 0;
     }
     case WM_PARENTNOTIFY:
@@ -564,7 +565,6 @@ LRESULT WINAPI DefMDIChildProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
                 return 0;
             case SC_MINIMIZE: {
                 DefWindowProc(h, msg, wp, lp);
-                icon_arrange(client, m);
                 /* the next open child takes over, if there is one */
                 if (m->active == h) {
                     wwnd *cl = user_wnd(client);

@@ -210,12 +210,22 @@ static void paint_iconic(wwnd *w, HDC dc)
     fill(dc, 0, 0, ww, wh, bg);
     int id = w->cls->wc.hIcon ? (int)(intptr_t)win_handle_get(w->cls->wc.hIcon, WOBJ_CURSOR) : 0;
     user_draw_icon_id(dc, (ww - UM_ICON) / 2, 2, id ? id : 101);
-    RECT tr = { 0, UM_ICON + 4, ww, wh };
+    /* the title wraps at spaces (or anywhere in a long word) to two lines,
+     * centred; the active one's lines get the caption colour */
+    RECT tr = { 1, UM_ICON + 3, ww - 1, wh };
+    RECT m = tr;
+    const char *t = w->text ? w->text : "";
+    user_draw_text(dc, t, -1, &m, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+    int tw = m.right - m.left, th = m.bottom - m.top;
+    if (th > tr.bottom - tr.top)
+        th = tr.bottom - tr.top;
     int active = child ? w->active_frame : w == U.active;
-    SetBkMode(dc, OPAQUE);
-    SetBkColor(dc, GetSysColor(active ? COLOR_ACTIVECAPTION : bg));
+    RECT hb = { (ww - tw) / 2 - 1, tr.top, (ww + tw) / 2 + 1, tr.top + th };
+    if (active)
+        fill(dc, hb.left, hb.top, hb.right, hb.bottom, COLOR_ACTIVECAPTION);
+    SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, GetSysColor(active ? COLOR_CAPTIONTEXT : child ? COLOR_WINDOWTEXT : COLOR_CAPTIONTEXT));
-    user_draw_text(dc, w->text, -1, &tr, DT_CENTER | DT_SINGLELINE | DT_NOPREFIX);
+    user_draw_text(dc, t, -1, &tr, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX);
 }
 
 /* ---------------------------------------------------------------- painting */
@@ -759,6 +769,88 @@ void user_nc_button(wwnd *w, UINT msg, int hit, int x, int y)
         break;
     }
 }
+
+/* ---------------------------------------------------------------- Alt+Tab */
+
+static void switch_box(HDC dc, const RECT *box, wwnd *t)
+{
+    RECT r = *box;
+    FillRect(dc, &r, user_sys_brush(COLOR_BTNFACE));
+    FrameRect(dc, &r, GetStockObject(BLACK_BRUSH));
+    InflateRect(&r, -2, -2);
+    FrameRect(dc, &r, GetStockObject(BLACK_BRUSH));
+    int id = t->cls->wc.hIcon ? (int)(intptr_t)win_handle_get(t->cls->wc.hIcon, WOBJ_CURSOR) : 0;
+    int ih = box->bottom - box->top;
+    user_draw_icon_id(dc, box->left + 12, box->top + (ih - UM_ICON) / 2, id ? id : 101);
+    RECT tr = { box->left + 12 + UM_ICON + 10, box->top, box->right - 8, box->bottom };
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, GetSysColor(COLOR_BTNTEXT));
+    user_draw_text(dc, t->text ? t->text : "", -1, &tr,
+                   DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+}
+
+/* Alt+Tab, as the fast switching of Windows 3.1: while Alt is held, every
+ * Tab (Shift+Tab back) shows the next window's name in a box; releasing
+ * Alt switches to it, restoring it if it is minimized; Esc cancels. */
+static void alt_tab(wwnd *from)
+{
+    wwnd *list[32];
+    int n = 0;
+    for (wwnd *t = U.desktop->child; t && n < 32; t = t->next)
+        if (user_is_visible(t) && !(t->style & WS_DISABLED) && !t->owner)
+            list[n++] = t;
+    if (n < 2)
+        return;
+    int cur = 0;
+    for (int i = 0; i < n; i++)
+        if (list[i] == U.active)
+            cur = i;
+    int sel = (cur + 1) % n;
+    if (GetKeyState(VK_SHIFT) < 0)
+        sel = (cur + n - 1) % n;
+
+    int sw = win_sys.screen.width, sh = win_sys.screen.height;
+    int bw = sw * 3 / 5, bh = UM_ICON + 24;
+    RECT box = { (sw - bw) / 2, (sh - bh) / 2, (sw + bw) / 2, (sh + bh) / 2 };
+    HDC dc = CreateDC("DISPLAY", NULL, NULL, NULL);
+    switch_box(dc, &box, list[sel]);
+    int cancel = 0;
+    for (;;) {
+        MSG m;
+        POINT pt;
+        if (!track_msg(from, &m, &pt)) {
+            if (GetKeyState(VK_MENU) >= 0)          /* Alt already up */
+                break;
+            continue;
+        }
+        if ((m.message == WM_KEYUP || m.message == WM_SYSKEYUP) && m.wParam == VK_MENU)
+            break;
+        if (m.message != WM_KEYDOWN && m.message != WM_SYSKEYDOWN)
+            continue;
+        if (m.wParam == VK_ESCAPE) {
+            cancel = 1;
+            break;
+        }
+        if (m.wParam == VK_TAB) {
+            sel = GetKeyState(VK_SHIFT) < 0 ? (sel + n - 1) % n : (sel + 1) % n;
+            switch_box(dc, &box, list[sel]);
+        }
+    }
+    DeleteDC(dc);
+    wrgn g;
+    wrgn_init(&g);
+    wrgn_set_rect(&g, &box);
+    user_invalidate_screen(&g);
+    wrgn_free(&g);
+    wwnd *t = list[sel];
+    if (cancel || !IsWindow(t->h))
+        return;
+    SetActiveWindow(t->h);
+    if (t->style & WS_MINIMIZE)
+        SendMessage(t->h, WM_SYSCOMMAND, SC_RESTORE, 0);
+}
+
+void user_alt_tab(wwnd *w) { alt_tab(w); }
 
 void user_syscommand(wwnd *w, UINT cmd, int x, int y)
 {

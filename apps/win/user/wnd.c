@@ -914,25 +914,75 @@ HWND WINAPI GetCapture(void) { return U.capture ? U.capture->h : 0; }
 
 /* ---------------------------------------------------------------- show */
 
-/* Where a window being minimized goes: the next free place in the bottom
- * row(s) of the screen, or of its parent's client area for a child. */
-static void icon_slot(wwnd *w, RECT *r)
+/* Width of a minimized window: the standard one, or wider when a word of
+ * the title would not fit (titles wrap at spaces, never inside a word). */
+static int icon_width(wwnd *w)
 {
-    int n = 0;
-    wwnd *p = (w->style & WS_CHILD) && w->parent ? w->parent : U.desktop;
-    for (wwnd *t = p->child; t; t = t->next)
-        if (t != w && (t->style & WS_MINIMIZE))
+    int width = UM_ICONW;
+    const char *t = w->text;
+    if (!t)
+        return width;
+    HDC dc = GetDC(0);
+    while (*t) {
+        while (*t == ' ')
+            t++;
+        int n = 0;
+        while (t[n] && t[n] != ' ')
             n++;
+        if (n) {
+            SIZE sz;
+            GetTextExtentPoint(dc, t, n, &sz);
+            if (sz.cx + 4 > width)
+                width = sz.cx + 4;
+        }
+        t += n;
+    }
+    ReleaseDC(0, dc);
+    return width > 3 * UM_ICONW ? 3 * UM_ICONW : width;
+}
+
+/* Where a window being minimized goes: the first place in the rows at the
+ * bottom of the screen (of the parent's client area for a child) where it
+ * covers no other icon. Icons only overlap when moved there by hand. */
+void user_icon_slot(wwnd *w, RECT *r)
+{
+    wwnd *p = (w->style & WS_CHILD) && w->parent ? w->parent : U.desktop;
+    int ox = 0, oy = 0;
     int sw = win_sys.screen.width, sh = win_sys.screen.height;
     if (p != U.desktop) {
+        ox = p->client.left;
+        oy = p->client.top;
         sw = p->client.right - p->client.left;
         sh = p->client.bottom - p->client.top;
     }
-    int per_row = sw / 76 ? sw / 76 : 1;
-    r->left = 4 + (n % per_row) * 76;
-    r->top = sh - UM_ICONH - 4 - (n / per_row) * (UM_ICONH + 4);
-    r->right = r->left + UM_ICONW;
-    r->bottom = r->top + UM_ICONH;
+    int width = icon_width(w);
+    int dx = UM_ICONW + UM_ICONGAP, dy = UM_ICONH + UM_ICONGAP;
+    int per_row = (sw - UM_ICONGAP) / dx;
+    if (per_row < 1)
+        per_row = 1;
+    for (int k = 0; k < 256; k++) {
+        /* centred on its place in the grid, kept inside the area */
+        int cx = UM_ICONGAP + (k % per_row) * dx + UM_ICONW / 2;
+        r->left = cx - width / 2;
+        if (r->left < UM_ICONGAP / 2)
+            r->left = UM_ICONGAP / 2;
+        if (r->left + width > sw)
+            r->left = sw - width;
+        r->top = sh - dy - (k / per_row) * dy;
+        r->right = r->left + width;
+        r->bottom = r->top + UM_ICONH;
+        int taken = 0;
+        for (wwnd *t = p->child; t && !taken; t = t->next) {
+            if (t == w || !(t->style & WS_MINIMIZE) || !(t->style & WS_VISIBLE))
+                continue;
+            RECT o = t->rc, x;
+            OffsetRect(&o, -ox, -oy);
+            InflateRect(&o, UM_ICONGAP / 2, UM_ICONGAP / 2);
+            taken = IntersectRect(&x, &o, r);
+        }
+        if (!taken)
+            return;
+    }
 }
 
 BOOL WINAPI ShowWindow(HWND h, int cmd)
@@ -963,10 +1013,10 @@ BOOL WINAPI ShowWindow(HWND h, int cmd)
                 rect_to_parent(w, &w->normal);
             }
             RECT r;
-            icon_slot(w, &r);
+            user_icon_slot(w, &r);
             w->style |= WS_MINIMIZE;
             w->style &= ~WS_MAXIMIZE;
-            SetWindowPos(h, 0, r.left, r.top, UM_ICONW, UM_ICONH,
+            SetWindowPos(h, 0, r.left, r.top, r.right - r.left, r.bottom - r.top,
                          SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
         }
         if (!was)
