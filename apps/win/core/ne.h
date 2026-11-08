@@ -24,6 +24,19 @@ enum {
     WIN_NE_UNRESOLVED = -8
 };
 
+/* WINN-specific WinExec error codes (WinExec treats values < 32 as errors). */
+enum {
+    WIN_EXEC_NE_REQUIRES_386 = 12,
+    WIN_EXEC_NE_UNSUPPORTED = 13
+};
+
+typedef enum {
+    WIN_NE_LAUNCH_OTHER = 0,       /* not a valid Windows NE image */
+    WIN_NE_LAUNCH_READY,           /* eligible for the restricted 386 runner */
+    WIN_NE_LAUNCH_REQUIRES_386,    /* valid Windows NE, but CPU < 386 */
+    WIN_NE_LAUNCH_UNSUPPORTED      /* Windows NE layout not yet supported */
+} win_ne_launch_status;
+
 typedef struct {
     uint16_t cs_index, ip, ss_index, sp;
     uint16_t segment_count, module_count;
@@ -93,5 +106,11 @@ void win_ne_free_image(win_ne_image *image);
  * modified. Output is cleared on failure. */
 int win_ne_scan(const char *path, win_ne_info *info,
                 win_ne_import_cb cb, void *opaque);
+
+/* Classify the file independently of CPU capability. A valid Windows NE
+ * must not be diagnosed as an invalid native ARM/EZ application on a 286.
+ * This only checks the current runner's segment layout, not its supported
+ * x86 instructions/imports (those are validated at task execution). */
+win_ne_launch_status win_ne_classify_launch(const char *path, unsigned cpu_gen);
 
 #endif

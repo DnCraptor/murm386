@@ -424,17 +424,22 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
         rc = -2;
     }
     if (rc == -2) {
-        /* NE is an x86 Win16 image, not an ARM EZ image. The entry checker
-         * rejects all unsupported guest instructions before CR0.PE=1. */
-        win_ne_info ni;
+        /* Recognize Win16 NE even on a 286: its format is valid although
+         * the guest executor requires the 386 protected-mode core. */
         PC *pc = get_PC();
-        if (pc && pc->cpu && pc->cpu->gen >= 3 &&
-            win_ne_scan(path, &ni, NULL, NULL) == WIN_NE_OK &&
-            ni.target_os == 2 && ni.segment_count == 2 &&
-            ni.cs_index && ni.ss_index && ni.cs_index != ni.ss_index) {
+        unsigned gen = pc && pc->cpu ? pc->cpu->gen : 0;
+        switch (win_ne_classify_launch(path, gen)) {
+        case WIN_NE_LAUNCH_REQUIRES_386:
+            return WIN_EXEC_NE_REQUIRES_386;
+        case WIN_NE_LAUNCH_UNSUPPORTED:
+            return WIN_EXEC_NE_UNSUPPORTED;
+        case WIN_NE_LAUNCH_READY:
             ne_guest = 1;
             memset(&img, 0, sizeof(img));
             rc = 0;
+            break;
+        default:
+            break;
         }
     }
 #endif

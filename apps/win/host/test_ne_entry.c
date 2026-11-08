@@ -139,6 +139,60 @@ int main(void)
     flow_bad[0] = 0x2e; /* CS override cannot write executable segment */
     assert(!win_ne_entry_calls_data(flow_bad, sizeof flow_bad, 0, 8,
                                     zero_args, 2, 0xc0, &n));
+    /* A LOOP is allowed only when CX is exactly known and small. The
+     * verifier follows each iteration, including all API calls in it. */
+    const uint16_t loop_service[] = { 3 };
+    const uint8_t bounded_loop[] = {
+        0xb9,0x05,0x00,        /* MOV CX,5 */
+        0x31,0xc0,             /* XOR AX,AX */
+        0x40,                  /* INC AX */
+        0xe2,0xfd,             /* LOOP -3 (five iterations) */
+        0x9a,0x00,0x00,0x08,0x00, /* KERNEL.GetVersion */
+        0xcb
+    };
+    assert(win_ne_entry_calls(bounded_loop, sizeof bounded_loop, 0,
+                              8, loop_service, 1, &n) && n == 1);
+    uint8_t broken_loop[sizeof bounded_loop];
+    memcpy(broken_loop, bounded_loop, sizeof broken_loop);
+    broken_loop[1] = 0; /* MOV CX,0: LOOP would wrap to 65535 */
+    assert(!win_ne_entry_calls(broken_loop, sizeof broken_loop, 0,
+                               8, loop_service, 1, &n));
+    memcpy(broken_loop, bounded_loop, sizeof broken_loop);
+    broken_loop[1] = 65; /* over static bound */
+    assert(!win_ne_entry_calls(broken_loop, sizeof broken_loop, 0,
+                               8, loop_service, 1, &n));
+    memcpy(broken_loop, bounded_loop, sizeof broken_loop);
+    broken_loop[7] = 2; /* LOOP forward */
+    assert(!win_ne_entry_calls(broken_loop, sizeof broken_loop, 0,
+                               8, loop_service, 1, &n));
+    memcpy(broken_loop, bounded_loop, sizeof broken_loop);
+    broken_loop[7] = 0xfc; /* backward into MOV CX immediate */
+    assert(!win_ne_entry_calls(broken_loop, sizeof broken_loop, 0,
+                               8, loop_service, 1, &n));
+    const uint8_t unknown_cx[] = {
+        0xb9,0x02,0x00, 0x31,0xc1, 0x90, 0xe2,0xfd,
+        0x9a,0x00,0x00,0x08,0x00,0xcb
+    }; /* XOR CX,AX loses exact counter value */
+    assert(!win_ne_entry_calls(unknown_cx, sizeof unknown_cx, 0,
+                               8, loop_service, 1, &n));
+    const uint8_t endless_reset[] = {
+        0xb9,0x02,0x00,0x90,0xe2,0xfa,
+        0x9a,0x00,0x00,0x08,0x00,0xcb
+    }; /* iteration jumps to MOV CX,2, and resets counter forever */
+    assert(!win_ne_entry_calls(endless_reset, sizeof endless_reset, 0,
+                               8, loop_service, 1, &n));
+    const uint8_t uninitialized[] = {
+        0x90,0xe2,0xfd,0x9a,0x00,0x00,0x08,0x00,0xcb
+    };
+    assert(!win_ne_entry_calls(uninitialized, sizeof uninitialized, 0,
+                               8, loop_service, 1, &n));
+    /* Clobbering CX via MOV must invalidate the exact loop count. */
+    const uint8_t clobbered[] = {
+        0xb9,0x02,0x00, 0x89,0xd1, 0x90, 0xe2,0xfd,
+        0x9a,0x00,0x00,0x08,0x00,0xcb
+    }; /* MOV CX,DX */
+    assert(!win_ne_entry_calls(clobbered, sizeof clobbered, 0,
+                               8, loop_service, 1, &n));
     puts("ne entry stack validator: PASS");
     return 0;
 }

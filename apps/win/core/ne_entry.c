@@ -16,6 +16,7 @@
 
 #define ENTRY_WINDOW 256u
 #define ENTRY_VISIT_LIMIT 1024u
+#define ENTRY_MAX_LOOP_CX 64u
 
 static unsigned args_for(uint16_t id)
 {
@@ -53,6 +54,8 @@ typedef struct {
     unsigned calls, depth, frame;
     uint8_t stack[8];
     uint8_t regs[8];
+    uint16_t cx_value;       /* known CX for deterministic LOOP rel8 */
+    uint8_t cx_known;
 } path_state;
 
 static uint16_t read16(const uint8_t *p)
@@ -161,6 +164,24 @@ static int check_path(verifier *v, path_state s)
             continue;
         }
 
+        /* 16-bit LOOP is safe with an exact, bounded CX. This is a
+         * deterministic branch: LOOP decrements CX before testing it.
+         * The instruction subset cannot modify code or change address size.
+         * Every taken iteration is visited, so resetting CX inside the loop
+         * is rejected by the global instruction-visit budget. */
+        if (op == 0xe2) { /* LOOP rel8, backwards only */
+            if (remaining < 2 || !s.cx_known || !s.cx_value ||
+                s.cx_value > ENTRY_MAX_LOOP_CX || (int8_t)p[1] >= 0)
+                return 0;
+            int32_t target = (int32_t)at + 2 + (int8_t)p[1];
+            if (target < (int32_t)v->entry || target >= (int32_t)at ||
+                !mark(v, at, 2))
+                return 0;
+            s.cx_value--;
+            s.at = s.cx_value ? (size_t)target : at + 2;
+            continue;
+        }
+
         /* Forward-only 16-bit branches: 70..7F Jcc rel8, EB JMP rel8,
          * E9 JMP rel16. All paths must independently pass validation. */
         if ((op >= 0x70 && op <= 0x7f) || op == 0xeb || op == 0xe9) {
@@ -231,6 +252,10 @@ static int check_path(verifier *v, path_state s)
             unsigned reg = op - 0xb8;
             if (remaining < 3 || !ordinary_reg(reg) || !mark(v, at, 3)) return 0;
             s.regs[reg] = ARG_WORD;
+            if (reg == REG_CX) {
+                s.cx_known = 1;
+                s.cx_value = read16(p + 1);
+            }
             s.at += 3;
             continue;
         }
@@ -246,6 +271,7 @@ static int check_path(verifier *v, path_state s)
             unsigned reg = op - 0x58;
             if (!s.depth || !ordinary_reg(reg) || !mark(v, at, 1)) return 0;
             s.regs[reg] = s.stack[--s.depth];
+            if (reg == REG_CX) s.cx_known = 0; /* numeric value unknown */
             s.at++;
             continue;
         }
@@ -258,12 +284,21 @@ static int check_path(verifier *v, path_state s)
             if (op == 0x8c) { /* MOV r16,DS */
                 if (reg != 3 || !ordinary_reg(rm)) return 0;
                 s.regs[rm] = ARG_DS;
+                if (rm == REG_CX) s.cx_known = 0;
             } else {
                 unsigned dst = op == 0x8b || op == 0x33 ? reg : rm;
                 unsigned src = op == 0x8b || op == 0x33 ? rm : reg;
                 if (!ordinary_reg(dst) || !ordinary_reg(src)) return 0;
                 s.regs[dst] = (op == 0x89 || op == 0x8b) ?
                               s.regs[src] : ARG_WORD;
+                if (dst == REG_CX) {
+                    if (op == 0x31 || op == 0x33) {
+                        s.cx_known = src == REG_CX; /* XOR CX,CX = zero */
+                        s.cx_value = 0;
+                    } else if (src != REG_CX) {
+                        s.cx_known = 0;
+                    }
+                }
             }
             s.at += 2;
             continue;
@@ -272,6 +307,8 @@ static int check_path(verifier *v, path_state s)
             unsigned reg = op & 7u;
             if (!ordinary_reg(reg) || !mark(v, at, 1)) return 0;
             s.regs[reg] = ARG_WORD;
+            if (reg == REG_CX && s.cx_known)
+                s.cx_value = (uint16_t)(s.cx_value + (op < 0x48 ? 1 : -1));
             s.at++;
             continue;
         }

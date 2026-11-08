@@ -183,6 +183,21 @@ done:
     return rc;
 }
 
+/* The NE format is independent of the emulated CPU generation. Keep
+ * recognition separate from the restrictions of the current 386 executor. */
+win_ne_launch_status win_ne_classify_launch(const char *path, unsigned cpu_gen)
+{
+    win_ne_info info;
+    if (win_ne_scan(path, &info, NULL, NULL) != WIN_NE_OK || info.target_os != 2)
+        return WIN_NE_LAUNCH_OTHER;
+    if (cpu_gen < 3)
+        return WIN_NE_LAUNCH_REQUIRES_386;
+    if (info.segment_count != 2 || !info.cs_index || !info.ss_index ||
+        info.cs_index == info.ss_index)
+        return WIN_NE_LAUNCH_UNSUPPORTED;
+    return WIN_NE_LAUNCH_READY;
+}
+
 /* ---------------------------------------------------------------- staged image */
 
 static void wr16(uint8_t *p, uint16_t v)

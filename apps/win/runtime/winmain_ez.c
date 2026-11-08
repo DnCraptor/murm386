@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "wincore.h"
+#include "ne.h"
 
 extern const win_display_driver win_disp_vbe8;
 extern const win_input_driver win_input_dos;
@@ -24,7 +25,9 @@ static const char *exec_error(UINT r)
     switch (r) {
     case 2: return "file not found";
     case 8: return "out of memory";
-    case 11: return "not a Windows application";
+    case 11: return "not a Native Windows application";
+    case WIN_EXEC_NE_REQUIRES_386: return "Win16 NE requires a firmware build with a 386+ CPU core";
+    case WIN_EXEC_NE_UNSUPPORTED: return "Win16 NE format not yet supported";
     default: return "cannot start";
     }
 }

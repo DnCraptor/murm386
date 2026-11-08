@@ -7,8 +7,10 @@
 /* All reachable paths must end at a RETF after at least one supported API
  * call. Conditional and unconditional branches are allowed only forward;
  * memory references must be direct DS:disp16 and stay below data_limit.
- * Indirect branches, loops and arbitrary/stack-relative addressing remain
- * disabled until protected-mode exception recovery is implemented.
+ * Indirect branches, arbitrary/stack-relative addressing and unbounded
+ * loops remain disabled until protected-mode exception recovery exists.
+ * LOOP rel8 is allowed only with an exactly tracked CX <= 64; all taken
+ * iterations are validated within the instruction visit limit.
  * calls receives the maximum number of API calls on any validated path. */
 int win_ne_entry_calls_data(const uint8_t *p, size_t bytes, size_t ip,
                             uint16_t thunk_selector, const uint16_t *service_ids,
