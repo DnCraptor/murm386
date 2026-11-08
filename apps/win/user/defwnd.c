@@ -39,6 +39,14 @@ LRESULT WINAPI DefWindowProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         user_nc_paint(w);
         return 0;
     case WM_NCACTIVATE:
+        if ((w->style & WS_MINIMIZE) && w->active_frame != (wp != 0)) {
+            /* Clear old caption/text pixels before drawing the new state. */
+            wrgn damage;
+            wrgn_init(&damage);
+            wrgn_set_rect(&damage, &w->rc);
+            user_invalidate_screen(&damage);
+            wrgn_free(&damage);
+        }
         w->active_frame = wp != 0;
         user_nc_paint(w);
         return TRUE;
@@ -124,6 +132,14 @@ LRESULT WINAPI DefWindowProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     case WM_SETTEXT:
         win_free(w->text);
         w->text = win_strdup(lp ? (LPCSTR)(intptr_t)lp : "");
+        if (w->style & WS_MINIMIZE) {
+            /* Old text may extend beyond the new text's glyphs. */
+            wrgn damage;
+            wrgn_init(&damage);
+            wrgn_set_rect(&damage, &w->rc);
+            user_invalidate_screen(&damage);
+            wrgn_free(&damage);
+        }
         if (user_has_caption(w->style) || (w->style & WS_MINIMIZE))
             user_nc_paint(w);
         return TRUE;

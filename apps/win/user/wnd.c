@@ -482,6 +482,19 @@ static int clips_siblings(const wwnd *w)
     return !(w->style & WS_CHILD) || (w->style & WS_CLIPSIBLINGS);
 }
 
+/* A minimized icon has no rectangular background: only a self-painted
+ * 32x32 client (e.g. Clock) must be protected against painting below it.
+ * Ordinary icons are redrawn over the updated pixels after each GDI draw. */
+static void subtract_window_coverage(wrgn *out, const wwnd *w)
+{
+    if (w->style & WS_MINIMIZE) {
+        if (w->cls && !w->cls->wc.hIcon)
+            wrgn_diff_rect(out, &w->client);
+    } else {
+        wrgn_diff_rect(out, &w->rc);
+    }
+}
+
 /* Visible part of a window (or its client area) in screen coordinates. */
 void user_vis_region(const wwnd *w, int client_only, wrgn *out)
 {
@@ -493,7 +506,7 @@ void user_vis_region(const wwnd *w, int client_only, wrgn *out)
     if (client_only && (w->style & WS_CLIPCHILDREN || w == U.desktop))
         for (const wwnd *c = w->child; c; c = c->next)
             if (c->style & WS_VISIBLE)
-                wrgn_diff_rect(out, &c->rc);
+                subtract_window_coverage(out, c);
     for (const wwnd *cur = w; cur->parent && out->n; cur = cur->parent) {
         const wwnd *p = cur->parent;
         if (p != U.desktop)
@@ -501,7 +514,7 @@ void user_vis_region(const wwnd *w, int client_only, wrgn *out)
         if (clips_siblings(cur))
             for (const wwnd *s = p->child; s && s != cur; s = s->next)
                 if (s->style & WS_VISIBLE)
-                    wrgn_diff_rect(out, &s->rc);
+                    subtract_window_coverage(out, s);
     }
 }
 
@@ -758,6 +771,10 @@ BOOL WINAPI SetWindowPos(HWND h, HWND after, int x, int y, int cx, int cy, UINT 
         wrgn exposed;
         wrgn_init(&exposed);
         wrgn_diff(&exposed, &old, &nw);
+        /* Moving into minimized form uncovers the entire old window,
+         * including the area inside the new icon's transparent bounds. */
+        if (now_vis && (w->style & WS_MINIMIZE))
+            wrgn_or(&exposed, &exposed, &nw);
         user_invalidate_screen(&exposed);
         /* w itself: everything after a move/size, newly uncovered otherwise */
         if (now_vis) {
@@ -1478,6 +1495,7 @@ HANDLE WINAPI RemoveProp(HWND h, LPCSTR name)
 
 void user_init_windows(void)
 {
+    gdi_overlay_hook = user_overlay_icons;
     user_register_builtin("#32769", user_desktop_proc, CS_DBLCLKS, 0, 0, 0);
     wclass *c = user_find_class("#32769");
     wwnd *d = (wwnd *)win_alloc(sizeof(*d));

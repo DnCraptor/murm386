@@ -234,6 +234,8 @@ void     gdi_realize_brush(wdc *dc, HBRUSH br, wfill *f);
 wrgn    *gdi_region(HRGN h);
 void     gdi_begin_draw(wdc *dc, const RECT *dev_bounds);   /* cursor exclusion */
 void     gdi_end_draw(wdc *dc, const RECT *dev_bounds);     /* flush, cursor */
+/* USER installs the icon overlay; NULL in standalone GDI tests. */
+extern void (*gdi_overlay_hook)(HWND source, const RECT *damage);
 void     gdi_text_init(void);
 const wfont *gdi_font(HFONT h);
 int      gdi_char_width(const wfont *f, unsigned char ch);

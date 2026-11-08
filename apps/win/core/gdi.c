@@ -11,6 +11,8 @@
 #include <string.h>
 #include "wincore.h"
 
+void (*gdi_overlay_hook)(HWND source, const RECT *damage);
+
 /* ---------------------------------------------------------------- palette */
 
 /* Windows 3.x static colours: 0-9 and 246-255, ~i is the inverse of i. */
@@ -1056,9 +1058,12 @@ void gdi_end_draw(wdc *dc, const RECT *b)
         return;
     RECT r;
     RECT scr = { 0, 0, win_sys.screen.width, win_sys.screen.height };
-    if (win_sys.disp && win_sys.disp->flush && !win_sys.screen_real && IntersectRect(&r, b, &scr) &&
-        IntersectRect(&r, &r, &dc_eff(dc)->box))
-        win_sys.disp->flush(r.left, r.top, r.right, r.bottom);
+    if (IntersectRect(&r, b, &scr) && IntersectRect(&r, &r, &dc_eff(dc)->box)) {
+        if (win_sys.disp && win_sys.disp->flush && !win_sys.screen_real)
+            win_sys.disp->flush(r.left, r.top, r.right, r.bottom);
+        if (gdi_overlay_hook)
+            gdi_overlay_hook(dc->hwnd, &r);
+    }
     cursor_unexclude();
 }
 

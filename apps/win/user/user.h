@@ -119,6 +119,7 @@ HDC     user_get_dc(wwnd *w, int whole, const wrgn *limit);
 /* nc.c */
 LRESULT user_nc_hittest(wwnd *w, int x, int y);
 void    user_nc_paint(wwnd *w);
+void    user_overlay_icons(HWND source, const RECT *damage);
 void    user_nc_button(wwnd *w, UINT msg, int hit, int x, int y);
 void    user_syscommand(wwnd *w, UINT cmd, int x, int y);
 void    user_alt_tab(wwnd *w);            /* fast switching, Alt held */

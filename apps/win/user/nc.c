@@ -204,10 +204,10 @@ void user_draw_icon_id(HDC dc, int x, int y, int id);
 static void paint_iconic(wwnd *w, HDC dc)
 {
     int ww = w->rc.right - w->rc.left, wh = w->rc.bottom - w->rc.top;
-    /* on the desktop, or in an MDI client's work space */
+    /* The icon and the label are overlays: do not fill the bounding box.
+     * The underlying desktop (including its pattern) or another window
+     * is responsible for the transparent pixels. */
     int child = (w->style & WS_CHILD) != 0;
-    int bg = child ? COLOR_APPWORKSPACE : COLOR_BACKGROUND;
-    fill(dc, 0, 0, ww, wh, bg);
     /* a class without an icon: the window paints it in its client area */
     if (w->cls->wc.hIcon && !DrawIcon(dc, (ww - UM_ICON) / 2, 2, w->cls->wc.hIcon))
         user_draw_icon_id(dc, (ww - UM_ICON) / 2, 2, 101);
@@ -319,11 +319,11 @@ static void paint_frame(HDC dc, wwnd *w, const ncgeo *g)
     }
 }
 
-static void nc_paint_ex(wwnd *w, int pressed)
+static void nc_paint_ex(wwnd *w, int pressed, const wrgn *limit)
 {
     if (!user_is_visible(w))
         return;
-    HDC dc = user_get_dc(w, 1, NULL);
+    HDC dc = user_get_dc(w, 1, limit);
     if (!dc)
         return;
     /* never touch the client area */
@@ -350,9 +350,47 @@ static void nc_paint_ex(wwnd *w, int pressed)
             FillRect(dc, &g.corner, user_sys_brush(COLOR_BTNFACE));
     }
     ReleaseDC(w->h, dc);
+    if ((w->style & WS_MINIMIZE) && !limit)
+        user_overlay_icons(0, &w->rc);
 }
 
-void user_nc_paint(wwnd *w) { nc_paint_ex(w, 0); }
+void user_nc_paint(wwnd *w) { nc_paint_ex(w, 0, NULL); }
+
+/* Transparent minimized windows do not clip the windows below them.
+ * After a lower window or the desktop paints, restore the icon layers in
+ * back-to-front order. Reentrancy guard: painting an icon uses GDI itself. */
+static int icons_overlaying;
+
+static void overlay_icon_tree(wwnd *w, const RECT *damage, const wrgn *limit)
+{
+    if (!w)
+        return;
+    overlay_icon_tree(w->next, damage, limit);  /* bottom siblings first */
+    if (!user_is_visible(w))
+        return;
+    if (w->style & WS_MINIMIZE) {
+        RECT intersection;
+        if (IntersectRect(&intersection, &w->rc, damage))
+            nc_paint_ex(w, 0, limit);
+    }
+    overlay_icon_tree(w->child, damage, limit);
+}
+
+void user_overlay_icons(HWND source, const RECT *damage)
+{
+    if (icons_overlaying || !U.desktop || !damage)
+        return;
+    wwnd *painter = user_wnd(source);
+    if (painter && (painter->style & WS_MINIMIZE))
+        return;                         /* its own completed icon is handled above */
+    wrgn limit;
+    wrgn_init(&limit);
+    wrgn_set_rect(&limit, damage);
+    icons_overlaying = 1;
+    overlay_icon_tree(U.desktop->child, damage, &limit);
+    icons_overlaying = 0;
+    wrgn_free(&limit);
+}
 
 /* ---------------------------------------------------------------- hit test */
 
@@ -529,7 +567,7 @@ static int track_box(wwnd *w, int hit)
     RECT box = hit == HTMAXBUTTON ? g.maxbox : g.minbox;
     OffsetRect(&box, w->rc.left, w->rc.top);
     int in = 1;
-    nc_paint_ex(w, hit);
+    nc_paint_ex(w, hit, NULL);
     SetCapture(w->h);
     for (;;) {
         MSG m;
@@ -542,12 +580,12 @@ static int track_box(wwnd *w, int hit)
             int now = PtInRect(&box, pt);
             if (now != in) {
                 in = now;
-                nc_paint_ex(w, in ? hit : 0);
+                nc_paint_ex(w, in ? hit : 0, NULL);
             }
         }
     }
     ReleaseCapture();
-    nc_paint_ex(w, 0);
+    nc_paint_ex(w, 0, NULL);
     return in;
 }
 
