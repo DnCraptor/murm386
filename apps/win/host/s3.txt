@@ -1,0 +1,25 @@
+wait 50
+click 446 43
+wait 30
+snap s3_max.ppm
+click 625 9
+wait 30
+snap s3_restored.ppm
+down 459 200
+move 520 250
+move 560 260
+up 560 260
+wait 30
+snap s3_sized.ppm
+click 550 43
+wait 30
+snap s3_min.ppm
+dblclick 40 370
+wait 30
+snap s3_back.ppm
+click 310 145
+wait 30
+snap s3_quit.ppm
+key RETURN
+wait 30
+exit

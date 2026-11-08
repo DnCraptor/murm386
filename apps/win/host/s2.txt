@@ -1,0 +1,32 @@
+wait 50
+click 200 145
+wait 50
+type Alice
+key TAB
+key DOWN
+key TAB
+key SPACE
+snap s2_dlg.ppm
+key RETURN
+wait 50
+click 120 185
+type Bob
+click 320 185
+wait 30
+snap s2_added.ppm
+dblclick 150 220
+wait 30
+snap s2_dbl.ppm
+key RETURN
+wait 30
+click 290 216
+wait 2000
+snap s2_timer.ppm
+down 300 42
+move 250 100
+move 200 120
+snap s2_drag.ppm
+up 200 120
+wait 30
+snap s2_moved.ppm
+exit

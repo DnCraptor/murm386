@@ -1,0 +1,8 @@
+wait 50
+click 310 145
+wait 30
+snap s5_quit.ppm
+key TAB
+wait 30
+snap s5_tab.ppm
+exit

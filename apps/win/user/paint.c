@@ -1,0 +1,363 @@
+/*
+ * paint.c - update regions, window DCs, BeginPaint/EndPaint, scrolling.
+ *
+ * Copyright (c) 2026 murm386 contributors. MIT License.
+ */
+#include <string.h>
+#include "user.h"
+
+static wwnd *find_paint_in(wwnd *w)
+{
+    for (; w; w = w->next) {
+        if (!(w->style & WS_VISIBLE))
+            continue;
+        if (w->update.n || w->ncpaint)
+            return w;
+        wwnd *c = find_paint_in(w->child);
+        if (c)
+            return c;
+    }
+    return NULL;
+}
+
+wwnd *user_find_paint(void)
+{
+    if (!U.desktop)
+        return NULL;
+    if (U.desktop->update.n || U.desktop->ncpaint)
+        return U.desktop;
+    return find_paint_in(U.desktop->child);
+}
+
+/* ---------------------------------------------------------------- DCs */
+
+HDC user_get_dc(wwnd *w, int whole, const wrgn *limit)
+{
+    HDC h;
+    int own = (w->cls->wc.style & CS_OWNDC) && !whole;
+    if (own && w->owndc) {
+        h = w->owndc;
+    } else {
+        h = gdi_create_screen_dc(w->h);
+        if (!h)
+            return 0;
+        if (own)
+            w->owndc = h;
+    }
+    wrgn vis;
+    wrgn_init(&vis);
+    user_vis_region(w, !whole, &vis);
+    if (whole && !(w->style & WS_CLIPCHILDREN)) {
+        /* window DC: frame plus client, children not excluded */
+    }
+    if (limit)
+        wrgn_and(&vis, &vis, limit);
+    gdi_set_dc_vis(h, &vis);
+    wrgn_free(&vis);
+    if (whole)
+        gdi_set_dc_origin(h, w->rc.left, w->rc.top);
+    else
+        gdi_set_dc_origin(h, w->client.left, w->client.top);
+    if (!own)
+        gdi_reset_dc(h);
+    return h;
+}
+
+HDC WINAPI GetDC(HWND hwnd)
+{
+    wwnd *w = hwnd ? user_wnd(hwnd) : U.desktop;
+    return w ? user_get_dc(w, 0, NULL) : 0;
+}
+
+HDC WINAPI GetWindowDC(HWND hwnd)
+{
+    wwnd *w = hwnd ? user_wnd(hwnd) : U.desktop;
+    return w ? user_get_dc(w, 1, NULL) : 0;
+}
+
+int WINAPI ReleaseDC(HWND hwnd, HDC hdc)
+{
+    wwnd *w = user_wnd(hwnd);
+    if (w && w->owndc == hdc)
+        return 1;
+    return DeleteDC(hdc) ? 1 : 0;
+}
+
+/* ---------------------------------------------------------------- paint */
+
+HDC WINAPI BeginPaint(HWND hwnd, LPPAINTSTRUCT ps)
+{
+    wwnd *w = user_wnd(hwnd);
+    memset(ps, 0, sizeof(*ps));
+    if (!w)
+        return 0;
+    user_caret_hide_for_paint(w);
+    if (w->ncpaint) {
+        w->ncpaint = 0;
+        SendMessage(hwnd, WM_NCPAINT, 1, 0);
+    }
+    wrgn upd;
+    wrgn_init(&upd);
+    wrgn_copy(&upd, &w->update);
+    wrgn_and_rect(&upd, &w->client);
+    int erase = w->erase;
+    wrgn_clear(&w->update);
+    w->erase = 0;
+
+    HDC dc = user_get_dc(w, 0, &upd);
+    ps->hdc = dc;
+    ps->rcPaint = upd.box;
+    if (upd.n)
+        OffsetRect(&ps->rcPaint, -w->client.left, -w->client.top);
+    else
+        SetRectEmpty(&ps->rcPaint);
+    wrgn_free(&upd);
+    ps->fErase = TRUE;
+    if (erase && dc)
+        ps->fErase = !SendMessage(hwnd, WM_ERASEBKGND, dc, 0);
+    return dc;
+}
+
+void WINAPI EndPaint(HWND hwnd, const PAINTSTRUCT *ps)
+{
+    ReleaseDC(hwnd, ps->hdc);
+    wwnd *w = user_wnd(hwnd);
+    if (w)
+        user_caret_restore(w);
+}
+
+/* ---------------------------------------------------------------- invalidation */
+
+static void client_region(wwnd *w, const RECT *rc, wrgn *out)
+{
+    RECT r = w->client;
+    if (rc) {
+        r = *rc;
+        OffsetRect(&r, w->client.left, w->client.top);
+        IntersectRect(&r, &r, &w->client);
+    }
+    wrgn_set_rect(out, &r);
+}
+
+void WINAPI InvalidateRect(HWND hwnd, const RECT *rc, BOOL erase)
+{
+    if (!hwnd) {
+        wrgn r;
+        wrgn_init(&r);
+        wrgn_set_rect(&r, &U.desktop->rc);
+        user_invalidate_screen(&r);
+        wrgn_free(&r);
+        return;
+    }
+    wwnd *w = user_wnd(hwnd);
+    if (!w)
+        return;
+    wrgn r;
+    wrgn_init(&r);
+    client_region(w, rc, &r);
+    user_invalidate(w, &r, erase, 0);
+    wrgn_free(&r);
+}
+
+void WINAPI InvalidateRgn(HWND hwnd, HRGN hr, BOOL erase)
+{
+    wwnd *w = user_wnd(hwnd);
+    wrgn *g = gdi_region(hr);
+    if (!w)
+        return;
+    if (!g) {
+        InvalidateRect(hwnd, NULL, erase);
+        return;
+    }
+    wrgn r;
+    wrgn_init(&r);
+    wrgn_copy(&r, g);
+    wrgn_offset(&r, w->client.left, w->client.top);
+    wrgn_and_rect(&r, &w->client);
+    user_invalidate(w, &r, erase, 0);
+    wrgn_free(&r);
+}
+
+void WINAPI ValidateRect(HWND hwnd, const RECT *rc)
+{
+    wwnd *w = user_wnd(hwnd);
+    if (!w)
+        return;
+    if (!rc) {
+        user_validate(w, NULL);
+        return;
+    }
+    wrgn r;
+    wrgn_init(&r);
+    client_region(w, rc, &r);
+    user_validate(w, &r);
+    wrgn_free(&r);
+}
+
+void WINAPI ValidateRgn(HWND hwnd, HRGN hr)
+{
+    wwnd *w = user_wnd(hwnd);
+    wrgn *g = gdi_region(hr);
+    if (!w)
+        return;
+    if (!g) {
+        user_validate(w, NULL);
+        return;
+    }
+    wrgn r;
+    wrgn_init(&r);
+    wrgn_copy(&r, g);
+    wrgn_offset(&r, w->client.left, w->client.top);
+    user_validate(w, &r);
+    wrgn_free(&r);
+}
+
+BOOL WINAPI GetUpdateRect(HWND hwnd, LPRECT rc, BOOL erase)
+{
+    wwnd *w = user_wnd(hwnd);
+    if (!w)
+        return FALSE;
+    RECT b;
+    if (!w->update.n || !IntersectRect(&b, &w->update.box, &w->client)) {
+        if (rc)
+            SetRectEmpty(rc);
+        return FALSE;
+    }
+    if (rc) {
+        *rc = b;
+        OffsetRect(rc, -w->client.left, -w->client.top);
+    }
+    if (erase && w->erase) {
+        HDC dc = user_get_dc(w, 0, &w->update);
+        w->erase = !SendMessage(hwnd, WM_ERASEBKGND, dc, 0) ? 1 : 0;
+        ReleaseDC(hwnd, dc);
+    }
+    return TRUE;
+}
+
+int WINAPI GetUpdateRgn(HWND hwnd, HRGN hr, BOOL erase)
+{
+    wwnd *w = user_wnd(hwnd);
+    wrgn *g = gdi_region(hr);
+    if (!w || !g)
+        return ERROR;
+    wrgn_copy(g, &w->update);
+    wrgn_and_rect(g, &w->client);
+    wrgn_offset(g, -w->client.left, -w->client.top);
+    (void)erase;
+    return wrgn_type(g);
+}
+
+BOOL WINAPI UpdateWindow(HWND hwnd)
+{
+    wwnd *w = user_wnd(hwnd);
+    if (!w || !user_is_visible(w))
+        return FALSE;
+    if (w->update.n || w->ncpaint)
+        SendMessage(hwnd, WM_PAINT, 0, 0);
+    for (wwnd *c = w->child; c; c = c->next)
+        if ((c->style & WS_VISIBLE) && (c->update.n || c->ncpaint))
+            UpdateWindow(c->h);
+    return TRUE;
+}
+
+BOOL WINAPI RedrawWindow(HWND hwnd, const RECT *rc, HRGN hr, UINT flags)
+{
+    wwnd *w = hwnd ? user_wnd(hwnd) : U.desktop;
+    if (!w)
+        return FALSE;
+    wrgn r;
+    wrgn_init(&r);
+    wrgn *g = gdi_region(hr);
+    if (g) {
+        wrgn_copy(&r, g);
+        wrgn_offset(&r, w->client.left, w->client.top);
+    } else if (rc) {
+        client_region(w, rc, &r);
+    } else {
+        wrgn_set_rect(&r, (flags & RDW_FRAME) ? &w->rc : &w->client);
+    }
+    if (flags & RDW_INVALIDATE)
+        user_invalidate(w, &r, (flags & RDW_ERASE) != 0, (flags & RDW_ALLCHILDREN) != 0);
+    if (flags & RDW_FRAME)
+        w->ncpaint = 1;
+    if (flags & RDW_VALIDATE)
+        user_validate(w, &r);
+    wrgn_free(&r);
+    if (flags & (RDW_UPDATENOW | RDW_ERASENOW))
+        UpdateWindow(w->h);
+    return TRUE;
+}
+
+/* ---------------------------------------------------------------- scrolling */
+
+void WINAPI ScrollWindow(HWND hwnd, int dx, int dy, const RECT *rc, const RECT *clip)
+{
+    wwnd *w = user_wnd(hwnd);
+    if (!w || (!dx && !dy))
+        return;
+    RECT area = w->client;
+    if (rc) {
+        area = *rc;
+        OffsetRect(&area, w->client.left, w->client.top);
+        IntersectRect(&area, &area, &w->client);
+    }
+    RECT lim = area;
+    if (clip) {
+        RECT c = *clip;
+        OffsetRect(&c, w->client.left, w->client.top);
+        IntersectRect(&lim, &lim, &c);
+    }
+    user_caret_hide_for_paint(w);
+
+    wrgn vis, shifted, dst;
+    wrgn_init(&vis);
+    wrgn_init(&shifted);
+    wrgn_init(&dst);
+    user_vis_region(w, 1, &vis);
+    wrgn_and_rect(&vis, &area);
+    wrgn_copy(&shifted, &vis);
+    wrgn_offset(&shifted, dx, dy);
+    wrgn_and(&dst, &vis, &shifted);
+    wrgn_and_rect(&dst, &lim);
+
+    if (dst.n) {
+        HDC dc = user_get_dc(w, 0, &dst);
+        int x = area.left - w->client.left, y = area.top - w->client.top;
+        BitBlt(dc, x + dx, y + dy, area.right - area.left, area.bottom - area.top,
+               dc, x, y, SRCCOPY);
+        ReleaseDC(hwnd, dc);
+    }
+    /* pending update moves with the contents */
+    if (w->update.n) {
+        wrgn moved;
+        wrgn_init(&moved);
+        wrgn_copy(&moved, &w->update);
+        wrgn_and_rect(&moved, &area);
+        wrgn_diff_rect(&w->update, &area);
+        wrgn_offset(&moved, dx, dy);
+        wrgn_and_rect(&moved, &area);
+        wrgn_or(&w->update, &w->update, &moved);
+        wrgn_free(&moved);
+    }
+    /* what did not come from visible bits must be repainted */
+    wrgn need;
+    wrgn_init(&need);
+    wrgn_set_rect(&need, &lim);
+    wrgn_diff(&need, &need, &dst);
+    user_invalidate(w, &need, TRUE, 0);
+    wrgn_free(&need);
+
+    if (!rc) {
+        for (wwnd *c = w->child; c; c = c->next) {
+            RECT r = c->rc;
+            OffsetRect(&r, dx - w->client.left, dy - w->client.top);
+            SetWindowPos(c->h, 0, r.left, r.top, 0, 0,
+                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW);
+        }
+    }
+    wrgn_free(&vis);
+    wrgn_free(&shifted);
+    wrgn_free(&dst);
+    user_caret_restore(w);
+}

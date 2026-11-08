@@ -1295,48 +1295,6 @@ int read(int handle, void *buffer, unsigned int count)
 
         if (regs.x.cflag)
         {
-            unsigned dos_error = (unsigned)regs.w.ax & 0xffu;
-
-            /*
-             * Diagnose ERROR_INVALID_HANDLE only after the failing AH=3Fh.
-             * This extra AH=51h call therefore cannot affect the failure.
-             *
-             * Border code:
-             *   4M JJ HH EE
-             *   M  = current PSP max-files (low 6 bits, added to 0x40)
-             *   JJ = JFT entry for handle HH (FF=closed, FE=out of range)
-             *   HH = handle passed to read()
-             *   EE = DOS error (06 = invalid handle)
-             */
-            if (dos_error == 0x06u)
-            {
-                union REGS pspregs = {0};
-                uint16_t psp_seg;
-                uint16_t maxfiles;
-                uint16_t jft_off;
-                uint16_t jft_seg;
-                unsigned jft_entry = 0xfeu;
-
-                pspregs.h.ah = 0x51;
-                int386(0x21, &pspregs, &pspregs);
-                psp_seg = pspregs.w.bx;
-
-                maxfiles = *(volatile uint16_t *)
-                    dos_guest_far_ptr(psp_seg, 0x32);
-                jft_off = *(volatile uint16_t *)
-                    dos_guest_far_ptr(psp_seg, 0x34);
-                jft_seg = *(volatile uint16_t *)
-                    dos_guest_far_ptr(psp_seg, 0x36);
-
-                if ((unsigned)handle < maxfiles)
-                {
-                    volatile uint8_t *jft =
-                        (volatile uint8_t *)dos_guest_far_ptr(jft_seg, jft_off);
-                    jft_entry = jft[(unsigned)handle];
-                }
-
-            }
-
             return total ? (int)total : -1;
         }
 

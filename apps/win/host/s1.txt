@@ -1,0 +1,11 @@
+wait 50
+snap s1_start.ppm
+click 100 145
+wait 50
+snap s1_about.ppm
+key RETURN
+wait 50
+click 200 145
+wait 50
+snap s1_settings.ppm
+exit
