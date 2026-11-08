@@ -20,14 +20,30 @@
 #define IDC_R2     203
 #define IDC_R3     204
 #define IDC_AGREE  205
+#define IDC_COLOR  206
+#define IDC_LEVEL  207
+#define IDC_LEVELV 208
+
+#define IDM_NEW    301
+#define IDM_EXIT   302
+#define IDM_CLEAR  303
+#define IDM_TIMER  304
+#define IDM_RED    305
+#define IDM_GREEN  306
+#define IDM_BLUE   307
+#define IDM_ABOUT  308
 
 static HINSTANCE hinst;
 static HWND hedit, hlist;
 static int ticks;
 static char user_name[64] = "World";
+static int color_ix = 0;         /* 0 red, 1 green, 2 blue */
+static int level = 50;
+static const COLORREF colors[3] = { RGB(255, 0, 0), RGB(0, 128, 0), RGB(0, 0, 255) };
+static const char *const color_names[3] = { "Red", "Green", "Blue" };
 
 static const DLGTEMPLATE_N about_tpl = {
-    WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME, 9, 40, 30, 180, 110,
+    WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME, 14, 40, 30, 180, 130,
     NULL, NULL, "Settings", 0, NULL
 };
 static const DLGITEM_N about_items[] = {
@@ -40,7 +56,17 @@ static const DLGITEM_N about_items[] = {
     { 8, 74, 120, 10, IDC_AGREE, BS_AUTOCHECKBOX | WS_TABSTOP | WS_GROUP | WS_VISIBLE, "BUTTON", "I &agree" },
     { 120, 30, 50, 14, IDOK, BS_DEFPUSHBUTTON | WS_TABSTOP | WS_GROUP | WS_VISIBLE, "BUTTON", "OK" },
     { 120, 50, 50, 14, IDCANCEL, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "Cancel" },
+    { 8, 90, 40, 10, -1, SS_LEFT | WS_VISIBLE, "STATIC", "&Color:" },
+    { 50, 88, 70, 60, IDC_COLOR, CBS_DROPDOWNLIST | WS_TABSTOP | WS_GROUP | WS_VISIBLE, "COMBOBOX", "" },
+    { 8, 108, 40, 10, -1, SS_LEFT | WS_VISIBLE, "STATIC", "Level:" },
+    { 50, 108, 90, 9, IDC_LEVEL, SBS_HORZ | WS_TABSTOP | WS_VISIBLE, "SCROLLBAR", "" },
+    { 148, 108, 24, 10, IDC_LEVELV, SS_LEFT | WS_VISIBLE, "STATIC", "" },
 };
+
+static void show_level(HWND dlg, int v)
+{
+    SetDlgItemInt(dlg, IDC_LEVELV, (UINT)v, FALSE);
+}
 
 static BOOL CALLBACK SettingsProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -49,7 +75,30 @@ static BOOL CALLBACK SettingsProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
     case WM_INITDIALOG:
         SetDlgItemText(dlg, IDC_NAME, user_name);
         CheckRadioButton(dlg, IDC_R1, IDC_R3, IDC_R2);
+        for (int i = 0; i < 3; i++)
+            SendDlgItemMessage(dlg, IDC_COLOR, CB_ADDSTRING, 0, (LPARAM)(intptr_t)color_names[i]);
+        SendDlgItemMessage(dlg, IDC_COLOR, CB_SETCURSEL, (WPARAM)color_ix, 0);
+        SetScrollRange(GetDlgItem(dlg, IDC_LEVEL), SB_CTL, 0, 100, FALSE);
+        SetScrollPos(GetDlgItem(dlg, IDC_LEVEL), SB_CTL, level, TRUE);
+        show_level(dlg, level);
         return TRUE;
+    case WM_HSCROLL: {
+        HWND sb = (HWND)HIWORD(lp);
+        int v = GetScrollPos(sb, SB_CTL);
+        switch (wp) {
+        case SB_LINEUP: v -= 1; break;
+        case SB_LINEDOWN: v += 1; break;
+        case SB_PAGEUP: v -= 10; break;
+        case SB_PAGEDOWN: v += 10; break;
+        case SB_THUMBTRACK: case SB_THUMBPOSITION: v = (int)LOWORD(lp); break;
+        default: return TRUE;
+        }
+        if (v < 0) v = 0;
+        if (v > 100) v = 100;
+        SetScrollPos(sb, SB_CTL, v, TRUE);
+        show_level(dlg, v);
+        return TRUE;
+    }
     case WM_COMMAND:
         if (wp == IDOK) {
             if (!IsDlgButtonChecked(dlg, IDC_AGREE)) {
@@ -57,6 +106,9 @@ static BOOL CALLBACK SettingsProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                 return TRUE;
             }
             GetDlgItemText(dlg, IDC_NAME, user_name, sizeof(user_name));
+            color_ix = (int)SendDlgItemMessage(dlg, IDC_COLOR, CB_GETCURSEL, 0, 0);
+            if (color_ix < 0) color_ix = 0;
+            level = GetScrollPos(GetDlgItem(dlg, IDC_LEVEL), SB_CTL);
             EndDialog(dlg, IDOK);
             return TRUE;
         }
@@ -83,11 +135,11 @@ static void paint(HWND h, HDC dc)
     Ellipse(dc, rc.right - 110, 10, rc.right - 10, 80);
     SelectObject(dc, ob);
     DeleteObject(b);
-    HPEN p = CreatePen(PS_SOLID, 2, RGB(255, 0, 0));
+    HPEN p = CreatePen(PS_SOLID, 2, colors[color_ix]);
     HGDIOBJ op = SelectObject(dc, p);
     for (int i = 0; i < 5; i++) {
         MoveTo(dc, 10, 40 + i * 6);
-        LineTo(dc, 200, 40 + i * 12);
+        LineTo(dc, 50 + level * 3, 40 + i * 12);
     }
     SelectObject(dc, op);
     DeleteObject(p);
@@ -124,8 +176,38 @@ static LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     case WM_SETFOCUS:
         SetFocus(hedit);
         return 0;
+    case WM_INITMENUPOPUP: {
+        HMENU m = (HMENU)wp;
+        CheckMenuItem(m, IDM_TIMER, IsDlgButtonChecked(h, ID_CHECK) ? MF_CHECKED : MF_UNCHECKED);
+        for (int i = 0; i < 3; i++)
+            CheckMenuItem(m, IDM_RED + i, i == color_ix ? MF_CHECKED : MF_UNCHECKED);
+        EnableMenuItem(m, IDM_CLEAR, SendMessage(hlist, LB_GETCOUNT, 0, 0) ? MF_ENABLED : MF_GRAYED);
+        return 0;
+    }
     case WM_COMMAND:
         switch (wp) {
+        case IDM_NEW:
+            SetWindowText(hedit, "");
+            SetFocus(hedit);
+            break;
+        case IDM_EXIT:
+            PostMessage(h, WM_COMMAND, ID_QUIT, 0);
+            break;
+        case IDM_CLEAR:
+            SendMessage(hlist, LB_RESETCONTENT, 0, 0);
+            break;
+        case IDM_TIMER: {
+            HWND chk = GetDlgItem(h, ID_CHECK);
+            int on = !SendMessage(chk, BM_GETCHECK, 0, 0);
+            SendMessage(chk, BM_SETCHECK, (WPARAM)on, 0);
+            if (on) SetTimer(h, 1, 500, NULL); else KillTimer(h, 1);
+            break;
+        }
+        case IDM_RED: case IDM_GREEN: case IDM_BLUE:
+            color_ix = (int)wp - IDM_RED;
+            InvalidateRect(h, NULL, TRUE);
+            break;
+        case IDM_ABOUT:
         case ID_ABOUT:
             MessageBox(h, "Native Windows 3.x API for murm386.\nGDI + USER on a VBE 8-bit display.",
                        "About Hello", MB_OK | MB_ICONINFORMATION);
@@ -201,14 +283,47 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
         if (!RegisterClass(&wc))
             return 1;
     }
+    HMENU colors_menu = CreatePopupMenu();
+    AppendMenu(colors_menu, MF_STRING, IDM_RED, "&Red");
+    AppendMenu(colors_menu, MF_STRING, IDM_GREEN, "&Green");
+    AppendMenu(colors_menu, MF_STRING, IDM_BLUE, "&Blue");
+    HMENU file = CreatePopupMenu();
+    AppendMenu(file, MF_STRING, IDM_NEW, "&New\tCtrl+N");
+    AppendMenu(file, MF_STRING, ID_DIALOG, "&Settings...");
+    AppendMenu(file, MF_SEPARATOR, 0, NULL);
+    AppendMenu(file, MF_STRING, IDM_EXIT, "E&xit");
+    HMENU list = CreatePopupMenu();
+    AppendMenu(list, MF_STRING, ID_ADD, "&Add item");
+    AppendMenu(list, MF_STRING, IDM_CLEAR, "&Clear all\tDel");
+    HMENU opts = CreatePopupMenu();
+    AppendMenu(opts, MF_STRING, IDM_TIMER, "&Tick timer\tCtrl+T");
+    AppendMenu(opts, MF_POPUP, (UINT)colors_menu, "&Color");
+    HMENU help = CreatePopupMenu();
+    AppendMenu(help, MF_STRING, IDM_ABOUT, "&About Hello...\tF1");
+    HMENU bar = CreateMenu();
+    AppendMenu(bar, MF_POPUP, (UINT)file, "&File");
+    AppendMenu(bar, MF_POPUP, (UINT)list, "&List");
+    AppendMenu(bar, MF_POPUP, (UINT)opts, "&Options");
+    AppendMenu(bar, MF_POPUP | MF_HELP, (UINT)help, "&Help");
+
+    static const ACCEL_N keys[] = {
+        { FVIRTKEY | FCONTROL, 'N', IDM_NEW },
+        { FVIRTKEY | FCONTROL, 'T', IDM_TIMER },
+        { FVIRTKEY, VK_F1, IDM_ABOUT },
+    };
+    HACCEL acc = CreateAcceleratorTableN(keys, 3);
+
     HWND h = CreateWindow("HelloWnd", "Hello, Windows", WS_OVERLAPPEDWINDOW,
-                          40, 30, 420, 300, 0, 0, inst, NULL);
+                          40, 30, 420, 320, 0, bar, inst, NULL);
     ShowWindow(h, show);
     UpdateWindow(h);
     MSG m;
     while (GetMessage(&m, 0, 0, 0)) {
+        if (TranslateAccelerator(h, acc, &m))
+            continue;
         TranslateMessage(&m);
         DispatchMessage(&m);
     }
+    DestroyAcceleratorTableN(acc);
     return (int)m.wParam;
 }

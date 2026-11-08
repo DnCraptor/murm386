@@ -91,16 +91,30 @@ LRESULT WINAPI DefWindowProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     case WM_SYSCOMMAND:
         user_syscommand(w, (UINT)wp, (int16_t)LOWORD(lp), (int16_t)HIWORD(lp));
         return 0;
-    case WM_SYSKEYDOWN: {
-        wwnd *top = user_toplevel(w);
-        if (wp == VK_F4 && (lp & (1L << 29)) && top)
-            PostMessage(top->h, WM_SYSCOMMAND, SC_CLOSE, 0);
-        else if ((wp == VK_TAB || wp == VK_ESCAPE) && (lp & (1L << 29)))
-            PostMessage(top->h, WM_SYSCOMMAND, SC_NEXTWINDOW, 0);
+    case WM_SYSKEYDOWN:
+    case WM_SYSKEYUP:
+    case WM_SYSCHAR: {
+        /* keys of child windows are handled by the top-level window */
+        if ((w->style & WS_CHILD) && w->parent && w->parent != U.desktop)
+            return SendMessage(w->parent->h, msg, wp, lp);
+        if (msg == WM_SYSKEYDOWN) {
+            w->alt_tap = wp == VK_MENU;
+            if (wp == VK_F4 && (lp & (1L << 29)))
+                PostMessage(h, WM_SYSCOMMAND, SC_CLOSE, 0);
+            else if ((wp == VK_TAB || wp == VK_ESCAPE) && (lp & (1L << 29)))
+                PostMessage(h, WM_SYSCOMMAND, SC_NEXTWINDOW, 0);
+            else if (wp == VK_F10)
+                SendMessage(h, WM_SYSCOMMAND, SC_KEYMENU, 0);
+        } else if (msg == WM_SYSKEYUP) {
+            if (wp == VK_MENU && w->alt_tap)
+                SendMessage(h, WM_SYSCOMMAND, SC_KEYMENU, 0);
+            w->alt_tap = 0;
+        } else if (wp == ' ' || wp > ' ') {
+            w->alt_tap = 0;
+            SendMessage(h, WM_SYSCOMMAND, SC_KEYMENU, (LPARAM)(unsigned char)wp);
+        }
         return 0;
     }
-    case WM_SYSCHAR:
-        return 0;
     case WM_SETTEXT:
         win_free(w->text);
         w->text = win_strdup(lp ? (LPCSTR)(intptr_t)lp : "");

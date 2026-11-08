@@ -243,6 +243,8 @@ static LPCSTR ctl_class(LPCSTR k)
     case 0x81: return "EDIT";
     case 0x82: return "STATIC";
     case 0x83: return "LISTBOX";
+    case 0x84: return "SCROLLBAR";
+    case 0x85: return "COMBOBOX";
     default: return "STATIC";
     }
 }
@@ -644,6 +646,9 @@ int user_init(void)
     user_register_builtin("STATIC", user_static_proc, 0, ex, arrow, 0);
     user_register_builtin("EDIT", user_edit_proc, CS_DBLCLKS, ex, ibeam, 0);
     user_register_builtin("LISTBOX", user_listbox_proc, CS_DBLCLKS, ex, arrow, 0);
+    user_register_builtin("SCROLLBAR", user_scrollbar_proc, CS_DBLCLKS, 0, arrow, 0);
+    user_register_builtin("COMBOBOX", user_combo_proc, CS_DBLCLKS, ex, arrow, 0);
     user_register_builtin("#32770", user_dialog_proc, 0, DLG_EXTRA, arrow, 0);
+    user_register_builtin("#32768", user_menu_popup_proc, 0, 0, arrow, 0);
     return 0;
 }

@@ -74,6 +74,7 @@ typedef struct {
     int  f;                 /* frame width */
     RECT caption;           /* caption bar, empty if none */
     RECT sysbox, minbox, maxbox;
+    RECT menu;              /* menu bar, black line below it */
     RECT vbar, hbar, corner;
 } ncgeo;
 
@@ -96,6 +97,10 @@ static void nc_geo(const wwnd *w, ncgeo *g)
         if (w->style & WS_MINIMIZEBOX)
             SetRect(&g->minbox, x - s, f, x, f + s);
     }
+    if (user_menu_bar_height(w)) {
+        int top = f + (user_has_caption(w->style) ? UM_CAPTION + 1 : 0);
+        SetRect(&g->menu, f, top, ww - f, top + UM_MENU);
+    }
     RECT c = w->client;
     OffsetRect(&c, -w->rc.left, -w->rc.top);
     /* Bars share their outer lines with the frame and the caption line. */
@@ -111,15 +116,23 @@ static void nc_geo(const wwnd *w, ncgeo *g)
 /* Scroll bar parts in window coordinates. */
 typedef struct { RECT bar, up, down, track, thumb; int vert, len, tpos; } sbgeo;
 
-static wscroll *bar_info(wwnd *w, int bar) { return bar == SB_VERT ? &w->vs : &w->hs; }
+/* SB_CTL: a SCROLLBAR control keeps its state in vs and fills its window */
+static wscroll *bar_info(wwnd *w, int bar) { return bar == SB_HORZ ? &w->hs : &w->vs; }
+
+static int ctl_vert(const wwnd *w) { return (w->style & SBS_VERT) != 0; }
 
 static void sb_geo(wwnd *w, int bar, sbgeo *s)
 {
-    ncgeo g;
-    nc_geo(w, &g);
     memset(s, 0, sizeof(*s));
-    s->vert = bar == SB_VERT;
-    s->bar = s->vert ? g.vbar : g.hbar;
+    if (bar == SB_CTL) {
+        s->vert = ctl_vert(w);
+        SetRect(&s->bar, 0, 0, w->rc.right - w->rc.left, w->rc.bottom - w->rc.top);
+    } else {
+        ncgeo g;
+        nc_geo(w, &g);
+        s->vert = bar == SB_VERT;
+        s->bar = s->vert ? g.vbar : g.hbar;
+    }
     RECT b = s->bar;
     int a = UM_SCROLL;
     if (s->vert) {
@@ -309,6 +322,11 @@ static void nc_paint_ex(wwnd *w, int pressed)
         nc_geo(w, &g);
         paint_frame(dc, w, &g);
         paint_caption(dc, w, &g, pressed);
+        if (!IsRectEmpty(&g.menu)) {
+            user_menu_paint_bar(w, dc, &g.menu);
+            RECT l = { g.menu.left, g.menu.bottom, g.menu.right, g.menu.bottom + 1 };
+            FillRect(dc, &l, user_sys_brush(COLOR_WINDOWFRAME));
+        }
         if (w->style & WS_VSCROLL)
             draw_scrollbar(dc, w, SB_VERT, 0);
         if (w->style & WS_HSCROLL)
@@ -358,6 +376,7 @@ LRESULT user_nc_hittest(wwnd *w, int x, int y)
         if (PtInRect(&g.minbox, q)) return HTMINBUTTON;
         return HTCAPTION;
     }
+    if (PtInRect(&g.menu, q)) return HTMENU;
     if (PtInRect(&g.vbar, q)) return HTVSCROLL;
     if (PtInRect(&g.hbar, q)) return HTHSCROLL;
     if (f && (q.x < f || q.y < f || q.x >= ww - f || q.y >= wh - f))
@@ -527,6 +546,14 @@ void user_scroll_set(wwnd *w, int bar, int min, int max, int pos, int redraw)
     if (pos < min) pos = min;
     if (pos > max) pos = max;
     s->pos = pos;
+    if (bar == SB_CTL) {
+        if (redraw && user_is_visible(w)) {
+            HDC dc = user_get_dc(w, 1, NULL);
+            draw_scrollbar(dc, w, SB_CTL, 0);
+            ReleaseDC(w->h, dc);
+        }
+        return;
+    }
     DWORD bit = bar == SB_VERT ? WS_VSCROLL : WS_HSCROLL;
     DWORD want = min < max ? bit : 0;
     if ((w->style & bit) != want) {
@@ -548,7 +575,7 @@ void user_scroll_set(wwnd *w, int bar, int min, int max, int pos, int redraw)
 int WINAPI SetScrollPos(HWND h, int bar, int pos, BOOL redraw)
 {
     wwnd *w = user_wnd(h);
-    if (!w || bar == SB_CTL)
+    if (!w)
         return 0;
     wscroll *s = bar_info(w, bar);
     int old = s->pos;
@@ -559,13 +586,13 @@ int WINAPI SetScrollPos(HWND h, int bar, int pos, BOOL redraw)
 int WINAPI GetScrollPos(HWND h, int bar)
 {
     wwnd *w = user_wnd(h);
-    return (w && bar != SB_CTL) ? bar_info(w, bar)->pos : 0;
+    return w ? bar_info(w, bar)->pos : 0;
 }
 
 void WINAPI SetScrollRange(HWND h, int bar, int min, int max, BOOL redraw)
 {
     wwnd *w = user_wnd(h);
-    if (!w || bar == SB_CTL)
+    if (!w)
         return;
     user_scroll_set(w, bar, min, max, bar_info(w, bar)->pos, redraw);
 }
@@ -573,7 +600,7 @@ void WINAPI SetScrollRange(HWND h, int bar, int min, int max, BOOL redraw)
 void WINAPI GetScrollRange(HWND h, int bar, LPINT min, LPINT max)
 {
     wwnd *w = user_wnd(h);
-    wscroll *s = (w && bar != SB_CTL) ? bar_info(w, bar) : NULL;
+    wscroll *s = w ? bar_info(w, bar) : NULL;
     if (min) *min = s ? s->min : 0;
     if (max) *max = s ? s->max : 0;
 }
@@ -601,7 +628,15 @@ static void scroll_track(wwnd *w, int bar, int x, int y)
     sbgeo s;
     sb_geo(w, bar, &s);
     POINT q = { x - w->rc.left, y - w->rc.top };
-    UINT msg = bar == SB_VERT ? WM_VSCROLL : WM_HSCROLL;
+    UINT msg = (bar == SB_CTL ? s.vert : bar == SB_VERT) ? WM_VSCROLL : WM_HSCROLL;
+    /* the window itself, or for a control its parent with the control's
+     * handle in HIWORD(lParam), as in Win16 */
+    HWND to = w->h;
+    WORD from = 0;
+    if (bar == SB_CTL) {
+        to = w->parent ? w->parent->h : w->h;
+        from = w->h;
+    }
     int code, part = 0;
     if (PtInRect(&s.up, q)) { code = SB_LINEUP; part = 1; }
     else if (PtInRect(&s.down, q)) { code = SB_LINEDOWN; part = 2; }
@@ -630,17 +665,17 @@ static void scroll_track(wwnd *w, int bar, int x, int y)
             int np = sc->min + (int)((long)v * (sc->max - sc->min) / room);
             if (np != pos) {
                 pos = np;
-                SendMessage(w->h, msg, SB_THUMBTRACK, MAKELPARAM(pos, 0));
+                SendMessage(to, msg, SB_THUMBTRACK, MAKELPARAM(pos, from));
             }
         }
         ReleaseDC(w->h, dc);
-        SendMessage(w->h, msg, SB_THUMBPOSITION, MAKELPARAM(pos, 0));
+        SendMessage(to, msg, SB_THUMBPOSITION, MAKELPARAM(pos, from));
     } else {
         HDC dc = user_get_dc(w, 1, NULL);
         if (part) {
             draw_scrollbar(dc, w, bar, part);
         }
-        SendMessage(w->h, msg, (WPARAM)code, 0);
+        SendMessage(to, msg, (WPARAM)code, MAKELPARAM(0, from));
         uint32_t next = GetTickCount() + 400;
         for (;;) {
             MSG m;
@@ -654,7 +689,7 @@ static void scroll_track(wwnd *w, int bar, int x, int y)
                 int still = part == 1 ? PtInRect(&s2.up, q2) : part == 2 ? PtInRect(&s2.down, q2) :
                             PtInRect(&s2.track, q2) && !PtInRect(&s2.thumb, q2);
                 if (still)
-                    SendMessage(w->h, msg, (WPARAM)code, 0);
+                    SendMessage(to, msg, (WPARAM)code, MAKELPARAM(0, from));
                 next = GetTickCount() + 60;
             }
         }
@@ -663,7 +698,7 @@ static void scroll_track(wwnd *w, int bar, int x, int y)
         ReleaseDC(w->h, dc);
     }
     ReleaseCapture();
-    SendMessage(w->h, msg, SB_ENDSCROLL, 0);
+    SendMessage(to, msg, SB_ENDSCROLL, MAKELPARAM(0, from));
 }
 
 /* ---------------------------------------------------------------- NC mouse, sys commands */
@@ -686,6 +721,12 @@ void user_nc_button(wwnd *w, UINT msg, int hit, int x, int y)
     case HTCAPTION:
         if (!(w->style & WS_MAXIMIZE))
             SendMessage(w->h, WM_SYSCOMMAND, SC_MOVE + HTCAPTION, MAKELPARAM(x, y));
+        break;
+    case HTMENU:
+        user_menu_track_bar(w, x, y);
+        break;
+    case HTSYSMENU:
+        user_menu_track_sys(w, 0);
         break;
     case HTMINBUTTON:
         if (track_box(w, hit))
@@ -736,6 +777,9 @@ void user_syscommand(wwnd *w, UINT cmd, int x, int y)
     case SC_CLOSE:
         SendMessage(w->h, WM_CLOSE, 0, 0);
         break;
+    case SC_KEYMENU:
+        user_menu_key(w, (int)(unsigned char)x);
+        break;
     case SC_NEXTWINDOW: {
         /* bottom-most activatable top-level window comes to the front */
         wwnd *pick = NULL;
@@ -749,4 +793,41 @@ void user_syscommand(wwnd *w, UINT cmd, int x, int y)
     default:
         break;
     }
+}
+
+/* ---------------------------------------------------------------- SCROLLBAR control */
+
+void user_scroll_ctl_track(wwnd *w, int x, int y) { scroll_track(w, SB_CTL, x, y); }
+
+LRESULT CALLBACK user_scrollbar_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+    wwnd *w = user_wnd(h);
+    switch (msg) {
+    case WM_CREATE:
+        w->vs.min = 0;
+        w->vs.max = 100;
+        w->vs.pos = 0;
+        return 0;
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        BeginPaint(h, &ps);
+        EndPaint(h, &ps);
+        HDC dc = user_get_dc(w, 1, NULL);
+        draw_scrollbar(dc, w, SB_CTL, 0);
+        ReleaseDC(h, dc);
+        return 0;
+    }
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONDBLCLK: {
+        POINT p = { (int16_t)LOWORD(lp), (int16_t)HIWORD(lp) };
+        ClientToScreen(h, &p);
+        scroll_track(w, SB_CTL, p.x, p.y);
+        return 0;
+    }
+    case WM_GETDLGCODE:
+        return 0;
+    }
+    return DefWindowProc(h, msg, wp, lp);
 }

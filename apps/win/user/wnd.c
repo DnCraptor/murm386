@@ -316,7 +316,7 @@ int user_frame_width(DWORD style, DWORD exstyle)
     return 0;
 }
 
-static void nc_calc(DWORD style, DWORD ex, const RECT *win, RECT *cl)
+static void nc_calc(DWORD style, DWORD ex, int menu_h, const RECT *win, RECT *cl)
 {
     *cl = *win;
     if (style & WS_MINIMIZE) {
@@ -328,6 +328,7 @@ static void nc_calc(DWORD style, DWORD ex, const RECT *win, RECT *cl)
     InflateRect(cl, -f, -f);
     if (user_has_caption(style))
         cl->top += UM_CAPTION + 1;
+    cl->top += menu_h;
     if (style & WS_VSCROLL)
         cl->right -= UM_SCROLL - 1;
     if (style & WS_HSCROLL)
@@ -336,11 +337,15 @@ static void nc_calc(DWORD style, DWORD ex, const RECT *win, RECT *cl)
     if (cl->bottom < cl->top) cl->bottom = cl->top;
 }
 
-void user_nc_rects(const wwnd *w, RECT *client) { nc_calc(w->style, w->exstyle, &w->rc, client); }
+void user_nc_rects(const wwnd *w, RECT *client)
+{
+    nc_calc(w->style, w->exstyle, user_menu_bar_height(w), &w->rc, client);
+}
 
 void WINAPI AdjustWindowRectEx(LPRECT rc, DWORD style, BOOL menu, DWORD ex)
 {
-    (void)menu;
+    if (menu && !(style & WS_CHILD))
+        rc->top -= UM_MENU + 1;
     int f = user_frame_width(style, ex);
     InflateRect(rc, f, f);
     if (user_has_caption(style))
@@ -605,7 +610,7 @@ void user_set_window_rect(wwnd *w, const RECT *rc, UINT flags)
     (void)flags;
     RECT oc = w->client;
     w->rc = *rc;
-    nc_calc(w->style, w->exstyle, &w->rc, &w->client);
+    nc_calc(w->style, w->exstyle, user_menu_bar_height(w), &w->rc, &w->client);
     int dx = w->client.left - oc.left, dy = w->client.top - oc.top;
     if (dx || dy)
         offset_tree(w, dx, dy);
@@ -1024,6 +1029,7 @@ HWND WINAPI CreateWindowEx(DWORD ex, LPCSTR klass, LPCSTR title, DWORD style,
     w->owner = owner;
     w->inst = inst;
     w->id = (style & WS_CHILD) ? (UINT)menu : 0;
+    w->menu = (style & WS_CHILD) ? 0 : menu;
     w->cb_extra = c->wc.cbWndExtra;
     if (w->cb_extra > 0)
         w->extra = (uint8_t *)win_alloc((size_t)w->cb_extra);
@@ -1050,7 +1056,7 @@ HWND WINAPI CreateWindowEx(DWORD ex, LPCSTR klass, LPCSTR title, DWORD style,
     if (parent != U.desktop)
         OffsetRect(&rc, parent->client.left, parent->client.top);
     w->rc = rc;
-    nc_calc(w->style, w->exstyle, &w->rc, &w->client);
+    nc_calc(w->style, w->exstyle, user_menu_bar_height(w), &w->rc, &w->client);
     w->text = win_strdup(title ? title : "");
 
     if (parent && (style & WS_CHILD))
@@ -1123,6 +1129,7 @@ static void free_tree(wwnd *w)
         DeleteAtom(p->atom);
         win_free(p);
     }
+    user_menu_destroy_window(w);
     if (w->owndc)
         DeleteDC(w->owndc);
     wrgn_free(&w->update);

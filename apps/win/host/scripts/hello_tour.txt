@@ -2,12 +2,12 @@
 # management. Run: ./hello scripts/hello_tour.txt  (snapshots: *.ppm)
 wait 50
 snap tour_start.ppm
-click 100 145
+click 100 164
 wait 50
 snap tour_about.ppm
 key RETURN
 wait 50
-click 200 145
+click 200 164
 wait 50
 key BACK
 type Alice Smith
@@ -18,16 +18,16 @@ key SPACE
 snap tour_settings.ppm
 key RETURN
 wait 50
-click 120 185
+click 120 204
 type Bob
-click 320 185
+click 320 204
 wait 30
-dblclick 150 220
+dblclick 150 239
 wait 30
 snap tour_picked.ppm
 key RETURN
 wait 30
-click 290 216
+click 290 235
 wait 2000
 down 300 42
 move 250 100
@@ -39,7 +39,7 @@ wait 30
 snap tour_minimized.ppm
 dblclick 40 370
 wait 30
-click 250 204
+click 250 223
 wait 30
 snap tour_quit.ppm
 key RETURN

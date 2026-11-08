@@ -65,6 +65,7 @@ typedef HANDLE          HPALETTE;
 typedef HANDLE          HMENU;
 typedef HANDLE          HICON;
 typedef HANDLE          HCURSOR;
+typedef HANDLE          HACCEL;
 typedef HANDLE          HINSTANCE;
 typedef HANDLE          HMODULE;
 typedef HANDLE          HGLOBAL;

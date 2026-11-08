@@ -48,6 +48,9 @@ typedef struct wwnd {
     int       destroying;
     int       active_frame;      /* caption drawn active */
     HCURSOR   cursor_override;
+    HMENU     menu;              /* menu bar (top-level windows) */
+    HMENU     sysmenu;           /* own copy after GetSystemMenu */
+    int       alt_tap;           /* Alt pressed with nothing else yet */
 } wwnd;
 
 /* Global USER state. */
@@ -73,6 +76,7 @@ extern wuser U;
 #define UM_FRAME      4
 #define UM_CAPTION    18      /* caption bar height, separator line extra */
 #define UM_SCROLL     17
+#define UM_MENU       18      /* menu bar line, black line below extra */
 #define UM_ICON       32
 #define UM_ICONW      72      /* minimized window: icon and title */
 #define UM_ICONH      52
@@ -114,6 +118,16 @@ void    user_syscommand(wwnd *w, UINT cmd, int x, int y);
 void    user_draw_3d(HDC dc, const RECT *rc, int pressed);
 void    user_draw_arrow(HDC dc, const RECT *rc, int dir, COLORREF c);
 void    user_scroll_set(wwnd *w, int bar, int min, int max, int pos, int redraw);
+void    user_scroll_ctl_track(wwnd *w, int x, int y);
+
+/* menu.c */
+int     user_menu_bar_height(const wwnd *w);           /* 0 or UM_MENU + 1 */
+void    user_menu_paint_bar(wwnd *w, HDC wdc, const RECT *bar);
+void    user_menu_track_bar(wwnd *w, int x, int y);    /* mouse on the bar */
+void    user_menu_key(wwnd *w, int ch);                /* SC_KEYMENU */
+void    user_menu_track_sys(wwnd *w, int by_key);
+void    user_menu_destroy_window(wwnd *w);
+int     user_translate_accel(HWND h, HACCEL a, MSG *m);
 
 /* sysmet.c */
 HBRUSH  user_sys_brush(int index);
@@ -127,6 +141,9 @@ LRESULT CALLBACK user_edit_proc(HWND, UINT, WPARAM, LPARAM);
 LRESULT CALLBACK user_listbox_proc(HWND, UINT, WPARAM, LPARAM);
 LRESULT CALLBACK user_dialog_proc(HWND, UINT, WPARAM, LPARAM);
 LRESULT CALLBACK user_desktop_proc(HWND, UINT, WPARAM, LPARAM);
+LRESULT CALLBACK user_menu_popup_proc(HWND, UINT, WPARAM, LPARAM);
+LRESULT CALLBACK user_scrollbar_proc(HWND, UINT, WPARAM, LPARAM);
+LRESULT CALLBACK user_combo_proc(HWND, UINT, WPARAM, LPARAM);
 
 /* control helpers */
 HFONT   user_ctl_font(HWND h);

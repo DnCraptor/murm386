@@ -711,6 +711,9 @@ DWORD   WINAPI GetDialogBaseUnits(void);
 #define WM_NCRBUTTONDOWN    0x00A4
 #define WM_NCRBUTTONUP      0x00A5
 #define WM_NCRBUTTONDBLCLK  0x00A6
+#define WM_NCMBUTTONDOWN    0x00A7
+#define WM_NCMBUTTONUP      0x00A8
+#define WM_NCMBUTTONDBLCLK  0x00A9
 
 #define CTLCOLOR_MSGBOX     0
 #define CTLCOLOR_EDIT       1
@@ -805,6 +808,131 @@ void    WINAPI GetCaretPos(LPPOINT pt);
 void    WINAPI SetCaretBlinkTime(UINT ms);
 UINT    WINAPI GetCaretBlinkTime(void);
 
+
+/* ---------------------------------------------------------------- menus */
+
+#define MF_INSERT           0x0000
+#define MF_CHANGE           0x0080
+#define MF_APPEND           0x0100
+#define MF_DELETE           0x0200
+#define MF_REMOVE           0x1000
+#define MF_BYCOMMAND        0x0000
+#define MF_BYPOSITION       0x0400
+#define MF_SEPARATOR        0x0800
+#define MF_ENABLED          0x0000
+#define MF_GRAYED           0x0001
+#define MF_DISABLED         0x0002
+#define MF_UNCHECKED        0x0000
+#define MF_CHECKED          0x0008
+#define MF_USECHECKBITMAPS  0x0200
+#define MF_STRING           0x0000
+#define MF_BITMAP           0x0004
+#define MF_OWNERDRAW        0x0100
+#define MF_POPUP            0x0010
+#define MF_MENUBARBREAK     0x0020
+#define MF_MENUBREAK        0x0040
+#define MF_UNHILITE         0x0000
+#define MF_HILITE           0x0080
+#define MF_SYSMENU          0x2000
+#define MF_HELP             0x4000
+#define MF_MOUSESELECT      0x8000
+
+#define TPM_LEFTBUTTON      0x0000
+#define TPM_RIGHTBUTTON     0x0002
+#define TPM_LEFTALIGN       0x0000
+#define TPM_CENTERALIGN     0x0004
+#define TPM_RIGHTALIGN      0x0008
+
+HMENU   WINAPI CreateMenu(void);
+HMENU   WINAPI CreatePopupMenu(void);
+BOOL    WINAPI DestroyMenu(HMENU menu);
+BOOL    WINAPI AppendMenu(HMENU menu, UINT flags, UINT id, LPCSTR text);
+BOOL    WINAPI InsertMenu(HMENU menu, UINT pos, UINT flags, UINT id, LPCSTR text);
+BOOL    WINAPI ModifyMenu(HMENU menu, UINT pos, UINT flags, UINT id, LPCSTR text);
+BOOL    WINAPI DeleteMenu(HMENU menu, UINT pos, UINT flags);
+BOOL    WINAPI RemoveMenu(HMENU menu, UINT pos, UINT flags);
+HMENU   WINAPI GetMenu(HWND hwnd);
+BOOL    WINAPI SetMenu(HWND hwnd, HMENU menu);
+void    WINAPI DrawMenuBar(HWND hwnd);
+HMENU   WINAPI GetSubMenu(HMENU menu, int pos);
+int     WINAPI GetMenuItemCount(HMENU menu);
+UINT    WINAPI GetMenuItemID(HMENU menu, int pos);
+UINT    WINAPI GetMenuState(HMENU menu, UINT id, UINT flags);
+int     WINAPI GetMenuString(HMENU menu, UINT id, LPSTR buf, int max, UINT flags);
+BOOL    WINAPI CheckMenuItem(HMENU menu, UINT id, UINT flags);
+BOOL    WINAPI EnableMenuItem(HMENU menu, UINT id, UINT flags);
+BOOL    WINAPI HiliteMenuItem(HWND hwnd, HMENU menu, UINT id, UINT flags);
+HMENU   WINAPI GetSystemMenu(HWND hwnd, BOOL revert);
+BOOL    WINAPI TrackPopupMenu(HMENU menu, UINT flags, int x, int y, int reserved,
+                              HWND hwnd, const RECT *rc);
+
+/* Accelerators. Win16 loads them from resources only; native programs
+ * build a table with CreateAcceleratorTableN. */
+#define FVIRTKEY            0x01
+#define FNOINVERT           0x02
+#define FSHIFT              0x04
+#define FCONTROL            0x08
+#define FALT                0x10
+
+typedef struct { BYTE fVirt; WORD key; WORD cmd; } ACCEL_N;
+
+HACCEL  WINAPI CreateAcceleratorTableN(const ACCEL_N *a, int n);
+BOOL    WINAPI DestroyAcceleratorTableN(HACCEL h);
+int     WINAPI TranslateAccelerator(HWND hwnd, HACCEL h, LPMSG msg);
+
+/* ---------------------------------------------------------------- scroll bar control */
+
+#define SBS_HORZ            0x0000L
+#define SBS_VERT            0x0001L
+
+/* ---------------------------------------------------------------- combo box */
+
+#define CBS_SIMPLE          0x0001L
+#define CBS_DROPDOWN        0x0002L
+#define CBS_DROPDOWNLIST    0x0003L
+#define CBS_OWNERDRAWFIXED  0x0010L
+#define CBS_AUTOHSCROLL     0x0040L
+#define CBS_OEMCONVERT      0x0080L
+#define CBS_SORT            0x0100L
+#define CBS_HASSTRINGS      0x0200L
+#define CBS_NOINTEGRALHEIGHT 0x0400L
+
+#define CB_GETEDITSEL       (WM_USER + 0)
+#define CB_LIMITTEXT        (WM_USER + 1)
+#define CB_SETEDITSEL       (WM_USER + 2)
+#define CB_ADDSTRING        (WM_USER + 3)
+#define CB_DELETESTRING     (WM_USER + 4)
+#define CB_DIR              (WM_USER + 5)
+#define CB_GETCOUNT         (WM_USER + 6)
+#define CB_GETCURSEL        (WM_USER + 7)
+#define CB_GETLBTEXT        (WM_USER + 8)
+#define CB_GETLBTEXTLEN     (WM_USER + 9)
+#define CB_INSERTSTRING     (WM_USER + 10)
+#define CB_RESETCONTENT     (WM_USER + 11)
+#define CB_FINDSTRING       (WM_USER + 12)
+#define CB_SELECTSTRING     (WM_USER + 13)
+#define CB_SETCURSEL        (WM_USER + 14)
+#define CB_SHOWDROPDOWN     (WM_USER + 15)
+#define CB_GETITEMDATA      (WM_USER + 16)
+#define CB_SETITEMDATA      (WM_USER + 17)
+#define CB_GETDROPPEDCONTROLRECT (WM_USER + 18)
+#define CB_GETDROPPEDSTATE  (WM_USER + 23)
+#define CB_FINDSTRINGEXACT  (WM_USER + 24)
+#define CB_OKAY             0
+#define CB_ERR              (-1)
+#define CB_ERRSPACE         (-2)
+
+#define CBN_ERRSPACE        (-1)
+#define CBN_SELCHANGE       1
+#define CBN_DBLCLK          2
+#define CBN_SETFOCUS        3
+#define CBN_KILLFOCUS       4
+#define CBN_EDITCHANGE      5
+#define CBN_EDITUPDATE      6
+#define CBN_DROPDOWN        7
+#define CBN_CLOSEUP         8
+#define CBN_SELENDOK        9
+#define CBN_SELENDCANCEL    10
 
 /* Application entry: native apps define WinMain; the runtime's main() calls it. */
 int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmdline, int show);

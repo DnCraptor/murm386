@@ -26,6 +26,7 @@ enum {
     WOBJ_CURSOR,
     WOBJ_MENU,
     WOBJ_CLASS,
+    WOBJ_ACCEL,
 };
 
 HANDLE win_handle_alloc(int type, void *obj);

@@ -1,0 +1,43 @@
+# Menus, accelerators, system menu, combo box and scroll bar control.
+wait 50
+click 62 62
+wait 30
+move 150 62
+wait 30
+move 160 101
+wait 30
+move 220 101
+wait 30
+snap menus_sub.ppm
+key ESC
+key ESC
+key ESC
+wait 30
+keydown ALT
+keyup ALT
+key RIGHT
+key DOWN
+wait 30
+snap menus_kbd.ppm
+key ESC
+key ESC
+keydown CTRL
+key T
+keyup CTRL
+click 52 41
+wait 30
+snap menus_sys.ppm
+key ESC
+click 62 62
+click 80 100
+wait 50
+click 355 319
+wait 30
+snap menus_combo.ppm
+click 280 360
+click 397 355
+click 150 290
+key RETURN
+wait 50
+snap menus_end.ppm
+exit
