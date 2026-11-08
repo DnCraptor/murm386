@@ -1153,6 +1153,7 @@ static void free_tree(wwnd *w)
     if (U.focus == w) U.focus = NULL;
     if (U.active == w) U.active = NULL;
     if (U.capture == w) U.capture = NULL;
+    user_caret_window_gone(h);
     user_kill_window_timers(h);
     user_purge_window(h);
     while (w->props) {

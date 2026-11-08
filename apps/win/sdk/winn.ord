@@ -5,3 +5,5 @@
 3 CreateAcceleratorTableN
 4 DestroyAcceleratorTableN
 5 GetDisplayDriverInfoN
+6 WinDirListN
+7 IsWinAppN

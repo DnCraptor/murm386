@@ -1,0 +1,57 @@
+# Program Manager as the shell: run with "./winhost scripts/progman.txt PROGMAN"
+# after "rm -f hostwin/PROGMAN.INI" (the first start fills the Main group).
+wait 100
+snap pm_start.ppm
+# File > New Program Group
+keydown ALT
+key F
+keyup ALT
+key G
+wait 50
+type Games
+key RETURN
+wait 50
+# File > New Program Item, into the new group
+keydown ALT
+key F
+keyup ALT
+key I
+wait 50
+type Second Demo
+key TAB
+type DEMO.EXE
+wait 30
+snap pm_item.ppm
+key RETURN
+wait 50
+snap pm_groups.ppm
+# double click Demo in Main
+dblclick 72 112
+wait 200
+snap pm_demo.ppm
+keydown ALT
+key F4
+keyup ALT
+wait 100
+# File > Run with a DOS program
+keydown ALT
+key F
+keyup ALT
+key R
+wait 50
+type NC
+key RETURN
+wait 50
+snap pm_runerr.ppm
+key RETURN
+wait 50
+# closing the shell ends Windows
+keydown ALT
+key F4
+keyup ALT
+wait 50
+snap pm_exit.ppm
+key RETURN
+wait 100
+snap pm_after.ppm
+exit

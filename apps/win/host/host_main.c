@@ -1,6 +1,8 @@
 /*
- * host_main.c - run a native Windows application on Linux under a script:
- *   test_app script.txt
+ * host_main.c - run native Windows applications on Linux under a script:
+ *   winhost script.txt [PROGRAM]      (default DEMO.EXE)
+ * The Windows directory is hostwin/ (the Makefile puts stand-ins for the
+ * application files there, PROGMAN.INI lands there too).
  * Script lines (executed one by one whenever the system is idle):
  *   wait MS | move X Y | down X Y | up X Y | click X Y | dblclick X Y |
  *   rdown X Y | rup X Y | key VK | keydown VK | keyup VK | type TEXT |
@@ -13,17 +15,31 @@
 #include "wincore.h"
 #include "host_drivers.h"
 
-/* the demo application, built in (WinMain renamed by the Makefile) */
+/* the applications, built in (WinMain renamed by the Makefile) */
 int PASCAL demo_WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show);
+int PASCAL progman_WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show);
 
 static int demo_entry(const win_app_host *h)
 {
     return demo_WinMain(h->hinstance, 0, (LPSTR)h->cmdline, h->show);
 }
 
+static int progman_entry(const win_app_host *h)
+{
+    return progman_WinMain(h->hinstance, 0, (LPSTR)h->cmdline, h->show);
+}
+
 win_app_entry win_host_app(const char *prog)
 {
-    return !lstrcmpi(prog, "DEMO.EXE") ? demo_entry : NULL;
+    const char *b = prog;
+    for (const char *p = prog; *p; p++)
+        if (*p == '\\' || *p == '/' || *p == ':')
+            b = p + 1;
+    if (!lstrcmpi(b, "DEMO.EXE"))
+        return demo_entry;
+    if (!lstrcmpi(b, "PROGMAN.EXE"))
+        return progman_entry;
+    return NULL;
 }
 
 #ifdef HOST_VGA800
@@ -155,7 +171,7 @@ void host_script_idle(uint32_t now)
 int main(int argc, char **argv)
 {
     if (argc < 2) {
-        fprintf(stderr, "usage: %s script\n", argv[0]);
+        fprintf(stderr, "usage: %s script [program]\n", argv[0]);
         return 2;
     }
     FILE *f = fopen(argv[1], "r");
@@ -172,13 +188,13 @@ int main(int argc, char **argv)
     fclose(f);
     task_init();
 #ifdef HOST_VGA800
-    if (win_boot(argv[0], &win_disp_vga800, &host_script_input))
+    if (win_boot("hostwin/WINN.EXE", &win_disp_vga800, &host_script_input))
         return 1;
 #else
-    if (win_boot(argv[0], &host_snap_display, &host_script_input))
+    if (win_boot("hostwin/WINN.EXE", &host_snap_display, &host_script_input))
         return 1;
 #endif
-    UINT r = WinExec("DEMO.EXE", SW_SHOWNORMAL);
+    UINT r = WinExec(argc > 2 ? argv[2] : "DEMO.EXE", SW_SHOWNORMAL);
     if (r < 32) {
         printf("WinExec failed: %u\n", r);
         return 1;

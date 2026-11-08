@@ -35,6 +35,7 @@ static HBRUSH sys_brushes[COLOR_MAX];
 
 void user_init_sysmet(void)
 {
+    gdi_sys_color_brush = user_sys_brush;
     for (int i = 0; i < COLOR_MAX; i++) {
         sys_brushes[i] = CreateSolidBrush(sys_colors[i]);
         win_handle_set_stock(sys_brushes[i]);

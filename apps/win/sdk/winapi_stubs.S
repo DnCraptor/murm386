@@ -330,6 +330,23 @@ GetProfileString:
     .ltorg
     .size GetProfileString, .-GetProfileString
 
+    .section .text.winapi.WriteProfileString,"ax",%progbits
+    .global WriteProfileString
+    .type WriteProfileString, %function
+    .thumb_func
+WriteProfileString:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =236
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size WriteProfileString, .-WriteProfileString
+
     .section .text.winapi.FindAtom,"ax",%progbits
     .global FindAtom
     .type FindAtom, %function
@@ -397,6 +414,108 @@ GetAtomName:
     bx   r12
     .ltorg
     .size GetAtomName, .-GetAtomName
+
+    .section .text.winapi._lclose,"ax",%progbits
+    .global _lclose
+    .type _lclose, %function
+    .thumb_func
+_lclose:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =324
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size _lclose, .-_lclose
+
+    .section .text.winapi._lread,"ax",%progbits
+    .global _lread
+    .type _lread, %function
+    .thumb_func
+_lread:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =328
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size _lread, .-_lread
+
+    .section .text.winapi._lcreat,"ax",%progbits
+    .global _lcreat
+    .type _lcreat, %function
+    .thumb_func
+_lcreat:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =332
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size _lcreat, .-_lcreat
+
+    .section .text.winapi._llseek,"ax",%progbits
+    .global _llseek
+    .type _llseek, %function
+    .thumb_func
+_llseek:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =336
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size _llseek, .-_llseek
+
+    .section .text.winapi._lopen,"ax",%progbits
+    .global _lopen
+    .type _lopen, %function
+    .thumb_func
+_lopen:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =340
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size _lopen, .-_lopen
+
+    .section .text.winapi._lwrite,"ax",%progbits
+    .global _lwrite
+    .type _lwrite, %function
+    .thumb_func
+_lwrite:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =344
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size _lwrite, .-_lwrite
 
     .section .text.winapi.lstrcpy,"ax",%progbits
     .global lstrcpy
@@ -500,6 +619,23 @@ GetPrivateProfileString:
     .ltorg
     .size GetPrivateProfileString, .-GetPrivateProfileString
 
+    .section .text.winapi.WritePrivateProfileString,"ax",%progbits
+    .global WritePrivateProfileString
+    .type WritePrivateProfileString, %function
+    .thumb_func
+WritePrivateProfileString:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =516
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size WritePrivateProfileString, .-WritePrivateProfileString
+
     .section .text.winapi.GetWindowsDirectory,"ax",%progbits
     .global GetWindowsDirectory
     .type GetWindowsDirectory, %function
@@ -584,6 +720,40 @@ IsTask:
     bx   r12
     .ltorg
     .size IsTask, .-IsTask
+
+    .section .text.winapi._hread,"ax",%progbits
+    .global _hread
+    .type _hread, %function
+    .thumb_func
+_hread:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =1396
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size _hread, .-_hread
+
+    .section .text.winapi._hwrite,"ax",%progbits
+    .global _hwrite
+    .type _hwrite, %function
+    .thumb_func
+_hwrite:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =1400
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size _hwrite, .-_hwrite
 
     .section .text.winapi.lstrcpyn,"ax",%progbits
     .global lstrcpyn
@@ -5106,3 +5276,37 @@ GetDisplayDriverInfoN:
     bx   r12
     .ltorg
     .size GetDisplayDriverInfoN, .-GetDisplayDriverInfoN
+
+    .section .text.winapi.WinDirListN,"ax",%progbits
+    .global WinDirListN
+    .type WinDirListN, %function
+    .thumb_func
+WinDirListN:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #12]
+    ldr  r1, =24
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size WinDirListN, .-WinDirListN
+
+    .section .text.winapi.IsWinAppN,"ax",%progbits
+    .global IsWinAppN
+    .type IsWinAppN, %function
+    .thumb_func
+IsWinAppN:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #12]
+    ldr  r1, =28
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size IsWinAppN, .-IsWinAppN

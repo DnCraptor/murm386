@@ -289,6 +289,20 @@ typedef struct {
     uint32_t  stack_size;       /* from the EZ header, 0 = default */
 } win_ez_image;
 int    win_ez_load(const char *path, win_ez_image *img);
+/* the SDK's application entry starts with a branch over WINAPP_MAGIC */
+int    win_ez_entry_is_app(const void *entry);
+int    win_ez_is_app(const char *path);    /* the file, without loading it */
+
+/* gdi.c: set by USER, for FillRect(dc, rc, (HBRUSH)(COLOR_xxx + 1)) */
+extern HBRUSH (*gdi_sys_color_brush)(int index);
+
+/* file.c */
+void   win_files_task_ended(HTASK task);
+
+#if !(defined(__arm__) || defined(__thumb__))
+/* host tests: applications built into the harness, by file name */
+win_app_entry win_host_app(const char *prog);
+#endif
 
 /* exports.c (generated) */
 extern const void *const *const win_export_tables[WINMOD_COUNT];

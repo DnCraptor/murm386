@@ -2088,81 +2088,81 @@ void _enable(void)
     get_PC()->cpu->flags.bits.IF = 1;
 }
 
-static int dos_ptr_to_far(const void *ptr, uint16_t *seg, uint16_t *off)
+/*
+ * findfirst/findnext. DOS reads the pattern and keeps the DTA in guest
+ * memory, which the program's own data is not when its image sits in
+ * PSRAM; so both live in a small DOS block of their own, allocated on first
+ * use. The DTA stays there between findfirst and findnext (the I/O staging
+ * buffer is reused by every read/write and cannot hold it).
+ */
+#define DOS_FIND_DTA      0u            /* DOS 2+ DTA, 43 bytes used */
+#define DOS_FIND_PATTERN  64u
+#define DOS_FIND_SIZE     256u
+
+static uint16_t dos_find_segment;
+static unsigned char *dos_find_mem;
+
+static int dos_find_ensure(void)
 {
-    uintptr_t p = (uintptr_t)ptr;
-    uint32_t linear;
+    union REGS regs = {0};
 
-    if (p < (uintptr_t)DOS_GUEST_RAM_BASE)
+    if (dos_find_mem)
+        return 0;
+    regs.h.ah = 0x48;
+    regs.w.bx = (uint16_t)(DOS_FIND_SIZE / 16u);
+    int386(0x21, &regs, &regs);
+    if (regs.x.cflag)
         return -1;
-    linear = (uint32_t)(p - (uintptr_t)DOS_GUEST_RAM_BASE);
-    if (linear > 0xfffffu)
-        return -1;
-
-    *seg = (uint16_t)(linear >> 4);
-    *off = (uint16_t)(linear & 15u);
+    dos_find_segment = regs.w.ax;
+    dos_find_mem = (unsigned char *)dos_guest_far_ptr(dos_find_segment, 0);
     return 0;
 }
 
-/* DOS 2+ findfirst/findnext DTA layout. */
-static unsigned char dos_find_dta[64];
-
 static int dos_set_find_dta(void)
 {
-    union REGS inregs;
-    union REGS outregs;
-    struct SREGS segregs;
-    uint16_t seg;
-    uint16_t off;
+    union REGS regs = {0};
 
-    if (dos_ptr_to_far(dos_find_dta, &seg, &off) != 0)
+    if (dos_find_ensure() != 0)
         return -1;
-
-    memset(&inregs, 0, sizeof(inregs));
-    memset(&outregs, 0, sizeof(outregs));
-    segread(&segregs);
-    segregs.ds = seg;
-    inregs.h.ah = 0x1a;
-    inregs.w.dx = off;
-    int386x(0x21, &inregs, &outregs, &segregs);
-    return outregs.x.cflag ? (int)outregs.w.ax : 0;
+    regs.h.ah = 0x1a;
+    regs.w.dx = DOS_FIND_DTA;
+    native_int21_with_ds(dos_find_segment, &regs);
+    return regs.x.cflag ? (int)regs.w.ax : 0;
 }
 
 static void dos_copy_find_result(struct find_t *info)
 {
+    const unsigned char *dta = dos_find_mem + DOS_FIND_DTA;
     unsigned int i;
 
-    info->attrib = dos_find_dta[21];
-    for (i = 0; i < 13 && dos_find_dta[30 + i] != 0; ++i)
-        info->name[i] = (char)dos_find_dta[30 + i];
+    info->attrib = dta[21];
+    for (i = 0; i < 13 && dta[30 + i] != 0; ++i)
+        info->name[i] = (char)dta[30 + i];
     info->name[i] = '\0';
 }
 
 int _dos_findfirst(const char *pattern, unsigned attrib, struct find_t *info)
 {
-    union REGS inregs;
-    union REGS outregs;
-    struct SREGS segregs;
-    uint16_t seg;
-    uint16_t off;
+    union REGS regs = {0};
+    size_t length;
     int rc;
 
+    if (!pattern || !info)
+        return -1;
     rc = dos_set_find_dta();
     if (rc != 0)
         return rc;
-    if (dos_ptr_to_far(pattern, &seg, &off) != 0)
+    length = strlen(pattern) + 1;
+    if (length > DOS_FIND_SIZE - DOS_FIND_PATTERN)
         return -1;
+    memcpy(dos_find_mem + DOS_FIND_PATTERN, pattern, length);
 
-    memset(&inregs, 0, sizeof(inregs));
-    memset(&outregs, 0, sizeof(outregs));
-    segread(&segregs);
-    segregs.ds = seg;
-    inregs.h.ah = 0x4e;
-    inregs.w.cx = (uint16_t)attrib;
-    inregs.w.dx = off;
-    int386x(0x21, &inregs, &outregs, &segregs);
-    if (outregs.x.cflag)
-        return (int)outregs.w.ax;
+    regs.h.ah = 0x4e;
+    regs.w.cx = (uint16_t)attrib;
+    regs.w.dx = DOS_FIND_PATTERN;
+    native_int21_with_ds(dos_find_segment, &regs);
+    if (regs.x.cflag)
+        return (int)regs.w.ax;
 
     dos_copy_find_result(info);
     return 0;
@@ -2170,20 +2170,19 @@ int _dos_findfirst(const char *pattern, unsigned attrib, struct find_t *info)
 
 int _dos_findnext(struct find_t *info)
 {
-    union REGS inregs;
-    union REGS outregs;
+    union REGS regs = {0};
     int rc;
 
+    if (!info)
+        return -1;
     rc = dos_set_find_dta();
     if (rc != 0)
         return rc;
 
-    memset(&inregs, 0, sizeof(inregs));
-    memset(&outregs, 0, sizeof(outregs));
-    inregs.h.ah = 0x4f;
-    int386(0x21, &inregs, &outregs);
-    if (outregs.x.cflag)
-        return (int)outregs.w.ax;
+    regs.h.ah = 0x4f;
+    int386(0x21, &regs, &regs);
+    if (regs.x.cflag)
+        return (int)regs.w.ax;
 
     dos_copy_find_result(info);
     return 0;

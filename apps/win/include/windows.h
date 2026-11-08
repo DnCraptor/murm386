@@ -459,8 +459,33 @@ int     WINAPI GetPrivateProfileString(LPCSTR section, LPCSTR key, LPCSTR def,
 UINT    WINAPI GetPrivateProfileInt(LPCSTR section, LPCSTR key, int def, LPCSTR file);
 int     WINAPI GetProfileString(LPCSTR section, LPCSTR key, LPCSTR def, LPSTR buf, int size);
 UINT    WINAPI GetProfileInt(LPCSTR section, LPCSTR key, int def);
+BOOL    WINAPI WritePrivateProfileString(LPCSTR section, LPCSTR key, LPCSTR value, LPCSTR file);
+BOOL    WINAPI WriteProfileString(LPCSTR section, LPCSTR key, LPCSTR value);
 UINT    WINAPI GetWindowsDirectory(LPSTR buf, UINT size);
 UINT    WINAPI GetSystemDirectory(LPSTR buf, UINT size);
+
+/* ---------------------------------------------------------------- files */
+
+typedef int HFILE;
+#define HFILE_ERROR     ((HFILE)-1)
+#define OF_READ         0x0000
+#define OF_WRITE        0x0001
+#define OF_READWRITE    0x0002
+
+HFILE   WINAPI _lopen(LPCSTR path, int mode);
+HFILE   WINAPI _lcreat(LPCSTR path, int attr);
+HFILE   WINAPI _lclose(HFILE f);
+UINT    WINAPI _lread(HFILE f, void *buf, UINT n);
+UINT    WINAPI _lwrite(HFILE f, const void *buf, UINT n);
+LONG    WINAPI _hread(HFILE f, void *buf, LONG n);
+LONG    WINAPI _hwrite(HFILE f, const void *buf, LONG n);
+LONG    WINAPI _llseek(HFILE f, LONG off, int origin);
+
+/* Native extensions: the files matching spec as NUL-separated names ending
+ * with a second NUL (returns how many), and whether a file is a Windows
+ * application. */
+int     WINAPI WinDirListN(LPCSTR spec, LPSTR buf, int size);
+BOOL    WINAPI IsWinAppN(LPCSTR path);
 
 /* ---------------------------------------------------------------- tasks */
 

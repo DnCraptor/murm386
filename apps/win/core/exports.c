@@ -183,6 +183,7 @@ extern void IsDlgButtonChecked(void);
 extern void IsIconic(void);
 extern void IsRectEmpty(void);
 extern void IsTask(void);
+extern void IsWinAppN(void);
 extern void IsWindow(void);
 extern void IsWindowEnabled(void);
 extern void IsWindowVisible(void);
@@ -290,9 +291,20 @@ extern void UpdateWindow(void);
 extern void ValidateRect(void);
 extern void ValidateRgn(void);
 extern void WaitMessage(void);
+extern void WinDirListN(void);
 extern void WinExec(void);
 extern void WindowFromPoint(void);
+extern void WritePrivateProfileString(void);
+extern void WriteProfileString(void);
 extern void Yield(void);
+extern void _hread(void);
+extern void _hwrite(void);
+extern void _lclose(void);
+extern void _lcreat(void);
+extern void _llseek(void);
+extern void _lopen(void);
+extern void _lread(void);
+extern void _lwrite(void);
 extern void lstrcat(void);
 extern void lstrcmp(void);
 extern void lstrcmpi(void);
@@ -322,21 +334,31 @@ static const void *const exports_kernel[354] = {
     [47] = (const void *)GetModuleHandle,
     [57] = (const void *)GetProfileInt,
     [58] = (const void *)GetProfileString,
+    [59] = (const void *)WriteProfileString,
     [69] = (const void *)FindAtom,
     [70] = (const void *)AddAtom,
     [71] = (const void *)DeleteAtom,
     [72] = (const void *)GetAtomName,
+    [81] = (const void *)_lclose,
+    [82] = (const void *)_lread,
+    [83] = (const void *)_lcreat,
+    [84] = (const void *)_llseek,
+    [85] = (const void *)_lopen,
+    [86] = (const void *)_lwrite,
     [88] = (const void *)lstrcpy,
     [89] = (const void *)lstrcat,
     [90] = (const void *)lstrlen,
     [115] = (const void *)OutputDebugString,
     [127] = (const void *)GetPrivateProfileInt,
     [128] = (const void *)GetPrivateProfileString,
+    [129] = (const void *)WritePrivateProfileString,
     [134] = (const void *)GetWindowsDirectory,
     [135] = (const void *)GetSystemDirectory,
     [152] = (const void *)GetNumTasks,
     [166] = (const void *)WinExec,
     [320] = (const void *)IsTask,
+    [349] = (const void *)_hread,
+    [350] = (const void *)_hwrite,
     [353] = (const void *)lstrcpyn,
 };
 
@@ -606,12 +628,14 @@ static const void *const exports_user[474] = {
     [473] = (const void *)AnsiPrev,
 };
 
-static const void *const exports_winn[6] = {
+static const void *const exports_winn[8] = {
     [1] = (const void *)DialogBoxIndirectN,
     [2] = (const void *)CreateDialogIndirectN,
     [3] = (const void *)CreateAcceleratorTableN,
     [4] = (const void *)DestroyAcceleratorTableN,
     [5] = (const void *)GetDisplayDriverInfoN,
+    [6] = (const void *)WinDirListN,
+    [7] = (const void *)IsWinAppN,
 };
 
 const void *const *const win_export_tables[WINMOD_COUNT] = {

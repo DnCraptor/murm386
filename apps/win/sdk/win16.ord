@@ -81,6 +81,12 @@ KERNEL 77 Reserved1
 KERNEL 78 Reserved2
 KERNEL 79 Reserved3
 KERNEL 80 Reserved4
+KERNEL 81 _lclose
+KERNEL 82 _lread
+KERNEL 83 _lcreat
+KERNEL 84 _llseek
+KERNEL 85 _lopen
+KERNEL 86 _lwrite
 KERNEL 87 Reserved5
 KERNEL 88 lstrcpy
 KERNEL 89 lstrcat
@@ -250,6 +256,8 @@ KERNEL 345 IsSharedSelector
 KERNEL 346 IsBadHugeReadPtr
 KERNEL 347 IsBadHugeWritePtr
 KERNEL 348 hmemcpy
+KERNEL 349 _hread
+KERNEL 350 _hwrite
 KERNEL 351 BUNNY_351
 KERNEL 352 lstrcatn
 KERNEL 353 lstrcpyn

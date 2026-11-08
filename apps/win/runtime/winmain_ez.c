@@ -4,8 +4,9 @@
  *   WINN [program [arguments]]
  *
  * Starts the drivers named in SYSTEM.INI (or the built-in ones), GDI and
- * USER, then runs the shell given by [boot] shell= and the program from the
- * command line, each as its own task. Windows ends when the first task
+ * USER, then runs the shell given by [boot] shell= (PROGMAN.EXE when the
+ * key is missing) and the program from the command line, each as its own
+ * task. Windows ends when the first task
  * started (the shell, or the program if there is no shell) ends.
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
@@ -22,7 +23,7 @@ static const char *exec_error(UINT r)
     switch (r) {
     case 2: return "file not found";
     case 8: return "out of memory";
-    case 11: return "not a Windows program";
+    case 11: return "not a Windows application";
     default: return "cannot start";
     }
 }
@@ -54,8 +55,15 @@ int main(int argc, char **argv)
         printf("Windows: display start failed (%d)\n", r);
         return 1;
     }
+    /* no shell= at all: PROGMAN.EXE, as in Windows 3.x, if it is there;
+     * "shell=" with nothing: no shell */
     char shell[80];
-    GetPrivateProfileString("boot", "shell", "", shell, sizeof(shell), "SYSTEM.INI");
+    GetPrivateProfileString("boot", "shell", "*", shell, sizeof(shell), "SYSTEM.INI");
+    if (!lstrcmp(shell, "*")) {
+        char path[128];
+        win_path("PROGMAN.EXE", path, sizeof(path));
+        lstrcpy(shell, IsWinAppN(path) ? "PROGMAN.EXE" : "");
+    }
     int started = 0;
     if (shell[0])
         started += run(shell);

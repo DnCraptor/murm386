@@ -1,6 +1,6 @@
 /*
- * profile.c - INI files (GetPrivateProfileString & co., read only for now)
- * and the Windows directory.
+ * profile.c - INI files (GetPrivateProfileString, WritePrivateProfileString
+ * & co.) and the Windows directory.
  *
  * A file name without a drive or directory is looked up in the Windows
  * directory, which is where WINN.EXE was started from.
@@ -54,10 +54,15 @@ void win_path(const char *name, char *out, int size)
         lstrcpyn(out, name, size);
         return;
     }
+#if defined(__arm__) || defined(__thumb__)
+    const char sep = '\\';
+#else
+    const char sep = '/';           /* host tests */
+#endif
     int n = lstrlen(win_dir);
     lstrcpyn(out, win_dir, size);
-    if (n && win_dir[n - 1] != '\\' && n + 1 < size) {
-        out[n++] = '\\';
+    if (n && win_dir[n - 1] != sep && n + 1 < size) {
+        out[n++] = sep;
         out[n] = 0;
     }
     if (n < size)
@@ -74,24 +79,61 @@ static char *trim(char *s)
     return s;
 }
 
+/* The last file read stays in memory: applications read their settings key
+ * by key, and every key would otherwise be another pass over the SD card.
+ * Writes go through the same copy. */
+#define PROFILE_MAX 16384
+
+static char  cache_path[128];
+static char *cache_text;            /* NUL-terminated, NULL = no such file */
+static int   cache_len, cache_valid;
+
+static const char *load(const char *file, int *len)
+{
+    char path[128];
+    win_path(file, path, sizeof(path));
+    if (cache_valid && !lstrcmpi(path, cache_path)) {
+        *len = cache_len;
+        return cache_text;
+    }
+    win_free(cache_text);
+    cache_text = NULL;
+    cache_len = 0;
+    cache_valid = 0;
+    FILE *f = fopen(path, "rb");
+    if (f) {
+        char *t = (char *)win_alloc(PROFILE_MAX + 1);
+        if (!t) {
+            fclose(f);
+            *len = 0;
+            return NULL;            /* not cached: try again next time */
+        }
+        size_t n = fread(t, 1, PROFILE_MAX, f);
+        fclose(f);
+        t[n] = 0;
+        cache_text = (char *)win_realloc(t, n + 1);
+        if (!cache_text)
+            cache_text = t;
+        cache_len = (int)n;
+    }
+    lstrcpyn(cache_path, path, sizeof(cache_path));
+    cache_valid = 1;
+    *len = cache_len;
+    return cache_text;
+}
+
 /* Calls fn for every key of [section]; fn returns non-zero to stop. */
 static int scan(const char *file, const char *section,
                 int (*fn)(const char *key, const char *val, void *ctx), void *ctx)
 {
-    char path[128];
-    win_path(file, path, sizeof(path));
-    /* the native stdio has no fgets: read the whole (small) file */
-    FILE *f = fopen(path, "rb");
-    if (!f)
+    int n;
+    const char *src = load(file, &n);
+    if (!src)
         return 0;
-    char *text = (char *)win_alloc(16384 + 1);
-    if (!text) {
-        fclose(f);
+    char *text = (char *)win_alloc((size_t)n + 1);
+    if (!text)
         return 0;
-    }
-    size_t n = fread(text, 1, 16384, f);
-    fclose(f);
-    text[n] = 0;
+    memcpy(text, src, (size_t)n + 1);
     int in = 0, stop = 0;
     for (char *line = text; !stop && line && *line;) {
         char *next = line;
@@ -120,6 +162,201 @@ static int scan(const char *file, const char *section,
     }
     win_free(text);
     return 1;
+}
+
+/* ---------------------------------------------------------------- writing */
+
+static int is_space(char c) { return c == ' ' || c == '\t'; }
+
+/* the line [p, end) without its line break; returns where the next starts */
+static const char *line_end(const char *p, const char **body_end)
+{
+    const char *e = p;
+    while (*e && *e != '\n')
+        e++;
+    const char *b = e;
+    if (b > p && b[-1] == '\r')
+        b--;
+    *body_end = b;
+    return *e ? e + 1 : e;
+}
+
+/* does [s, e) name a [section] / start with "key =" ? */
+static int is_section(const char *s, const char *e, const char *name)
+{
+    while (s < e && is_space(*s))
+        s++;
+    if (s == e || *s != '[')
+        return -1;                  /* not a section line */
+    s++;
+    while (s < e && is_space(*s))
+        s++;
+    const char *c = s;
+    while (c < e && *c != ']')
+        c++;
+    while (c > s && is_space(c[-1]))
+        c--;
+    int n = lstrlen(name);
+    if (c - s != n)
+        return 0;
+    for (int i = 0; i < n; i++) {
+        char a = s[i], b = name[i];
+        if (a >= 'a' && a <= 'z') a -= 32;
+        if (b >= 'a' && b <= 'z') b -= 32;
+        if (a != b)
+            return 0;
+    }
+    return 1;
+}
+
+static int is_key(const char *s, const char *e, const char *key)
+{
+    while (s < e && is_space(*s))
+        s++;
+    if (s == e || *s == ';' || *s == '[')
+        return 0;
+    const char *q = s;
+    while (q < e && *q != '=')
+        q++;
+    if (q == e)
+        return 0;
+    const char *k = q;
+    while (k > s && is_space(k[-1]))
+        k--;
+    int n = lstrlen(key);
+    if (k - s != n)
+        return 0;
+    for (int i = 0; i < n; i++) {
+        char a = s[i], b = key[i];
+        if (a >= 'a' && a <= 'z') a -= 32;
+        if (b >= 'a' && b <= 'z') b -= 32;
+        if (a != b)
+            return 0;
+    }
+    return 1;
+}
+
+static void put(char *out, int *o, const char *s, int n)
+{
+    memcpy(out + *o, s, (size_t)n);
+    *o += n;
+}
+
+/* key NULL: the whole section goes; value NULL: the key goes. */
+static BOOL write_profile(const char *section, const char *key, const char *value,
+                          const char *file)
+{
+    if (!section || !file)
+        return FALSE;
+    int len;
+    const char *text = load(file, &len);
+    if (!cache_valid)
+        return FALSE;               /* out of memory reading it */
+    if (!text)
+        text = "", len = 0;
+
+    /* find the section, the key line in it and the end of its last entry */
+    const char *sec = NULL, *sec_end = NULL, *last = NULL, *ks = NULL, *ke = NULL;
+    for (const char *p = text; *p;) {
+        const char *be, *next = line_end(p, &be);
+        int r = is_section(p, be, section);
+        if (r >= 0) {
+            if (sec && !sec_end)
+                sec_end = p;
+            if (r == 1 && !sec) {
+                sec = p;
+                last = next;
+            }
+        } else if (sec && !sec_end) {
+            const char *q = p;
+            while (q < be && is_space(*q))
+                q++;
+            if (q < be)
+                last = next;
+            if (key && !ks && is_key(p, be, key)) {
+                ks = p;
+                ke = next;
+            }
+        }
+        p = next;
+    }
+    if (sec && !sec_end)
+        sec_end = text + len;
+
+    int extra = (int)lstrlen(section) + (key ? lstrlen(key) : 0) + (value ? lstrlen(value) : 0) + 16;
+    if (len + extra > PROFILE_MAX)
+        return FALSE;
+    char *out = (char *)win_alloc((size_t)(len + extra + 1));
+    if (!out)
+        return FALSE;
+    int o = 0;
+    if (!key) {                                     /* delete the section */
+        if (!sec) {
+            win_free(out);
+            return TRUE;
+        }
+        put(out, &o, text, (int)(sec - text));
+        put(out, &o, sec_end, (int)(text + len - sec_end));
+    } else if (ks) {                                /* replace or delete the key */
+        put(out, &o, text, (int)(ks - text));
+        if (value) {
+            put(out, &o, key, lstrlen(key));
+            put(out, &o, "=", 1);
+            put(out, &o, value, lstrlen(value));
+            put(out, &o, "\r\n", 2);
+        }
+        put(out, &o, ke, (int)(text + len - ke));
+    } else if (!value) {                            /* nothing to delete */
+        win_free(out);
+        return TRUE;
+    } else if (sec) {                               /* new key, after the last entry */
+        put(out, &o, text, (int)(last - text));
+        if (last > text && last[-1] != '\n')
+            put(out, &o, "\r\n", 2);
+        put(out, &o, key, lstrlen(key));
+        put(out, &o, "=", 1);
+        put(out, &o, value, lstrlen(value));
+        put(out, &o, "\r\n", 2);
+        put(out, &o, last, (int)(text + len - last));
+    } else {                                        /* new section at the end */
+        put(out, &o, text, len);
+        if (len && text[len - 1] != '\n')
+            put(out, &o, "\r\n", 2);
+        if (len)
+            put(out, &o, "\r\n", 2);
+        put(out, &o, "[", 1);
+        put(out, &o, section, lstrlen(section));
+        put(out, &o, "]\r\n", 3);
+        put(out, &o, key, lstrlen(key));
+        put(out, &o, "=", 1);
+        put(out, &o, value, lstrlen(value));
+        put(out, &o, "\r\n", 2);
+    }
+    out[o] = 0;
+
+    FILE *f = fopen(cache_path, "wb");
+    int ok = f && (int)fwrite(out, 1, (size_t)o, f) == o;
+    if (f)
+        fclose(f);
+    if (!ok) {
+        win_free(out);
+        cache_valid = 0;            /* the file may be half written: read it again */
+        return FALSE;
+    }
+    win_free(cache_text);
+    cache_text = out;
+    cache_len = o;
+    return TRUE;
+}
+
+BOOL WINAPI WritePrivateProfileString(LPCSTR section, LPCSTR key, LPCSTR value, LPCSTR file)
+{
+    return write_profile(section, key, value, file);
+}
+
+BOOL WINAPI WriteProfileString(LPCSTR section, LPCSTR key, LPCSTR value)
+{
+    return write_profile(section, key, value, "WIN.INI");
 }
 
 typedef struct { const char *key; char *buf; int size; int found; int len; } pctx;

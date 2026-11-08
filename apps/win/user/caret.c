@@ -111,6 +111,17 @@ void user_caret_restore(wwnd *w)
     on_now();
 }
 
+/* The owner is being destroyed: the caret goes with it (its handle may be
+ * given to the next window created, which must not inherit the caret). The
+ * window is already hidden, so nothing is drawn. */
+void user_caret_window_gone(HWND h)
+{
+    if (C.owner == h) {
+        C.owner = 0;
+        C.on = 0;
+    }
+}
+
 void user_caret_tick(uint32_t now)
 {
     if (!C.owner)

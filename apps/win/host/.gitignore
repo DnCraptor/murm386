@@ -1,5 +1,7 @@
 test_gdi
-demo
-demo800
+winhost
+winhost800
+*.o
 *.ppm
 *.png
+hostwin/

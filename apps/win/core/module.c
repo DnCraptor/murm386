@@ -136,6 +136,37 @@ out:
     return rc;
 }
 
+/* __ez_start of sdk/winapp_entry.c: "b 1f; .hword 0; .word WINAPP_MAGIC" */
+int win_ez_entry_is_app(const void *entry)
+{
+    uintptr_t e = (uintptr_t)entry & ~(uintptr_t)1;
+    if (e & 3)
+        return 0;
+    uint32_t sig;
+    memcpy(&sig, (const uint8_t *)e + 4, 4);
+    return sig == WINAPP_MAGIC;
+}
+
+int win_ez_is_app(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return 0;
+    ezhdr h;
+    uint32_t sig = 0;
+    uint32_t e = 0;
+    if (fread(&h, 1, sizeof(h), f) == sizeof(h) && h.magic == EZ_MAGIC && h.version == 1 &&
+        h.header_size >= sizeof(h)) {
+        e = h.entry_rva & ~1u;
+        if (!(e & 3) && e >= EZ_IMAGE_RVA && e + 8 <= EZ_IMAGE_RVA + h.image_file_size &&
+            !fseek(f, (long)(h.header_size + e - EZ_IMAGE_RVA + 4), SEEK_SET) &&
+            fread(&sig, 1, 4, f) != 4)
+            sig = 0;
+    }
+    fclose(f);
+    return sig == WINAPP_MAGIC;
+}
+
 int win_load_module(const char *path, const win_module_info **info)
 {
     *info = NULL;

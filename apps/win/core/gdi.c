@@ -1526,9 +1526,16 @@ BOOL WINAPI Polygon(HDC h, const POINT *pts, int n)
     return TRUE;
 }
 
+/* USER's system colour brushes: FillRect takes COLOR_xxx + 1 as a brush,
+ * as in Windows 3.x */
+HBRUSH (*gdi_sys_color_brush)(int index);
+
 int WINAPI FillRect(HDC h, const RECT *rc, HBRUSH br)
 {
     DC_OR_RET(h, 0);
+    if (br && (uintptr_t)br <= COLOR_MAX && gdi_sys_color_brush &&
+        !win_handle_get(br, WOBJ_BRUSH))
+        br = gdi_sys_color_brush((int)(uintptr_t)br - 1);
     RECT r = *rc;
     lp_rect(dc, &r);
     if (IsRectEmpty(&r))

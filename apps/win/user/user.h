@@ -157,5 +157,6 @@ int     user_vk_to_char(int vk, int sc, unsigned char *out);
 void    user_caret_hide_for_paint(wwnd *w);
 void    user_caret_restore(wwnd *w);
 void    user_caret_tick(uint32_t now);
+void    user_caret_window_gone(HWND h);
 
 #endif /* MURM_USER_H */

@@ -14,6 +14,7 @@
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
+#include <stdio.h>
 #include <string.h>
 #include "wincore.h"
 
@@ -176,6 +177,7 @@ static void task_start(void)
     t->state = WTASK_RUNNING;
     t->exit_code = t->run(t);
     user_task_ended(t->h);
+    win_files_task_ended(t->h);
     t->state = WTASK_DEAD;
     switch_to(&kernel_task);
     for (;;)
@@ -348,9 +350,19 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
     /* the host test has its applications built in */
     memset(&img, 0, sizeof(img));
     img.entry = (void *)win_host_app(prog);
-    int rc = img.entry ? 0 : -1;
+    int rc = 0;
+    if (!img.entry) {               /* a file that is not one of them: a DOS program */
+        FILE *f = fopen(path, "rb");
+        rc = f ? -2 : -1;
+        if (f)
+            fclose(f);
+    }
 #else
     int rc = win_ez_load(path, &img);
+    if (!rc && !win_ez_entry_is_app(img.entry)) {
+        win_free(img.raw);          /* a DOS program or a driver */
+        rc = -2;
+    }
 #endif
     if (rc == -1)
         return 2;                   /* file not found */
