@@ -109,8 +109,12 @@ static LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
                      220, 118, 70, 26, h, (HMENU)ID_ADD, hinst, NULL);
         hlist = CreateWindow("LISTBOX", "", WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | LBS_NOTIFY,
                              10, 150, 200, 100, h, (HMENU)ID_LIST, hinst, NULL);
-        CreateWindow("BUTTON", "Tick timer", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                     220, 154, 120, 20, h, (HMENU)ID_CHECK, hinst, NULL);
+        {
+            HWND chk = CreateWindow("BUTTON", "Tick timer", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                    220, 154, 120, 20, h, (HMENU)ID_CHECK, hinst, NULL);
+            SendMessage(chk, BM_SETCHECK, 1, 0);
+            SetTimer(h, 1, 500, NULL);
+        }
         for (int i = 1; i <= 9; i++) {
             char s[32];
             wsprintf(s, "Item number %d", i);

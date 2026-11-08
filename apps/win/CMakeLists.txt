@@ -53,6 +53,7 @@ add_executable(${PROJECT_NAME}
     ${WIN_USER}
     ${WIN_DRV}
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime/winmain_ez.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/runtime/ez_process.c
     ${APP_SRC}
 )
 

@@ -1,15 +1,20 @@
 /*
- * input_dos.c - input driver: native keyboard events, INT 33h mouse,
- * time from the emulator's microsecond counter.
+ * input_dos.c - input driver: keyboard through the guest BIOS, INT 33h
+ * mouse, time from the emulator's microsecond counter.
  *
- * Keyboard events arrive as Linux input keycodes; codes 1..95 equal the
- * PC set 1 scancodes, the extended keys are translated by a table.
+ * Keys are taken from the BIOS keyboard buffer (INT 16h) and the shift
+ * flags at 40:17h, i.e. after the firmware has seen them. Reading the raw
+ * host queue (dos_keyboard_get_event) would race the firmware for every
+ * key: its hot keys (Win+F11 and others) and the NumPad mouse would lose
+ * the keys we took. The BIOS gives no key releases, so every key is
+ * reported as a press immediately followed by a release; Shift, Ctrl and
+ * Alt follow the flag bits and are exact.
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
 #include <stdint.h>
 #include "dos.h"
-#include "dos_keyboard.h"
+#include "dos_guest_ptr.h"
 #include "dos_yield.h"
 #include "windows.h"
 #include "winddi.h"
@@ -28,21 +33,46 @@ static const uint8_t sc_vk[0x59] = {
     0, 0, 0xE2, VK_F11, VK_F12,
 };
 
-/* Linux keycodes 96..127 -> (vk, set 1 scancode with 0x100 = extended). */
-static const struct { uint8_t vk; uint16_t sc; } ext_keys[32] = {
-    { VK_RETURN, 0x11C }, { VK_CONTROL, 0x11D }, { VK_DIVIDE, 0x135 }, { VK_SNAPSHOT, 0x137 },
-    { VK_MENU, 0x138 }, { 0, 0 }, { VK_HOME, 0x147 }, { VK_UP, 0x148 },
-    { VK_PRIOR, 0x149 }, { VK_LEFT, 0x14B }, { VK_RIGHT, 0x14D }, { VK_END, 0x14F },
-    { VK_DOWN, 0x150 }, { VK_NEXT, 0x151 }, { VK_INSERT, 0x152 }, { VK_DELETE, 0x153 },
-    { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0, 0 }, { VK_PAUSE, 0x45 },
-    { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0x5B, 0x15B }, { 0x5C, 0x15C }, { 0x5D, 0x15D },
-};
+/* Extended BIOS codes (AL = 0 or E0h) -> virtual key; 0x100 marks keys
+ * that come from the grey block (E0 prefix). */
+static int ext_vk(uint8_t sc, uint8_t al, int *xsc)
+{
+    static const struct { uint8_t sc; uint8_t vk; } nav[] = {
+        { 0x47, VK_HOME }, { 0x48, VK_UP }, { 0x49, VK_PRIOR }, { 0x4B, VK_LEFT },
+        { 0x4D, VK_RIGHT }, { 0x4F, VK_END }, { 0x50, VK_DOWN }, { 0x51, VK_NEXT },
+        { 0x52, VK_INSERT }, { 0x53, VK_DELETE }, { 0x4C, VK_CLEAR },
+        /* Ctrl+ and Alt+ variants of the same keys */
+        { 0x77, VK_HOME }, { 0x8D, VK_UP }, { 0x84, VK_PRIOR }, { 0x73, VK_LEFT },
+        { 0x74, VK_RIGHT }, { 0x75, VK_END }, { 0x91, VK_DOWN }, { 0x76, VK_NEXT },
+        { 0x92, VK_INSERT }, { 0x93, VK_DELETE },
+        { 0x97, VK_HOME }, { 0x98, VK_UP }, { 0x99, VK_PRIOR }, { 0x9B, VK_LEFT },
+        { 0x9D, VK_RIGHT }, { 0x9F, VK_END }, { 0xA0, VK_DOWN }, { 0xA1, VK_NEXT },
+        { 0xA2, VK_INSERT }, { 0xA3, VK_DELETE },
+        { 0x94, VK_TAB }, { 0xA5, VK_TAB }, { 0xA6, VK_RETURN }, { 0xA4, VK_DIVIDE },
+        { 0x85, VK_F11 }, { 0x86, VK_F12 }, { 0x87, VK_F11 }, { 0x88, VK_F12 },
+        { 0x89, VK_F11 }, { 0x8A, VK_F12 }, { 0x8B, VK_F11 }, { 0x8C, VK_F12 },
+    };
+    *xsc = (al == 0xE0) ? 0x100 : 0;
+    for (unsigned i = 0; i < sizeof(nav) / sizeof(nav[0]); i++)
+        if (nav[i].sc == sc)
+            return nav[i].vk;
+    if (sc >= 0x54 && sc <= 0x71)                 /* Shift/Ctrl/Alt + F1..F10 */
+        return VK_F1 + (sc - 0x54) % 10;
+    if (sc >= 0x78 && sc <= 0x83) {               /* Alt + 1..0 - = */
+        static const uint8_t d[12] = { '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', 0xBD, 0xBB };
+        return d[sc - 0x78];
+    }
+    if (sc < sizeof(sc_vk))
+        return sc_vk[sc];
+    return 0;
+}
 
 /* The microsecond counter wraps every ~71 minutes: accumulate deltas. */
 static uint32_t last_us, ms_acc, us_rem;
 static uint32_t update_ticks(void);
 
 static int has_mouse;
+static uint8_t kb_flags;        /* last 40:17h seen */
 static int last_x = -1, last_y = -1;
 static unsigned last_btn;
 
@@ -61,10 +91,7 @@ static int dos_in_enable(int w, int h)
         int386(0x33, &r, &r);
     }
     last_us = dos_yield();
-    /* drop keys typed before start */
-    dos_keyboard_event_t ev;
-    while (dos_keyboard_get_event(&ev, DOS_KEYBOARD_EVENT_CONSUME) > 0)
-        ;
+    kb_flags = 0x20;            /* what USER starts with: NumLock on */
     return 0;
 }
 
@@ -80,19 +107,46 @@ static void dos_in_disable(void)
 static void dos_in_poll(void)
 {
     update_ticks();
-    dos_keyboard_event_t ev;
-    while (dos_keyboard_get_event(&ev, DOS_KEYBOARD_EVENT_CONSUME) > 0) {
-        int code = ev.keycode, vk = 0, sc = 0;
-        if (code > 0 && code < (int)sizeof(sc_vk)) {
-            vk = sc_vk[code];
-            sc = code;
-        } else if (code >= 96 && code <= 127) {
-            vk = ext_keys[code - 96].vk;
-            sc = ext_keys[code - 96].sc;
+    volatile uint8_t *bda = (volatile uint8_t *)dos_guest_far_ptr(0x40, 0);
+    uint8_t f = bda[0x17], ch = f ^ kb_flags;
+    /* lock keys: one press toggles USER's state */
+    if (ch & 0x20) { win_ddi_key_event(VK_NUMLOCK, 0x45, 1); win_ddi_key_event(VK_NUMLOCK, 0x45, 0); }
+    if (ch & 0x40) { win_ddi_key_event(VK_CAPITAL, 0x3A, 1); win_ddi_key_event(VK_CAPITAL, 0x3A, 0); }
+    if (ch & 0x10) { win_ddi_key_event(VK_SCROLL, 0x46, 1); win_ddi_key_event(VK_SCROLL, 0x46, 0); }
+    /* modifiers going down before the keys, going up after them */
+    if ((ch & 0x03) && (f & 0x03)) win_ddi_key_event(VK_SHIFT, 0x2A, 1);
+    if ((ch & 0x04) && (f & 0x04)) win_ddi_key_event(VK_CONTROL, 0x1D, 1);
+    if ((ch & 0x08) && (f & 0x08)) win_ddi_key_event(VK_MENU, 0x38, 1);
+
+    while (*(volatile uint16_t *)&bda[0x1A] != *(volatile uint16_t *)&bda[0x1C]) {
+        union REGS r = { 0 };
+        r.h.ah = 0x10;
+        int386(0x16, &r, &r);
+        uint8_t sc = r.h.ah, al = r.h.al;
+        int vk, xsc = 0;
+        if (al == 0 || al == 0xE0) {
+            vk = ext_vk(sc, al, &xsc);
+        } else if (sc == 0xE0) {              /* grey Enter and / */
+            vk = al == '/' ? VK_DIVIDE : VK_RETURN;
+            xsc = 0x100;
+            sc = al == '/' ? 0x35 : 0x1C;
+        } else if (sc >= 0x47 && sc <= 0x53 && sc != 0x4A && sc != 0x4E &&
+                   ((al >= '0' && al <= '9') || al == '.' || al == ',')) {
+            vk = al == '.' || al == ',' ? VK_DECIMAL : VK_NUMPAD0 + (al - '0');
+        } else {
+            vk = sc < sizeof(sc_vk) ? sc_vk[sc] : 0;
         }
-        if (vk)
-            win_ddi_key_event(vk, sc, ev.is_down);
+        if (!vk)
+            continue;
+        win_ddi_key_event(vk, sc | xsc, 1);
+        win_ddi_key_event(vk, sc | xsc, 0);
     }
+
+    if ((ch & 0x08) && !(f & 0x08)) win_ddi_key_event(VK_MENU, 0x38, 0);
+    if ((ch & 0x04) && !(f & 0x04)) win_ddi_key_event(VK_CONTROL, 0x1D, 0);
+    if ((ch & 0x03) && !(f & 0x03)) win_ddi_key_event(VK_SHIFT, 0x2A, 0);
+    kb_flags = f;
+
     if (has_mouse) {
         union REGS r = { 0 };
         r.w.ax = 0x0003;
