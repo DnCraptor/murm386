@@ -25,7 +25,7 @@ static void cur_rect(RECT *r)
 static void flush(const RECT *r)
 {
     RECT s = { 0, 0, win_sys.screen.width, win_sys.screen.height }, x;
-    if (win_sys.disp && win_sys.disp->flush && IntersectRect(&x, r, &s))
+    if (win_sys.disp && win_sys.disp->flush && !win_sys.screen_real && IntersectRect(&x, r, &s))
         win_sys.disp->flush(x.left, x.top, x.right, x.bottom);
 }
 

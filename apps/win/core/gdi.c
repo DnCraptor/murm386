@@ -1056,7 +1056,7 @@ void gdi_end_draw(wdc *dc, const RECT *b)
         return;
     RECT r;
     RECT scr = { 0, 0, win_sys.screen.width, win_sys.screen.height };
-    if (win_sys.disp && win_sys.disp->flush && IntersectRect(&r, b, &scr) &&
+    if (win_sys.disp && win_sys.disp->flush && !win_sys.screen_real && IntersectRect(&r, b, &scr) &&
         IntersectRect(&r, &r, &dc_eff(dc)->box))
         win_sys.disp->flush(r.left, r.top, r.right, r.bottom);
     cursor_unexclude();

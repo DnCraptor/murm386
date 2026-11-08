@@ -7,8 +7,11 @@
  * 8 bpp, plain or RLE8, at most 236 colours: they go into the free middle
  * of the hardware palette (10..245) while the logo is up. It is centred
  * on the colour of its top-left pixel, scaled down when it is larger than
- * the screen, and stays for SYSTEM.INI [boot] logo.time milliseconds
- * (2000; 0: no logo). "WINN :" starts without it, as "WIN :" did.
+ * the screen. The shell loads and paints behind it: drawing goes to a copy
+ * of the screen until the system is first idle (win_logo_end, from the
+ * kernel loop) and the logo has been up for SYSTEM.INI [boot] logo.time
+ * milliseconds (2000; 0: no logo); then the copy goes to the screen in one
+ * piece. "WINN :" starts without it, as "WIN :" did.
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
@@ -253,10 +256,20 @@ void win_logo_show(void)
     if (d->flush)
         d->flush(0, 0, win_sys.screen.width, win_sys.screen.height);
     shown_at = GetTickCount();
+    /* from here on the screen is drawn in a copy, behind the logo */
+    size_t size = (size_t)win_sys.screen.pitch * (size_t)win_sys.screen.height;
+    uint8_t *copy = (uint8_t *)win_alloc(size);     /* zeroed */
+    if (copy) {
+        win_sys.screen_real = win_sys.screen.bits;
+        win_sys.screen.bits = copy;
+    } else {
+        win_logo_end();                 /* no memory for it: the logo goes first */
+    }
 }
 
-/* The logo has been up long enough: a black screen, the system palette
- * back, the desktop comes next. */
+/* The system is idle (the shell has painted) or ending: once the logo has
+ * been up long enough, the system palette comes back and the screen drawn
+ * behind it replaces it. */
 void win_logo_end(void)
 {
     if (!shown)
@@ -264,11 +277,19 @@ void win_logo_end(void)
     shown = 0;
     while (GetTickCount() - shown_at < hold_ms && win_sys.input)
         win_sys.input->idle();
-    const win_surface *s = &win_sys.screen;
-    for (int y = 0; y < s->height; y++)
-        memset(s->bits + (long)y * s->pitch, 0, (size_t)s->width);
+    win_surface *s = &win_sys.screen;
+    gdi_palette_reset();
+    if (win_sys.screen_real) {
+        uint8_t *copy = s->bits;
+        memcpy(win_sys.screen_real, copy, (size_t)s->pitch * (size_t)s->height);
+        s->bits = win_sys.screen_real;
+        win_sys.screen_real = NULL;
+        win_free(copy);
+    } else {
+        for (int y = 0; y < s->height; y++)
+            memset(s->bits + (long)y * s->pitch, 0, (size_t)s->width);
+    }
     if (win_sys.disp->flush)
         win_sys.disp->flush(0, 0, s->width, s->height);
-    gdi_palette_reset();
     cursor_show(TRUE);
 }

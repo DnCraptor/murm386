@@ -187,6 +187,7 @@ typedef struct wsys {
     const win_input_driver   *input;
     wsurf     screen;
     int       screen_ok;
+    uint8_t  *screen_real;      /* the logo is up: drawing goes to a copy, screen.bits */
     PALETTEENTRY syspal[256];
     HGDIOBJ   stock[17];
     /* software cursor */

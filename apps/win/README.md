@@ -97,10 +97,12 @@ After adding an API function, run `sdk/gen_exports.py` (it updates
 
 ## Start-up logo
 
-Between the display switching on and the shell starting, WINN shows
-`WINLOGO.BMP` (256 colours) or `WINLOG16.BMP` (16-colour displays) from
-its directory, centred, scaled down if it is larger than the screen, for
-SYSTEM.INI [boot] `logo.time` milliseconds (2000; 0: none). `WINN :`
+While the shell loads, WINN shows `WINLOGO.BMP` (256 colours) or
+`WINLOG16.BMP` (16-colour displays) from its directory, centred, scaled
+down if it is larger than the screen. The shell starts and paints behind
+it, into a copy of the screen; when the system is first idle, and the logo
+has been up for SYSTEM.INI [boot] `logo.time` milliseconds (2000; 0: no
+logo), the copy replaces it at once. `WINN :`
 starts without it, as `WIN :` did. The files are 8 bpp BMPs, plain or
 RLE8, of at most 236 colours (they take the free middle of the palette
 while the logo is up); `logo/mklogo.py` makes both from `logo/logo.png`.

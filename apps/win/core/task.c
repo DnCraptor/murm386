@@ -297,8 +297,11 @@ void task_kernel_loop(void)
         if (!IsTask(shell_task))
             break;
         user_poll_input();
-        if (!task_yield() && win_sys.input)
-            win_sys.input->idle();
+        if (!task_yield()) {
+            win_logo_end();             /* the shell has painted behind the logo */
+            if (win_sys.input)
+                win_sys.input->idle();
+        }
     }
     /* the shell is gone: Windows ends, every task gets WM_QUIT */
     for (int round = 0; round < 1000 && GetNumTasks(); round++) {

@@ -36,6 +36,7 @@ static int run(const char *cmd)
         return 1;
     char msg[160];
     wsprintf(msg, "Cannot run %s: %s.", cmd, exec_error(r));
+    win_logo_end();                 /* the message must be seen */
     MessageBox(0, msg, "Windows", MB_OK | MB_ICONSTOP);
     return 0;
 }
@@ -61,8 +62,7 @@ int main(int argc, char **argv)
         printf("Windows: display start failed (%d)\n", r);
         return 1;
     }
-    win_logo_show();
-    win_logo_end();
+    win_logo_show();                /* up until the shell is first idle */
     /* no shell= at all: PROGMAN.EXE, as in Windows 3.x, if it is there;
      * "shell=" with nothing: no shell */
     char shell[80];
@@ -77,6 +77,8 @@ int main(int argc, char **argv)
         started += run(shell);
     if (cmdline[0])
         started += run(cmdline);
+    if (!started)
+        win_logo_end();
     if (!started && !shell[0] && !cmdline[0])
         MessageBox(0, "Nothing to run: give a program on the command line\n"
                       "(WINN DEMO) or set shell= in [boot] of SYSTEM.INI.",
