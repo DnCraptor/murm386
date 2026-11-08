@@ -631,6 +631,7 @@ BOOL WINAPI ExitWindows(DWORD reserved, UINT code)
 /* A task ended: its windows, timers and messages go. */
 void user_task_ended(HTASK task)
 {
+    user_clipboard_task_ended(task);
     for (int again = 1; again;) {
         again = 0;
         for (wwnd *w = U.desktop->child; w; w = w->next)

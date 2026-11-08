@@ -706,6 +706,32 @@ DWORD   WINAPI GetDialogBaseUnits(void);
 #define WM_QUERYOPEN        0x0013
 #define WM_CHILDACTIVATE    0x0022
 
+/* clipboard */
+#define WM_CUT              0x0300
+#define WM_COPY             0x0301
+#define WM_PASTE            0x0302
+#define WM_CLEAR            0x0303
+#define WM_UNDO             0x0304
+#define WM_RENDERFORMAT     0x0305
+#define WM_RENDERALLFORMATS 0x0306
+#define WM_DESTROYCLIPBOARD 0x0307
+#define CF_TEXT             1
+#define CF_BITMAP           2
+#define CF_OEMTEXT          7
+
+BOOL    WINAPI OpenClipboard(HWND h);
+BOOL    WINAPI CloseClipboard(void);
+BOOL    WINAPI EmptyClipboard(void);
+HWND    WINAPI GetClipboardOwner(void);
+HANDLE  WINAPI SetClipboardData(UINT fmt, HANDLE data);
+HANDLE  WINAPI GetClipboardData(UINT fmt);
+int     WINAPI CountClipboardFormats(void);
+UINT    WINAPI EnumClipboardFormats(UINT fmt);
+UINT    WINAPI RegisterClipboardFormat(LPCSTR name);
+int     WINAPI GetClipboardFormatName(UINT fmt, LPSTR buf, int size);
+BOOL    WINAPI IsClipboardFormatAvailable(UINT fmt);
+UINT    WINAPI RegisterWindowMessage(LPCSTR name);
+
 /* MDI */
 #define WM_MDICREATE        0x0220
 #define WM_MDIDESTROY       0x0221
@@ -785,6 +811,7 @@ BOOL    WINAPI TranslateMDISysAccel(HWND client, LPMSG msg);
 #define EM_UNDO             (WM_USER + 23)
 #define EM_LINEFROMCHAR     (WM_USER + 25)
 #define EM_SETPASSWORDCHAR  (WM_USER + 28)
+#define EM_EMPTYUNDOBUFFER  (WM_USER + 29)
 #define EN_UPDATE           0x0400
 #define EN_ERRSPACE         0x0500
 #define EN_MAXTEXT          0x0501

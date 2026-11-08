@@ -1,5 +1,5 @@
 # Program Manager as the shell: run with "./winhost scripts/progman.txt PROGMAN"
-# after "rm -f hostwin/PROGMAN.INI" (the first start fills the Main group).
+# after "rm -f HOSTWIN/PROGMAN.INI" (the first start fills the Main group).
 wait 100
 snap pm_start.ppm
 # File > New Program Group

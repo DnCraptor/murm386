@@ -1,0 +1,65 @@
+# Notepad: run with "./winhost scripts/notepad.txt 'NOTEPAD HOSTWIN/README.TXT'"
+wait 100
+snap np_open.ppm
+# copy the first word, paste it at the end of the line
+keydown CTRL
+key HOME
+keydown SHIFT
+key RIGHT
+keyup SHIFT
+key C
+keyup CTRL
+key END
+keydown CTRL
+key V
+keyup CTRL
+wait 30
+snap np_paste.ppm
+# undo the paste
+keydown CTRL
+key Z
+keyup CTRL
+wait 30
+# Edit > Word Wrap
+keydown ALT
+key E
+keyup ALT
+key W
+wait 50
+snap np_wrap.ppm
+# Search > Find "long"
+keydown ALT
+key S
+keyup ALT
+key F
+wait 50
+type long
+key RETURN
+wait 50
+snap np_find.ppm
+key ESC
+wait 30
+# File > Save As OUT.TXT
+keydown ALT
+key F
+keyup ALT
+key A
+wait 50
+snap np_saveas.ppm
+type OUT
+key RETURN
+wait 50
+# File > Open: the list now has out.txt
+keydown ALT
+key F
+keyup ALT
+key O
+wait 50
+snap np_openlist.ppm
+key ESC
+wait 30
+keydown ALT
+key F4
+keyup ALT
+wait 50
+exit

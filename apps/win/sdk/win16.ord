@@ -1415,3 +1415,12 @@ USER 929 IsCharArabic
 USER 930 MessageBoxEx
 USER 1000 SetProcessDefaultLayout
 USER 1001 GetProcessDefaultLayout
+COMMDLG 1 GetOpenFileName
+COMMDLG 2 GetSaveFileName
+COMMDLG 5 ChooseColor
+COMMDLG 11 FindText
+COMMDLG 12 ReplaceText
+COMMDLG 15 ChooseFont
+COMMDLG 20 PrintDlg
+COMMDLG 26 CommDlgExtendedError
+COMMDLG 27 GetFileTitle

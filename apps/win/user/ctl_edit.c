@@ -2,8 +2,10 @@
  * ctl_edit.c - EDIT window class: single and multi-line text editing.
  *
  * Text is one buffer with CR LF line breaks, as in Windows. Multi-line
- * controls without ES_AUTOHSCROLL wrap at the right edge; line starts are
- * recomputed after each change (edit controls hold little text here).
+ * controls without ES_AUTOHSCROLL wrap at the right edge, with it they
+ * scroll sideways; line starts are recomputed after each change. Tabs stop
+ * every 8 average characters. Cut, copy and paste go through the clipboard;
+ * one step of undo (a run of typing is one step), undo again redoes.
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
@@ -27,9 +29,13 @@ typedef struct {
     char  pwchar;
     int   lh;                   /* line height */
     int   goal_x;               /* column memory for up/down */
+    int   maxw;                 /* widest line (multi line, no wrap) */
+    short cw[256];              /* character widths of the font */
+    int   tabw, cw_ok;
+    char *u_text;               /* undo: the text before the last change */
+    int   u_len, u_caret, u_anchor, u_valid;
+    int   u_group, op_typing;   /* typing goes into one undo step */
 } wedit;
-
-static char clipboard[1024];
 
 static DWORD estyle(HWND h) { return (DWORD)GetWindowLong(h, GWL_STYLE); }
 static int multi(HWND h) { return (estyle(h) & ES_MULTILINE) != 0; }
@@ -61,16 +67,41 @@ static HDC edit_dc(HWND h)
     return dc;
 }
 
+static void measure(HWND h, wedit *e)
+{
+    HDC dc = edit_dc(h);
+    for (int c = 0; c < 256; c++) {
+        char ch = (char)c;
+        SIZE sz;
+        GetTextExtentPoint(dc, &ch, 1, &sz);
+        e->cw[c] = (short)sz.cx;
+    }
+    TEXTMETRIC tm;
+    GetTextMetrics(dc, &tm);
+    ReleaseDC(h, dc);
+    e->tabw = 8 * (tm.tmAveCharWidth > 0 ? tm.tmAveCharWidth : 8);
+    e->cw['\t'] = 0;
+    e->cw_ok = 1;
+}
+
+/* advance of character c at x pixels from the line start */
+static int adv(wedit *e, unsigned char c, int x)
+{
+    if (e->pwchar)
+        return e->cw[(unsigned char)e->pwchar];
+    if (c == '\t')
+        return e->tabw - x % e->tabw;
+    return e->cw[c];
+}
+
+/* width of n characters from a line start */
 static int width_of(HDC dc, wedit *e, const char *s, int n)
 {
-    if (e->pwchar) {
-        SIZE c;
-        GetTextExtentPoint(dc, &e->pwchar, 1, &c);
-        return c.cx * n;
-    }
-    SIZE sz;
-    GetTextExtentPoint(dc, s, n, &sz);
-    return sz.cx;
+    (void)dc;
+    int x = 0;
+    for (int i = 0; i < n; i++)
+        x += adv(e, (unsigned char)s[i], x);
+    return x;
 }
 
 /* ---------------------------------------------------------------- lines */
@@ -96,6 +127,7 @@ static void relayout(HWND h, wedit *e)
         return;
     }
     int wrap = !(estyle(h) & ES_AUTOHSCROLL);
+    e->maxw = 0;
     RECT tr;
     text_rect(h, &tr);
     int width = tr.right - tr.left;
@@ -126,6 +158,11 @@ static void relayout(HWND h, wedit *e)
             push_line(e, brk);
             i = brk;
             continue;
+        }
+        if (!wrap) {
+            int lw = width_of(dc, e, e->text + start, end - start);
+            if (lw > e->maxw)
+                e->maxw = lw;
         }
         i = end;
         if (i < e->len && e->text[i] == '\r') i++;
@@ -171,7 +208,7 @@ static void pos_to_xy(HWND h, HDC dc, wedit *e, int pos, int *x, int *y)
     text_rect(h, &tr);
     int l = line_of(e, pos);
     int s = e->lines[l];
-    *x = tr.left + width_of(dc, e, e->text + s, pos - s) - (multi(h) ? 0 : e->xscroll);
+    *x = tr.left + width_of(dc, e, e->text + s, pos - s) - e->xscroll;
     *y = multi(h) ? (l - e->top) * e->lh : (tr.bottom - tr.top - e->lh) / 2;
     if (!multi(h) && *y < 0)
         *y = 0;
@@ -185,17 +222,15 @@ static int xy_to_pos(HWND h, wedit *e, int x, int y)
     if (l < 0) l = 0;
     if (l >= e->nlines) l = e->nlines - 1;
     int s = e->lines[l], end = line_end(e, l);
-    HDC dc = edit_dc(h);
-    int px = x - tr.left + (multi(h) ? 0 : e->xscroll);
+    int px = x - tr.left + e->xscroll;
     int pos = s, acc = 0;
     while (pos < end) {
-        int cw = width_of(dc, e, e->text + pos, 1);
+        int cw = adv(e, (unsigned char)e->text[pos], acc);
         if (acc + cw / 2 > px)
             break;
         acc += cw;
         pos++;
     }
-    ReleaseDC(h, dc);
     return pos;
 }
 
@@ -241,8 +276,26 @@ static void paint(HWND h, HDC dc, wedit *e)
                 int n = b - a > 127 ? 127 : b - a;
                 memset(stars, e->pwchar, (size_t)n);
                 TextOut(dc, xa, y, stars, n);
-            } else {
-                TextOut(dc, xa, y, e->text + a, b - a);
+                continue;
+            }
+            /* pieces between tabs; a tab is filled with the background */
+            int lx = xa - x;            /* from the line start */
+            for (int p = a; p < b;) {
+                int q = p;
+                while (q < b && e->text[q] != '\t')
+                    q++;
+                if (q > p) {
+                    TextOut(dc, x + lx, y, e->text + p, q - p);
+                    lx += width_of(dc, e, e->text + p, q - p);
+                }
+                if (q < b) {
+                    int tw = adv(e, '\t', lx);
+                    RECT tr = { x + lx, y, x + lx + tw, y + e->lh };
+                    ExtTextOut(dc, x + lx, y, ETO_OPAQUE, &tr, "", 0, NULL);
+                    lx += tw;
+                    q++;
+                }
+                p = q;
             }
         }
     }
@@ -260,37 +313,60 @@ static void redraw(HWND h)
     ShowCaret(h);
 }
 
+static int hscroll_max(HWND h, wedit *e)
+{
+    RECT tr;
+    text_rect(h, &tr);
+    int m = e->maxw + 8 - (tr.right - tr.left);
+    return m > 0 ? m : 0;
+}
+
 static void update_scrollbar(HWND h, wedit *e)
 {
-    if (!multi(h) || !(estyle(h) & WS_VSCROLL))
+    if (!multi(h))
         return;
-    int maxtop = e->nlines - visible_lines(h, e);
-    if (maxtop < 0) maxtop = 0;
-    SetScrollRange(h, SB_VERT, 0, maxtop > 0 ? maxtop : 1, FALSE);
-    SetScrollPos(h, SB_VERT, e->top, TRUE);
+    if (estyle(h) & WS_VSCROLL) {
+        int maxtop = e->nlines - visible_lines(h, e);
+        if (maxtop < 0) maxtop = 0;
+        SetScrollRange(h, SB_VERT, 0, maxtop > 0 ? maxtop : 1, FALSE);
+        SetScrollPos(h, SB_VERT, e->top, TRUE);
+    }
+    if (estyle(h) & WS_HSCROLL) {
+        int m = hscroll_max(h, e);
+        SetScrollRange(h, SB_HORZ, 0, m > 0 ? m : 1, FALSE);
+        SetScrollPos(h, SB_HORZ, e->xscroll, TRUE);
+    }
 }
 
 /* Keep the caret visible; returns 1 if the view moved. */
 static int scroll_to_caret(HWND h, wedit *e)
 {
     int moved = 0;
+    int s = 0;
     if (multi(h)) {
         int l = line_of(e, e->caret), vis = visible_lines(h, e);
         if (l < e->top) { e->top = l; moved = 1; }
         if (l >= e->top + vis) { e->top = l - vis + 1; moved = 1; }
-        if (moved)
-            update_scrollbar(h, e);
-        return moved;
+        s = e->lines[l];
+        if (!(estyle(h) & ES_AUTOHSCROLL)) {
+            if (e->xscroll) { e->xscroll = 0; moved = 1; }
+            if (moved)
+                update_scrollbar(h, e);
+            return moved;
+        }
     }
     RECT tr;
     text_rect(h, &tr);
-    HDC dc = edit_dc(h);
-    int x = width_of(dc, e, e->text, e->caret);
-    ReleaseDC(h, dc);
+    int x = width_of(0, e, e->text + s, e->caret - s);
     int w = tr.right - tr.left;
-    if (x - e->xscroll < 0) { e->xscroll = x - w / 4; moved = 1; }
-    if (x - e->xscroll > w - 1) { e->xscroll = x - w + w / 4; moved = 1; }
+    int old = e->xscroll;
+    if (x - e->xscroll < 0) e->xscroll = x - w / 4;
+    if (x - e->xscroll > w - 1) e->xscroll = x - w + w / 4;
     if (e->xscroll < 0) e->xscroll = 0;
+    if (e->xscroll != old)
+        moved = 1;
+    if (moved)
+        update_scrollbar(h, e);
     return moved;
 }
 
@@ -331,6 +407,22 @@ static int ensure_cap(wedit *e, int n)
     return 1;
 }
 
+/* keep the text as it is now for EM_UNDO */
+static void snapshot(wedit *e)
+{
+    char *t = (char *)win_realloc(e->u_text, (size_t)e->len + 1);
+    if (!t) {
+        e->u_valid = 0;
+        return;
+    }
+    memcpy(t, e->text, (size_t)e->len + 1);
+    e->u_text = t;
+    e->u_len = e->len;
+    e->u_caret = e->caret;
+    e->u_anchor = e->anchor;
+    e->u_valid = 1;
+}
+
 /* Replace the selection with s (n bytes); single-line drops line breaks. */
 static int replace_sel(HWND h, wedit *e, const char *s, int n)
 {
@@ -354,6 +446,10 @@ static int replace_sel(HWND h, wedit *e, const char *s, int n)
     }
     if (!ensure_cap(e, nl))
         return 0;
+    if (!(e->op_typing && e->u_group))
+        snapshot(e);
+    e->u_group = e->op_typing;
+    e->op_typing = 0;
     memmove(e->text + a + n, e->text + b, (size_t)(e->len - b));
     for (int i = 0; i < n; i++) {
         char c = s[i];
@@ -386,15 +482,60 @@ static void set_text(HWND h, wedit *e, const char *s)
     replace_sel(h, e, s ? s : "", s ? lstrlen(s) : 0);
     e->anchor = e->caret = 0;
     e->modified = 0;
+    e->u_valid = 0;                 /* new text: nothing to undo */
     scroll_to_caret(h, e);
 }
 
-static void copy_sel(wedit *e)
+/* undo: swap the text with the one kept (so undo again redoes) */
+static int undo(HWND h, wedit *e)
+{
+    if (!e->u_valid || (estyle(h) & ES_READONLY))
+        return FALSE;
+    char *t = e->u_text;
+    int len = e->u_len, caret = e->u_caret, anchor = e->u_anchor;
+    e->u_text = e->text;
+    e->u_len = e->len;
+    e->u_caret = e->caret;
+    e->u_anchor = e->anchor;
+    e->text = t;
+    e->len = len;
+    e->cap = len + 1;               /* snapshot() sized it exactly */
+    e->caret = caret > len ? len : caret;
+    e->anchor = anchor > len ? len : anchor;
+    e->u_group = 0;
+    e->modified = 1;
+    relayout(h, e);
+    update_scrollbar(h, e);
+    changed(h, e);
+    return TRUE;
+}
+
+static void copy_sel(HWND h, wedit *e)
 {
     int a = smin(e), b = smax(e);
-    int n = b - a < (int)sizeof(clipboard) - 1 ? b - a : (int)sizeof(clipboard) - 1;
-    memcpy(clipboard, e->text + a, (size_t)n);
-    clipboard[n] = 0;
+    if (b > a && !e->pwchar)
+        user_clipboard_put_text(h, e->text + a, b - a);
+}
+
+static void paste(HWND h, wedit *e)
+{
+    if (estyle(h) & ES_READONLY)
+        return;
+    char *t = user_clipboard_get_text(h);
+    if (!t)
+        return;
+    replace_sel(h, e, t, lstrlen(t));
+    win_free(t);
+    changed(h, e);
+}
+
+static void cut(HWND h, wedit *e)
+{
+    if ((estyle(h) & ES_READONLY) || smin(e) == smax(e))
+        return;
+    copy_sel(h, e);
+    replace_sel(h, e, "", 0);
+    changed(h, e);
 }
 
 static int is_word(char c) { return c != ' ' && c != '\t' && c != '\r' && c != '\n'; }
@@ -454,7 +595,7 @@ static void key_down(HWND h, wedit *e, int vk)
         if (ro)
             return;
         if (shift && smin(e) != smax(e)) {
-            copy_sel(e);
+            copy_sel(h, e);
         } else if (smin(e) == smax(e)) {
             if (p >= e->len)
                 return;
@@ -466,17 +607,16 @@ static void key_down(HWND h, wedit *e, int vk)
         return;
     case VK_INSERT:
         if (ctrl)
-            copy_sel(e);
-        else if (shift && !ro) {
-            replace_sel(h, e, clipboard, lstrlen(clipboard));
-            changed(h, e);
-        }
+            copy_sel(h, e);
+        else if (shift)
+            paste(h, e);
         return;
     default:
         return;
     }
     if (!keep_goal)
         e->goal_x = -1;
+    e->u_group = 0;
     e->caret = p;
     if (!shift)
         e->anchor = p;
@@ -488,18 +628,16 @@ static void char_in(HWND h, wedit *e, unsigned char c)
     int ro = (estyle(h) & ES_READONLY) != 0;
     switch (c) {
     case 3:             /* ^C */
-        copy_sel(e);
+        copy_sel(h, e);
         return;
     case 24:            /* ^X */
-        if (ro) return;
-        copy_sel(e);
-        replace_sel(h, e, "", 0);
-        changed(h, e);
+        cut(h, e);
         return;
     case 22:            /* ^V */
-        if (ro) return;
-        replace_sel(h, e, clipboard, lstrlen(clipboard));
-        changed(h, e);
+        paste(h, e);
+        return;
+    case 26:            /* ^Z */
+        undo(h, e);
         return;
     case 8:
         if (ro) return;
@@ -531,6 +669,7 @@ static void char_in(HWND h, wedit *e, unsigned char c)
             return;
         {
             char s = (char)c;
+            e->op_typing = 1;
             replace_sel(h, e, &s, 1);
         }
         e->goal_x = -1;
@@ -555,6 +694,7 @@ LRESULT CALLBACK user_edit_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         e->lh = 16;
         if (estyle(h) & ES_PASSWORD)
             e->pwchar = '*';
+        measure(h, e);
         ensure_cap(e, 0);
         e->text[0] = 0;
         CREATESTRUCT *cs = (CREATESTRUCT *)(intptr_t)lp;
@@ -565,6 +705,7 @@ LRESULT CALLBACK user_edit_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         if (e) {
             win_free(e->text);
             win_free(e->lines);
+            win_free(e->u_text);
             win_free(e);
         }
         user_ctl_set_data(h, NULL);
@@ -589,6 +730,7 @@ LRESULT CALLBACK user_edit_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     case WM_SETFONT:
         SetProp(h, MAKEINTATOM(1), (HANDLE)wp);
         if (e) {
+            measure(h, e);
             relayout(h, e);
             if (lp)
                 InvalidateRect(h, NULL, TRUE);
@@ -638,6 +780,7 @@ LRESULT CALLBACK user_edit_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             e->anchor = e->caret;
         e->tracking = 1;
         e->goal_x = -1;
+        e->u_group = 0;
         SetCapture(h);
         after_move(h, e, 0);
         return 0;
@@ -733,7 +876,7 @@ LRESULT CALLBACK user_edit_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     case EM_LIMITTEXT:
         if (e)
-            e->limit = wp ? (int)wp : 30000;
+            e->limit = wp ? (int)wp : 65535;
         return 0;
     case EM_SETREADONLY: {
         wwnd *w = user_wnd(h);
@@ -790,9 +933,61 @@ LRESULT CALLBACK user_edit_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             text_rect(h, (RECT *)(intptr_t)lp);
         return 0;
     case EM_CANUNDO:
-        return FALSE;
+        return e && e->u_valid;
     case EM_UNDO:
-        return FALSE;
+    case WM_UNDO:
+        return e ? undo(h, e) : FALSE;
+    case EM_EMPTYUNDOBUFFER:
+        if (e)
+            e->u_valid = 0;
+        return 0;
+    case WM_CUT:
+        if (e) cut(h, e);
+        return 0;
+    case WM_COPY:
+        if (e) copy_sel(h, e);
+        return 0;
+    case WM_PASTE:
+        if (e) paste(h, e);
+        return 0;
+    case WM_CLEAR:
+        if (e && !(estyle(h) & ES_READONLY) && smin(e) != smax(e)) {
+            replace_sel(h, e, "", 0);
+            changed(h, e);
+        }
+        return 0;
+    case WM_SYSKEYDOWN:
+        if (e && wp == VK_BACK) {      /* Alt+Backspace: undo */
+            undo(h, e);
+            return 0;
+        }
+        break;
+    case WM_HSCROLL: {
+        if (!e || !multi(h))
+            return 0;
+        RECT tr;
+        text_rect(h, &tr);
+        int page = tr.right - tr.left, m = hscroll_max(h, e), x = e->xscroll;
+        switch (wp) {
+        case SB_LINEUP: x -= e->cw['x'] * 2; break;
+        case SB_LINEDOWN: x += e->cw['x'] * 2; break;
+        case SB_PAGEUP: x -= page; break;
+        case SB_PAGEDOWN: x += page; break;
+        case SB_THUMBTRACK: case SB_THUMBPOSITION: x = (int16_t)LOWORD(lp); break;
+        case SB_TOP: x = 0; break;
+        case SB_BOTTOM: x = m; break;
+        default: return 0;
+        }
+        if (x > m) x = m;
+        if (x < 0) x = 0;
+        if (x != e->xscroll) {
+            e->xscroll = x;
+            update_scrollbar(h, e);
+            redraw(h);
+            place_caret(h, e);
+        }
+        return 0;
+    }
     }
     return DefWindowProc(h, msg, wp, lp);
 }

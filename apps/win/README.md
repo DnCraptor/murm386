@@ -18,15 +18,15 @@ nothing leaves the program from the command line in that part (`WINN DEMO`).
 
 | Path | Contents |
 |------|----------|
-| `include/` | `windows.h`, `winuser.h`: the API applications see |
+| `include/` | `windows.h`, `winuser.h`, `commdlg.h`: the API applications see |
 | `ddi/winddi.h` | driver interface: display (DIB surface + palette) and input |
 | `ddi/winmod.h` | loadable driver modules: entry point and the tables exchanged with the core |
 | `core/` | handle table, KERNEL subset (memory, strings, atoms, INI files, files, tasks), regions, 1/8 bpp raster engine, GDI, fonts, software cursor, module loader, export tables |
-| `user/` | windows, messages, painting, non-client area, menus and accelerators, controls (BUTTON, STATIC, EDIT, LISTBOX, COMBOBOX, SCROLLBAR), dialogs, MessageBox, MDI (MDICLIENT, DefFrameProc, DefMDIChildProc) |
+| `user/` | windows, messages, painting, non-client area, menus and accelerators, controls (BUTTON, STATIC, EDIT, LISTBOX, COMBOBOX, SCROLLBAR), dialogs, MessageBox, MDI (MDICLIENT, DefFrameProc, DefMDIChildProc), clipboard, common dialogs (module COMMDLG: Open, Save As, Find, Replace) |
 | `drivers/dos/` | `VBE8` display driver (VBE 100h 640x400x8, fallback 13h) and `DOS` input driver (keyboard through the BIOS buffer, INT 33h mouse) |
 | `runtime/` | `WINN.EXE` `main()`: drivers, core, shell and command-line program as tasks |
 | `sdk/` | for applications: API stubs by Win16 ordinal, `__ez_start`, `winapp.cmake`; `gen_exports.py` makes the export tables |
-| `../winapps/<name>/` | applications: `progman` (the Program Manager, the default shell), `demo` (a tour of the API) |
+| `../winapps/<name>/` | applications: `progman` (the Program Manager, the default shell), `notepad`, `demo` (a tour of the API) |
 | `../windrv/<name>/` | driver modules; `vga800` is VBE 102h 800x600 in 16 colours |
 | `host/` | the same sources on Linux with a snapshot display and scripted input |
 
@@ -79,6 +79,8 @@ After adding an API function, run `sdk/gen_exports.py` (it updates
     cmake --build build-vga800
     cmake -S apps/winapps/progman -B build-pm      # apps/compiled/PROGMAN.exe
     cmake --build build-pm
+    cmake -S apps/winapps/notepad -B build-np      # apps/compiled/NOTEPAD.exe
+    cmake --build build-np
     cmake -S apps/winapps/demo -B build-demo       # apps/compiled/DEMO.exe
     cmake --build build-demo
 
@@ -89,12 +91,13 @@ use `ucontext`):
     ./winhost scripts/tour.txt       # writes tour_*.ppm snapshots
     ./winhost scripts/menus.txt      # menus, combo box, scroll bar
     ./winhost scripts/tasks.txt      # two DEMO tasks
-    rm -f hostwin/PROGMAN.INI
+    rm -f HOSTWIN/PROGMAN.INI
     ./winhost scripts/progman.txt PROGMAN    # the shell: groups (MDI), items, Run, exit
+    ./winhost scripts/notepad.txt 'NOTEPAD HOSTWIN\README.TXT'   # editing, Find, Save As, Open
     ./winhost800 scripts/vga800.txt  # the VGA800 driver, built in
     ./test_gdi                       # GDI sample sheet, gdi.ppm
 
-The applications are built into the harness; `hostwin/` is the Windows
+The applications are built into the harness; `HOSTWIN/` is the Windows
 directory, with empty stand-ins for their files and a "DOS program".
 
 ## Keyboard
@@ -104,6 +107,6 @@ Text is ANSI Windows-1251 and is drawn with the CP866 VGA font.
 
 ## Not yet
 
-Resources (stage 2 brings the NE loader), clipboard, printing, `.GRP`
+Resources (stage 2 brings the NE loader), printing, `.GRP`
 files (`PROGMAN.INI` holds the groups as text). A maximized MDI child keeps
 its own caption instead of merging it into the frame's menu bar.

@@ -1,7 +1,7 @@
 /*
  * host_main.c - run native Windows applications on Linux under a script:
  *   winhost script.txt [PROGRAM]      (default DEMO.EXE)
- * The Windows directory is hostwin/ (the Makefile puts stand-ins for the
+ * The Windows directory is HOSTWIN/ (the Makefile puts stand-ins for the
  * application files there, PROGMAN.INI lands there too).
  * Script lines (executed one by one whenever the system is idle):
  *   wait MS | move X Y | down X Y | up X Y | click X Y | dblclick X Y |
@@ -18,6 +18,7 @@
 /* the applications, built in (WinMain renamed by the Makefile) */
 int PASCAL demo_WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show);
 int PASCAL progman_WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show);
+int PASCAL notepad_WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show);
 
 static int demo_entry(const win_app_host *h)
 {
@@ -27,6 +28,11 @@ static int demo_entry(const win_app_host *h)
 static int progman_entry(const win_app_host *h)
 {
     return progman_WinMain(h->hinstance, 0, (LPSTR)h->cmdline, h->show);
+}
+
+static int notepad_entry(const win_app_host *h)
+{
+    return notepad_WinMain(h->hinstance, 0, (LPSTR)h->cmdline, h->show);
 }
 
 win_app_entry win_host_app(const char *prog)
@@ -39,6 +45,8 @@ win_app_entry win_host_app(const char *prog)
         return demo_entry;
     if (!lstrcmpi(b, "PROGMAN.EXE"))
         return progman_entry;
+    if (!lstrcmpi(b, "NOTEPAD.EXE"))
+        return notepad_entry;
     return NULL;
 }
 
@@ -73,6 +81,11 @@ static int parse_vk(const char *s)
     if (!strcmp(s, "DOWN")) return VK_DOWN;
     if (!strcmp(s, "BACK")) return VK_BACK;
     if (!strcmp(s, "SPACE")) return VK_SPACE;
+    if (!strcmp(s, "HOME")) return VK_HOME;
+    if (!strcmp(s, "END")) return VK_END;
+    if (!strcmp(s, "DELETE")) return VK_DELETE;
+    if (!strcmp(s, "PGUP")) return VK_PRIOR;
+    if (!strcmp(s, "PGDN")) return VK_NEXT;
     if (s[0] == 'F' && s[1] >= '1' && s[1] <= '9') return VK_F1 + atoi(s + 1) - 1;
     return (int)strtol(s, NULL, 0);
 }
@@ -83,6 +96,8 @@ static void key(int vk, int down)
         { VK_RETURN, 0x1C }, { VK_TAB, 0x0F }, { VK_ESCAPE, 0x01 }, { VK_SHIFT, 0x2A },
         { VK_CONTROL, 0x1D }, { VK_MENU, 0x38 }, { VK_SPACE, 0x39 }, { VK_BACK, 0x0E },
         { VK_LEFT, 0x14B }, { VK_RIGHT, 0x14D }, { VK_UP, 0x148 }, { VK_DOWN, 0x150 },
+        { VK_HOME, 0x147 }, { VK_END, 0x14F }, { VK_DELETE, 0x153 }, { VK_PRIOR, 0x149 },
+        { VK_NEXT, 0x151 },
     };
     int sc = 0;
     for (unsigned i = 0; i < sizeof(map) / sizeof(map[0]); i++)
@@ -188,10 +203,10 @@ int main(int argc, char **argv)
     fclose(f);
     task_init();
 #ifdef HOST_VGA800
-    if (win_boot("hostwin/WINN.EXE", &win_disp_vga800, &host_script_input))
+    if (win_boot("HOSTWIN/WINN.EXE", &win_disp_vga800, &host_script_input))
         return 1;
 #else
-    if (win_boot("hostwin/WINN.EXE", &host_snap_display, &host_script_input))
+    if (win_boot("HOSTWIN/WINN.EXE", &host_snap_display, &host_script_input))
         return 1;
 #endif
     UINT r = WinExec(argc > 2 ? argv[2] : "DEMO.EXE", SW_SHOWNORMAL);

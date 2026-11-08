@@ -157,6 +157,11 @@ HBRUSH  user_ctl_color(HWND h, HDC dc, int type);
 /* keyboard.c */
 int     user_vk_to_char(int vk, int sc, unsigned char *out);
 
+/* clipboard.c */
+void    user_clipboard_task_ended(HTASK task);
+int     user_clipboard_put_text(HWND h, const char *s, int n);
+char   *user_clipboard_get_text(HWND h);     /* win_free it */
+
 /* caret.c */
 void    user_caret_hide_for_paint(wwnd *w);
 void    user_caret_restore(wwnd *w);

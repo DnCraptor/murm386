@@ -3679,6 +3679,23 @@ PostAppMessage:
     .ltorg
     .size PostAppMessage, .-PostAppMessage
 
+    .section .text.winapi.RegisterWindowMessage,"ax",%progbits
+    .global RegisterWindowMessage
+    .type RegisterWindowMessage, %function
+    .thumb_func
+RegisterWindowMessage:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =472
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size RegisterWindowMessage, .-RegisterWindowMessage
+
     .section .text.winapi.GetMessagePos,"ax",%progbits
     .global GetMessagePos
     .type GetMessagePos, %function
@@ -3916,6 +3933,176 @@ SetWindowLong:
     bx   r12
     .ltorg
     .size SetWindowLong, .-SetWindowLong
+
+    .section .text.winapi.OpenClipboard,"ax",%progbits
+    .global OpenClipboard
+    .type OpenClipboard, %function
+    .thumb_func
+OpenClipboard:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =548
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size OpenClipboard, .-OpenClipboard
+
+    .section .text.winapi.CloseClipboard,"ax",%progbits
+    .global CloseClipboard
+    .type CloseClipboard, %function
+    .thumb_func
+CloseClipboard:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =552
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size CloseClipboard, .-CloseClipboard
+
+    .section .text.winapi.EmptyClipboard,"ax",%progbits
+    .global EmptyClipboard
+    .type EmptyClipboard, %function
+    .thumb_func
+EmptyClipboard:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =556
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size EmptyClipboard, .-EmptyClipboard
+
+    .section .text.winapi.GetClipboardOwner,"ax",%progbits
+    .global GetClipboardOwner
+    .type GetClipboardOwner, %function
+    .thumb_func
+GetClipboardOwner:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =560
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetClipboardOwner, .-GetClipboardOwner
+
+    .section .text.winapi.SetClipboardData,"ax",%progbits
+    .global SetClipboardData
+    .type SetClipboardData, %function
+    .thumb_func
+SetClipboardData:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =564
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SetClipboardData, .-SetClipboardData
+
+    .section .text.winapi.GetClipboardData,"ax",%progbits
+    .global GetClipboardData
+    .type GetClipboardData, %function
+    .thumb_func
+GetClipboardData:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =568
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetClipboardData, .-GetClipboardData
+
+    .section .text.winapi.CountClipboardFormats,"ax",%progbits
+    .global CountClipboardFormats
+    .type CountClipboardFormats, %function
+    .thumb_func
+CountClipboardFormats:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =572
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size CountClipboardFormats, .-CountClipboardFormats
+
+    .section .text.winapi.EnumClipboardFormats,"ax",%progbits
+    .global EnumClipboardFormats
+    .type EnumClipboardFormats, %function
+    .thumb_func
+EnumClipboardFormats:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =576
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size EnumClipboardFormats, .-EnumClipboardFormats
+
+    .section .text.winapi.RegisterClipboardFormat,"ax",%progbits
+    .global RegisterClipboardFormat
+    .type RegisterClipboardFormat, %function
+    .thumb_func
+RegisterClipboardFormat:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =580
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size RegisterClipboardFormat, .-RegisterClipboardFormat
+
+    .section .text.winapi.GetClipboardFormatName,"ax",%progbits
+    .global GetClipboardFormatName
+    .type GetClipboardFormatName, %function
+    .thumb_func
+GetClipboardFormatName:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =584
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetClipboardFormatName, .-GetClipboardFormatName
 
     .section .text.winapi.CreateMenu,"ax",%progbits
     .global CreateMenu
@@ -4392,6 +4579,23 @@ InSendMessage:
     bx   r12
     .ltorg
     .size InSendMessage, .-InSendMessage
+
+    .section .text.winapi.IsClipboardFormatAvailable,"ax",%progbits
+    .global IsClipboardFormatAvailable
+    .type IsClipboardFormatAvailable, %function
+    .thumb_func
+IsClipboardFormatAvailable:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =772
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size IsClipboardFormatAvailable, .-IsClipboardFormatAvailable
 
     .section .text.winapi.TabbedTextOut,"ax",%progbits
     .global TabbedTextOut
@@ -5361,3 +5565,122 @@ IsWinAppN:
     bx   r12
     .ltorg
     .size IsWinAppN, .-IsWinAppN
+
+    .section .text.winapi.WinDirListAttrN,"ax",%progbits
+    .global WinDirListAttrN
+    .type WinDirListAttrN, %function
+    .thumb_func
+WinDirListAttrN:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #12]
+    ldr  r1, =32
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size WinDirListAttrN, .-WinDirListAttrN
+
+    .section .text.winapi.GetOpenFileName,"ax",%progbits
+    .global GetOpenFileName
+    .type GetOpenFileName, %function
+    .thumb_func
+GetOpenFileName:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #16]
+    ldr  r1, =4
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetOpenFileName, .-GetOpenFileName
+
+    .section .text.winapi.GetSaveFileName,"ax",%progbits
+    .global GetSaveFileName
+    .type GetSaveFileName, %function
+    .thumb_func
+GetSaveFileName:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #16]
+    ldr  r1, =8
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetSaveFileName, .-GetSaveFileName
+
+    .section .text.winapi.FindText,"ax",%progbits
+    .global FindText
+    .type FindText, %function
+    .thumb_func
+FindText:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #16]
+    ldr  r1, =44
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size FindText, .-FindText
+
+    .section .text.winapi.ReplaceText,"ax",%progbits
+    .global ReplaceText
+    .type ReplaceText, %function
+    .thumb_func
+ReplaceText:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #16]
+    ldr  r1, =48
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size ReplaceText, .-ReplaceText
+
+    .section .text.winapi.CommDlgExtendedError,"ax",%progbits
+    .global CommDlgExtendedError
+    .type CommDlgExtendedError, %function
+    .thumb_func
+CommDlgExtendedError:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #16]
+    ldr  r1, =104
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size CommDlgExtendedError, .-CommDlgExtendedError
+
+    .section .text.winapi.GetFileTitle,"ax",%progbits
+    .global GetFileTitle
+    .type GetFileTitle, %function
+    .thumb_func
+GetFileTitle:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #16]
+    ldr  r1, =108
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetFileTitle, .-GetFileTitle

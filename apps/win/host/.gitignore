@@ -4,4 +4,4 @@ winhost800
 *.o
 *.ppm
 *.png
-hostwin/
+HOSTWIN/

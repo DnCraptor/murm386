@@ -57,13 +57,13 @@ int win_load_module(const char *path, const win_module_info **info);
  * the program only says that it needs Windows.
  *
  * modules[m][ordinal] is the function exported by module m under the
- * Win16 ordinal (m: WINMOD_KERNEL, WINMOD_GDI, WINMOD_USER, WINMOD_WINN for
- * the native extensions).
+ * Win16 ordinal (m: WINMOD_KERNEL, WINMOD_GDI, WINMOD_USER, WINMOD_COMMDLG),
+ * or the WINN ordinal of a native extension (m: WINMOD_WINN).
  */
 #define WINAPP_MAGIC   0x4150574Eu        /* "NWPA" */
 #define WINAPP_VERSION 1
 
-enum { WINMOD_KERNEL, WINMOD_GDI, WINMOD_USER, WINMOD_WINN, WINMOD_COUNT };
+enum { WINMOD_KERNEL, WINMOD_GDI, WINMOD_USER, WINMOD_WINN, WINMOD_COMMDLG, WINMOD_COUNT };
 
 typedef struct win_app_host {
     uint32_t magic;                 /* WINAPP_MAGIC */

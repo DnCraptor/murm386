@@ -18,8 +18,11 @@ extern void CheckMenuItem(void);
 extern void CheckRadioButton(void);
 extern void ChildWindowFromPoint(void);
 extern void ClientToScreen(void);
+extern void CloseClipboard(void);
 extern void CombineRgn(void);
+extern void CommDlgExtendedError(void);
 extern void CopyRect(void);
+extern void CountClipboardFormats(void);
 extern void CreateAcceleratorTableN(void);
 extern void CreateBitmap(void);
 extern void CreateBrushIndirect(void);
@@ -61,11 +64,13 @@ extern void DrawIcon(void);
 extern void DrawMenuBar(void);
 extern void DrawText(void);
 extern void Ellipse(void);
+extern void EmptyClipboard(void);
 extern void EnableMenuItem(void);
 extern void EnableWindow(void);
 extern void EndDialog(void);
 extern void EndPaint(void);
 extern void EnumChildWindows(void);
+extern void EnumClipboardFormats(void);
 extern void EnumWindows(void);
 extern void EqualRect(void);
 extern void EqualRgn(void);
@@ -76,6 +81,7 @@ extern void FatalExit(void);
 extern void FillRect(void);
 extern void FillRgn(void);
 extern void FindAtom(void);
+extern void FindText(void);
 extern void FindWindow(void);
 extern void FrameRect(void);
 extern void GetActiveWindow(void);
@@ -93,6 +99,9 @@ extern void GetClassName(void);
 extern void GetClassWord(void);
 extern void GetClientRect(void);
 extern void GetClipBox(void);
+extern void GetClipboardData(void);
+extern void GetClipboardFormatName(void);
+extern void GetClipboardOwner(void);
 extern void GetCurrentTask(void);
 extern void GetCurrentTime(void);
 extern void GetCursorPos(void);
@@ -105,6 +114,7 @@ extern void GetDlgCtrlID(void);
 extern void GetDlgItem(void);
 extern void GetDlgItemInt(void);
 extern void GetDlgItemText(void);
+extern void GetFileTitle(void);
 extern void GetFocus(void);
 extern void GetKeyState(void);
 extern void GetMenu(void);
@@ -121,6 +131,7 @@ extern void GetNextDlgGroupItem(void);
 extern void GetNextDlgTabItem(void);
 extern void GetNumTasks(void);
 extern void GetObject(void);
+extern void GetOpenFileName(void);
 extern void GetPaletteEntries(void);
 extern void GetParent(void);
 extern void GetPixel(void);
@@ -131,6 +142,7 @@ extern void GetProfileString(void);
 extern void GetProp(void);
 extern void GetROP2(void);
 extern void GetRgnBox(void);
+extern void GetSaveFileName(void);
 extern void GetScrollPos(void);
 extern void GetScrollRange(void);
 extern void GetStockObject(void);
@@ -180,6 +192,7 @@ extern void InvalidateRect(void);
 extern void InvalidateRgn(void);
 extern void InvertRect(void);
 extern void IsChild(void);
+extern void IsClipboardFormatAvailable(void);
 extern void IsDialogMessage(void);
 extern void IsDlgButtonChecked(void);
 extern void IsIconic(void);
@@ -209,6 +222,7 @@ extern void MoveToEx(void);
 extern void MoveWindow(void);
 extern void OffsetRect(void);
 extern void OffsetRgn(void);
+extern void OpenClipboard(void);
 extern void OutputDebugString(void);
 extern void PaintRgn(void);
 extern void PatBlt(void);
@@ -227,10 +241,13 @@ extern void RectVisible(void);
 extern void Rectangle(void);
 extern void RedrawWindow(void);
 extern void RegisterClass(void);
+extern void RegisterClipboardFormat(void);
+extern void RegisterWindowMessage(void);
 extern void ReleaseCapture(void);
 extern void ReleaseDC(void);
 extern void RemoveMenu(void);
 extern void RemoveProp(void);
+extern void ReplaceText(void);
 extern void RestoreDC(void);
 extern void RoundRect(void);
 extern void SaveDC(void);
@@ -249,6 +266,7 @@ extern void SetBrushOrg(void);
 extern void SetCapture(void);
 extern void SetCaretBlinkTime(void);
 extern void SetCaretPos(void);
+extern void SetClipboardData(void);
 extern void SetCursor(void);
 extern void SetCursorPos(void);
 extern void SetDlgItemInt(void);
@@ -294,6 +312,7 @@ extern void UpdateWindow(void);
 extern void ValidateRect(void);
 extern void ValidateRgn(void);
 extern void WaitMessage(void);
+extern void WinDirListAttrN(void);
 extern void WinDirListN(void);
 extern void WinExec(void);
 extern void WindowFromPoint(void);
@@ -540,6 +559,7 @@ static const void *const exports_user[474] = {
     [113] = (const void *)TranslateMessage,
     [114] = (const void *)DispatchMessage,
     [116] = (const void *)PostAppMessage,
+    [118] = (const void *)RegisterWindowMessage,
     [119] = (const void *)GetMessagePos,
     [120] = (const void *)GetMessageTime,
     [122] = (const void *)CallWindowProc,
@@ -554,6 +574,16 @@ static const void *const exports_user[474] = {
     [134] = (const void *)SetWindowWord,
     [135] = (const void *)GetWindowLong,
     [136] = (const void *)SetWindowLong,
+    [137] = (const void *)OpenClipboard,
+    [138] = (const void *)CloseClipboard,
+    [139] = (const void *)EmptyClipboard,
+    [140] = (const void *)GetClipboardOwner,
+    [141] = (const void *)SetClipboardData,
+    [142] = (const void *)GetClipboardData,
+    [143] = (const void *)CountClipboardFormats,
+    [144] = (const void *)EnumClipboardFormats,
+    [145] = (const void *)RegisterClipboardFormat,
+    [146] = (const void *)GetClipboardFormatName,
     [151] = (const void *)CreateMenu,
     [152] = (const void *)DestroyMenu,
     [154] = (const void *)CheckMenuItem,
@@ -582,6 +612,7 @@ static const void *const exports_user[474] = {
     [190] = (const void *)GetUpdateRect,
     [191] = (const void *)ChildWindowFromPoint,
     [192] = (const void *)InSendMessage,
+    [193] = (const void *)IsClipboardFormatAvailable,
     [196] = (const void *)TabbedTextOut,
     [197] = (const void *)GetTabbedTextExtent,
     [227] = (const void *)GetNextDlgGroupItem,
@@ -634,7 +665,7 @@ static const void *const exports_user[474] = {
     [473] = (const void *)AnsiPrev,
 };
 
-static const void *const exports_winn[8] = {
+static const void *const exports_winn[9] = {
     [1] = (const void *)DialogBoxIndirectN,
     [2] = (const void *)CreateDialogIndirectN,
     [3] = (const void *)CreateAcceleratorTableN,
@@ -642,6 +673,16 @@ static const void *const exports_winn[8] = {
     [5] = (const void *)GetDisplayDriverInfoN,
     [6] = (const void *)WinDirListN,
     [7] = (const void *)IsWinAppN,
+    [8] = (const void *)WinDirListAttrN,
+};
+
+static const void *const exports_commdlg[28] = {
+    [1] = (const void *)GetOpenFileName,
+    [2] = (const void *)GetSaveFileName,
+    [11] = (const void *)FindText,
+    [12] = (const void *)ReplaceText,
+    [26] = (const void *)CommDlgExtendedError,
+    [27] = (const void *)GetFileTitle,
 };
 
 const void *const *const win_export_tables[WINMOD_COUNT] = {
@@ -649,4 +690,5 @@ const void *const *const win_export_tables[WINMOD_COUNT] = {
     exports_gdi,
     exports_user,
     exports_winn,
+    exports_commdlg,
 };

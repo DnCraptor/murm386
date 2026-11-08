@@ -485,6 +485,7 @@ LONG    WINAPI _llseek(HFILE f, LONG off, int origin);
  * with a second NUL (returns how many), and whether a file is a Windows
  * application. */
 int     WINAPI WinDirListN(LPCSTR spec, LPSTR buf, int size);
+int     WINAPI WinDirListAttrN(LPCSTR spec, UINT attr, LPSTR buf, int size); /* attr 0x10: subdirectories */
 BOOL    WINAPI IsWinAppN(LPCSTR path);
 
 /* ---------------------------------------------------------------- tasks */

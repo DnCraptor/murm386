@@ -10,9 +10,9 @@ HOST     = host_drivers.c
 GDICORE  = $(filter-out ../core/exports.c ../core/task.c ../core/file.c,$(CORE))
 
 # the applications, built in; each WinMain gets its own name
-APPS     = demo.o progman.o
+APPS     = demo.o progman.o notepad.o
 
-all: test_gdi winhost winhost800 hostwin
+all: test_gdi winhost winhost800 HOSTWIN
 
 test_gdi: $(GDICORE) $(HOST) test_gdi.c
 	$(CC) $(CFLAGS) $(INC) -o $@ $^
@@ -23,6 +23,9 @@ demo.o: ../../winapps/demo/demo.c
 progman.o: ../../winapps/progman/progman.c
 	$(CC) $(CFLAGS) $(INC) -DWinMain=progman_WinMain -c -o $@ $<
 
+notepad.o: ../../winapps/notepad/notepad.c
+	$(CC) $(CFLAGS) $(INC) -DWinMain=notepad_WinMain -c -o $@ $<
+
 winhost: $(CORE) $(USER) $(HOST) host_main.c $(APPS)
 	$(CC) $(CFLAGS) $(INC) -o $@ $^
 
@@ -31,12 +34,14 @@ winhost800: $(CORE) $(USER) $(HOST) host_main.c $(APPS) ../../windrv/vga800/vga8
 	$(CC) $(CFLAGS) $(INC) -DHOST_VGA800 -DWINDRV_HOST -o $@ $^
 
 # the Windows directory of the tests: stand-ins for the application files
-# (the applications themselves are built in) and a DOS program
-hostwin:
-	mkdir -p hostwin
-	touch hostwin/DEMO.EXE hostwin/PROGMAN.EXE hostwin/WINN.EXE hostwin/NC.EXE
+# (the applications themselves are built in), a DOS program and a text file
+HOSTWIN:
+	mkdir -p HOSTWIN
+	touch HOSTWIN/DEMO.EXE HOSTWIN/PROGMAN.EXE HOSTWIN/NOTEPAD.EXE HOSTWIN/WINN.EXE HOSTWIN/NC.EXE
+	mkdir -p HOSTWIN/DOCS
+	printf 'Notepad test file\n\tTabbed line\tand more\nThis is a rather long line that goes on and on past the right edge of the window so that horizontal scrolling is needed to see its end.\nLast line\n' > HOSTWIN/README.TXT
 
 clean:
-	rm -rf test_gdi winhost winhost800 *.o *.ppm *.png hostwin
+	rm -rf test_gdi winhost winhost800 *.o *.ppm *.png HOSTWIN
 
-.PHONY: all clean hostwin
+.PHONY: all clean HOSTWIN

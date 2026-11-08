@@ -26,6 +26,7 @@
 #include <dirent.h>
 #include <fnmatch.h>
 #include <sys/stat.h>
+#include <stdio.h>
 #define O_BINARY 0
 #define F_RDWR O_RDWR
 #endif
@@ -55,6 +56,20 @@ static int tracked(HFILE f)
             return i;
     return -1;
 }
+
+#ifdef FILE_HOST
+/* host tests: DOS paths to Linux ones */
+static const char *host_path(const char *p)
+{
+    static char buf[256];
+    lstrcpyn(buf, p, sizeof(buf));
+    for (char *q = buf; *q; q++)
+        if (*q == '\\')
+            *q = '/';
+    return buf;
+}
+#define open(p, ...) open(host_path(p), __VA_ARGS__)
+#endif
 
 HFILE WINAPI _lopen(LPCSTR path, int mode)
 {
@@ -130,13 +145,16 @@ static int add_name(LPSTR buf, int size, int *len, const char *name)
     return 1;
 }
 
-/* Names of the files matching spec ("C:\WINN\*.EXE"), NUL-separated with
- * a second NUL at the end; returns how many. The whole search is done in
- * one call, so no search state lives across task switches. */
-int WINAPI WinDirListN(LPCSTR spec, LPSTR buf, int size)
+/* Names of the entries matching spec ("C:\\WINN\\*.EXE"), NUL-separated with
+ * a second NUL at the end; returns how many. attr 0: files only;
+ * WIN_DIR_DIRS (0x10): subdirectories only ("." and ".." left out). The
+ * whole search is done in one call, so no search state lives across task
+ * switches. */
+int WINAPI WinDirListAttrN(LPCSTR spec, UINT attr, LPSTR buf, int size)
 {
     if (!spec || !buf || size < 2)
         return 0;
+    int dirs = (attr & 0x10) != 0;
     int len = 0, count = 0;
 #ifdef FILE_HOST
     char dir[256];
@@ -158,7 +176,22 @@ int WINAPI WinDirListN(LPCSTR spec, LPSTR buf, int size)
     if (d) {
         struct dirent *e;
         while ((e = readdir(d)) != NULL) {
-            if (e->d_name[0] == '.' || fnmatch(pat, e->d_name, FNM_CASEFOLD))
+            if (e->d_name[0] == '.')
+                continue;
+            /* DOS: "NAME.*" also matches "NAME" (no extension) */
+            int miss = fnmatch(pat, e->d_name, FNM_CASEFOLD);
+            int pl = (int)strlen(pat);
+            if (miss && pl >= 2 && !strcmp(pat + pl - 2, ".*") && !strchr(e->d_name, '.')) {
+                char p2[64];
+                lstrcpyn(p2, pat, pl - 1 < (int)sizeof(p2) ? pl - 1 : (int)sizeof(p2));
+                miss = fnmatch(p2, e->d_name, FNM_CASEFOLD);
+            }
+            if (miss)
+                continue;
+            char full[512];
+            struct stat st;
+            snprintf(full, sizeof(full), "%s/%s", dir, e->d_name);
+            if (stat(full, &st) || (S_ISDIR(st.st_mode) != 0) != dirs)
                 continue;
             if (!add_name(buf, size, &len, e->d_name))
                 break;
@@ -168,7 +201,9 @@ int WINAPI WinDirListN(LPCSTR spec, LPSTR buf, int size)
     }
 #else
     static struct find_t ft;        /* big, keep it off the task stack */
-    for (int r = _dos_findfirst(spec, 0, &ft); !r; r = _dos_findnext(&ft)) {
+    for (int r = _dos_findfirst(spec, dirs ? 0x10 : 0, &ft); !r; r = _dos_findnext(&ft)) {
+        if (((ft.attrib & 0x10) != 0) != dirs || ft.name[0] == '.')
+            continue;
         if (!add_name(buf, size, &len, ft.name))
             break;
         count++;
@@ -176,6 +211,11 @@ int WINAPI WinDirListN(LPCSTR spec, LPSTR buf, int size)
 #endif
     buf[len] = 0;
     return count;
+}
+
+int WINAPI WinDirListN(LPCSTR spec, LPSTR buf, int size)
+{
+    return WinDirListAttrN(spec, 0, buf, size);
 }
 
 /* Is the file a Windows application (an EZ image built with the SDK)? */
