@@ -462,6 +462,16 @@ UINT    WINAPI GetProfileInt(LPCSTR section, LPCSTR key, int def);
 UINT    WINAPI GetWindowsDirectory(LPSTR buf, UINT size);
 UINT    WINAPI GetSystemDirectory(LPSTR buf, UINT size);
 
+/* ---------------------------------------------------------------- tasks */
+
+UINT    WINAPI WinExec(LPCSTR cmdline, UINT show);
+HTASK   WINAPI GetCurrentTask(void);
+BOOL    WINAPI IsTask(HTASK task);
+UINT    WINAPI GetNumTasks(void);
+
+/* Native extension: description of the display driver, returns colours. */
+UINT    WINAPI GetDisplayDriverInfoN(LPSTR buf, int size);
+
 #include "winuser.h"
 
 #ifdef __cplusplus

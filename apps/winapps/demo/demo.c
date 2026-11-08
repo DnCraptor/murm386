@@ -1,5 +1,5 @@
 /*
- * hello.c - sample native Windows application.
+ * demo.c - DEMO.EXE, a tour of the native Windows API for WINN.EXE.
  *
  * A main window that draws with GDI, a few controls, a modal dialog and
  * message boxes. Built the same way for the device (EZ) and the host
@@ -32,6 +32,7 @@
 #define IDM_GREEN  306
 #define IDM_BLUE   307
 #define IDM_ABOUT  308
+#define IDM_RUN    309
 
 static HINSTANCE hinst;
 static HWND hedit, hlist;
@@ -193,6 +194,16 @@ static LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         case IDM_EXIT:
             PostMessage(h, WM_COMMAND, ID_QUIT, 0);
             break;
+        case IDM_RUN:
+        {
+            UINT r = WinExec("DEMO.EXE", SW_SHOWNORMAL);
+            if (r < 32) {
+                char msg[64];
+                wsprintf(msg, "Cannot start DEMO.EXE (error %u).", r);
+                MessageBox(h, msg, "Demo", MB_OK | MB_ICONSTOP);
+            }
+            break;
+        }
         case IDM_CLEAR:
             SendMessage(hlist, LB_RESETCONTENT, 0, 0);
             break;
@@ -209,8 +220,17 @@ static LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             break;
         case IDM_ABOUT:
         case ID_ABOUT:
-            MessageBox(h, "Native Windows 3.x API for murm386.\nGDI + USER on a VBE 8-bit display.",
-                       "About Hello", MB_OK | MB_ICONINFORMATION);
+        {
+            char drv[64], text[256];
+            UINT colors = GetDisplayDriverInfoN(drv, sizeof(drv));
+            HDC dc = GetDC(h);
+            wsprintf(text, "Native Windows 3.x API for murm386.\n\n"
+                           "Display: %s\n%d x %d, %u colours\nTasks running: %u",
+                     drv, GetDeviceCaps(dc, HORZRES), GetDeviceCaps(dc, VERTRES), colors,
+                     GetNumTasks());
+            ReleaseDC(h, dc);
+            MessageBox(h, text, "About Demo", MB_OK | MB_ICONINFORMATION);
+        }
             break;
         case ID_DIALOG:
             if (DialogBoxIndirectN(hinst, &about_tpl, about_items, h, SettingsProc) == IDOK)
@@ -242,7 +262,7 @@ static LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             }
             break;
         case ID_QUIT:
-            if (MessageBox(h, "Really quit?", "Hello", MB_YESNO | MB_ICONQUESTION) == IDYES)
+            if (MessageBox(h, "Really quit?", "Demo", MB_YESNO | MB_ICONQUESTION) == IDYES)
                 DestroyWindow(h);
             break;
         }
@@ -279,7 +299,7 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
         wc.hIcon = LoadIcon(0, IDI_APPLICATION);
         wc.hCursor = LoadCursor(0, IDC_ARROW);
         wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-        wc.lpszClassName = "HelloWnd";
+        wc.lpszClassName = "DemoWnd";
         if (!RegisterClass(&wc))
             return 1;
     }
@@ -290,6 +310,7 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     HMENU file = CreatePopupMenu();
     AppendMenu(file, MF_STRING, IDM_NEW, "&New\tCtrl+N");
     AppendMenu(file, MF_STRING, ID_DIALOG, "&Settings...");
+    AppendMenu(file, MF_STRING, IDM_RUN, "&Run another Demo");
     AppendMenu(file, MF_SEPARATOR, 0, NULL);
     AppendMenu(file, MF_STRING, IDM_EXIT, "E&xit");
     HMENU list = CreatePopupMenu();
@@ -299,7 +320,7 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     AppendMenu(opts, MF_STRING, IDM_TIMER, "&Tick timer\tCtrl+T");
     AppendMenu(opts, MF_POPUP, (UINT)colors_menu, "&Color");
     HMENU help = CreatePopupMenu();
-    AppendMenu(help, MF_STRING, IDM_ABOUT, "&About Hello...\tF1");
+    AppendMenu(help, MF_STRING, IDM_ABOUT, "&About Demo...\tF1");
     HMENU bar = CreateMenu();
     AppendMenu(bar, MF_POPUP, (UINT)file, "&File");
     AppendMenu(bar, MF_POPUP, (UINT)list, "&List");
@@ -313,8 +334,9 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     };
     HACCEL acc = CreateAcceleratorTableN(keys, 3);
 
-    HWND h = CreateWindow("HelloWnd", "Hello, Windows", WS_OVERLAPPEDWINDOW,
-                          40, 30, 420, 320, 0, bar, inst, NULL);
+    int shift = ((int)GetNumTasks() - 1) * 24;      /* more copies: cascade */
+    HWND h = CreateWindow("DemoWnd", "Demo", WS_OVERLAPPEDWINDOW,
+                          40 + shift, 30 + shift, 420, 320, 0, bar, inst, NULL);
     ShowWindow(h, show);
     UpdateWindow(h);
     MSG m;

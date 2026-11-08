@@ -6,18 +6,22 @@ INC      = -I../include -I../core -I../ddi -I../user -I.
 CORE     = $(wildcard ../core/*.c)
 USER     = $(wildcard ../user/*.c)
 HOST     = host_drivers.c
+# GDI test: no USER, so no tasks and no export tables
+GDICORE  = $(filter-out ../core/exports.c ../core/task.c,$(CORE))
 
-all: test_gdi hello hello800
+all: test_gdi demo demo800
 
-test_gdi: $(CORE) $(HOST) test_gdi.c
+test_gdi: $(GDICORE) $(HOST) test_gdi.c
 	$(CC) $(CFLAGS) $(INC) -o $@ $^
 
-hello: $(CORE) $(USER) $(HOST) host_main.c ../samples/hello/hello.c
-	$(CC) $(CFLAGS) $(INC) -o $@ $^
+DEMO     = ../../winapps/demo/demo.c
+
+demo: $(CORE) $(USER) $(HOST) host_main.c $(DEMO)
+	$(CC) $(CFLAGS) $(INC) -DWinMain=demo_WinMain -o $@ $^
 
 clean:
-	rm -f test_gdi hello hello800 *.ppm *.png
+	rm -f test_gdi demo demo800 *.ppm *.png
 
 # the VGA800 driver module, built in, with fake planar video memory
-hello800: $(CORE) $(USER) $(HOST) host_main.c ../samples/hello/hello.c ../../windrv/vga800/vga800.c
-	$(CC) $(CFLAGS) $(INC) -DHOST_VGA800 -DWINDRV_HOST -o $@ $^
+demo800: $(CORE) $(USER) $(HOST) host_main.c $(DEMO) ../../windrv/vga800/vga800.c
+	$(CC) $(CFLAGS) $(INC) -DWinMain=demo_WinMain -DHOST_VGA800 -DWINDRV_HOST -o $@ $^

@@ -744,7 +744,12 @@ int WINAPI GetDeviceCaps(HDC h, int index)
     case VERTRES: return s->height;
     case BITSPIXEL: return s->bpp;
     case PLANES: return 1;
-    case NUMCOLORS: return s->bpp == 1 ? 2 : 20;
+    case NUMCOLORS:
+        if (s->bpp == 1)
+            return 2;
+        if (dc && dc->is_screen && GetDisplayDriverInfoN(NULL, 0) <= 16)
+            return (int)GetDisplayDriverInfoN(NULL, 0);
+        return 20;
     case LOGPIXELSX: case LOGPIXELSY: return 96;
     case SIZEPALETTE: return s->bpp == 8 ? 256 : 0;
     case NUMRESERVED: return s->bpp == 8 ? 20 : 0;

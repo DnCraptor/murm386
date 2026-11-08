@@ -793,6 +793,8 @@ DWORD   WINAPI GetDialogBaseUnits(void);
 
 /* ---------------------------------------------------------------- more API */
 
+BOOL    WINAPI ExitWindows(DWORD reserved, UINT code);
+
 int     WINAPI SetScrollPos(HWND hwnd, int bar, int pos, BOOL redraw);
 int     WINAPI GetScrollPos(HWND hwnd, int bar);
 void    WINAPI SetScrollRange(HWND hwnd, int bar, int min, int max, BOOL redraw);

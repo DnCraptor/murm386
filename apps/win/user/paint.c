@@ -6,27 +6,27 @@
 #include <string.h>
 #include "user.h"
 
-static wwnd *find_paint_in(wwnd *w)
+static wwnd *find_paint_in(wwnd *w, HTASK task)
 {
     for (; w; w = w->next) {
-        if (!(w->style & WS_VISIBLE))
+        if (!(w->style & WS_VISIBLE) || (w->task && w->task != task))
             continue;
         if (w->update.n || w->ncpaint)
             return w;
-        wwnd *c = find_paint_in(w->child);
+        wwnd *c = find_paint_in(w->child, task);
         if (c)
             return c;
     }
     return NULL;
 }
 
-wwnd *user_find_paint(void)
+wwnd *user_find_paint(HTASK task)
 {
     if (!U.desktop)
         return NULL;
     if (U.desktop->update.n || U.desktop->ncpaint)
         return U.desktop;
-    return find_paint_in(U.desktop->child);
+    return find_paint_in(U.desktop->child, task);
 }
 
 /* ---------------------------------------------------------------- DCs */

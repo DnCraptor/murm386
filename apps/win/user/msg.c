@@ -15,7 +15,8 @@
 #define QSIZE 256
 
 static MSG queue[QSIZE];
-static int16_t qchar[QSIZE];     /* key-down: character at post time, -1 none */
+static int16_t qchar[QSIZE];
+static HTASK qtask[QSIZE];      /* task the message is for (0: any) */     /* key-down: character at post time, -1 none */
 static int last_char = -1;       /* of the last key message retrieved */
 static MSG last_key;
 static int q_head, q_count;
@@ -23,15 +24,25 @@ static int ctrl_shift_pending;
 
 static uint32_t now_ms(void) { return GetTickCount(); }
 
-static void q_put_ch(const MSG *m, int ch)
+/* the task a window belongs to; 0 for the desktop (any task may serve) */
+static HTASK wnd_task(HWND h)
+{
+    wwnd *w = user_wnd(h);
+    return w ? w->task : 0;
+}
+
+static void q_put_t(const MSG *m, int ch, HTASK task)
 {
     if (q_count == QSIZE)          /* full: drop the oldest */
         q_head = (q_head + 1) % QSIZE, q_count--;
-    queue[(q_head + q_count) % QSIZE] = *m;
-    qchar[(q_head + q_count) % QSIZE] = (int16_t)ch;
+    int i = (q_head + q_count) % QSIZE;
+    queue[i] = *m;
+    qchar[i] = (int16_t)ch;
+    qtask[i] = task;
     q_count++;
 }
 
+static void q_put_ch(const MSG *m, int ch) { q_put_t(m, ch, m->hwnd ? wnd_task(m->hwnd) : task_current()->h); }
 static void q_put(const MSG *m) { q_put_ch(m, -1); }
 
 static MSG *q_at(int i) { return &queue[(q_head + i) % QSIZE]; }
@@ -41,6 +52,7 @@ static void q_remove(int i)
     for (int k = i; k > 0; k--) {
         *q_at(k) = *q_at(k - 1);
         qchar[(q_head + k) % QSIZE] = qchar[(q_head + k - 1) % QSIZE];
+        qtask[(q_head + k) % QSIZE] = qtask[(q_head + k - 1) % QSIZE];
     }
     q_head = (q_head + 1) % QSIZE;
     q_count--;
@@ -74,15 +86,18 @@ BOOL WINAPI PostMessage(HWND h, UINT m, WPARAM wp, LPARAM lp)
 
 BOOL WINAPI PostAppMessage(HTASK task, UINT m, WPARAM wp, LPARAM lp)
 {
-    (void)task;
-    user_post(0, m, wp, lp);
+    if (!task_from_handle(task))
+        return FALSE;
+    MSG msg = { 0, m, wp, lp, now_ms(), { U.mouse_x, U.mouse_y } };
+    q_put_t(&msg, -1, task);
     return TRUE;
 }
 
 void WINAPI PostQuitMessage(int code)
 {
-    U.quit = 1;
-    U.quit_code = code;
+    wtask *t = task_current();
+    t->quit = 1;
+    t->quit_code = code;
 }
 
 LRESULT WINAPI SendMessage(HWND h, UINT m, WPARAM wp, LPARAM lp)
@@ -196,6 +211,7 @@ BOOL WINAPI TranslateMessage(const MSG *msg)
     q_head = (q_head + QSIZE - 1) % QSIZE;
     queue[q_head] = c;
     qchar[q_head] = -1;
+    qtask[q_head] = wnd_task(c.hwnd);
     q_count++;
     return TRUE;
 }
@@ -359,6 +375,7 @@ typedef struct {
     uint32_t  due;
     TIMERPROC proc;
     int       used, pending;
+    HTASK     task;
 } wtimer;
 
 #define NTIMERS 32
@@ -380,7 +397,8 @@ UINT WINAPI SetTimer(HWND h, UINT id, UINT elapse, TIMERPROC proc)
         }
     for (int i = 0; i < NTIMERS; i++)
         if (!timers[i].used) {
-            timers[i] = (wtimer){ h, id, elapse, now_ms() + elapse, proc, 1, 0 };
+            timers[i] = (wtimer){ h, id, elapse, now_ms() + elapse, proc, 1, 0,
+                                  h ? wnd_task(h) : task_current()->h };
             return id ? id : 1;
         }
     return 0;
@@ -403,12 +421,21 @@ void user_kill_window_timers(HWND h)
             timers[i].used = 0;
 }
 
-static int timer_message(MSG *m, HWND filter)
+static int timer_due(HTASK task)
+{
+    uint32_t t = now_ms();
+    for (int i = 0; i < NTIMERS; i++)
+        if (timers[i].used && timers[i].task == task && (int32_t)(t - timers[i].due) >= 0)
+            return 1;
+    return 0;
+}
+
+static int timer_message(MSG *m, HWND filter, HTASK task)
 {
     uint32_t t = now_ms();
     for (int i = 0; i < NTIMERS; i++) {
         wtimer *tm = &timers[i];
-        if (!tm->used || (int32_t)(t - tm->due) < 0)
+        if (!tm->used || tm->task != task || (int32_t)(t - tm->due) < 0)
             continue;
         if (filter && tm->hwnd != filter && !IsChild(filter, tm->hwnd))
             continue;
@@ -447,12 +474,16 @@ static void pump_input(void)
 static int get_one(MSG *out, HWND h, UINT first, UINT last, int remove)
 {
     pump_input();
+    wtask *me = task_current();
     for (int i = 0; i < q_count; i++) {
         MSG *m = q_at(i);
         if (m->hwnd && !IsWindow(m->hwnd)) {
             q_remove(i--);
             continue;
         }
+        HTASK owner = qtask[(q_head + i) % QSIZE];
+        if (owner && owner != me->h)
+            continue;
         if (!matches(m, h, first, last))
             continue;
         *out = *m;
@@ -464,16 +495,16 @@ static int get_one(MSG *out, HWND h, UINT first, UINT last, int remove)
             q_remove(i);
         return 1;
     }
-    if (U.quit) {
+    if (me->quit) {
         memset(out, 0, sizeof(*out));
         out->message = WM_QUIT;
-        out->wParam = (WPARAM)U.quit_code;
+        out->wParam = (WPARAM)me->quit_code;
         if (remove)
-            U.quit = 0;
+            me->quit = 0;
         return -1;
     }
     if (!first || (WM_PAINT >= first && WM_PAINT <= last)) {
-        wwnd *w = user_find_paint();
+        wwnd *w = user_find_paint(me->h);
         if (w && (!h || w->h == h || IsChild(h, w->h))) {
             memset(out, 0, sizeof(*out));
             out->hwnd = w->h;
@@ -486,12 +517,22 @@ static int get_one(MSG *out, HWND h, UINT first, UINT last, int remove)
     }
     if (!first || (WM_TIMER >= first && WM_TIMER <= last)) {
         MSG t;
-        if (timer_message(&t, h)) {
+        if (timer_message(&t, h, me->h)) {
             *out = t;
             return 1;
         }
     }
     return 0;
+}
+
+/* Nothing for this task: let the others run, or idle when nobody can. */
+static void wait_turn(void)
+{
+    wtask *me = task_current();
+    me->waiting = 1;
+    if (!task_yield() && win_sys.input)
+        win_sys.input->idle();
+    me->waiting = 0;
 }
 
 BOOL WINAPI GetMessage(LPMSG msg, HWND h, UINT first, UINT last)
@@ -502,16 +543,18 @@ BOOL WINAPI GetMessage(LPMSG msg, HWND h, UINT first, UINT last)
             U.cur_msg = *msg;
             return r > 0;
         }
-        if (win_sys.input)
-            win_sys.input->idle();
+        wait_turn();
     }
 }
 
+/* Win16: finding nothing yields to the other tasks (unless PM_NOYIELD). */
 BOOL WINAPI PeekMessage(LPMSG msg, HWND h, UINT first, UINT last, UINT flags)
 {
     int r = get_one(msg, h, first, last, flags & PM_REMOVE);
     if (r)
         U.cur_msg = *msg;
+    else if (!(flags & PM_NOYIELD))
+        task_yield();
     return r != 0;
 }
 
@@ -519,15 +562,67 @@ BOOL WINAPI WaitMessage(void)
 {
     MSG m;
     while (!get_one(&m, 0, 0, 0, 0))
-        if (win_sys.input)
-            win_sys.input->idle();
+        wait_turn();
     return TRUE;
 }
 
 BOOL WINAPI Yield(void)
 {
     pump_input();
+    task_yield();
     return TRUE;
+}
+
+/* ---------------------------------------------------------------- tasks */
+
+void user_poll_input(void) { pump_input(); }
+
+int user_task_has_work(HTASK task)
+{
+    wtask *t = task_from_handle(task);
+    if (t && t->quit)
+        return 1;
+    for (int i = 0; i < q_count; i++)
+        if (qtask[(q_head + i) % QSIZE] == task || !qtask[(q_head + i) % QSIZE])
+            return 1;
+    return user_find_paint(task) != NULL || timer_due(task);
+}
+
+/* Ask every top-level window, then end all applications (Windows ends
+ * with its shell). */
+BOOL WINAPI ExitWindows(DWORD reserved, UINT code)
+{
+    (void)reserved; (void)code;
+    for (wwnd *w = U.desktop->child; w; w = w->next)
+        if (!SendMessage(w->h, WM_QUERYENDSESSION, 0, 0))
+            return FALSE;
+    for (wwnd *w = U.desktop->child, *n; w; w = n) {
+        n = w->next;
+        SendMessage(w->h, WM_ENDSESSION, TRUE, 0);
+    }
+    task_quit_all();
+    return TRUE;
+}
+
+/* A task ended: its windows, timers and messages go. */
+void user_task_ended(HTASK task)
+{
+    for (int again = 1; again;) {
+        again = 0;
+        for (wwnd *w = U.desktop->child; w; w = w->next)
+            if (w->task == task) {
+                DestroyWindow(w->h);
+                again = 1;
+                break;
+            }
+    }
+    for (int i = 0; i < NTIMERS; i++)
+        if (timers[i].used && timers[i].task == task)
+            timers[i].used = 0;
+    user_unregister_task_classes(task);
+    for (int i = q_count - 1; i >= 0; i--)
+        if (qtask[(q_head + i) % QSIZE] == task)
+            q_remove(i);
 }
 
 DWORD WINAPI GetMessagePos(void) { return (DWORD)MAKELONG(U.cur_msg.pt.x, U.cur_msg.pt.y); }

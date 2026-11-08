@@ -81,9 +81,10 @@ static int apply(uint8_t *base, uint32_t mem_end, const ezrel *r)
     }
 }
 
-int win_load_module(const char *path, const win_module_info **info)
+/* Read, place and relocate an EZ image. 0 ok, -1 no file, < -1 bad. */
+int win_ez_load(const char *path, win_ez_image *img)
 {
-    *info = NULL;
+    memset(img, 0, sizeof(*img));
     FILE *f = fopen(path, "rb");
     if (!f)
         return -1;
@@ -123,26 +124,37 @@ int win_load_module(const char *path, const win_module_info **info)
             }
         }
     }
-    fclose(f);
-    f = NULL;
-#if defined(__arm__) || defined(__thumb__)
-    {
-        win_module_entry entry = (win_module_entry)(uintptr_t)(base + h.entry_rva);
-        const win_module_info *mi = entry(&host_table);
-        rc = -6;
-        if (!mi || mi->version != WINMOD_VERSION || mi->size < sizeof(win_module_info))
-            goto out;
-        *info = mi;
-        raw = NULL;          /* stays loaded */
-        rc = 0;
-    }
-#else
-    (void)host_table;
-    rc = -7;                 /* ARM code cannot run on the host */
-#endif
+    img->raw = raw;
+    img->base = base;
+    img->entry = base + h.entry_rva;
+    img->stack_size = h.native_stack_size;
+    raw = NULL;
+    rc = 0;
 out:
-    if (f)
-        fclose(f);
+    fclose(f);
     win_free(raw);
     return rc;
+}
+
+int win_load_module(const char *path, const win_module_info **info)
+{
+    *info = NULL;
+    win_ez_image img;
+    int rc = win_ez_load(path, &img);
+    if (rc)
+        return rc;
+#if defined(__arm__) || defined(__thumb__)
+    win_module_entry entry = (win_module_entry)(uintptr_t)img.entry;
+    const win_module_info *mi = entry(&host_table);
+    if (!mi || mi->version != WINMOD_VERSION || mi->size < sizeof(win_module_info)) {
+        win_free(img.raw);
+        return -6;
+    }
+    *info = mi;              /* stays loaded */
+    return 0;
+#else
+    (void)host_table;
+    win_free(img.raw);
+    return -7;               /* ARM code cannot run on the host */
+#endif
 }

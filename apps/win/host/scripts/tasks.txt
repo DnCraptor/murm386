@@ -1,0 +1,26 @@
+# Two copies of DEMO as two tasks: start, switch, close one.
+wait 50
+click 62 62
+click 80 118
+wait 100
+snap tasks_two.ppm
+key F1
+wait 50
+snap tasks_about.ppm
+key RETURN
+wait 30
+click 100 160
+wait 600
+snap tasks_first.ppm
+keydown ALT
+key F4
+keyup ALT
+wait 50
+snap tasks_closed.ppm
+keydown ALT
+key F4
+keyup ALT
+wait 50
+key RETURN
+wait 50
+exit

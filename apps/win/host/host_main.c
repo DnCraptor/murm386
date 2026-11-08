@@ -13,6 +13,19 @@
 #include "wincore.h"
 #include "host_drivers.h"
 
+/* the demo application, built in (WinMain renamed by the Makefile) */
+int PASCAL demo_WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show);
+
+static int demo_entry(const win_app_host *h)
+{
+    return demo_WinMain(h->hinstance, 0, (LPSTR)h->cmdline, h->show);
+}
+
+win_app_entry win_host_app(const char *prog)
+{
+    return !lstrcmpi(prog, "DEMO.EXE") ? demo_entry : NULL;
+}
+
 #ifdef HOST_VGA800
 /* the VGA800 module's driver, built in for the test */
 extern const win_display_driver win_disp_vga800;
@@ -44,7 +57,7 @@ static int parse_vk(const char *s)
     if (!strcmp(s, "DOWN")) return VK_DOWN;
     if (!strcmp(s, "BACK")) return VK_BACK;
     if (!strcmp(s, "SPACE")) return VK_SPACE;
-    if (!strcmp(s, "F4")) return VK_F1 + 3;
+    if (s[0] == 'F' && s[1] >= '1' && s[1] <= '9') return VK_F1 + atoi(s + 1) - 1;
     return (int)strtol(s, NULL, 0);
 }
 
@@ -157,6 +170,7 @@ int main(int argc, char **argv)
         lines[nlines++] = strdup(buf);
     }
     fclose(f);
+    task_init();
 #ifdef HOST_VGA800
     if (win_boot(argv[0], &win_disp_vga800, &host_script_input))
         return 1;
@@ -164,8 +178,13 @@ int main(int argc, char **argv)
     if (win_boot(argv[0], &host_snap_display, &host_script_input))
         return 1;
 #endif
-    int r = WinMain(1, 0, "", SW_SHOWNORMAL);
-    printf("WinMain returned %d\n", r);
+    UINT r = WinExec("DEMO.EXE", SW_SHOWNORMAL);
+    if (r < 32) {
+        printf("WinExec failed: %u\n", r);
+        return 1;
+    }
+    task_kernel_loop();
+    printf("Windows ended\n");
     win_shutdown();
     return 0;
 }

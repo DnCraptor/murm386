@@ -86,4 +86,5 @@ static void vbe8_flush(int l, int t, int r, int b) { (void)l; (void)t; (void)r; 
 const win_display_driver win_disp_vbe8 = {
     WINDDI_VERSION, "VBE8", vbe8_enable, vbe8_disable, vbe8_surface,
     vbe8_set_palette, vbe8_flush,
+    "VBE 640x400 256 colours (built in)", 256,
 };

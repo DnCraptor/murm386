@@ -1,12 +1,10 @@
-# Native Windows 3.x API for murm386 EZ applications.
-#
-# The core (KERNEL/GDI/USER), the drivers and the runtime entry are compiled
-# into every application; samples/<name> holds the application sources.
+# Native Windows 3.x for murm386: WINN.EXE with KERNEL, GDI, USER and the
+# built-in drivers.
 #
 #   cmake -S apps/win -B build-win && cmake --build build-win
 #
-# The result is apps/compiled/winn.exe ("Windows native"); WIN_APP picks the
-# application started by it (default: samples/hello).
+# The result is apps/compiled/winn.exe ("Windows native"): the loader that
+# runs the core, the drivers and the applications (apps/winapps/*).
 #
 # The same sources build on Linux for snapshot tests: see host/Makefile.
 
@@ -29,8 +27,6 @@ set(PICO_BOARD pico CACHE STRING "Board type")
 cmake_minimum_required(VERSION 3.22)
 include(pico_sdk_import.cmake)
 
-set(WIN_APP hello CACHE STRING "Application under samples/ to build")
-
 project(winn C CXX ASM)
 pico_sdk_init()
 
@@ -49,7 +45,6 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${OUTPUT_DIR}")
 file(GLOB WIN_CORE "${CMAKE_CURRENT_SOURCE_DIR}/core/*.c")
 file(GLOB WIN_USER "${CMAKE_CURRENT_SOURCE_DIR}/user/*.c")
 file(GLOB WIN_DRV  "${CMAKE_CURRENT_SOURCE_DIR}/drivers/dos/*.c")
-file(GLOB APP_SRC  "${CMAKE_CURRENT_SOURCE_DIR}/samples/${WIN_APP}/*.c")
 
 add_executable(${PROJECT_NAME}
     ${WIN_CORE}
@@ -57,7 +52,6 @@ add_executable(${PROJECT_NAME}
     ${WIN_DRV}
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime/winmain_ez.c
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime/ez_process.c
-    ${APP_SRC}
 )
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/../api/native-dos-runtime.cmake)
@@ -79,8 +73,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 configure_file(memmap.ld.in memmap.ld @ONLY)
 pico_set_linker_script(${PROJECT_NAME} ${CMAKE_CURRENT_BINARY_DIR}/memmap.ld)
 
-pico_set_program_name(${PROJECT_NAME} "Windows native: ${WIN_APP}")
-pico_set_program_version(${PROJECT_NAME} "${WIN_APP}")
+pico_set_program_name(${PROJECT_NAME} "Windows native loader")
 
 target_link_options(${PROJECT_NAME} PRIVATE -Xlinker --print-memory-usage -r)
 

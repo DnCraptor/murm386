@@ -1,4 +1,4 @@
-# Menus and a dialog on the VGA800 driver (800x600, 16 colours): ./hello800
+# Menus and a dialog on the VGA800 driver (800x600, 16 colours): ./demo800
 wait 50
 click 62 62
 wait 30

@@ -16,13 +16,13 @@ static int n_disp, n_input;
 
 void win_register_display_driver(const win_display_driver *drv)
 {
-    if (drv && drv->ddi_version == WINDDI_VERSION && n_disp < MAX_DRV)
+    if (drv && drv->ddi_version >= 1 && drv->ddi_version <= WINDDI_VERSION && n_disp < MAX_DRV)
         disp_drv[n_disp++] = drv;
 }
 
 void win_register_input_driver(const win_input_driver *drv)
 {
-    if (drv && drv->ddi_version == WINDDI_VERSION && n_input < MAX_DRV)
+    if (drv && drv->ddi_version >= 1 && drv->ddi_version <= WINDDI_VERSION && n_input < MAX_DRV)
         input_drv[n_input++] = drv;
 }
 
@@ -122,4 +122,21 @@ int win_boot(const char *exe_path, const win_display_driver *disp, const win_inp
     if (rc)
         return rc;
     return user_init();
+}
+
+/* Native: description of the display driver in use; returns its colours. */
+UINT WINAPI GetDisplayDriverInfoN(LPSTR buf, int size)
+{
+    const win_display_driver *d = win_sys.disp;
+    const char *desc = d ? d->name : "";
+    UINT colors = 256;
+    if (d && d->ddi_version >= 2) {
+        if (d->description)
+            desc = d->description;
+        if (d->colors)
+            colors = (UINT)d->colors;
+    }
+    if (buf && size > 0)
+        lstrcpyn(buf, desc, size);
+    return colors;
 }

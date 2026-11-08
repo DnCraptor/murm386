@@ -18,22 +18,53 @@ wuser U;
 
 static wclass *classes;
 
+static int class_is(const wclass *c, LPCSTR name)
+{
+    return IS_INTRESOURCE(name) ? c->atom == (ATOM)(uintptr_t)name : !lstrcmpi(c->name, name);
+}
+
+/* Application classes belong to the instance that registered them (each
+ * task has its own copy of the program); global classes serve everyone.
+ * The calling task's own class wins. */
 wclass *user_find_class(LPCSTR name)
 {
     if (!name)
         return NULL;
+    HTASK me = task_current()->h;
+    wclass *global = NULL;
     for (wclass *c = classes; c; c = c->next) {
-        if (IS_INTRESOURCE(name) ? c->atom == (ATOM)(uintptr_t)name : !lstrcmpi(c->name, name))
+        if (!class_is(c, name))
+            continue;
+        if (c->wc.hInstance == me && !(c->wc.style & CS_GLOBALCLASS))
             return c;
+        if (!global && ((c->wc.style & CS_GLOBALCLASS) || !c->wc.hInstance))
+            global = c;
     }
-    return NULL;
+    return global;
+}
+
+/* classes of a finished task */
+void user_unregister_task_classes(HTASK task)
+{
+    for (wclass **pp = &classes; *pp;) {
+        wclass *c = *pp;
+        if (c->wc.hInstance == task && task) {
+            *pp = c->next;
+            DeleteAtom(c->atom);
+            win_free(c->name);
+            win_free(c);
+            continue;
+        }
+        pp = &c->next;
+    }
 }
 
 ATOM WINAPI RegisterClass(const WNDCLASS *wc)
 {
     if (!wc || !wc->lpszClassName || IS_INTRESOURCE(wc->lpszClassName))
         return 0;
-    if (user_find_class(wc->lpszClassName))
+    wclass *same = user_find_class(wc->lpszClassName);
+    if (same && (same->wc.hInstance == wc->hInstance || (same->wc.style & CS_GLOBALCLASS)))
         return 0;
     wclass *c = (wclass *)win_alloc(sizeof(*c));
     if (!c)
@@ -1030,6 +1061,7 @@ HWND WINAPI CreateWindowEx(DWORD ex, LPCSTR klass, LPCSTR title, DWORD style,
     w->inst = inst;
     w->id = (style & WS_CHILD) ? (UINT)menu : 0;
     w->menu = (style & WS_CHILD) ? 0 : menu;
+    w->task = (style & WS_CHILD) ? parent->task : task_current()->h;
     w->cb_extra = c->wc.cbWndExtra;
     if (w->cb_extra > 0)
         w->extra = (uint8_t *)win_alloc((size_t)w->cb_extra);

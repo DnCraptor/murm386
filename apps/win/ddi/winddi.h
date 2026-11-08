@@ -15,7 +15,8 @@
 
 #include <stdint.h>
 
-#define WINDDI_VERSION 1
+/* 2 added description and colors to the display driver */
+#define WINDDI_VERSION 2
 
 /* A framebuffer or memory bitmap. bpp: 1 (MSB = leftmost pixel) or 8
  * (palette index). pitch is in bytes. */
@@ -43,6 +44,9 @@ typedef struct win_display_driver {
      * (right/bottom exclusive). Drivers that scan the framebuffer directly
      * ignore it; a shadow-buffer driver copies the area out. */
     void (*flush)(int left, int top, int right, int bottom);
+    /* version 2 */
+    const char *description;          /* e.g. "VGA 800x600 16 colours" */
+    int         colors;               /* colours the device shows (16, 256) */
 } win_display_driver;
 
 /* Key and mouse events go into the core through these calls. */

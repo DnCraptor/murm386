@@ -8,6 +8,7 @@
 
 #include "windows.h"
 #include "../ddi/winddi.h"
+#include "../ddi/winmod.h"
 
 /* ---------------------------------------------------------------- handles */
 
@@ -27,6 +28,7 @@ enum {
     WOBJ_MENU,
     WOBJ_CLASS,
     WOBJ_ACCEL,
+    WOBJ_TASK,
 };
 
 HANDLE win_handle_alloc(int type, void *obj);
@@ -238,5 +240,57 @@ void     cursor_set_shape(const uint8_t *and_mask, const uint8_t *xor_mask, int 
 int      cursor_show(int show);                 /* ShowCursor counter */
 enum { WCUR_ARROW, WCUR_IBEAM, WCUR_WAIT, WCUR_CROSS, WCUR_SIZEWE, WCUR_SIZENS, WCUR_COUNT };
 void     cursor_select_builtin(int id);
+
+/* ---------------------------------------------------------------- tasks (task.c) */
+
+enum { WTASK_NEW, WTASK_RUNNING, WTASK_DEAD };
+
+struct wtask_ctx;
+
+typedef struct wtask {
+    struct wtask *next;
+    HTASK     h;
+    int       state;
+    int       waiting;          /* blocked in GetMessage/WaitMessage */
+    int       quit, quit_code;  /* PostQuitMessage */
+    int       exit_code;
+    char      name[16];
+    char      cmdline[128];
+    int       show;
+    uint8_t  *stack;
+    uint32_t  stack_size;
+    void     *module;           /* EZ image memory */
+    win_app_entry entry;
+    win_app_host  app;
+    int     (*run)(struct wtask *);
+    struct wtask_ctx *ctx;
+} wtask;
+
+void   task_init(void);
+wtask *task_current(void);
+wtask *task_kernel(void);
+wtask *task_from_handle(HTASK h);
+wtask *task_create(const char *name, int (*run)(wtask *), uint32_t stack_size);
+int    task_yield(void);                 /* 1 if another task ran */
+void   task_run_now(wtask *t);
+void   task_kernel_loop(void);
+void   task_quit_all(void);              /* WM_QUIT for every application */
+
+/* user/msg.c */
+int    user_task_has_work(HTASK h);
+void   user_task_ended(HTASK h);
+void   user_poll_input(void);
+
+/* module.c: an EZ image loaded and relocated */
+typedef struct {
+    void     *raw;              /* allocation to free */
+    uint8_t  *base;
+    void     *entry;
+    uint32_t  stack_size;       /* from the EZ header, 0 = default */
+} win_ez_image;
+int    win_ez_load(const char *path, win_ez_image *img);
+
+/* exports.c (generated) */
+extern const void *const *const win_export_tables[WINMOD_COUNT];
 
 #endif /* MURM_WINCORE_H */

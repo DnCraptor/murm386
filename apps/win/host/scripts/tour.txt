@@ -1,5 +1,5 @@
-# Walk through the hello sample: dialogs, editing, list box, window
-# management. Run: ./hello scripts/hello_tour.txt  (snapshots: *.ppm)
+# Walk through the demo application: dialogs, editing, list box, window
+# management. Run: ./demo scripts/tour.txt  (snapshots: *.ppm)
 wait 50
 snap tour_start.ppm
 click 100 164

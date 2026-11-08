@@ -51,6 +51,7 @@ typedef struct wwnd {
     HMENU     menu;              /* menu bar (top-level windows) */
     HMENU     sysmenu;           /* own copy after GetSystemMenu */
     int       alt_tap;           /* Alt pressed with nothing else yet */
+    HTASK     task;              /* owner task; 0 = the desktop */
 } wwnd;
 
 /* Global USER state. */
@@ -61,7 +62,6 @@ typedef struct wuser {
     int      mouse_x, mouse_y;
     unsigned buttons;
     MSG      cur_msg;            /* last retrieved */
-    int      quit, quit_code;
     int      in_modal_move;
     int      layout;             /* 0 = US, 1 = Russian */
     uint32_t last_click_time;
@@ -93,6 +93,7 @@ void    user_invalidate_screen(const wrgn *r);
 void    user_invalidate(wwnd *w, const wrgn *r, int erase, int children);
 void    user_validate(wwnd *w, const wrgn *r);
 wclass *user_find_class(LPCSTR name);
+void    user_unregister_task_classes(HTASK task);
 void    user_register_builtin(LPCSTR name, WNDPROC proc, UINT style, int extra,
                               HCURSOR cur, HBRUSH bg);
 void    user_init_windows(void);
@@ -107,7 +108,7 @@ void    user_kill_window_timers(HWND h);
 int     user_pump_one(void);        /* modal loops: one message, 0 on WM_QUIT */
 
 /* paint.c */
-wwnd   *user_find_paint(void);
+wwnd   *user_find_paint(HTASK task);    /* desktop windows count for any task */
 HDC     user_get_dc(wwnd *w, int whole, const wrgn *limit);
 
 /* nc.c */

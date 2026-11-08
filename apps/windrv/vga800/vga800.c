@@ -193,11 +193,13 @@ static void vga800_flush(int l, int t, int r, int b) { convert(l, t, r, b); }
 const win_display_driver win_disp_vga800 = {
     WINDDI_VERSION, "VGA800", vga800_enable, vga800_disable, vga800_surface,
     vga800_set_palette, vga800_flush,
+    "VGA 800x600 16 colours (VGA800.DRV)", 16,
 };
 
 /* ---------------------------------------------------------------- module */
 
 #ifndef WINDRV_HOST
+#include <stdio.h>
 extern const win_module_host *winmod_host;
 
 static const win_module_info info = {
@@ -206,7 +208,12 @@ static const win_module_info info = {
 
 const win_module_info *__ez_start(const win_module_host *host)
 {
-    if (!host || host->version != WINMOD_VERSION)
+    /* started from DOS: the argument is argc, not a pointer */
+    if ((uintptr_t)host < 0x10000u) {
+        puts("VGA800.DRV is a display driver for WINN.EXE (see SYSTEM.INI).");
+        return NULL;
+    }
+    if (host->version != WINMOD_VERSION)
         return NULL;
     winmod_host = host;
     return &info;

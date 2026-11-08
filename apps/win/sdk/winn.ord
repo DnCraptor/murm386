@@ -1,0 +1,7 @@
+# Native extensions exported by module WINN (no Win16 equivalent).
+# Format: ORDINAL NAME. Append only: applications import by these numbers.
+1 DialogBoxIndirectN
+2 CreateDialogIndirectN
+3 CreateAcceleratorTableN
+4 DestroyAcceleratorTableN
+5 GetDisplayDriverInfoN

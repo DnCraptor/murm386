@@ -1686,9 +1686,10 @@ FILE *fopen(const char *filename, const char *mode)
         return NULL;
     }
 
+    /* malloc does not clear: a stale is_mem would turn this into a memory
+       stream (reads from garbage, fclose leaking the handle) */
+    memset(stream, 0, sizeof(*stream));
     stream->handle = handle;
-    stream->eof = 0;
-    stream->is_static = 0;
     stream->text_mode = strchr(mode, 'b') == NULL;
     return stream;
 }

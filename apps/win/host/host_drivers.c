@@ -43,6 +43,7 @@ static void snap_flush(int l, int t, int r, int b) { (void)l; (void)t; (void)r; 
 const win_display_driver host_snap_display = {
     WINDDI_VERSION, "SNAP", snap_enable, snap_disable, snap_surface,
     snap_set_palette, snap_flush,
+    "Host snapshot 8 bpp", 256,
 };
 
 int host_snapshot(const char *path)
