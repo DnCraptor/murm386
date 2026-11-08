@@ -452,6 +452,16 @@ BOOL    WINAPI UnionRect(LPRECT d, const RECT *a, const RECT *b);
 BOOL    WINAPI SubtractRect(LPRECT d, const RECT *a, const RECT *b);
 BOOL    WINAPI EqualRect(const RECT *a, const RECT *b);
 
+/* ---------------------------------------------------------------- profiles */
+
+int     WINAPI GetPrivateProfileString(LPCSTR section, LPCSTR key, LPCSTR def,
+                                       LPSTR buf, int size, LPCSTR file);
+UINT    WINAPI GetPrivateProfileInt(LPCSTR section, LPCSTR key, int def, LPCSTR file);
+int     WINAPI GetProfileString(LPCSTR section, LPCSTR key, LPCSTR def, LPSTR buf, int size);
+UINT    WINAPI GetProfileInt(LPCSTR section, LPCSTR key, int def);
+UINT    WINAPI GetWindowsDirectory(LPSTR buf, UINT size);
+UINT    WINAPI GetSystemDirectory(LPSTR buf, UINT size);
+
 #include "winuser.h"
 
 #ifdef __cplusplus

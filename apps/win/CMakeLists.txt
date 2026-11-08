@@ -3,7 +3,10 @@
 # The core (KERNEL/GDI/USER), the drivers and the runtime entry are compiled
 # into every application; samples/<name> holds the application sources.
 #
-#   cmake -S apps/win -B build-win -DWIN_APP=hello && cmake --build build-win
+#   cmake -S apps/win -B build-win && cmake --build build-win
+#
+# The result is apps/compiled/winn.exe ("Windows native"); WIN_APP picks the
+# application started by it (default: samples/hello).
 #
 # The same sources build on Linux for snapshot tests: see host/Makefile.
 
@@ -28,7 +31,7 @@ include(pico_sdk_import.cmake)
 
 set(WIN_APP hello CACHE STRING "Application under samples/ to build")
 
-project(${WIN_APP} C CXX ASM)
+project(winn C CXX ASM)
 pico_sdk_init()
 
 set(BUILD_NAME "${PROJECT_NAME}")
@@ -76,7 +79,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 configure_file(memmap.ld.in memmap.ld @ONLY)
 pico_set_linker_script(${PROJECT_NAME} ${CMAKE_CURRENT_BINARY_DIR}/memmap.ld)
 
-pico_set_program_name(${PROJECT_NAME} "ARM DOS Applications: ${WIN_APP}")
+pico_set_program_name(${PROJECT_NAME} "Windows native: ${WIN_APP}")
 pico_set_program_version(${PROJECT_NAME} "${WIN_APP}")
 
 target_link_options(${PROJECT_NAME} PRIVATE -Xlinker --print-memory-usage -r)

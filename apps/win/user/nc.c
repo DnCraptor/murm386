@@ -705,6 +705,11 @@ static void scroll_track(wwnd *w, int bar, int x, int y)
 
 void user_nc_button(wwnd *w, UINT msg, int hit, int x, int y)
 {
+    /* a quick second click is only special on the caption and the system
+     * menu box; elsewhere (menu bar, buttons, scroll bars, borders) it is
+     * another press */
+    if (msg == WM_NCLBUTTONDBLCLK && hit != HTCAPTION && hit != HTSYSMENU)
+        msg = WM_NCLBUTTONDOWN;
     if (msg == WM_NCLBUTTONDBLCLK) {
         if (hit == HTSYSMENU && (w->style & WS_SYSMENU))
             SendMessage(w->h, WM_SYSCOMMAND, SC_CLOSE, MAKELPARAM(x, y));

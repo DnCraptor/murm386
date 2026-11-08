@@ -7,7 +7,7 @@ CORE     = $(wildcard ../core/*.c)
 USER     = $(wildcard ../user/*.c)
 HOST     = host_drivers.c
 
-all: test_gdi hello
+all: test_gdi hello hello800
 
 test_gdi: $(CORE) $(HOST) test_gdi.c
 	$(CC) $(CFLAGS) $(INC) -o $@ $^
@@ -16,4 +16,8 @@ hello: $(CORE) $(USER) $(HOST) host_main.c ../samples/hello/hello.c
 	$(CC) $(CFLAGS) $(INC) -o $@ $^
 
 clean:
-	rm -f test_gdi hello *.ppm *.png
+	rm -f test_gdi hello hello800 *.ppm *.png
+
+# the VGA800 driver module, built in, with fake planar video memory
+hello800: $(CORE) $(USER) $(HOST) host_main.c ../samples/hello/hello.c ../../windrv/vga800/vga800.c
+	$(CC) $(CFLAGS) $(INC) -DHOST_VGA800 -DWINDRV_HOST -o $@ $^

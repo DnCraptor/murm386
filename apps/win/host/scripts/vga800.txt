@@ -1,0 +1,17 @@
+# Menus and a dialog on the VGA800 driver (800x600, 16 colours): ./hello800
+wait 50
+click 62 62
+wait 30
+move 150 62
+move 160 101
+move 220 101
+wait 30
+snap v8_menu.ppm
+key ESC
+key ESC
+key ESC
+click 62 62
+click 80 100
+wait 50
+snap v8_dlg.ppm
+exit

@@ -5,6 +5,7 @@
 
 void win_ddi_key_event(int vk, int sc, int down) { (void)vk; (void)sc; (void)down; }
 void win_ddi_mouse_event(int x, int y, unsigned b) { cursor_move(x, y); (void)b; }
+int user_init(void) { return 0; }   /* GDI only: no USER here */
 
 int main(void)
 {

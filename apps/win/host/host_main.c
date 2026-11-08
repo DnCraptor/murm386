@@ -13,6 +13,15 @@
 #include "wincore.h"
 #include "host_drivers.h"
 
+#ifdef HOST_VGA800
+/* the VGA800 module's driver, built in for the test */
+extern const win_display_driver win_disp_vga800;
+int vga800_host_snapshot(const char *path);
+#define SNAPSHOT vga800_host_snapshot
+#else
+#define SNAPSHOT host_snapshot
+#endif
+
 static char **lines;
 static int nlines, cur;
 static uint32_t wait_until;
@@ -118,7 +127,7 @@ void host_script_idle(uint32_t now)
                 type_char(*p);
         } else if (!strcmp(cmd, "snap")) {
             sscanf(rest, "%255s", a);
-            host_snapshot(a);
+            SNAPSHOT(a);
             printf("snap %s\n", a);
         } else if (!strcmp(cmd, "exit")) {
             printf("script done\n");
@@ -148,11 +157,13 @@ int main(int argc, char **argv)
         lines[nlines++] = strdup(buf);
     }
     fclose(f);
-    win_register_display_driver(&host_snap_display);
-    win_register_input_driver(&host_script_input);
-    if (win_init(NULL, NULL, 640, 400, 8))
+#ifdef HOST_VGA800
+    if (win_boot(argv[0], &win_disp_vga800, &host_script_input))
         return 1;
-    user_init();
+#else
+    if (win_boot(argv[0], &host_snap_display, &host_script_input))
+        return 1;
+#endif
     int r = WinMain(1, 0, "", SW_SHOWNORMAL);
     printf("WinMain returned %d\n", r);
     win_shutdown();

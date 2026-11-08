@@ -1,6 +1,6 @@
 /*
  * winmain_ez.c - entry point of a native Windows EZ application:
- * select the drivers, start the core and USER, run WinMain.
+ * drivers from SYSTEM.INI (or the built-in ones), core and USER, WinMain.
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
@@ -21,14 +21,11 @@ int main(int argc, char **argv)
             strcat(cmdline, " ");
         strcat(cmdline, argv[i]);
     }
-    win_register_display_driver(&win_disp_vbe8);
-    win_register_input_driver(&win_input_dos);
-    int r = win_init(NULL, NULL, 0, 0, 8);
+    int r = win_boot(argc > 0 ? argv[0] : NULL, &win_disp_vbe8, &win_input_dos);
     if (r) {
         printf("Windows: display start failed (%d)\n", r);
         return 1;
     }
-    user_init();
     r = WinMain(1, 0, cmdline, SW_SHOWNORMAL);
     win_shutdown();
     return r;

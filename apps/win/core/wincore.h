@@ -202,7 +202,13 @@ extern wsys win_sys;
 /* winsys.c */
 int      win_init(const char *display, const char *input, int want_w, int want_h, int want_bpp);
 void     win_shutdown(void);
+int      win_boot(const char *exe_path, const win_display_driver *disp,
+                  const win_input_driver *in);
 int      user_init(void);                        /* user/dialog.c */
+
+/* profile.c */
+void     win_set_home(const char *exe_path);
+void     win_path(const char *name, char *out, int size);
 
 /* gdi.c */
 int      gdi_init(void);

@@ -3,8 +3,10 @@
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
+#include <stdio.h>
 #include <string.h>
 #include "wincore.h"
+#include "winmod.h"
 
 #define MAX_DRV 4
 
@@ -75,4 +77,49 @@ void win_shutdown(void)
     if (win_sys.disp && win_sys.screen_ok)
         win_sys.disp->disable();
     win_sys.screen_ok = 0;
+}
+
+/* Load the module named by [boot] key in SYSTEM.INI, register what it has. */
+static const char *boot_module(const char *key, int want_display)
+{
+    char name[64], path[128];
+    GetPrivateProfileString("boot", key, "", name, sizeof(name), "SYSTEM.INI");
+    if (!name[0])
+        return NULL;
+    win_path(name, path, sizeof(path));
+    const win_module_info *mi;
+    int rc = win_load_module(path, &mi);
+    if (rc) {
+        printf("Windows: cannot load %s (%d), using the built-in driver\n", path, rc);
+        return NULL;
+    }
+    if (mi->display)
+        win_register_display_driver(mi->display);
+    if (mi->input)
+        win_register_input_driver(mi->input);
+    if (want_display)
+        return mi->display ? mi->display->name : NULL;
+    return mi->input ? mi->input->name : NULL;
+}
+
+/* Start-up used by the runtime: Windows directory from the program path,
+ * drivers from SYSTEM.INI [boot] display.drv / input.drv (falling back to
+ * the built-in ones), then GDI and USER. */
+int win_boot(const char *exe_path, const win_display_driver *disp, const win_input_driver *in)
+{
+    win_set_home(exe_path);
+    const char *dname = boot_module("display.drv", 1);
+    const char *iname = boot_module("input.drv", 0);
+    if (disp)
+        win_register_display_driver(disp);
+    if (in)
+        win_register_input_driver(in);
+    int w = (int)GetPrivateProfileInt("display", "width", 0, "SYSTEM.INI");
+    int h = (int)GetPrivateProfileInt("display", "height", 0, "SYSTEM.INI");
+    int rc = win_init(dname, iname, w, h, 8);
+    if (rc && dname)                 /* module refused: try the built-in */
+        rc = win_init(disp ? disp->name : NULL, iname, 0, 0, 8);
+    if (rc)
+        return rc;
+    return user_init();
 }
