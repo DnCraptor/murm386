@@ -16,10 +16,13 @@
  */
 #include "ne_entry.h"
 #include "ne_guest.h"
+#include "ne_cmp_flow.h"
 
 #define ENTRY_WINDOW 512u
-#define ENTRY_VISIT_LIMIT 2048u
+#define ENTRY_VISIT_LIMIT 4096u
 #define ENTRY_MAX_LOOP_CX 64u
+#define ENTRY_MAX_C_BACK_EDGES 64u
+#define ENTRY_MAX_CONDITIONAL_LOOP_CX 16u
 /* The NE stack starts four bytes below initial SP (FAR CALL from boot).
  * Reserve headroom for Win16 API argument thunks, the PM/RM gateway and
  * the private fault handler. This counts all local frames and API args. */
@@ -66,6 +69,7 @@ typedef struct {
 typedef struct {
     frame_saves caller_saves;
     size_t return_at;
+    size_t target; /* active near-helper entry: disallow recursion */
     unsigned stack_before, frame_before, bp_before;
     unsigned arg_words;
     /* BP+4 is the last word pushed before CALL; BP+6 the one before it.
@@ -79,6 +83,8 @@ typedef struct {
     unsigned calls, depth, frame;
     unsigned stack_bytes, bp_bytes, near_depth;
     unsigned cleanup_bytes; /* CDECL RET: exact caller ADD SP required next. */
+    unsigned backward_steps; /* exact register loops, never unbounded */
+    win_ne_flag_proof flag_proof;
     int direction; /* 0: unknown DF; +1: CLD; -1: STD. */
     frame_saves saves;
     near_call near[ENTRY_NEAR_CALL_DEPTH];
@@ -313,8 +319,26 @@ static int forward_target(const verifier *v, size_t at, size_t length,
     return 1;
 }
 
+/* Only a directly preceding, exact register CMP/TEST/INC/DEC can justify
+ * taking a backward Jcc. Every taken edge consumes an explicit finite budget.
+ * Unknown condition FLAGS always reject backward Jcc. */
+static int verified_back_jcc(const verifier *v, path_state *s, size_t at,
+                             unsigned length, int disp, unsigned cond)
+{
+    int32_t target = (int32_t)at + (int32_t)length + (int32_t)disp;
+    int taken = win_ne_jcc(&s->flag_proof, cond, at);
+    if (disp >= 0 || target < (int32_t)v->entry ||
+        target >= (int32_t)at || taken < 0)
+        return 0;
+    if (taken && s->backward_steps >= ENTRY_MAX_C_BACK_EDGES) return 0;
+    if (taken) ++s->backward_steps;
+    s->at = taken ? (size_t)target : at + length;
+    return 1;
+}
+
 /* Every path carries its own simulated registers and argument stack.
- * The verifier explores both outcomes of every conditional branch. */
+ * Forward unknown branches explore both outcomes; finite exact backward
+ * loops are followed deterministically. */
 static int check_path(verifier *v, path_state s)
 {
     while (s.at < v->end) {
@@ -325,6 +349,14 @@ static int check_path(verifier *v, path_state s)
         size_t remaining = v->end - at;
         uint8_t op = p[0];
 
+        /* A proven FLAGS value is usable only by the very next conditional
+         * instruction. Ordinary instructions may alter FLAGS implicitly,
+         * and a later control-flow merge must never reuse an old proof. */
+        if (!((op >= 0x70 && op <= 0x7f) ||
+              (op == 0x0f && remaining >= 2 &&
+               p[1] >= 0x80 && p[1] <= 0x8f) ||
+              op == 0xe0 || op == 0xe1))
+            s.flag_proof.mask = 0;
         /* A near CDECL callee returns with its arguments still on the
          * stack. Only an immediately following, exact caller ADD SP is
          * accepted. No NOP, branch, FAR API, or other stack operation may
@@ -472,14 +504,20 @@ static int check_path(verifier *v, path_state s)
             continue;
         }
         if (op == 0x0f && remaining >= 4 &&
-            p[1] >= 0x80 && p[1] <= 0x8f) { /* 386 near Jcc rel16 */
+            p[1] >= 0x80 && p[1] <= 0x8f) { /* 386 Jcc rel16 */
+            int disp = (int16_t)read16(p + 2);
             size_t target;
-            if (!forward_target(v, at, 4, (int16_t)read16(p + 2), &target) ||
-                !mark(v, at, 4)) return 0;
-            path_state taken = s;
-            taken.at = target;
-            if (!check_path(v, taken)) return 0;
-            s.at = at + 4;
+            if (!mark(v, at, 4)) return 0;
+            if (disp < 0) {
+                if (!verified_back_jcc(v, &s, at, 4u, disp, p[1] & 15u))
+                    return 0;
+            } else {
+                if (!forward_target(v, at, 4u, disp, &target)) return 0;
+                path_state taken = s;
+                taken.at = target;
+                if (!check_path(v, taken)) return 0;
+                s.at = at + 4u;
+            }
             continue;
         }
         /* UD2 is an unconditionally faulting 386 instruction. Permit it
@@ -546,11 +584,17 @@ static int check_path(verifier *v, path_state s)
                 s.near_depth == ENTRY_NEAR_CALL_DEPTH ||
                 !mark(v, at, 3)) return 0;
             int32_t target = (int32_t)at + 3 + (int16_t)read16(p + 1);
-            if (target <= (int32_t)(at + 2) ||
+            if (target <= (int32_t)v->entry ||
                 target >= (int32_t)v->end ||
+                target == (int32_t)at ||
                 !stack_push(&s, 2u)) return 0;
+            /* A helper may be called repeatedly after it returns, including
+             * from a later address, but no active helper may call itself. */
+            for (unsigned i=0; i<s.near_depth; ++i)
+                if (s.near[i].target == (size_t)target) return 0;
             near_call *c = &s.near[s.near_depth++];
             c->return_at = at + 3;
+            c->target = (size_t)target;
             c->stack_before = s.stack_bytes - 2u;
             c->frame_before = s.frame;
             c->bp_before = s.bp_bytes;
@@ -592,39 +636,73 @@ static int check_path(verifier *v, path_state s)
             continue;
         }
 
-        /* 16-bit LOOP is safe with an exact, bounded CX. This is a
-         * deterministic branch: LOOP decrements CX before testing it.
-         * The instruction subset cannot modify code or change address size.
-         * Every taken iteration is visited, so resetting CX inside the loop
-         * is rejected by the global instruction-visit budget. */
-        if (op == 0xe2) { /* LOOP rel8, backwards only */
+        /* LOOP/LOOPE/LOOPNE decrement exact bounded CX before testing.
+         * When ZF is unknown, both early exit and continued iteration must
+         * pass preflight; require a small CX to bound verifier recursion. */
+        if (op >= 0xe0 && op <= 0xe2) {
             if (remaining < 2 || !s.number_known[REG_CX] ||
-                !s.number[REG_CX] ||
-                s.number[REG_CX] > ENTRY_MAX_LOOP_CX || (int8_t)p[1] >= 0)
-                return 0;
+                !s.number[REG_CX] || s.number[REG_CX] > ENTRY_MAX_LOOP_CX ||
+                (int8_t)p[1] >= 0) return 0;
             int32_t target = (int32_t)at + 2 + (int8_t)p[1];
             if (target < (int32_t)v->entry || target >= (int32_t)at ||
-                !mark(v, at, 2))
-                return 0;
+                !mark(v, at, 2)) return 0;
             s.number[REG_CX]--;
-            s.at = s.number[REG_CX] ? (size_t)target : at + 2;
+            if (op == 0xe2) {
+                s.at = s.number[REG_CX] ? (size_t)target : at + 2;
+                continue;
+            }
+            int zf = win_ne_jcc(&s.flag_proof, 4u, at);
+            if (!s.number[REG_CX]) { s.at = at + 2; continue; }
+            if (zf < 0) {
+                if (s.number[REG_CX] >= ENTRY_MAX_CONDITIONAL_LOOP_CX)
+                    return 0;
+                path_state taken = s;
+                taken.at = (size_t)target;
+                if (!check_path(v, taken)) return 0;
+                s.at = at + 2; /* unknown ZF may stop on this iteration */
+            } else {
+                int keep_looping = op == 0xe1 ? zf : !zf;
+                s.at = keep_looping ? (size_t)target : at + 2;
+            }
+            continue;
+        }
+        /* JCXZ reads CX without changing FLAGS. Unknown CX is permitted
+         * only for a forward branch, with both paths verified. */
+        if (op == 0xe3) {
+            size_t target;
+            if (remaining < 2 || !forward_target(v,at,2,(int8_t)p[1],&target)
+                || !mark(v,at,2)) return 0;
+            if (s.number_known[REG_CX]) {
+                s.at = s.number[REG_CX] ? at + 2 : target;
+            } else {
+                path_state taken = s;
+                taken.at = target;
+                if (!check_path(v,taken)) return 0;
+                s.at = at + 2;
+            }
             continue;
         }
 
-        /* Forward-only 16-bit branches: 70..7F Jcc rel8, EB JMP rel8,
-         * E9 JMP rel16. All paths must independently pass validation. */
+        /* Unknown Jcc conditions still require both *forward* paths.
+         * Backward Jcc may only consume a fresh, exact FLAGS proof; JMP
+         * backwards remains forbidden. */
         if ((op >= 0x70 && op <= 0x7f) || op == 0xeb || op == 0xe9) {
             size_t length = op == 0xe9 ? 3u : 2u, target;
             if (remaining < length) return 0;
             int displacement = length == 3 ? (int16_t)read16(p + 1) : (int8_t)p[1];
-            if (!forward_target(v, at, length, displacement, &target) ||
-                !mark(v, at, length))
+            if (!mark(v, at, length)) return 0;
+            if (op >= 0x70 && op <= 0x7f && displacement < 0) {
+                if (!verified_back_jcc(v, &s, at, (unsigned)length,
+                                       displacement, op & 15u)) return 0;
+                continue;
+            }
+            if (!forward_target(v, at, length, displacement, &target))
                 return 0;
             if (op >= 0x70 && op <= 0x7f) {
                 path_state taken = s;
                 taken.at = target;
                 if (!check_path(v, taken)) return 0;
-                s.at = at + length; /* fall-through also mandatory */
+                s.at = at + length;
             } else {
                 s.at = target;
             }
@@ -637,18 +715,43 @@ static int check_path(verifier *v, path_state s)
          * TEST AL,AL / JZ without permitting an arbitrary guest pointer. */
         if (op == 0x3d || op == 0xa9) { /* CMP/TEST AX,imm16 */
             if (remaining < 3 || !mark(v, at, 3)) return 0;
+            s.flag_proof = (win_ne_flag_proof){0};
+            if (s.number_known[REG_AX])
+                s.flag_proof = op == 0x3d ?
+                    win_ne_cmp(s.number[REG_AX], read16(p+1), 16u, at+3u) :
+                    win_ne_test(s.number[REG_AX], read16(p+1), 16u, at+3u);
             s.at += 3;
             continue;
         }
         if (op == 0x3c || op == 0xa8) { /* CMP/TEST AL,imm8 */
             if (remaining < 2 || !mark(v, at, 2)) return 0;
+            s.flag_proof = (win_ne_flag_proof){0};
+            if (s.number_known[REG_AX])
+                s.flag_proof = op == 0x3c ?
+                    win_ne_cmp(byte8(&s,0),p[1],8u,at+2u) :
+                    win_ne_test(byte8(&s,0),p[1],8u,at+2u);
             s.at += 2;
             continue;
         }
-        if (op == 0x39 || op == 0x3b || op == 0x85 ||
-            op == 0x84) { /* CMP/TEST register-register (8/16 bit) */
+        if (op == 0x38 || op == 0x3a || op == 0x39 || op == 0x3b ||
+            op == 0x85 || op == 0x84) { /* CMP/TEST register-register */
             if (remaining < 2 || (p[1] & 0xc0) != 0xc0 ||
                 !mark(v, at, 2)) return 0;
+            unsigned reg = (p[1] >> 3) & 7u, rm = p[1] & 7u;
+            unsigned width = (op == 0x38 || op == 0x3a || op == 0x84) ? 8u : 16u;
+            int known = width == 8u ?
+                s.number_known[parent8(reg)] && s.number_known[parent8(rm)] :
+                s.number_known[reg] && s.number_known[rm];
+            s.flag_proof = (win_ne_flag_proof){0};
+            if (known) {
+                unsigned a = width == 8u ? byte8(&s,reg) : s.number[reg];
+                unsigned b = width == 8u ? byte8(&s,rm) : s.number[rm];
+                if (op == 0x84 || op == 0x85)
+                    s.flag_proof = win_ne_test(a,b,width,at+2u);
+                else
+                    s.flag_proof = (op & 2u) ? win_ne_cmp(a,b,width,at+2u) :
+                                                win_ne_cmp(b,a,width,at+2u);
+            }
             s.at += 2;
             continue;
         }
@@ -798,6 +901,13 @@ static int check_path(verifier *v, path_state s)
             unsigned group = (p[1] >> 3) & 7u, reg = p[1] & 7u;
             unsigned imm = op == 0x81 ? read16(p + 2) :
                            op == 0x83 ? (uint16_t)(int16_t)(int8_t)p[2] : p[2];
+            if (group == 7u) { /* CMP register,imm: fresh FLAGS proof */
+                s.flag_proof = (win_ne_flag_proof){0};
+                if (width == 16u && s.number_known[reg])
+                    s.flag_proof = win_ne_cmp(s.number[reg],imm,16u,at+length);
+                else if (width == 8u && s.number_known[parent8(reg)])
+                    s.flag_proof = win_ne_cmp(byte8(&s,reg),imm,8u,at+length);
+            }
             if (width == 16) {
                 if (!ordinary_reg(reg)) return 0;
                 if (group != 7) {
@@ -1083,9 +1193,12 @@ static int check_path(verifier *v, path_state s)
             unsigned reg = op & 7u;
             if (!ordinary_reg(reg) || !mark(v, at, 1)) return 0;
             s.regs[reg] = ARG_WORD;
-            if (s.number_known[reg])
-                s.number[reg] = (uint16_t)(s.number[reg] +
-                                           (op < 0x48 ? 1 : -1));
+            s.flag_proof = (win_ne_flag_proof){0};
+            if (s.number_known[reg]) {
+                int delta = op < 0x48 ? 1 : -1;
+                s.flag_proof = win_ne_incdec(s.number[reg],delta,at+1u);
+                s.number[reg] = (uint16_t)(s.number[reg] + delta);
+            }
             s.at++;
             continue;
         }

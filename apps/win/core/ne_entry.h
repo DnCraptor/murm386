@@ -25,6 +25,9 @@
  * Register-only arithmetic never grants unproved DS/SS memory access.
  * Bounded ENTER imm16,0 frames and LIFO BX/SI/DI compiler saves are
  * verified through nested direct near CALL/RET, in a 512-byte window.
+ * Exact CMP/TEST/INC/DEC condition flags permit bounded backward short/near
+ * Jcc; backward direct calls to nonrecursive helpers are allowed. JCXZ and
+ * bounded LOOPE/LOOPNE verify all exits when runtime ZF is unknown.
  * Indirect calls/returns,
  * unknown SS addresses, segment overrides, delayed/partial caller cleanup
  * and recursion remain prohibited.

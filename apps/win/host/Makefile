@@ -147,6 +147,19 @@ clean_ne_compiler:
 	rm -f test_ne_compiler NECABI-fixture.exe
 .PHONY: clean_ne_compiler
 
+# Checked Win16 C-style loops, reused near helpers and LOOPcc.
+all: test_ne_cmp_flow test_ne_bounded_flow NEFLOW-fixture.exe
+NEFLOW-fixture.exe: mkne_bounded_flow.py
+	python3 mkne_bounded_flow.py $@
+test_ne_cmp_flow: test_ne_cmp_flow.c ../core/ne_cmp_flow.h
+	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ test_ne_cmp_flow.c
+test_ne_bounded_flow: ../core/ne_entry.c ../core/ne_cmp_flow.h test_ne_bounded_flow.c NEFLOW-fixture.exe
+	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne_entry.c test_ne_bounded_flow.c
+clean: clean_ne_bounded_flow
+clean_ne_bounded_flow:
+	rm -f test_ne_cmp_flow test_ne_bounded_flow NEFLOW-fixture.exe
+.PHONY: clean_ne_bounded_flow
+
 # Keep the existing clean recipe unchanged (it may differ locally).
 clean: clean_ne_alu
 clean_ne_alu:
