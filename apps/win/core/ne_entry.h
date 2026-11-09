@@ -14,6 +14,8 @@
  * BP-relative stack locals require a standard frame and a bounded SUB SP.
  * DS reads/writes must stay below data_limit. Byte-sized MOV accesses use
  * AL only and require a proven DS offset (direct or indexed).
+ * CMP/TEST AL,imm8 and register-only TEST r8,r8 change FLAGS; memory
+ * CMP r/m8,imm8 is limited to checked DS, never unknown SS addresses.
  * Indirect calls/returns,
  * unknown SS addresses, segment overrides, delayed/partial caller cleanup
  * and recursion remain prohibited.

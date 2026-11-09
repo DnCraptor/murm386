@@ -453,17 +453,35 @@ static int check_path(verifier *v, path_state s)
             continue;
         }
 
-        /* CMP/TEST only change FLAGS. Restrict ModRM operands to registers
-         * so their effective address cannot escape the known DATA region. */
+        /* CMP/TEST alter FLAGS but not register values or provenance.
+         * ModRM register-register byte TEST is safe; memory access from
+         * TEST remains excluded. This enables a bounded NUL scanner with
+         * TEST AL,AL / JZ without permitting an arbitrary guest pointer. */
         if (op == 0x3d || op == 0xa9) { /* CMP/TEST AX,imm16 */
             if (remaining < 3 || !mark(v, at, 3)) return 0;
             s.at += 3;
             continue;
         }
-        if (op == 0x39 || op == 0x3b || op == 0x85) {
+        if (op == 0x3c || op == 0xa8) { /* CMP/TEST AL,imm8 */
+            if (remaining < 2 || !mark(v, at, 2)) return 0;
+            s.at += 2;
+            continue;
+        }
+        if (op == 0x39 || op == 0x3b || op == 0x85 ||
+            op == 0x84) { /* CMP/TEST register-register (8/16 bit) */
             if (remaining < 2 || (p[1] & 0xc0) != 0xc0 ||
                 !mark(v, at, 2)) return 0;
             s.at += 2;
+            continue;
+        }
+        if (op == 0x80 && remaining >= 2 &&
+            (p[1] & 0x38u) == 0x38u) { /* CMP r/m8,imm8: /7 */
+            size_t ea_len;
+            unsigned addr;
+            if (!data_ea(v, &s, p, remaining, 1u, &ea_len, &addr) ||
+                remaining < ea_len + 1u ||
+                !mark(v, at, ea_len + 1u)) return 0;
+            s.at += ea_len + 1u;
             continue;
         }
 
