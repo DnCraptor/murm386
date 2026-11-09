@@ -5,9 +5,10 @@
  * RETF, and control flow may only jump forward, preventing unbounded loops
  * while no protected-mode fault-recovery mechanism exists.
  *
- * In particular, direct DS memory accesses must stay below the reserved
- * Win16 stack area; no instruction may change DS/SS or make an indirect
- * control transfer. A symbolic stack records the origin of FAR selectors.
+ * In particular, DATA accesses must stay below the reserved Win16 stack.
+ * Register-derived addresses require statically known 16-bit values; BP/SS,
+ * segment overrides, and indirect control transfers are rejected. A symbolic
+ * stack tracks the origin of FAR selectors passed to imported Win16 APIs.
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
@@ -54,8 +55,10 @@ typedef struct {
     unsigned calls, depth, frame;
     uint8_t stack[8];
     uint8_t regs[8];
-    uint16_t cx_value;       /* known CX for deterministic LOOP rel8 */
-    uint8_t cx_known;
+    /* Exact 16-bit register values are tracked independently of the Win16
+     * FAR-selector provenance tags. Unknown values cannot address memory. */
+    uint16_t number[8];
+    uint8_t number_known[8];
 } path_state;
 
 static uint16_t read16(const uint8_t *p)
@@ -88,6 +91,56 @@ static int mark(verifier *v, size_t at, size_t bytes)
 static int direct_data(const verifier *v, unsigned offset, unsigned width)
 {
     return v->data_limit >= width && offset <= v->data_limit - width;
+}
+
+/* Decode a 16-bit data effective address. Register-indirect access is
+ * permitted only with exact values for every base/index register, and only
+ * when the full operand stays in the already validated DATA region. BP-based
+ * forms default to SS and are intentionally rejected. No segment/address
+ * override prefix is part of the accepted instruction subset. */
+static int data_ea(const verifier *v, const path_state *s,
+                   const uint8_t *p, size_t remain, unsigned width,
+                   size_t *bytes, unsigned *address)
+{
+    if (remain < 2 || (p[1] & 0xc0) == 0xc0)
+        return 0;
+    unsigned mod = p[1] >> 6, rm = p[1] & 7u;
+    size_t len = 2;
+    int32_t addr = 0;
+    if (mod == 0 && rm == 6) { /* direct disp16 */
+        if (remain < 4) return 0;
+        addr = read16(p + 2);
+        len += 2;
+    } else {
+        unsigned r1 = 8u, r2 = 8u;
+        switch (rm) {
+        case 0: r1 = REG_BX; r2 = REG_SI; break;
+        case 1: r1 = REG_BX; r2 = REG_DI; break;
+        case 4: r1 = REG_SI; break;
+        case 5: r1 = REG_DI; break;
+        case 7: r1 = REG_BX; break;
+        default: return 0; /* BP+SI, BP+DI, BP (SS) */
+        }
+        if (!s->number_known[r1] ||
+            (r2 < 8u && !s->number_known[r2]))
+            return 0;
+        addr = s->number[r1];
+        if (r2 < 8u) addr += s->number[r2];
+        if (mod == 1) {
+            if (remain < len + 1) return 0;
+            addr += (int8_t)p[len++];
+        } else if (mod == 2) {
+            if (remain < len + 2) return 0;
+            addr += (int16_t)read16(p + len);
+            len += 2;
+        }
+    }
+    /* Also reject 16-bit address wraparound; no unintended access at 0000. */
+    if (addr < 0 || addr > 0xffff || !direct_data(v, (unsigned)addr, width))
+        return 0;
+    *bytes = len;
+    *address = (unsigned)addr;
+    return 1;
 }
 
 static int forward_target(const verifier *v, size_t at, size_t length,
@@ -181,15 +234,16 @@ static int check_path(verifier *v, path_state s)
          * Every taken iteration is visited, so resetting CX inside the loop
          * is rejected by the global instruction-visit budget. */
         if (op == 0xe2) { /* LOOP rel8, backwards only */
-            if (remaining < 2 || !s.cx_known || !s.cx_value ||
-                s.cx_value > ENTRY_MAX_LOOP_CX || (int8_t)p[1] >= 0)
+            if (remaining < 2 || !s.number_known[REG_CX] ||
+                !s.number[REG_CX] ||
+                s.number[REG_CX] > ENTRY_MAX_LOOP_CX || (int8_t)p[1] >= 0)
                 return 0;
             int32_t target = (int32_t)at + 2 + (int8_t)p[1];
             if (target < (int32_t)v->entry || target >= (int32_t)at ||
                 !mark(v, at, 2))
                 return 0;
-            s.cx_value--;
-            s.at = s.cx_value ? (size_t)target : at + 2;
+            s.number[REG_CX]--;
+            s.at = s.number[REG_CX] ? (size_t)target : at + 2;
             continue;
         }
 
@@ -227,20 +281,68 @@ static int check_path(verifier *v, path_state s)
             continue;
         }
 
-        /* Absolute 16-bit DS accesses only. DS cannot be changed by any
-         * verified instruction. Stack bytes above data_limit are excluded. */
+        /* Absolute 16-bit DS references. Indexed references are checked
+         * separately using exact base/index values. */
         if (op == 0xa1 || op == 0xa3) { /* MOV AX,[disp16] / MOV [disp16],AX */
             if (remaining < 3 || !direct_data(v, read16(p + 1), 2) ||
                 !mark(v, at, 3)) return 0;
-            if (op == 0xa1) s.regs[REG_AX] = ARG_WORD;
+            if (op == 0xa1) {
+                s.regs[REG_AX] = ARG_WORD;
+                s.number_known[REG_AX] = 0;
+            }
             s.at += 3;
             continue;
         }
-        if (op == 0xc6 || op == 0xc7) { /* MOV byte/word [disp16],imm */
-            size_t length = op == 0xc6 ? 5u : 6u;
-            if (remaining < length || p[1] != 0x06 ||
-                !direct_data(v, read16(p + 2), op == 0xc6 ? 1 : 2) ||
-                !mark(v, at, length)) return 0;
+        if (op == 0xc6 || op == 0xc7) { /* MOV [known DS ea],immediate */
+            size_t ea_len;
+            unsigned addr;
+            size_t imm_len = op == 0xc6 ? 1u : 2u;
+            if (remaining < 2 || (p[1] & 0x38u) != 0 ||
+                !data_ea(v, &s, p, remaining, (unsigned)imm_len,
+                         &ea_len, &addr) ||
+                remaining < ea_len + imm_len ||
+                !mark(v, at, ea_len + imm_len)) return 0;
+            s.at += ea_len + imm_len;
+            continue;
+        }
+
+        /* Standard 16-bit DS addressing, not arbitrary guest pointers.
+         * LEA computes the checked address; MOV can read/write a word.
+         * No memory operand may use BP (which defaults to SS). */
+        if (op == 0x8d || op == 0x8b || op == 0x89) {
+            if (remaining >= 2 && (p[1] & 0xc0u) != 0xc0u) {
+                unsigned reg = (p[1] >> 3) & 7u, addr;
+                size_t ea_len;
+                if (!ordinary_reg(reg) ||
+                    !data_ea(v, &s, p, remaining, op == 0x8d ? 1u : 2u,
+                             &ea_len, &addr) ||
+                    !mark(v, at, ea_len)) return 0;
+                if (op != 0x89) {
+                    s.regs[reg] = ARG_WORD;
+                    s.number_known[reg] = op == 0x8d;
+                    if (op == 0x8d) s.number[reg] = (uint16_t)addr;
+                }
+                s.at += ea_len;
+                continue;
+            }
+        }
+
+        /* ADD/SUB r16, sign-extended immediate. Only direct registers are
+         * supported, never SP/BP or an unproven memory operand. */
+        if (op == 0x83 || op == 0x81) {
+            size_t length = op == 0x83 ? 3u : 4u;
+            if (remaining < length || (p[1] & 0xc0u) != 0xc0u ||
+                (((p[1] >> 3) & 7u) != 0u &&
+                 ((p[1] >> 3) & 7u) != 5u) ||
+                !ordinary_reg(p[1] & 7u) || !mark(v, at, length))
+                return 0;
+            unsigned reg = p[1] & 7u;
+            uint16_t delta = op == 0x83 ? (uint16_t)(int16_t)(int8_t)p[2]
+                                          : read16(p + 2);
+            if (((p[1] >> 3) & 7u) == 5u) delta = (uint16_t)-delta;
+            if (s.number_known[reg])
+                s.number[reg] = (uint16_t)(s.number[reg] + delta);
+            s.regs[reg] = ARG_WORD;
             s.at += length;
             continue;
         }
@@ -263,10 +365,8 @@ static int check_path(verifier *v, path_state s)
             unsigned reg = op - 0xb8;
             if (remaining < 3 || !ordinary_reg(reg) || !mark(v, at, 3)) return 0;
             s.regs[reg] = ARG_WORD;
-            if (reg == REG_CX) {
-                s.cx_known = 1;
-                s.cx_value = read16(p + 1);
-            }
+            s.number_known[reg] = 1;
+            s.number[reg] = read16(p + 1);
             s.at += 3;
             continue;
         }
@@ -282,7 +382,7 @@ static int check_path(verifier *v, path_state s)
             unsigned reg = op - 0x58;
             if (!s.depth || !ordinary_reg(reg) || !mark(v, at, 1)) return 0;
             s.regs[reg] = s.stack[--s.depth];
-            if (reg == REG_CX) s.cx_known = 0; /* numeric value unknown */
+            s.number_known[reg] = 0; /* POP value unknown */
             s.at++;
             continue;
         }
@@ -295,20 +395,19 @@ static int check_path(verifier *v, path_state s)
             if (op == 0x8c) { /* MOV r16,DS */
                 if (reg != 3 || !ordinary_reg(rm)) return 0;
                 s.regs[rm] = ARG_DS;
-                if (rm == REG_CX) s.cx_known = 0;
+                s.number_known[rm] = 0;
             } else {
                 unsigned dst = op == 0x8b || op == 0x33 ? reg : rm;
                 unsigned src = op == 0x8b || op == 0x33 ? rm : reg;
                 if (!ordinary_reg(dst) || !ordinary_reg(src)) return 0;
-                s.regs[dst] = (op == 0x89 || op == 0x8b) ?
-                              s.regs[src] : ARG_WORD;
-                if (dst == REG_CX) {
-                    if (op == 0x31 || op == 0x33) {
-                        s.cx_known = src == REG_CX; /* XOR CX,CX = zero */
-                        s.cx_value = 0;
-                    } else if (src != REG_CX) {
-                        s.cx_known = 0;
-                    }
+                if (op == 0x89 || op == 0x8b) {
+                    s.regs[dst] = s.regs[src];
+                    s.number_known[dst] = s.number_known[src];
+                    s.number[dst] = s.number[src];
+                } else {
+                    s.regs[dst] = ARG_WORD;
+                    s.number_known[dst] = dst == src; /* XOR r16,r16 */
+                    if (dst == src) s.number[dst] = 0;
                 }
             }
             s.at += 2;
@@ -318,14 +417,20 @@ static int check_path(verifier *v, path_state s)
             unsigned reg = op & 7u;
             if (!ordinary_reg(reg) || !mark(v, at, 1)) return 0;
             s.regs[reg] = ARG_WORD;
-            if (reg == REG_CX && s.cx_known)
-                s.cx_value = (uint16_t)(s.cx_value + (op < 0x48 ? 1 : -1));
+            if (s.number_known[reg])
+                s.number[reg] = (uint16_t)(s.number[reg] +
+                                           (op < 0x48 ? 1 : -1));
             s.at++;
             continue;
         }
         if (op == 0x05 || op == 0x2d) { /* ADD/SUB AX,imm16 */
             if (remaining < 3 || !mark(v, at, 3)) return 0;
             s.regs[REG_AX] = ARG_WORD;
+            if (s.number_known[REG_AX]) {
+                uint16_t delta = read16(p + 1);
+                if (op == 0x2d) delta = (uint16_t)-delta;
+                s.number[REG_AX] = (uint16_t)(s.number[REG_AX] + delta);
+            }
             s.at += 3;
             continue;
         }
@@ -354,6 +459,8 @@ static int check_path(verifier *v, path_state s)
          * These registers cannot retain a previously proven DS selector. */
         s.regs[REG_AX] = ARG_WORD;
         s.regs[REG_DX] = ARG_WORD;
+        s.number_known[REG_AX] = 0;
+        s.number_known[REG_DX] = 0;
         s.calls++;
         s.at += 5;
     }

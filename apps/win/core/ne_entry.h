@@ -6,9 +6,10 @@
 
 /* All reachable paths must end at a RETF after at least one supported API
  * call. Conditional and unconditional branches are allowed only forward;
- * memory references must be direct DS:disp16 and stay below data_limit.
- * Indirect branches, arbitrary/stack-relative addressing and unbounded
- * loops remain disabled until protected-mode exception recovery exists.
+ * DATA reads and writes (direct or register-indexed) must stay strictly
+ * below data_limit. Indexed addresses require exact known 16-bit register
+ * values; BP/SS accesses, segment overrides, and indirect branches remain
+ * disabled. The private IDT provides recovery for supported guest faults.
  * LOOP rel8 is allowed only with an exactly tracked CX <= 64; all taken
  * iterations are validated within the instruction visit limit.
  * calls receives the maximum number of API calls on any validated path. */

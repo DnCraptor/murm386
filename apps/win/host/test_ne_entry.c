@@ -204,6 +204,106 @@ int main(void)
                               8, loop_service, 1, &n) && n == 1);
     assert(!win_ne_entry_calls(deliberate_ud+5, 2, 0,
                                8, loop_service, 1, &n));
+    /* Register-indexed DATA with statically known BX/SI values, plus LEA.
+     * Old tests above still reject unknown-index MOV AX,[BX]. */
+    const uint8_t index_ok[] = {
+        0xbb, 0x1e, 0x00,       /* MOV BX,001Eh */
+        0x83, 0xc3, 0x02,       /* ADD BX,+2 -> 0020h */
+        0xbe, 0x04, 0x00,       /* MOV SI,0004h */
+        0xb8, 0x34, 0x12,       /* MOV AX,1234h */
+        0x89, 0x40, 0x01,       /* MOV [BX+SI+1],AX -> 0025h */
+        0x8b, 0x40, 0x01,       /* MOV AX,[BX+SI+1] */
+        0x8d, 0x78, 0x01,       /* LEA DI,[BX+SI+1] -> 0025h */
+        0x8b, 0x05,             /* MOV AX,[DI] */
+        0x9a, 0x00, 0x00, 0x08, 0x00, /* KERNEL.GetVersion */
+        0xcb
+    };
+    assert(win_ne_entry_calls_data(index_ok, sizeof index_ok, 0,
+                                   8, loop_service, 1, 0x40, &n) && n == 1);
+    assert(!win_ne_entry_calls(index_ok, sizeof index_ok, 0,
+                               8, loop_service, 1, &n));
+    uint8_t index_bad[sizeof index_ok];
+    memcpy(index_bad, index_ok, sizeof index_ok);
+    index_bad[1] = 0x3e; /* address becomes 0045h: beyond 0040h */
+    assert(!win_ne_entry_calls_data(index_bad, sizeof index_bad, 0,
+                                    8, loop_service, 1, 0x40, &n));
+    memcpy(index_bad, index_ok, sizeof index_ok);
+    index_bad[4] = 0xeb; /* SUB BX,2: still in range and known */
+    assert(win_ne_entry_calls_data(index_bad, sizeof index_bad, 0,
+                                   8, loop_service, 1, 0x40, &n));
+    memcpy(index_bad, index_ok, sizeof index_ok);
+    index_bad[4] = 0xf3; /* SUB BX,unknown grp6 -> forbidden */
+    assert(!win_ne_entry_calls_data(index_bad, sizeof index_bad, 0,
+                                    8, loop_service, 1, 0x40, &n));
+    memcpy(index_bad, index_ok, sizeof index_ok);
+    index_bad[13] = 0x46; /* indexed write via [BP+SI+disp] (SS) */
+    assert(!win_ne_entry_calls_data(index_bad, sizeof index_bad, 0,
+                                    8, loop_service, 1, 0x40, &n));
+    memcpy(index_bad, index_ok, sizeof index_ok);
+    index_bad[12] = 0x26; /* ES override, not a safe 16-bit DS write */
+    assert(!win_ne_entry_calls_data(index_bad, sizeof index_bad, 0,
+                                    8, loop_service, 1, 0x40, &n));
+    memcpy(index_bad, index_ok, sizeof index_ok);
+    index_bad[10] = 0x3f; index_bad[11] = 0x00; /* AX value irrelevant */
+    assert(win_ne_entry_calls_data(index_bad, sizeof index_bad, 0,
+                                   8, loop_service, 1, 0x40, &n));
+    /* The source index must not be a value read from guest memory. */
+    const uint8_t unknown_index[] = {
+        0xbe,0x10,0x00,      /* MOV SI,0010 */
+        0x8b,0x1c,           /* MOV BX,[SI] -> unknown */
+        0x8b,0x07,           /* MOV AX,[BX] rejected */
+        0x9a,0x00,0x00,0x08,0x00,0xcb
+    };
+    assert(!win_ne_entry_calls_data(unknown_index, sizeof unknown_index, 0,
+                                    8, loop_service, 1, 0x40, &n));
+    const uint8_t wrap_index[] = {
+        0xbe,0xff,0xff, /* MOV SI,FFFFh */
+        0x8b,0x44,0x01, /* MOV AX,[SI+1] - cannot wrap to DS:[0] */
+        0x9a,0x00,0x00,0x08,0x00,0xcb
+    };
+    assert(!win_ne_entry_calls_data(wrap_index, sizeof wrap_index, 0,
+                                    8, loop_service, 1, 0x40, &n));
+    /* Both paths of JNZ must have proven in-range indexed addresses. */
+    const uint8_t branch_index[] = {
+        0xbb,0x20,0x00, 0x3d,0x00,0x00, /* BX=0020; CMP AX,0 */
+        0x75,0x02,                      /* JNZ +2 => MOV BX,003F */
+        0xeb,0x03,                      /* JMP +3 => MOV AX,[BX] */
+        0xbb,0x3f,0x00,                /* MOV BX,003F */
+        0x8b,0x07,                     /* word read at 003F crosses 0040 */
+        0x9a,0x00,0x00,0x08,0x00,0xcb
+    };
+    assert(!win_ne_entry_calls_data(branch_index, sizeof branch_index, 0,
+                                    8, loop_service, 1, 0x40, &n));
+    /* LOOP advances a checked index and must recheck each iteration. */
+    const uint8_t indexed_loop[] = {
+        0xb9,0x03,0x00,       /* MOV CX,3 */
+        0xbe,0x20,0x00,       /* MOV SI,0020h */
+        0xb8,0x34,0x12,       /* MOV AX,1234h */
+        0x89,0x04,            /* MOV [SI],AX */
+        0x46,                 /* INC SI */
+        0xe2,0xfb,            /* LOOP -5 */
+        0x9a,0x00,0x00,0x08,0x00,0xcb
+    };
+    assert(win_ne_entry_calls_data(indexed_loop, sizeof indexed_loop, 0,
+                                   8, loop_service, 1, 0x40, &n) && n == 1);
+    uint8_t index_loop_bad[sizeof indexed_loop];
+    memcpy(index_loop_bad, indexed_loop, sizeof indexed_loop);
+    index_loop_bad[4] = 0x3e; /* 003Eh fits once, 003F crosses DATA limit */
+    assert(!win_ne_entry_calls_data(index_loop_bad, sizeof index_loop_bad, 0,
+                                    8, loop_service, 1, 0x40, &n));
+    memcpy(index_loop_bad, indexed_loop, sizeof indexed_loop);
+    index_loop_bad[1] = 0; /* LOOP with CX=0 wraps to 0xffff */
+    assert(!win_ne_entry_calls_data(index_loop_bad, sizeof index_loop_bad, 0,
+                                    8, loop_service, 1, 0x40, &n));
+    /* Clobbering an exact pointer with a native API return invalidates it. */
+    const uint8_t api_pointer[] = {
+        0x9a,0x00,0x00,0x08,0x00, /* GetVersion returns unknown AX */
+        0x89,0xc3,                /* MOV BX,AX */
+        0x8b,0x07,                /* MOV AX,[BX] rejected */
+        0x9a,0x00,0x00,0x08,0x00,0xcb
+    };
+    assert(!win_ne_entry_calls_data(api_pointer, sizeof api_pointer, 0,
+                                    8, loop_service, 1, 0x40, &n));
     puts("ne entry stack validator: PASS");
     return 0;
 }
