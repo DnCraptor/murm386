@@ -50,8 +50,8 @@ static void save_cpu(CPU *cpu, win_cpu_snapshot *s)
 static void restore_cpu(CPU *cpu, const win_cpu_snapshot *s)
 {
     CPU_ext_accessors_t *e = cpu->ext_accessors;
-    /* Guest code has cleared PE before OUT EXIT. The saved GDTR was also
-     * restored in guest code; segment setters therefore run in Real Mode. */
+    /* Both EXIT and recoverable FAULT switch to RM and restore the original
+     * GDTR/IDTR before OUT. Segment setters therefore run in Real Mode. */
     for (unsigned i = 0; i < WIN_SEG_COUNT; i++)
         e->set_seg16(cpu, (uint8_t)i, s->seg[i]);
     for (unsigned i = 0; i < 8; i++) cpu->gprx[i] = s->gpr[i];
@@ -63,9 +63,9 @@ static void restore_cpu(CPU *cpu, const win_cpu_snapshot *s)
     cpu->excerr = s->excerr;
 }
 
-/* Permit only a bounded acyclic NE entry, with validated DS accesses and
- * FAR API imports. Reject arbitrary instructions and backward jumps before
- * changing CR0.PE: no PM fault handler is installed for arbitrary code. */
+/* Permit only a bounded NE entry, with validated DS accesses and FAR API
+ * imports. The private IDT catches faults from supported code, but arbitrary
+ * instructions and unbounded backward jumps are still forbidden. */
 static int valid_basic_entry(const win_ne_guest_image *g, unsigned *calls)
 {
     if (!g->info.cs_index || !g->info.ss_index ||
@@ -172,8 +172,15 @@ int win_ne_execute_basic(const char *path, uint32_t *value)
         .ne_ss = g.ss, .ne_sp = g.sp,
         .gdt_limit = g.gdt_limit, .gdt_linear = g.gdt_linear
     };
+    uint8_t fault_idt[WIN_NE_FAULT_AREA_BYTES];
+    uint8_t fault_code[WIN_NE_FAULT_AREA_BYTES];
     if (!win_ne_boot_make(boot, sizeof(boot), &args) ||
-        !g.io.write(g.opaque, linear, boot, sizeof(boot))) {
+        !win_ne_fault_make(fault_idt, fault_code, &args) ||
+        !g.io.write(g.opaque, linear, boot, sizeof(boot)) ||
+        !g.io.write(g.opaque, g.thunk_linear + WIN_NE_FAULT_IDT_OFFSET,
+                    fault_idt, sizeof(fault_idt)) ||
+        !g.io.write(g.opaque, g.thunk_linear + WIN_NE_FAULT_CODE_OFFSET,
+                    fault_code, sizeof(fault_code))) {
         rc = WIN_NE_EXEC_BAD_BOOT;
         goto done;
     }
@@ -194,17 +201,20 @@ int win_ne_execute_basic(const char *path, uint32_t *value)
     };
     rc = winx86_run(cpu, invoke_native, &gate, calls + 4u);
 
-    /* Fail closed. When no EXIT trap was observed we cannot prove that the
-     * CPU returned to Real Mode. Calling DOS or freeing memory then could
-     * corrupt the shared emulator. A hardware reset is required instead. */
-    if (rc != WINX86_OK)
+    /* Both EXIT and the private-IDT FAULT trap switch back to Real Mode,
+     * restore the DOS GDTR/IDTR, and issue OUT. On other failures, real-mode
+     * recovery is not proven and using DOS memory would be unsafe. */
+    if (rc != WINX86_OK && rc != WINX86_FAULT)
         for (;;) { }
 
     const uint32_t result = ((uint32_t)cpu->gprx[regcx].r16 << 16) |
                              cpu->gprx[regbx].r16;
+    int fault_vector = cpu->gprx[regbx].r16;
+    int guest_fault = rc == WINX86_FAULT;
     restore_cpu(cpu, &old);
-    if (value) *value = result;
-    rc = api.invalid_args ? WIN_NE_EXEC_BAD_ARGS : WIN_NE_OK;
+    if (!guest_fault && value) *value = result;
+    rc = guest_fault ? WIN_NE_EXEC_FAULT_BASE - fault_vector :
+         (api.invalid_args ? WIN_NE_EXEC_BAD_ARGS : WIN_NE_OK);
 done:
     win_ne_guest_release(&g);
     ne_cpu_busy = 0;

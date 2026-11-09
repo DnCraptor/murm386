@@ -138,6 +138,17 @@ static int check_path(verifier *v, path_state s)
         }
         if (s.frame == FRAME_DONE && op != 0xcb)
             return 0;
+        /* UD2 is an unconditionally faulting 386 instruction. Permit it
+         * solely as a terminal test path after an imported API call: this
+         * tests the private IDT recovery without enabling arbitrary code. */
+        if (op == 0x0f && remaining >= 2 && p[1] == 0x0b) {
+            if (!s.calls || s.depth ||
+                (s.frame != FRAME_NONE && s.frame != FRAME_DONE) ||
+                !mark(v, at, 2)) return 0;
+            if (s.calls > v->max_calls) v->max_calls = s.calls;
+            v->returns++;
+            return 1;
+        }
         if (op == 0xcb) { /* RETF */
             if (!s.calls || s.depth ||
                 (s.frame != FRAME_NONE && s.frame != FRAME_DONE) ||

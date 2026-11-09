@@ -65,8 +65,9 @@ int winx86_run(CPU *cpu, winx86_service_fn service, void *opaque,
             }
             continue;
         }
-        if (frame.request == WINX86_BRIDGE_EXIT) {
-            rc = WINX86_OK;
+        if (frame.request == WINX86_BRIDGE_EXIT ||
+            frame.request == WINX86_BRIDGE_FAULT) {
+            rc = frame.request == WINX86_BRIDGE_EXIT ? WINX86_OK : WINX86_FAULT;
             break;
         }
         if (!service || !service(opaque, cpu, frame.request)) {

@@ -22,9 +22,13 @@
 /* Never allow allocated API slots or the PM bootstrap to overlap. */
 _Static_assert(WIN_NE_GUEST_ACTIVE_THUNKS * THUNK_BYTES <= WIN_NE_BOOT_OFFSET,
                "NE API thunks overlap the PM trampoline");
-_Static_assert(WIN_NE_BOOT_OFFSET + WIN_NE_BOOT_CAPACITY <=
+_Static_assert(WIN_NE_BOOT_OFFSET + WIN_NE_BOOT_CAPACITY <= WIN_NE_FAULT_IDT_OFFSET,
+               "NE PM trampoline overlaps private fault IDT");
+_Static_assert(WIN_NE_FAULT_IDT_OFFSET + WIN_NE_FAULT_AREA_BYTES <=
+               WIN_NE_FAULT_CODE_OFFSET, "NE private IDT overlaps fault code");
+_Static_assert(WIN_NE_FAULT_CODE_OFFSET + WIN_NE_FAULT_AREA_BYTES <=
                WIN_NE_GUEST_MAX_THUNKS * THUNK_BYTES,
-               "NE PM trampoline exceeds thunk segment");
+               "NE fault recovery exceeds thunk segment");
 
 static void put16(uint8_t *p, uint16_t v)
 {

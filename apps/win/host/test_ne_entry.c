@@ -193,6 +193,17 @@ int main(void)
     }; /* MOV CX,DX */
     assert(!win_ne_entry_calls(clobbered, sizeof clobbered, 0,
                                8, loop_service, 1, &n));
+    /* Deliberate terminal #UD after a known far API call is permitted:
+     * the private IDT will terminate this NE task without returning to
+     * guest code. A fault before the first import remains disallowed. */
+    const uint8_t deliberate_ud[] = {
+        0x9a,0x00,0x00,0x08,0x00, /* KERNEL.GetVersion */
+        0x0f,0x0b                /* UD2, terminal #UD */
+    };
+    assert(win_ne_entry_calls(deliberate_ud, sizeof deliberate_ud, 0,
+                              8, loop_service, 1, &n) && n == 1);
+    assert(!win_ne_entry_calls(deliberate_ud+5, 2, 0,
+                               8, loop_service, 1, &n));
     puts("ne entry stack validator: PASS");
     return 0;
 }

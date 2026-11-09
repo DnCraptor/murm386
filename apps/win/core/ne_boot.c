@@ -20,9 +20,10 @@ static void b16(emitter *e, uint16_t v)
 {
     b8(e, (uint8_t)v); b8(e, (uint8_t)(v >> 8));
 }
-static void b32(emitter *e, uint32_t v)
+static void put16(uint8_t *p, uint16_t v)
 {
-    b16(e, (uint16_t)v); b16(e, (uint16_t)(v >> 16));
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
 }
 static void patch16(emitter *e, size_t at, uint16_t v)
 {
@@ -36,7 +37,10 @@ size_t win_ne_boot_make(uint8_t *buffer, size_t capacity,
     if (!buffer || !a || capacity < WIN_NE_BOOT_CAPACITY ||
         (a->pm_segment & 7u) || !a->pm_segment || !a->rm_segment ||
         !a->ne_cs || !a->ne_ss || a->ne_sp < 64u ||
-        a->gdt_linear >= 0x1000000u || !a->gdt_limit)
+        a->gdt_linear >= 0x1000000u || !a->gdt_limit ||
+        ((uint32_t)a->rm_segment << 4) < WIN_NE_BOOT_OFFSET ||
+        ((uint32_t)a->rm_segment << 4) +
+            (WIN_NE_FAULT_IDT_OFFSET - WIN_NE_BOOT_OFFSET) >= 0x1000000u)
         return 0;
 
     emitter e = { 0 };
@@ -46,9 +50,13 @@ size_t win_ne_boot_make(uint8_t *buffer, size_t capacity,
     b8(&e, 0x8c); b8(&e, 0xc8);                /* mov ax,cs */
     b8(&e, 0x8e); b8(&e, 0xd8);                /* mov ds,ax */
     b8(&e, 0x0f); b8(&e, 0x01); b8(&e, 0x06); /* sgdt [saved_gdtr] */
-    size_t save_ref1 = e.n; b16(&e, 0);
+    size_t save_ref1 = e.n; b16(&e, WIN_NE_BOOT_SAVED_GDTR_OFFSET);
+    b8(&e, 0x0f); b8(&e, 0x01); b8(&e, 0x0e); /* sidt [saved_idtr] */
+    b16(&e, WIN_NE_BOOT_SAVED_IDTR_OFFSET);
     b8(&e, 0x0f); b8(&e, 0x01); b8(&e, 0x16); /* lgdt [new_gdtr] */
-    size_t new_ref = e.n; b16(&e, 0);
+    size_t new_ref = e.n; b16(&e, WIN_NE_BOOT_NEW_GDTR_OFFSET);
+    b8(&e, 0x0f); b8(&e, 0x01); b8(&e, 0x1e); /* lidt [private_idtr] */
+    b16(&e, WIN_NE_BOOT_NEW_IDTR_OFFSET);
     b8(&e, 0x0f); b8(&e, 0x20); b8(&e, 0xc0); /* mov eax,cr0 */
     b8(&e, 0x0c); b8(&e, 0x01);                /* or al,1 */
     b8(&e, 0x0f); b8(&e, 0x22); b8(&e, 0xc0); /* mov cr0,eax */
@@ -76,17 +84,17 @@ size_t win_ne_boot_make(uint8_t *buffer, size_t capacity,
     b8(&e, 0x8e); b8(&e, 0xd8);               /* mov ds,ax */
     b8(&e, 0x8e); b8(&e, 0xd0);               /* mov ss,ax */
     b8(&e, 0x8e); b8(&e, 0xc0);               /* mov es,ax */
+    b8(&e, 0x0f); b8(&e, 0x01); b8(&e, 0x1e);/* lidt [saved_idtr] */
+    b16(&e, WIN_NE_BOOT_SAVED_IDTR_OFFSET);
     b8(&e, 0x0f); b8(&e, 0x01); b8(&e, 0x16);/* lgdt [saved_gdtr] */
-    size_t save_ref2 = e.n; b16(&e, 0);
+    size_t save_ref2 = e.n; b16(&e, WIN_NE_BOOT_SAVED_GDTR_OFFSET);
     b8(&e, 0xba); b16(&e, WINX86_BRIDGE_PORT); /* mov dx,port */
     b8(&e, 0xb8); b16(&e, WINX86_BRIDGE_EXIT);/* mov ax,exit */
     b8(&e, 0xef);                              /* out dx,ax */
     b8(&e, 0xeb); b8(&e, 0xfe);                /* jmp $ (should never run) */
 
-    size_t saved = e.n;
-    for (int i = 0; i < 6; i++) b8(&e, 0);
-    size_t fresh = e.n;
-    b16(&e, a->gdt_limit); b32(&e, a->gdt_linear);
+    size_t saved = WIN_NE_BOOT_SAVED_GDTR_OFFSET;
+    size_t fresh = WIN_NE_BOOT_NEW_GDTR_OFFSET;
 
     /* A Win16 API thunk CALL FARs the shared gateway. The gateway saves
      * the guest register/segment state on the Win16 stack, drops CR0.PE,
@@ -120,6 +128,8 @@ size_t win_ne_boot_make(uint8_t *buffer, size_t capacity,
     b8(&e, 0x8e); b8(&e, 0xd8); /* mov ds,ax */
     b8(&e, 0x8e); b8(&e, 0xd0); /* mov ss,ax */
     b8(&e, 0xbc); b16(&e, 0x00ee); /* no guest pushes in RM callback */
+    b8(&e, 0x0f); b8(&e, 0x01); b8(&e, 0x1e); /* lidt [saved_idtr] */
+    b16(&e, WIN_NE_BOOT_SAVED_IDTR_OFFSET);
     b8(&e, 0x0f); b8(&e, 0x01); b8(&e, 0x16); /* lgdt [saved_gdtr] */
     b16(&e, (uint16_t)saved);
     b8(&e, 0xba); b16(&e, WINX86_BRIDGE_PORT); /* mov dx,port */
@@ -129,6 +139,8 @@ size_t win_ne_boot_make(uint8_t *buffer, size_t capacity,
     b8(&e, 0x89); b8(&e, 0x16); b16(&e, WIN_NE_BOOT_RESULT_DX_OFFSET);
     b8(&e, 0x0f); b8(&e, 0x01); b8(&e, 0x16); /* lgdt [new_gdtr] */
     b16(&e, (uint16_t)fresh);
+    b8(&e, 0x0f); b8(&e, 0x01); b8(&e, 0x1e); /* lidt [private_idtr] */
+    b16(&e, WIN_NE_BOOT_NEW_IDTR_OFFSET);
     b8(&e, 0x0f); b8(&e, 0x20); b8(&e, 0xc0);
     b8(&e, 0x0c); b8(&e, 0x01); /* or al,1 */
     b8(&e, 0x0f); b8(&e, 0x22); b8(&e, 0xc0);
@@ -162,5 +174,72 @@ size_t win_ne_boot_make(uint8_t *buffer, size_t capacity,
     patch16(&e, rm_ref, (uint16_t)rm_start);
     memset(buffer, 0xcc, capacity);
     memcpy(buffer, e.bytes, e.n);
+    put16(buffer + WIN_NE_BOOT_NEW_GDTR_OFFSET, a->gdt_limit);
+    buffer[WIN_NE_BOOT_NEW_GDTR_OFFSET + 2] = (uint8_t)a->gdt_linear;
+    buffer[WIN_NE_BOOT_NEW_GDTR_OFFSET + 3] = (uint8_t)(a->gdt_linear >> 8);
+    buffer[WIN_NE_BOOT_NEW_GDTR_OFFSET + 4] = (uint8_t)(a->gdt_linear >> 16);
+    buffer[WIN_NE_BOOT_NEW_GDTR_OFFSET + 5] = (uint8_t)(a->gdt_linear >> 24);
+    put16(buffer + WIN_NE_BOOT_NEW_IDTR_OFFSET,
+          (uint16_t)(WIN_NE_FAULT_VECTORS * 8u - 1u));
+    uint32_t idt_base = ((uint32_t)a->rm_segment << 4) -
+                        WIN_NE_BOOT_OFFSET + WIN_NE_FAULT_IDT_OFFSET;
+    buffer[WIN_NE_BOOT_NEW_IDTR_OFFSET + 2] = (uint8_t)idt_base;
+    buffer[WIN_NE_BOOT_NEW_IDTR_OFFSET + 3] = (uint8_t)(idt_base >> 8);
+    buffer[WIN_NE_BOOT_NEW_IDTR_OFFSET + 4] = (uint8_t)(idt_base >> 16);
+    buffer[WIN_NE_BOOT_NEW_IDTR_OFFSET + 5] = (uint8_t)(idt_base >> 24);
     return e.n;
+}
+
+/* The i386 core's existing call_isr() accepts 16-bit interrupt gates (0x86).
+ * Every vector uses a separate MOV BX,vector / JMP near common stub. The
+ * common handler drops PE without using the exception frame (which differs
+ * for error-code vectors), restores the DOS descriptor tables, and reports
+ * FAULT to the ARM bridge from real mode. No x86 core changes are required. */
+int win_ne_fault_make(uint8_t idt[WIN_NE_FAULT_AREA_BYTES],
+                      uint8_t code[WIN_NE_FAULT_AREA_BYTES],
+                      const win_ne_boot_args *a)
+{
+    if (!idt || !code || !a || !a->rm_segment || !a->pm_segment ||
+        (a->pm_segment & 7u))
+        return 0;
+    memset(idt, 0, WIN_NE_FAULT_AREA_BYTES);
+    memset(code, 0xcc, WIN_NE_FAULT_AREA_BYTES);
+    const unsigned common = 6u * WIN_NE_FAULT_VECTORS;
+    for (unsigned v = 0; v < WIN_NE_FAULT_VECTORS; v++) {
+        unsigned pos = 6u * v;
+        uint16_t off = (uint16_t)(WIN_NE_FAULT_CODE_OFFSET + pos);
+        put16(idt + 8u*v, off);
+        put16(idt + 8u*v + 2u, a->pm_segment);
+        idt[8u*v + 5u] = 0x86;  /* P, DPL0, 16-bit interrupt gate */
+        code[pos] = 0xbb; /* mov bx,vector */
+        put16(code + pos + 1u, (uint16_t)v);
+        code[pos + 3u] = 0xe9; /* jmp near common */
+        put16(code + pos + 4u, (uint16_t)(common - (pos + 6u)));
+    }
+    emitter e = { 0 };
+    b8(&e, 0xfa);                             /* cli */
+    b8(&e, 0x0f); b8(&e, 0x20); b8(&e, 0xc0);/* mov eax,cr0 */
+    b8(&e, 0x24); b8(&e, 0xfe);               /* and al,~PE */
+    b8(&e, 0x0f); b8(&e, 0x22); b8(&e, 0xc0);/* mov cr0,eax */
+    b8(&e, 0xea);                            /* far jmp to RM */
+    size_t rmref = e.n; b16(&e, 0); b16(&e, a->rm_segment);
+    size_t rm = e.n;
+    b8(&e, 0x8c); b8(&e, 0xc8);              /* mov ax,cs */
+    b8(&e, 0x8e); b8(&e, 0xd8);              /* mov ds,ax */
+    b8(&e, 0x8e); b8(&e, 0xd0);              /* mov ss,ax */
+    b8(&e, 0xbc); b16(&e, 0x00ee);          /* sp for RM only */
+    b8(&e, 0x0f); b8(&e, 0x01); b8(&e, 0x1e); /* lidt saved */
+    b16(&e, WIN_NE_BOOT_SAVED_IDTR_OFFSET);
+    b8(&e, 0x0f); b8(&e, 0x01); b8(&e, 0x16); /* lgdt saved */
+    b16(&e, WIN_NE_BOOT_SAVED_GDTR_OFFSET);
+    b8(&e, 0xba); b16(&e, WINX86_BRIDGE_PORT);
+    b8(&e, 0xb8); b16(&e, WINX86_BRIDGE_FAULT);
+    b8(&e, 0xef);                          /* OUT, from RM */
+    b8(&e, 0xeb); b8(&e, 0xfe);            /* no return */
+    if (e.overflow || common + e.n > WIN_NE_FAULT_AREA_BYTES)
+        return 0;
+    patch16(&e, rmref, (uint16_t)(WIN_NE_FAULT_CODE_OFFSET -
+                                 WIN_NE_BOOT_OFFSET + common + rm));
+    memcpy(code + common, e.bytes, e.n);
+    return 1;
 }

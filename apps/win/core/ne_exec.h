@@ -7,7 +7,8 @@ enum {
     WIN_NE_EXEC_BAD_ENTRY = -21,
     WIN_NE_EXEC_BAD_BOOT = -22,
     WIN_NE_EXEC_BAD_ARGS = -23,
-    WIN_NE_EXEC_BUSY = -24
+    WIN_NE_EXEC_BUSY = -24,
+    WIN_NE_EXEC_FAULT_BASE = -100 /* vector n => -100-n */
 };
 #if defined(__arm__) || defined(__thumb__)
 int win_ne_execute_basic(const char *path, uint32_t *value);

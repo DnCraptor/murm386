@@ -11,18 +11,32 @@
 /* 64 executable API slots x 16 bytes, followed by the PM trampoline.
  * The full guest thunk segment is 128 slots (2 KiB). */
 #define WIN_NE_BOOT_OFFSET 1024u
-#define WIN_NE_BOOT_CAPACITY 256u
+#define WIN_NE_BOOT_CAPACITY 320u
 /* The imported API thunks FAR CALL this common protected/real gateway.
- * Offsets below are relative to the 256-byte boot image, except GATEWAY
+ * Offsets below are relative to the 320-byte boot image, except GATEWAY
  * which is an offset in the encompassing executable thunk segment. */
 #define WIN_NE_BOOT_GATEWAY_OFFSET (WIN_NE_BOOT_OFFSET + 128u)
-#define WIN_NE_BOOT_SCRATCH_OFFSET 240u
-#define WIN_NE_BOOT_SVC_OFFSET 240u
-#define WIN_NE_BOOT_CALL_SP_OFFSET 242u
-#define WIN_NE_BOOT_PM_SS_OFFSET 244u
-#define WIN_NE_BOOT_PM_SP_OFFSET 246u
-#define WIN_NE_BOOT_RESULT_AX_OFFSET 248u
-#define WIN_NE_BOOT_RESULT_DX_OFFSET 250u
+#define WIN_NE_BOOT_SCRATCH_OFFSET 272u
+#define WIN_NE_BOOT_SVC_OFFSET 272u
+#define WIN_NE_BOOT_CALL_SP_OFFSET 274u
+#define WIN_NE_BOOT_PM_SS_OFFSET 276u
+#define WIN_NE_BOOT_PM_SP_OFFSET 278u
+#define WIN_NE_BOOT_RESULT_AX_OFFSET 280u
+#define WIN_NE_BOOT_RESULT_DX_OFFSET 282u
+
+/* 6-byte pseudo-descriptors in RM boot memory. GDT and IDT are restored
+ * before *every* OUT from real mode, including the exception path. */
+#define WIN_NE_BOOT_SAVED_GDTR_OFFSET 288u
+#define WIN_NE_BOOT_NEW_GDTR_OFFSET   294u
+#define WIN_NE_BOOT_SAVED_IDTR_OFFSET 300u
+#define WIN_NE_BOOT_NEW_IDTR_OFFSET   306u
+
+/* The remaining 768 bytes of the 2 KiB thunk allocation contain an
+ * exception IDT and 32 small 16-bit vector stubs + a common RM exit. */
+#define WIN_NE_FAULT_IDT_OFFSET    1536u
+#define WIN_NE_FAULT_CODE_OFFSET   1792u
+#define WIN_NE_FAULT_AREA_BYTES     256u
+#define WIN_NE_FAULT_VECTORS         32u
 
 
 typedef struct {
@@ -37,4 +51,9 @@ typedef struct {
 /* Returns bytes emitted (<= WIN_NE_BOOT_CAPACITY), or zero on error. */
 size_t win_ne_boot_make(uint8_t *buffer, size_t capacity,
                         const win_ne_boot_args *args);
+/* Creates a private IDT and handlers in the already allocated thunk region.
+ * A recoverable fault goes through PM -> RM -> WINX86_BRIDGE_FAULT. */
+int win_ne_fault_make(uint8_t idt[WIN_NE_FAULT_AREA_BYTES],
+                      uint8_t code[WIN_NE_FAULT_AREA_BYTES],
+                      const win_ne_boot_args *args);
 #endif

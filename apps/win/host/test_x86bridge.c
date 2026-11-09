@@ -53,6 +53,13 @@ static int reject_service(void *opaque, CPU *cpu, uint16_t id)
     return 0;
 }
 
+static void fault_step(CPU *cpu, int count)
+{
+    assert(count == 4096);
+    cpu->gprx[regbx].r16 = 6;
+    cpu->cb.io_write16(cpu->cb.io, WINX86_BRIDGE_PORT, WINX86_BRIDGE_FAULT);
+}
+
 static void hanging_step(CPU *cpu, int count)
 {
     (void)cpu; (void)count;
@@ -79,6 +86,12 @@ int main(void)
 
     state.phase = 0;
     assert(winx86_run(&cpu, reject_service, &state, 4) == WINX86_BAD_SERVICE);
+    assert(cpu.cb.io_write16 == original_out && cpu.native_done);
+
+    ext.step = fault_step;
+    int calls_before = state.calls;
+    assert(winx86_run(&cpu, fake_service, &state, 2) == WINX86_FAULT);
+    assert(state.calls == calls_before && cpu.gprx[regbx].r16 == 6);
     assert(cpu.cb.io_write16 == original_out && cpu.native_done);
 
     ext.step = hanging_step;

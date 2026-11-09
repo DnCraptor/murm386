@@ -362,7 +362,11 @@ static int run_ne_app(wtask *t)
     uint32_t result = 0;
     int rc = win_ne_execute_basic((const char *)t->module, &result);
     char msg[128];
-    if (rc)
+    if (rc <= WIN_NE_EXEC_FAULT_BASE &&
+        rc > WIN_NE_EXEC_FAULT_BASE - 32)
+        wsprintf(msg, "NE program %s: x86 exception #%d (CPU restored)",
+                 t->name, WIN_NE_EXEC_FAULT_BASE - rc);
+    else if (rc)
         wsprintf(msg, "NE program %s: unsupported or failed (%d)", t->name, rc);
     else
         wsprintf(msg, "NE program %s completed. DX:AX=%08lx", t->name,

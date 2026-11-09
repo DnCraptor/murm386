@@ -1,68 +1,82 @@
-/* Trampoline byte-level and relocation checks, no hardware required. */
+/* Verify both the normal RM/PM/RM path and the private fault-IDT path. */
 #include <assert.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include "../core/ne_boot.h"
 #include "../core/x86bridge.h"
 
-static unsigned rd16(const uint8_t *p) { return p[0] | ((unsigned)p[1] << 8); }
-static unsigned rd32(const uint8_t *p) { return rd16(p) | (rd16(p+2)<<16); }
+static unsigned r16(const uint8_t *p) { return p[0] | ((unsigned)p[1]<<8); }
+static unsigned r32(const uint8_t *p) { return r16(p) | (r16(p+2)<<16); }
+static int contains(const uint8_t *p, size_t size, const uint8_t *seq, size_t len)
+{
+    for (size_t i = 0; i+len <= size; i++)
+        if (!memcmp(p+i,seq,len)) return 1;
+    return 0;
+}
+static unsigned count_table_op(const uint8_t *p, size_t size, unsigned modrm, unsigned offset)
+{
+    unsigned count = 0;
+    for (size_t i = 0; i+5 <= size; i++)
+        if (p[i] == 0x0f && p[i+1] == 0x01 && p[i+2] == modrm &&
+            r16(p+i+3) == offset)
+            count++;
+    return count;
+}
 int main(void)
 {
-    uint8_t boot[WIN_NE_BOOT_CAPACITY];
-    win_ne_boot_args args = { 0x1234, 8, 0x10, 0x42, 0x18, 0x100, 31, 0x6a30 };
-    size_t len = win_ne_boot_make(boot, sizeof(boot), &args);
-    assert(len == WIN_NE_BOOT_CAPACITY);
-    /* Real-mode entry at RM_SEG:0000. */
+    uint8_t boot[WIN_NE_BOOT_CAPACITY], idt[WIN_NE_FAULT_AREA_BYTES];
+    uint8_t code[WIN_NE_FAULT_AREA_BYTES];
+    win_ne_boot_args a = { 0x1234,8,0x10,0x42,0x18,0x100,31,0x6a30 };
+    assert(win_ne_boot_make(boot,sizeof(boot),&a) == sizeof(boot));
     assert(boot[0] == 0xfa && boot[1] == 0x8c && boot[2] == 0xc8);
-    assert(!memcmp(boot + 5, "\x0f\x01\x06", 3)); /* SGDT */
-    assert(!memcmp(boot + 10, "\x0f\x01\x16", 3));/* LGDT */
-    assert(!memcmp(boot + 15, "\x0f\x20\xc0", 3));/* MOV EAX,CR0 */
-    assert(!memcmp(boot + 20, "\x0f\x22\xc0", 3));/* MOV CR0,EAX */
-    assert(boot[23] == 0xea && rd16(boot+26) == 0x0008);
-    unsigned pm = rd16(boot+24) - WIN_NE_BOOT_OFFSET;
-    assert(pm == 28);
-    assert(boot[pm] == 0xb8 && rd16(boot+pm+1) == 0x18); /* stack sel */
-    assert(boot[pm+3] == 0x8e && boot[pm+4] == 0xd0);    /* MOV SS,AX */
-    assert(boot[pm+5] == 0xbc && rd16(boot+pm+6) == 0x100);
-    assert(boot[pm+12] == 0x9a && rd16(boot+pm+13) == 0x42 &&
-           rd16(boot+pm+15) == 0x10);
-    /* PM -> real mode jumps back to original boot segment. */
-    unsigned pm_exit = pm + 17 + 4 + 3 + 2 + 3;
-    assert(boot[pm_exit] == 0xea && rd16(boot+pm_exit+3) == 0x1234);
-    unsigned rm = rd16(boot+pm_exit+1);
-    assert(rm == pm_exit + 5);
-    assert(boot[rm] == 0x8c && boot[rm+1] == 0xc8);
-    unsigned saved = rd16(boot+8), fresh = rd16(boot+13);
-    assert(rd16(boot+rm+11) == saved);
-    assert(rd16(boot+fresh) == args.gdt_limit);
-    assert(rd32(boot+fresh+2) == args.gdt_linear);
-    assert(boot[rm+13] == 0xba && rd16(boot+rm+14) == WINX86_BRIDGE_PORT);
-    assert(boot[rm+16] == 0xb8 && rd16(boot+rm+17) == WINX86_BRIDGE_EXIT);
-    assert(boot[rm+19] == 0xef);
-    assert(len == WIN_NE_BOOT_CAPACITY);
-    assert(boot[WIN_NE_BOOT_GATEWAY_OFFSET - WIN_NE_BOOT_OFFSET] == 0x2e);
-    assert(boot[WIN_NE_BOOT_SCRATCH_OFFSET - 1] == 0xcc);
-    assert(boot[WIN_NE_BOOT_SVC_OFFSET] == 0);
-    /* Fixed service gateway: save PM stack, enter RM, OUT, re-enter PM. */
-    const unsigned gw = WIN_NE_BOOT_GATEWAY_OFFSET - WIN_NE_BOOT_OFFSET;
-    assert(boot[gw] == 0x2e && boot[gw+1] == 0xa3);
-    assert(rd16(boot+gw+2) == WIN_NE_BOOT_OFFSET+WIN_NE_BOOT_SVC_OFFSET);
-    assert(boot[gw+9] == 0x60); /* PUSHA */
-    assert(!memcmp(boot+0x99, "\x0f\x20\xc0\x24\xfe\x0f\x22\xc0", 8));
-    assert(boot[0xa1] == 0xea && rd16(boot+0xa2) == 0xa6);
-    assert(rd16(boot+0xa4) == args.rm_segment);
-    assert(boot[0xb4] == 0xba && rd16(boot+0xb5) == WINX86_BRIDGE_PORT);
-    assert(boot[0xba] == 0xef); /* callback invoked in RM */
-    assert(boot[0xcf] == 0xea && rd16(boot+0xd0) ==
-           WIN_NE_BOOT_OFFSET + 0xd4);
-    assert(rd16(boot+0xd2) == args.pm_segment);
-    assert(boot[0xe2] == 0x61 && boot[0xec] == 0xcb); /* POPA, RETF */
-    args.ne_sp = 8;
-    assert(!win_ne_boot_make(boot,sizeof(boot), &args));
-    args.ne_sp = 0x100;
-    args.gdt_linear = 0x1000000;
-    assert(!win_ne_boot_make(boot,sizeof(boot), &args));
-    puts("ne boot: PASS");
-    return 0;
+    /* SGDT and SIDT are each executed once at entry; each table is restored
+     * before either normal EXIT or a native API OUT. */
+    assert(count_table_op(boot,sizeof(boot),0x06,WIN_NE_BOOT_SAVED_GDTR_OFFSET)==1);
+    assert(count_table_op(boot,sizeof(boot),0x0e,WIN_NE_BOOT_SAVED_IDTR_OFFSET)==1);
+    assert(count_table_op(boot,sizeof(boot),0x16,WIN_NE_BOOT_SAVED_GDTR_OFFSET)==2);
+    assert(count_table_op(boot,sizeof(boot),0x1e,WIN_NE_BOOT_SAVED_IDTR_OFFSET)==2);
+    assert(count_table_op(boot,sizeof(boot),0x16,WIN_NE_BOOT_NEW_GDTR_OFFSET)==2);
+    assert(count_table_op(boot,sizeof(boot),0x1e,WIN_NE_BOOT_NEW_IDTR_OFFSET)==2);
+    assert(r16(boot+WIN_NE_BOOT_NEW_GDTR_OFFSET)==a.gdt_limit);
+    assert(r32(boot+WIN_NE_BOOT_NEW_GDTR_OFFSET+2)==a.gdt_linear);
+    assert(r16(boot+WIN_NE_BOOT_NEW_IDTR_OFFSET)==WIN_NE_FAULT_VECTORS*8-1);
+    assert(r32(boot+WIN_NE_BOOT_NEW_IDTR_OFFSET+2)==
+           ((unsigned)a.rm_segment<<4)-WIN_NE_BOOT_OFFSET+WIN_NE_FAULT_IDT_OFFSET);
+    assert(boot[WIN_NE_BOOT_GATEWAY_OFFSET-WIN_NE_BOOT_OFFSET]==0x2e);
+    assert(boot[WIN_NE_BOOT_SCRATCH_OFFSET-1]==0xcc);
+    assert(boot[WIN_NE_BOOT_SVC_OFFSET]==0);
+    assert(win_ne_fault_make(idt,code,&a));
+    for (unsigned v=0;v<WIN_NE_FAULT_VECTORS;v++) {
+        unsigned pos=6*v;
+        assert(r16(idt+v*8)==WIN_NE_FAULT_CODE_OFFSET+pos);
+        assert(r16(idt+v*8+2)==a.pm_segment);
+        assert(idt[v*8+4]==0 && idt[v*8+5]==0x86);
+        assert(r16(idt+v*8+6)==0);
+        assert(code[pos]==0xbb && r16(code+pos+1)==v);
+        assert(code[pos+3]==0xe9 && r16(code+pos+4)==
+               WIN_NE_FAULT_VECTORS*6-(pos+6));
+    }
+    const unsigned common=WIN_NE_FAULT_VECTORS*6;
+    const uint8_t clear_pe[]={0x0f,0x20,0xc0,0x24,0xfe,0x0f,0x22,0xc0};
+    assert(code[common]==0xfa &&
+           !memcmp(code+common+1,clear_pe,sizeof(clear_pe)));
+    assert(code[common+1+sizeof(clear_pe)]==0xea);
+    assert(r16(code+common+1+sizeof(clear_pe)+3)==a.rm_segment);
+    const uint8_t lidt_old[]={0x0f,0x01,0x1e,
+                              WIN_NE_BOOT_SAVED_IDTR_OFFSET&255,
+                              WIN_NE_BOOT_SAVED_IDTR_OFFSET>>8};
+    const uint8_t lgdt_old[]={0x0f,0x01,0x16,
+                              WIN_NE_BOOT_SAVED_GDTR_OFFSET&255,
+                              WIN_NE_BOOT_SAVED_GDTR_OFFSET>>8};
+    assert(contains(code+common,sizeof(code)-common,lidt_old,sizeof(lidt_old)));
+    assert(contains(code+common,sizeof(code)-common,lgdt_old,sizeof(lgdt_old)));
+    const uint8_t fault_out[]={0xba,0xe7,0xe7,0xb8,0xfe,0xff,0xef};
+    assert(contains(code+common,sizeof(code)-common,fault_out,sizeof(fault_out)));
+    assert(!win_ne_fault_make(NULL,code,&a));
+    assert(!win_ne_fault_make(idt,NULL,&a));
+    a.ne_sp=8; assert(!win_ne_boot_make(boot,sizeof(boot),&a));
+    a.ne_sp=0x100; a.gdt_linear=0x1000000;
+    assert(!win_ne_boot_make(boot,sizeof(boot),&a));
+    puts("ne fault IDT/boot: PASS");
 }

@@ -14,17 +14,19 @@
 
 #define WINX86_BRIDGE_PORT 0xE7E7u
 #define WINX86_BRIDGE_EXIT 0xFFFFu
+#define WINX86_BRIDGE_FAULT 0xFFFEu
 
 enum {
     WINX86_OK = 0,
     WINX86_BAD_CONTEXT = -1,
     WINX86_TIMEOUT = -2,
     WINX86_BAD_SERVICE = -3,
-    WINX86_INTERRUPTED = -4
+    WINX86_INTERRUPTED = -4,
+    WINX86_FAULT = -5
 };
 
 /* Handler may update guest registers; 1 = handled, 0 = unsupported.
- * The special EXIT token bypasses the handler and ends the guest run.
+ * EXIT and FAULT tokens bypass the handler and end the guest run.
  * Native calls using DOS/BIOS are safe only when the caller has explicitly
  * returned the shared CPU to its original real-mode DOS context.
  */
