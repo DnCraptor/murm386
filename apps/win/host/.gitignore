@@ -6,3 +6,11 @@ winhost800
 *.png
 HOSTWIN/
 appinfo.c
+test_x86bridge
+test_ne
+test_ne_*
+!test_ne_*.c
+*-fixture.exe
+NEDIALOG.EXE
+NEFAULT.EXE
+NEHANG.EXE

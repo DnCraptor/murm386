@@ -37,6 +37,9 @@
 #define WIN_NE_FAULT_CODE_OFFSET   1792u
 #define WIN_NE_FAULT_AREA_BYTES     256u
 #define WIN_NE_FAULT_VECTORS         32u
+/* The last vector is no CPU exception: WINN raises it itself to stop a
+ * guest that has run too long without returning (ne_exec.c). */
+#define WIN_NE_TIMEOUT_VECTOR (WIN_NE_FAULT_VECTORS - 1u)
 
 
 typedef struct {
@@ -52,7 +55,8 @@ typedef struct {
 size_t win_ne_boot_make(uint8_t *buffer, size_t capacity,
                         const win_ne_boot_args *args);
 /* Creates a private IDT and handlers in the already allocated thunk region.
- * A recoverable fault goes through PM -> RM -> WINX86_BRIDGE_FAULT. */
+ * A recoverable fault goes through PM -> RM -> WINX86_BRIDGE_FAULT with BX =
+ * the vector and SI:DI = SS:SP of its exception frame (selector:offset). */
 int win_ne_fault_make(uint8_t idt[WIN_NE_FAULT_AREA_BYTES],
                       uint8_t code[WIN_NE_FAULT_AREA_BYTES],
                       const win_ne_boot_args *args);

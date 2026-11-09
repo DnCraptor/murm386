@@ -8,14 +8,14 @@ USER     = $(wildcard ../user/*.c)
 HOST     = host_drivers.c
 # GDI test: no USER, so no tasks, files and export tables
 GDICORE  = $(filter-out ../core/exports.c ../core/task.c ../core/file.c ../core/logo.c \
-            ../core/ne.c ../core/ne_boot.c ../core/ne_entry.c ../core/ne_exec.c \
+            ../core/ne.c ../core/ne_boot.c ../core/ne_exec.c \
             ../core/ne_guest.c ../core/ne_guest_api.c ../core/ne_guest_dos.c \
             ../core/x86bridge.c,$(CORE))
 
 # the applications, built in; each WinMain gets its own name
 APPS     = demo.o progman.o notepad.o clock.o calc.o control.o winfile.o taskman.o winmine.o appinfo.o
 
-all: test_gdi test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_entry test_ne_args test_ne_dialog test_ne_registers test_ne_strings test_ne_flow test_ne_indexed test_ne_callframe test_ne_parameters test_ne_bytes test_ne_scan test_ne_string_ops test_ne_alu NESTR2-fixture.exe NEALU-fixture.exe NECDECL-fixture.exe test_ne_loop test_ne_launch test_ne_rm_gate winhost winhost800 HOSTWIN
+all: test_gdi test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_launch test_ne_rm_gate NEFIXTURES winhost winhost800 HOSTWIN
 
 test_gdi: $(GDICORE) $(HOST) test_gdi.c
 	$(CC) $(CFLAGS) $(INC) -o $@ $^
@@ -37,180 +37,22 @@ test_ne_guest: ../core/ne.c ../core/ne_guest.c test_ne_guest.c
 test_ne_guest_api: ../core/ne_guest_api.c test_ne_guest_api.c
 	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined $(INC) -o $@ $^
 
-# NE with three safe Win16 ordinal imports; generator includes a real DOS MZ stub.
+# NE programs for WINN on the target (each with a DOS MZ stub): ordinal
+# imports, MessageBox, a counted loop, an invalid instruction, a hang.
 NEAPP-fixture.exe: mkne_winexec.py
 	python3 mkne_winexec.py $@
+NEDIALOG.EXE: mkne_dialog.py
+	python3 mkne_dialog.py $@
+NELOOP-fixture.exe: mkne_loop.py
+	python3 mkne_loop.py $@
+NEFAULT.EXE: mkne_fault.py
+	python3 mkne_fault.py $@
+NEHANG.EXE: mkne_fault.py
+	python3 mkne_fault.py --hang $@
+NEFIXTURES: NEAPP-fixture.exe NEDIALOG.EXE NELOOP-fixture.exe NEFAULT.EXE NEHANG.EXE
 
 test_ne_multi: ../core/ne.c ../core/ne_guest.c test_ne_multi.c NEAPP-fixture.exe
 	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne.c ../core/ne_guest.c test_ne_multi.c
-
-test_ne_entry: ../core/ne_entry.c test_ne_entry.c
-	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ $^
-
-# Checked Pascal stack, selector pointers and relocations in a two-DLL NE.
-NEARGS-fixture.exe: mkne_args.py
-	python3 mkne_args.py $@
-
-test_ne_args: ../core/ne.c ../core/ne_guest.c ../core/ne_entry.c test_ne_args.c NEARGS-fixture.exe
-	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne.c ../core/ne_guest.c ../core/ne_entry.c test_ne_args.c
-
-# Real/Protected/Real machine-code emitter checks (64-bit host compatible).
-NEDIALOG-fixture.exe: mkne_dialog.py
-	python3 mkne_dialog.py $@
-
-test_ne_dialog: ../core/ne.c ../core/ne_guest.c ../core/ne_entry.c test_ne_dialog.c NEDIALOG-fixture.exe
-	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne.c ../core/ne_guest.c ../core/ne_entry.c test_ne_dialog.c
-
-# Register-based Win16 NE (BP frame, general-register PUSH, ordinary FAR fixup).
-NEREGS-fixture.exe: mkne_registers.py
-	python3 mkne_registers.py $@
-
-test_ne_registers: ../core/ne.c ../core/ne_guest.c ../core/ne_entry.c test_ne_registers.c NEREGS-fixture.exe
-	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne.c ../core/ne_guest.c ../core/ne_entry.c test_ne_registers.c
-
-# Writable NE DATA via KERNEL.lstrcpy, then USER.MessageBox with the result.
-NESTR-fixture.exe: mkne_strings.py
-	python3 mkne_strings.py $@
-
-test_ne_strings: ../core/ne.c ../core/ne_guest.c ../core/ne_entry.c test_ne_strings.c NESTR-fixture.exe
-	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne.c ../core/ne_guest.c ../core/ne_entry.c test_ne_strings.c
-
-# Safe forward Jcc/JMP paths with bounded direct DS access and two API imports.
-NEFLOW-fixture.exe: mkne_flow.py
-	python3 mkne_flow.py $@
-
-test_ne_flow: ../core/ne.c ../core/ne_guest.c ../core/ne_entry.c test_ne_flow.c NEFLOW-fixture.exe
-	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne.c ../core/ne_guest.c ../core/ne_entry.c test_ne_flow.c
-
-# Register-indexed DS addressing with an exact symbolic 16-bit base/index.
-NEINDEX-fixture.exe: mkne_indexed.py
-	python3 mkne_indexed.py $@
-
-test_ne_indexed: ../core/ne.c ../core/ne_guest.c ../core/ne_entry.c test_ne_indexed.c NEINDEX-fixture.exe
-	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne.c ../core/ne_guest.c ../core/ne_entry.c test_ne_indexed.c
-
-# Near CALL/RET with 16-bit BP-relative stack locals and native MessageBox.
-NECALL-fixture.exe: mkne_callframe.py
-	python3 mkne_callframe.py $@
-
-test_ne_callframe: ../core/ne.c ../core/ne_guest.c ../core/ne_entry.c test_ne_callframe.c NECALL-fixture.exe
-	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne.c ../core/ne_guest.c ../core/ne_entry.c test_ne_callframe.c
-
-# Checked near PASCAL parameters BP+4/BP+6, nested CALL and RET imm16.
-NEPARAM-fixture.exe: mkne_params.py
-	python3 mkne_params.py $@
-
-NECDECL-fixture.exe: mkne_params.py
-	python3 mkne_params.py --cdecl $@
-
-test_ne_parameters: ../core/ne.c ../core/ne_guest.c ../core/ne_entry.c test_ne_parameters.c NEPARAM-fixture.exe NECDECL-fixture.exe
-	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne.c ../core/ne_guest.c ../core/ne_entry.c test_ne_parameters.c
-
-# Copy NUL-terminated text through checked byte MOV + SI/DI/CX/LOOP.
-NEBYTE-fixture.exe: mkne_bytes.py
-	python3 mkne_bytes.py $@
-
-test_ne_bytes: ../core/ne.c ../core/ne_guest.c ../core/ne_entry.c test_ne_bytes.c NEBYTE-fixture.exe
-	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne.c ../core/ne_guest.c ../core/ne_entry.c test_ne_bytes.c
-
-# Bounded NUL-terminated byte scan with TEST/CMP and forward JZ.
-NESCAN-fixture.exe: mkne_scan.py
-	python3 mkne_scan.py $@
-
-test_ne_scan: ../core/ne.c ../core/ne_guest.c ../core/ne_entry.c test_ne_scan.c NESCAN-fixture.exe
-	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne.c ../core/ne_guest.c ../core/ne_entry.c test_ne_scan.c
-
-# Full Win16 string-instruction family, forward/backward, REP/REPE/REPNE.
-NESTR2-fixture.exe: mkne_string_ops.py
-	python3 mkne_string_ops.py $@
-
-test_ne_string_ops: ../core/ne_entry.c test_ne_string_ops.c NESTR2-fixture.exe
-	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne_entry.c test_ne_string_ops.c
-
-# Register and immediate ALU, byte-register moves, shifts, 386 near Jcc.
-NEALU-fixture.exe: mkne_alu.py
-	python3 mkne_alu.py $@
-
-test_ne_alu: ../core/ne_entry.c test_ne_alu.c NEALU-fixture.exe
-	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne_entry.c test_ne_alu.c
-
-# Compiler-generated 16-bit ENTER frames, saved callee registers, longer entry.
-NECABI-fixture.exe: mkne_compiler.py
-	python3 mkne_compiler.py $@
-
-test_ne_compiler: ../core/ne_entry.c test_ne_compiler.c NECABI-fixture.exe
-	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne_entry.c test_ne_compiler.c
-
-all: test_ne_compiler NECABI-fixture.exe
-clean: clean_ne_compiler
-clean_ne_compiler:
-	rm -f test_ne_compiler NECABI-fixture.exe
-.PHONY: clean_ne_compiler
-
-# Symbolically tracked BP locals, saved-register isolation and NE smoke test.
-all: test_ne_frame_locals test_ne_locals NELOCAL-fixture.exe
-NELOCAL-fixture.exe: mkne_locals.py
-	python3 mkne_locals.py $@
-test_ne_frame_locals: test_ne_frame_locals.c ../core/ne_frame_locals.h
-	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ test_ne_frame_locals.c
-test_ne_locals: ../core/ne_entry.c ../core/ne_frame_locals.h test_ne_locals.c NELOCAL-fixture.exe
-	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne_entry.c test_ne_locals.c
-clean: clean_ne_locals
-clean_ne_locals:
-	rm -f test_ne_frame_locals test_ne_locals NELOCAL-fixture.exe
-.PHONY: clean_ne_locals
-
-# Path-local symbolic DS globals, checked pointers and bounded branch recursion.
-all: test_ne_ds_shadow test_ne_globals NEGLOBAL-fixture.exe
-NEGLOBAL-fixture.exe: mkne_globals.py
-	python3 mkne_globals.py $@
-test_ne_ds_shadow: test_ne_ds_shadow.c ../core/ne_ds_shadow.h
-	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ test_ne_ds_shadow.c
-test_ne_globals: ../core/ne_entry.c ../core/ne_ds_shadow.h test_ne_globals.c NEGLOBAL-fixture.exe
-	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne_entry.c test_ne_globals.c
-clean: clean_ne_globals
-clean_ne_globals:
-	rm -f test_ne_ds_shadow test_ne_globals NEGLOBAL-fixture.exe
-.PHONY: clean_ne_globals
-
-# Checked Win16 memory ALU, arrays, BP locals, exact FLAGS and NE fixture.
-all: test_ne_mem_alu test_ne_arrays NEARRAY-fixture.exe
-NEARRAY-fixture.exe: mkne_arrays.py
-	python3 mkne_arrays.py $@
-test_ne_mem_alu: test_ne_mem_alu.c ../core/ne_mem_alu.h
-	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ test_ne_mem_alu.c
-test_ne_arrays: ../core/ne_entry.c ../core/ne_mem_alu.h test_ne_arrays.c NEARRAY-fixture.exe
-	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne_entry.c test_ne_arrays.c
-clean: clean_ne_arrays
-clean_ne_arrays:
-	rm -f test_ne_mem_alu test_ne_arrays NEARRAY-fixture.exe
-.PHONY: clean_ne_arrays
-
-# Checked Win16 C-style loops, reused near helpers and LOOPcc.
-all: test_ne_cmp_flow test_ne_bounded_flow NEFLOW-fixture.exe
-NEFLOW-fixture.exe: mkne_bounded_flow.py
-	python3 mkne_bounded_flow.py $@
-test_ne_cmp_flow: test_ne_cmp_flow.c ../core/ne_cmp_flow.h
-	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ test_ne_cmp_flow.c
-test_ne_bounded_flow: ../core/ne_entry.c ../core/ne_cmp_flow.h test_ne_bounded_flow.c NEFLOW-fixture.exe
-	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne_entry.c test_ne_bounded_flow.c
-clean: clean_ne_bounded_flow
-clean_ne_bounded_flow:
-	rm -f test_ne_cmp_flow test_ne_bounded_flow NEFLOW-fixture.exe
-.PHONY: clean_ne_bounded_flow
-
-# Keep the existing clean recipe unchanged (it may differ locally).
-clean: clean_ne_alu
-clean_ne_alu:
-	rm -f test_ne_alu NEALU-fixture.exe
-.PHONY: clean_ne_alu
-
-# Bounded counted LOOP backwards, with a DOS-safe MZ stub.
-NELOOP-fixture.exe: mkne_loop.py
-	python3 mkne_loop.py $@
-
-test_ne_loop: ../core/ne.c ../core/ne_guest.c ../core/ne_entry.c test_ne_loop.c NELOOP-fixture.exe
-	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne.c ../core/ne_guest.c ../core/ne_entry.c test_ne_loop.c
 
 test_ne_launch: ../core/ne.c test_ne_launch.c NELOOP-fixture.exe
 	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne.c test_ne_launch.c
@@ -224,6 +66,12 @@ test_ne_rm_gate: ../core/ne_exec.c ../core/ne_guest_api.c test_ne_rm_gate.c
 # Real/Protected/Real machine-code emitter checks (64-bit host compatible).
 test_ne_boot: ../core/ne_boot.c test_ne_boot.c
 	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ $^
+
+# The tests that take a file
+check: test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_launch test_ne_rm_gate NEFIXTURES
+	./test_x86bridge && ./test_ne && ./test_ne_image && ./test_ne_guest && ./test_ne_guest_api && \
+	./test_ne_boot && ./test_ne_multi NEAPP-fixture.exe && ./test_ne_launch NELOOP-fixture.exe && \
+	./test_ne_rm_gate
 
 demo.o: ../../winapps/demo/demo.c
 	$(CC) $(CFLAGS) $(INC) -DWinMain=demo_WinMain -c -o $@ $<
@@ -277,6 +125,6 @@ HOSTWIN:
 	cp HOSTWIN/README.TXT HOSTWIN/DOCS/README.TXT
 
 clean:
-	rm -rf test_gdi test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_entry test_ne_args test_ne_dialog test_ne_registers test_ne_strings test_ne_flow test_ne_indexed test_ne_callframe test_ne_parameters test_ne_bytes test_ne_scan test_ne_string_ops NESTR2-fixture.exe test_ne_loop test_ne_launch test_ne_rm_gate winhost winhost800 *.o *.ppm *.png appinfo.c HOSTWIN
+	rm -rf test_gdi test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_launch test_ne_rm_gate *-fixture.exe NEDIALOG.EXE NEFAULT.EXE NEHANG.EXE winhost winhost800 *.o *.ppm *.png appinfo.c HOSTWIN
 
-.PHONY: all clean HOSTWIN
+.PHONY: all check clean HOSTWIN NEFIXTURES

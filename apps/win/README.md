@@ -5,27 +5,37 @@ subset) for native ARM programs. `WINN.EXE` is the Windows loader: it holds
 KERNEL, GDI, USER and the built-in drivers, loads driver modules, and runs
 applications (separate EZ files) as cooperative tasks, as Windows 3.x does.
 The preliminary 386 NE path is available through ordinary `WinExec` and
-`WINN NEDIALOG.EXE`. It accepts only a preflighted straight-line x86 entry:
-`NOP`, bounded `PUSH DS` / `PUSH imm16`, up to 32 `FAR CALL`s to known Win16
-APIs, and `RETF`. Each 16-byte thunk calls a common guest PM→RM→PM gateway.
-The native callback runs with the original DOS Real Mode CPU context, so
-WINN can service keyboard/mouse BIOS calls and cooperative modal dialogs.
-After the native call, the same Win16 registers and stack are resumed; each
-`RETF imm16` cleans the Win16 PASCAL arguments.
+`WINN NEDIALOG.EXE`: a Win16 program of one code and one data segment runs
+its entry as a FAR procedure on the emulator's 386 core, in 16-bit protected
+mode with its own GDT. Each 16-byte import thunk calls a common guest
+PM→RM→PM gateway; the native callback runs with the original DOS Real Mode
+CPU context, so WINN can service keyboard/mouse BIOS calls and cooperative
+modal dialogs. After the native call, the same Win16 registers and stack are
+resumed; each `RETF imm16` cleans the Win16 PASCAL arguments.
+
+The code is not checked beforehand. Protected mode keeps it in its segments;
+an exception goes through a private IDT back to Real Mode and DOS, and a
+program that runs some 16 million instructions without returning or calling
+the API is stopped through the same IDT (WINN answers the CPU's interrupt
+controller callback with its vector for one step). Either ends with the
+Windows 3.1 "Application Error" message and the place, `segment:offset`.
+Neither x86 CPU implementation is modified.
 
 Supported functions: KERNEL.3 GetVersion, KERNEL.36 GetCurrentTask,
-KERNEL.90 lstrlen (checked selector:offset string), KERNEL.152 GetNumTasks,
-USER.13 GetTickCount, USER.179 GetSystemMetrics, USER.180 GetSysColor and
-USER.1 MessageBox. Its FAR ANSI strings are copied into bounded native buffers
-and the owner, pointers and style are read from the guest Pascal stack.
-Other Win16 programs are rejected before Protected Mode. One NE executor
-can be active at a time: a nested NE launch is refused while a native modal
-loop is running. The original ARM WINN thread remains the executor; neither
-x86 CPU implementation is modified.
+KERNEL.88 lstrcpy, KERNEL.89 lstrcat, KERNEL.90 lstrlen (checked
+selector:offset strings), KERNEL.152 GetNumTasks, USER.13 GetTickCount,
+USER.179 GetSystemMetrics, USER.180 GetSysColor and USER.1 MessageBox. Its
+FAR ANSI strings are copied into bounded native buffers and the owner,
+pointers and style are read from the guest Pascal stack. Programs importing
+anything else are refused before protected mode. One NE executor can be
+active at a time: a nested NE launch is refused while a native modal loop is
+running.
 
-`host/mkne_winexec.py`, `host/mkne_args.py` and `host/mkne_dialog.py` generate
-`NEAPP.EXE`, `NEARGS.EXE` and `NEDIALOG.EXE`. All three have DOS MZ stubs that
-explain how to launch them under WINN when invoked directly from DOS.
+`host/mkne_winexec.py`, `host/mkne_dialog.py`, `host/mkne_loop.py` and
+`host/mkne_fault.py` (`--hang` for `NEHANG.EXE`) generate `NEAPP.EXE`,
+`NEDIALOG.EXE`, `NELOOP.EXE`, `NEFAULT.EXE` and `NEHANG.EXE` (`make
+NEFIXTURES` in `host/`). All have DOS MZ stubs that explain how to launch
+them under WINN when invoked directly from DOS.
 
     WINN [:] [program [arguments]]
 
@@ -190,6 +200,7 @@ use `ucontext`):
     ./winhost scripts/logo.txt PROGMAN       # the logo (copy the BMPs into HOSTWIN first)
     ./winhost800 scripts/vga800.txt  # the VGA800 driver, built in
     ./test_gdi                       # GDI sample sheet, gdi.ppm
+    make check                       # the NE loader, gateway and trampoline
 
 The applications are built into the harness; `HOSTWIN/` is the Windows
 directory, with empty stand-ins for their files and a "DOS program". On

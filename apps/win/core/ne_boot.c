@@ -192,9 +192,10 @@ size_t win_ne_boot_make(uint8_t *buffer, size_t capacity,
 
 /* The i386 core's existing call_isr() accepts 16-bit interrupt gates (0x86).
  * Every vector uses a separate MOV BX,vector / JMP near common stub. The
- * common handler drops PE without using the exception frame (which differs
- * for error-code vectors), restores the DOS descriptor tables, and reports
- * FAULT to the ARM bridge from real mode. No x86 core changes are required. */
+ * common handler notes where the exception frame is (its layout differs for
+ * error-code vectors; ARM reads it), drops PE, restores the DOS descriptor
+ * tables, and reports FAULT to the ARM bridge from real mode. No x86 core
+ * changes are required. */
 int win_ne_fault_make(uint8_t idt[WIN_NE_FAULT_AREA_BYTES],
                       uint8_t code[WIN_NE_FAULT_AREA_BYTES],
                       const win_ne_boot_args *a)
@@ -217,6 +218,8 @@ int win_ne_fault_make(uint8_t idt[WIN_NE_FAULT_AREA_BYTES],
         put16(code + pos + 4u, (uint16_t)(common - (pos + 6u)));
     }
     emitter e = { 0 };
+    b8(&e, 0x8c); b8(&e, 0xd6);              /* mov si,ss: the frame, */
+    b8(&e, 0x89); b8(&e, 0xe7);              /* mov di,sp  for the report */
     b8(&e, 0xfa);                             /* cli */
     b8(&e, 0x0f); b8(&e, 0x20); b8(&e, 0xc0);/* mov eax,cr0 */
     b8(&e, 0x24); b8(&e, 0xfe);               /* and al,~PE */

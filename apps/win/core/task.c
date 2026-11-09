@@ -21,6 +21,7 @@
 #include "dos-api.h"
 #include "ne.h"
 #include "ne_exec.h"
+#include "ne_boot.h"
 #endif
 
 #if !(defined(__arm__) || defined(__thumb__))
@@ -355,18 +356,43 @@ static int run_app(wtask *t)
 }
 
 #if defined(__arm__) || defined(__thumb__)
-/* Run the restricted NE entry on the current WINN ARM stack. No native task
- * switching occurs before the guest has returned to Real Mode. */
+/* Run the NE entry on the current WINN ARM stack. A program that faults or
+ * runs too long without returning ends with the Windows 3.1 "Application
+ * Error" message. */
 static int run_ne_app(wtask *t)
 {
     uint32_t result = 0;
-    int rc = win_ne_execute_basic((const char *)t->module, &result);
-    char msg[128];
-    if (rc <= WIN_NE_EXEC_FAULT_BASE &&
-        rc > WIN_NE_EXEC_FAULT_BASE - 32)
-        wsprintf(msg, "NE program %s: x86 exception #%d (CPU restored)",
-                 t->name, WIN_NE_EXEC_FAULT_BASE - rc);
-    else if (rc)
+    win_ne_fault f;
+    const char *path = (const char *)t->module;
+    int rc = win_ne_execute_basic(path, &result, &f);
+    char msg[160];
+    if (rc == WIN_NE_EXEC_FAULT) {
+        const char *file = path;
+        for (const char *p = path; *p; p++)
+            if (*p == '\\' || *p == '/' || *p == ':')
+                file = p + 1;
+        char where[24];
+        if (f.segment)
+            wsprintf(where, "%04X:%04X", f.segment, f.ip);
+        else
+            wsprintf(where, "%04X:%04X (selector)", f.cs, f.ip);
+        const char *what = f.vector == 0 ? "a Divide by Zero" :
+                           f.vector == 6 ? "an Invalid Instruction" :
+                           f.vector == 12 ? "a Stack Fault" :
+                           f.vector == 13 ? "a General Protection Fault" : NULL;
+        if (f.vector == (int)WIN_NE_TIMEOUT_VECTOR)
+            wsprintf(msg, "%s has stopped responding to the system "
+                     "in module %s at %s.", t->name, file, where);
+        else if (what)
+            wsprintf(msg, "%s caused %s in module %s at %s.", t->name, what, file, where);
+        else
+            wsprintf(msg, "%s caused exception %d in module %s at %s.",
+                     t->name, f.vector, file, where);
+        win_logo_end();
+        MessageBox(0, msg, "Application Error", MB_OK | MB_ICONSTOP);
+        return 1;
+    }
+    if (rc)
         wsprintf(msg, "NE program %s: unsupported or failed (%d)", t->name, rc);
     else
         wsprintf(msg, "NE program %s completed. DX:AX=%08lx", t->name,

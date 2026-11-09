@@ -1,12 +1,15 @@
 /*
- * ne_exec.c - restricted 386 Win16 execution under native WINN.
+ * ne_exec.c - 386 Win16 execution under native WINN.
  *
  * The native WINN thread owns the emulator.  This prepares a staged NE
  * with a DATA stack, enters PE in guest code, yields on API OUT, returns
- * from the guest FAR procedure, exits PE and returns to WINN.  The executor
- * accepts ONLY preflighted bounded Win16 code (acyclic branches, direct
- * DATA accesses and supported PASCAL API calls). Arbitrary NE applications
- * remain disabled until protected-mode fault recovery exists.
+ * from the guest FAR procedure, exits PE and returns to WINN.  The code is
+ * not checked beforehand: protected mode itself keeps it inside its
+ * segments, and whatever it does wrong ends in the private IDT, which takes
+ * the CPU back to Real Mode and DOS. A guest that runs too long without
+ * coming back is made to take the IDT's timeout vector: for that one step
+ * the CPU's interrupt controller callback answers with that vector, much as
+ * the bridge borrows the OUT callback.
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
@@ -20,7 +23,6 @@
 #include "ne_guest.h"
 #include "ne_guest_api.h"
 #include "ne_boot.h"
-#include "ne_entry.h"
 
 /* CPU_ext_accessors segment indices, matching native int386x(). */
 enum { WIN_ES, WIN_CS, WIN_SS, WIN_DS, WIN_FS, WIN_GS, WIN_SEG_COUNT };
@@ -63,31 +65,22 @@ static void restore_cpu(CPU *cpu, const win_cpu_snapshot *s)
     cpu->excerr = s->excerr;
 }
 
-/* Permit only a bounded NE entry, with validated DS accesses and FAR API
- * imports. The private IDT catches faults from supported code, but arbitrary
- * instructions and unbounded backward jumps are still forbidden. */
-static int valid_basic_entry(const win_ne_guest_image *g, unsigned *calls)
+/* Bursts of 4096 instructions a guest may run before it is stopped (API
+ * calls count one each): some 16 million instructions. */
+#define WIN_NE_EXEC_BURSTS 4096u
+
+/* The layout the trampoline expects: code and a writable DATA segment that
+ * holds the stack. */
+static int valid_entry(const win_ne_guest_image *g)
 {
-    if (!g->info.cs_index || !g->info.ss_index ||
-        g->info.cs_index == g->info.ss_index ||
-        g->info.segment_count != 2 || g->thunk_count == 0 ||
-        !g->cs || !g->ss || g->sp < 64 ||
-        (g->segments[g->info.ss_index].flags & 1u) != 1u ||
-        (g->segments[g->info.cs_index].flags & 1u) != 0u ||
-        g->sp > g->segments[g->info.ss_index].size ||
-        g->ip >= g->segments[g->info.cs_index].size)
-        return 0;
-    const win_ne_guest_segment *code = &g->segments[g->info.cs_index];
-    const uint8_t *p = (const uint8_t *)dos_guest_linear_ptr(code->linear);
-    /* DS initially points to SS (the NE DATA segment). Keep direct memory
-     * operations below the stack's low-water reservation: FAR calls and
-     * the PM/RM gateway share that stack during native API dispatch. */
-    size_t safe_data = g->sp > 64u ? (size_t)g->sp - 64u : 0u;
-    if (safe_data > g->segments[g->info.ss_index].size)
-        safe_data = g->segments[g->info.ss_index].size;
-    return win_ne_entry_calls_data(p, code->size, g->ip, g->thunk_selector,
-                                   g->thunk_services, g->thunk_count,
-                                   safe_data, calls);
+    return g->info.cs_index && g->info.ss_index &&
+           g->info.cs_index != g->info.ss_index &&
+           g->info.segment_count == 2 &&
+           g->cs && g->ss && g->sp >= 64 &&
+           (g->segments[g->info.ss_index].flags & 1u) == 1u &&
+           (g->segments[g->info.cs_index].flags & 1u) == 0u &&
+           g->sp <= g->segments[g->info.ss_index].size &&
+           g->ip < g->segments[g->info.cs_index].size;
 }
 
 typedef struct {
@@ -138,7 +131,83 @@ static int read_guest(void *opaque, uint32_t linear, void *dst, uint32_t bytes)
     return 1;
 }
 
-int win_ne_execute_basic(const char *path, uint32_t *value)
+/* A run that ended in the trampoline's Real Mode code after its OUT: the
+ * DOS descriptor tables are back, the snapshot can be restored. A guest
+ * cannot get there by an OUT of its own: it cannot load that CS. */
+static int back_in_rm(CPU *cpu, const win_ne_native_gate *gate, int rc)
+{
+    return (rc == WINX86_OK || rc == WINX86_FAULT || rc == WINX86_BAD_SERVICE) &&
+           cpu->ext_accessors->get_seg16(cpu, WIN_CS) == gate->rm_segment;
+}
+
+static int timeout_taken;
+
+static int timeout_irq(void *pic)
+{
+    (void)pic;
+    timeout_taken = 1;
+    return (int)WIN_NE_TIMEOUT_VECTOR;
+}
+
+/* Stop a guest that has not come back. In its own code it is in protected
+ * mode with the private IDT, where the timeout vector leads to the fault
+ * exit; the trampoline switches modes and tables, so a guest found there
+ * runs on (out of it, or to its end) first. */
+static int stop_guest(CPU *cpu, win_ne_native_gate *gate, uint16_t thunk_selector)
+{
+    CPU_ext_accessors_t *e = cpu->ext_accessors;
+    for (int i = 0; i < 16; i++) {
+        uint16_t cs = e->get_seg16(cpu, WIN_CS);
+        if (cs != gate->rm_segment && cs != thunk_selector)
+            break;
+        int rc = winx86_run(cpu, invoke_native, gate, 1u);
+        if (back_in_rm(cpu, gate, rc))
+            return rc;
+    }
+    if (e->get_seg16(cpu, WIN_CS) == gate->rm_segment)
+        return WINX86_BAD_CONTEXT;      /* Real Mode, but not at the end */
+    int (*pic_read_irq)(void *) = cpu->cb.pic_read_irq;
+    bool pending = cpu->intr;
+    timeout_taken = 0;
+    cpu->cb.pic_read_irq = timeout_irq;
+    cpu->intr = true;
+    e->set_flags(cpu, 0x200u, 0);       /* the gate clears IF again */
+    int rc = winx86_run(cpu, invoke_native, gate, 4u);
+    cpu->cb.pic_read_irq = pic_read_irq;
+    if (!timeout_taken)
+        cpu->intr = false;
+    cpu->intr = cpu->intr || pending;   /* a real one waits for DOS */
+    return rc;
+}
+
+static int is_error_code_vector(int v)
+{
+    return v == 8 || (v >= 10 && v <= 14) || v == 17;
+}
+
+/* CS:IP from the exception frame at SI:DI (see win_ne_fault_make) */
+static void fault_where(const win_ne_guest_image *g, CPU *cpu, win_ne_fault *f)
+{
+    f->vector = cpu->gprx[regbx].r16;
+    f->cs = f->ip = f->segment = 0;
+    uint16_t ss = cpu->gprx[regsi].r16;
+    uint32_t sp = cpu->gprx[regdi].r16 + (is_error_code_vector(f->vector) ? 2u : 0u);
+    for (uint16_t i = 1; i <= g->info.segment_count; i++) {
+        const win_ne_guest_segment *s = &g->segments[i];
+        uint8_t fr[4];
+        if (s->selector != ss || sp + 4u > s->size ||
+            !read_guest(NULL, s->linear + sp, fr, 4))
+            continue;
+        f->ip = (uint16_t)(fr[0] | fr[1] << 8);
+        f->cs = (uint16_t)(fr[2] | fr[3] << 8);
+        break;
+    }
+    for (uint16_t i = 1; f->cs && i <= g->info.segment_count; i++)
+        if ((g->segments[i].selector & ~3u) == (f->cs & ~3u))
+            f->segment = i;
+}
+
+int win_ne_execute_basic(const char *path, uint32_t *value, win_ne_fault *fault)
 {
     PC *pc = get_PC();
     CPU *cpu = pc ? pc->cpu : NULL;
@@ -157,8 +226,7 @@ int win_ne_execute_basic(const char *path, uint32_t *value)
         ne_cpu_busy = 0;
         return rc;
     }
-    unsigned calls = 0;
-    if (!valid_basic_entry(&g, &calls)) {
+    if (!valid_entry(&g)) {
         rc = WIN_NE_EXEC_BAD_ENTRY;
         goto done;
     }
@@ -199,22 +267,27 @@ int win_ne_execute_basic(const char *path, uint32_t *value)
         .scratch_linear = linear,
         .rm_segment = args.rm_segment
     };
-    rc = winx86_run(cpu, invoke_native, &gate, calls + 4u);
+    rc = winx86_run(cpu, invoke_native, &gate, WIN_NE_EXEC_BURSTS);
+    if (!back_in_rm(cpu, &gate, rc))
+        rc = stop_guest(cpu, &gate, g.thunk_selector);
 
-    /* Both EXIT and the private-IDT FAULT trap switch back to Real Mode,
-     * restore the DOS GDTR/IDTR, and issue OUT. On other failures, real-mode
-     * recovery is not proven and using DOS memory would be unsafe. */
-    if (rc != WINX86_OK && rc != WINX86_FAULT)
+    /* EXIT, the private-IDT FAULT trap and a refused API call are all in
+     * Real Mode with the DOS GDTR/IDTR back. Anything else (the trampoline
+     * looping in Real Mode, the timeout vector not taken) leaves the CPU in
+     * a mode and tables the public CPU interface cannot restore: DOS cannot
+     * run again. */
+    if (!back_in_rm(cpu, &gate, rc))
         for (;;) { }
 
     const uint32_t result = ((uint32_t)cpu->gprx[regcx].r16 << 16) |
                              cpu->gprx[regbx].r16;
-    int fault_vector = cpu->gprx[regbx].r16;
     int guest_fault = rc == WINX86_FAULT;
+    if (guest_fault && fault)
+        fault_where(&g, cpu, fault);
     restore_cpu(cpu, &old);
     if (!guest_fault && value) *value = result;
-    rc = guest_fault ? WIN_NE_EXEC_FAULT_BASE - fault_vector :
-         (api.invalid_args ? WIN_NE_EXEC_BAD_ARGS : WIN_NE_OK);
+    rc = guest_fault ? WIN_NE_EXEC_FAULT :
+         rc == WINX86_BAD_SERVICE || api.invalid_args ? WIN_NE_EXEC_BAD_ARGS : WIN_NE_OK;
 done:
     win_ne_guest_release(&g);
     ne_cpu_busy = 0;

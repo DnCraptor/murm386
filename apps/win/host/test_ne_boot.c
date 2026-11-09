@@ -57,7 +57,9 @@ int main(void)
         assert(code[pos+3]==0xe9 && r16(code+pos+4)==
                WIN_NE_FAULT_VECTORS*6-(pos+6));
     }
-    const unsigned common=WIN_NE_FAULT_VECTORS*6;
+    const uint8_t save_frame[]={0x8c,0xd6,0x89,0xe7};    /* si=ss, di=sp */
+    assert(!memcmp(code+WIN_NE_FAULT_VECTORS*6,save_frame,sizeof(save_frame)));
+    const unsigned common=WIN_NE_FAULT_VECTORS*6+sizeof(save_frame);
     const uint8_t clear_pe[]={0x0f,0x20,0xc0,0x24,0xfe,0x0f,0x22,0xc0};
     assert(code[common]==0xfa &&
            !memcmp(code+common+1,clear_pe,sizeof(clear_pe)));
