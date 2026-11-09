@@ -173,6 +173,19 @@ clean_ne_globals:
 	rm -f test_ne_ds_shadow test_ne_globals NEGLOBAL-fixture.exe
 .PHONY: clean_ne_globals
 
+# Checked Win16 memory ALU, arrays, BP locals, exact FLAGS and NE fixture.
+all: test_ne_mem_alu test_ne_arrays NEARRAY-fixture.exe
+NEARRAY-fixture.exe: mkne_arrays.py
+	python3 mkne_arrays.py $@
+test_ne_mem_alu: test_ne_mem_alu.c ../core/ne_mem_alu.h
+	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ test_ne_mem_alu.c
+test_ne_arrays: ../core/ne_entry.c ../core/ne_mem_alu.h test_ne_arrays.c NEARRAY-fixture.exe
+	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne_entry.c test_ne_arrays.c
+clean: clean_ne_arrays
+clean_ne_arrays:
+	rm -f test_ne_mem_alu test_ne_arrays NEARRAY-fixture.exe
+.PHONY: clean_ne_arrays
+
 # Checked Win16 C-style loops, reused near helpers and LOOPcc.
 all: test_ne_cmp_flow test_ne_bounded_flow NEFLOW-fixture.exe
 NEFLOW-fixture.exe: mkne_bounded_flow.py

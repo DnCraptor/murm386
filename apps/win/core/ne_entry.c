@@ -19,6 +19,7 @@
 #include "ne_cmp_flow.h"
 #include "ne_frame_locals.h"
 #include "ne_ds_shadow.h"
+#include "ne_mem_alu.h"
 
 #define ENTRY_WINDOW 512u
 #define ENTRY_MAX_BRANCH_DEPTH 20u
@@ -299,6 +300,53 @@ static int data_ea(const verifier *v, const path_state *s,
  * to the same checked data selector as DS. The gateway saves/restores ES.
  * For backward direction, verify the first and last access (no wraparound).
  * Every access between those endpoints is monotonic and stays in DATA. */
+typedef struct {
+    int local;
+    unsigned address; /* Validated DS address, or BP-local displacement. */
+    size_t bytes;
+} checked_mem;
+
+static int checked_mem_ea(const verifier *v, const path_state *s,
+                          const uint8_t *p, size_t remain, unsigned width,
+                          checked_mem *m)
+{
+    unsigned offset = 0;
+    m->local = local_ea(s, p, remain, width, &m->bytes, &offset);
+    if (m->local) {
+        m->address = offset;
+        return 1;
+    }
+    return data_ea(v, s, p, remain, width, &m->bytes, &m->address);
+}
+
+static int checked_mem_read(const path_state *s, const checked_mem *m,
+                            unsigned width, unsigned *value)
+{
+    if (m->local) {
+        unsigned tag; int known; uint16_t v;
+        win_ne_local_load(&s->locals, m->address, width,
+                          &tag, &known, &v);
+        *value = v;
+        return known;
+    }
+    return width == 1u ?
+        win_ne_ds_get8(&s->ds_shadow, (uint16_t)m->address, value) :
+        win_ne_ds_get16(&s->ds_shadow, (uint16_t)m->address, value);
+}
+
+static void checked_mem_write(path_state *s, const checked_mem *m,
+                              unsigned width, int known, unsigned value)
+{
+    if (m->local) {
+        win_ne_local_store(&s->locals, m->address, width,
+                           ARG_WORD, known, (uint16_t)value);
+    } else if (width == 1u) {
+        win_ne_ds_put8(&s->ds_shadow, (uint16_t)m->address, known, value);
+    } else {
+        win_ne_ds_put16(&s->ds_shadow, (uint16_t)m->address, known, value);
+    }
+}
+
 static int string_span(const verifier *v, const path_state *s,
                        unsigned reg, unsigned count, unsigned width)
 {
@@ -768,10 +816,10 @@ static int check_path(verifier *v, path_state s)
             s.at += 2;
             continue;
         }
-        if (op == 0x38 || op == 0x3a || op == 0x39 || op == 0x3b ||
-            op == 0x85 || op == 0x84) { /* CMP/TEST register-register */
-            if (remaining < 2 || (p[1] & 0xc0) != 0xc0 ||
-                !mark(v, at, 2)) return 0;
+        if ((op == 0x38 || op == 0x3a || op == 0x39 || op == 0x3b ||
+             op == 0x85 || op == 0x84) && remaining >= 2 &&
+            (p[1] & 0xc0u) == 0xc0u) { /* CMP/TEST register-register */
+            if (!mark(v, at, 2)) return 0;
             unsigned reg = (p[1] >> 3) & 7u, rm = p[1] & 7u;
             unsigned width = (op == 0x38 || op == 0x3a || op == 0x84) ? 8u : 16u;
             int known = width == 8u ?
@@ -790,17 +838,129 @@ static int check_path(verifier *v, path_state s)
             s.at += 2;
             continue;
         }
-        if (op == 0x80 && remaining >= 2 &&
-            (p[1] & 0xc0u) != 0xc0u &&
-            (p[1] & 0x38u) == 0x38u) { /* CMP r/m8,imm8: /7 */
-            size_t ea_len;
-            unsigned addr;
-            if (!data_ea(v, &s, p, remaining, 1u, &ea_len, &addr) ||
-                remaining < ea_len + 1u ||
-                !mark(v, at, ea_len + 1u)) return 0;
-            s.at += ea_len + 1u;
+        /* 80/81/83: checked byte/word memory ALU with immediate operands.
+         * Support arrays, structs and BP locals; never dereference unknown EA. */
+        if ((op == 0x80 || op == 0x81 || op == 0x83) &&
+            remaining >= 2u && (p[1] & 0xc0u) != 0xc0u) {
+            unsigned group = (p[1] >> 3) & 7u;
+            unsigned width = op == 0x80 ? 8u : 16u;
+            unsigned bytes = width / 8u;
+            size_t immbytes = op == 0x81 ? 2u : 1u;
+            checked_mem m;
+            if (!alu_group(group) ||
+                !checked_mem_ea(v, &s, p, remaining, bytes, &m) ||
+                remaining < m.bytes + immbytes ||
+                !mark(v, at, m.bytes + immbytes)) return 0;
+            unsigned imm = op == 0x81 ? read16(p + m.bytes) :
+                            op == 0x83 ? (uint16_t)(int16_t)(int8_t)p[m.bytes] :
+                            p[m.bytes];
+            unsigned value = 0;
+            int known = checked_mem_read(&s, &m, bytes, &value);
+            s.flag_proof = (win_ne_flag_proof){0};
+            if (known)
+                s.flag_proof = win_ne_mem_flags(group, width, value, imm,
+                                               at + m.bytes + immbytes);
+            if (group != 7u)
+                checked_mem_write(&s, &m, bytes, known,
+                                  win_ne_mem_value(group, width, value, imm));
+            s.at += m.bytes + immbytes;
             continue;
         }
+        /* Register/memory ALU and CMP/TEST, both directions. 16-bit ModRM
+         * memory operands may be a checked DS effective address or a BP local.
+         * Arithmetic discards any selector provenance in the destination. */
+        if (remaining >= 2u && (p[1] & 0xc0u) != 0xc0u &&
+            ((op <= 0x33u &&
+              ((op & 0xfcu) == 0x00u || (op & 0xfcu) == 0x08u ||
+               (op & 0xfcu) == 0x20u || (op & 0xfcu) == 0x28u ||
+               (op & 0xfcu) == 0x30u)) ||
+             op == 0x38u || op == 0x39u || op == 0x3au || op == 0x3bu ||
+             op == 0x84u || op == 0x85u)) {
+            unsigned width = (op & 1u) ? 16u : 8u;
+            unsigned bytes = width / 8u;
+            unsigned reg = (p[1] >> 3) & 7u;
+            unsigned group = (op & 0xfcu) == 0x00u ? 0u :
+                             (op & 0xfcu) == 0x08u ? 1u :
+                             (op & 0xfcu) == 0x20u ? 4u :
+                             (op & 0xfcu) == 0x28u ? 5u :
+                             (op & 0xfcu) == 0x30u ? 6u : 7u;
+            const int test = op == 0x84u || op == 0x85u;
+            const int reg_dest = (op & 2u) != 0u;
+            if (width == 16u && !ordinary_reg(reg)) return 0;
+            checked_mem m;
+            if (!checked_mem_ea(v, &s, p, remaining, bytes, &m) ||
+                !mark(v, at, m.bytes)) return 0;
+            unsigned memvalue = 0;
+            int memknown = checked_mem_read(&s, &m, bytes, &memvalue);
+            int regknown = width == 8u ? s.number_known[parent8(reg)] :
+                                          s.number_known[reg];
+            unsigned regvalue = width == 8u ? byte8(&s, reg) : s.number[reg];
+            unsigned lhs = reg_dest ? regvalue : memvalue;
+            unsigned rhs = reg_dest ? memvalue : regvalue;
+            int known = memknown && regknown;
+            s.flag_proof = (win_ne_flag_proof){0};
+            if (known)
+                s.flag_proof = test ? win_ne_test(lhs, rhs, width, at + m.bytes) :
+                     win_ne_mem_flags(group, width, lhs, rhs, at + m.bytes);
+            if (!test && group != 7u) {
+                unsigned result = win_ne_mem_value(group, width, lhs, rhs);
+                if (reg_dest) {
+                    if (width == 8u) set8(&s, reg, result, known);
+                    else {
+                        s.regs[reg] = ARG_WORD;
+                        s.number_known[reg] = (uint8_t)known;
+                        if (known) s.number[reg] = (uint16_t)result;
+                    }
+                } else checked_mem_write(&s, &m, bytes, known, result);
+            }
+            s.at += m.bytes;
+            continue;
+        }
+
+        /* FE/FF memory /0,/1 INC/DEC and F6/F7 memory TEST/NOT/NEG.
+         * FF /6 (PUSH) continues to the existing, separately checked path. */
+        if (remaining >= 2u && (p[1] & 0xc0u) != 0xc0u &&
+            (op == 0xfeu || op == 0xffu || op == 0xf6u || op == 0xf7u)) {
+            unsigned group = (p[1] >> 3) & 7u;
+            unsigned width = (op == 0xfeu || op == 0xf6u) ? 8u : 16u;
+            if ((op == 0xfeu || op == 0xffu) ? group > 1u :
+                (group != 0u && group != 2u && group != 3u)) {
+                if (op != 0xffu || group != 6u) return 0;
+            } else {
+                checked_mem m;
+                const unsigned bytes = width / 8u;
+                size_t immbytes = (op == 0xf6u || op == 0xf7u) && group == 0u ?
+                                  bytes : 0u;
+                if (!checked_mem_ea(v, &s, p, remaining, bytes, &m) ||
+                    remaining < m.bytes + immbytes ||
+                    !mark(v, at, m.bytes + immbytes)) return 0;
+                unsigned value = 0;
+                int known = checked_mem_read(&s, &m, bytes, &value);
+                unsigned result = value;
+                s.flag_proof = (win_ne_flag_proof){0};
+                if (op == 0xfeu || op == 0xffu) {
+                    int delta = group == 0u ? 1 : -1;
+                    result = (value + (unsigned)delta) & (width == 8u ? 255u : 65535u);
+                    if (known) s.flag_proof =
+                        win_ne_mem_incdec(value, delta, width, at + m.bytes);
+                } else if (group == 0u) {
+                    unsigned imm = width == 8u ? p[m.bytes] : read16(p + m.bytes);
+                    if (known) s.flag_proof =
+                        win_ne_test(value, imm, width, at + m.bytes + immbytes);
+                } else if (group == 2u) {
+                    result = (~value) & (width == 8u ? 255u : 65535u);
+                } else {
+                    result = (0u - value) & (width == 8u ? 255u : 65535u);
+                    if (known) s.flag_proof = win_ne_cmp(0u, value, width,
+                                                         at + m.bytes);
+                }
+                if (!(op == 0xf6u || op == 0xf7u) || group != 0u)
+                    checked_mem_write(&s, &m, bytes, known, result);
+                s.at += m.bytes + immbytes;
+                continue;
+            }
+        }
+
 
         /* Absolute 16-bit DS references. Indexed references are checked
          * separately using exact base/index values. */

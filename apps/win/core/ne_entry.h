@@ -37,6 +37,9 @@
  * initial DATA contents or imported API side effects are assumed known.
  * Direct DS loads can never fabricate FAR-selector provenance. Unresolved
  * branches are bounded by an explicit verifier recursion-depth budget.
+ * Checked DS arrays and BP locals support 8/16-bit memory operands of
+ * ADD/SUB/AND/OR/XOR/CMP/TEST, INC/DEC, NOT/NEG and their exact FLAGS;
+ * unsupported ADC/SBB, MUL/DIV and unproved pointers remain rejected.
  * Indirect calls/returns,
  * unknown SS addresses, segment overrides, delayed/partial caller cleanup
  * and recursion remain prohibited.
