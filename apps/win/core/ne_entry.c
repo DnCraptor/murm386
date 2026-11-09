@@ -72,6 +72,7 @@ typedef struct {
     unsigned calls, depth, frame;
     unsigned stack_bytes, bp_bytes, near_depth;
     unsigned cleanup_bytes; /* CDECL RET: exact caller ADD SP required next. */
+    int direction; /* 0: unknown DF; +1: CLD; -1: STD. */
     near_call near[ENTRY_NEAR_CALL_DEPTH];
     uint8_t stack[8], stack_known[8];
     uint16_t stack_values[8];
@@ -221,6 +222,24 @@ static int data_ea(const verifier *v, const path_state *s,
     return 1;
 }
 
+/* Verify an entire 16-bit string instruction's footprint before entering PE.
+ * SI reads use DS; DI reads/writes use ES, which the WINN PM bootstrap sets
+ * to the same checked data selector as DS. The gateway saves/restores ES.
+ * For backward direction, verify the first and last access (no wraparound).
+ * Every access between those endpoints is monotonic and stays in DATA. */
+static int string_span(const verifier *v, const path_state *s,
+                       unsigned reg, unsigned count, unsigned width)
+{
+    if (!count) return 1; /* REP with CX=0 does not dereference pointers. */
+    if (!s->number_known[reg]) return 0;
+    int32_t first = s->number[reg];
+    int32_t last = first + s->direction * (int32_t)(count - 1u) * (int32_t)width;
+    if (last < 0 || last > 0xffff ||
+        (uint32_t)last + width > 65536u) return 0;
+    return direct_data(v, (unsigned)first, width) &&
+           direct_data(v, (unsigned)last, width);
+}
+
 static int forward_target(const verifier *v, size_t at, size_t length,
                           int displacement, size_t *target)
 {
@@ -295,6 +314,68 @@ static int check_path(verifier *v, path_state s)
         if (s.frame == FRAME_DONE && op != 0xcb && op != 0xc3 &&
             op != 0xc2)
             return 0;
+        /* CLD/STD make the string direction explicit. Never assume the
+         * incoming guest FLAGS have DF cleared. */
+        if (op == 0xfc || op == 0xfd) {
+            if (!mark(v, at, 1)) return 0;
+            s.direction = op == 0xfc ? 1 : -1;
+            s.at++;
+            continue;
+        }
+
+        /* 8086 MOVS, CMPS, STOS, LODS, SCAS (byte/word), with bounded
+         * REP / REPE / REPNE. No operand-size/segment overrides or unknown
+         * pointers. Every possible iteration is checked before execution.
+         * REPE/REPNE on comparisons may exit early on runtime FLAGS:
+         * their final SI/DI/CX are therefore treated as unknown values. */
+        unsigned prefixed = op == 0xf3 || op == 0xf2;
+        uint8_t sop = prefixed && remaining >= 2u ? p[1] : op;
+        if (sop >= 0xa4 && sop <= 0xaf && sop != 0xa8 && sop != 0xa9) {
+            const unsigned compare = sop == 0xa6 || sop == 0xa7 ||
+                                     sop == 0xae || sop == 0xaf;
+            const unsigned use_si = sop <= 0xa7 || sop == 0xac || sop == 0xad;
+            const unsigned use_di = sop <= 0xa7 || sop == 0xaa || sop == 0xab ||
+                                    sop == 0xae || sop == 0xaf;
+            const unsigned width = (sop & 1u) ? 2u : 1u;
+            const unsigned len = prefixed ? 2u : 1u;
+            if (!s.direction || remaining < len ||
+                (op == 0xf2 && !compare)) return 0;
+            unsigned count = 1u;
+            if (prefixed) {
+                if (!s.number_known[REG_CX] ||
+                    s.number[REG_CX] > ENTRY_MAX_LOOP_CX) return 0;
+                count = s.number[REG_CX];
+            }
+            if ((use_si && !string_span(v, &s, REG_SI, count, width)) ||
+                (use_di && !string_span(v, &s, REG_DI, count, width)) ||
+                !mark(v, at, len)) return 0;
+            const unsigned variable = prefixed && compare && count != 0u;
+            if (count) {
+                int32_t delta = s.direction * (int32_t)(count * width);
+                if (use_si) {
+                    s.regs[REG_SI] = ARG_WORD;
+                    if (variable) s.number_known[REG_SI] = 0;
+                    else s.number[REG_SI] = (uint16_t)(s.number[REG_SI] + delta);
+                }
+                if (use_di) {
+                    s.regs[REG_DI] = ARG_WORD;
+                    if (variable) s.number_known[REG_DI] = 0;
+                    else s.number[REG_DI] = (uint16_t)(s.number[REG_DI] + delta);
+                }
+                if (sop == 0xac || sop == 0xad) { /* LODS changes AL/AX. */
+                    s.regs[REG_AX] = ARG_WORD;
+                    s.number_known[REG_AX] = 0;
+                }
+            }
+            if (prefixed) {
+                s.regs[REG_CX] = ARG_WORD;
+                s.number_known[REG_CX] = !variable;
+                if (!variable) s.number[REG_CX] = 0;
+            }
+            s.at += len;
+            continue;
+        }
+
         if (op == 0xc9) { /* LEAVE = MOV SP,BP; POP BP */
             if (s.frame != FRAME_ACTIVE || s.depth ||
                 s.bp_bytes < 2u || !mark(v, at, 1)) return 0;

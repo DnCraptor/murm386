@@ -16,6 +16,10 @@
  * AL only and require a proven DS offset (direct or indexed).
  * CMP/TEST AL,imm8 and register-only TEST r8,r8 change FLAGS; memory
  * CMP r/m8,imm8 is limited to checked DS, never unknown SS addresses.
+ * CLD/STD and bounded MOVS/CMPS/STOS/LODS/SCAS byte/word forms
+ * accept REP, REPE, REPNE only with exact CX <= 64 and proven DATA
+ * ranges (ES=DS in the WINN bootstrap). A conditional repeat makes
+ * the final SI/DI/CX unknown; unsafe later accesses are rejected.
  * Indirect calls/returns,
  * unknown SS addresses, segment overrides, delayed/partial caller cleanup
  * and recursion remain prohibited.
