@@ -7,9 +7,12 @@
 /* Every reachable path must end at a RETF (or a deliberate fault), after
  * at least one supported Win16 API call. Forward branches, counted LOOP,
  * and forward direct near CALL/RET with at most two nested calls are checked.
+ * A near callee may read caller-pushed word parameters at BP+4, BP+6,...
+ * and must release exactly those words through RET imm16 (PASCAL ABI).
  * BP-relative stack locals require a standard frame and a bounded SUB SP.
  * DS reads/writes must stay below data_limit. Indirect calls/returns,
- * unknown SS addresses, segment overrides and recursion remain prohibited.
+ * unknown SS addresses, segment overrides, CDECL caller cleanup and
+ * recursion remain prohibited.
  * calls receives the maximum number of API calls on a validated path. */
 int win_ne_entry_calls_data(const uint8_t *p, size_t bytes, size_t ip,
                             uint16_t thunk_selector, const uint16_t *service_ids,

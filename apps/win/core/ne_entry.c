@@ -7,7 +7,8 @@
  *
  * In particular, DATA accesses must stay below the reserved Win16 stack.
  * Register-derived DS addresses require exact values. BP-relative locals
- * must lie within a verified stack frame; indirect control transfers,
+ * and positive BP parameters must lie within verified stack slots;
+ * indirect control transfers,
  * segment overrides and unrestricted SS accesses are rejected. A symbolic
  * stack tracks the FAR selectors passed to imported Win16 APIs.
  *
@@ -59,6 +60,11 @@ typedef struct {
 typedef struct {
     size_t return_at;
     unsigned stack_before, frame_before, bp_before;
+    unsigned arg_words;
+    /* BP+4 is the last word pushed before CALL; BP+6 the one before it.
+     * The callee's own API arguments must not alias these near parameters. */
+    uint8_t arg_tags[8], arg_known[8];
+    uint16_t arg_values[8];
 } near_call;
 
 typedef struct {
@@ -66,7 +72,8 @@ typedef struct {
     unsigned calls, depth, frame;
     unsigned stack_bytes, bp_bytes, near_depth;
     near_call near[ENTRY_NEAR_CALL_DEPTH];
-    uint8_t stack[8];
+    uint8_t stack[8], stack_known[8];
+    uint16_t stack_values[8];
     uint8_t regs[8];
     /* Exact 16-bit register values are tracked independently of the Win16
      * FAR-selector provenance tags. Unknown values cannot address memory. */
@@ -112,6 +119,33 @@ static int local_ea(const path_state *s, const uint8_t *p, size_t remain,
         (unsigned)(-displacement) > s->stack_bytes - s->bp_bytes)
         return 0;
     return 1;
+}
+
+/* Positive BP offsets in a near callee refer to the actual words pushed
+ * by its caller. BP+0 is saved BP, BP+2 is return IP; neither is data.
+ * Only word-aligned, in-range parameters are readable. This is deliberately
+ * NOT a general SS memory access primitive. */
+static int near_arg_ea(const path_state *s, const uint8_t *p, size_t remain,
+                       size_t *bytes, unsigned *index)
+{
+    if (s->frame != FRAME_ACTIVE || !s->near_depth || remain < 3u ||
+        (p[1] & 7u) != 6u)
+        return 0;
+    unsigned mod = p[1] >> 6;
+    int displacement;
+    if (mod == 1u) {
+        displacement = (int8_t)p[2];
+        *bytes = 3u;
+    } else if (mod == 2u && remain >= 4u) {
+        displacement = (int16_t)read16(p + 2);
+        *bytes = 4u;
+    } else {
+        return 0;
+    }
+    if (displacement < 4 || (displacement & 1))
+        return 0;
+    *index = (unsigned)(displacement - 4) / 2u;
+    return *index < s->near[s->near_depth - 1].arg_words;
 }
 
 static int mark(verifier *v, size_t at, size_t bytes)
@@ -237,7 +271,8 @@ static int check_path(verifier *v, path_state s)
             s.at++;
             continue;
         }
-        if (s.frame == FRAME_DONE && op != 0xcb && op != 0xc3)
+        if (s.frame == FRAME_DONE && op != 0xcb && op != 0xc3 &&
+            op != 0xc2)
             return 0;
         if (op == 0xc9) { /* LEAVE = MOV SP,BP; POP BP */
             if (s.frame != FRAME_ACTIVE || s.depth ||
@@ -247,13 +282,21 @@ static int check_path(verifier *v, path_state s)
             s.at++;
             continue;
         }
-        if (op == 0xc3) { /* near RET: restore the statically known caller */
+        if (op == 0xc3 || op == 0xc2) { /* RET / RET imm16 (near) */
+            size_t length = op == 0xc2 ? 3u : 1u;
             if (!s.near_depth || s.depth || s.stack_bytes < 2u ||
+                remaining < length ||
                 (s.frame != FRAME_NONE && s.frame != FRAME_DONE) ||
-                !mark(v, at, 1)) return 0;
+                !mark(v, at, length)) return 0;
             near_call c = s.near[--s.near_depth];
-            if (s.stack_bytes != c.stack_before + 2u) return 0;
-            s.stack_bytes = c.stack_before;
+            /* The immediate is a byte count, not a word count. Reject
+             * partial or excessive cleanup and plain RET with arguments.
+             * Caller-cleanup (CDECL) can be modeled separately later. */
+            unsigned pop = op == 0xc2 ? read16(p + 1) : 0u;
+            if (pop != c.arg_words * 2u ||
+                s.stack_bytes != c.stack_before + 2u ||
+                c.stack_before < pop) return 0;
+            s.stack_bytes = c.stack_before - pop;
             s.bp_bytes = c.bp_before;
             s.frame = c.frame_before;
             s.at = c.return_at;
@@ -297,11 +340,11 @@ static int check_path(verifier *v, path_state s)
             continue;
         }
 
-        /* 16-bit direct relative near CALL. It pushes a return IP, then
-         * runs the target in-line with its own BP-frame state. Reject
-         * backward targets, recursive nesting and unbalanced return SP. */
+        /* CALL rel16. Pending PUSH words become this procedure's formal
+         * parameters rather than Win16 API arguments. The return IP is
+         * counted separately and RET imm16 must clean the exact args. */
         if (op == 0xe8) {
-            if (remaining < 3 || s.depth ||
+            if (remaining < 3 ||
                 s.near_depth == ENTRY_NEAR_CALL_DEPTH ||
                 !mark(v, at, 3)) return 0;
             int32_t target = (int32_t)at + 3 + (int16_t)read16(p + 1);
@@ -313,6 +356,14 @@ static int check_path(verifier *v, path_state s)
             c->stack_before = s.stack_bytes - 2u;
             c->frame_before = s.frame;
             c->bp_before = s.bp_bytes;
+            c->arg_words = s.depth;
+            for (unsigned i = 0; i < c->arg_words; i++) {
+                unsigned src = c->arg_words - 1u - i;
+                c->arg_tags[i] = s.stack[src];
+                c->arg_known[i] = s.stack_known[src];
+                c->arg_values[i] = s.stack_values[src];
+            }
+            s.depth = 0; /* Callee now owns its formal arguments. */
             s.frame = FRAME_NONE;
             s.bp_bytes = 0;
             s.at = (size_t)target;
@@ -419,14 +470,43 @@ static int check_path(verifier *v, path_state s)
             continue;
         }
 
+        /* PUSH WORD [BP+4..] forwards a checked near parameter, retaining
+         * its Win16 FAR-selector provenance and known numeric value. */
+        if (op == 0xff && remaining >= 2 &&
+            (p[1] & 0x38u) == 0x30u) { /* FF /6 */
+            size_t ea_len;
+            unsigned index;
+            if (s.depth == sizeof(s.stack) ||
+                !near_arg_ea(&s, p, remaining, &ea_len, &index) ||
+                !stack_push(&s, 2u) || !mark(v, at, ea_len)) return 0;
+            const near_call *c = &s.near[s.near_depth - 1];
+            s.stack[s.depth] = c->arg_tags[index];
+            s.stack_known[s.depth] = c->arg_known[index];
+            s.stack_values[s.depth] = c->arg_values[index];
+            s.depth++;
+            s.at += ea_len;
+            continue;
+        }
+
         /* Standard 16-bit DS addressing, not arbitrary guest pointers.
          * LEA computes the checked address; MOV can read/write a word.
-         * No memory operand may use BP (which defaults to SS). */
+         * BP+4.. in a near callee reads checked, known call arguments. */
         if (op == 0x8d || op == 0x8b || op == 0x89) {
             if (remaining >= 2 && (p[1] & 0xc0u) != 0xc0u) {
                 unsigned reg = (p[1] >> 3) & 7u, addr;
                 size_t ea_len;
                 if (!ordinary_reg(reg)) return 0;
+                unsigned index;
+                if (op == 0x8b &&
+                    near_arg_ea(&s, p, remaining, &ea_len, &index)) {
+                    if (!mark(v, at, ea_len)) return 0;
+                    const near_call *c = &s.near[s.near_depth - 1];
+                    s.regs[reg] = c->arg_tags[index];
+                    s.number_known[reg] = c->arg_known[index];
+                    s.number[reg] = c->arg_values[index];
+                    s.at += ea_len;
+                    continue;
+                }
                 if (op != 0x8d && local_ea(&s, p, remaining, 2u, &ea_len)) {
                     if (!mark(v, at, ea_len)) return 0;
                     if (op == 0x8b) {
@@ -471,7 +551,9 @@ static int check_path(verifier *v, path_state s)
         if (op == 0x1e) { /* PUSH DS */
             if (s.depth == sizeof(s.stack) || !stack_push(&s, 2u) ||
                 !mark(v, at, 1)) return 0;
-            s.stack[s.depth++] = ARG_DS;
+            s.stack[s.depth] = ARG_DS;
+            s.stack_known[s.depth] = 0;
+            s.depth++;
             s.at++;
             continue;
         }
@@ -479,7 +561,11 @@ static int check_path(verifier *v, path_state s)
             size_t length = op == 0x68 ? 3u : 2u;
             if (remaining < length || s.depth == sizeof(s.stack) ||
                 !stack_push(&s, 2u) || !mark(v, at, length)) return 0;
-            s.stack[s.depth++] = ARG_WORD;
+            s.stack[s.depth] = ARG_WORD;
+            s.stack_known[s.depth] = 1;
+            s.stack_values[s.depth] = op == 0x68 ? read16(p + 1) :
+                                      (uint16_t)(int16_t)(int8_t)p[1];
+            s.depth++;
             s.at += length;
             continue;
         }
@@ -496,7 +582,10 @@ static int check_path(verifier *v, path_state s)
             unsigned reg = op - 0x50;
             if (s.depth == sizeof(s.stack) || !ordinary_reg(reg) ||
                 !stack_push(&s, 2u) || !mark(v, at, 1)) return 0;
-            s.stack[s.depth++] = s.regs[reg];
+            s.stack[s.depth] = s.regs[reg];
+            s.stack_known[s.depth] = s.number_known[reg];
+            s.stack_values[s.depth] = s.number[reg];
+            s.depth++;
             s.at++;
             continue;
         }
@@ -505,9 +594,32 @@ static int check_path(verifier *v, path_state s)
             if (!s.depth || !ordinary_reg(reg) || s.stack_bytes < 2u ||
                 !mark(v, at, 1)) return 0;
             s.stack_bytes -= 2u;
-            s.regs[reg] = s.stack[--s.depth];
-            s.number_known[reg] = 0; /* POP value unknown */
+            s.depth--;
+            s.regs[reg] = s.stack[s.depth];
+            s.number_known[reg] = s.stack_known[s.depth];
+            s.number[reg] = s.stack_values[s.depth];
             s.at++;
+            continue;
+        }
+        /* Register-register ADD/SUB, commonly emitted for a C helper
+         * that combines two parameters read via BP. No memory operands. */
+        if (op == 0x01 || op == 0x03 || op == 0x29 || op == 0x2b) {
+            if (remaining < 2 || (p[1] & 0xc0u) != 0xc0u ||
+                !mark(v, at, 2)) return 0;
+            unsigned reg = (p[1] >> 3) & 7u, rm = p[1] & 7u;
+            unsigned dst = (op == 0x03 || op == 0x2b) ? reg : rm;
+            unsigned src = (op == 0x03 || op == 0x2b) ? rm : reg;
+            if (!ordinary_reg(dst) || !ordinary_reg(src)) return 0;
+            if (s.number_known[dst] && s.number_known[src]) {
+                uint16_t rhs = s.number[src];
+                s.number[dst] = (uint16_t)(s.number[dst] +
+                               ((op == 0x29 || op == 0x2b) ?
+                                (uint16_t)-rhs : rhs));
+            } else {
+                s.number_known[dst] = 0;
+            }
+            s.regs[dst] = ARG_WORD;
+            s.at += 2;
             continue;
         }
         if (op == 0x8c || op == 0x89 || op == 0x8b ||
