@@ -1,0 +1,46 @@
+# A Win16 program's resources, on the i386 core: its title from a string,
+# its class's menu, an accelerator, a dialog with its dialog procedure.
+#     ./winhost scripts/owmenu.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OWMENU
+key RETURN
+wait 100
+# Ctrl+C twice (the accelerator), then File, Count from the menu
+keydown CTRL
+key C
+keyup CTRL
+wait 20
+keydown CTRL
+key C
+keyup CTRL
+wait 20
+keydown ALT
+key F
+keyup ALT
+wait 30
+snap om_menu.ppm
+key C
+wait 30
+snap om_counted.ppm
+# File, About: the dialog shows the count
+keydown ALT
+key F
+keyup ALT
+key A
+wait 50
+snap om_about.ppm
+key RETURN
+wait 30
+# File, Exit
+keydown ALT
+key F
+keyup ALT
+key X
+wait 50
+snap om_exit.ppm
+exit

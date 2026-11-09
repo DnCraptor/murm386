@@ -4,7 +4,7 @@
  * task's turn) through the private IDT, back to the DOS context.
  *
  *     ./test_ne_run NEDIALOG.EXE NELOOP-fixture.exe NEFAULT.EXE NEHANG.EXE \
- *                   OWHELLO.EXE OWBUSY.EXE
+ *                   OWHELLO.EXE OWBUSY.EXE OWSEGS.EXE
  */
 #include <assert.h>
 #include <stdint.h>
@@ -87,6 +87,8 @@ int main(int argc, char **argv)
         else if (ends_with(f, "OWHELLO.EXE"))     /* Open Watcom's start-up code */
             assert(rc == 0 && r.exited && r.value == 3 && boxes == 1 &&
                    !strcmp(last_text, "hello world") && !strcmp(last_caption, "Open Watcom"));
+        else if (ends_with(f, "OWSEGS.EXE"))      /* far calls between code segments */
+            assert(rc == 0 && r.exited && boxes == 1 && !strcmp(last_text, "C8CA765F"));
         else if (ends_with(f, "OWBUSY.EXE"))      /* the same result, turns in between */
             assert(rc == 0 && r.exited && yields >= 5 && boxes == 1 &&
                    !strcmp(last_text, "94FB0EA1"));

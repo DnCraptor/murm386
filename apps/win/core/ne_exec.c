@@ -85,7 +85,7 @@ static int valid_entry(const win_ne_guest_image *g)
 {
     return g->info.cs_index && g->info.ss_index &&
            g->info.cs_index != g->info.ss_index &&
-           g->info.segment_count == 2 &&
+           g->info.segment_count >= 2 &&
            g->cs && g->ss && g->sp >= 64 &&
            (g->segments[g->info.ss_index].flags & 1u) == 1u &&
            (g->segments[g->info.cs_index].flags & 1u) == 0u &&

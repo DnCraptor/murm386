@@ -13,6 +13,13 @@ OWBUSY: a computation of some million instructions without a call (WINN
 
 OWWIN: a window of its own class: painting, clicks counted, closing; the
     exit code is the number of clicks
+
+OWMENU: resources: the title a string, the class's menu, an accelerator
+    (Ctrl+C counts), a dialog (About) with its dialog procedure; medium
+    model (-mm), wrc owmenu.rc
+
+OWSEGS: code in three segments (medium model, two modules, linked with
+    wlink option packcode=0), far calls between them: C8CA765F
 """
 import sys
 
@@ -215,6 +222,267 @@ PROGRAMS = {
             '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
             '0000000000000000000000000000db02db020000000000000000000000000000000000000000000000000000'
             '0000000000000000'
+        )),
+    'OWMENU': (
+        # ---- owmenu.h
+        # #define IDM_MENU    100
+        # #define IDM_COUNT   101
+        # #define IDM_ABOUT   102
+        # #define IDM_EXIT    103
+        # #define IDD_ABOUT   200
+        # #define IDC_COUNT   201
+        # #define IDS_TITLE   1
+        # ---- owmenu.rc
+        # #include <windows.h>
+        # #include "owmenu.h"
+        #
+        # IDM_MENU MENU
+        # BEGIN
+        #     POPUP "&File"
+        #     BEGIN
+        #         MENUITEM "&Count\tCtrl+C", IDM_COUNT
+        #         MENUITEM "&About...", IDM_ABOUT
+        #         MENUITEM SEPARATOR
+        #         MENUITEM "E&xit", IDM_EXIT
+        #     END
+        # END
+        #
+        # IDM_MENU ACCELERATORS
+        # BEGIN
+        #     "^C", IDM_COUNT
+        # END
+        #
+        # STRINGTABLE
+        # BEGIN
+        #     IDS_TITLE "Watcom menus"
+        # END
+        #
+        # IDD_ABOUT DIALOG 20, 20, 140, 64
+        # STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+        # CAPTION "About"
+        # BEGIN
+        #     LTEXT "Counted:", -1, 10, 10, 40, 10
+        #     EDITTEXT IDC_COUNT, 54, 8, 40, 12
+        #     DEFPUSHBUTTON "OK", IDOK, 50, 40, 40, 14
+        # END
+        # ---- owmenu.c
+        # #include <windows.h>
+        # #include "owmenu.h"
+        #
+        # /* resources: a menu with an accelerator, a string, a dialog */
+        # static HINSTANCE inst;
+        # static int count;
+        #
+        # BOOL FAR PASCAL __export AboutProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM lParam)
+        # {
+        #     switch (msg) {
+        #     case WM_INITDIALOG:
+        #         SetDlgItemInt(dlg, IDC_COUNT, count, FALSE);
+        #         return TRUE;
+        #     case WM_COMMAND:
+        #         if (wParam == IDOK || wParam == IDCANCEL) {
+        #             EndDialog(dlg, wParam);
+        #             return TRUE;
+        #         }
+        #         break;
+        #     }
+        #     return FALSE;
+        # }
+        #
+        # LRESULT FAR PASCAL __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+        # {
+        #     PAINTSTRUCT ps;
+        #     HDC dc;
+        #     char text[32];
+        #     FARPROC proc;
+        #     switch (msg) {
+        #     case WM_COMMAND:
+        #         switch (wParam) {
+        #         case IDM_COUNT:
+        #             count++;
+        #             InvalidateRect(hwnd, NULL, TRUE);
+        #             return 0;
+        #         case IDM_ABOUT:
+        #             proc = MakeProcInstance((FARPROC)AboutProc, inst);
+        #             DialogBox(inst, MAKEINTRESOURCE(IDD_ABOUT), hwnd, (DLGPROC)proc);
+        #             FreeProcInstance(proc);
+        #             return 0;
+        #         case IDM_EXIT:
+        #             DestroyWindow(hwnd);
+        #             return 0;
+        #         }
+        #         break;
+        #     case WM_PAINT:
+        #         dc = BeginPaint(hwnd, &ps);
+        #         TextOut(dc, 10, 10, text, wsprintf(text, "Count: %d", count));
+        #         EndPaint(hwnd, &ps);
+        #         return 0;
+        #     case WM_DESTROY:
+        #         PostQuitMessage(count);
+        #         return 0;
+        #     }
+        #     return DefWindowProc(hwnd, msg, wParam, lParam);
+        # }
+        #
+        # int PASCAL WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
+        # {
+        #     WNDCLASS wc;
+        #     MSG msg;
+        #     HWND hwnd;
+        #     HACCEL acc;
+        #     char title[40];
+        #     inst = hInstance;
+        #     LoadString(hInstance, IDS_TITLE, title, sizeof(title));
+        #     if (!hPrevInstance) {
+        #         wc.style = CS_HREDRAW | CS_VREDRAW;
+        #         wc.lpfnWndProc = WndProc;
+        #         wc.cbClsExtra = 0;
+        #         wc.cbWndExtra = 0;
+        #         wc.hInstance = hInstance;
+        #         wc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+        #         wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        #         wc.hbrBackground = GetStockObject(WHITE_BRUSH);
+        #         wc.lpszMenuName = MAKEINTRESOURCE(IDM_MENU);
+        #         wc.lpszClassName = "OwMenu";
+        #         if (!RegisterClass(&wc))
+        #             return 1;
+        #     }
+        #     hwnd = CreateWindow("OwMenu", title, WS_OVERLAPPEDWINDOW,
+        #                         CW_USEDEFAULT, CW_USEDEFAULT, 300, 200, NULL, NULL, hInstance, NULL);
+        #     ShowWindow(hwnd, nCmdShow);
+        #     UpdateWindow(hwnd);
+        #     acc = LoadAccelerators(hInstance, MAKEINTRESOURCE(IDM_MENU));
+        #     while (GetMessage(&msg, NULL, 0, 0)) {
+        #         if (TranslateAccelerator(hwnd, acc, &msg))
+        #             continue;
+        #         TranslateMessage(&msg);
+        #         DispatchMessage(&msg);
+        #     }
+        #     return msg.wParam;
+        # }
+        bytes.fromhex(
+            '4d5a80000100000004000000ffff0000b8000000000000004000000000000000000000000000000000000000'
+            '00000000000000000000000000000000800000000e1fba0e00b409cd21b8014ccd2154686973206973206120'
+            '57696e646f77732031362d6269742065786563757461626c650d0a240000000000000000000000004e450501'
+            'db000a000000000002030200000400206e02010000000200020003000e0040005000a400c400ca0065010000'
+            '0000010004000208ba00940300000a03ba00e004400de004c3030001410c1001010004800100000000004e04'
+            '1e00301064800000000009800100000000004b040300300064800000000005800100000000006c0429003010'
+            'c88000000000068001000000000095040e0030100180000000000000064f574d454e5500000941424f555450'
+            '524f43010007574e4450524f43020000010006000d00000455534552064b45524e454c034744490201290000'
+            '294c0000000a6f776d656e752e657865000000001e5890455589e51e8ed88b460a8b5e0c8b560e81fb110175'
+            '0e3d010074253d0200742031c0eb6c81fb100175f652b8c90050ff36020131c0509affff0000b80100eb5052'
+            '509affff0000ebf21e5890455589e51e8ed8565783ec428b560a8b460c8b760e3d1101753083fa67744083fa'
+            '66743d83fa65756c5631c05050b8010050010602019affff000031c031d28d66fa5f5e1f5d4dca0a003d0f00'
+            '74503d02007541ff3602019affff0000ebdceb36b8ffff50b8ffff50ff3600019affff0000ff36000189c731'
+            'c050b8c800505652578956f89affff0000ff76f8579affff0000eba6eb45569affff0000eb9c561e8d56d852'
+            '9affff000050b80a0050501e8d56b852ff3602011eb81000501e529affff000083c40a509affff0000561e8d'
+            '56d8529affff0000e95fff565052ff7608ff76069affff0000e952ff1e5890455589e51e8ed8565783ec548b'
+            '460ea3000150b80100501e8d56a652b82800509affff0000837e0c007503e98f001eb81a00501e8d56a652b8'
+            'cf005031c050b800805050b82c0150b8c8005031c05050ff760e50509affff00005089c6ff760689c79affff'
+            '0000569affff0000ff760e31c050b86400509affff000089c61e8d56e85231c05050509affff000085c07426'
+            '57561e8d56e8529affff000085c075dd1e8d56e8529affff00001e8d56e8529affff0000ebc78b46ece992fe'
+            '31c08946d48946d68b460e8946d831c050c746ce030050b8007fc746d0ffff50c746d2ffff9affff00008946'
+            'da31c05050b8007f509affff00008946dc31c0509affff0000c746e06400c746e20000c746e41a008d56ce1e'
+            '8946de528c5ee69affff000085c07403e906ffb80100e921fe00eb009affff00000bc0750e5033c0ba0f00e8'
+            '000258b44ccd218c062600575606535253be0401893641008c1e4300268a078804464384c075f589360a005b'
+            '2bc0509affff000057579affff0000fc1e07b90401bf00012bcf32c0f3aab8ba03a33d00b8ffffa33f00b430'
+            'cd21a22800882629009affff0000a22a0088262b0086e0a32c0054583bc475120f01e0a90100740ab001a22e'
+            '00b003a22f001ebf490057b89000509affff0000b84900893e45008c1e4700b8ff00e801010e3ee80efee98d'
+            '0089c04f70656e20576174636f6d20432f432b2b31362052756e2d54696d652073797374656d2e20436f7079'
+            '726967687420286329204f70656e20576174636f6d20436f6e7472696275746f727320323030322d32303236'
+            '2e20506f7274696f6e7320436f7079726967687420284329205379626173652c20496e632e20313938382d32'
+            '3030322e00c3cb00c3c3535289c3833efe00007404ff16fe00ff16da00baff00b81000e8a800ff16da00ff16'
+            'dc0089d8e992fe5289c2ff16da00ff16dc0089d0e982fe5589e5535289c3833f0075078d66fc5a5b5dc31eff'
+            '171febf35589e5535289c38b47028b1785c0750485d274df1eff1f1febd95589e5535152565789c11ee881ff'
+            'bf000189fabb000189fe88c839fb7316803f02750583c306ebf23a470172f689de8a4701ebef39fe74158d44'
+            '02803c007508e88affc60402ebcbe89bffebf61f8d66f65f5e5a595b5dc35589e55351565789c11ee82aff88'
+            'd5bf000189fabb000189fe88c839fb7316803f02750583c306ebf23a470177f689de8a4701ebef39fe741c3a'
+            '6c017305c60402ebd18d4402803c007505e827ffebeee83bffebe91f8d66f85f5eeb9f00240003013a000100'
+            '5e0003014600010058000301860001007d000301a800010006000200b100010000000500b500010000000301'
+            'bd00020033000301d500010057000301de00020034000301e800010035000301f50001002700030110010100'
+            'a401030119010300210003012401010028000301350101006b00030160010100b00003019501010029000301'
+            'a20101002a000301a80101007c000301b7010100b1000301c80101006c000301d8010100b2000301e6010100'
+            '71000301f001010072000500190201004c0002001f0201004c00030122020100ae00030132020100ad000301'
+            '3d020300570003015c02010039000301710202005b000301b00202001e000301b702010005000200d1020100'
+            '6e020301e2020200030003011403020031000000000000000000000000000000000000000000050000000000'
+            '000000000000436f756e743a202564004f774d656e750000ffff00000000000000000000000c000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000bd03bd030000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000008003'
+            '006500000000000090002646696c65000000650026436f756e74094374726c2b4300000066002641626f7574'
+            '2e2e2e00000800000080006700452678697400008000c88003140014008c004000000041626f7574000a000a'
+            '0028000a00ffff0000025082436f756e7465643a00003600080028000c00c900000081508100003200280028'
+            '000e00010001000150804f4b0000000c576174636f6d206d656e75730000000000000000000000000000'
+        )),
+    'OWSEGS': (
+        # ---- owsegs.c
+        # #include <windows.h>
+        #
+        # /* code in two segments (medium model, two modules): far calls between them */
+        # extern unsigned long far compute(unsigned n);
+        #
+        # static char text[9];
+        #
+        # int PASCAL WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
+        # {
+        #     unsigned long x = compute(1000);
+        #     char *p = text + 8;
+        #     while (p > text) {
+        #         *--p = "0123456789ABCDEF"[(unsigned)x & 15];
+        #         x >>= 4;
+        #     }
+        #     MessageBox(NULL, text, "Segments", MB_OK);
+        #     return 0;
+        # }
+        # ---- owsegs2.c
+        # /* the second code segment */
+        # unsigned long far compute(unsigned n)
+        # {
+        #     unsigned long x = 7;
+        #     while (n--)
+        #         x = x * 69069UL + 1UL;
+        #     return x;
+        # }
+        # ---- owsegs.lnk
+        # system windows
+        # option packcode=0
+        # name owsegs.exe
+        # file owsegs.o, owsegs2.o
+        bytes.fromhex(
+            '4d5a80000100000004000000ffff0000b8000000000000004000000000000000000000000000000000000000'
+            '00000000000000000000000000000000800000000e1fba0e00b409cd21b8014ccd2154686973206973206120'
+            '57696e646f77732031362d6269742065786563757461626c650d0a240000000000000000000000004e450501'
+            '7b0002000000000002030400000400200000030000000400040002000e004000600060006a006e00fd000000'
+            '0000010000000200000000000000000386005200400d5200b8002800400d2800d1008a02400d8a0233020801'
+            '410c2001064f575345475300000001000600000455534552064b45524e454c00000a6f77736567732e657865'
+            '000000001e5890455589e51e8ed856b8e803bb10019affff000081fb0801761789c683e60f4b8a8c1000880f'
+            'b90400d1ead1d8e2faebe331c0501eb80801501eb821005031c0509affff000031c05e1f5d4dca0a00000200'
+            '0300120002000000030144000100010053515689c6b8070031d24e83feff75045e595bcbbbcd0db901009aff'
+            'ff000005010083d200ebe300010003001b0003004e01eb009affff00000bc0750e5033c0ba0f00e8180258b4'
+            '4ccd218c062e00575606535253be1101893649008c1e4b00268a078804464384c075f589360a005b2bc0509a'
+            'ffff000057579affff0000fc1e07b91101bf08012bcf32c0f3aab84c01a34500b8ffffa34700b430cd21a230'
+            '00882631009affff0000a232008826330086e0a3340054583bc475120f01e0a90100740ab001a23600b003a2'
+            '37001ebf510057b89000509affff0000b85100893e4d008c1e4f00b8ff00e819019affff0000e9a50089c04f'
+            '70656e20576174636f6d20432f432b2b31362052756e2d54696d652073797374656d2e20436f707972696768'
+            '7420286329204f70656e20576174636f6d20436f6e7472696275746f727320323030322d323032362e20506f'
+            '7274696f6e7320436f7079726967687420284329205379626173652c20496e632e20313938382d323030322e'
+            '00c3cb009350920bc07402f7e2910bc07404f7e303c858f7e303d1cbc3c3535289c3833e0601007404ff1606'
+            '01ff16e200baff00b81000e8a800ff16e200ff16e40089d8e97afe5289c2ff16e200ff16e40089d0e96afe55'
+            '89e5535289c3833f0075078d66fc5a5b5dc31eff171febf35589e5535289c38b47028b1785c0750485d274df'
+            '1eff1f1febd95589e5535152565789c11ee869ffbf080189fabb080189fe88c839fb7316803f02750583c306'
+            'ebf23a470172f689de8a4701ebef39fe74158d4402803c007508e88affc60402ebcbe89bffebf61f8d66f65f'
+            '5e5a595b5dc35589e55351565789c11ee812ff88d5bf080189fabb080189fe88c839fb7316803f02750583c3'
+            '06ebf23a470177f689de8a4701ebef39fe741c3a6c017305c60402ebd18d4402803c007505e827ffebeee83b'
+            'ffebe91f8d66f85f5eeb9f0007000301030002005b000301420002001e000301490001000500020063000300'
+            '000003017400020003000301a600020031000300bc0001000000000000000500000000000000000000003031'
+            '3233343536373839414243444546005365676d656e747300ffff00000000000000000000000c000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000670167010000000000000000'
+            '0000000000000000000000000000000000000000000000000000'
         )),
 }
 

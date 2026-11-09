@@ -5,8 +5,9 @@ subset) for native ARM programs. `WINN.EXE` is the Windows loader: it holds
 KERNEL, GDI, USER and the built-in drivers, loads driver modules, and runs
 applications (separate EZ files) as cooperative tasks, as Windows 3.x does.
 The preliminary 386 NE path is available through ordinary `WinExec` and
-`WINN PROGRAM.EXE`: a Win16 program of one code and one data segment (the
-small model of Open Watcom, `wcl -bt=windows -l=windows -ms`) runs on the
+`WINN PROGRAM.EXE`: a Win16 program of code segments and one data segment
+(the small and medium models of Open Watcom, `wcl -bt=windows -l=windows
+-ms`/`-mm`) runs on the
 emulator's 386 core in 16-bit protected mode with its own GDT, with its
 own start-up code: its DGROUP gets the local heap and the stack of its
 header, `InitTask` gives it its PSP (the command line), its instance and
@@ -36,15 +37,20 @@ and back, nesting as the procedure calls the API in turn), and its
 messages, painting and drawing are converted between the Win16 structures
 in the guest and the native ones; a message's `lParam` reaches the window
 procedure as it is (a native pointer, for the program to hand on to
-`DefWindowProc`).
+`DefWindowProc`). Its resources are read from its file as it asks for them:
+menus (`LoadMenu`, the menu of a class), accelerators, strings, dialogs
+(made native templates, their dialog procedures its own code as well).
 
 Supported functions (the table in `core/ne_guest.c`): KERNEL GetVersion,
-WaitEvent, GetCurrentTask, GetModuleFileName, lstrcpy, lstrcat, lstrlen,
-InitTask, GetNumTasks; USER MessageBox, InitApp, PostQuitMessage,
-BeginPaint, EndPaint, CreateWindow, ShowWindow, DestroyWindow,
-RegisterClass, DefWindowProc, GetMessage, TranslateMessage,
-DispatchMessage, UpdateWindow, InvalidateRect, LoadCursor and LoadIcon
-(the system's), wsprintf, GetTickCount, GetSystemMetrics, GetSysColor; GDI
+WaitEvent, GetCurrentTask, GetModuleFileName, MakeProcInstance,
+FreeProcInstance, lstrcpy, lstrcat, lstrlen, InitTask, GetNumTasks; USER
+MessageBox, InitApp, PostQuitMessage, BeginPaint, EndPaint, CreateWindow,
+ShowWindow, DestroyWindow, RegisterClass, DefWindowProc, GetMessage,
+TranslateMessage, DispatchMessage, UpdateWindow, InvalidateRect,
+LoadCursor and LoadIcon (the system's), LoadMenu, LoadString,
+LoadAccelerators, TranslateAccelerator, DialogBox, EndDialog, GetDlgItem,
+SetDlgItemText, GetDlgItemText, SetDlgItemInt, GetDlgItemInt, wsprintf,
+GetTickCount, GetSystemMetrics, GetSysColor; GDI
 TextOut, GetStockObject; INT 21h 30h (version) and 4Ch (exit), INT 20h.
 Its FAR ANSI strings are copied into bounded native buffers. A program
 importing anything else is refused before protected mode with the first
@@ -56,13 +62,13 @@ starts or goes on.
 `host/mkne_winexec.py`, `host/mkne_dialog.py`, `host/mkne_loop.py`,
 `host/mkne_fault.py` (`--hang` for `NEHANG.EXE`) and `host/mkne_watcom.py`
 generate `NEAPP.EXE`, `NEDIALOG.EXE`, `NELOOP.EXE`, `NEFAULT.EXE`,
-`NEHANG.EXE`, `OWHELLO.EXE`, `OWBUSY.EXE` and `OWWIN.EXE` (the last three
-built by Open Watcom, their sources in the script; `make NEFIXTURES` in
-`host/`). All have DOS MZ stubs that explain how to launch them under WINN
+`NEHANG.EXE` and the `OW*.EXE`, built by Open Watcom, their sources in the
+script: `OWHELLO`, `OWBUSY`, `OWWIN`, `OWMENU` (resources), `OWSEGS` (three
+code segments) (`make NEFIXTURES` in `host/`). All have DOS MZ stubs that explain how to launch them under WINN
 when invoked directly from DOS. `host/test_ne_run` runs them on the
 emulator's own i386 core (`src/i386.c` as it is, built for the host with
 the stand-ins in `host/x86run/`), and so does the host `winhost`: they are
-in its `HOSTWIN/` (`scripts/owwin.txt`).
+in its `HOSTWIN/` (`scripts/owwin.txt`, `scripts/owmenu.txt`).
 
     WINN [:] [program [arguments]]
 
@@ -225,6 +231,7 @@ use `ucontext`):
     ./winhost scripts/mdimax.txt PROGMAN     # a maximized group in the menu bar, Alt+-
     ./winhost scripts/switch.txt PROGMAN     # Alt+Tab, Alt+Esc past a MessageBox; DEMO's Alt+letters
     ./winhost scripts/owwin.txt PROGMAN      # a Win16 program's window, on the i386 core
+    ./winhost scripts/owmenu.txt PROGMAN     # its menu, accelerator, string, dialog
     ./winhost scripts/winmine.txt WINMINE    # marks, a lost game, Expert, Best Times
     ./winhost scripts/logo.txt PROGMAN       # the logo (copy the BMPs into HOSTWIN first)
     ./winhost800 scripts/vga800.txt  # the VGA800 driver, built in

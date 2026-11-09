@@ -195,7 +195,7 @@ win_ne_launch_status win_ne_classify_launch(const char *path, unsigned cpu_gen)
         return WIN_NE_LAUNCH_OTHER;
     if (cpu_gen < 3)
         return WIN_NE_LAUNCH_REQUIRES_386;
-    if (info.segment_count != 2 || !info.cs_index || !info.ss_index ||
+    if (info.segment_count < 2 || !info.cs_index || !info.ss_index ||
         info.cs_index == info.ss_index)
         return WIN_NE_LAUNCH_UNSUPPORTED;
     return WIN_NE_LAUNCH_READY;
@@ -548,5 +548,105 @@ out:
     fclose(f);
     if (rc)
         win_ne_free_image(image);
+    return rc;
+}
+
+/* ---------------------------------------------------------------- resources */
+
+/* A resource's id in the table: high bit, the number; else the offset of
+ * its length-prefixed name from the table's start. */
+static int res_id_match(FILE *f, uint64_t size, uint64_t table, uint16_t v,
+                        uint16_t id, const char *name)
+{
+    if (v & 0x8000u)
+        return !name && (v & 0x7fffu) == id;
+    if (!name)
+        return 0;
+    uint8_t len;
+    char buf[256];
+    if (!read_at(f, size, table + v, &len, 1) || !read_at(f, size, table + v + 1, buf, len))
+        return 0;
+    size_t n = strlen(name);
+    if (n != len)
+        return 0;
+    for (size_t i = 0; i < n; i++) {
+        char a = buf[i], b = name[i];
+        if (a >= 'a' && a <= 'z') a = (char)(a - 32);
+        if (b >= 'a' && b <= 'z') b = (char)(b - 32);
+        if (a != b)
+            return 0;
+    }
+    return 1;
+}
+
+int win_ne_resource(const char *path, uint16_t type, uint16_t id, const char *name,
+                    uint8_t **data, uint32_t *bytes)
+{
+    *data = NULL;
+    *bytes = 0;
+    if (name && name[0] == '#') {               /* "#123" is the number */
+        id = 0;
+        for (const char *p = name + 1; *p >= '0' && *p <= '9'; p++)
+            id = (uint16_t)(id * 10 + (*p - '0'));
+        name = NULL;
+    }
+    FILE *f = path ? fopen(path, "rb") : NULL;
+    if (!f)
+        return WIN_NE_NO_FILE;
+    int rc = WIN_NE_BAD_IMAGE;
+    long end;
+    uint8_t mz[64], h[NE_HDR_SIZE], w[2];
+    if (fseek(f, 0, SEEK_END) || (end = ftell(f)) < 0)
+        goto out;
+    uint64_t size = (uint64_t)end;
+    if (!read_at(f, size, 0, mz, sizeof(mz)) || rd16(mz) != 0x5a4d)
+        goto out;
+    uint64_t base = rd32(mz + 0x3c);
+    if (!read_at(f, size, base, h, sizeof(h)) || rd16(h) != 0x454e)
+        goto out;
+    uint16_t restab = rd16(h + 0x24), resname = rd16(h + 0x26);
+    rc = WIN_NE_UNRESOLVED;                     /* no such resource */
+    if (restab == resname)
+        goto out;
+    uint64_t table = base + restab, p = table;
+    if (!read_at(f, size, p, w, 2))
+        goto out;
+    uint16_t shift = rd16(w);
+    p += 2;
+    for (;;) {
+        uint8_t ti[8];
+        if (!read_at(f, size, p, ti, 2) || !rd16(ti))
+            goto out;
+        if (!read_at(f, size, p, ti, 8))
+            goto out;
+        uint16_t t = rd16(ti), count = rd16(ti + 2);
+        p += 8;
+        int this_type = (t & 0x8000u) && (t & 0x7fffu) == type;
+        for (unsigned i = 0; i < count; i++, p += 12) {
+            uint8_t ni[12];
+            if (!read_at(f, size, p, ni, sizeof(ni)))
+                goto out;
+            if (!this_type || !res_id_match(f, size, table, rd16(ni + 6), id, name))
+                continue;
+            uint64_t at = (uint64_t)rd16(ni) << shift;
+            uint32_t len = (uint32_t)rd16(ni + 2) << shift;
+            uint8_t *d = len ? (uint8_t *)malloc(len) : NULL;
+            if (!d) {
+                rc = WIN_NE_NO_MEMORY;
+                goto out;
+            }
+            if (!read_at(f, size, at, d, len)) {
+                free(d);
+                rc = WIN_NE_BAD_IMAGE;
+                goto out;
+            }
+            *data = d;
+            *bytes = len;
+            rc = WIN_NE_OK;
+            goto out;
+        }
+    }
+out:
+    fclose(f);
     return rc;
 }

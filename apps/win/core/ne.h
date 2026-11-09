@@ -115,4 +115,11 @@ int win_ne_scan(const char *path, win_ne_info *info,
  * x86 instructions/imports (those are validated at task execution). */
 win_ne_launch_status win_ne_classify_launch(const char *path, unsigned cpu_gen);
 
+/* A resource of the program: its type (RT_MENU 4, RT_DIALOG 5, RT_STRING 6,
+ * RT_ACCELERATOR 9 ...), and its number id or, not NULL, its name ("#12"
+ * is number 12). WIN_NE_OK with the bytes in *data (malloc'd: the caller
+ * frees them), WIN_NE_UNRESOLVED when there is none. */
+int win_ne_resource(const char *path, uint16_t type, uint16_t id, const char *name,
+                    uint8_t **data, uint32_t *bytes);
+
 #endif
