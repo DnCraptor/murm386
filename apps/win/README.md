@@ -27,9 +27,9 @@ selector:offset strings), KERNEL.152 GetNumTasks, USER.13 GetTickCount,
 USER.179 GetSystemMetrics, USER.180 GetSysColor and USER.1 MessageBox. Its
 FAR ANSI strings are copied into bounded native buffers and the owner,
 pointers and style are read from the guest Pascal stack. Programs importing
-anything else are refused before protected mode. One NE executor can be
-active at a time: a nested NE launch is refused while a native modal loop is
-running.
+anything else are refused before protected mode. Several NE programs can
+run at once, each as a WINN task: while one waits in a native call (a modal
+MessageBox), another starts or goes on.
 
 `host/mkne_winexec.py`, `host/mkne_dialog.py`, `host/mkne_loop.py` and
 `host/mkne_fault.py` (`--hang` for `NEHANG.EXE`) generate `NEAPP.EXE`,

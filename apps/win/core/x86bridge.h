@@ -33,7 +33,9 @@ enum {
 typedef int (*winx86_service_fn)(void *opaque, CPU *cpu, uint16_t service);
 
 /* CPU entry state (CS:IP, SS:SP and segment descriptors) is prepared by the
- * caller.  The caller also owns its restoration and any nested guest frame.
+ * caller.  The caller also owns its restoration.  A service may start another
+ * run (nested), or switch to another task whose run starts or resumes; the
+ * caller then keeps each guest's CPU state while it is not stepping.
  * Each burst is at most 4096 instructions; max_bursts bounds runaway code.
  */
 int winx86_run(CPU *cpu, winx86_service_fn service, void *opaque,

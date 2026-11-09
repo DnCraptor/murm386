@@ -12,14 +12,19 @@
 
 typedef struct winx86_frame {
     CPU *cpu;
-    struct winx86_frame *parent;
     uint16_t request;
     int pending;
 } winx86_frame;
 
-/* Only core 0 executes x86 code.  Stacking frames permits native APIs to
- * make another guest call, provided the caller saves the outer CPU state. */
+/* Only core 0 executes x86 code. Runs need not end in the order they began:
+ * a native API called from one guest may switch to another WINN task, which
+ * starts or resumes a guest of its own, and the first task may come back
+ * and finish while the other is still in a native call. So the OUT hook
+ * stays while any run is in progress, and the frame it reports to is the
+ * one whose step is executing (a nested run, from a native API, included). */
 static winx86_frame *active_frame;
+static CPU *bridge_cpu;
+static unsigned runs;
 static void (*original_out16)(void *, int, uint16_t);
 
 static void bridge_out16(void *io, int port, uint16_t value)
@@ -40,24 +45,26 @@ int winx86_run(CPU *cpu, winx86_service_fn service, void *opaque,
 {
     if (!cpu || cpu->gen < 3 || !cpu->ext_accessors ||
         !cpu->ext_accessors->step || !max_bursts ||
-        (active_frame && active_frame->cpu != cpu))
+        (runs && bridge_cpu != cpu))
         return WINX86_BAD_CONTEXT;
 
     winx86_frame frame = { 0 };
     frame.cpu = cpu;
-    frame.parent = active_frame;
     bool old_native_done = cpu->native_done;
-    if (!active_frame) {
+    if (!runs++) {
+        bridge_cpu = cpu;
         original_out16 = cpu->cb.io_write16;
         cpu->cb.io_write16 = bridge_out16;
     }
-    active_frame = &frame;
 
     int rc = WINX86_TIMEOUT;
     for (unsigned i = 0; i < max_bursts; i++) {
         frame.pending = 0;
         cpu->native_done = false;
+        winx86_frame *outer = active_frame;
+        active_frame = &frame;
         cpu->ext_accessors->step(cpu, 4096);
+        active_frame = outer;
         if (!frame.pending) {
             if (cpu->native_done) {
                 rc = WINX86_INTERRUPTED;
@@ -76,10 +83,10 @@ int winx86_run(CPU *cpu, winx86_service_fn service, void *opaque,
         }
     }
 
-    active_frame = frame.parent;
-    if (!active_frame) {
+    if (!--runs) {
         cpu->cb.io_write16 = original_out16;
         original_out16 = NULL;
+        bridge_cpu = NULL;
     }
     cpu->native_done = old_native_done;
     return rc;

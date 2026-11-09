@@ -11,6 +11,13 @@
  * the CPU's interrupt controller callback answers with that vector, much as
  * the bridge borrows the OUT callback.
  *
+ * Several NE tasks can run: a native API (a modal MessageBox) switches WINN
+ * tasks with the CPU in the DOS context, and another task may start or
+ * resume its guest meanwhile. Each guest's state while it waits is the Real
+ * Mode gateway's, which the public CPU interface captures completely: its
+ * registers in invoke_native's frame on that task's stack, its PM stack and
+ * descriptor tables in its own image.
+ *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
 #include "ne_exec.h"
@@ -120,8 +127,6 @@ static int invoke_native(void *opaque, CPU *cpu, uint16_t service)
     return handled;
 }
 
-static int ne_cpu_busy;
-
 static int read_guest(void *opaque, uint32_t linear, void *dst, uint32_t bytes)
 {
     (void)opaque;
@@ -172,7 +177,7 @@ static int stop_guest(CPU *cpu, win_ne_native_gate *gate, uint16_t thunk_selecto
     cpu->cb.pic_read_irq = timeout_irq;
     cpu->intr = true;
     e->set_flags(cpu, 0x200u, 0);       /* the gate clears IF again */
-    int rc = winx86_run(cpu, invoke_native, gate, 4u);
+    int rc = winx86_run(cpu, NULL, gate, 4u);    /* no API call: no task switch */
     cpu->cb.pic_read_irq = pic_read_irq;
     if (!timeout_taken)
         cpu->intr = false;
@@ -211,21 +216,16 @@ int win_ne_execute_basic(const char *path, uint32_t *value, win_ne_fault *fault)
 {
     PC *pc = get_PC();
     CPU *cpu = pc ? pc->cpu : NULL;
-    if (ne_cpu_busy)
-        return WIN_NE_EXEC_BUSY; /* A native modal loop can schedule other tasks. */
     if (!cpu || cpu->gen < 3 || !cpu->ext_accessors ||
         !cpu->ext_accessors->step || !cpu->ext_accessors->get_seg16 ||
         !cpu->ext_accessors->set_seg16 || !cpu->ext_accessors->get_flags ||
         !cpu->ext_accessors->set_flags)
         return WIN_NE_EXEC_BAD_CPU;
 
-    ne_cpu_busy = 1;
     win_ne_guest_image g;
     int rc = win_ne_guest_load(path, &g, win_ne_guest_dos_io(), NULL);
-    if (rc) {
-        ne_cpu_busy = 0;
+    if (rc)
         return rc;
-    }
     if (!valid_entry(&g)) {
         rc = WIN_NE_EXEC_BAD_ENTRY;
         goto done;
@@ -290,7 +290,6 @@ int win_ne_execute_basic(const char *path, uint32_t *value, win_ne_fault *fault)
          rc == WINX86_BAD_SERVICE || api.invalid_args ? WIN_NE_EXEC_BAD_ARGS : WIN_NE_OK;
 done:
     win_ne_guest_release(&g);
-    ne_cpu_busy = 0;
     return rc;
 }
 #endif

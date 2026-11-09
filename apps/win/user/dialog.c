@@ -637,7 +637,12 @@ int WINAPI MessageBox(HWND owner, LPCSTR text, LPCSTR caption, UINT type)
     DLGTEMPLATE_N t = { WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_ABSALIGN,
                         (BYTE)n, (sw - width) / 2, (sh - height) / 2, width, height,
                         NULL, NULL, caption ? caption : "Error", 0, NULL };
-    HWND own = owner ? owner : (U.active ? U.active->h : 0);
+    /* Without an owner, the active window is the box's when it is the
+     * calling task's (the box stays over it, which waits for it); another
+     * task's window is not disabled for it (Windows: no owner, nothing
+     * disabled). */
+    wwnd *act = U.active;
+    HWND own = owner ? owner : (act && act->task == task_current()->h ? act->h : 0);
     int r = DialogBoxIndirectN(0, &t, items, own, msgbox_proc);
     if (r == IDCANCEL && !(set == 1 || set == 3 || set == 5))
         r = sets[set].ids[0];

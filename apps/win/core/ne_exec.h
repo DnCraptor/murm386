@@ -7,7 +7,6 @@ enum {
     WIN_NE_EXEC_BAD_ENTRY = -21,
     WIN_NE_EXEC_BAD_BOOT = -22,
     WIN_NE_EXEC_BAD_ARGS = -23,
-    WIN_NE_EXEC_BUSY = -24,
     WIN_NE_EXEC_FAULT = -25        /* see win_ne_fault */
 };
 
