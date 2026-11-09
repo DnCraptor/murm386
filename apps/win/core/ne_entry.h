@@ -4,15 +4,13 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* All reachable paths must end at a RETF after at least one supported API
- * call. Conditional and unconditional branches are allowed only forward;
- * DATA reads and writes (direct or register-indexed) must stay strictly
- * below data_limit. Indexed addresses require exact known 16-bit register
- * values; BP/SS accesses, segment overrides, and indirect branches remain
- * disabled. The private IDT provides recovery for supported guest faults.
- * LOOP rel8 is allowed only with an exactly tracked CX <= 64; all taken
- * iterations are validated within the instruction visit limit.
- * calls receives the maximum number of API calls on any validated path. */
+/* Every reachable path must end at a RETF (or a deliberate fault), after
+ * at least one supported Win16 API call. Forward branches, counted LOOP,
+ * and forward direct near CALL/RET with at most two nested calls are checked.
+ * BP-relative stack locals require a standard frame and a bounded SUB SP.
+ * DS reads/writes must stay below data_limit. Indirect calls/returns,
+ * unknown SS addresses, segment overrides and recursion remain prohibited.
+ * calls receives the maximum number of API calls on a validated path. */
 int win_ne_entry_calls_data(const uint8_t *p, size_t bytes, size_t ip,
                             uint16_t thunk_selector, const uint16_t *service_ids,
                             unsigned thunk_count, size_t data_limit,

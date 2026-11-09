@@ -2,13 +2,14 @@
  *
  * This is deliberately NOT a general NE sandbox. Only a small 16-bit
  * instruction subset is accepted. All reachable paths must terminate in
- * RETF, and control flow may only jump forward, preventing unbounded loops
- * while no protected-mode fault-recovery mechanism exists.
+ * RETF. Forward branches, counted LOOP and bounded direct near CALL/RET
+ * are accepted; unresolved control-flow transfers are rejected.
  *
  * In particular, DATA accesses must stay below the reserved Win16 stack.
- * Register-derived addresses require statically known 16-bit values; BP/SS,
- * segment overrides, and indirect control transfers are rejected. A symbolic
- * stack tracks the origin of FAR selectors passed to imported Win16 APIs.
+ * Register-derived DS addresses require exact values. BP-relative locals
+ * must lie within a verified stack frame; indirect control transfers,
+ * segment overrides and unrestricted SS accesses are rejected. A symbolic
+ * stack tracks the FAR selectors passed to imported Win16 APIs.
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
@@ -18,6 +19,11 @@
 #define ENTRY_WINDOW 256u
 #define ENTRY_VISIT_LIMIT 1024u
 #define ENTRY_MAX_LOOP_CX 64u
+/* The NE stack starts four bytes below initial SP (FAR CALL from boot).
+ * Reserve headroom for Win16 API argument thunks, the PM/RM gateway and
+ * the private fault handler. This counts all local frames and API args. */
+#define ENTRY_STACK_BUDGET 20u
+#define ENTRY_NEAR_CALL_DEPTH 2u
 
 static unsigned args_for(uint16_t id)
 {
@@ -51,8 +57,15 @@ typedef struct {
 } verifier;
 
 typedef struct {
+    size_t return_at;
+    unsigned stack_before, frame_before, bp_before;
+} near_call;
+
+typedef struct {
     size_t at;
     unsigned calls, depth, frame;
+    unsigned stack_bytes, bp_bytes, near_depth;
+    near_call near[ENTRY_NEAR_CALL_DEPTH];
     uint8_t stack[8];
     uint8_t regs[8];
     /* Exact 16-bit register values are tracked independently of the Win16
@@ -69,6 +82,36 @@ static uint16_t read16(const uint8_t *p)
 static int ordinary_reg(unsigned reg)
 {
     return reg != REG_SP && reg != REG_BP;
+}
+
+static int stack_push(path_state *s, unsigned bytes)
+{
+    if (bytes > ENTRY_STACK_BUDGET - s->stack_bytes) return 0;
+    s->stack_bytes += bytes;
+    return 1;
+}
+
+/* A local word/byte must be entirely below the current BP, in space
+ * explicitly reserved with SUB SP,imm. Addresses above BP could alias the
+ * caller's return address, saved BP, or PASCAL arguments. */
+static int local_ea(const path_state *s, const uint8_t *p, size_t remain,
+                    unsigned width, size_t *bytes)
+{
+    if (s->frame != FRAME_ACTIVE || remain < 3 ||
+        (p[1] & 7u) != 6u) return 0;
+    unsigned mod = p[1] >> 6;
+    int displacement;
+    if (mod == 1) {
+        displacement = (int8_t)p[2];
+        *bytes = 3;
+    } else if (mod == 2 && remain >= 4) {
+        displacement = (int16_t)read16(p + 2);
+        *bytes = 4;
+    } else return 0;
+    if (displacement >= 0 || -displacement < (int)width ||
+        (unsigned)(-displacement) > s->stack_bytes - s->bp_bytes)
+        return 0;
+    return 1;
 }
 
 static int mark(verifier *v, size_t at, size_t bytes)
@@ -180,17 +223,42 @@ static int check_path(verifier *v, path_state s)
                   (op == 0x89 && p[1] == 0xe5)) || !mark(v, at, 2))
                 return 0;
             s.frame = FRAME_ACTIVE;
+            s.bp_bytes = s.stack_bytes;
             s.at += 2;
             continue;
         }
-        if (s.frame == FRAME_NEED_POP) {
-            if (op != 0x5d || !mark(v, at, 1)) return 0;
+        if (s.frame == FRAME_NEED_POP ||
+            (s.frame == FRAME_ACTIVE && op == 0x5d &&
+             s.depth == 0 && s.stack_bytes == s.bp_bytes)) {
+            if (op != 0x5d || s.stack_bytes < 2u ||
+                !mark(v, at, 1)) return 0;
+            s.stack_bytes -= 2u;
             s.frame = FRAME_DONE;
             s.at++;
             continue;
         }
-        if (s.frame == FRAME_DONE && op != 0xcb)
+        if (s.frame == FRAME_DONE && op != 0xcb && op != 0xc3)
             return 0;
+        if (op == 0xc9) { /* LEAVE = MOV SP,BP; POP BP */
+            if (s.frame != FRAME_ACTIVE || s.depth ||
+                s.bp_bytes < 2u || !mark(v, at, 1)) return 0;
+            s.stack_bytes = s.bp_bytes - 2u;
+            s.frame = FRAME_DONE;
+            s.at++;
+            continue;
+        }
+        if (op == 0xc3) { /* near RET: restore the statically known caller */
+            if (!s.near_depth || s.depth || s.stack_bytes < 2u ||
+                (s.frame != FRAME_NONE && s.frame != FRAME_DONE) ||
+                !mark(v, at, 1)) return 0;
+            near_call c = s.near[--s.near_depth];
+            if (s.stack_bytes != c.stack_before + 2u) return 0;
+            s.stack_bytes = c.stack_before;
+            s.bp_bytes = c.bp_before;
+            s.frame = c.frame_before;
+            s.at = c.return_at;
+            continue;
+        }
         /* UD2 is an unconditionally faulting 386 instruction. Permit it
          * solely as a terminal test path after an imported API call: this
          * tests the private IDT recovery without enabling arbitrary code. */
@@ -203,7 +271,7 @@ static int check_path(verifier *v, path_state s)
             return 1;
         }
         if (op == 0xcb) { /* RETF */
-            if (!s.calls || s.depth ||
+            if (!s.calls || s.depth || s.near_depth || s.stack_bytes ||
                 (s.frame != FRAME_NONE && s.frame != FRAME_DONE) ||
                 !mark(v, at, 1))
                 return 0;
@@ -213,8 +281,8 @@ static int check_path(verifier *v, path_state s)
             return 1;
         }
         if (op == 0x55 && s.frame == FRAME_NONE &&
-            !s.calls && !s.depth) { /* PUSH BP */
-            if (!mark(v, at, 1)) return 0;
+            (s.near_depth || !s.calls) && !s.depth) { /* PUSH BP */
+            if (!stack_push(&s, 2u) || !mark(v, at, 1)) return 0;
             s.frame = FRAME_NEED_BP;
             s.at++;
             continue;
@@ -223,8 +291,52 @@ static int check_path(verifier *v, path_state s)
             ((op == 0x89 && p[1] == 0xec) ||
              (op == 0x8b && p[1] == 0xe5))) { /* MOV SP,BP */
             if (s.depth || !mark(v, at, 2)) return 0;
+            s.stack_bytes = s.bp_bytes;
             s.frame = FRAME_NEED_POP;
             s.at += 2;
+            continue;
+        }
+
+        /* 16-bit direct relative near CALL. It pushes a return IP, then
+         * runs the target in-line with its own BP-frame state. Reject
+         * backward targets, recursive nesting and unbalanced return SP. */
+        if (op == 0xe8) {
+            if (remaining < 3 || s.depth ||
+                s.near_depth == ENTRY_NEAR_CALL_DEPTH ||
+                !mark(v, at, 3)) return 0;
+            int32_t target = (int32_t)at + 3 + (int16_t)read16(p + 1);
+            if (target <= (int32_t)(at + 2) ||
+                target >= (int32_t)v->end ||
+                !stack_push(&s, 2u)) return 0;
+            near_call *c = &s.near[s.near_depth++];
+            c->return_at = at + 3;
+            c->stack_before = s.stack_bytes - 2u;
+            c->frame_before = s.frame;
+            c->bp_before = s.bp_bytes;
+            s.frame = FRAME_NONE;
+            s.bp_bytes = 0;
+            s.at = (size_t)target;
+            continue;
+        }
+
+        /* Reserve/reclaim small, known-size local space. Never let a
+         * stack adjustment consume a return address or another frame. */
+        if ((op == 0x83 || op == 0x81) && remaining >= 3 &&
+            (p[1] == 0xec || p[1] == 0xc4)) { /* SUB/ADD SP,imm */
+            size_t length = op == 0x83 ? 3u : 4u;
+            if (s.frame != FRAME_ACTIVE || s.depth || remaining < length ||
+                !mark(v, at, length)) return 0;
+            int amount = op == 0x83 ? (int8_t)p[2] : (int)read16(p + 2);
+            if (amount <= 0 || (amount & 1) || amount > 12)
+                return 0;
+            if (p[1] == 0xec) {
+                if (!stack_push(&s, (unsigned)amount)) return 0;
+            } else {
+                if ((unsigned)amount > s.stack_bytes - s.bp_bytes)
+                    return 0;
+                s.stack_bytes -= (unsigned)amount;
+            }
+            s.at += length;
             continue;
         }
 
@@ -293,13 +405,14 @@ static int check_path(verifier *v, path_state s)
             s.at += 3;
             continue;
         }
-        if (op == 0xc6 || op == 0xc7) { /* MOV [known DS ea],immediate */
+        if (op == 0xc6 || op == 0xc7) { /* MOV [known DS/local ea],imm */
             size_t ea_len;
             unsigned addr;
             size_t imm_len = op == 0xc6 ? 1u : 2u;
             if (remaining < 2 || (p[1] & 0x38u) != 0 ||
-                !data_ea(v, &s, p, remaining, (unsigned)imm_len,
-                         &ea_len, &addr) ||
+                !(local_ea(&s, p, remaining, (unsigned)imm_len, &ea_len) ||
+                  data_ea(v, &s, p, remaining, (unsigned)imm_len,
+                          &ea_len, &addr)) ||
                 remaining < ea_len + imm_len ||
                 !mark(v, at, ea_len + imm_len)) return 0;
             s.at += ea_len + imm_len;
@@ -313,10 +426,18 @@ static int check_path(verifier *v, path_state s)
             if (remaining >= 2 && (p[1] & 0xc0u) != 0xc0u) {
                 unsigned reg = (p[1] >> 3) & 7u, addr;
                 size_t ea_len;
-                if (!ordinary_reg(reg) ||
-                    !data_ea(v, &s, p, remaining, op == 0x8d ? 1u : 2u,
-                             &ea_len, &addr) ||
-                    !mark(v, at, ea_len)) return 0;
+                if (!ordinary_reg(reg)) return 0;
+                if (op != 0x8d && local_ea(&s, p, remaining, 2u, &ea_len)) {
+                    if (!mark(v, at, ea_len)) return 0;
+                    if (op == 0x8b) {
+                        s.regs[reg] = ARG_WORD;
+                        s.number_known[reg] = 0;
+                    }
+                    s.at += ea_len;
+                    continue;
+                }
+                if (!data_ea(v, &s, p, remaining, op == 0x8d ? 1u : 2u,
+                             &ea_len, &addr) || !mark(v, at, ea_len)) return 0;
                 if (op != 0x89) {
                     s.regs[reg] = ARG_WORD;
                     s.number_known[reg] = op == 0x8d;
@@ -348,7 +469,8 @@ static int check_path(verifier *v, path_state s)
         }
 
         if (op == 0x1e) { /* PUSH DS */
-            if (s.depth == sizeof(s.stack) || !mark(v, at, 1)) return 0;
+            if (s.depth == sizeof(s.stack) || !stack_push(&s, 2u) ||
+                !mark(v, at, 1)) return 0;
             s.stack[s.depth++] = ARG_DS;
             s.at++;
             continue;
@@ -356,7 +478,7 @@ static int check_path(verifier *v, path_state s)
         if (op == 0x68 || op == 0x6a) { /* PUSH immediate */
             size_t length = op == 0x68 ? 3u : 2u;
             if (remaining < length || s.depth == sizeof(s.stack) ||
-                !mark(v, at, length)) return 0;
+                !stack_push(&s, 2u) || !mark(v, at, length)) return 0;
             s.stack[s.depth++] = ARG_WORD;
             s.at += length;
             continue;
@@ -373,14 +495,16 @@ static int check_path(verifier *v, path_state s)
         if (op >= 0x50 && op <= 0x57) { /* PUSH register */
             unsigned reg = op - 0x50;
             if (s.depth == sizeof(s.stack) || !ordinary_reg(reg) ||
-                !mark(v, at, 1)) return 0;
+                !stack_push(&s, 2u) || !mark(v, at, 1)) return 0;
             s.stack[s.depth++] = s.regs[reg];
             s.at++;
             continue;
         }
         if (op >= 0x58 && op <= 0x5f) { /* POP register, not BP/SP */
             unsigned reg = op - 0x58;
-            if (!s.depth || !ordinary_reg(reg) || !mark(v, at, 1)) return 0;
+            if (!s.depth || !ordinary_reg(reg) || s.stack_bytes < 2u ||
+                !mark(v, at, 1)) return 0;
+            s.stack_bytes -= 2u;
             s.regs[reg] = s.stack[--s.depth];
             s.number_known[reg] = 0; /* POP value unknown */
             s.at++;
@@ -454,6 +578,8 @@ static int check_path(verifier *v, path_state s)
                             s.stack[2] != ARG_WORD || s.stack[3] != ARG_DS ||
                             s.stack[4] != ARG_WORD || s.stack[5] != ARG_WORD)))
             return 0;
+        if (s.stack_bytes < 2u * words) return 0;
+        s.stack_bytes -= 2u * words;
         s.depth = 0; /* The thunk's RETF imm16 cleans PASCAL arguments. */
         /* Native services return through AX (and DX for DWORD/FAR results).
          * These registers cannot retain a previously proven DS selector. */
