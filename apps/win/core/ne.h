@@ -40,6 +40,8 @@ typedef enum {
 typedef struct {
     uint16_t cs_index, ip, ss_index, sp;
     uint16_t segment_count, module_count;
+    uint16_t auto_data;            /* the DGROUP segment, 0: none */
+    uint16_t heap_size, stack_size;     /* added to it when it is loaded */
     uint32_t fixup_records, import_records;
     uint8_t target_os;
 } win_ne_info;

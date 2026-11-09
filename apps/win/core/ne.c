@@ -105,8 +105,11 @@ int win_ne_scan(const char *path, win_ne_info *info,
     found.ss_index = rd16(hdr + 0x1a);
     found.segment_count = nseg;
     found.module_count = nmod;
+    found.auto_data = rd16(hdr + 0x0e);
+    found.heap_size = rd16(hdr + 0x10);
+    found.stack_size = rd16(hdr + 0x12);
     found.target_os = hdr[0x36];
-    if (found.cs_index > nseg || found.ss_index > nseg)
+    if (found.cs_index > nseg || found.ss_index > nseg || found.auto_data > nseg)
         goto done;
 
     /* Every import relocation refers to a 1-based module-table entry. A
@@ -482,6 +485,13 @@ int win_ne_load_image(const char *path, win_ne_image *image,
         if (!min_size)
             min_size = 65536u;
         uint32_t mem_size = sector && disk_len > min_size ? disk_len : min_size;
+        if (i == info.auto_data) {      /* DGROUP: the local heap and the stack follow */
+            mem_size += (uint32_t)info.heap_size + info.stack_size;
+            if (mem_size > 65536u) {
+                rc = WIN_NE_UNSUPPORTED;
+                goto out;
+            }
+        }
         win_ne_segment_image *seg = &image->segments[i];
         seg->flags = rd16(ent + 4);
         seg->size = mem_size;

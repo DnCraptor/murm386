@@ -5,8 +5,8 @@ or with --hang NEHANG.EXE: KERNEL.GetVersion followed by JMP $.
 The DOS MZ stub exits normally with a "requires WINN" message.
 NEFAULT raises #UD after one native API call; WINN's private IDT returns to
 real mode and reports exception vector 6 without a reset ("Application
-Error ... an Invalid Instruction"). NEHANG never returns; WINN stops it
-("... has stopped responding to the system").
+Error ... an Invalid Instruction"). NEHANG never returns: WINN keeps giving
+the other tasks their turns, and it ends with Windows.
 """
 import os
 import struct
@@ -70,4 +70,4 @@ b[0x380:0x380+len(title)+1] = title+b'\0'
 with open(args[0], 'wb') as f:
     f.write(b)
 print(name.decode() + ':', len(b), 'bytes;',
-      'a stop' if hang else '#UD', 'expected and DOS context must resume')
+      'turns for the other tasks' if hang else '#UD, the DOS context back', 'expected')

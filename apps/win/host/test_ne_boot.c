@@ -25,8 +25,8 @@ static unsigned count_table_op(const uint8_t *p, size_t size, unsigned modrm, un
 }
 int main(void)
 {
-    uint8_t boot[WIN_NE_BOOT_CAPACITY], idt[WIN_NE_FAULT_AREA_BYTES];
-    uint8_t code[WIN_NE_FAULT_AREA_BYTES];
+    uint8_t boot[WIN_NE_BOOT_CAPACITY], idt[WIN_NE_FAULT_IDT_BYTES];
+    uint8_t code[WIN_NE_FAULT_CODE_BYTES], dos[WIN_NE_DOS_STUB_BYTES];
     win_ne_boot_args a = { 0x1234,8,0x10,0x42,0x18,0x100,31,0x6a30 };
     assert(win_ne_boot_make(boot,sizeof(boot),&a) == sizeof(boot));
     assert(boot[0] == 0xfa && boot[1] == 0x8c && boot[2] == 0xc8);
@@ -40,7 +40,7 @@ int main(void)
     assert(count_table_op(boot,sizeof(boot),0x1e,WIN_NE_BOOT_NEW_IDTR_OFFSET)==2);
     assert(r16(boot+WIN_NE_BOOT_NEW_GDTR_OFFSET)==a.gdt_limit);
     assert(r32(boot+WIN_NE_BOOT_NEW_GDTR_OFFSET+2)==a.gdt_linear);
-    assert(r16(boot+WIN_NE_BOOT_NEW_IDTR_OFFSET)==WIN_NE_FAULT_VECTORS*8-1);
+    assert(r16(boot+WIN_NE_BOOT_NEW_IDTR_OFFSET)==WIN_NE_IDT_VECTORS*8-1);
     assert(r32(boot+WIN_NE_BOOT_NEW_IDTR_OFFSET+2)==
            ((unsigned)a.rm_segment<<4)-WIN_NE_BOOT_OFFSET+WIN_NE_FAULT_IDT_OFFSET);
     assert(boot[WIN_NE_BOOT_GATEWAY_OFFSET-WIN_NE_BOOT_OFFSET]==0x2e);
@@ -49,7 +49,8 @@ int main(void)
     assert(win_ne_fault_make(idt,code,&a));
     for (unsigned v=0;v<WIN_NE_FAULT_VECTORS;v++) {
         unsigned pos=6*v;
-        assert(r16(idt+v*8)==WIN_NE_FAULT_CODE_OFFSET+pos);
+        assert(r16(idt+v*8)==(v==WIN_NE_YIELD_VECTOR ? WIN_NE_YIELD_OFFSET :
+                              WIN_NE_FAULT_CODE_OFFSET+pos));
         assert(r16(idt+v*8+2)==a.pm_segment);
         assert(idt[v*8+4]==0 && idt[v*8+5]==0x86);
         assert(r16(idt+v*8+6)==0);
@@ -57,6 +58,19 @@ int main(void)
         assert(code[pos+3]==0xe9 && r16(code+pos+4)==
                WIN_NE_FAULT_VECTORS*6-(pos+6));
     }
+    /* INT 20h and INT 21h: the DOS stubs, INT 21h a gateway service */
+    assert(r16(idt+0x20*8)==WIN_NE_INT20_OFFSET && r16(idt+0x21*8)==WIN_NE_INT21_OFFSET);
+    assert(r16(idt+0x21*8+2)==a.pm_segment && idt[0x21*8+5]==0x86);
+    assert(win_ne_dos_make(dos,&a));
+    const uint8_t int21[]={0x50,0xb8,WIN_NE_SERVICE_INT21&255,WIN_NE_SERVICE_INT21>>8,0x9a,
+                           WIN_NE_BOOT_GATEWAY_OFFSET&255,WIN_NE_BOOT_GATEWAY_OFFSET>>8,
+                           8,0,0x83,0xc4,0x02,0xcf};
+    assert(dos[0]==0xb8 && r16(dos+1)==0x4c00);
+    assert(!memcmp(dos+WIN_NE_INT21_OFFSET-WIN_NE_INT20_OFFSET,int21,sizeof(int21)));
+    uint8_t yield[sizeof(int21)];
+    memcpy(yield,int21,sizeof(int21));
+    yield[2]=WIN_NE_SERVICE_YIELD&255; yield[3]=WIN_NE_SERVICE_YIELD>>8;
+    assert(!memcmp(dos+WIN_NE_YIELD_OFFSET-WIN_NE_INT20_OFFSET,yield,sizeof(yield)));
     const uint8_t save_frame[]={0x8c,0xd6,0x89,0xe7};    /* si=ss, di=sp */
     assert(!memcmp(code+WIN_NE_FAULT_VECTORS*6,save_frame,sizeof(save_frame)));
     const unsigned common=WIN_NE_FAULT_VECTORS*6+sizeof(save_frame);

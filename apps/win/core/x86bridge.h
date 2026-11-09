@@ -25,18 +25,23 @@ enum {
     WINX86_FAULT = -5
 };
 
-/* Handler may update guest registers; 1 = handled, 0 = unsupported.
- * EXIT and FAULT tokens bypass the handler and end the guest run.
+/* Handler may update guest registers; 1 = handled, 0 = unsupported,
+ * WINX86_SERVICE_EXIT = handled, and the run ends there (WINX86_OK; a
+ * program that exits through DOS). EXIT and FAULT tokens bypass the
+ * handler and end the guest run.
  * Native calls using DOS/BIOS are safe only when the caller has explicitly
  * returned the shared CPU to its original real-mode DOS context.
  */
+#define WINX86_SERVICE_EXIT 2
 typedef int (*winx86_service_fn)(void *opaque, CPU *cpu, uint16_t service);
 
 /* CPU entry state (CS:IP, SS:SP and segment descriptors) is prepared by the
  * caller.  The caller also owns its restoration.  A service may start another
  * run (nested), or switch to another task whose run starts or resumes; the
  * caller then keeps each guest's CPU state while it is not stepping.
- * Each burst is at most 4096 instructions; max_bursts bounds runaway code.
+ * Each burst is at most 4096 instructions; max_bursts bounds the bursts in
+ * a row without a service call (runaway code), the count starts again at
+ * each call.
  */
 int winx86_run(CPU *cpu, winx86_service_fn service, void *opaque,
                unsigned max_bursts);

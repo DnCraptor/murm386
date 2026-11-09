@@ -22,6 +22,7 @@
 #include "ne.h"
 #include "ne_exec.h"
 #include "ne_boot.h"
+#include "ne_guest.h"
 #endif
 
 #if !(defined(__arm__) || defined(__thumb__))
@@ -356,21 +357,28 @@ static int run_app(wtask *t)
 }
 
 #if defined(__arm__) || defined(__thumb__)
-/* Run the NE entry on the current WINN ARM stack. A program that faults or
- * runs too long without returning ends with the Windows 3.1 "Application
- * Error" message. */
+/* Run the NE program on the current WINN ARM stack. A program that faults
+ * ends with the Windows 3.1 "Application Error" message. */
+/* A program's time slice is over: the other tasks' turn; it ends when its
+ * task is to quit (Windows ends) */
+static int ne_yield(void)
+{
+    Yield();
+    return task_current()->quit;
+}
+
 static int run_ne_app(wtask *t)
 {
-    uint32_t result = 0;
-    win_ne_fault f;
+    win_ne_result r;
     const char *path = (const char *)t->module;
-    int rc = win_ne_execute_basic(path, &result, &f);
+    int rc = win_ne_execute(path, t->cmdline, t->show, ne_yield, &r);
     char msg[160];
+    const char *file = path;
+    for (const char *p = path; *p; p++)
+        if (*p == '\\' || *p == '/' || *p == ':')
+            file = p + 1;
     if (rc == WIN_NE_EXEC_FAULT) {
-        const char *file = path;
-        for (const char *p = path; *p; p++)
-            if (*p == '\\' || *p == '/' || *p == ':')
-                file = p + 1;
+        const win_ne_fault f = r.fault;
         char where[24];
         if (f.segment)
             wsprintf(where, "%04X:%04X", f.segment, f.ip);
@@ -380,10 +388,7 @@ static int run_ne_app(wtask *t)
                            f.vector == 6 ? "an Invalid Instruction" :
                            f.vector == 12 ? "a Stack Fault" :
                            f.vector == 13 ? "a General Protection Fault" : NULL;
-        if (f.vector == (int)WIN_NE_TIMEOUT_VECTOR)
-            wsprintf(msg, "%s has stopped responding to the system "
-                     "in module %s at %s.", t->name, file, where);
-        else if (what)
+        if (what)
             wsprintf(msg, "%s caused %s in module %s at %s.", t->name, what, file, where);
         else
             wsprintf(msg, "%s caused exception %d in module %s at %s.",
@@ -392,11 +397,26 @@ static int run_ne_app(wtask *t)
         MessageBox(0, msg, "Application Error", MB_OK | MB_ICONSTOP);
         return 1;
     }
-    if (rc)
+    if (!rc && r.exited)            /* it ended as a program does */
+        return (int)r.value;
+    if (!rc && r.stopped)           /* Windows ends */
+        return 0;
+    win_ne_unresolved u;
+    if (rc == WIN_NE_EXEC_UNSUPPORTED && r.unsupported >= WIN_NE_SERVICE_INT21)
+        wsprintf(msg, "%s uses INT 21h function %02Xh, which WINN does not have yet.",
+                 file, r.unsupported - WIN_NE_SERVICE_INT21);
+    else if (rc == WIN_NE_UNRESOLVED && win_ne_guest_unresolved(path, &u)) {
+        if (u.ordinal)
+            wsprintf(msg, "%s needs %s.%u, which WINN does not have yet.", file, u.module,
+                     u.ordinal);
+        else
+            wsprintf(msg, "%s needs %s.%s, which WINN does not have yet.", file, u.module,
+                     u.name);
+    } else if (rc)
         wsprintf(msg, "NE program %s: unsupported or failed (%d)", t->name, rc);
-    else
+    else                            /* an entry that returned (the probes) */
         wsprintf(msg, "NE program %s completed. DX:AX=%08lx", t->name,
-                 (unsigned long)result);
+                 (unsigned long)r.value);
     win_logo_end();
     MessageBox(0, msg, "WINN Win16", MB_OK | (rc ? MB_ICONSTOP : MB_ICONINFORMATION));
     return rc ? 1 : 0;

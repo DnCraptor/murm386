@@ -5,37 +5,51 @@ subset) for native ARM programs. `WINN.EXE` is the Windows loader: it holds
 KERNEL, GDI, USER and the built-in drivers, loads driver modules, and runs
 applications (separate EZ files) as cooperative tasks, as Windows 3.x does.
 The preliminary 386 NE path is available through ordinary `WinExec` and
-`WINN NEDIALOG.EXE`: a Win16 program of one code and one data segment runs
-its entry as a FAR procedure on the emulator's 386 core, in 16-bit protected
-mode with its own GDT. Each 16-byte import thunk calls a common guest
-PM→RM→PM gateway; the native callback runs with the original DOS Real Mode
-CPU context, so WINN can service keyboard/mouse BIOS calls and cooperative
-modal dialogs. After the native call, the same Win16 registers and stack are
-resumed; each `RETF imm16` cleans the Win16 PASCAL arguments.
+`WINN PROGRAM.EXE`: a Win16 program of one code and one data segment (the
+small model of Open Watcom, `wcl -bt=windows -l=windows -ms`) runs on the
+emulator's 386 core in 16-bit protected mode with its own GDT, with its
+own start-up code: its DGROUP gets the local heap and the stack of its
+header, `InitTask` gives it its PSP (the command line), its instance and
+nCmdShow, it ends with INT 21h 4Ch (an entry that returns with `RETF` works
+too). Each 16-byte import thunk, and INT 21h, calls a common guest PM→RM→PM
+gateway; the native callback runs with the original DOS Real Mode CPU
+context, so WINN can service keyboard/mouse BIOS calls and cooperative
+modal dialogs. After the native call, the same Win16 registers and stack
+are resumed; each `RETF imm16` cleans the Win16 PASCAL arguments.
 
 The code is not checked beforehand. Protected mode keeps it in its segments;
-an exception goes through a private IDT back to Real Mode and DOS, and a
-program that runs some 16 million instructions without returning or calling
-the API is stopped through the same IDT (WINN answers the CPU's interrupt
-controller callback with its vector for one step). Either ends with the
-Windows 3.1 "Application Error" message and the place, `segment:offset`.
-Neither x86 CPU implementation is modified.
+an exception goes through a private IDT back to Real Mode and DOS and ends
+the program with the Windows 3.1 "Application Error" message and the place,
+`segment:offset`. WINN runs the guest's instructions itself, in bursts of
+CPU steps: a program that has run some 260 thousand instructions without
+calling the API takes a vector of the same IDT (WINN answers the CPU's
+interrupt controller callback with it for one step), whose stub calls the
+gateway like an API call: the other tasks get their turn, then the program
+goes on where it was. So a program busy computing does not stop the rest
+of the system, as it would in Windows 3.1, and one that never returns ends
+with Windows. Neither x86 CPU implementation is modified.
 
-Supported functions: KERNEL.3 GetVersion, KERNEL.36 GetCurrentTask,
-KERNEL.88 lstrcpy, KERNEL.89 lstrcat, KERNEL.90 lstrlen (checked
-selector:offset strings), KERNEL.152 GetNumTasks, USER.13 GetTickCount,
-USER.179 GetSystemMetrics, USER.180 GetSysColor and USER.1 MessageBox. Its
-FAR ANSI strings are copied into bounded native buffers and the owner,
-pointers and style are read from the guest Pascal stack. Programs importing
-anything else are refused before protected mode. Several NE programs can
-run at once, each as a WINN task: while one waits in a native call (a modal
-MessageBox), another starts or goes on.
+Supported functions: KERNEL.3 GetVersion, KERNEL.30 WaitEvent, KERNEL.36
+GetCurrentTask, KERNEL.49 GetModuleFileName, KERNEL.88 lstrcpy, KERNEL.89
+lstrcat, KERNEL.90 lstrlen (checked selector:offset strings), KERNEL.91
+InitTask, KERNEL.152 GetNumTasks, USER.1 MessageBox, USER.5 InitApp,
+USER.13 GetTickCount, USER.179 GetSystemMetrics, USER.180 GetSysColor;
+INT 21h 30h (version) and 4Ch (exit), INT 20h. Its FAR ANSI strings are
+copied into bounded native buffers and the owner, pointers and style are
+read from the guest Pascal stack. A program importing anything else is
+refused before protected mode with the first function it lacks named; an
+INT 21h function WINN does not have ends it with that function named.
+Several NE programs can run at once, each as a WINN task: while one waits
+in a native call (a modal MessageBox), another starts or goes on.
 
-`host/mkne_winexec.py`, `host/mkne_dialog.py`, `host/mkne_loop.py` and
-`host/mkne_fault.py` (`--hang` for `NEHANG.EXE`) generate `NEAPP.EXE`,
-`NEDIALOG.EXE`, `NELOOP.EXE`, `NEFAULT.EXE` and `NEHANG.EXE` (`make
-NEFIXTURES` in `host/`). All have DOS MZ stubs that explain how to launch
-them under WINN when invoked directly from DOS.
+`host/mkne_winexec.py`, `host/mkne_dialog.py`, `host/mkne_loop.py`,
+`host/mkne_fault.py` (`--hang` for `NEHANG.EXE`) and `host/mkne_watcom.py`
+generate `NEAPP.EXE`, `NEDIALOG.EXE`, `NELOOP.EXE`, `NEFAULT.EXE`,
+`NEHANG.EXE`, `OWHELLO.EXE` and `OWBUSY.EXE` (the last two built by Open
+Watcom, their sources in the script; `make NEFIXTURES` in `host/`). All have DOS MZ stubs that explain how to launch them under WINN
+when invoked directly from DOS. `host/test_ne_run` runs them on the
+emulator's own i386 core (`src/i386.c` as it is, built for the host with
+the stand-ins in `host/x86run/`).
 
     WINN [:] [program [arguments]]
 
@@ -201,7 +215,7 @@ use `ucontext`):
     ./winhost scripts/logo.txt PROGMAN       # the logo (copy the BMPs into HOSTWIN first)
     ./winhost800 scripts/vga800.txt  # the VGA800 driver, built in
     ./test_gdi                       # GDI sample sheet, gdi.ppm
-    make check                       # the NE loader, gateway and trampoline
+    make check                       # NE: loader, gateway, trampoline; the programs on the i386 core
 
 The applications are built into the harness; `HOSTWIN/` is the Windows
 directory, with empty stand-ins for their files and a "DOS program". On

@@ -18,6 +18,9 @@
 #define WIN_NE_THUNK_BYTES 16u /* includes FAR return + Pascal stack adjustment */
 /* Upper half of thunk segment is reserved for the PM trampoline. */
 #define WIN_NE_GUEST_ACTIVE_THUNKS 64u
+/* The program's PSP (its own selector, ES after InitTask): the command line
+ * at 81h, as DOS has it, but ending with a NUL (Windows). */
+#define WIN_NE_GUEST_PSP_BYTES 256u
 
 /* Guest linear allocations must be addressable via an x86 segment base and
  * remain allocated until the entire staged image is released. The callbacks
@@ -42,6 +45,7 @@ typedef struct {
     win_ne_guest_segment *segments; /* 1-based; 0 unused */
     uint32_t gdt_linear, thunk_linear;
     uint16_t gdt_limit, thunk_selector;
+    win_ne_guest_segment psp;       /* a data segment of its own */
     uint16_t cs, ip, ss, sp;
     uint16_t thunk_count;
     /* Each active slot holds a Win16 service with a known Pascal ABI. */
@@ -57,6 +61,15 @@ typedef struct {
 int win_ne_guest_load(const char *path, win_ne_guest_image *out,
                       const win_ne_guest_io *io, void *opaque);
 void win_ne_guest_release(win_ne_guest_image *image);
+
+/* The first import a program needs that WINN does not have (the load
+ * fails with WIN_NE_UNRESOLVED): 1 with it in u, 0 if there is none. */
+typedef struct {
+    char module[16];
+    char name[40];
+    uint16_t ordinal;               /* 0: by name */
+} win_ne_unresolved;
+int win_ne_guest_unresolved(const char *path, win_ne_unresolved *u);
 
 /* Returns the DOS INT 21h-backed guest allocator on the RP2350 target.
  * Allocation/free must run before entering protected mode or after leaving it. */

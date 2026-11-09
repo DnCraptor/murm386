@@ -31,15 +31,29 @@
 #define WIN_NE_BOOT_SAVED_IDTR_OFFSET 300u
 #define WIN_NE_BOOT_NEW_IDTR_OFFSET   306u
 
-/* The remaining 768 bytes of the 2 KiB thunk allocation contain an
- * exception IDT and 32 small 16-bit vector stubs + a common RM exit. */
+/* After the trampoline: the DOS calls (INT 20h, INT 21h) as API calls
+ * through the gateway, then the private IDT (the 32 exception vectors and
+ * 20h, 21h), then 32 small 16-bit vector stubs + a common RM exit. */
+#define WIN_NE_DOS_STUB_OFFSET     1344u
+#define WIN_NE_DOS_STUB_BYTES       192u
+#define WIN_NE_INT20_OFFSET        WIN_NE_DOS_STUB_OFFSET
+#define WIN_NE_INT21_OFFSET        (WIN_NE_DOS_STUB_OFFSET + 3u)
+#define WIN_NE_YIELD_OFFSET        (WIN_NE_DOS_STUB_OFFSET + 16u)
 #define WIN_NE_FAULT_IDT_OFFSET    1536u
-#define WIN_NE_FAULT_CODE_OFFSET   1792u
-#define WIN_NE_FAULT_AREA_BYTES     256u
+#define WIN_NE_IDT_VECTORS         0x22u
+#define WIN_NE_FAULT_IDT_BYTES     (WIN_NE_IDT_VECTORS * 8u)
+#define WIN_NE_FAULT_CODE_OFFSET   (WIN_NE_FAULT_IDT_OFFSET + WIN_NE_FAULT_IDT_BYTES)
+#define WIN_NE_FAULT_CODE_BYTES    (2048u - WIN_NE_FAULT_CODE_OFFSET)
 #define WIN_NE_FAULT_VECTORS         32u
-/* The last vector is no CPU exception: WINN raises it itself to stop a
- * guest that has run too long without returning (ne_exec.c). */
-#define WIN_NE_TIMEOUT_VECTOR (WIN_NE_FAULT_VECTORS - 1u)
+/* The service an INT 21h becomes: AX of the guest is the first word above
+ * the gateway's return address, then the interrupt's IP, CS, FLAGS. */
+#define WIN_NE_SERVICE_INT21     0x2100u
+/* The last vector is no CPU exception: WINN raises it itself when a guest
+ * has run its time slice without calling the API (ne_exec.c). Its stub is
+ * an INT 21h one with the service WIN_NE_SERVICE_YIELD: other tasks run,
+ * then the guest goes on where it was. */
+#define WIN_NE_YIELD_VECTOR      (WIN_NE_FAULT_VECTORS - 1u)
+#define WIN_NE_SERVICE_YIELD     0x2200u
 
 
 typedef struct {
@@ -56,8 +70,14 @@ size_t win_ne_boot_make(uint8_t *buffer, size_t capacity,
                         const win_ne_boot_args *args);
 /* Creates a private IDT and handlers in the already allocated thunk region.
  * A recoverable fault goes through PM -> RM -> WINX86_BRIDGE_FAULT with BX =
- * the vector and SI:DI = SS:SP of its exception frame (selector:offset). */
-int win_ne_fault_make(uint8_t idt[WIN_NE_FAULT_AREA_BYTES],
-                      uint8_t code[WIN_NE_FAULT_AREA_BYTES],
+ * the vector and SI:DI = SS:SP of its exception frame (selector:offset).
+ * INT 20h and INT 21h go to the DOS stubs (win_ne_dos_make). */
+int win_ne_fault_make(uint8_t idt[WIN_NE_FAULT_IDT_BYTES],
+                      uint8_t code[WIN_NE_FAULT_CODE_BYTES],
                       const win_ne_boot_args *args);
+/* INT 21h: PUSH AX, the service WIN_NE_SERVICE_INT21 through the gateway,
+ * IRET with the flags the native side left in the interrupt frame. INT 20h:
+ * INT 21h AX=4C00h. The yield vector: the same with WIN_NE_SERVICE_YIELD. */
+int win_ne_dos_make(uint8_t stub[WIN_NE_DOS_STUB_BYTES],
+                    const win_ne_boot_args *args);
 #endif

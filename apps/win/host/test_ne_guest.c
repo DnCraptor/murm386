@@ -144,15 +144,17 @@ int main(void)
     reset_guest();
     assert(win_ne_guest_load(path, &img, &io, NULL) == WIN_NE_OK);
     assert(img.info.segment_count == 1 && img.thunk_count == 1);
-    assert(img.gdt_limit == 23 && img.cs == 0x10 && img.ss == 0x10);
+    assert(img.gdt_limit == 31 && img.cs == 0x10 && img.ss == 0x10);
     assert(img.ip == 0 && img.sp == 0x40 && img.thunk_selector == 0x08);
-    assert(nactive == 3 && img.gdt_linear && img.thunk_linear);
+    assert(nactive == 4 && img.gdt_linear && img.thunk_linear && img.psp.linear);
+    assert(img.psp.selector == 0x18);
     assert(img.segments[1].linear && img.segments[1].size == 0x80);
     const uint8_t *gdt = guest + img.gdt_linear;
     assert(!r32(gdt) && !r32(gdt + 4));
     check_desc(gdt + 8, img.thunk_linear,
                WIN_NE_THUNK_BYTES * WIN_NE_GUEST_MAX_THUNKS, 1);
     check_desc(gdt + 16, img.segments[1].linear, 0x80u, 1);
+    check_desc(gdt + 24, img.psp.linear, WIN_NE_GUEST_PSP_BYTES, 0);
     const uint8_t *code = guest + img.segments[1].linear;
     assert(code[0] == 0x90 && code[0x7f] == 0);
     assert(r16(code + 0x10) == 0 && r16(code + 0x12) == 0x08);
@@ -175,7 +177,7 @@ int main(void)
         assert(win_ne_guest_load(path, &img, &io, NULL) == WIN_NE_IO_ERROR);
         assert(!nactive && alloc_calls == free_calls);
     }
-    for (unsigned nth = 1; nth <= 3; nth++) {
+    for (unsigned nth = 1; nth <= 4; nth++) {
         reset_guest();
         fail_alloc = nth;
         int rc = win_ne_guest_load(path, &img, &io, NULL);
@@ -187,6 +189,11 @@ int main(void)
     save_fixture(path, file);
     assert(win_ne_guest_load(path, &img, &io, NULL) == WIN_NE_UNRESOLVED);
     assert(!nactive && alloc_calls == free_calls);
+    win_ne_unresolved u;
+    assert(win_ne_guest_unresolved(path, &u) && !strcmp(u.module, "KERNEL") && u.ordinal == 4);
+    file[SEG1 + 0x40 + 2 + 6] = 3;
+    save_fixture(path, file);
+    assert(!win_ne_guest_unresolved(path, &u));
     unlink(path);
     puts("ne guest: PASS");
     return 0;

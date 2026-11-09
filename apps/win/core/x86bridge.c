@@ -58,7 +58,7 @@ int winx86_run(CPU *cpu, winx86_service_fn service, void *opaque,
     }
 
     int rc = WINX86_TIMEOUT;
-    for (unsigned i = 0; i < max_bursts; i++) {
+    for (unsigned left = max_bursts; left; left--) {
         frame.pending = 0;
         cpu->native_done = false;
         winx86_frame *outer = active_frame;
@@ -77,10 +77,16 @@ int winx86_run(CPU *cpu, winx86_service_fn service, void *opaque,
             rc = frame.request == WINX86_BRIDGE_EXIT ? WINX86_OK : WINX86_FAULT;
             break;
         }
-        if (!service || !service(opaque, cpu, frame.request)) {
+        int handled = service ? service(opaque, cpu, frame.request) : 0;
+        if (!handled) {
             rc = WINX86_BAD_SERVICE;
             break;
         }
+        if (handled == WINX86_SERVICE_EXIT) {
+            rc = WINX86_OK;
+            break;
+        }
+        left = max_bursts + 1;          /* it came back: a new count */
     }
 
     if (!--runs) {

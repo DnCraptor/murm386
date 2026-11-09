@@ -15,7 +15,7 @@ GDICORE  = $(filter-out ../core/exports.c ../core/task.c ../core/file.c ../core/
 # the applications, built in; each WinMain gets its own name
 APPS     = demo.o progman.o notepad.o clock.o calc.o control.o winfile.o taskman.o winmine.o appinfo.o
 
-all: test_gdi test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_launch test_ne_rm_gate NEFIXTURES winhost winhost800 HOSTWIN
+all: test_gdi test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_launch test_ne_rm_gate test_ne_run NEFIXTURES winhost winhost800 HOSTWIN
 
 test_gdi: $(GDICORE) $(HOST) test_gdi.c
 	$(CC) $(CFLAGS) $(INC) -o $@ $^
@@ -38,7 +38,8 @@ test_ne_guest_api: ../core/ne_guest_api.c test_ne_guest_api.c
 	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined $(INC) -o $@ $^
 
 # NE programs for WINN on the target (each with a DOS MZ stub): ordinal
-# imports, MessageBox, a counted loop, an invalid instruction, a hang.
+# imports, MessageBox, a counted loop, an invalid instruction, a hang; two
+# built by Open Watcom.
 NEAPP-fixture.exe: mkne_winexec.py
 	python3 mkne_winexec.py $@
 NEDIALOG.EXE: mkne_dialog.py
@@ -49,7 +50,9 @@ NEFAULT.EXE: mkne_fault.py
 	python3 mkne_fault.py $@
 NEHANG.EXE: mkne_fault.py
 	python3 mkne_fault.py --hang $@
-NEFIXTURES: NEAPP-fixture.exe NEDIALOG.EXE NELOOP-fixture.exe NEFAULT.EXE NEHANG.EXE
+OWHELLO.EXE OWBUSY.EXE: mkne_watcom.py
+	python3 mkne_watcom.py $(basename $@) $@
+NEFIXTURES: NEAPP-fixture.exe NEDIALOG.EXE NELOOP-fixture.exe NEFAULT.EXE NEHANG.EXE OWHELLO.EXE OWBUSY.EXE
 
 test_ne_multi: ../core/ne.c ../core/ne_guest.c test_ne_multi.c NEAPP-fixture.exe
 	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne.c ../core/ne_guest.c test_ne_multi.c
@@ -63,15 +66,28 @@ test_ne_rm_gate: ../core/ne_exec.c ../core/ne_guest_api.c test_ne_rm_gate.c
 		-Wl,--gc-sections -fsanitize=address,undefined -Igate_mock -o $@ \
 		../core/ne_guest_api.c test_ne_rm_gate.c
 
+# NE programs end to end on the emulator's own i386 core (its source as is,
+# the Pico SDK and the rest of the firmware stood in for by x86run/).
+X86RUN_CFLAGS = -m32 -O1 -g -w -Ui386 -DNO_PAGING -DI386_MODE -include x86run/pico.h -Ix86run -I../../../src
+i386-host.o: ../../../src/i386.c x86run/pico.h
+	$(CC) $(X86RUN_CFLAGS) -c -o $@ $<
+
+test_ne_run: test_ne_run.c x86run/i386_host.c i386-host.o ../core/ne_exec.c ../core/ne_guest.c ../core/ne.c \
+		../core/ne_boot.c ../core/ne_guest_api.c ../core/x86bridge.c
+	$(CC) -std=c11 -m32 -O1 -g -Wall -Wextra -Werror -Ix86run -o $@ test_ne_run.c x86run/i386_host.c \
+		i386-host.o ../core/ne_guest.c ../core/ne.c ../core/ne_boot.c ../core/ne_guest_api.c \
+		../core/x86bridge.c
+
 # Real/Protected/Real machine-code emitter checks (64-bit host compatible).
 test_ne_boot: ../core/ne_boot.c test_ne_boot.c
 	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ $^
 
 # The tests that take a file
-check: test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_launch test_ne_rm_gate NEFIXTURES
+check: test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_launch test_ne_rm_gate test_ne_run NEFIXTURES
 	./test_x86bridge && ./test_ne && ./test_ne_image && ./test_ne_guest && ./test_ne_guest_api && \
 	./test_ne_boot && ./test_ne_multi NEAPP-fixture.exe && ./test_ne_launch NELOOP-fixture.exe && \
-	./test_ne_rm_gate
+	./test_ne_rm_gate && ./test_ne_run NEDIALOG.EXE NELOOP-fixture.exe NEFAULT.EXE NEHANG.EXE \
+		OWHELLO.EXE OWBUSY.EXE
 
 demo.o: ../../winapps/demo/demo.c
 	$(CC) $(CFLAGS) $(INC) -DWinMain=demo_WinMain -c -o $@ $<
@@ -125,6 +141,6 @@ HOSTWIN:
 	cp HOSTWIN/README.TXT HOSTWIN/DOCS/README.TXT
 
 clean:
-	rm -rf test_gdi test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_launch test_ne_rm_gate *-fixture.exe NEDIALOG.EXE NEFAULT.EXE NEHANG.EXE winhost winhost800 *.o *.ppm *.png appinfo.c HOSTWIN
+	rm -rf test_gdi test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_launch test_ne_rm_gate test_ne_run i386-host.o *-fixture.exe NEDIALOG.EXE NEFAULT.EXE NEHANG.EXE OWHELLO.EXE OWBUSY.EXE winhost winhost800 *.o *.ppm *.png appinfo.c HOSTWIN
 
 .PHONY: all check clean HOSTWIN NEFIXTURES

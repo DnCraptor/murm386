@@ -180,7 +180,7 @@ size_t win_ne_boot_make(uint8_t *buffer, size_t capacity,
     buffer[WIN_NE_BOOT_NEW_GDTR_OFFSET + 4] = (uint8_t)(a->gdt_linear >> 16);
     buffer[WIN_NE_BOOT_NEW_GDTR_OFFSET + 5] = (uint8_t)(a->gdt_linear >> 24);
     put16(buffer + WIN_NE_BOOT_NEW_IDTR_OFFSET,
-          (uint16_t)(WIN_NE_FAULT_VECTORS * 8u - 1u));
+          (uint16_t)(WIN_NE_FAULT_IDT_BYTES - 1u));
     uint32_t idt_base = ((uint32_t)a->rm_segment << 4) -
                         WIN_NE_BOOT_OFFSET + WIN_NE_FAULT_IDT_OFFSET;
     buffer[WIN_NE_BOOT_NEW_IDTR_OFFSET + 2] = (uint8_t)idt_base;
@@ -196,22 +196,30 @@ size_t win_ne_boot_make(uint8_t *buffer, size_t capacity,
  * error-code vectors; ARM reads it), drops PE, restores the DOS descriptor
  * tables, and reports FAULT to the ARM bridge from real mode. No x86 core
  * changes are required. */
-int win_ne_fault_make(uint8_t idt[WIN_NE_FAULT_AREA_BYTES],
-                      uint8_t code[WIN_NE_FAULT_AREA_BYTES],
+static void gate(uint8_t *idt, unsigned v, uint16_t offset, uint16_t selector)
+{
+    put16(idt + 8u*v, offset);
+    put16(idt + 8u*v + 2u, selector);
+    idt[8u*v + 5u] = 0x86;  /* P, DPL0, 16-bit interrupt gate */
+}
+
+int win_ne_fault_make(uint8_t idt[WIN_NE_FAULT_IDT_BYTES],
+                      uint8_t code[WIN_NE_FAULT_CODE_BYTES],
                       const win_ne_boot_args *a)
 {
     if (!idt || !code || !a || !a->rm_segment || !a->pm_segment ||
         (a->pm_segment & 7u))
         return 0;
-    memset(idt, 0, WIN_NE_FAULT_AREA_BYTES);
-    memset(code, 0xcc, WIN_NE_FAULT_AREA_BYTES);
+    memset(idt, 0, WIN_NE_FAULT_IDT_BYTES);
+    memset(code, 0xcc, WIN_NE_FAULT_CODE_BYTES);
+    gate(idt, 0x20, WIN_NE_INT20_OFFSET, a->pm_segment);
+    gate(idt, 0x21, WIN_NE_INT21_OFFSET, a->pm_segment);
     const unsigned common = 6u * WIN_NE_FAULT_VECTORS;
     for (unsigned v = 0; v < WIN_NE_FAULT_VECTORS; v++) {
         unsigned pos = 6u * v;
         uint16_t off = (uint16_t)(WIN_NE_FAULT_CODE_OFFSET + pos);
-        put16(idt + 8u*v, off);
-        put16(idt + 8u*v + 2u, a->pm_segment);
-        idt[8u*v + 5u] = 0x86;  /* P, DPL0, 16-bit interrupt gate */
+        gate(idt, v, v == WIN_NE_YIELD_VECTOR ? (uint16_t)WIN_NE_YIELD_OFFSET : off,
+             a->pm_segment);
         code[pos] = 0xbb; /* mov bx,vector */
         put16(code + pos + 1u, (uint16_t)v);
         code[pos + 3u] = 0xe9; /* jmp near common */
@@ -239,10 +247,43 @@ int win_ne_fault_make(uint8_t idt[WIN_NE_FAULT_AREA_BYTES],
     b8(&e, 0xb8); b16(&e, WINX86_BRIDGE_FAULT);
     b8(&e, 0xef);                          /* OUT, from RM */
     b8(&e, 0xeb); b8(&e, 0xfe);            /* no return */
-    if (e.overflow || common + e.n > WIN_NE_FAULT_AREA_BYTES)
+    if (e.overflow || common + e.n > WIN_NE_FAULT_CODE_BYTES)
         return 0;
     patch16(&e, rmref, (uint16_t)(WIN_NE_FAULT_CODE_OFFSET -
                                  WIN_NE_BOOT_OFFSET + common + rm));
     memcpy(code + common, e.bytes, e.n);
+    return 1;
+}
+
+/* An interrupt as a service: the guest's AX kept above the gateway's
+ * return address, AX and DX its results, IRET */
+static void int21_like(emitter *e, uint16_t service, uint16_t pm_segment)
+{
+    b8(e, 0x50);                              /* push ax */
+    b8(e, 0xb8); b16(e, service);             /* mov ax,service */
+    b8(e, 0x9a); b16(e, WIN_NE_BOOT_GATEWAY_OFFSET); /* call far gateway */
+    b16(e, pm_segment);
+    b8(e, 0x83); b8(e, 0xc4); b8(e, 0x02);    /* add sp,2 (AX, DX: results) */
+    b8(e, 0xcf);                              /* iret */
+}
+
+int win_ne_dos_make(uint8_t stub[WIN_NE_DOS_STUB_BYTES], const win_ne_boot_args *a)
+{
+    if (!stub || !a || !a->pm_segment || (a->pm_segment & 7u))
+        return 0;
+    memset(stub, 0xcc, WIN_NE_DOS_STUB_BYTES);
+    emitter e = { 0 };
+    b8(&e, 0xb8); b16(&e, 0x4c00);            /* INT 20h: mov ax,4C00h */
+    if (e.n != WIN_NE_INT21_OFFSET - WIN_NE_INT20_OFFSET)
+        return 0;
+    int21_like(&e, WIN_NE_SERVICE_INT21, a->pm_segment);
+    while (e.n < WIN_NE_YIELD_OFFSET - WIN_NE_INT20_OFFSET)
+        b8(&e, 0xcc);
+    if (e.n != WIN_NE_YIELD_OFFSET - WIN_NE_INT20_OFFSET)
+        return 0;
+    int21_like(&e, WIN_NE_SERVICE_YIELD, a->pm_segment);
+    if (e.overflow || e.n > WIN_NE_DOS_STUB_BYTES)
+        return 0;
+    memcpy(stub, e.bytes, e.n);
     return 1;
 }

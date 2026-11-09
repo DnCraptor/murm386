@@ -6,10 +6,13 @@
  * from the guest FAR procedure, exits PE and returns to WINN.  The code is
  * not checked beforehand: protected mode itself keeps it inside its
  * segments, and whatever it does wrong ends in the private IDT, which takes
- * the CPU back to Real Mode and DOS. A guest that runs too long without
- * coming back is made to take the IDT's timeout vector: for that one step
- * the CPU's interrupt controller callback answers with that vector, much as
- * the bridge borrows the OUT callback.
+ * the CPU back to Real Mode and DOS. WINN runs the guest's instructions
+ * itself, in bursts of CPU steps; a guest that has run its time slice
+ * without calling the API is made to take the IDT's yield vector, which
+ * calls the gateway as an API call does: other tasks run, and it goes on
+ * (or ends, when its task is told to quit). For that one step the CPU's
+ * interrupt controller callback answers with the vector, much as the
+ * bridge borrows the OUT callback.
  *
  * Several NE tasks can run: a native API (a modal MessageBox) switches WINN
  * tasks with the CPU in the DOS context, and another task may start or
@@ -72,9 +75,9 @@ static void restore_cpu(CPU *cpu, const win_cpu_snapshot *s)
     cpu->excerr = s->excerr;
 }
 
-/* Bursts of 4096 instructions a guest may run before it is stopped (API
- * calls count one each): some 16 million instructions. */
-#define WIN_NE_EXEC_BURSTS 4096u
+/* Bursts of 4096 instructions a guest runs without calling the API before
+ * other tasks get their turn: some 260 thousand instructions. */
+#define WIN_NE_EXEC_SLICE 64u
 
 /* The layout the trampoline expects: code and a writable DATA segment that
  * holds the stack. */
@@ -145,43 +148,45 @@ static int back_in_rm(CPU *cpu, const win_ne_native_gate *gate, int rc)
            cpu->ext_accessors->get_seg16(cpu, WIN_CS) == gate->rm_segment;
 }
 
-static int timeout_taken;
+/* The interrupt controller's answer for the one step that takes the yield
+ * vector: it puts the real callback back at once (the guest may call the
+ * API in the same run, and DOS must see its own interrupts), and keeps an
+ * interrupt that was pending for DOS. */
+static CPU *yield_cpu;
+static int (*yield_saved)(void *);
+static bool yield_pending;
 
-static int timeout_irq(void *pic)
+static int yield_irq(void *pic)
 {
     (void)pic;
-    timeout_taken = 1;
-    return (int)WIN_NE_TIMEOUT_VECTOR;
+    yield_cpu->cb.pic_read_irq = yield_saved;
+    yield_cpu->intr = yield_pending;
+    return (int)WIN_NE_YIELD_VECTOR;
 }
 
-/* Stop a guest that has not come back. In its own code it is in protected
- * mode with the private IDT, where the timeout vector leads to the fault
- * exit; the trampoline switches modes and tables, so a guest found there
- * runs on (out of it, or to its end) first. */
-static int stop_guest(CPU *cpu, win_ne_native_gate *gate, uint16_t thunk_selector)
+/* The guest has run its slice without calling the API: in its own code it
+ * is in protected mode with the private IDT and takes the yield vector,
+ * whose stub calls the gateway as an API call does (other tasks run, then
+ * it goes on where it was). The trampoline switches modes and tables, so a
+ * guest found there runs on out of it first. Returns how the run that
+ * follows ends. */
+static int preempt(CPU *cpu, win_ne_native_gate *gate, uint16_t thunk_selector)
 {
     CPU_ext_accessors_t *e = cpu->ext_accessors;
-    for (int i = 0; i < 16; i++) {
-        uint16_t cs = e->get_seg16(cpu, WIN_CS);
-        if (cs != gate->rm_segment && cs != thunk_selector)
-            break;
-        int rc = winx86_run(cpu, invoke_native, gate, 1u);
-        if (back_in_rm(cpu, gate, rc))
-            return rc;
-    }
-    if (e->get_seg16(cpu, WIN_CS) == gate->rm_segment)
-        return WINX86_BAD_CONTEXT;      /* Real Mode, but not at the end */
-    int (*pic_read_irq)(void *) = cpu->cb.pic_read_irq;
-    bool pending = cpu->intr;
-    timeout_taken = 0;
-    cpu->cb.pic_read_irq = timeout_irq;
+    uint16_t cs = e->get_seg16(cpu, WIN_CS);
+    if (cs == gate->rm_segment || cs == thunk_selector)
+        return winx86_run(cpu, invoke_native, gate, 1u);
+    yield_cpu = cpu;
+    yield_saved = cpu->cb.pic_read_irq;
+    yield_pending = cpu->intr;
+    cpu->cb.pic_read_irq = yield_irq;
     cpu->intr = true;
-    e->set_flags(cpu, 0x200u, 0);       /* the gate clears IF again */
-    int rc = winx86_run(cpu, NULL, gate, 4u);    /* no API call: no task switch */
-    cpu->cb.pic_read_irq = pic_read_irq;
-    if (!timeout_taken)
-        cpu->intr = false;
-    cpu->intr = cpu->intr || pending;   /* a real one waits for DOS */
+    e->set_flags(cpu, 0x200u, 0);       /* the yield service clears it again */
+    int rc = winx86_run(cpu, invoke_native, gate, WIN_NE_EXEC_SLICE);
+    if (cpu->cb.pic_read_irq == yield_irq) {    /* not taken (cannot be) */
+        cpu->cb.pic_read_irq = yield_saved;
+        cpu->intr = yield_pending;
+    }
     return rc;
 }
 
@@ -212,8 +217,30 @@ static void fault_where(const win_ne_guest_image *g, CPU *cpu, win_ne_fault *f)
             f->segment = i;
 }
 
-int win_ne_execute_basic(const char *path, uint32_t *value, win_ne_fault *fault)
+/* The PSP: INT 20h at 0 as in DOS, the command line at 81h, its length
+ * at 80h, ending with a NUL (Windows) */
+static int write_psp(const win_ne_guest_image *g, const char *cmdline)
 {
+    uint8_t psp[WIN_NE_GUEST_PSP_BYTES];
+    memset(psp, 0, sizeof(psp));
+    psp[0] = 0xcd;
+    psp[1] = 0x20;
+    size_t n = cmdline ? strlen(cmdline) : 0;
+    if (n > 125)
+        n = 125;
+    psp[0x80] = (uint8_t)n;
+    if (n)
+        memcpy(psp + 0x81, cmdline, n);
+    return g->io.write(g->opaque, g->psp.linear, psp, sizeof(psp));
+}
+
+int win_ne_execute(const char *path, const char *cmdline, int show, int (*yield)(void),
+                   win_ne_result *r)
+{
+    win_ne_result none;
+    if (!r)
+        r = &none;
+    memset(r, 0, sizeof(*r));
     PC *pc = get_PC();
     CPU *cpu = pc ? pc->cpu : NULL;
     if (!cpu || cpu->gen < 3 || !cpu->ext_accessors ||
@@ -240,11 +267,15 @@ int win_ne_execute_basic(const char *path, uint32_t *value, win_ne_fault *fault)
         .ne_ss = g.ss, .ne_sp = g.sp,
         .gdt_limit = g.gdt_limit, .gdt_linear = g.gdt_linear
     };
-    uint8_t fault_idt[WIN_NE_FAULT_AREA_BYTES];
-    uint8_t fault_code[WIN_NE_FAULT_AREA_BYTES];
+    uint8_t fault_idt[WIN_NE_FAULT_IDT_BYTES];
+    uint8_t fault_code[WIN_NE_FAULT_CODE_BYTES];
+    uint8_t dos[WIN_NE_DOS_STUB_BYTES];
     if (!win_ne_boot_make(boot, sizeof(boot), &args) ||
         !win_ne_fault_make(fault_idt, fault_code, &args) ||
+        !win_ne_dos_make(dos, &args) ||
+        !write_psp(&g, cmdline) ||
         !g.io.write(g.opaque, linear, boot, sizeof(boot)) ||
+        !g.io.write(g.opaque, g.thunk_linear + WIN_NE_DOS_STUB_OFFSET, dos, sizeof(dos)) ||
         !g.io.write(g.opaque, g.thunk_linear + WIN_NE_FAULT_IDT_OFFSET,
                     fault_idt, sizeof(fault_idt)) ||
         !g.io.write(g.opaque, g.thunk_linear + WIN_NE_FAULT_CODE_OFFSET,
@@ -261,32 +292,37 @@ int win_ne_execute_basic(const char *path, uint32_t *value, win_ne_fault *fault)
     cpu->ext_accessors->set_seg16(cpu, WIN_CS, args.rm_segment);
     cpu->ip = cpu->next_ip = 0;
     cpu->prefetch_base = (uint32_t)-1;
-    win_ne_guest_api_context api = { &g, read_guest, NULL, 0 };
+    win_ne_guest_api_context api = { &g, read_guest, NULL, 0, path, show, 0, 0, 0, yield, 0 };
     win_ne_native_gate gate = {
         .dos_context = &old, .api = &api,
         .scratch_linear = linear,
         .rm_segment = args.rm_segment
     };
-    rc = winx86_run(cpu, invoke_native, &gate, WIN_NE_EXEC_BURSTS);
-    if (!back_in_rm(cpu, &gate, rc))
-        rc = stop_guest(cpu, &gate, g.thunk_selector);
+    /* until it ends: its exit, its entry's RETF, a fault, a call WINN has
+     * not; an OUT of its own in protected mode ends nothing */
+    rc = winx86_run(cpu, invoke_native, &gate, WIN_NE_EXEC_SLICE);
+    while (!back_in_rm(cpu, &gate, rc) && rc != WINX86_BAD_CONTEXT)
+        rc = preempt(cpu, &gate, g.thunk_selector);
 
     /* EXIT, the private-IDT FAULT trap and a refused API call are all in
-     * Real Mode with the DOS GDTR/IDTR back. Anything else (the trampoline
-     * looping in Real Mode, the timeout vector not taken) leaves the CPU in
-     * a mode and tables the public CPU interface cannot restore: DOS cannot
-     * run again. */
+     * Real Mode with the DOS GDTR/IDTR back. Anything else leaves the CPU
+     * in a mode and tables the public CPU interface cannot restore: DOS
+     * cannot run again. */
     if (!back_in_rm(cpu, &gate, rc))
         for (;;) { }
 
     const uint32_t result = ((uint32_t)cpu->gprx[regcx].r16 << 16) |
                              cpu->gprx[regbx].r16;
     int guest_fault = rc == WINX86_FAULT;
-    if (guest_fault && fault)
-        fault_where(&g, cpu, fault);
+    if (guest_fault)
+        fault_where(&g, cpu, &r->fault);
     restore_cpu(cpu, &old);
-    if (!guest_fault && value) *value = result;
+    r->exited = api.exited;
+    r->stopped = api.stopped;
+    r->value = api.exited ? api.exit_code : guest_fault ? 0 : result;
+    r->unsupported = api.unsupported;
     rc = guest_fault ? WIN_NE_EXEC_FAULT :
+         rc == WINX86_BAD_SERVICE && api.unsupported ? WIN_NE_EXEC_UNSUPPORTED :
          rc == WINX86_BAD_SERVICE || api.invalid_args ? WIN_NE_EXEC_BAD_ARGS : WIN_NE_OK;
 done:
     win_ne_guest_release(&g);

@@ -48,6 +48,13 @@ static int fake_service(void *opaque, CPU *cpu, uint16_t id)
     return 1;
 }
 
+static int exit_service(void *opaque, CPU *cpu, uint16_t id)
+{
+    (void)opaque; (void)cpu;
+    assert(id == 3);
+    return WINX86_SERVICE_EXIT;
+}
+
 static int reject_service(void *opaque, CPU *cpu, uint16_t id)
 {
     (void)opaque; (void)cpu; (void)id;
@@ -174,6 +181,12 @@ int main(void)
     ext.step = hanging_step;
     assert(winx86_run(&cpu, fake_service, &state, 2) == WINX86_TIMEOUT);
     assert(cpu.cb.io_write16 == original_out && cpu.native_done);
+
+    /* a service that ends the run (a DOS exit) */
+    ext.step = fake_step;
+    state.phase = 0;
+    assert(winx86_run(&cpu, exit_service, &state, 4) == WINX86_OK);
+    assert(state.phase == 1 && cpu.cb.io_write16 == original_out && cpu.native_done);
 
     ext.step = note_hook;
     assert(winx86_run(&cpu, NULL, NULL, 1) == WINX86_OK);

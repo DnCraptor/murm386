@@ -7,6 +7,7 @@
 #include "ne_guest_api.h"
 #include <stdint.h>
 #include <string.h>
+#include "ne_boot.h"
 
 extern uint32_t GetVersion(void);
 extern uint16_t GetCurrentTask(void);
@@ -16,21 +17,27 @@ extern int GetSystemMetrics(int);
 extern uint32_t GetSysColor(int);
 extern int MessageBox(uint16_t, const char *, const char *, unsigned int);
 
-/* Bounds are those of the NE segment, not of the complete DOS memory map. */
+/* The segment of a selector: one of the program's, or its PSP */
+static const win_ne_guest_segment *lookup_segment(
+    const win_ne_guest_api_context *ctx, uint16_t selector)
+{
+    if (!ctx || !ctx->image || !ctx->image->segments)
+        return NULL;
+    const win_ne_guest_image *g = ctx->image;
+    for (uint16_t i = 1; i <= g->info.segment_count; i++)
+        if (g->segments[i].selector == selector)
+            return &g->segments[i];
+    return g->psp.selector && g->psp.selector == selector ? &g->psp : NULL;
+}
+
+/* Bounds are those of the segment, not of the complete DOS memory map. */
 static int read_segment(win_ne_guest_api_context *ctx, uint16_t selector,
                         uint32_t offset, void *dst, uint32_t len)
 {
-    if (!ctx || !ctx->image || !ctx->read || !dst)
+    const win_ne_guest_segment *s = lookup_segment(ctx, selector);
+    if (!s || !ctx->read || !dst || offset > s->size || len > s->size - offset)
         return 0;
-    const win_ne_guest_image *g = ctx->image;
-    for (uint16_t i = 1; i <= g->info.segment_count; i++) {
-        const win_ne_guest_segment *s = &g->segments[i];
-        if (s->selector != selector) continue;
-        if (offset > s->size || len > s->size - offset)
-            return 0;
-        return ctx->read(ctx->opaque, s->linear + offset, dst, len);
-    }
-    return 0;
+    return ctx->read(ctx->opaque, s->linear + offset, dst, len);
 }
 
 static int read_stack_word(win_ne_guest_api_context *ctx, CPU *cpu,
@@ -51,47 +58,30 @@ static int read_stack_word(win_ne_guest_api_context *ctx, CPU *cpu,
 static int guest_strlen(win_ne_guest_api_context *ctx,
                         uint16_t selector, uint16_t offset, uint16_t *length)
 {
-    if (!ctx || !ctx->image) return 0;
-    for (uint16_t i = 1; i <= ctx->image->info.segment_count; i++) {
-        const win_ne_guest_segment *s = &ctx->image->segments[i];
-        if (s->selector != selector) continue;
-        if (offset >= s->size) return 0;
-        uint32_t pos = offset;
-        uint8_t buf[32];
-        while (pos < s->size) {
-            uint32_t n = s->size - pos;
-            if (n > sizeof(buf)) n = sizeof(buf);
-            if (!read_segment(ctx, selector, pos, buf, n)) return 0;
-            const uint8_t *end = (const uint8_t *)memchr(buf, 0, n);
-            if (end) {
-                uint32_t count = pos - offset + (uint32_t)(end - buf);
-                if (count > UINT16_MAX) return 0;
-                *length = (uint16_t)count;
-                return 1;
-            }
-            pos += n;
-        }
+    const win_ne_guest_segment *s = lookup_segment(ctx, selector);
+    if (!s || offset >= s->size)
         return 0;
+    uint32_t pos = offset;
+    uint8_t buf[32];
+    while (pos < s->size) {
+        uint32_t n = s->size - pos;
+        if (n > sizeof(buf)) n = sizeof(buf);
+        if (!read_segment(ctx, selector, pos, buf, n)) return 0;
+        const uint8_t *end = (const uint8_t *)memchr(buf, 0, n);
+        if (end) {
+            uint32_t count = pos - offset + (uint32_t)(end - buf);
+            if (count > UINT16_MAX) return 0;
+            *length = (uint16_t)count;
+            return 1;
+        }
+        pos += n;
     }
     return 0;
 }
 
-/* Guest string functions write only to loaded, writable NE data segments.
+/* Guest string functions write only to loaded, writable data segments.
  * The original DOS guest allocator owns the memory; its write callback
  * works while the bridge has restored the CPU's Real Mode DOS context. */
-static const win_ne_guest_segment *lookup_segment(
-    const win_ne_guest_api_context *ctx, uint16_t selector)
-{
-    if (!ctx || !ctx->image || !ctx->image->segments)
-        return NULL;
-    for (uint16_t i = 1; i <= ctx->image->info.segment_count; i++) {
-        const win_ne_guest_segment *s = &ctx->image->segments[i];
-        if (s->selector == selector)
-            return s;
-    }
-    return NULL;
-}
-
 static int write_segment(win_ne_guest_api_context *ctx, uint16_t selector,
                          uint32_t offset, const void *src, uint32_t len)
 {
@@ -154,6 +144,87 @@ static int guest_copy_string(win_ne_guest_api_context *ctx,
     return 0; /* unterminated, even when the guest segment is larger */
 }
 
+/* The guest's other registers, as the gateway saved them below its return
+ * address (4 bytes below SP here): PUSHA, then DS, ES, FLAGS. A service
+ * that returns more than AX and DX writes them there. */
+enum { FR_CX = -8, FR_DX = -10, FR_BX = -12, FR_BP = -16, FR_SI = -18,
+       FR_DI = -20, FR_DS = -22, FR_ES = -24 };
+
+static int frame_get(win_ne_guest_api_context *ctx, CPU *cpu, int at, uint16_t *v)
+{
+    uint8_t b[2];
+    if (!read_segment(ctx, ctx->image->ss, (uint16_t)(cpu->gprx[regsp].r16 + at), b, 2))
+        return 0;
+    *v = (uint16_t)(b[0] | b[1] << 8);
+    return 1;
+}
+
+static int frame_set(win_ne_guest_api_context *ctx, CPU *cpu, int at, uint16_t v)
+{
+    uint8_t b[2] = { (uint8_t)v, (uint8_t)(v >> 8) };
+    return write_segment(ctx, ctx->image->ss, (uint16_t)(cpu->gprx[regsp].r16 + at), b, 2);
+}
+
+static uint16_t dgroup(const win_ne_guest_image *g)
+{
+    uint16_t i = g->info.auto_data ? g->info.auto_data : g->info.ss_index;
+    return i ? g->segments[i].selector : 0;
+}
+
+/* KERNEL.91 InitTask: AX 1, BX the command line (ES:BX, in the PSP), CX
+ * the stack size, DX nCmdShow, SI hPrevInstance, DI hInstance (DGROUP's
+ * selector, as in Windows), ES the PSP; the stack bounds in DGROUP's
+ * header (pStackTop, pStackMin, pStackBottom at 0Ah). */
+static int init_task(win_ne_guest_api_context *ctx, CPU *cpu, uint32_t *value)
+{
+    const win_ne_guest_image *g = ctx->image;
+    uint16_t ds = dgroup(g);
+    if (!frame_set(ctx, cpu, FR_BX, 0x81) ||
+        !frame_set(ctx, cpu, FR_CX, g->info.stack_size) ||
+        !frame_set(ctx, cpu, FR_SI, 0) ||
+        !frame_set(ctx, cpu, FR_DI, ds) ||
+        !frame_set(ctx, cpu, FR_ES, g->psp.selector))
+        return 0;
+    uint16_t bottom = g->sp, top = (uint16_t)(g->sp - g->info.stack_size);
+    uint8_t hdr[6] = { (uint8_t)top, (uint8_t)(top >> 8), (uint8_t)top, (uint8_t)(top >> 8),
+                       (uint8_t)bottom, (uint8_t)(bottom >> 8) };
+    if (g->info.stack_size && g->info.stack_size < g->sp)
+        write_segment(ctx, ds, 0x0a, hdr, sizeof(hdr));
+    *value = ((uint32_t)(uint16_t)ctx->show << 16) | 1u;
+    return 1;
+}
+
+/* INT 21h: the guest's AX is the word at SP, then the interrupt's IP, CS,
+ * FLAGS (its carry: the error); DX stays the guest's unless the function
+ * sets it. */
+static int int21(win_ne_guest_api_context *ctx, CPU *cpu, uint32_t *value)
+{
+    uint16_t ax, dx, flags;
+    if (!read_stack_word(ctx, cpu, 0, &ax) || !frame_get(ctx, cpu, FR_DX, &dx) ||
+        !read_stack_word(ctx, cpu, 6, &flags))
+        return 0;
+    switch (ax >> 8) {
+    case 0x30:                  /* DOS version: 7.0, as GetVersion says */
+        ax = 0x0007;
+        if (!frame_set(ctx, cpu, FR_BX, 0) || !frame_set(ctx, cpu, FR_CX, 0))
+            return 0;
+        break;
+    case 0x4c:                  /* exit */
+        ctx->exited = 1;
+        ctx->exit_code = (uint8_t)ax;
+        return WINX86_SERVICE_EXIT;
+    default:
+        ctx->unsupported = (uint16_t)(WIN_NE_SERVICE_INT21 + (ax >> 8));
+        return 0;
+    }
+    flags &= (uint16_t)~1u;     /* CF: no error */
+    uint8_t b[2] = { (uint8_t)flags, (uint8_t)(flags >> 8) };
+    if (!write_segment(ctx, ctx->image->ss, (uint16_t)(cpu->gprx[regsp].r16 + 6), b, 2))
+        return 0;
+    *value = ((uint32_t)dx << 16) | ax;
+    return 1;
+}
+
 int win_ne_guest_api(void *opaque, CPU *cpu, uint16_t service)
 {
     if (!cpu) return 0;
@@ -162,6 +233,64 @@ int win_ne_guest_api(void *opaque, CPU *cpu, uint16_t service)
     int dword = 0;
     uint16_t arg, ptr_seg;
     switch (service) {
+    case 91:      /* KERNEL.InitTask: registers */
+        if (!init_task(ctx, cpu, &value)) {
+            ctx->invalid_args = 1;
+            value = 0;
+        }
+        dword = 1;
+        break;
+    case 30:      /* KERNEL.WaitEvent(HTASK): nothing waits */
+        value = 0;
+        break;
+    case 0x1005:  /* USER.InitApp(HINSTANCE) */
+        value = 1;
+        break;
+    case 49: {    /* KERNEL.GetModuleFileName(HINSTANCE, LPSTR, int) */
+        uint16_t size, off, sel;
+        value = 0;
+        if (!read_stack_word(ctx, cpu, 4, &size) || !read_stack_word(ctx, cpu, 6, &off) ||
+            !read_stack_word(ctx, cpu, 8, &sel) || !size) {
+            ctx->invalid_args = 1;
+            break;
+        }
+        const char *p = ctx->path ? ctx->path : "";
+        uint16_t n = (uint16_t)strlen(p);
+        if (n > size - 1u)
+            n = (uint16_t)(size - 1u);
+        static const char nul = 0;
+        if (!write_segment(ctx, sel, off, p, n) || !write_segment(ctx, sel, (uint32_t)off + n, &nul, 1))
+            ctx->invalid_args = 1;
+        else
+            value = n;
+        break;
+    }
+    case WIN_NE_SERVICE_YIELD: {
+        /* the yield vector: AX, DX and the flags as they were, but IF (set
+         * to take it) */
+        uint16_t ax, dx, flags;
+        if (!read_stack_word(ctx, cpu, 0, &ax) || !frame_get(ctx, cpu, FR_DX, &dx) ||
+            !read_stack_word(ctx, cpu, 6, &flags))
+            return 0;
+        flags &= (uint16_t)~0x200u;
+        uint8_t b[2] = { (uint8_t)flags, (uint8_t)(flags >> 8) };
+        if (!write_segment(ctx, ctx->image->ss, (uint16_t)(cpu->gprx[regsp].r16 + 6), b, 2))
+            return 0;
+        if (ctx->yield && ctx->yield()) {
+            ctx->stopped = 1;
+            return WINX86_SERVICE_EXIT;
+        }
+        value = ((uint32_t)dx << 16) | ax;
+        dword = 1;
+        break;
+    }
+    case WIN_NE_SERVICE_INT21: {
+        int r = int21(ctx, cpu, &value);
+        if (r != 1)
+            return r;
+        dword = 1;
+        break;
+    }
     case 3:       value = GetVersion(); dword = 1; break;
     case 36:      value = GetCurrentTask(); break;
     case 152:     value = GetNumTasks(); break;
@@ -230,7 +359,9 @@ int win_ne_guest_api(void *opaque, CPU *cpu, uint16_t service)
             value = GetSysColor((int)(int16_t)arg);
         }
         break;
-    default: return 0;
+    default:
+        ctx->unsupported = service;
+        return 0;
     }
     cpu->gprx[regax].r16 = (uint16_t)value;
     cpu->gprx[regdx].r16 = dword ? (uint16_t)(value >> 16) : 0;

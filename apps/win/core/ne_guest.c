@@ -22,11 +22,13 @@
 /* Never allow allocated API slots or the PM bootstrap to overlap. */
 _Static_assert(WIN_NE_GUEST_ACTIVE_THUNKS * THUNK_BYTES <= WIN_NE_BOOT_OFFSET,
                "NE API thunks overlap the PM trampoline");
-_Static_assert(WIN_NE_BOOT_OFFSET + WIN_NE_BOOT_CAPACITY <= WIN_NE_FAULT_IDT_OFFSET,
-               "NE PM trampoline overlaps private fault IDT");
-_Static_assert(WIN_NE_FAULT_IDT_OFFSET + WIN_NE_FAULT_AREA_BYTES <=
+_Static_assert(WIN_NE_BOOT_OFFSET + WIN_NE_BOOT_CAPACITY <= WIN_NE_DOS_STUB_OFFSET,
+               "NE PM trampoline overlaps the DOS stubs");
+_Static_assert(WIN_NE_DOS_STUB_OFFSET + WIN_NE_DOS_STUB_BYTES <= WIN_NE_FAULT_IDT_OFFSET,
+               "NE DOS stubs overlap the private IDT");
+_Static_assert(WIN_NE_FAULT_IDT_OFFSET + WIN_NE_FAULT_IDT_BYTES <=
                WIN_NE_FAULT_CODE_OFFSET, "NE private IDT overlaps fault code");
-_Static_assert(WIN_NE_FAULT_CODE_OFFSET + WIN_NE_FAULT_AREA_BYTES <=
+_Static_assert(WIN_NE_FAULT_CODE_OFFSET + WIN_NE_FAULT_CODE_BYTES <=
                WIN_NE_GUEST_MAX_THUNKS * THUNK_BYTES,
                "NE fault recovery exceeds thunk segment");
 
@@ -73,6 +75,8 @@ void win_ne_guest_release(win_ne_guest_image *image)
             image->io.free(image->opaque, image->thunk_linear);
         if (image->gdt_linear)
             image->io.free(image->opaque, image->gdt_linear);
+        if (image->psp.linear)
+            image->io.free(image->opaque, image->psp.linear);
     }
     free(image->segments);
     free(image->gdt);
@@ -110,63 +114,91 @@ static int assign_selector(void *opaque, uint16_t index, uint16_t flags,
     return 1;
 }
 
-/* Win16 ordinals are distinct per DLL. The encoded service number lives
- * entirely inside WINN; it is not a guest pointer or an emulated IRQ. */
+/* The Win16 functions the guest can import: module, ordinal, name and the
+ * bytes of PASCAL arguments its RETF releases. The service number, KERNEL
+ * ordinal n or USER 0x1000 + n, lives entirely inside WINN; it is not a
+ * guest pointer or an emulated IRQ. */
+static const struct {
+    uint8_t user;
+    uint16_t ordinal;
+    const char *name;
+    uint16_t args;
+} services[] = {
+    { 0, 3, "GetVersion", 0 },
+    { 0, 30, "WaitEvent", 2 },
+    { 0, 36, "GetCurrentTask", 0 },
+    { 0, 49, "GetModuleFileName", 8 },
+    { 0, 88, "lstrcpy", 8 },
+    { 0, 89, "lstrcat", 8 },
+    { 0, 90, "lstrlen", 4 },
+    { 0, 91, "InitTask", 0 },
+    { 0, 152, "GetNumTasks", 0 },
+    { 1, 1, "MessageBox", 12 },
+    { 1, 5, "InitApp", 2 },
+    { 1, 13, "GetTickCount", 0 },
+    { 1, 179, "GetSystemMetrics", 2 },
+    { 1, 180, "GetSysColor", 2 },
+};
+
+static int service_index(const win_ne_import *imp)
+{
+    int user;
+    if (name_eq(imp->module, "KERNEL") || name_eq(imp->module, "KERNEL.EXE"))
+        user = 0;
+    else if (name_eq(imp->module, "USER") || name_eq(imp->module, "USER.EXE"))
+        user = 1;
+    else
+        return -1;
+    for (int i = 0; i < (int)(sizeof(services) / sizeof(services[0])); i++)
+        if (services[i].user == user &&
+            (imp->ordinal ? imp->ordinal == services[i].ordinal && !imp->procedure[0]
+                          : name_eq(imp->procedure, services[i].name)))
+            return i;
+    return -1;
+}
+
 static int service_id(const win_ne_import *imp, uint16_t *id)
 {
-    if (name_eq(imp->module, "KERNEL") || name_eq(imp->module, "KERNEL.EXE")) {
-        if ((imp->ordinal == 3 && !imp->procedure[0]) ||
-            (!imp->ordinal && name_eq(imp->procedure, "GetVersion")))
-            *id = 3;
-        else if ((imp->ordinal == 36 && !imp->procedure[0]) ||
-                 (!imp->ordinal && name_eq(imp->procedure, "GetCurrentTask")))
-            *id = 36;
-        else if ((imp->ordinal == 152 && !imp->procedure[0]) ||
-                 (!imp->ordinal && name_eq(imp->procedure, "GetNumTasks")))
-            *id = 152;
-        else if ((imp->ordinal == 88 && !imp->procedure[0]) ||
-                 (!imp->ordinal && name_eq(imp->procedure, "lstrcpy")))
-            *id = 88;
-        else if ((imp->ordinal == 89 && !imp->procedure[0]) ||
-                 (!imp->ordinal && name_eq(imp->procedure, "lstrcat")))
-            *id = 89;
-        else if ((imp->ordinal == 90 && !imp->procedure[0]) ||
-                 (!imp->ordinal && name_eq(imp->procedure, "lstrlen")))
-            *id = 90;
-        else
-            return 0;
-    } else if (name_eq(imp->module, "USER") ||
-               name_eq(imp->module, "USER.EXE")) {
-        if ((imp->ordinal == 13 && !imp->procedure[0]) ||
-            (!imp->ordinal && name_eq(imp->procedure, "GetTickCount")))
-            *id = 0x100du;
-        else if ((imp->ordinal == 179 && !imp->procedure[0]) ||
-                 (!imp->ordinal && name_eq(imp->procedure, "GetSystemMetrics")))
-            *id = 0x10b3u;
-        else if ((imp->ordinal == 180 && !imp->procedure[0]) ||
-                 (!imp->ordinal && name_eq(imp->procedure, "GetSysColor")))
-            *id = 0x10b4u;
-        else if ((imp->ordinal == 1 && !imp->procedure[0]) ||
-                 (!imp->ordinal && name_eq(imp->procedure, "MessageBox")))
-            *id = 0x1001u;
-        else
-            return 0;
-    } else {
+    int i = service_index(imp);
+    if (i < 0)
         return 0;
-    }
+    *id = (uint16_t)((services[i].user ? 0x1000u : 0u) + services[i].ordinal);
     return 1;
 }
 
 /* Win16 PASCAL return releases the argument words after popping CS:IP. */
 static uint16_t service_args(uint16_t id)
 {
-    switch (id) {
-    case 88: case 89: return 8;    /* KERNEL.lstrcpy/lstrcat: two FAR pointers */
-    case 90: return 4;             /* KERNEL.lstrlen: far pointer */
-    case 0x1001: return 12;        /* USER.MessageBox(HWND, FAR, FAR, WORD) */
-    case 0x10b3: case 0x10b4: return 2; /* USER: int parameter */
-    default: return 0;
-    }
+    for (unsigned i = 0; i < sizeof(services) / sizeof(services[0]); i++)
+        if ((services[i].user ? 0x1000u : 0u) + services[i].ordinal == id)
+            return services[i].args;
+    return 0;
+}
+
+static int note_unresolved(void *opaque, const win_ne_import *imp)
+{
+    if (service_index(imp) >= 0)
+        return 0;
+    win_ne_unresolved *u = (win_ne_unresolved *)opaque;
+    size_t n = strlen(imp->module);
+    if (n >= sizeof(u->module))
+        n = sizeof(u->module) - 1;
+    memcpy(u->module, imp->module, n);
+    u->module[n] = 0;
+    n = strlen(imp->procedure);
+    if (n >= sizeof(u->name))
+        n = sizeof(u->name) - 1;
+    memcpy(u->name, imp->procedure, n);
+    u->name[n] = 0;
+    u->ordinal = imp->ordinal;
+    return 1;                           /* the first one is enough */
+}
+
+int win_ne_guest_unresolved(const char *path, win_ne_unresolved *u)
+{
+    memset(u, 0, sizeof(*u));
+    win_ne_info info;
+    return win_ne_scan(path, &info, note_unresolved, u) == WIN_NE_CANCELLED;
 }
 
 static int resolve_import(void *opaque, const win_ne_import *imp,
@@ -211,19 +243,25 @@ int win_ne_guest_load(const char *path, win_ne_guest_image *out,
     out->info = info;
     out->segments = (win_ne_guest_segment *)calloc((size_t)info.segment_count + 1u,
                                                     sizeof(*out->segments));
-    uint32_t gdtsize = ((uint32_t)info.segment_count + 2u) * GDT_ENTRY_BYTES;
+    /* null, thunks, the segments, the PSP */
+    uint32_t gdtsize = ((uint32_t)info.segment_count + 3u) * GDT_ENTRY_BYTES;
     out->gdt = (uint8_t *)calloc(gdtsize, 1);
     rc = WIN_NE_NO_MEMORY;
     if (!out->segments || !out->gdt)
         goto fail;
     out->gdt_limit = (uint16_t)(gdtsize - 1u);
     out->thunk_selector = GDT_THUNK_INDEX * GDT_ENTRY_BYTES;
+    out->psp.selector = (uint16_t)(GDT_SEGMENT_INDEX(info.segment_count + 1u) * GDT_ENTRY_BYTES);
     if (!guest_alloc(out, gdtsize, &out->gdt_linear) ||
         !guest_alloc(out, WIN_NE_GUEST_MAX_THUNKS * THUNK_BYTES,
-                     &out->thunk_linear))
+                     &out->thunk_linear) ||
+        !guest_alloc(out, WIN_NE_GUEST_PSP_BYTES, &out->psp.linear))
         goto fail;
     descriptor(out->gdt + out->thunk_selector, out->thunk_linear,
                WIN_NE_GUEST_MAX_THUNKS * THUNK_BYTES, 1);
+    out->psp.size = WIN_NE_GUEST_PSP_BYTES;
+    out->psp.flags = 1;                 /* data */
+    descriptor(out->gdt + out->psp.selector, out->psp.linear, WIN_NE_GUEST_PSP_BYTES, 0);
 
     win_ne_image image;
     rc = win_ne_load_image(path, &image, assign_selector,
@@ -270,8 +308,10 @@ int win_ne_guest_load(const char *path, win_ne_guest_image *out,
     out->cs = out->segments[info.cs_index].selector;
     out->ip = info.ip;
     if (info.ss_index) {
-        out->ss = out->segments[info.ss_index].selector;
-        out->sp = info.sp;
+        /* SP 0: the top of the segment, after DGROUP's data, heap, stack */
+        const win_ne_guest_segment *ss = &out->segments[info.ss_index];
+        out->ss = ss->selector;
+        out->sp = info.sp ? info.sp : (uint16_t)(ss->size < 65536u ? ss->size : 0xfffeu);
     }
     rc = WIN_NE_OK;
 loaded_fail:
