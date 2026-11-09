@@ -259,34 +259,57 @@ static uint16_t guest_get16(uint32_t linear)
  * it in protected mode, the result comes back in Real Mode. The gateway's
  * scratch words are kept around it, since the procedure calls the API in
  * turn. A fault in it ends the program (dead, at its next return). */
+/* the stack the program waits on (the gateway's, in its innermost call) */
+static const win_ne_guest_segment *guest_stack(const ne_run *run, uint16_t *ss, uint16_t *sp)
+{
+    const win_ne_guest_image *g = run->g;
+    *ss = guest_get16(run->gate.scratch_linear + WIN_NE_BOOT_PM_SS_OFFSET);
+    *sp = guest_get16(run->gate.scratch_linear + WIN_NE_BOOT_PM_SP_OFFSET);
+    for (uint16_t i = 1; i <= g->info.segment_count; i++)
+        if (g->segments[i].selector == *ss)
+            return &g->segments[i];
+    return NULL;
+}
+
+uint32_t win_ne_blob_far(win_ne_guest_api_context *ctx, uint16_t len)
+{
+    ne_run *run = ctx ? (ne_run *)ctx->exec : NULL;
+    uint16_t ss, sp;
+    if (!run || !guest_stack(run, &ss, &sp))
+        return 0;
+    return (uint32_t)ss << 16 | (uint16_t)((sp - len) & ~1u);
+}
+
 uint32_t win_ne_callback(win_ne_guest_api_context *ctx, uint32_t proc, uint16_t hwnd,
                          uint16_t msg, uint16_t wp, uint32_t lp)
 {
+    const uint16_t words[5] = { hwnd, msg, wp, (uint16_t)(lp >> 16), (uint16_t)lp };
+    return win_ne_call(ctx, proc, words, 5, NULL, 0);
+}
+
+uint32_t win_ne_call(win_ne_guest_api_context *ctx, uint32_t proc, const uint16_t *words,
+                     int n, void *blob, uint16_t len)
+{
     PC *pc = get_PC();
     ne_run *run = ctx ? (ne_run *)ctx->exec : NULL;
-    if (!pc || !pc->cpu || !run || ctx->dead || ctx->exited || ctx->stopped)
+    if (!pc || !pc->cpu || !run || ctx->dead || ctx->exited || ctx->stopped || n < 0 || n > 16)
         return 0;
     CPU *cpu = pc->cpu;
     const win_ne_guest_image *g = run->g;
     const uint32_t boot = run->gate.scratch_linear;
     const uint32_t thunks = g->thunk_linear;
+    uint16_t ss, top;
+    const win_ne_guest_segment *stack = guest_stack(run, &ss, &top);
+    uint16_t at = (uint16_t)((top - len) & ~1u), sp = (uint16_t)(at - 2u * (unsigned)n);
+    if (!stack || sp < 64u || at > top || top > stack->size)
+        return 0;
     uint8_t scratch[WIN_NE_BOOT_SCRATCH_BYTES];
     memcpy(scratch, dos_guest_linear_ptr(boot + WIN_NE_BOOT_SCRATCH_OFFSET), sizeof(scratch));
-    uint16_t ss = guest_get16(boot + WIN_NE_BOOT_PM_SS_OFFSET);
-    uint16_t sp = (uint16_t)(guest_get16(boot + WIN_NE_BOOT_PM_SP_OFFSET) - 10u);
-    const win_ne_guest_segment *stack = NULL;
-    for (uint16_t i = 1; i <= g->info.segment_count; i++)
-        if (g->segments[i].selector == ss)
-            stack = &g->segments[i];
-    if (!stack || sp < 16u || sp + 10u > stack->size)
-        return 0;
-    /* PASCAL: hwnd, msg, wParam, lParam pushed in this order */
-    uint32_t a = stack->linear + sp;
-    guest_put16(a, (uint16_t)lp);
-    guest_put16(a + 2, (uint16_t)(lp >> 16));
-    guest_put16(a + 4, wp);
-    guest_put16(a + 6, msg);
-    guest_put16(a + 8, hwnd);
+    /* the blob above the arguments, PASCAL: the first word pushed highest */
+    if (len)
+        memcpy(dos_guest_linear_ptr(stack->linear + at), blob, len);
+    for (int i = 0; i < n; i++)
+        guest_put16(stack->linear + sp + 2u * (unsigned)(n - 1 - i), words[i]);
     guest_put16(thunks + WIN_NE_CB_PROC_OFFSET, (uint16_t)proc);
     guest_put16(thunks + WIN_NE_CB_PROC_OFFSET + 2, (uint16_t)(proc >> 16));
     guest_put16(thunks + WIN_NE_CB_SS_OFFSET, ss);
@@ -316,6 +339,8 @@ uint32_t win_ne_callback(win_ne_guest_api_context *ctx, uint32_t proc, uint16_t 
     }
     restore_cpu(cpu, &here);
     memcpy(dos_guest_linear_ptr(boot + WIN_NE_BOOT_SCRATCH_OFFSET), scratch, sizeof(scratch));
+    if (len)                            /* what the procedure left in it */
+        memcpy(blob, dos_guest_linear_ptr(stack->linear + at), len);
     return result;
 }
 

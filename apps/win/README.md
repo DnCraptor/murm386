@@ -41,18 +41,21 @@ procedure as it is (a native pointer, for the program to hand on to
 menus (`LoadMenu`, the menu of a class), accelerators, strings, dialogs
 (made native templates, their dialog procedures its own code as well).
 
-Supported functions (the table in `core/ne_guest.c`): KERNEL GetVersion,
-WaitEvent, GetCurrentTask, GetModuleFileName, MakeProcInstance,
-FreeProcInstance, lstrcpy, lstrcat, lstrlen, InitTask, GetNumTasks; USER
-MessageBox, InitApp, PostQuitMessage, BeginPaint, EndPaint, CreateWindow,
-ShowWindow, DestroyWindow, RegisterClass, DefWindowProc, GetMessage,
-TranslateMessage, DispatchMessage, UpdateWindow, InvalidateRect,
-LoadCursor and LoadIcon (the system's), LoadMenu, LoadString,
-LoadAccelerators, TranslateAccelerator, DialogBox, EndDialog, GetDlgItem,
-SetDlgItemText, GetDlgItemText, SetDlgItemInt, GetDlgItemInt, wsprintf,
-GetTickCount, GetSystemMetrics, GetSysColor; GDI
-TextOut, GetStockObject; INT 21h 30h (version) and 4Ch (exit), INT 20h.
-Its FAR ANSI strings are copied into bounded native buffers. A program
+The functions a program can call: some 230 go the generic way
+(`core/ne_sigs.h`, made by `sdk/gen_ne_sigs.py` from the native prototypes:
+words, signed words, dwords, strings, buffers with their sizes, RECTs,
+POINTs, converted and handed to the function of the native export table);
+the rest have code of their own (the table in `core/ne_guest.c`): start-up
+(InitTask ...), messages and window procedures, resources, dialogs,
+SendMessage and PostMessage (strings for the controls made native),
+SetTimer with a procedure of its own, EnumWindows, subclassing
+(SetWindowLong GWL_WNDPROC, CallWindowProc), memory (GlobalAlloc: a
+selector of its own per block; LocalAlloc: in DGROUP's local heap),
+structures (TEXTMETRIC, LOGFONT, LOGPEN, LOGBRUSH, BITMAP), wsprintf. A
+window procedure gets WM_CREATE's CREATESTRUCT, WM_GETMINMAXINFO's,
+WM_WINDOWPOSCHANGING's and WM_NCCALCSIZE's structures as copies of its
+own, which its DefWindowProc gives back; INT 21h 30h (version) and 4Ch
+(exit), INT 20h. Its FAR ANSI strings are copied into bounded native buffers. A program
 importing anything else is refused before protected mode with the first
 function it lacks named; an INT 21h function WINN does not have ends it
 with that function named. Several NE programs can run at once, each as a
@@ -64,11 +67,13 @@ starts or goes on.
 generate `NEAPP.EXE`, `NEDIALOG.EXE`, `NELOOP.EXE`, `NEFAULT.EXE`,
 `NEHANG.EXE` and the `OW*.EXE`, built by Open Watcom, their sources in the
 script: `OWHELLO`, `OWBUSY`, `OWWIN`, `OWMENU` (resources), `OWSEGS` (three
-code segments) (`make NEFIXTURES` in `host/`). All have DOS MZ stubs that explain how to launch them under WINN
+code segments), `OWDEMO` (many functions at once) (`make NEFIXTURES` in
+`host/`). All have DOS MZ stubs that explain how to launch them under WINN
 when invoked directly from DOS. `host/test_ne_run` runs them on the
 emulator's own i386 core (`src/i386.c` as it is, built for the host with
 the stand-ins in `host/x86run/`), and so does the host `winhost`: they are
-in its `HOSTWIN/` (`scripts/owwin.txt`, `scripts/owmenu.txt`).
+in its `HOSTWIN/` (`scripts/owwin.txt`, `scripts/owmenu.txt`,
+`scripts/owdemo.txt`).
 
     WINN [:] [program [arguments]]
 
@@ -156,7 +161,8 @@ DOS critical errors (a drive without a disk) fail the call instead of
 asking "Abort, Retry, Fail?".
 
 After adding an API function, run `sdk/gen_exports.py` (it updates
-`core/exports.c` and `sdk/winapi_stubs.S`, both committed).
+`core/exports.c` and `sdk/winapi_stubs.S`, both committed), then
+`sdk/gen_ne_sigs.py` (`core/ne_sigs.h`: how Win16 programs reach it).
 
 ## Start-up logo
 
@@ -232,6 +238,7 @@ use `ucontext`):
     ./winhost scripts/switch.txt PROGMAN     # Alt+Tab, Alt+Esc past a MessageBox; DEMO's Alt+letters
     ./winhost scripts/owwin.txt PROGMAN      # a Win16 program's window, on the i386 core
     ./winhost scripts/owmenu.txt PROGMAN     # its menu, accelerator, string, dialog
+    ./winhost scripts/owdemo.txt PROGMAN     # controls, GDI, timers, memory, a file, subclassing
     ./winhost scripts/winmine.txt WINMINE    # marks, a lost game, Expert, Best Times
     ./winhost scripts/logo.txt PROGMAN       # the logo (copy the BMPs into HOSTWIN first)
     ./winhost800 scripts/vga800.txt  # the VGA800 driver, built in

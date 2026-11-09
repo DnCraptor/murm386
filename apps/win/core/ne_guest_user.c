@@ -19,32 +19,9 @@
 #include <string.h>
 #include "wincore.h"
 #include "ne_guest_api.h"
+#include "ne_guest_int.h"
 
 #if defined(__arm__) || defined(__thumb__) || defined(WINN_NE_HOST)
-
-#define NE_CLASSES 16
-#define NE_PAINTS  4
-#define NE_DIALOGS 8
-#define NE_ACCELS  4
-
-typedef struct ne_user {
-    struct ne_user *next;
-    win_ne_guest_api_context *ctx;
-    HTASK task;
-    struct {
-        char name[32];
-        uint32_t proc;
-        char menu[32];              /* its menu resource: a name, */
-        uint16_t menu_id;           /* or a number */
-    } cls[NE_CLASSES];
-    struct { HWND hwnd; PAINTSTRUCT ps; } paint[NE_PAINTS];
-    /* the dialog procedures of the dialogs open (nested, as DialogBox
-     * runs), and the one of the dialog being made */
-    struct { HWND hwnd; uint32_t proc; } dlg[NE_DIALOGS];
-    int dialogs;
-    uint32_t pending;
-    HACCEL accel[NE_ACCELS];        /* destroyed at the end */
-} ne_user;
 
 static ne_user *programs;
 
@@ -69,10 +46,31 @@ void win_ne_user_end(win_ne_guest_api_context *ctx)
             for (int i = 0; i < NE_ACCELS; i++)
                 if (u->accel[i])
                     DestroyAcceleratorTableN(u->accel[i]);
+            ne_call_end(u);
             win_free(u);
             break;
         }
     ctx->user = NULL;
+}
+
+ne_user *ne_user_of(HTASK task)
+{
+    for (ne_user *u = programs; u; u = u->next)
+        if (u->task == task)
+            return u;
+    return NULL;
+}
+
+/* a window of one of the program's classes */
+int ne_own_window(ne_user *u, HWND h)
+{
+    char name[32];
+    if (GetWindowTask(h) != u->task || !GetClassName(h, name, sizeof(name)))
+        return 0;
+    for (int i = 0; i < NE_CLASSES; i++)
+        if (u->cls[i].proc && !lstrcmpi(u->cls[i].name, name))
+            return 1;
+    return 0;
 }
 
 /* The native window procedure of every class a program registers: its own
@@ -90,16 +88,15 @@ static LRESULT CALLBACK ne_wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             break;
         for (int i = 0; i < NE_CLASSES; i++)
             if (u->cls[i].proc && !lstrcmpi(u->cls[i].name, name))
-                return (LRESULT)(int32_t)win_ne_callback(c, u->cls[i].proc, (uint16_t)h,
-                                                         (uint16_t)msg, (uint16_t)wp,
-                                                         (uint32_t)lp);
+                return ne_message(u, u->cls[i].proc, h, msg, wp, lp);
         break;
     }
     return DefWindowProc(h, msg, wp, lp);
 }
 
 /* The native dialog procedure of the program's dialogs: its own, bound to
- * the dialog at its first message (WM_SETFONT, WM_INITDIALOG ...). */
+ * the dialog at its first message (WM_SETFONT, WM_INITDIALOG ...) until it
+ * is destroyed. */
 static BOOL CALLBACK ne_dlgproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
     HTASK task = GetWindowTask(h);
@@ -109,103 +106,54 @@ static BOOL CALLBACK ne_dlgproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         win_ne_guest_api_context *c = u->ctx;
         if (c->dead || c->exited || c->stopped)
             return FALSE;
-        uint32_t proc = 0;
-        for (int i = 0; i < u->dialogs; i++)
+        int slot = -1;
+        for (int i = 0; i < NE_DIALOGS; i++)
             if (u->dlg[i].hwnd == h)
-                proc = u->dlg[i].proc;
-        if (!proc && u->pending && u->dialogs < NE_DIALOGS) {
-            proc = u->pending;
-            u->dlg[u->dialogs].hwnd = h;
-            u->dlg[u->dialogs++].proc = proc;
-            u->pending = 0;
-        }
-        if (!proc)
+                slot = i;
+        for (int i = 0; slot < 0 && u->pending && i < NE_DIALOGS; i++)
+            if (!u->dlg[i].hwnd) {
+                slot = i;
+                u->dlg[i].hwnd = h;
+                u->dlg[i].proc = u->pending;
+                u->pending = 0;
+            }
+        if (slot < 0)
             return FALSE;
-        return (uint16_t)win_ne_callback(c, proc, (uint16_t)h, (uint16_t)msg, (uint16_t)wp,
-                                         (uint32_t)lp) != 0;
+        BOOL r = (uint16_t)ne_message(u, u->dlg[slot].proc, h, msg, wp, lp) != 0;
+        if (msg == WM_NCDESTROY)
+            u->dlg[slot].hwnd = 0;
+        return r;
     }
     return FALSE;
 }
 
 /* ---------------------------------------------------------------- helpers */
 
-static uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | p[1] << 8); }
-static uint32_t rd32(const uint8_t *p) { return rd16(p) | (uint32_t)rd16(p + 2) << 16; }
-static void wr16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
-static void wr32(uint8_t *p, uint32_t v) { wr16(p, (uint16_t)v); wr16(p + 2, (uint16_t)(v >> 16)); }
-
-typedef struct {
-    win_ne_guest_api_context *ctx;
-    win_ne_regs *cpu;
-    int bad;
-} args;
-
-/* the argument word at SP + off (the first is at 4) */
-static uint16_t w(args *a, uint32_t off)
-{
-    uint16_t v = 0;
-    if (!win_ne_arg(a->ctx, a->cpu, off, &v))
-        a->bad = 1;
-    return v;
-}
-
-static uint32_t dw(args *a, uint32_t off) { return w(a, off) | (uint32_t)w(a, off + 2) << 16; }
-
-/* a Win16 coordinate or size; CW_USEDEFAULT is 8000h there */
-static int coord(uint16_t v) { return v == 0x8000u ? CW_USEDEFAULT : (int)(int16_t)v; }
-
-/* a name, or an atom (selector 0): a native LPCSTR */
-static LPCSTR name_or_atom(args *a, uint32_t far, char *buf, uint32_t cap)
-{
-    if (!(far >> 16))
-        return MAKEINTRESOURCE((WORD)far);
-    if (!win_ne_string(a->ctx, (uint16_t)(far >> 16), (uint16_t)far, buf, cap)) {
-        a->bad = 1;
-        buf[0] = 0;
-    }
-    return buf;
-}
-
-/* the program's hInstance (its DGROUP selector, from InitTask): its task */
-static HINSTANCE instance(ne_user *u, uint16_t h) { return h ? (HINSTANCE)u->task : 0; }
-
-/* Win16 MSG: hwnd, message, wParam (words), lParam, time (dwords), pt */
-static void msg_to_guest(const MSG *m, uint8_t g[18])
-{
-    wr16(g, (uint16_t)m->hwnd);
-    wr16(g + 2, (uint16_t)m->message);
-    wr16(g + 4, (uint16_t)m->wParam);
-    wr32(g + 6, (uint32_t)m->lParam);
-    wr32(g + 10, m->time);
-    wr16(g + 14, (uint16_t)m->pt.x);
-    wr16(g + 16, (uint16_t)m->pt.y);
-}
-
-static int msg_from_guest(args *a, uint32_t far, MSG *m)
-{
-    uint8_t g[18];
-    if (!win_ne_read(a->ctx, (uint16_t)(far >> 16), (uint16_t)far, g, sizeof(g)))
-        return a->bad = 1, 0;
-    memset(m, 0, sizeof(*m));
-    m->hwnd = rd16(g);
-    m->message = rd16(g + 2);
-    m->wParam = rd16(g + 4);
-    m->lParam = (LPARAM)rd32(g + 6);
-    m->time = rd32(g + 10);
-    m->pt.x = (int16_t)rd16(g + 14);
-    m->pt.y = (int16_t)rd16(g + 16);
-    return 1;
-}
-
 /* ---------------------------------------------------------------- wsprintf */
 
 /* USER.420 wsprintf(LPSTR, LPCSTR, ...): C arguments, words for %d %u %x
  * %c, dwords for %l., far pointers for %s */
-static __attribute__((noinline)) int ne_wsprintf(args *a)
+/* an argument of wsprintf (on the stack, from 12 on) or wvsprintf (at
+ * list, from 0 on) */
+static uint16_t fw(args *a, uint32_t list, uint32_t off)
+{
+    uint8_t b[2] = { 0, 0 };
+    if (!list)
+        return w(a, off);
+    if (!win_ne_read(a->ctx, (uint16_t)(list >> 16), (uint16_t)list + off - 12u, b, 2))
+        a->bad = 1;
+    return rd16(b);
+}
+
+static uint32_t fdw(args *a, uint32_t list, uint32_t off)
+{
+    return fw(a, list, off) | (uint32_t)fw(a, list, off + 2) << 16;
+}
+
+__attribute__((noinline)) int ne_format(args *a, uint32_t dst, uint32_t fmtp, uint32_t list)
 {
     char out[1025];
     const int cap = (int)sizeof(out);
-    uint32_t dst = dw(a, 4), fmtp = dw(a, 8);
     char fmt[256];
     if (a->bad || !win_ne_string(a->ctx, (uint16_t)(fmtp >> 16), (uint16_t)fmtp, fmt, sizeof(fmt)))
         return a->bad = 1, 0;
@@ -231,7 +179,7 @@ static __attribute__((noinline)) int ne_wsprintf(args *a)
         int len = 0;
         switch (*f) {
         case 'd': case 'i': case 'u': case 'x': case 'X': {
-            uint32_t v = lng ? dw(a, next) : w(a, next);
+            uint32_t v = lng ? fdw(a, list, next) : fw(a, list, next);
             next += lng ? 4 : 2;
             int neg = 0;
             if ((*f == 'd' || *f == 'i') && (lng ? (int32_t)v < 0 : (int16_t)v < 0)) {
@@ -253,11 +201,11 @@ static __attribute__((noinline)) int ne_wsprintf(args *a)
             break;
         }
         case 'c':
-            tmp[len++] = (char)w(a, next);
+            tmp[len++] = (char)fw(a, list, next);
             next += 2;
             break;
         case 's': {
-            uint32_t p = dw(a, next);
+            uint32_t p = fdw(a, list, next);
             next += 4;
             if (!win_ne_string(a->ctx, (uint16_t)(p >> 16), (uint16_t)p, tmp, sizeof(tmp)))
                 tmp[0] = 0;
@@ -496,7 +444,7 @@ static uint16_t load_string(args *a)
  * (style, count, x, y, cx, cy, menu, class, caption, [point size, face];
  * then each item: x, y, cx, cy, id, style, class (80h.. the built-in
  * ones), text, extra bytes) made a native one */
-static __attribute__((noinline)) int dialog_box(args *a, ne_user *u)
+static __attribute__((noinline)) int dialog_box(args *a, ne_user *u, int modeless)
 {
     static const char *const builtin[] = { "BUTTON", "EDIT", "STATIC", "LISTBOX",
                                            "SCROLLBAR", "COMBOBOX" };
@@ -571,11 +519,10 @@ static __attribute__((noinline)) int dialog_box(args *a, ne_user *u)
     t.cdit = (BYTE)k;
     {
         uint32_t outer = u->pending;
-        int open = u->dialogs;
         u->pending = proc;
-        r = DialogBoxIndirectN(instance(u, 1), &t, items, owner, ne_dlgproc);
+        r = modeless ? (int)CreateDialogIndirectN(instance(u, 1), &t, items, owner, ne_dlgproc)
+                     : DialogBoxIndirectN(instance(u, 1), &t, items, owner, ne_dlgproc);
         u->pending = outer;
-        u->dialogs = open;                      /* it is closed */
     }
 done:
     free(d);
@@ -684,7 +631,10 @@ int win_ne_guest_user(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint16_t 
     case 52:                            /* FreeProcInstance(FARPROC) */
         break;
     case 0x1057:                        /* DialogBox(HINSTANCE, LPCSTR, HWND, DLGPROC) */
-        v = (uint16_t)dialog_box(&a, u);
+        v = (uint16_t)dialog_box(&a, u, 0);
+        break;
+    case 0x1059:                        /* CreateDialog(HINSTANCE, LPCSTR, HWND, DLGPROC) */
+        v = (uint16_t)dialog_box(&a, u, 1);
         break;
     case 0x1058:                        /* EndDialog(HWND, int) */
         v = (uint16_t)EndDialog(w(&a, 6), (int16_t)w(&a, 4));
@@ -743,7 +693,7 @@ int win_ne_guest_user(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint16_t 
         break;
     }
     case 0x106b:                        /* DefWindowProc(HWND, UINT, WPARAM, LPARAM) */
-        v = (uint32_t)DefWindowProc(w(&a, 12), w(&a, 10), w(&a, 8), (LPARAM)dw(&a, 4));
+        v = (uint32_t)ne_defproc(&a, u, DefWindowProc, w(&a, 12), w(&a, 10), w(&a, 8), dw(&a, 4));
         *dword = 1;
         break;
     case 0x106c: {                      /* GetMessage(LPMSG, HWND, UINT, UINT) */
@@ -806,7 +756,7 @@ int win_ne_guest_user(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint16_t 
         break;
     }
     case 0x11a4:                        /* wsprintf(LPSTR, LPCSTR, ...) */
-        v = (uint16_t)ne_wsprintf(&a);
+        v = (uint16_t)ne_format(&a, dw(&a, 4), dw(&a, 8), 0);
         break;
     case 0x3021:                        /* TextOut(HDC, int, int, LPCSTR, int) */
         v = ne_textout(&a);
@@ -815,7 +765,9 @@ int win_ne_guest_user(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint16_t 
         v = GetStockObject((int16_t)w(&a, 4));
         break;
     default:
-        return 0;
+        if (!ne_call(&a, u, service, &v, dword))
+            return 0;
+        break;
     }
     if (a.bad)
         ctx->invalid_args = 1;

@@ -20,6 +20,9 @@ OWMENU: resources: the title a string, the class's menu, an accelerator
 
 OWSEGS: code in three segments (medium model, two modules, linked with
     wlink option packcode=0), far calls between them: C8CA765F
+
+OWDEMO: many API functions at once (controls with strings, GDI, timers,
+    memory, a file, a subclassed edit control, CREATESTRUCT, MINMAXINFO)
 """
 import sys
 
@@ -482,6 +485,268 @@ PROGRAMS = {
             '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
             '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
             '0000000000000000000000000000000000000000000000000000000000000000670167010000000000000000'
+            '0000000000000000000000000000000000000000000000000000'
+        )),
+    'OWDEMO': (
+        # #include <windows.h>
+        # #include <string.h>
+        #
+        # /* many API functions at once: controls with strings, GDI drawing, timers
+        #  * (a WM_TIMER one, a TIMERPROC one), global and local memory, a file,
+        #  * text metrics, enumeration, a subclassed edit control, WM_CREATE's
+        #  * CREATESTRUCT, WM_GETMINMAXINFO; what each gave in the window */
+        # static HINSTANCE inst;
+        # static HWND edit, list;
+        # static FARPROC edit_old;
+        # static int ticks, ticks2, windows, chars, created;
+        # static char title[40], file_text[16], global_text[16], local_text[16];
+        # static TEXTMETRIC tm;
+        #
+        # LRESULT FAR PASCAL __export EditProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+        # {
+        #     if (msg == WM_CHAR)
+        #         chars++;
+        #     return CallWindowProc(edit_old, h, msg, wp, lp);
+        # }
+        #
+        # void FAR PASCAL __export TimerProc(HWND h, UINT msg, UINT id, DWORD time)
+        # {
+        #     if (++ticks2 >= 3)
+        #         KillTimer(h, id);
+        # }
+        #
+        # BOOL FAR PASCAL __export EnumProc(HWND h, LPARAM lp)
+        # {
+        #     windows++;
+        #     return TRUE;
+        # }
+        #
+        # static void memory_and_file(void)
+        # {
+        #     HGLOBAL g = GlobalAlloc(GMEM_MOVEABLE, 1000);
+        #     char FAR *p = GlobalLock(g);
+        #     HLOCAL l;
+        #     HFILE f;
+        #     lstrcpy(p, "global ok");
+        #     lstrcpy(global_text, p);
+        #     GlobalUnlock(g);
+        #     GlobalFree(g);
+        #     l = LocalAlloc(LMEM_FIXED, 32);
+        #     lstrcpy((char NEAR *)l, "local ok");
+        #     lstrcpy(local_text, (char NEAR *)l);
+        #     LocalFree(l);
+        #     f = _lcreat("OWDEMO.TMP", 0);
+        #     _lwrite(f, "file ok", 8);
+        #     _lclose(f);
+        #     f = _lopen("OWDEMO.TMP", OF_READ);
+        #     _lread(f, file_text, 8);
+        #     _lclose(f);
+        # }
+        #
+        # LRESULT FAR PASCAL __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+        # {
+        #     PAINTSTRUCT ps;
+        #     HDC dc;
+        #     char text[80], item[32];
+        #     HPEN pen, oldpen;
+        #     HBRUSH brush, oldbrush;
+        #     POINT tri[3];
+        #     RECT rc;
+        #     int y = 160;
+        #     switch (msg) {
+        #     case WM_CREATE:
+        #         lstrcpy(title, ((LPCREATESTRUCT)lParam)->lpszName);
+        #         created = 1;
+        #         edit = CreateWindow("EDIT", "edit", WS_CHILD | WS_VISIBLE | WS_BORDER, 10, 10, 120, 22,
+        #                             hwnd, (HMENU)10, inst, NULL);
+        #         list = CreateWindow("LISTBOX", "", WS_CHILD | WS_VISIBLE | WS_BORDER, 10, 40, 120, 60,
+        #                             hwnd, (HMENU)11, inst, NULL);
+        #         CreateWindow("BUTTON", "Go", WS_CHILD | WS_VISIBLE, 10, 106, 50, 24, hwnd, (HMENU)12,
+        #                      inst, NULL);
+        #         SendMessage(list, LB_ADDSTRING, 0, (LPARAM)(LPSTR)"one");
+        #         SendMessage(list, LB_ADDSTRING, 0, (LPARAM)(LPSTR)"two");
+        #         SendMessage(list, LB_SETCURSEL, 1, 0);
+        #         edit_old = (FARPROC)GetWindowLong(edit, GWL_WNDPROC);
+        #         SetWindowLong(edit, GWL_WNDPROC, (LONG)MakeProcInstance((FARPROC)EditProc, inst));
+        #         SetTimer(hwnd, 1, 50, NULL);
+        #         SetTimer(hwnd, 2, 50, (TIMERPROC)MakeProcInstance((FARPROC)TimerProc, inst));
+        #         EnumWindows((WNDENUMPROC)MakeProcInstance((FARPROC)EnumProc, inst), 0);
+        #         memory_and_file();
+        #         dc = GetDC(hwnd);
+        #         GetTextMetrics(dc, &tm);
+        #         ReleaseDC(hwnd, dc);
+        #         return 0;
+        #     case WM_GETMINMAXINFO:
+        #         ((MINMAXINFO FAR *)lParam)->ptMinTrackSize.x = 200;
+        #         ((MINMAXINFO FAR *)lParam)->ptMinTrackSize.y = 150;
+        #         return 0;
+        #     case WM_TIMER:
+        #         if (wParam == 1 && ++ticks >= 3)
+        #             KillTimer(hwnd, 1);
+        #         InvalidateRect(hwnd, NULL, TRUE);
+        #         return 0;
+        #     case WM_COMMAND:
+        #         if (wParam == 12) {
+        #             SendMessage(list, LB_ADDSTRING, 0, (LPARAM)(LPSTR)"three");
+        #             SetWindowText(edit, "went");
+        #             InvalidateRect(hwnd, NULL, TRUE);
+        #         }
+        #         return 0;
+        #     case WM_PAINT:
+        #         dc = BeginPaint(hwnd, &ps);
+        #         pen = CreatePen(PS_SOLID, 2, RGB(255, 0, 0));
+        #         brush = CreateSolidBrush(RGB(255, 255, 0));
+        #         oldpen = SelectObject(dc, pen);
+        #         oldbrush = SelectObject(dc, brush);
+        #         Rectangle(dc, 150, 10, 220, 60);
+        #         Ellipse(dc, 230, 10, 300, 60);
+        #         tri[0].x = 310; tri[0].y = 60; tri[1].x = 340; tri[1].y = 10; tri[2].x = 370; tri[2].y = 60;
+        #         Polygon(dc, tri, 3);
+        #         MoveTo(dc, 150, 70);
+        #         LineTo(dc, 370, 70);
+        #         SelectObject(dc, oldpen);
+        #         SelectObject(dc, oldbrush);
+        #         DeleteObject(pen);
+        #         DeleteObject(brush);
+        #         SetBkMode(dc, TRANSPARENT);
+        #         SetTextColor(dc, RGB(0, 0, 128));
+        #         SendMessage(list, LB_GETTEXT, (WPARAM)SendMessage(list, LB_GETCURSEL, 0, 0),
+        #                     (LPARAM)(LPSTR)item);
+        #         TextOut(dc, 150, 80, text, wsprintf(text, "list %d, '%s'",
+        #                 (int)SendMessage(list, LB_GETCOUNT, 0, 0), (LPSTR)item));
+        #         GetWindowText(edit, item, sizeof(item));
+        #         TextOut(dc, 150, 96, text, wsprintf(text, "edit '%s', %d chars", (LPSTR)item, chars));
+        #         TextOut(dc, 150, 112, text, wsprintf(text, "timers %d %d", ticks, ticks2));
+        #         TextOut(dc, 150, 128, text, wsprintf(text, "%s, %s, %s", (LPSTR)global_text,
+        #                 (LPSTR)local_text, (LPSTR)file_text));
+        #         GetClientRect(hwnd, &rc);
+        #         TextOut(dc, 10, y, text, wsprintf(text, "font %d high, %d windows, client %dx%d",
+        #                 tm.tmHeight, windows > 0, rc.right, rc.bottom));
+        #         TextOut(dc, 10, y + 16, text, wsprintf(text, "created '%s'", (LPSTR)title));
+        #         EndPaint(hwnd, &ps);
+        #         return 0;
+        #     case WM_DESTROY:
+        #         PostQuitMessage(0);
+        #         return 0;
+        #     }
+        #     return DefWindowProc(hwnd, msg, wParam, lParam);
+        # }
+        #
+        # int PASCAL WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
+        # {
+        #     WNDCLASS wc;
+        #     MSG msg;
+        #     HWND hwnd;
+        #     inst = hInstance;
+        #     memset(&wc, 0, sizeof(wc));
+        #     wc.lpfnWndProc = WndProc;
+        #     wc.hInstance = hInstance;
+        #     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        #     wc.hbrBackground = GetStockObject(WHITE_BRUSH);
+        #     wc.lpszClassName = "OwDemo";
+        #     RegisterClass(&wc);
+        #     hwnd = CreateWindow("OwDemo", "Watcom API tour", WS_OVERLAPPEDWINDOW, 20, 20, 400, 240,
+        #                         NULL, NULL, hInstance, NULL);
+        #     ShowWindow(hwnd, nCmdShow);
+        #     UpdateWindow(hwnd);
+        #     while (GetMessage(&msg, NULL, 0, 0)) {
+        #         TranslateMessage(&msg);
+        #         DispatchMessage(&msg);
+        #     }
+        #     return msg.wParam;
+        # }
+        bytes.fromhex(
+            '4d5a80000100000004000000ffff0000b8000000000000004000000000000000000000000000000000000000'
+            '00000000000000000000000000000000800000000e1fba0e00b409cd21b8014ccd2154686973206973206120'
+            '57696e646f77732031362d6269742065786563757461626c650d0a240000000000000000000000004e450501'
+            '9d0010000000000002030200000400202607010000000200020003000e0040005000500086008c002d010000'
+            '000001000000020000000000000000039e009609400d9609fa06ca01410c6002064f5744454d4f0000084544'
+            '495450524f4301000954494d455250524f43020008454e554d50524f43030007574e4450524f430400000100'
+            '06000d00000455534552064b45524e454c034744490401290800293e0019600029430100000a6f7764656d6f'
+            '2e65786500000000ccebfd90909090001e5890455589e51e8ed88b460c3d02017504ff062802ff362402ff36'
+            '2202ff760e50ff760aff7608ff76069affff00001f5d4dca0a001e5890455589e51e8ed8ff063002833e3002'
+            '037ce5ff760eff760a9affff0000ebd81e5890455589e51e8ed8b80100ff062e021f5d4dca06005589e55351'
+            '52565783ec02b802005031c050b8e803509affff00005089c69affff000052508946f41eb810005089d79aff'
+            'ff00001eb8ca015057ff76f49affff0000569affff0000569affff000031c050b82000509affff00001e5089'
+            'c61eb81a00509affff00001eb81202501e569affff0000569affff00001eb823005031c0509affff00005089'
+            'c61eb82e0050bf0800579affff0000569affff00001ebe23005631f6569affff0000501ebf020257bf080057'
+            '89c69affff0000569affff00008d66f65f5e5a595b5dc31e5890455589e51e8ed8565781ecb0008b76068b56'
+            '088b5e0a8b460c8b7e0ec746f6a0003d0f007203e9ab013d02007503e9c3043d01007403e9c804b8da011e8e'
+            'c25026ff741826ff74169affff00001eb83b00501eb8360050b880505031c050b80a005050b8780050b81600'
+            '5057b80a0050ff36260231c05050c706320201009affff0000a32a021eb84100501eb8400050b880505031c0'
+            '50b80a0050b8280050b8780050b83c005057b80b0050ff36260231c050509affff0000a334021eb84c00501e'
+            'b8490050b800505031c050b80a0050b86a0050b8320050b818005057b80c0050ff36260231c050509affff00'
+            '00ff363402b801045031c0501eb85300509affff0000ff363402b801045031c0501eb85700509affff0000ff'
+            '363402b8070450b801005031c050509affff0000ff362a02b8fcff509affff0000ff362a02a32202b8fcff50'
+            'b8ffff50b8ffff50ff362602891624029affff000052509affff000057b8010050b832005031c050509affff'
+            '000057b8020050b8320050b8ffff50b8ffff50ff3626029affff000052509affff0000b8ffff50b8ffff50ff'
+            '3626029affff0000525031c050509affff0000e87dfd579affff00005089c61eb83602509affff000057569a'
+            'ffff000031c031f6eb3076383d1301753583fb017512011e2c02833e2c02037c0757539affff00005731c050'
+            '50b801005031f69affff000031c089f28d66fa5f5ee9e4fceb583d1101753883fb0c75b4ff363402b8010450'
+            '31c0501eb85b00509affff0000ff362a021eb86100509affff00005731c05050b80100509affff0000eb813d'
+            '240075138ec226c7440cc80031c026c7440e9600e96bffe99902571e8d569a529affff000089c68946f831c0'
+            '50b802005031c050b8ff00509affff00008946f031c050b8ffff509affff000056ff76f08946ee9affff0000'
+            '56ff76ee8946f29affff00008946f456b8960050b80a0050b8dc0050b83c00509affff000056b8e60050b80a'
+            '0050b82c0150b83c00509affff0000c746da3601c746dc3c00c746de5401c746e00a00568d56da1eb8030052'
+            'c746e2720150c746e43c009affff000056b8960050b84600509affff000056b8720150b84600509affff0000'
+            '56ff76f29affff000056ff76f49affff0000ff76f09affff0000ff76ee9affff000056b80100509affff0000'
+            '56b880005031c0509affff0000ff363402b80a0450ff363402b809045031c05050509affff0000501e8d56ba'
+            '529affff000056b8960050b85000501e8d964aff521e8d56ba52ff363402b80c045031c05050509affff0000'
+            '501eb86600501e8d964aff529affff000083c40e509affff0000ff362a021e8d56ba52b82000509affff0000'
+            '56b8960050b86000501e8d964aff52ff3628021e8d56ba521eb87400501e8d964aff529affff000083c40e50'
+            '9affff000056b8960050b87000501e8d964aff52ff363002ff362c021eb88800501e529affff000083c40c50'
+            '9affff000056b8960050b88000501e8d964aff521eb80202501eb81202501eb8ca01501eb89500501e529aff'
+            'ff000083c414509affff0000571e8d56e6529affff000056b80a0050b8a000501e8d964aff52ff76ecff76ea'
+            '833e2e02007e5fb8010050ff3636021eb8a000501e8d964aff529affff000083c410509affff0000ff76f8b8'
+            '0a00508b46f6051000501e8d964aff521eb8da01501eb8c700501e529affff000083c40c509affff0000571e'
+            '8d569a5231f69affff0000e912fd31c0eba031c05031f69affff0000e901fd57505352569affff000089d6e9'
+            'f4fc5589e5565783ec2c8b760cb91a008d7ed030c089362602571e078ae0d1e9f3ab13c9f3aa5f30e450c746'
+            'd2ffff50b8007fc746d4ffff508976da9affff00008946de31c0509affff0000c746e6d4008d56d01e8946e0'
+            '528c5ee89affff00001eb8d400501eb8db0050b8cf005031c050b814005050b8900150b8f0005031c0505056'
+            '50509affff000050ff760489c69affff0000569affff00001e8d56ea5231c05050509affff000085c0750c8b'
+            '46ee8d66fc5f5e5dc20a001e8d56ea529affff00001e8d56ea529affff0000ebcb00eb0203009affff00000b'
+            'c0750e5033c0ba0f00e8fc0158b44ccd218c06f000575606535253be550289360b018c1e0d01268a07880446'
+            '4384c075f589360a005b2bc0509affff000057579affff0000fc1e07b95502bfca012bcf32c0f3aab87008a3'
+            '0701b8ffffa30901b430cd21a2f2008826f3009affff0000a2f4008826f50086e0a3f60054583bc475120f01'
+            'e0a90100740ab001a2f800b003a2f9001ebf130157b89000509affff0000b81301893e0f018c1e1101b8ff00'
+            'e8fd00e870fee98b004f70656e20576174636f6d20432f432b2b31362052756e2d54696d652073797374656d'
+            '2e20436f7079726967687420286329204f70656e20576174636f6d20436f6e7472696275746f727320323030'
+            '322d323032362e20506f7274696f6e7320436f7079726967687420284329205379626173652c20496e632e20'
+            '313938382d323030322e00c3cb00c3c3535289c3833ec801007404ff16c801ff16a401baff00b81000e8a800'
+            'ff16a401ff16a60189d8e996fe5289c2ff16a401ff16a60189d0e986fe5589e5535289c3833f0075078d66fc'
+            '5a5b5dc31eff171febf35589e5535289c38b47028b1785c0750485d274df1eff1f1febd95589e55351525657'
+            '89c11ee881ffbfca0189fabbca0189fe88c839fb7316803f02750583c306ebf23a470172f689de8a4701ebef'
+            '39fe74158d4402803c007508e88affc60402ebcbe89bffebf61f8d66f65f5e5a595b5dc35589e55351565789'
+            'c11ee82aff88d5bfca0189fabbca0189fe88c839fb7316803f02750583c306ebf23a470177f689de8a4701eb'
+            'ef39fe741c3a6c017305c60402ebd18d4402803c007505e827ffebeee83bffebe91f8d66f85f5eeb9f006400'
+            '0301ca0401006f000301f00401006f00030101050100a40103010a050300210003011c050100240003014405'
+            '0100a40103014d0503002100030170050100a40103017905030021000301a3050100a4010301ac0503002100'
+            '0301b705010021000301eb050100a4010301f40503002100030119060100a401030122060300210003012f06'
+            '01002800030140060100060003014d0601006b00050081060100430102008a0601004301030191060100ad00'
+            '03019c06030057000301b106010039000301db06010029000301e60601002a000301ec0601007c000301fb06'
+            '01006c00030115070100710003011f070100720003012b0702005b0003016a0702001e000301710701000500'
+            '02008b070100260703019c07020003000301ce07020031000301340001007a0003015a0001000c0003018e00'
+            '02000f0003019600020012000301a700020058000301b500020058000301bb00020013000301c10002001100'
+            '0301cd00020005000301db00020058000301e700020058000301ed00020007000301fa000200530003010b01'
+            '02005600030111010200510003011e010200550003012f0102005200030135010200510003018f0102005800'
+            '0301c501010029000301fb010100290003013102010029000301460201006f0003015b0201006f0003017002'
+            '01006f0003017d020100870002008d0201000800050091020100080003019d02020033000301a40201008800'
+            '0301b60201000a000200c40201003e000500c80201003e000301d002020033000301d70201000a000200dc02'
+            '010060000500e002010060000301e802020033000301f302010036000301fc02010042000301090303005d00'
+            '03011003010044000301340301000c000301440301007d000301710301006f0003017f030100250003018d03'
+            '01007d000301b503010027000301cd0303003d000301dc03030042000301e80303002d000301f40303002d00'
+            '03010d0403001b000301230403001800030150040300240003015e040300140003016c040300130003017504'
+            '03002d0003017e0403002d00030186040300450003018e040300450003019804030002000301a50403000900'
+            '0301bf0401006f0000000000050000000000000000000000676c6f62616c206f6b006c6f63616c206f6b004f'
+            '5744454d4f2e544d500066696c65206f6b0065646974004544495400004c495354424f5800476f0042555454'
+            '4f4e006f6e650074776f0074687265650077656e74006c6973742025642c2027257327006564697420272573'
+            '272c2025642063686172730074696d6572732025642025640025732c2025732c20257300666f6e7420256420'
+            '686967682c2025642077696e646f77732c20636c69656e742025647825640063726561746564202725732700'
+            '4f7744656d6f00576174636f6d2041504920746f75720000ffff00000000000000000000000c000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000730873080000000000000000'
             '0000000000000000000000000000000000000000000000000000'
         )),
 }

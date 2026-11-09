@@ -144,7 +144,7 @@ int main(void)
     reset_guest();
     assert(win_ne_guest_load(path, &img, &io, NULL) == WIN_NE_OK);
     assert(img.info.segment_count == 1 && img.thunk_count == 1);
-    assert(img.gdt_limit == 31 && img.cs == 0x10 && img.ss == 0x10);
+    assert(img.gdt_limit == 8 * (4 + WIN_NE_GUEST_GLOBALS) - 1 && img.cs == 0x10 && img.ss == 0x10);
     assert(img.ip == 0 && img.sp == 0x40 && img.thunk_selector == 0x08);
     assert(nactive == 4 && img.gdt_linear && img.thunk_linear && img.psp.linear);
     assert(img.psp.selector == 0x18);
@@ -185,12 +185,12 @@ int main(void)
         assert(!nactive && alloc_calls == free_calls);
     }
     reset_guest();
-    file[SEG1 + 0x40 + 2 + 6] = 4; /* unsupported KERNEL ordinal */
+    file[SEG1 + 0x40 + 2 + 6] = 2; /* unsupported KERNEL ordinal (ExitKernel) */
     save_fixture(path, file);
     assert(win_ne_guest_load(path, &img, &io, NULL) == WIN_NE_UNRESOLVED);
     assert(!nactive && alloc_calls == free_calls);
     win_ne_unresolved u;
-    assert(win_ne_guest_unresolved(path, &u) && !strcmp(u.module, "KERNEL") && u.ordinal == 4);
+    assert(win_ne_guest_unresolved(path, &u) && !strcmp(u.module, "KERNEL") && u.ordinal == 2);
     file[SEG1 + 0x40 + 2 + 6] = 3;
     save_fixture(path, file);
     assert(!win_ne_guest_unresolved(path, &u));

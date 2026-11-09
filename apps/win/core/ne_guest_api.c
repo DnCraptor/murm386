@@ -17,7 +17,7 @@ extern int GetSystemMetrics(int);
 extern uint32_t GetSysColor(int);
 extern int MessageBox(uint16_t, const char *, const char *, unsigned int);
 
-/* The segment of a selector: one of the program's, or its PSP */
+/* The segment of a selector: one of the program's, its PSP, a global block */
 static const win_ne_guest_segment *lookup_segment(
     const win_ne_guest_api_context *ctx, uint16_t selector)
 {
@@ -27,7 +27,12 @@ static const win_ne_guest_segment *lookup_segment(
     for (uint16_t i = 1; i <= g->info.segment_count; i++)
         if (g->segments[i].selector == selector)
             return &g->segments[i];
-    return g->psp.selector && g->psp.selector == selector ? &g->psp : NULL;
+    if (g->psp.selector && g->psp.selector == selector)
+        return &g->psp;
+    for (unsigned i = 0; i < WIN_NE_GUEST_GLOBALS; i++)     /* GlobalAlloc's */
+        if (g->globals[i].linear && g->globals[i].selector == selector)
+            return &g->globals[i];
+    return NULL;
 }
 
 /* Bounds are those of the segment, not of the complete DOS memory map. */

@@ -21,6 +21,8 @@
 /* The program's PSP (its own selector, ES after InitTask): the command line
  * at 81h, as DOS has it, but ending with a NUL (Windows). */
 #define WIN_NE_GUEST_PSP_BYTES 256u
+/* GDT entries for the program's global memory blocks (GlobalAlloc) */
+#define WIN_NE_GUEST_GLOBALS 64u
 
 /* Guest linear allocations must be addressable via an x86 segment base and
  * remain allocated until the entire staged image is released. The callbacks
@@ -46,6 +48,8 @@ typedef struct {
     uint32_t gdt_linear, thunk_linear;
     uint16_t gdt_limit, thunk_selector;
     win_ne_guest_segment psp;       /* a data segment of its own */
+    /* its global memory blocks, a selector each (0: a free entry) */
+    win_ne_guest_segment globals[WIN_NE_GUEST_GLOBALS];
     uint16_t cs, ip, ss, sp;
     uint16_t thunk_count;
     /* Each active slot holds a Win16 service with a known Pascal ABI. */
@@ -70,6 +74,19 @@ typedef struct {
     uint16_t ordinal;               /* 0: by name */
 } win_ne_unresolved;
 int win_ne_guest_unresolved(const char *path, win_ne_unresolved *u);
+
+/* A global memory block of the program (DOS memory, a data selector of its
+ * own, zeroed): its selector, 0 if there is no memory or no entry left.
+ * Resized (moved: same selector), freed (all of them go with the image). */
+uint16_t win_ne_guest_global_alloc(win_ne_guest_image *g, uint32_t bytes);
+int win_ne_guest_global_realloc(win_ne_guest_image *g, uint16_t sel, uint32_t bytes,
+                                int (*read)(void *, uint32_t, void *, uint32_t));
+int win_ne_guest_global_free(win_ne_guest_image *g, uint16_t sel);
+win_ne_guest_segment *win_ne_guest_global(win_ne_guest_image *g, uint16_t sel);
+
+/* The marshalling of a generic function (core/ne_sigs.h) by its service
+ * number, NULL if it is not one: "result:arguments" */
+const char *win_ne_generic_sig(uint16_t service);
 
 /* Returns the DOS INT 21h-backed guest allocator on the RP2350 target.
  * Allocation/free must run before entering protected mode or after leaving it. */

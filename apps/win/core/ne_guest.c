@@ -77,6 +77,9 @@ void win_ne_guest_release(win_ne_guest_image *image)
             image->io.free(image->opaque, image->gdt_linear);
         if (image->psp.linear)
             image->io.free(image->opaque, image->psp.linear);
+        for (unsigned i = 0; i < WIN_NE_GUEST_GLOBALS; i++)
+            if (image->globals[i].linear)
+                image->io.free(image->opaque, image->globals[i].linear);
     }
     free(image->segments);
     free(image->gdt);
@@ -172,20 +175,110 @@ static const struct {
     { M_USER, 178, "TranslateAccelerator", 8 },
     { M_GDI, 33, "TextOut", 12 },
     { M_GDI, 87, "GetStockObject", 2 },
+    /* ne_guest_call.c */
+    { M_KERNEL, 4, "LocalInit", 6 },
+    { M_KERNEL, 5, "LocalAlloc", 4 },
+    { M_KERNEL, 6, "LocalReAlloc", 6 },
+    { M_KERNEL, 7, "LocalFree", 2 },
+    { M_KERNEL, 8, "LocalLock", 2 },
+    { M_KERNEL, 9, "LocalUnlock", 2 },
+    { M_KERNEL, 10, "LocalSize", 2 },
+    { M_KERNEL, 15, "GlobalAlloc", 6 },
+    { M_KERNEL, 16, "GlobalReAlloc", 8 },
+    { M_KERNEL, 17, "GlobalFree", 2 },
+    { M_KERNEL, 18, "GlobalLock", 2 },
+    { M_KERNEL, 19, "GlobalUnlock", 2 },
+    { M_KERNEL, 20, "GlobalSize", 2 },
+    { M_KERNEL, 21, "GlobalHandle", 2 },
+    { M_KERNEL, 22, "GlobalFlags", 2 },
+    { M_KERNEL, 23, "LockSegment", 2 },
+    { M_KERNEL, 24, "UnlockSegment", 2 },
+    { M_USER, 10, "SetTimer", 10 },
+    { M_USER, 12, "KillTimer", 4 },
+    { M_USER, 30, "WindowFromPoint", 4 },
+    { M_USER, 54, "EnumWindows", 8 },
+    { M_USER, 55, "EnumChildWindows", 10 },
+    { M_USER, 76, "PtInRect", 8 },
+    { M_USER, 89, "CreateDialog", 12 },
+    { M_USER, 90, "IsDialogMessage", 6 },
+    { M_USER, 101, "SendDlgItemMessage", 12 },
+    { M_USER, 109, "PeekMessage", 12 },
+    { M_USER, 110, "PostMessage", 10 },
+    { M_USER, 111, "SendMessage", 10 },
+    { M_USER, 122, "CallWindowProc", 14 },
+    { M_USER, 129, "GetClassWord", 4 },
+    { M_USER, 131, "GetClassLong", 4 },
+    { M_USER, 133, "GetWindowWord", 4 },
+    { M_USER, 134, "SetWindowWord", 6 },
+    { M_USER, 135, "GetWindowLong", 4 },
+    { M_USER, 136, "SetWindowLong", 8 },
+    { M_USER, 191, "ChildWindowFromPoint", 6 },
+    { M_USER, 308, "DefDlgProc", 10 },
+    { M_USER, 421, "wvsprintf", 12 },
+    { M_USER, 431, "AnsiUpper", 4 },
+    { M_USER, 432, "AnsiLower", 4 },
+    { M_USER, 472, "AnsiNext", 4 },
+    { M_USER, 473, "AnsiPrev", 8 },
+    { M_GDI, 50, "CreateBrushIndirect", 4 },
+    { M_GDI, 57, "CreateFontIndirect", 4 },
+    { M_GDI, 62, "CreatePenIndirect", 4 },
+    { M_GDI, 82, "GetObject", 8 },
+    { M_GDI, 93, "GetTextMetrics", 6 },
 };
 
+/* the generic ones (sdk/gen_ne_sigs.py) */
+static const struct {
+    uint8_t module;
+    uint16_t ordinal;
+    const char *name;
+    const char *sig;
+} generic[] = {
+#include "ne_sigs.h"
+};
+
+/* the bytes of PASCAL arguments of a signature's codes */
+static uint16_t sig_args(const char *sig)
+{
+    uint16_t n = 0;
+    for (const char *p = strchr(sig, ':') + 1; *p; p++)
+        n = (uint16_t)(n + (strchr("wiI", *p) ? 2 : 4));
+    return n;
+}
+
+static int generic_index(int module, const win_ne_import *imp)
+{
+    for (int i = 0; i < (int)(sizeof(generic) / sizeof(generic[0])); i++)
+        if (generic[i].module == module &&
+            (imp->ordinal ? imp->ordinal == generic[i].ordinal && !imp->procedure[0]
+                          : name_eq(imp->procedure, generic[i].name)))
+            return i;
+    return -1;
+}
+
+const char *win_ne_generic_sig(uint16_t service)
+{
+    for (unsigned i = 0; i < sizeof(generic) / sizeof(generic[0]); i++)
+        if (module_base[generic[i].module] + generic[i].ordinal == service)
+            return generic[i].sig;
+    return NULL;
+}
+
+static int module_of(const win_ne_import *imp)
+{
+    if (name_eq(imp->module, "KERNEL") || name_eq(imp->module, "KERNEL.EXE"))
+        return M_KERNEL;
+    if (name_eq(imp->module, "USER") || name_eq(imp->module, "USER.EXE"))
+        return M_USER;
+    if (name_eq(imp->module, "GDI") || name_eq(imp->module, "GDI.EXE"))
+        return M_GDI;
+    return -1;
+}
+
+/* a function WINN has its own code for: its index in services[], -1 */
 static int service_index(const win_ne_import *imp)
 {
-    int module;
-    if (name_eq(imp->module, "KERNEL") || name_eq(imp->module, "KERNEL.EXE"))
-        module = M_KERNEL;
-    else if (name_eq(imp->module, "USER") || name_eq(imp->module, "USER.EXE"))
-        module = M_USER;
-    else if (name_eq(imp->module, "GDI") || name_eq(imp->module, "GDI.EXE"))
-        module = M_GDI;
-    else
-        return -1;
-    for (int i = 0; i < (int)(sizeof(services) / sizeof(services[0])); i++)
+    int module = module_of(imp);
+    for (int i = 0; module >= 0 && i < (int)(sizeof(services) / sizeof(services[0])); i++)
         if (services[i].module == module &&
             (imp->ordinal ? imp->ordinal == services[i].ordinal && !imp->procedure[0]
                           : name_eq(imp->procedure, services[i].name)))
@@ -193,13 +286,27 @@ static int service_index(const win_ne_import *imp)
     return -1;
 }
 
+/* the service number of an import, and the bytes of its arguments */
+static int service_id_args(const win_ne_import *imp, uint16_t *id, uint16_t *args)
+{
+    int i = service_index(imp), module = module_of(imp);
+    if (i >= 0) {
+        *id = (uint16_t)(module_base[services[i].module] + services[i].ordinal);
+        *args = services[i].args;
+        return 1;
+    }
+    if (module >= 0 && (i = generic_index(module, imp)) >= 0) {
+        *id = (uint16_t)(module_base[module] + generic[i].ordinal);
+        *args = sig_args(generic[i].sig);
+        return 1;
+    }
+    return 0;
+}
+
 static int service_id(const win_ne_import *imp, uint16_t *id)
 {
-    int i = service_index(imp);
-    if (i < 0)
-        return 0;
-    *id = (uint16_t)(module_base[services[i].module] + services[i].ordinal);
-    return 1;
+    uint16_t args;
+    return service_id_args(imp, id, &args);
 }
 
 /* Win16 PASCAL return releases the argument words after popping CS:IP. */
@@ -208,12 +315,14 @@ static uint16_t service_args(uint16_t id)
     for (unsigned i = 0; i < sizeof(services) / sizeof(services[0]); i++)
         if (module_base[services[i].module] + services[i].ordinal == id)
             return services[i].args;
-    return 0;
+    const char *sig = win_ne_generic_sig(id);
+    return sig ? sig_args(sig) : 0;
 }
 
 static int note_unresolved(void *opaque, const win_ne_import *imp)
 {
-    if (service_index(imp) >= 0)
+    uint16_t id;
+    if (service_id(imp, &id))
         return 0;
     win_ne_unresolved *u = (win_ne_unresolved *)opaque;
     size_t n = strlen(imp->module);
@@ -279,8 +388,8 @@ int win_ne_guest_load(const char *path, win_ne_guest_image *out,
     out->info = info;
     out->segments = (win_ne_guest_segment *)calloc((size_t)info.segment_count + 1u,
                                                     sizeof(*out->segments));
-    /* null, thunks, the segments, the PSP */
-    uint32_t gdtsize = ((uint32_t)info.segment_count + 3u) * GDT_ENTRY_BYTES;
+    /* null, thunks, the segments, the PSP, the global blocks */
+    uint32_t gdtsize = ((uint32_t)info.segment_count + 3u + WIN_NE_GUEST_GLOBALS) * GDT_ENTRY_BYTES;
     out->gdt = (uint8_t *)calloc(gdtsize, 1);
     rc = WIN_NE_NO_MEMORY;
     if (!out->segments || !out->gdt)
@@ -357,4 +466,83 @@ loaded_fail:
 fail:
     win_ne_guest_release(out);
     return rc;
+}
+
+/* ---------------------------------------------------------------- global memory */
+
+static void set_descriptor(win_ne_guest_image *g, uint16_t sel, uint32_t linear, uint32_t size)
+{
+    descriptor(g->gdt + sel, linear, size, 0);
+    g->io.write(g->opaque, g->gdt_linear + sel, g->gdt + sel, GDT_ENTRY_BYTES);
+}
+
+static uint16_t global_selector(const win_ne_guest_image *g, unsigned i)
+{
+    return (uint16_t)(GDT_SEGMENT_INDEX(g->info.segment_count + 2u + i) * GDT_ENTRY_BYTES);
+}
+
+win_ne_guest_segment *win_ne_guest_global(win_ne_guest_image *g, uint16_t sel)
+{
+    for (unsigned i = 0; i < WIN_NE_GUEST_GLOBALS; i++)
+        if (g->globals[i].linear && g->globals[i].selector == (sel & ~7u))
+            return &g->globals[i];
+    return NULL;
+}
+
+uint16_t win_ne_guest_global_alloc(win_ne_guest_image *g, uint32_t bytes)
+{
+    if (!bytes || bytes > 65536u)
+        return 0;
+    for (unsigned i = 0; i < WIN_NE_GUEST_GLOBALS; i++) {
+        win_ne_guest_segment *s = &g->globals[i];
+        if (s->linear)
+            continue;
+        if (!guest_alloc(g, bytes, &s->linear))
+            return 0;
+        uint8_t zero[256];
+        memset(zero, 0, sizeof(zero));
+        for (uint32_t at = 0; at < bytes; at += sizeof(zero))
+            g->io.write(g->opaque, s->linear + at, zero,
+                        bytes - at < sizeof(zero) ? bytes - at : (uint32_t)sizeof(zero));
+        s->size = bytes;
+        s->flags = 1;
+        s->selector = global_selector(g, i);
+        set_descriptor(g, s->selector, s->linear, bytes);
+        return s->selector;
+    }
+    return 0;
+}
+
+int win_ne_guest_global_realloc(win_ne_guest_image *g, uint16_t sel, uint32_t bytes,
+                                int (*read)(void *, uint32_t, void *, uint32_t))
+{
+    win_ne_guest_segment *s = win_ne_guest_global(g, sel);
+    uint32_t linear;
+    if (!s || !bytes || bytes > 65536u || !guest_alloc(g, bytes, &linear))
+        return 0;
+    uint8_t buf[256];
+    for (uint32_t at = 0; at < bytes; at += sizeof(buf)) {
+        uint32_t n = bytes - at < sizeof(buf) ? bytes - at : (uint32_t)sizeof(buf);
+        memset(buf, 0, sizeof(buf));
+        if (at < s->size)
+            read(NULL, s->linear + at, buf, s->size - at < n ? s->size - at : n);
+        g->io.write(g->opaque, linear + at, buf, n);
+    }
+    g->io.free(g->opaque, s->linear);
+    s->linear = linear;
+    s->size = bytes;
+    set_descriptor(g, s->selector, linear, bytes);
+    return 1;
+}
+
+int win_ne_guest_global_free(win_ne_guest_image *g, uint16_t sel)
+{
+    win_ne_guest_segment *s = win_ne_guest_global(g, sel);
+    if (!s)
+        return 0;
+    g->io.free(g->opaque, s->linear);
+    memset(g->gdt + s->selector, 0, GDT_ENTRY_BYTES);  /* not present */
+    g->io.write(g->opaque, g->gdt_linear + s->selector, g->gdt + s->selector, GDT_ENTRY_BYTES);
+    memset(s, 0, sizeof(*s));
+    return 1;
 }

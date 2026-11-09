@@ -1,0 +1,25 @@
+# Many Win16 API functions at once, on the i386 core: each line of the
+# window says what one group gave.
+#     ./winhost scripts/owdemo.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OWDEMO
+key RETURN
+wait 400
+snap od_start.ppm
+# Go: a third list item, the edit's text set
+click 54 160
+wait 50
+# typing into the subclassed edit: its characters counted (Go again shows it)
+click 90 70
+key END
+type xy
+wait 50
+click 54 160
+wait 50
+snap od_after.ppm
+exit

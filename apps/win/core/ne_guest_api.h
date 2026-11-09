@@ -63,5 +63,12 @@ int win_ne_string(win_ne_guest_api_context *ctx, uint16_t sel, uint16_t off, cha
  * called with a window procedure's arguments; DX:AX */
 uint32_t win_ne_callback(win_ne_guest_api_context *ctx, uint32_t proc, uint16_t hwnd,
                          uint16_t msg, uint16_t wp, uint32_t lp);
+/* ... with any arguments: words, in the order a PASCAL caller pushes them,
+ * and a blob (len bytes, or none) put on the program's stack above them,
+ * at the far address win_ne_blob_far gives just before, copied back after
+ * the call */
+uint32_t win_ne_call(win_ne_guest_api_context *ctx, uint32_t proc, const uint16_t *words,
+                     int n, void *blob, uint16_t len);
+uint32_t win_ne_blob_far(win_ne_guest_api_context *ctx, uint16_t len);
 
 #endif /* WINN_NE_GUEST_API_H */
