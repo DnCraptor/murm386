@@ -8,11 +8,13 @@
  * at least one supported Win16 API call. Forward branches, counted LOOP,
  * and forward direct near CALL/RET with at most two nested calls are checked.
  * A near callee may read caller-pushed word parameters at BP+4, BP+6,...
- * and must release exactly those words through RET imm16 (PASCAL ABI).
+ * and may release exactly those words through RET imm16 (PASCAL ABI), or
+ * return with plain RET followed immediately by caller ADD SP,exact bytes
+ * (CDECL ABI; 83 C4 ib and 81 C4 iw are accepted).
  * BP-relative stack locals require a standard frame and a bounded SUB SP.
  * DS reads/writes must stay below data_limit. Indirect calls/returns,
- * unknown SS addresses, segment overrides, CDECL caller cleanup and
- * recursion remain prohibited.
+ * unknown SS addresses, segment overrides, delayed/partial caller cleanup
+ * and recursion remain prohibited.
  * calls receives the maximum number of API calls on a validated path. */
 int win_ne_entry_calls_data(const uint8_t *p, size_t bytes, size_t ip,
                             uint16_t thunk_selector, const uint16_t *service_ids,

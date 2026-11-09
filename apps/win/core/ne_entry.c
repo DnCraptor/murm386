@@ -71,6 +71,7 @@ typedef struct {
     size_t at;
     unsigned calls, depth, frame;
     unsigned stack_bytes, bp_bytes, near_depth;
+    unsigned cleanup_bytes; /* CDECL RET: exact caller ADD SP required next. */
     near_call near[ENTRY_NEAR_CALL_DEPTH];
     uint8_t stack[8], stack_known[8];
     uint16_t stack_values[8];
@@ -246,6 +247,26 @@ static int check_path(verifier *v, path_state s)
         size_t remaining = v->end - at;
         uint8_t op = p[0];
 
+        /* A near CDECL callee returns with its arguments still on the
+         * stack. Only an immediately following, exact caller ADD SP is
+         * accepted. No NOP, branch, FAR API, or other stack operation may
+         * intervene: the symbolic argument stack was transferred to the
+         * callee at CALL, so allowing arbitrary operations here would
+         * misrepresent the real stack. This also supports frameless callers. */
+        if (s.cleanup_bytes) {
+            size_t length = op == 0x83 ? 3u : op == 0x81 ? 4u : 0u;
+            if (!length || remaining < length || p[1] != 0xc4 || s.depth ||
+                (unsigned)(op == 0x83 ? (int8_t)p[2] :
+                                         read16(p + 2)) != s.cleanup_bytes ||
+                s.stack_bytes < s.cleanup_bytes ||
+                !mark(v, at, length))
+                return 0;
+            s.stack_bytes -= s.cleanup_bytes;
+            s.cleanup_bytes = 0;
+            s.at += length;
+            continue;
+        }
+
         if (op == 0x90) { /* NOP */
             if (!mark(v, at, 1)) return 0;
             s.at++;
@@ -290,13 +311,14 @@ static int check_path(verifier *v, path_state s)
                 !mark(v, at, length)) return 0;
             near_call c = s.near[--s.near_depth];
             /* The immediate is a byte count, not a word count. Reject
-             * partial or excessive cleanup and plain RET with arguments.
-             * Caller-cleanup (CDECL) can be modeled separately later. */
+             * partial/excessive PASCAL cleanup. Plain RET is CDECL: its
+             * caller must immediately perform the exact ADD SP,bytes. */
             unsigned pop = op == 0xc2 ? read16(p + 1) : 0u;
-            if (pop != c.arg_words * 2u ||
+            if ((op == 0xc2 && pop != c.arg_words * 2u) ||
                 s.stack_bytes != c.stack_before + 2u ||
                 c.stack_before < pop) return 0;
             s.stack_bytes = c.stack_before - pop;
+            s.cleanup_bytes = op == 0xc3 ? c.arg_words * 2u : 0u;
             s.bp_bytes = c.bp_before;
             s.frame = c.frame_before;
             s.at = c.return_at;
@@ -342,7 +364,8 @@ static int check_path(verifier *v, path_state s)
 
         /* CALL rel16. Pending PUSH words become this procedure's formal
          * parameters rather than Win16 API arguments. The return IP is
-         * counted separately and RET imm16 must clean the exact args. */
+         * counted separately. RET imm16 cleans PASCAL args, plain RET
+         * requires an exact caller ADD SP for CDECL. */
         if (op == 0xe8) {
             if (remaining < 3 ||
                 s.near_depth == ENTRY_NEAR_CALL_DEPTH ||

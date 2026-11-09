@@ -154,6 +154,46 @@ int main(int argc, char **argv)
     assert(!win_ne_entry_calls(bad_nested, sizeof bad_nested, 0, 8,
                                 kernel, 1, &calls));
 
+    /* CDECL: RET leaves two arguments on the stack. A matching ADD SP,4
+     * must be the very next instruction; test both SP opcode encodings. */
+    const uint8_t cdecl[] = {
+        0x55,0x8b,0xec,                         /* main BP frame */
+        0x68,0x34,0x12, 0x68,0x21,0x43,        /* PUSH two words */
+        0xe8,0x0a,0x00,                         /* CALL helper at 22 */
+        0x83,0xc4,0x04,                         /* ADD SP,4 */
+        0x9a,0x00,0x00,0x08,0x00,               /* GetVersion */
+        0xc9,0xcb,                              /* main LEAVE; RETF */
+        0x55,0x8b,0xec,                         /* helper frame */
+        0x8b,0x46,0x04, 0x8b,0x5e,0x06,        /* BP+4, BP+6 */
+        0x01,0xd8,                              /* ADD AX,BX */
+        0xc9,0xc3                               /* LEAVE; plain RET */
+    };
+    assert(win_ne_entry_calls(cdecl, sizeof cdecl, 0, 8,
+                               kernel, 1, &calls) && calls == 1);
+    uint8_t bad_cdecl[sizeof cdecl];
+#define REJECT_CDECL(off, value) do {                     \
+        memcpy(bad_cdecl, cdecl, sizeof cdecl);            \
+        bad_cdecl[(off)] = (uint8_t)(value);               \
+        assert(!win_ne_entry_calls(bad_cdecl,             \
+                    sizeof bad_cdecl, 0, 8, kernel, 1, &calls)); \
+    } while (0)
+    REJECT_CDECL(14, 0x02); /* too little caller cleanup */
+    REJECT_CDECL(14, 0x06); /* too much caller cleanup */
+    REJECT_CDECL(12, 0x90); /* cleanup not immediate */
+    REJECT_CDECL(13, 0xec); /* SUB SP instead of ADD SP */
+    REJECT_CDECL(34, 0x90); /* missing near RET */
+#undef REJECT_CDECL
+
+    const uint8_t cdecl_long[] = {
+        0x68,0x01,0x00, 0xe8,0x0a,0x00,       /* frameless caller, one arg */
+        0x81,0xc4,0x02,0x00,                   /* ADD SP,2 (imm16) */
+        0x9a,0x00,0x00,0x08,0x00, 0xcb,        /* GetVersion; RETF */
+        0x55,0x8b,0xec, 0x8b,0x46,0x04,        /* BP frame, read arg */
+        0xc9,0xc3                              /* LEAVE; plain RET */
+    };
+    assert(win_ne_entry_calls(cdecl_long, sizeof cdecl_long, 0, 8,
+                               kernel, 1, &calls) && calls == 1);
+
     win_ne_guest_release(&g);
     assert(allocations == 0);
     puts("ne near PASCAL arguments / RET imm16: PASS");
