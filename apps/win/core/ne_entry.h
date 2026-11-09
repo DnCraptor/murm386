@@ -32,6 +32,11 @@
  * pending stack arguments are inaccessible. MOV r8/r16 to/from checked
  * locals tracks known word values and proven DS selector provenance;
  * near calls preserve their caller's frame-local state.
+ * Proven DATA writes are tracked as path-local symbolic bytes; word and
+ * byte reads may recover exact values and checked global pointers. No
+ * initial DATA contents or imported API side effects are assumed known.
+ * Direct DS loads can never fabricate FAR-selector provenance. Unresolved
+ * branches are bounded by an explicit verifier recursion-depth budget.
  * Indirect calls/returns,
  * unknown SS addresses, segment overrides, delayed/partial caller cleanup
  * and recursion remain prohibited.

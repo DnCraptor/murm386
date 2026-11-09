@@ -160,6 +160,19 @@ clean_ne_locals:
 	rm -f test_ne_frame_locals test_ne_locals NELOCAL-fixture.exe
 .PHONY: clean_ne_locals
 
+# Path-local symbolic DS globals, checked pointers and bounded branch recursion.
+all: test_ne_ds_shadow test_ne_globals NEGLOBAL-fixture.exe
+NEGLOBAL-fixture.exe: mkne_globals.py
+	python3 mkne_globals.py $@
+test_ne_ds_shadow: test_ne_ds_shadow.c ../core/ne_ds_shadow.h
+	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ test_ne_ds_shadow.c
+test_ne_globals: ../core/ne_entry.c ../core/ne_ds_shadow.h test_ne_globals.c NEGLOBAL-fixture.exe
+	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne_entry.c test_ne_globals.c
+clean: clean_ne_globals
+clean_ne_globals:
+	rm -f test_ne_ds_shadow test_ne_globals NEGLOBAL-fixture.exe
+.PHONY: clean_ne_globals
+
 # Checked Win16 C-style loops, reused near helpers and LOOPcc.
 all: test_ne_cmp_flow test_ne_bounded_flow NEFLOW-fixture.exe
 NEFLOW-fixture.exe: mkne_bounded_flow.py

@@ -18,8 +18,10 @@
 #include "ne_guest.h"
 #include "ne_cmp_flow.h"
 #include "ne_frame_locals.h"
+#include "ne_ds_shadow.h"
 
 #define ENTRY_WINDOW 512u
+#define ENTRY_MAX_BRANCH_DEPTH 20u
 #define ENTRY_VISIT_LIMIT 4096u
 #define ENTRY_MAX_LOOP_CX 64u
 #define ENTRY_MAX_C_BACK_EDGES 64u
@@ -56,6 +58,7 @@ typedef struct {
     unsigned max_calls;
     unsigned visited;
     unsigned returns;
+    unsigned branch_depth;
     /* Instruction boundaries are global to every path. Branching into the
      * middle of an immediate (or decoding overlapping instructions) fails. */
     uint8_t decoded[ENTRY_WINDOW]; /* 0=unknown, 1=opcode, 2=operand */
@@ -90,6 +93,7 @@ typedef struct {
     int direction; /* 0: unknown DF; +1: CLD; -1: STD. */
     frame_saves saves;
     win_ne_frame_locals locals;
+    win_ne_ds_shadow ds_shadow;
     near_call near[ENTRY_NEAR_CALL_DEPTH];
     uint8_t stack[8], stack_known[8];
     uint16_t stack_values[8];
@@ -339,6 +343,19 @@ static int verified_back_jcc(const verifier *v, path_state *s, size_t at,
     return 1;
 }
 
+/* Bounding recursive verification also bounds the actual firmware C stack.
+ * Both outcomes of unknown branches are still checked, just not at
+ * unbounded recursion depth when facing attacker-supplied NE code. */
+static int check_path(verifier *v, path_state s);
+static int check_branch(verifier *v, path_state s)
+{
+    if (v->branch_depth >= ENTRY_MAX_BRANCH_DEPTH) return 0;
+    ++v->branch_depth;
+    int valid = check_path(v, s);
+    --v->branch_depth;
+    return valid;
+}
+
 /* Every path carries its own simulated registers and argument stack.
  * Forward unknown branches explore both outcomes; finite exact backward
  * loops are followed deterministically. */
@@ -472,6 +489,11 @@ static int check_path(verifier *v, path_state s)
                 s.number_known[REG_CX] = !variable;
                 if (!variable) s.number[REG_CX] = 0;
             }
+            /* MOVS/STOS writes through ES=DS. Without modeling each byte,
+             * every previously known DATA value becomes untrusted. */
+            if (count && (sop == 0xa4 || sop == 0xa5 ||
+                          sop == 0xaa || sop == 0xab))
+                win_ne_ds_clear(&s.ds_shadow);
             s.at += len;
             continue;
         }
@@ -520,7 +542,7 @@ static int check_path(verifier *v, path_state s)
                 if (!forward_target(v, at, 4u, disp, &target)) return 0;
                 path_state taken = s;
                 taken.at = target;
-                if (!check_path(v, taken)) return 0;
+                if (!check_branch(v, taken)) return 0;
                 s.at = at + 4u;
             }
             continue;
@@ -671,7 +693,7 @@ static int check_path(verifier *v, path_state s)
                     return 0;
                 path_state taken = s;
                 taken.at = (size_t)target;
-                if (!check_path(v, taken)) return 0;
+                if (!check_branch(v, taken)) return 0;
                 s.at = at + 2; /* unknown ZF may stop on this iteration */
             } else {
                 int keep_looping = op == 0xe1 ? zf : !zf;
@@ -690,7 +712,7 @@ static int check_path(verifier *v, path_state s)
             } else {
                 path_state taken = s;
                 taken.at = target;
-                if (!check_path(v,taken)) return 0;
+                if (!check_branch(v,taken)) return 0;
                 s.at = at + 2;
             }
             continue;
@@ -714,7 +736,7 @@ static int check_path(verifier *v, path_state s)
             if (op >= 0x70 && op <= 0x7f) {
                 path_state taken = s;
                 taken.at = target;
-                if (!check_path(v, taken)) return 0;
+                if (!check_branch(v, taken)) return 0;
                 s.at = at + length;
             } else {
                 s.at = target;
@@ -785,24 +807,33 @@ static int check_path(verifier *v, path_state s)
         if (op == 0xa1 || op == 0xa3) { /* MOV AX,[disp16] / MOV [disp16],AX */
             if (remaining < 3 || !direct_data(v, read16(p + 1), 2) ||
                 !mark(v, at, 3)) return 0;
+            uint16_t addr = read16(p + 1);
             if (op == 0xa1) {
+                unsigned value = 0;
                 s.regs[REG_AX] = ARG_WORD;
-                s.number_known[REG_AX] = 0;
+                s.number_known[REG_AX] = (uint8_t)win_ne_ds_get16(
+                    &s.ds_shadow, addr, &value);
+                if (s.number_known[REG_AX]) s.number[REG_AX] = (uint16_t)value;
+            } else {
+                win_ne_ds_put16(&s.ds_shadow, addr,
+                                s.number_known[REG_AX], s.number[REG_AX]);
             }
             s.at += 3;
             continue;
         }
-        /* Byte-sized accesses are confined to the same checked DATA
-         * region as word MOV. AL is the only accepted byte register:
-         * other 8-bit halves would require tracking their parent words.
-         * A load changes AL, invalidating both the numeric value and
-         * selector provenance previously assigned to the entire AX. */
+        /* Absolute byte load/store uses the same validated DS shadow
+         * as indexed r/m8, without deriving contents from the NE image. */
         if (op == 0xa0 || op == 0xa2) { /* MOV AL,[moffs16] / [moffs16],AL */
             if (remaining < 3 || !direct_data(v, read16(p + 1), 1u) ||
                 !mark(v, at, 3)) return 0;
+            uint16_t addr = read16(p + 1);
             if (op == 0xa0) {
-                s.regs[REG_AX] = ARG_WORD;
-                s.number_known[REG_AX] = 0;
+                unsigned value = 0;
+                int known = win_ne_ds_get8(&s.ds_shadow, addr, &value);
+                set8(&s, 0u, value, known);
+            } else {
+                win_ne_ds_put8(&s.ds_shadow, addr,
+                               s.number_known[REG_AX], byte8(&s, 0u));
             }
             s.at += 3;
             continue;
@@ -832,11 +863,19 @@ static int check_path(verifier *v, path_state s)
                     unsigned tag; int known; uint16_t value;
                     win_ne_local_load(&s.locals, offset, 1u, &tag, &known, &value);
                     set8(&s, reg, value, known);
-                } else set8(&s, reg, 0u, 0);
+                } else {
+                    unsigned value = 0;
+                    int known = win_ne_ds_get8(&s.ds_shadow,
+                                                (uint16_t)addr, &value);
+                    set8(&s, reg, value, known);
+                }
             } else if (local) {
                 win_ne_local_store(&s.locals, offset, 1u, ARG_WORD,
                     s.number_known[parent8(reg)],
                     (uint16_t)byte8(&s, reg));
+            } else {
+                win_ne_ds_put8(&s.ds_shadow, (uint16_t)addr,
+                               s.number_known[parent8(reg)], byte8(&s, reg));
             }
             s.at += ea_len;
             continue;
@@ -852,10 +891,14 @@ static int check_path(verifier *v, path_state s)
                                     (unsigned)imm_len, &ea_len, &addr)) ||
                 remaining < ea_len + imm_len ||
                 !mark(v, at, ea_len + imm_len)) return 0;
+            uint16_t value = imm_len == 2u ? read16(p + ea_len) : p[ea_len];
             if (local) {
-                uint16_t value = imm_len == 2u ? read16(p + ea_len) : p[ea_len];
                 win_ne_local_store(&s.locals, offset, (unsigned)imm_len,
                                    ARG_WORD, 1, value);
+            } else if (imm_len == 1u) {
+                win_ne_ds_put8(&s.ds_shadow, (uint16_t)addr, 1, value);
+            } else {
+                win_ne_ds_put16(&s.ds_shadow, (uint16_t)addr, 1, value);
             }
             s.at += ea_len + imm_len;
             continue;
@@ -865,22 +908,30 @@ static int check_path(verifier *v, path_state s)
         if (op == 0xff && remaining >= 2 &&
             (p[1] & 0x38u) == 0x30u) { /* FF /6 */
             size_t ea_len;
-            unsigned index, offset = 0;
+            unsigned index, offset = 0, addr = 0;
             int arg = near_arg_ea(&s, p, remaining, &ea_len, &index);
             int local = !arg && local_ea(&s, p, remaining, 2u, &ea_len, &offset);
-            if (s.depth == sizeof(s.stack) || (!arg && !local) ||
+            int data = !arg && !local && data_ea(v, &s, p, remaining,
+                                                 2u, &ea_len, &addr);
+            if (s.depth == sizeof(s.stack) || (!arg && !local && !data) ||
                 !stack_push(&s, 2u) || !mark(v, at, ea_len)) return 0;
             if (arg) {
                 const near_call *c = &s.near[s.near_depth - 1];
                 s.stack[s.depth] = c->arg_tags[index];
                 s.stack_known[s.depth] = c->arg_known[index];
                 s.stack_values[s.depth] = c->arg_values[index];
-            } else {
+            } else if (local) {
                 unsigned tag; int known; uint16_t value;
                 win_ne_local_load(&s.locals, offset, 2u, &tag, &known, &value);
                 s.stack[s.depth] = (uint8_t)tag;
                 s.stack_known[s.depth] = (uint8_t)known;
                 s.stack_values[s.depth] = value;
+            } else {
+                unsigned value = 0;
+                s.stack[s.depth] = ARG_WORD; /* Never create a DS selector. */
+                s.stack_known[s.depth] = (uint8_t)win_ne_ds_get16(
+                    &s.ds_shadow, (uint16_t)addr, &value);
+                s.stack_values[s.depth] = (uint16_t)value;
             }
             s.depth++;
             s.at += ea_len;
@@ -926,10 +977,19 @@ static int check_path(verifier *v, path_state s)
                 }
                 if (!data_ea(v, &s, p, remaining, op == 0x8d ? 1u : 2u,
                              &ea_len, &addr) || !mark(v, at, ea_len)) return 0;
-                if (op != 0x89) {
+                if (op == 0x8d) {
                     s.regs[reg] = ARG_WORD;
-                    s.number_known[reg] = op == 0x8d;
-                    if (op == 0x8d) s.number[reg] = (uint16_t)addr;
+                    s.number_known[reg] = 1;
+                    s.number[reg] = (uint16_t)addr;
+                } else if (op == 0x8b) {
+                    unsigned value = 0;
+                    s.regs[reg] = ARG_WORD;
+                    s.number_known[reg] = (uint8_t)win_ne_ds_get16(
+                        &s.ds_shadow, (uint16_t)addr, &value);
+                    if (s.number_known[reg]) s.number[reg] = (uint16_t)value;
+                } else {
+                    win_ne_ds_put16(&s.ds_shadow, (uint16_t)addr,
+                                    s.number_known[reg], s.number[reg]);
                 }
                 s.at += ea_len;
                 continue;
@@ -1288,6 +1348,9 @@ static int check_path(verifier *v, path_state s)
         s.regs[REG_DX] = ARG_WORD;
         s.number_known[REG_AX] = 0;
         s.number_known[REG_DX] = 0;
+        /* The imported Win16 service can modify pointed-to DATA buffers.
+         * Invalidate symbolic memory unless its effects were modeled. */
+        win_ne_ds_clear(&s.ds_shadow);
         s.calls++;
         s.at += 5;
     }
