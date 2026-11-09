@@ -17,6 +17,7 @@
 #include "ne_entry.h"
 #include "ne_guest.h"
 #include "ne_cmp_flow.h"
+#include "ne_frame_locals.h"
 
 #define ENTRY_WINDOW 512u
 #define ENTRY_VISIT_LIMIT 4096u
@@ -68,6 +69,7 @@ typedef struct {
 
 typedef struct {
     frame_saves caller_saves;
+    win_ne_frame_locals caller_locals;
     size_t return_at;
     size_t target; /* active near-helper entry: disallow recursion */
     unsigned stack_before, frame_before, bp_before;
@@ -87,6 +89,7 @@ typedef struct {
     win_ne_flag_proof flag_proof;
     int direction; /* 0: unknown DF; +1: CLD; -1: STD. */
     frame_saves saves;
+    win_ne_frame_locals locals;
     near_call near[ENTRY_NEAR_CALL_DEPTH];
     uint8_t stack[8], stack_known[8];
     uint16_t stack_values[8];
@@ -165,11 +168,10 @@ static int stack_push(path_state *s, unsigned bytes)
     return 1;
 }
 
-/* A local word/byte must be entirely below the current BP, in space
- * explicitly reserved with SUB SP,imm. Addresses above BP could alias the
- * caller's return address, saved BP, or PASCAL arguments. */
+/* Only SUB/ENTER-reserved slots can be addressed as BP locals. Merely
+ * pushing a callee-saved register or API argument does NOT reserve locals. */
 static int local_ea(const path_state *s, const uint8_t *p, size_t remain,
-                    unsigned width, size_t *bytes)
+                    unsigned width, size_t *bytes, unsigned *offset)
 {
     if (s->frame != FRAME_ACTIVE || remain < 3 ||
         (p[1] & 7u) != 6u) return 0;
@@ -182,9 +184,10 @@ static int local_ea(const path_state *s, const uint8_t *p, size_t remain,
         displacement = (int16_t)read16(p + 2);
         *bytes = 4;
     } else return 0;
-    if (displacement >= 0 || -displacement < (int)width ||
-        (unsigned)(-displacement) > s->stack_bytes - s->bp_bytes)
+    if (displacement >= 0 ||
+        !win_ne_local_access(&s->locals, (unsigned)-displacement, width))
         return 0;
+    *offset = (unsigned)-displacement;
     return 1;
 }
 
@@ -477,6 +480,7 @@ static int check_path(verifier *v, path_state s)
             if (s.frame != FRAME_ACTIVE || s.depth || s.saves.depth ||
                 s.bp_bytes < 2u || !mark(v, at, 1)) return 0;
             s.stack_bytes = s.bp_bytes - 2u;
+            s.locals = (win_ne_frame_locals){0};
             s.frame = FRAME_DONE;
             s.at++;
             continue;
@@ -500,6 +504,7 @@ static int check_path(verifier *v, path_state s)
             s.bp_bytes = c.bp_before;
             s.frame = c.frame_before;
             s.saves = c.caller_saves;
+            s.locals = c.caller_locals;
             s.at = c.return_at;
             continue;
         }
@@ -546,6 +551,7 @@ static int check_path(verifier *v, path_state s)
             (s.near_depth || !s.calls) && !s.depth) { /* PUSH BP */
             if (!stack_push(&s, 2u) || !mark(v, at, 1)) return 0;
             s.frame = FRAME_NEED_BP;
+            s.locals = (win_ne_frame_locals){0};
             s.at++;
             continue;
         }
@@ -560,6 +566,8 @@ static int check_path(verifier *v, path_state s)
                 return 0;
             s.frame = FRAME_ACTIVE;
             s.bp_bytes = s.stack_bytes - locals;
+            s.locals = (win_ne_frame_locals){0};
+            if (!win_ne_local_reserve(&s.locals, 0u, locals)) return 0;
             s.saves = (frame_saves){0};
             s.saves.phase = 1;
             s.at += 4u;
@@ -570,6 +578,7 @@ static int check_path(verifier *v, path_state s)
              (op == 0x8b && p[1] == 0xe5))) { /* MOV SP,BP */
             if (s.depth || s.saves.depth || !mark(v, at, 2)) return 0;
             s.stack_bytes = s.bp_bytes;
+            s.locals = (win_ne_frame_locals){0};
             s.frame = FRAME_NEED_POP;
             s.at += 2;
             continue;
@@ -599,6 +608,7 @@ static int check_path(verifier *v, path_state s)
             c->frame_before = s.frame;
             c->bp_before = s.bp_bytes;
             c->caller_saves = s.saves;
+            c->caller_locals = s.locals;
             c->arg_words = s.depth;
             for (unsigned i = 0; i < c->arg_words; i++) {
                 unsigned src = c->arg_words - 1u - i;
@@ -610,6 +620,7 @@ static int check_path(verifier *v, path_state s)
             s.frame = FRAME_NONE;
             s.bp_bytes = 0;
             s.saves = (frame_saves){0};
+            s.locals = (win_ne_frame_locals){0};
             s.at = (size_t)target;
             continue;
         }
@@ -625,11 +636,13 @@ static int check_path(verifier *v, path_state s)
             if (amount <= 0 || (amount & 1) || amount > 12)
                 return 0;
             if (p[1] == 0xec) {
-                if (!stack_push(&s, (unsigned)amount)) return 0;
+                if (!win_ne_local_reserve(&s.locals,
+                      s.stack_bytes - s.bp_bytes, (unsigned)amount) ||
+                    !stack_push(&s, (unsigned)amount)) return 0;
             } else {
                 s.saves.phase = 0;
-                if ((unsigned)amount > s.stack_bytes - s.bp_bytes)
-                    return 0;
+                if (!win_ne_local_release(&s.locals,
+                      s.stack_bytes - s.bp_bytes, (unsigned)amount)) return 0;
                 s.stack_bytes -= (unsigned)amount;
             }
             s.at += length;
@@ -805,46 +818,70 @@ static int check_path(verifier *v, path_state s)
             s.at += 2;
             continue;
         }
-        if (op == 0x8a || op == 0x88) { /* MOV AL,r/m8 / MOV r/m8,AL */
+        if (op == 0x8a || op == 0x88) { /* MOV r8,[DS/BP] / [DS/BP],r8 */
             size_t ea_len;
-            unsigned addr;
-            if (remaining < 2 || (p[1] & 0x38u) != 0u ||
-                !data_ea(v, &s, p, remaining, 1u, &ea_len, &addr) ||
-                !mark(v, at, ea_len)) return 0;
+            unsigned addr, offset = 0;
+            if (remaining < 2) return 0;
+            unsigned reg = (p[1] >> 3) & 7u;
+            int local = local_ea(&s, p, remaining, 1u, &ea_len, &offset);
+            if (!local && !data_ea(v, &s, p, remaining, 1u,
+                                   &ea_len, &addr)) return 0;
+            if (!mark(v, at, ea_len)) return 0;
             if (op == 0x8a) {
-                s.regs[REG_AX] = ARG_WORD;
-                s.number_known[REG_AX] = 0;
+                if (local) {
+                    unsigned tag; int known; uint16_t value;
+                    win_ne_local_load(&s.locals, offset, 1u, &tag, &known, &value);
+                    set8(&s, reg, value, known);
+                } else set8(&s, reg, 0u, 0);
+            } else if (local) {
+                win_ne_local_store(&s.locals, offset, 1u, ARG_WORD,
+                    s.number_known[parent8(reg)],
+                    (uint16_t)byte8(&s, reg));
             }
             s.at += ea_len;
             continue;
         }
         if (op == 0xc6 || op == 0xc7) { /* MOV [known DS/local ea],imm */
             size_t ea_len;
-            unsigned addr;
+            unsigned addr, offset = 0;
             size_t imm_len = op == 0xc6 ? 1u : 2u;
-            if (remaining < 2 || (p[1] & 0x38u) != 0 ||
-                !(local_ea(&s, p, remaining, (unsigned)imm_len, &ea_len) ||
-                  data_ea(v, &s, p, remaining, (unsigned)imm_len,
-                          &ea_len, &addr)) ||
+            if (remaining < 2 || (p[1] & 0x38u) != 0) return 0;
+            int local = local_ea(&s, p, remaining, (unsigned)imm_len,
+                                 &ea_len, &offset);
+            if ((!local && !data_ea(v, &s, p, remaining,
+                                    (unsigned)imm_len, &ea_len, &addr)) ||
                 remaining < ea_len + imm_len ||
                 !mark(v, at, ea_len + imm_len)) return 0;
+            if (local) {
+                uint16_t value = imm_len == 2u ? read16(p + ea_len) : p[ea_len];
+                win_ne_local_store(&s.locals, offset, (unsigned)imm_len,
+                                   ARG_WORD, 1, value);
+            }
             s.at += ea_len + imm_len;
             continue;
         }
 
-        /* PUSH WORD [BP+4..] forwards a checked near parameter, retaining
-         * its Win16 FAR-selector provenance and known numeric value. */
+        /* PUSH WORD [BP+4..] / [BP-local] retains trusted provenance. */
         if (op == 0xff && remaining >= 2 &&
             (p[1] & 0x38u) == 0x30u) { /* FF /6 */
             size_t ea_len;
-            unsigned index;
-            if (s.depth == sizeof(s.stack) ||
-                !near_arg_ea(&s, p, remaining, &ea_len, &index) ||
+            unsigned index, offset = 0;
+            int arg = near_arg_ea(&s, p, remaining, &ea_len, &index);
+            int local = !arg && local_ea(&s, p, remaining, 2u, &ea_len, &offset);
+            if (s.depth == sizeof(s.stack) || (!arg && !local) ||
                 !stack_push(&s, 2u) || !mark(v, at, ea_len)) return 0;
-            const near_call *c = &s.near[s.near_depth - 1];
-            s.stack[s.depth] = c->arg_tags[index];
-            s.stack_known[s.depth] = c->arg_known[index];
-            s.stack_values[s.depth] = c->arg_values[index];
+            if (arg) {
+                const near_call *c = &s.near[s.near_depth - 1];
+                s.stack[s.depth] = c->arg_tags[index];
+                s.stack_known[s.depth] = c->arg_known[index];
+                s.stack_values[s.depth] = c->arg_values[index];
+            } else {
+                unsigned tag; int known; uint16_t value;
+                win_ne_local_load(&s.locals, offset, 2u, &tag, &known, &value);
+                s.stack[s.depth] = (uint8_t)tag;
+                s.stack_known[s.depth] = (uint8_t)known;
+                s.stack_values[s.depth] = value;
+            }
             s.depth++;
             s.at += ea_len;
             continue;
@@ -869,11 +906,20 @@ static int check_path(verifier *v, path_state s)
                     s.at += ea_len;
                     continue;
                 }
-                if (op != 0x8d && local_ea(&s, p, remaining, 2u, &ea_len)) {
+                unsigned offset = 0;
+                if (op != 0x8d &&
+                    local_ea(&s, p, remaining, 2u, &ea_len, &offset)) {
                     if (!mark(v, at, ea_len)) return 0;
                     if (op == 0x8b) {
-                        s.regs[reg] = ARG_WORD;
-                        s.number_known[reg] = 0;
+                        unsigned tag; int known; uint16_t value;
+                        win_ne_local_load(&s.locals, offset, 2u, &tag,
+                                          &known, &value);
+                        s.regs[reg] = (uint8_t)tag;
+                        s.number_known[reg] = (uint8_t)known;
+                        s.number[reg] = value;
+                    } else {
+                        win_ne_local_store(&s.locals, offset, 2u,
+                             s.regs[reg], s.number_known[reg], s.number[reg]);
                     }
                     s.at += ea_len;
                     continue;

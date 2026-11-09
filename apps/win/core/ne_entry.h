@@ -28,6 +28,10 @@
  * Exact CMP/TEST/INC/DEC condition flags permit bounded backward short/near
  * Jcc; backward direct calls to nonrecursive helpers are allowed. JCXZ and
  * bounded LOOPE/LOOPNE verify all exits when runtime ZF is unknown.
+ * Only SUB/ENTER-reserved BP locals may be accessed: saved registers and
+ * pending stack arguments are inaccessible. MOV r8/r16 to/from checked
+ * locals tracks known word values and proven DS selector provenance;
+ * near calls preserve their caller's frame-local state.
  * Indirect calls/returns,
  * unknown SS addresses, segment overrides, delayed/partial caller cleanup
  * and recursion remain prohibited.

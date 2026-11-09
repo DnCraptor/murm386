@@ -147,6 +147,19 @@ clean_ne_compiler:
 	rm -f test_ne_compiler NECABI-fixture.exe
 .PHONY: clean_ne_compiler
 
+# Symbolically tracked BP locals, saved-register isolation and NE smoke test.
+all: test_ne_frame_locals test_ne_locals NELOCAL-fixture.exe
+NELOCAL-fixture.exe: mkne_locals.py
+	python3 mkne_locals.py $@
+test_ne_frame_locals: test_ne_frame_locals.c ../core/ne_frame_locals.h
+	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ test_ne_frame_locals.c
+test_ne_locals: ../core/ne_entry.c ../core/ne_frame_locals.h test_ne_locals.c NELOCAL-fixture.exe
+	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne_entry.c test_ne_locals.c
+clean: clean_ne_locals
+clean_ne_locals:
+	rm -f test_ne_frame_locals test_ne_locals NELOCAL-fixture.exe
+.PHONY: clean_ne_locals
+
 # Checked Win16 C-style loops, reused near helpers and LOOPcc.
 all: test_ne_cmp_flow test_ne_bounded_flow NEFLOW-fixture.exe
 NEFLOW-fixture.exe: mkne_bounded_flow.py
