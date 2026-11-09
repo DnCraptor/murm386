@@ -20,6 +20,9 @@
  * accept REP, REPE, REPNE only with exact CX <= 64 and proven DATA
  * ranges (ES=DS in the WINN bootstrap). A conditional repeat makes
  * the final SI/DI/CX unknown; unsafe later accesses are rejected.
+ * The verified ALU supports register 8/16-bit MOV, AND/OR/XOR, shifts,
+ * TEST/NOT/NEG, exact-valued CMP and XCHG, and forward 386 Jcc rel16.
+ * Register-only arithmetic never grants unproved DS/SS memory access.
  * Indirect calls/returns,
  * unknown SS addresses, segment overrides, delayed/partial caller cleanup
  * and recursion remain prohibited.

@@ -15,7 +15,7 @@ GDICORE  = $(filter-out ../core/exports.c ../core/task.c ../core/file.c ../core/
 # the applications, built in; each WinMain gets its own name
 APPS     = demo.o progman.o notepad.o clock.o calc.o control.o winfile.o taskman.o winmine.o appinfo.o
 
-all: test_gdi test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_entry test_ne_args test_ne_dialog test_ne_registers test_ne_strings test_ne_flow test_ne_indexed test_ne_callframe test_ne_parameters test_ne_bytes test_ne_scan test_ne_string_ops NESTR2-fixture.exe NECDECL-fixture.exe test_ne_loop test_ne_launch test_ne_rm_gate winhost winhost800 HOSTWIN
+all: test_gdi test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_entry test_ne_args test_ne_dialog test_ne_registers test_ne_strings test_ne_flow test_ne_indexed test_ne_callframe test_ne_parameters test_ne_bytes test_ne_scan test_ne_string_ops test_ne_alu NESTR2-fixture.exe NEALU-fixture.exe NECDECL-fixture.exe test_ne_loop test_ne_launch test_ne_rm_gate winhost winhost800 HOSTWIN
 
 test_gdi: $(GDICORE) $(HOST) test_gdi.c
 	$(CC) $(CFLAGS) $(INC) -o $@ $^
@@ -126,6 +126,19 @@ NESTR2-fixture.exe: mkne_string_ops.py
 
 test_ne_string_ops: ../core/ne_entry.c test_ne_string_ops.c NESTR2-fixture.exe
 	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne_entry.c test_ne_string_ops.c
+
+# Register and immediate ALU, byte-register moves, shifts, 386 near Jcc.
+NEALU-fixture.exe: mkne_alu.py
+	python3 mkne_alu.py $@
+
+test_ne_alu: ../core/ne_entry.c test_ne_alu.c NEALU-fixture.exe
+	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne_entry.c test_ne_alu.c
+
+# Keep the existing clean recipe unchanged (it may differ locally).
+clean: clean_ne_alu
+clean_ne_alu:
+	rm -f test_ne_alu NEALU-fixture.exe
+.PHONY: clean_ne_alu
 
 # Bounded counted LOOP backwards, with a DOS-safe MZ stub.
 NELOOP-fixture.exe: mkne_loop.py

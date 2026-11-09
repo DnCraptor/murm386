@@ -83,6 +83,57 @@ typedef struct {
     uint8_t number_known[8];
 } path_state;
 
+/* 8086 byte-register encoding: AL,CL,DL,BL,AH,CH,DH,BH.
+ * A byte update cannot preserve a DS-selector provenance tag. */
+static unsigned parent8(unsigned reg) { return reg & 3u; }
+static unsigned byte8(const path_state *s, unsigned reg)
+{
+    unsigned n = s->number[parent8(reg)];
+    return reg & 4u ? (n >> 8) & 0xffu : n & 0xffu;
+}
+static void set8(path_state *s, unsigned reg, unsigned value, int known)
+{
+    unsigned parent = parent8(reg);
+    if (s->number_known[parent] && known) {
+        unsigned shift = reg & 4u ? 8u : 0u;
+        s->number[parent] = (uint16_t)((s->number[parent] &
+            (uint16_t)~(0xffu << shift)) | ((value & 0xffu) << shift));
+    } else {
+        s->number_known[parent] = 0;
+    }
+    s->regs[parent] = ARG_WORD;
+}
+static unsigned alu(unsigned group, unsigned dst, unsigned src, unsigned mask)
+{
+    switch (group) {
+    case 0: return (dst + src) & mask; /* ADD */
+    case 1: return (dst | src) & mask; /* OR */
+    case 4: return (dst & src) & mask; /* AND */
+    case 5: return (dst - src) & mask; /* SUB */
+    case 6: return (dst ^ src) & mask; /* XOR */
+    default: return dst & mask;
+    }
+}
+static int alu_group(unsigned group)
+{
+    return group == 0 || group == 1 || group == 4 || group == 5 ||
+           group == 6 || group == 7;
+}
+static unsigned shifted(unsigned group, unsigned value,
+                        unsigned count, unsigned width)
+{
+    unsigned mask = width == 8 ? 0xffu : 0xffffu;
+    value &= mask;
+    if (count == 0) return value;
+    if (group == 4) return (value << count) & mask; /* SHL */
+    if (group == 5) return value >> count; /* SHR */
+    /* Portable arithmetic right shift, including negative 8/16-bit values. */
+    unsigned result = value >> count;
+    if (value & (1u << (width - 1u)))
+        result |= mask ^ ((1u << (width - count)) - 1u);
+    return result & mask; /* SAR */
+}
+
 static uint16_t read16(const uint8_t *p)
 {
     return (uint16_t)(p[0] | (uint16_t)p[1] << 8);
@@ -405,6 +456,17 @@ static int check_path(verifier *v, path_state s)
             s.at = c.return_at;
             continue;
         }
+        if (op == 0x0f && remaining >= 4 &&
+            p[1] >= 0x80 && p[1] <= 0x8f) { /* 386 near Jcc rel16 */
+            size_t target;
+            if (!forward_target(v, at, 4, (int16_t)read16(p + 2), &target) ||
+                !mark(v, at, 4)) return 0;
+            path_state taken = s;
+            taken.at = target;
+            if (!check_path(v, taken)) return 0;
+            s.at = at + 4;
+            continue;
+        }
         /* UD2 is an unconditionally faulting 386 instruction. Permit it
          * solely as a terminal test path after an imported API call: this
          * tests the private IDT recovery without enabling arbitrary code. */
@@ -556,6 +618,7 @@ static int check_path(verifier *v, path_state s)
             continue;
         }
         if (op == 0x80 && remaining >= 2 &&
+            (p[1] & 0xc0u) != 0xc0u &&
             (p[1] & 0x38u) == 0x38u) { /* CMP r/m8,imm8: /7 */
             size_t ea_len;
             unsigned addr;
@@ -591,6 +654,17 @@ static int check_path(verifier *v, path_state s)
                 s.number_known[REG_AX] = 0;
             }
             s.at += 3;
+            continue;
+        }
+        if ((op == 0x8a || op == 0x88) && remaining >= 2 &&
+            (p[1] & 0xc0u) == 0xc0u) { /* MOV r8,r8 */
+            unsigned reg = (p[1] >> 3) & 7u, rm = p[1] & 7u;
+            unsigned dst = op == 0x8a ? reg : rm, src = op == 0x8a ? rm : reg;
+            int known = s.number_known[parent8(src)];
+            unsigned value = known ? byte8(&s, src) : 0u;
+            if (!mark(v, at, 2)) return 0;
+            set8(&s, dst, value, known);
+            s.at += 2;
             continue;
         }
         if (op == 0x8a || op == 0x88) { /* MOV AL,r/m8 / MOV r/m8,AL */
@@ -678,25 +752,109 @@ static int check_path(verifier *v, path_state s)
             }
         }
 
-        /* ADD/SUB r16, sign-extended immediate. Only direct registers are
-         * supported, never SP/BP or an unproven memory operand. */
-        if (op == 0x83 || op == 0x81) {
-            size_t length = op == 0x83 ? 3u : 4u;
+        /* Immediate ALU. Register operands only. CMP leaves provenance
+         * untouched; any other arithmetic discards selector provenance. */
+        if (op == 0x80 || op == 0x81 || op == 0x83) {
+            unsigned width = op == 0x80 ? 8u : 16u;
+            size_t length = op == 0x81 ? 4u : 3u;
             if (remaining < length || (p[1] & 0xc0u) != 0xc0u ||
-                (((p[1] >> 3) & 7u) != 0u &&
-                 ((p[1] >> 3) & 7u) != 5u) ||
-                !ordinary_reg(p[1] & 7u) || !mark(v, at, length))
+                !alu_group((p[1] >> 3) & 7u) || !mark(v, at, length))
                 return 0;
-            unsigned reg = p[1] & 7u;
-            uint16_t delta = op == 0x83 ? (uint16_t)(int16_t)(int8_t)p[2]
-                                          : read16(p + 2);
-            if (((p[1] >> 3) & 7u) == 5u) delta = (uint16_t)-delta;
-            if (s.number_known[reg])
-                s.number[reg] = (uint16_t)(s.number[reg] + delta);
-            s.regs[reg] = ARG_WORD;
+            unsigned group = (p[1] >> 3) & 7u, reg = p[1] & 7u;
+            unsigned imm = op == 0x81 ? read16(p + 2) :
+                           op == 0x83 ? (uint16_t)(int16_t)(int8_t)p[2] : p[2];
+            if (width == 16) {
+                if (!ordinary_reg(reg)) return 0;
+                if (group != 7) {
+                    if (s.number_known[reg])
+                        s.number[reg] = (uint16_t)alu(group, s.number[reg], imm, 0xffffu);
+                    s.regs[reg] = ARG_WORD;
+                }
+            } else if (group != 7) {
+                unsigned value = s.number_known[parent8(reg)] ?
+                    alu(group, byte8(&s,reg), imm, 0xffu) : 0u;
+                set8(&s, reg, value, s.number_known[parent8(reg)]);
+            }
             s.at += length;
             continue;
         }
+        /* MOV r8,imm8 preserves the other byte only if it was already known. */
+        if (op >= 0xb0 && op <= 0xb7) {
+            if (remaining < 2 || !mark(v, at, 2)) return 0;
+            set8(&s, op - 0xb0, p[1], 1);
+            s.at += 2;
+            continue;
+        }
+        /* AL-only immediate operations; CMP/TEST are handled earlier. */
+        if (op == 0x04 || op == 0x0c || op == 0x24 ||
+            op == 0x2c || op == 0x34) {
+            if (remaining < 2 || !mark(v, at, 2)) return 0;
+            unsigned group = op == 0x04 ? 0 : op == 0x0c ? 1 :
+                             op == 0x24 ? 4 : op == 0x2c ? 5 : 6;
+            unsigned value = s.number_known[REG_AX] ?
+                alu(group, byte8(&s,0), p[1], 0xffu) : 0u;
+            set8(&s, 0, value, s.number_known[REG_AX]);
+            s.at += 2;
+            continue;
+        }
+        /* Group 3: TEST, NOT, NEG on registers (never memory, SP or BP). */
+        if (op == 0xf6 || op == 0xf7) {
+            unsigned width = op == 0xf6 ? 8u : 16u;
+            if (remaining < 2 || (p[1] & 0xc0u) != 0xc0u) return 0;
+            unsigned group = (p[1] >> 3) & 7u, reg = p[1] & 7u;
+            if (group != 0 && group != 2 && group != 3) return 0;
+            size_t length = group == 0 ? (width == 8 ? 3u : 4u) : 2u;
+            if (remaining < length || (width == 16 && !ordinary_reg(reg)) ||
+                !mark(v, at, length)) return 0;
+            if (group != 0) {
+                if (width == 16) {
+                    if (s.number_known[reg])
+                        s.number[reg] = group == 2 ? (uint16_t)~s.number[reg] :
+                                        (uint16_t)-s.number[reg];
+                    s.regs[reg] = ARG_WORD;
+                } else {
+                    unsigned val = s.number_known[parent8(reg)] ?
+                        (group == 2 ? ~byte8(&s,reg) : -byte8(&s,reg)) & 0xffu : 0u;
+                    set8(&s,reg,val,s.number_known[parent8(reg)]);
+                }
+            }
+            s.at += length;
+            continue;
+        }
+        /* Group 2: SHL/SHR/SAR, imm8, 1, or CL. All register-only.
+         * For unknown or >=width CL shifts, numeric provenance is discarded. */
+        if (op == 0xc0 || op == 0xc1 || op == 0xd0 || op == 0xd1 ||
+            op == 0xd2 || op == 0xd3) {
+            if (remaining < 2 || (p[1] & 0xc0u) != 0xc0u) return 0;
+            unsigned group = (p[1] >> 3) & 7u, reg = p[1] & 7u;
+            unsigned width = (op == 0xc0 || op == 0xd0 || op == 0xd2) ? 8u : 16u;
+            size_t length = op == 0xc0 || op == 0xc1 ? 3u : 2u;
+            if ((group != 4 && group != 5 && group != 7) ||
+                (width == 16 && !ordinary_reg(reg)) ||
+                remaining < length || !mark(v, at, length)) return 0;
+            int known_count = 1;
+            unsigned count = op == 0xc0 || op == 0xc1 ? p[2] & 31u :
+                             op == 0xd0 || op == 0xd1 ? 1u : 0u;
+            if (op == 0xd2 || op == 0xd3) {
+                known_count = s.number_known[REG_CX];
+                if (known_count) count = s.number[REG_CX] & 31u;
+            }
+            int known_value = (width == 8 ? s.number_known[parent8(reg)] :
+                              s.number_known[reg]);
+            if (width == 8) {
+                unsigned value = known_count && count < width && known_value ?
+                    shifted(group,byte8(&s,reg),count,width) : 0u;
+                set8(&s,reg,value,known_count && count < width && known_value);
+            } else {
+                if (known_count && count < width && known_value)
+                    s.number[reg] = (uint16_t)shifted(group,s.number[reg],count,width);
+                else s.number_known[reg] = 0;
+                s.regs[reg] = ARG_WORD;
+            }
+            s.at += length;
+            continue;
+        }
+
 
         if (op == 0x1e) { /* PUSH DS */
             if (s.depth == sizeof(s.stack) || !stack_push(&s, 2u) ||
@@ -751,27 +909,81 @@ static int check_path(verifier *v, path_state s)
             s.at++;
             continue;
         }
-        /* Register-register ADD/SUB, commonly emitted for a C helper
-         * that combines two parameters read via BP. No memory operands. */
-        if (op == 0x01 || op == 0x03 || op == 0x29 || op == 0x2b) {
+        if (op == 0x01 || op == 0x03 || op == 0x09 || op == 0x0b ||
+            op == 0x21 || op == 0x23 || op == 0x29 || op == 0x2b ||
+            op == 0x31 || op == 0x33) {
             if (remaining < 2 || (p[1] & 0xc0u) != 0xc0u ||
                 !mark(v, at, 2)) return 0;
             unsigned reg = (p[1] >> 3) & 7u, rm = p[1] & 7u;
-            unsigned dst = (op == 0x03 || op == 0x2b) ? reg : rm;
-            unsigned src = (op == 0x03 || op == 0x2b) ? rm : reg;
+            unsigned dst = (op & 2u) ? reg : rm, src = (op & 2u) ? rm : reg;
+            unsigned group = (op & 0xf8u) == 0x00 ? 0 :
+                             (op & 0xf8u) == 0x08 ? 1 :
+                             (op & 0xf8u) == 0x20 ? 4 :
+                             (op & 0xf8u) == 0x28 ? 5 : 6;
             if (!ordinary_reg(dst) || !ordinary_reg(src)) return 0;
-            if (s.number_known[dst] && s.number_known[src]) {
-                uint16_t rhs = s.number[src];
-                s.number[dst] = (uint16_t)(s.number[dst] +
-                               ((op == 0x29 || op == 0x2b) ?
-                                (uint16_t)-rhs : rhs));
-            } else {
-                s.number_known[dst] = 0;
-            }
+            if (dst == src && (group == 5 || group == 6)) {
+                s.number[dst] = 0;
+                s.number_known[dst] = 1;
+            } else if (s.number_known[dst] && s.number_known[src]) {
+                s.number[dst] = (uint16_t)alu(group,s.number[dst],s.number[src],0xffffu);
+            } else s.number_known[dst] = 0;
             s.regs[dst] = ARG_WORD;
             s.at += 2;
             continue;
         }
+        /* Byte-register ALU: no memory form, no arithmetic on a segment selector. */
+        if ((op == 0x00 || op == 0x02 || op == 0x08 || op == 0x0a ||
+             op == 0x20 || op == 0x22 || op == 0x28 || op == 0x2a ||
+             op == 0x30 || op == 0x32 || op == 0x38 || op == 0x3a) &&
+            remaining >= 2) {
+            if ((p[1] & 0xc0u) != 0xc0u || !mark(v, at, 2)) return 0;
+            unsigned r = (p[1] >> 3) & 7u, rm = p[1] & 7u;
+            unsigned dst = (op & 2u) ? r : rm, src = (op & 2u) ? rm : r;
+            unsigned group = (op & 0xf8u) == 0x00 ? 0 :
+                             (op & 0xf8u) == 0x08 ? 1 :
+                             (op & 0xf8u) == 0x20 ? 4 :
+                             (op & 0xf8u) == 0x28 ? 5 :
+                             (op & 0xf8u) == 0x30 ? 6 : 7;
+            if (group != 7) {
+                int known = s.number_known[parent8(dst)] && s.number_known[parent8(src)];
+                unsigned val = known ? alu(group,byte8(&s,dst),byte8(&s,src),0xffu) : 0u;
+                if (dst == src && (group == 5 || group == 6)) {
+                    known = s.number_known[parent8(dst)]; val = 0;
+                }
+                set8(&s,dst,val,known);
+            }
+            s.at += 2;
+            continue;
+        }
+        /* XCHG reg,reg and short XCHG AX,reg: preserve verified values/tags. */
+        if (op == 0x87 || op == 0x86 || (op >= 0x91 && op <= 0x97)) {
+            unsigned reg, rm;
+            size_t length = op >= 0x91 ? 1u : 2u;
+            if (remaining < length || !mark(v, at, length)) return 0;
+            if (op >= 0x91) {reg = REG_AX; rm = op - 0x90;}
+            else {
+                if ((p[1] & 0xc0u) != 0xc0u) return 0;
+                reg = (p[1] >> 3) & 7u; rm = p[1] & 7u;
+            }
+            if (op == 0x86) {
+                int ka = s.number_known[parent8(reg)], kb = s.number_known[parent8(rm)];
+                unsigned a = byte8(&s,reg), b = byte8(&s,rm);
+                if (reg != rm) {
+                    set8(&s,reg,b,kb);
+                    set8(&s,rm,a,ka);
+                }
+            } else {
+                if (!ordinary_reg(reg) || !ordinary_reg(rm)) return 0;
+                uint8_t tag = s.regs[reg], known = s.number_known[reg];
+                uint16_t val = s.number[reg];
+                s.regs[reg] = s.regs[rm]; s.number_known[reg] = s.number_known[rm];
+                s.number[reg] = s.number[rm];
+                s.regs[rm] = tag; s.number_known[rm] = known; s.number[rm] = val;
+            }
+            s.at += length;
+            continue;
+        }
+
         if (op == 0x8c || op == 0x89 || op == 0x8b ||
             op == 0x31 || op == 0x33) {
             if (remaining < 2 || (p[1] & 0xc0) != 0xc0 ||
