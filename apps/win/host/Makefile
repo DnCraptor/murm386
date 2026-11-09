@@ -134,6 +134,19 @@ NEALU-fixture.exe: mkne_alu.py
 test_ne_alu: ../core/ne_entry.c test_ne_alu.c NEALU-fixture.exe
 	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne_entry.c test_ne_alu.c
 
+# Compiler-generated 16-bit ENTER frames, saved callee registers, longer entry.
+NECABI-fixture.exe: mkne_compiler.py
+	python3 mkne_compiler.py $@
+
+test_ne_compiler: ../core/ne_entry.c test_ne_compiler.c NECABI-fixture.exe
+	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne_entry.c test_ne_compiler.c
+
+all: test_ne_compiler NECABI-fixture.exe
+clean: clean_ne_compiler
+clean_ne_compiler:
+	rm -f test_ne_compiler NECABI-fixture.exe
+.PHONY: clean_ne_compiler
+
 # Keep the existing clean recipe unchanged (it may differ locally).
 clean: clean_ne_alu
 clean_ne_alu:

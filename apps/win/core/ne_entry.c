@@ -17,8 +17,8 @@
 #include "ne_entry.h"
 #include "ne_guest.h"
 
-#define ENTRY_WINDOW 256u
-#define ENTRY_VISIT_LIMIT 1024u
+#define ENTRY_WINDOW 512u
+#define ENTRY_VISIT_LIMIT 2048u
 #define ENTRY_MAX_LOOP_CX 64u
 /* The NE stack starts four bytes below initial SP (FAR CALL from boot).
  * Reserve headroom for Win16 API argument thunks, the PM/RM gateway and
@@ -58,6 +58,13 @@ typedef struct {
 } verifier;
 
 typedef struct {
+    unsigned depth, phase;
+    uint8_t reg[3], tag[3], known[3];
+    uint16_t value[3];
+} frame_saves;
+
+typedef struct {
+    frame_saves caller_saves;
     size_t return_at;
     unsigned stack_before, frame_before, bp_before;
     unsigned arg_words;
@@ -73,6 +80,7 @@ typedef struct {
     unsigned stack_bytes, bp_bytes, near_depth;
     unsigned cleanup_bytes; /* CDECL RET: exact caller ADD SP required next. */
     int direction; /* 0: unknown DF; +1: CLD; -1: STD. */
+    frame_saves saves;
     near_call near[ENTRY_NEAR_CALL_DEPTH];
     uint8_t stack[8], stack_known[8];
     uint16_t stack_values[8];
@@ -337,6 +345,11 @@ static int check_path(verifier *v, path_state s)
             continue;
         }
 
+        if (s.saves.phase && op != 0x53 && op != 0x56 &&
+            op != 0x57 &&
+            !((op == 0x83 || op == 0x81) && remaining >= 2u &&
+              p[1] == 0xec))
+            s.saves.phase = 0;
         if (op == 0x90) { /* NOP */
             if (!mark(v, at, 1)) return 0;
             s.at++;
@@ -349,6 +362,7 @@ static int check_path(verifier *v, path_state s)
                 return 0;
             s.frame = FRAME_ACTIVE;
             s.bp_bytes = s.stack_bytes;
+            s.saves.phase = 1;
             s.at += 2;
             continue;
         }
@@ -428,7 +442,7 @@ static int check_path(verifier *v, path_state s)
         }
 
         if (op == 0xc9) { /* LEAVE = MOV SP,BP; POP BP */
-            if (s.frame != FRAME_ACTIVE || s.depth ||
+            if (s.frame != FRAME_ACTIVE || s.depth || s.saves.depth ||
                 s.bp_bytes < 2u || !mark(v, at, 1)) return 0;
             s.stack_bytes = s.bp_bytes - 2u;
             s.frame = FRAME_DONE;
@@ -437,7 +451,7 @@ static int check_path(verifier *v, path_state s)
         }
         if (op == 0xc3 || op == 0xc2) { /* RET / RET imm16 (near) */
             size_t length = op == 0xc2 ? 3u : 1u;
-            if (!s.near_depth || s.depth || s.stack_bytes < 2u ||
+            if (!s.near_depth || s.depth || s.saves.depth || s.stack_bytes < 2u ||
                 remaining < length ||
                 (s.frame != FRAME_NONE && s.frame != FRAME_DONE) ||
                 !mark(v, at, length)) return 0;
@@ -453,6 +467,7 @@ static int check_path(verifier *v, path_state s)
             s.cleanup_bytes = op == 0xc3 ? c.arg_words * 2u : 0u;
             s.bp_bytes = c.bp_before;
             s.frame = c.frame_before;
+            s.saves = c.caller_saves;
             s.at = c.return_at;
             continue;
         }
@@ -479,7 +494,8 @@ static int check_path(verifier *v, path_state s)
             return 1;
         }
         if (op == 0xcb) { /* RETF */
-            if (!s.calls || s.depth || s.near_depth || s.stack_bytes ||
+            if (!s.calls || s.depth || s.near_depth || s.saves.depth ||
+                s.stack_bytes ||
                 (s.frame != FRAME_NONE && s.frame != FRAME_DONE) ||
                 !mark(v, at, 1))
                 return 0;
@@ -495,10 +511,26 @@ static int check_path(verifier *v, path_state s)
             s.at++;
             continue;
         }
+        /* ENTER imm16,0 is a compiler-generated BP prologue. The dynamic
+         * nesting operand is never accepted. Local space is bounded. */
+        if (op == 0xc8 && remaining >= 4u) {
+            unsigned locals = read16(p + 1);
+            if (s.frame != FRAME_NONE || s.depth || p[3] ||
+                (s.near_depth == 0u && s.calls) ||
+                locals > 12u || (locals & 1u) ||
+                !stack_push(&s, 2u + locals) || !mark(v, at, 4u))
+                return 0;
+            s.frame = FRAME_ACTIVE;
+            s.bp_bytes = s.stack_bytes - locals;
+            s.saves = (frame_saves){0};
+            s.saves.phase = 1;
+            s.at += 4u;
+            continue;
+        }
         if (s.frame == FRAME_ACTIVE && remaining >= 2 &&
             ((op == 0x89 && p[1] == 0xec) ||
              (op == 0x8b && p[1] == 0xe5))) { /* MOV SP,BP */
-            if (s.depth || !mark(v, at, 2)) return 0;
+            if (s.depth || s.saves.depth || !mark(v, at, 2)) return 0;
             s.stack_bytes = s.bp_bytes;
             s.frame = FRAME_NEED_POP;
             s.at += 2;
@@ -522,6 +554,7 @@ static int check_path(verifier *v, path_state s)
             c->stack_before = s.stack_bytes - 2u;
             c->frame_before = s.frame;
             c->bp_before = s.bp_bytes;
+            c->caller_saves = s.saves;
             c->arg_words = s.depth;
             for (unsigned i = 0; i < c->arg_words; i++) {
                 unsigned src = c->arg_words - 1u - i;
@@ -532,6 +565,7 @@ static int check_path(verifier *v, path_state s)
             s.depth = 0; /* Callee now owns its formal arguments. */
             s.frame = FRAME_NONE;
             s.bp_bytes = 0;
+            s.saves = (frame_saves){0};
             s.at = (size_t)target;
             continue;
         }
@@ -549,6 +583,7 @@ static int check_path(verifier *v, path_state s)
             if (p[1] == 0xec) {
                 if (!stack_push(&s, (unsigned)amount)) return 0;
             } else {
+                s.saves.phase = 0;
                 if ((unsigned)amount > s.stack_bytes - s.bp_bytes)
                     return 0;
                 s.stack_bytes -= (unsigned)amount;
@@ -886,6 +921,25 @@ static int check_path(verifier *v, path_state s)
             s.at += 3;
             continue;
         }
+        /* Early BX/SI/DI pushes in a BP frame are callee-save slots,
+         * not pending native API arguments. Require reverse-order POPs. */
+        if (s.frame == FRAME_ACTIVE && s.saves.phase &&
+            (op == 0x53 || op == 0x56 || op == 0x57)) {
+            unsigned reg = op - 0x50;
+            if (s.depth || s.saves.depth >= 3u) return 0;
+            for (unsigned i = 0; i < s.saves.depth; ++i)
+                if (s.saves.reg[i] == reg) return 0;
+            if (!stack_push(&s, 2u) || !mark(v, at, 1u)) return 0;
+            unsigned n = s.saves.depth++;
+            s.saves.reg[n] = (uint8_t)reg;
+            s.saves.tag[n] = s.regs[reg];
+            s.saves.known[n] = s.number_known[reg];
+            s.saves.value[n] = s.number[reg];
+            s.at++;
+            continue;
+        }
+        if (s.saves.phase && op != 0x83 && op != 0x81)
+            s.saves.phase = 0;
         if (op >= 0x50 && op <= 0x57) { /* PUSH register */
             unsigned reg = op - 0x50;
             if (s.depth == sizeof(s.stack) || !ordinary_reg(reg) ||
@@ -894,6 +948,20 @@ static int check_path(verifier *v, path_state s)
             s.stack_known[s.depth] = s.number_known[reg];
             s.stack_values[s.depth] = s.number[reg];
             s.depth++;
+            s.at++;
+            continue;
+        }
+        if (s.frame == FRAME_ACTIVE && s.saves.depth && !s.depth &&
+            op == 0x58 + s.saves.reg[s.saves.depth - 1u]) {
+            if (s.stack_bytes < s.bp_bytes + 2u ||
+                !mark(v, at, 1u)) return 0;
+            unsigned n = --s.saves.depth;
+            unsigned reg = s.saves.reg[n];
+            s.regs[reg] = s.saves.tag[n];
+            s.number_known[reg] = s.saves.known[n];
+            s.number[reg] = s.saves.value[n];
+            s.stack_bytes -= 2u;
+            s.saves.phase = 0;
             s.at++;
             continue;
         }

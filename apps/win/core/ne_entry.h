@@ -23,6 +23,8 @@
  * The verified ALU supports register 8/16-bit MOV, AND/OR/XOR, shifts,
  * TEST/NOT/NEG, exact-valued CMP and XCHG, and forward 386 Jcc rel16.
  * Register-only arithmetic never grants unproved DS/SS memory access.
+ * Bounded ENTER imm16,0 frames and LIFO BX/SI/DI compiler saves are
+ * verified through nested direct near CALL/RET, in a 512-byte window.
  * Indirect calls/returns,
  * unknown SS addresses, segment overrides, delayed/partial caller cleanup
  * and recursion remain prohibited.
