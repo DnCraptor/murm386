@@ -479,6 +479,34 @@ static int check_path(verifier *v, path_state s)
             s.at += 3;
             continue;
         }
+        /* Byte-sized accesses are confined to the same checked DATA
+         * region as word MOV. AL is the only accepted byte register:
+         * other 8-bit halves would require tracking their parent words.
+         * A load changes AL, invalidating both the numeric value and
+         * selector provenance previously assigned to the entire AX. */
+        if (op == 0xa0 || op == 0xa2) { /* MOV AL,[moffs16] / [moffs16],AL */
+            if (remaining < 3 || !direct_data(v, read16(p + 1), 1u) ||
+                !mark(v, at, 3)) return 0;
+            if (op == 0xa0) {
+                s.regs[REG_AX] = ARG_WORD;
+                s.number_known[REG_AX] = 0;
+            }
+            s.at += 3;
+            continue;
+        }
+        if (op == 0x8a || op == 0x88) { /* MOV AL,r/m8 / MOV r/m8,AL */
+            size_t ea_len;
+            unsigned addr;
+            if (remaining < 2 || (p[1] & 0x38u) != 0u ||
+                !data_ea(v, &s, p, remaining, 1u, &ea_len, &addr) ||
+                !mark(v, at, ea_len)) return 0;
+            if (op == 0x8a) {
+                s.regs[REG_AX] = ARG_WORD;
+                s.number_known[REG_AX] = 0;
+            }
+            s.at += ea_len;
+            continue;
+        }
         if (op == 0xc6 || op == 0xc7) { /* MOV [known DS/local ea],imm */
             size_t ea_len;
             unsigned addr;

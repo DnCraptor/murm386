@@ -12,7 +12,9 @@
  * return with plain RET followed immediately by caller ADD SP,exact bytes
  * (CDECL ABI; 83 C4 ib and 81 C4 iw are accepted).
  * BP-relative stack locals require a standard frame and a bounded SUB SP.
- * DS reads/writes must stay below data_limit. Indirect calls/returns,
+ * DS reads/writes must stay below data_limit. Byte-sized MOV accesses use
+ * AL only and require a proven DS offset (direct or indexed).
+ * Indirect calls/returns,
  * unknown SS addresses, segment overrides, delayed/partial caller cleanup
  * and recursion remain prohibited.
  * calls receives the maximum number of API calls on a validated path. */

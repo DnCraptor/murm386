@@ -15,7 +15,7 @@ GDICORE  = $(filter-out ../core/exports.c ../core/task.c ../core/file.c ../core/
 # the applications, built in; each WinMain gets its own name
 APPS     = demo.o progman.o notepad.o clock.o calc.o control.o winfile.o taskman.o winmine.o appinfo.o
 
-all: test_gdi test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_entry test_ne_args test_ne_dialog test_ne_registers test_ne_strings test_ne_flow test_ne_indexed test_ne_callframe test_ne_parameters NECDECL-fixture.exe test_ne_loop test_ne_launch test_ne_rm_gate winhost winhost800 HOSTWIN
+all: test_gdi test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_entry test_ne_args test_ne_dialog test_ne_registers test_ne_strings test_ne_flow test_ne_indexed test_ne_callframe test_ne_parameters test_ne_bytes NECDECL-fixture.exe test_ne_loop test_ne_launch test_ne_rm_gate winhost winhost800 HOSTWIN
 
 test_gdi: $(GDICORE) $(HOST) test_gdi.c
 	$(CC) $(CFLAGS) $(INC) -o $@ $^
@@ -106,6 +106,13 @@ NECDECL-fixture.exe: mkne_params.py
 test_ne_parameters: ../core/ne.c ../core/ne_guest.c ../core/ne_entry.c test_ne_parameters.c NEPARAM-fixture.exe NECDECL-fixture.exe
 	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne.c ../core/ne_guest.c ../core/ne_entry.c test_ne_parameters.c
 
+# Copy NUL-terminated text through checked byte MOV + SI/DI/CX/LOOP.
+NEBYTE-fixture.exe: mkne_bytes.py
+	python3 mkne_bytes.py $@
+
+test_ne_bytes: ../core/ne.c ../core/ne_guest.c ../core/ne_entry.c test_ne_bytes.c NEBYTE-fixture.exe
+	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne.c ../core/ne_guest.c ../core/ne_entry.c test_ne_bytes.c
+
 # Bounded counted LOOP backwards, with a DOS-safe MZ stub.
 NELOOP-fixture.exe: mkne_loop.py
 	python3 mkne_loop.py $@
@@ -178,6 +185,6 @@ HOSTWIN:
 	cp HOSTWIN/README.TXT HOSTWIN/DOCS/README.TXT
 
 clean:
-	rm -rf test_gdi test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_entry test_ne_args test_ne_dialog test_ne_registers test_ne_strings test_ne_flow test_ne_indexed test_ne_callframe test_ne_parameters test_ne_loop test_ne_launch test_ne_rm_gate winhost winhost800 *.o *.ppm *.png appinfo.c HOSTWIN
+	rm -rf test_gdi test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_entry test_ne_args test_ne_dialog test_ne_registers test_ne_strings test_ne_flow test_ne_indexed test_ne_callframe test_ne_parameters test_ne_bytes test_ne_loop test_ne_launch test_ne_rm_gate winhost winhost800 *.o *.ppm *.png appinfo.c HOSTWIN
 
 .PHONY: all clean HOSTWIN
