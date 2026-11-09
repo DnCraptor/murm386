@@ -15,6 +15,7 @@
 #define WINX86_BRIDGE_PORT 0xE7E7u
 #define WINX86_BRIDGE_EXIT 0xFFFFu
 #define WINX86_BRIDGE_FAULT 0xFFFEu
+#define WINX86_BRIDGE_RETURN 0xFFFDu
 
 enum {
     WINX86_OK = 0,
@@ -27,8 +28,9 @@ enum {
 
 /* Handler may update guest registers; 1 = handled, 0 = unsupported,
  * WINX86_SERVICE_EXIT = handled, and the run ends there (WINX86_OK; a
- * program that exits through DOS). EXIT and FAULT tokens bypass the
- * handler and end the guest run.
+ * program that exits through DOS). EXIT, RETURN (a callback into the
+ * guest returned) and FAULT tokens bypass the handler and end the guest
+ * run (WINX86_OK for EXIT and RETURN).
  * Native calls using DOS/BIOS are safe only when the caller has explicitly
  * returned the shared CPU to its original real-mode DOS context.
  */

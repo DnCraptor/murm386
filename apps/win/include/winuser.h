@@ -614,6 +614,7 @@ void    WINAPI MapWindowPoints(HWND from, HWND to, LPPOINT pts, UINT n);
 void    WINAPI AdjustWindowRect(LPRECT rc, DWORD style, BOOL menu);
 void    WINAPI AdjustWindowRectEx(LPRECT rc, DWORD style, BOOL menu, DWORD exstyle);
 
+HTASK   WINAPI GetWindowTask(HWND hwnd);
 LONG    WINAPI GetWindowLong(HWND hwnd, int index);
 LONG    WINAPI SetWindowLong(HWND hwnd, int index, LONG value);
 WORD    WINAPI GetWindowWord(HWND hwnd, int index);

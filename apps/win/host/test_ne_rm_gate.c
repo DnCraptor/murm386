@@ -119,7 +119,7 @@ int main(void)
     store16(0x300ceu, 0);                 /* hwnd */
     store16(scratch+WIN_NE_BOOT_CALL_SP_OFFSET, 0xbcu);
 
-    win_ne_guest_api_context api = { &img, read_guest, NULL, 0, "TEST.EXE", 1, 0, 0, 0, NULL, 0 };
+    win_ne_guest_api_context api = { .image = &img, .read = read_guest, .path = "TEST.EXE", .show = 1 };
     win_ne_native_gate gate = { &original, &api, scratch, rm_cs };
     assert(invoke_native(&gate, &cpu, 0x1001));
     assert(modal_calls == 1 && !api.invalid_args);

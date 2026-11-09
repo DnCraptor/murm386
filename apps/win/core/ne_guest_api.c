@@ -40,7 +40,7 @@ static int read_segment(win_ne_guest_api_context *ctx, uint16_t selector,
     return ctx->read(ctx->opaque, s->linear + offset, dst, len);
 }
 
-static int read_stack_word(win_ne_guest_api_context *ctx, CPU *cpu,
+static int read_stack_word(win_ne_guest_api_context *ctx, win_ne_regs *cpu,
                            uint32_t stack_offset, uint16_t *value)
 {
     uint32_t sp = cpu->gprx[regsp].r16;
@@ -150,7 +150,7 @@ static int guest_copy_string(win_ne_guest_api_context *ctx,
 enum { FR_CX = -8, FR_DX = -10, FR_BX = -12, FR_BP = -16, FR_SI = -18,
        FR_DI = -20, FR_DS = -22, FR_ES = -24 };
 
-static int frame_get(win_ne_guest_api_context *ctx, CPU *cpu, int at, uint16_t *v)
+static int frame_get(win_ne_guest_api_context *ctx, win_ne_regs *cpu, int at, uint16_t *v)
 {
     uint8_t b[2];
     if (!read_segment(ctx, ctx->image->ss, (uint16_t)(cpu->gprx[regsp].r16 + at), b, 2))
@@ -159,7 +159,7 @@ static int frame_get(win_ne_guest_api_context *ctx, CPU *cpu, int at, uint16_t *
     return 1;
 }
 
-static int frame_set(win_ne_guest_api_context *ctx, CPU *cpu, int at, uint16_t v)
+static int frame_set(win_ne_guest_api_context *ctx, win_ne_regs *cpu, int at, uint16_t v)
 {
     uint8_t b[2] = { (uint8_t)v, (uint8_t)(v >> 8) };
     return write_segment(ctx, ctx->image->ss, (uint16_t)(cpu->gprx[regsp].r16 + at), b, 2);
@@ -175,7 +175,7 @@ static uint16_t dgroup(const win_ne_guest_image *g)
  * the stack size, DX nCmdShow, SI hPrevInstance, DI hInstance (DGROUP's
  * selector, as in Windows), ES the PSP; the stack bounds in DGROUP's
  * header (pStackTop, pStackMin, pStackBottom at 0Ah). */
-static int init_task(win_ne_guest_api_context *ctx, CPU *cpu, uint32_t *value)
+static int init_task(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint32_t *value)
 {
     const win_ne_guest_image *g = ctx->image;
     uint16_t ds = dgroup(g);
@@ -197,7 +197,7 @@ static int init_task(win_ne_guest_api_context *ctx, CPU *cpu, uint32_t *value)
 /* INT 21h: the guest's AX is the word at SP, then the interrupt's IP, CS,
  * FLAGS (its carry: the error); DX stays the guest's unless the function
  * sets it. */
-static int int21(win_ne_guest_api_context *ctx, CPU *cpu, uint32_t *value)
+static int int21(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint32_t *value)
 {
     uint16_t ax, dx, flags;
     if (!read_stack_word(ctx, cpu, 0, &ax) || !frame_get(ctx, cpu, FR_DX, &dx) ||
@@ -225,7 +225,39 @@ static int int21(win_ne_guest_api_context *ctx, CPU *cpu, uint32_t *value)
     return 1;
 }
 
-int win_ne_guest_api(void *opaque, CPU *cpu, uint16_t service)
+/* no window services where ne_guest_user.c is not linked in */
+__attribute__((weak)) int win_ne_guest_user(win_ne_guest_api_context *ctx, win_ne_regs *cpu,
+                                            uint16_t service, uint32_t *value, int *dword)
+{
+    (void)ctx; (void)cpu; (void)service; (void)value; (void)dword;
+    return 0;
+}
+__attribute__((weak)) void win_ne_user_start(win_ne_guest_api_context *ctx) { (void)ctx; }
+__attribute__((weak)) void win_ne_user_end(win_ne_guest_api_context *ctx) { (void)ctx; }
+
+int win_ne_read(win_ne_guest_api_context *ctx, uint16_t sel, uint32_t off, void *dst, uint32_t n)
+{
+    return read_segment(ctx, sel, off, dst, n);
+}
+
+int win_ne_write(win_ne_guest_api_context *ctx, uint16_t sel, uint32_t off, const void *src,
+                 uint32_t n)
+{
+    return write_segment(ctx, sel, off, src, n);
+}
+
+int win_ne_arg(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint32_t off, uint16_t *v)
+{
+    return read_stack_word(ctx, cpu, off, v);
+}
+
+int win_ne_string(win_ne_guest_api_context *ctx, uint16_t sel, uint16_t off, char *dst,
+                  uint32_t cap)
+{
+    return guest_copy_string(ctx, sel, off, dst, cap);
+}
+
+int win_ne_guest_api(void *opaque, win_ne_regs *cpu, uint16_t service)
 {
     if (!cpu) return 0;
     win_ne_guest_api_context *ctx = (win_ne_guest_api_context *)opaque;
@@ -360,8 +392,11 @@ int win_ne_guest_api(void *opaque, CPU *cpu, uint16_t service)
         }
         break;
     default:
-        ctx->unsupported = service;
-        return 0;
+        if (!win_ne_guest_user(ctx, cpu, service, &value, &dword)) {
+            ctx->unsupported = service;
+            return 0;
+        }
+        break;
     }
     cpu->gprx[regax].r16 = (uint16_t)value;
     cpu->gprx[regdx].r16 = dword ? (uint16_t)(value >> 16) : 0;

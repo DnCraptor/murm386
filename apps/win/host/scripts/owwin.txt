@@ -1,0 +1,36 @@
+# A Win16 program with a window of its own class, built by Open Watcom, on
+# the emulator's i386 core, started from the Program Manager:
+#     ./winhost scripts/owwin.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OWWIN
+key RETURN
+wait 100
+snap ow_start.ppm
+click 100 120
+wait 30
+click 100 120
+wait 30
+click 100 120
+wait 30
+snap ow_clicks.ppm
+# Alt+Tab to the Program Manager and back: its window is painted again
+keydown ALT
+key TAB
+keyup ALT
+wait 30
+keydown ALT
+key TAB
+keyup ALT
+wait 30
+snap ow_back.ppm
+keydown ALT
+key F4
+keyup ALT
+wait 50
+snap ow_closed.ppm
+exit

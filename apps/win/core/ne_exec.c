@@ -25,7 +25,7 @@
  */
 #include "ne_exec.h"
 
-#if defined(__arm__) || defined(__thumb__)
+#if defined(__arm__) || defined(__thumb__) || defined(WINN_NE_HOST)
 #include <stddef.h>
 #include <string.h>
 #include "dos-api.h"
@@ -100,6 +100,13 @@ typedef struct {
     uint16_t rm_segment;
 } win_ne_native_gate;
 
+/* what a callback into the running program needs (win_ne_guest_api_context
+ * exec) */
+typedef struct {
+    win_ne_native_gate gate;
+    const win_ne_guest_image *g;
+} ne_run;
+
 /* OUT is now issued by guest code after switching to RM and restoring
  * the original GDTR. Save the transient RM continuation, expose the caller's
  * Win16 stack to the argument marshaller, and run native USER under the
@@ -117,13 +124,17 @@ static int invoke_native(void *opaque, CPU *cpu, uint16_t service)
     uint16_t call_sp = (uint16_t)(saved[0] | (uint16_t)saved[1] << 8);
     /* CALL FAR gateway pushed CS:IP; skip it so the API marshaller sees the
      * Win16 caller's far return address at [SS:SP], followed by arguments. */
-    CPU guest = *cpu;
+    win_ne_regs guest;
+    memcpy(guest.gprx, cpu->gprx, sizeof(guest.gprx));
     guest.gprx[regsp].r16 = (uint16_t)(call_sp + 4u);
 
     win_cpu_snapshot transient;
     save_cpu(cpu, &transient);
     restore_cpu(cpu, gate->dos_context);
     int handled = win_ne_guest_api(gate->api, &guest, service);
+    /* a fault or an exit in a callback this call made ends the program */
+    if (handled == 1 && (gate->api->dead || gate->api->exited || gate->api->stopped))
+        handled = WINX86_SERVICE_EXIT;
     restore_cpu(cpu, &transient);
     cpu->gprx[regax].r16 = guest.gprx[regax].r16;
     cpu->gprx[regdx].r16 = guest.gprx[regdx].r16;
@@ -217,6 +228,97 @@ static void fault_where(const win_ne_guest_image *g, CPU *cpu, win_ne_fault *f)
             f->segment = i;
 }
 
+/* Run the guest until it ends where its CPU state can be given back: its
+ * exit, its entry's or a callback's return, a fault, a call WINN has not;
+ * turns for the other tasks in between. An OUT of its own in protected
+ * mode ends nothing. */
+static int run_guest(CPU *cpu, win_ne_native_gate *gate, uint16_t thunk_selector)
+{
+    int rc = winx86_run(cpu, invoke_native, gate, WIN_NE_EXEC_SLICE);
+    while (!back_in_rm(cpu, gate, rc) && rc != WINX86_BAD_CONTEXT)
+        rc = preempt(cpu, gate, thunk_selector);
+    return rc;
+}
+
+static void guest_put16(uint32_t linear, uint16_t v)
+{
+    uint8_t *p = (uint8_t *)dos_guest_linear_ptr(linear);
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+}
+
+static uint16_t guest_get16(uint32_t linear)
+{
+    const uint8_t *p = (const uint8_t *)dos_guest_linear_ptr(linear);
+    return (uint16_t)(p[0] | p[1] << 8);
+}
+
+/* USER calls the program's window procedure (selector:offset proc) while
+ * the program waits in the gateway, in an API call or its turn's end: the
+ * arguments go below the stack the gateway left, the callback entry runs
+ * it in protected mode, the result comes back in Real Mode. The gateway's
+ * scratch words are kept around it, since the procedure calls the API in
+ * turn. A fault in it ends the program (dead, at its next return). */
+uint32_t win_ne_callback(win_ne_guest_api_context *ctx, uint32_t proc, uint16_t hwnd,
+                         uint16_t msg, uint16_t wp, uint32_t lp)
+{
+    PC *pc = get_PC();
+    ne_run *run = ctx ? (ne_run *)ctx->exec : NULL;
+    if (!pc || !pc->cpu || !run || ctx->dead || ctx->exited || ctx->stopped)
+        return 0;
+    CPU *cpu = pc->cpu;
+    const win_ne_guest_image *g = run->g;
+    const uint32_t boot = run->gate.scratch_linear;
+    const uint32_t thunks = g->thunk_linear;
+    uint8_t scratch[WIN_NE_BOOT_SCRATCH_BYTES];
+    memcpy(scratch, dos_guest_linear_ptr(boot + WIN_NE_BOOT_SCRATCH_OFFSET), sizeof(scratch));
+    uint16_t ss = guest_get16(boot + WIN_NE_BOOT_PM_SS_OFFSET);
+    uint16_t sp = (uint16_t)(guest_get16(boot + WIN_NE_BOOT_PM_SP_OFFSET) - 10u);
+    const win_ne_guest_segment *stack = NULL;
+    for (uint16_t i = 1; i <= g->info.segment_count; i++)
+        if (g->segments[i].selector == ss)
+            stack = &g->segments[i];
+    if (!stack || sp < 16u || sp + 10u > stack->size)
+        return 0;
+    /* PASCAL: hwnd, msg, wParam, lParam pushed in this order */
+    uint32_t a = stack->linear + sp;
+    guest_put16(a, (uint16_t)lp);
+    guest_put16(a + 2, (uint16_t)(lp >> 16));
+    guest_put16(a + 4, wp);
+    guest_put16(a + 6, msg);
+    guest_put16(a + 8, hwnd);
+    guest_put16(thunks + WIN_NE_CB_PROC_OFFSET, (uint16_t)proc);
+    guest_put16(thunks + WIN_NE_CB_PROC_OFFSET + 2, (uint16_t)(proc >> 16));
+    guest_put16(thunks + WIN_NE_CB_SS_OFFSET, ss);
+    guest_put16(thunks + WIN_NE_CB_SP_OFFSET, sp);
+    guest_put16(thunks + WIN_NE_CB_DS_OFFSET,
+                g->segments[g->info.auto_data ? g->info.auto_data : g->info.ss_index].selector);
+
+    win_cpu_snapshot here;
+    save_cpu(cpu, &here);
+    win_ne_native_gate gate = run->gate;
+    gate.dos_context = &here;
+    cpu->ext_accessors->set_flags(cpu, 0, 0x200u);
+    cpu->ext_accessors->set_seg16(cpu, WIN_CS, run->gate.rm_segment);
+    cpu->ip = cpu->next_ip = WIN_NE_CALLBACK_OFFSET - WIN_NE_BOOT_OFFSET;
+    cpu->prefetch_base = (uint32_t)-1;
+    int rc = run_guest(cpu, &gate, g->thunk_selector);
+    if (!back_in_rm(cpu, &gate, rc))
+        for (;;) { }                    /* as in win_ne_execute */
+    uint32_t result = 0;
+    if (rc == WINX86_FAULT) {
+        fault_where(g, cpu, &ctx->fault);
+        ctx->dead = 1;
+    } else if (rc == WINX86_OK && !ctx->exited && !ctx->stopped) {
+        result = ((uint32_t)cpu->gprx[regcx].r16 << 16) | cpu->gprx[regbx].r16;
+    } else if (rc == WINX86_BAD_SERVICE) {
+        ctx->dead = 1;                  /* a call WINN has not, in the procedure */
+    }
+    restore_cpu(cpu, &here);
+    memcpy(dos_guest_linear_ptr(boot + WIN_NE_BOOT_SCRATCH_OFFSET), scratch, sizeof(scratch));
+    return result;
+}
+
 /* The PSP: INT 20h at 0 as in DOS, the command line at 81h, its length
  * at 80h, ending with a NUL (Windows) */
 static int write_psp(const win_ne_guest_image *g, const char *cmdline)
@@ -292,31 +394,38 @@ int win_ne_execute(const char *path, const char *cmdline, int show, int (*yield)
     cpu->ext_accessors->set_seg16(cpu, WIN_CS, args.rm_segment);
     cpu->ip = cpu->next_ip = 0;
     cpu->prefetch_base = (uint32_t)-1;
-    win_ne_guest_api_context api = { &g, read_guest, NULL, 0, path, show, 0, 0, 0, yield, 0 };
-    win_ne_native_gate gate = {
-        .dos_context = &old, .api = &api,
-        .scratch_linear = linear,
-        .rm_segment = args.rm_segment
+    win_ne_guest_api_context api;
+    memset(&api, 0, sizeof(api));
+    api.image = &g;
+    api.read = read_guest;
+    api.path = path;
+    api.show = show;
+    api.yield = yield;
+    ne_run run = {
+        .gate = { .dos_context = &old, .api = &api, .scratch_linear = linear,
+                  .rm_segment = args.rm_segment },
+        .g = &g
     };
-    /* until it ends: its exit, its entry's RETF, a fault, a call WINN has
-     * not; an OUT of its own in protected mode ends nothing */
-    rc = winx86_run(cpu, invoke_native, &gate, WIN_NE_EXEC_SLICE);
-    while (!back_in_rm(cpu, &gate, rc) && rc != WINX86_BAD_CONTEXT)
-        rc = preempt(cpu, &gate, g.thunk_selector);
+    api.exec = &run;
+    win_ne_user_start(&api);
+    rc = run_guest(cpu, &run.gate, g.thunk_selector);
 
     /* EXIT, the private-IDT FAULT trap and a refused API call are all in
      * Real Mode with the DOS GDTR/IDTR back. Anything else leaves the CPU
      * in a mode and tables the public CPU interface cannot restore: DOS
      * cannot run again. */
-    if (!back_in_rm(cpu, &gate, rc))
+    if (!back_in_rm(cpu, &run.gate, rc))
         for (;;) { }
 
     const uint32_t result = ((uint32_t)cpu->gprx[regcx].r16 << 16) |
                              cpu->gprx[regbx].r16;
-    int guest_fault = rc == WINX86_FAULT;
-    if (guest_fault)
+    int guest_fault = rc == WINX86_FAULT || api.dead;
+    if (rc == WINX86_FAULT)
         fault_where(&g, cpu, &r->fault);
+    else if (api.dead)
+        r->fault = api.fault;           /* in a callback */
     restore_cpu(cpu, &old);
+    win_ne_user_end(&api);
     r->exited = api.exited;
     r->stopped = api.stopped;
     r->value = api.exited ? api.exit_code : guest_fault ? 0 : result;

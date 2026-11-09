@@ -10,6 +10,9 @@ OWHELLO: the command line in a message box, exit code 3: "OWHELLO hello world"
 
 OWBUSY: a computation of some million instructions without a call (WINN
     switches tasks meanwhile), its result in a message box: 94FB0EA1
+
+OWWIN: a window of its own class: painting, clicks counted, closing; the
+    exit code is the number of clicks
 """
 import sys
 
@@ -112,6 +115,106 @@ PROGRAMS = {
             '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
             '00000000000000000000000000000000000000000000000000000000000000000000e701e701000000000000'
             '00000000000000000000000000000000000000000000000000000000'
+        )),
+    'OWWIN': (
+        # #include <windows.h>
+        #
+        # /* a window: its class, painting, a click, closing */
+        # static int clicks;
+        #
+        # LRESULT FAR PASCAL __export WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+        # {
+        #     PAINTSTRUCT ps;
+        #     HDC dc;
+        #     char text[32];
+        #     switch (msg) {
+        #     case WM_PAINT:
+        #         dc = BeginPaint(hwnd, &ps);
+        #         TextOut(dc, 10, 10, text, wsprintf(text, "Clicks: %d", clicks));
+        #         EndPaint(hwnd, &ps);
+        #         return 0;
+        #     case WM_LBUTTONDOWN:
+        #         clicks++;
+        #         InvalidateRect(hwnd, NULL, TRUE);
+        #         return 0;
+        #     case WM_DESTROY:
+        #         PostQuitMessage(clicks);
+        #         return 0;
+        #     }
+        #     return DefWindowProc(hwnd, msg, wParam, lParam);
+        # }
+        #
+        # int PASCAL WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
+        # {
+        #     WNDCLASS wc;
+        #     MSG msg;
+        #     HWND hwnd;
+        #     if (!hPrevInstance) {
+        #         wc.style = CS_HREDRAW | CS_VREDRAW;
+        #         wc.lpfnWndProc = WndProc;
+        #         wc.cbClsExtra = 0;
+        #         wc.cbWndExtra = 0;
+        #         wc.hInstance = hInstance;
+        #         wc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+        #         wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        #         wc.hbrBackground = GetStockObject(WHITE_BRUSH);
+        #         wc.lpszMenuName = NULL;
+        #         wc.lpszClassName = "OwWin";
+        #         if (!RegisterClass(&wc))
+        #             return 1;
+        #     }
+        #     hwnd = CreateWindow("OwWin", "Open Watcom window", WS_OVERLAPPEDWINDOW,
+        #                         CW_USEDEFAULT, CW_USEDEFAULT, 300, 200, NULL, NULL, hInstance, NULL);
+        #     ShowWindow(hwnd, nCmdShow);
+        #     UpdateWindow(hwnd);
+        #     while (GetMessage(&msg, NULL, 0, 0)) {
+        #         TranslateMessage(&msg);
+        #         DispatchMessage(&msg);
+        #     }
+        #     return msg.wParam;
+        # }
+        bytes.fromhex(
+            '4d5a80000100000004000000ffff0000b8000000000000004000000000000000000000000000000000000000'
+            '00000000000000000000000000000000800000000e1fba0e00b409cd21b8014ccd2154686973206973206120'
+            '57696e646f77732031362d6269742065786563757461626c650d0a240000000000000000000000004e450501'
+            '7a0007000000000002030200000400208e01010000000200020003000d004000500050006300690001010000'
+            '000001000000020000000000000000038700fe03400dfe03eb021201410c2001054f5757494e000007574e44'
+            '50524f43010000010006000a0000045553455203474449064b45524e454c01012908000000096f7777696e2e'
+            '657865000000ccebfd90909090001e5890455589e51e8ed85683ec408b460c8b760e3d0102745d3d0f00741c'
+            '3d02007567ff3612019affff000031c031d28d66fc5e1f5d4dca0a00561e8d56bc529affff000050b80a0050'
+            '501e8d56dc52ff3612011eb81000501e529affff000083c40a509affff0000561e8d56bc529affff0000ebb6'
+            '5631c05050b8010050010612019affff0000eba25650ff760aff7608ff76069affff0000eb945589e55683ec'
+            '2c8b760c837e0a0074661eb81b00501eb8210050b8cf005031c050b800805050b82c0150b8c8005031c05050'
+            '5650509affff000050ff760489c69affff0000569affff00001e8d56ec5231c05050509affff000085c07416'
+            '1e8d56ec529affff00001e8d56ec529affff0000ebd7eb6fc746d2030031c0c746d4ffff8946d8508946da50'
+            'b8007fc746d6ffff508976dc9affff00008946de31c05050b8007f509affff00008946e031c0509affff0000'
+            'c746e81b008d56d28946e28c5eea1e31c0528946e48946e69affff000085c07403e936ffb801008d66fe5e5d'
+            'c20a008b46f0ebf3eb0203009affff00000bc0750e5033c0ba0f00e8fc0158b44ccd218c0638005756065352'
+            '53be1401893653008c1e5500268a078804464384c075f589360a005b2bc0509affff000057579affff0000fc'
+            '1e07b91401bf12012bcf32c0f3aab8d802a34f00b8ffffa35100b430cd21a23a0088263b009affff0000a23c'
+            '0088263d0086e0a33e0054583bc475120f01e0a90100740ab001a24000b003a241001ebf5b0057b89000509a'
+            'ffff0000b85b00893e57008c1e5900b8ff00e8fd00e856fee98b004f70656e20576174636f6d20432f432b2b'
+            '31362052756e2d54696d652073797374656d2e20436f7079726967687420286329204f70656e20576174636f'
+            '6d20436f6e7472696275746f727320323030322d323032362e20506f7274696f6e7320436f70797269676874'
+            '20284329205379626173652c20496e632e20313938382d323030322e00c3cb00c3c3535289c3833e10010074'
+            '04ff161001ff16ec00baff00b81000e8a800ff16ec00ff16ee0089d8e996fe5289c2ff16ec00ff16ee0089d0'
+            'e986fe5589e5535289c3833f0075078d66fc5a5b5dc31eff171febf35589e5535289c38b47028b1785c07504'
+            '85d274df1eff1f1febd95589e5535152565789c11ee881ffbf120189fabb120189fe88c839fb7316803f0275'
+            '0583c306ebf23a470172f689de8a4701ebef39fe74158d4402803c007508e88affc60402ebcbe89bffebf61f'
+            '8d66f65f5e5a595b5dc35589e55351565789c11ee82aff88d5bf120189fabb120189fe88c839fb7316803f02'
+            '750583c306ebf23a470177f689de8a4701ebef39fe741c3a6c017305c60402ebd18d4402803c007505e827ff'
+            'ebeee83bffebe91f8d66f85f5eeb9f00190003013000010006000301490001002700030164000100a4010301'
+            '6d0002002100030178000100280003018c0001007d0003019e0001006b000301da00010029000301e5000100'
+            '2a000301eb0001007c000301fa0001006c000301080101007100030112010100720005002401010008000200'
+            '34010100080003013b010100ae0003014b010100ad0003015601020057000301730101003900030193010300'
+            '5b000301d20103001e000301d901010005000200f30101008e01030104020300030003013602030031000000'
+            '0000050000000000000000000000436c69636b733a202564004f7757696e004f70656e20576174636f6d2077'
+            '696e646f7700ffff00000000000000000000000c000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000db02db020000000000000000000000000000000000000000000000000000'
+            '0000000000000000'
         )),
 }
 

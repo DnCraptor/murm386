@@ -10,44 +10,14 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/mman.h>
 #include "x86run/dos-api.h"
 #include "x86run/dos_guest_ptr.h"
 
-#define __arm__ 1
-#include "../core/ne_exec.c"
+#include "../core/ne_exec.h"
+#include "../core/ne_guest_api.h"
+#include "../core/ne_boot.h"
 
-CPU *cpu_new(int gen, CPU_CB **cb);
-
-static PC pc;
-PC *get_PC(void) { return &pc; }
-
-/* DOS memory: a bump allocator above the "DOS" area */
-static uint32_t next_free = 0x20000;
-static int run_alloc(void *o, uint32_t bytes, uint32_t *linear)
-{
-    (void)o;
-    if (!bytes || bytes > 65536 || next_free + bytes > 0xa0000)
-        return 0;
-    *linear = next_free;
-    next_free = (next_free + bytes + 15) & ~15u;
-    memset(X86RUN_RAM + *linear, 0xa5, bytes);      /* not zeroed, as DOS */
-    return 1;
-}
-static void run_free(void *o, uint32_t linear) { (void)o; (void)linear; }
-static int run_write(void *o, uint32_t linear, const void *data, uint32_t bytes)
-{
-    (void)o;
-    if (linear >= 0x100000 || bytes > 0x100000 - linear)
-        return 0;
-    memcpy(X86RUN_RAM + linear, data, bytes);
-    return 1;
-}
-const win_ne_guest_io *win_ne_guest_dos_io(void)
-{
-    static const win_ne_guest_io io = { run_alloc, run_free, run_write };
-    return &io;
-}
+enum { WIN_CS = 1, WIN_SS = 2 };     /* CPU_ext_accessors segment numbers */
 
 /* the native side */
 static char last_text[512], last_caption[128];
@@ -86,19 +56,8 @@ static int ends_with(const char *s, const char *tail)
 
 int main(int argc, char **argv)
 {
-    if (mmap(X86RUN_RAM, 0x110000, PROT_READ | PROT_WRITE,
-             MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) != X86RUN_RAM) {
-        perror("mmap");
-        return 1;
-    }
-    CPU_CB *cb;
-    pc.cpu = cpu_new(3, &cb);
     /* the "DOS" context the guest runs from and must come back to */
-    CPU *cpu = pc.cpu;
-    cpu->ext_accessors->set_seg16(cpu, WIN_CS, 0xf000);
-    cpu->ext_accessors->set_seg16(cpu, WIN_SS, 0x1000);
-    cpu->gprx[regsp].r16 = 0xfffe;
-    cpu->ip = cpu->next_ip = 0x1234;
+    CPU *cpu = get_PC()->cpu;
 
     for (int i = 1; i < argc; i++) {
         const char *f = argv[i];

@@ -115,42 +115,65 @@ static int assign_selector(void *opaque, uint16_t index, uint16_t flags,
 }
 
 /* The Win16 functions the guest can import: module, ordinal, name and the
- * bytes of PASCAL arguments its RETF releases. The service number, KERNEL
- * ordinal n or USER 0x1000 + n, lives entirely inside WINN; it is not a
- * guest pointer or an emulated IRQ. */
+ * bytes of PASCAL arguments its RETF releases (0 for the C ones: the caller
+ * does). The service number, KERNEL ordinal n, USER 0x1000 + n, GDI
+ * 0x3000 + n, lives entirely inside WINN; it is not a guest pointer or an
+ * emulated IRQ. */
+enum { M_KERNEL, M_USER, M_GDI };
+static const uint16_t module_base[] = { 0, 0x1000u, 0x3000u };
 static const struct {
-    uint8_t user;
+    uint8_t module;                 /* M_* */
     uint16_t ordinal;
     const char *name;
     uint16_t args;
 } services[] = {
-    { 0, 3, "GetVersion", 0 },
-    { 0, 30, "WaitEvent", 2 },
-    { 0, 36, "GetCurrentTask", 0 },
-    { 0, 49, "GetModuleFileName", 8 },
-    { 0, 88, "lstrcpy", 8 },
-    { 0, 89, "lstrcat", 8 },
-    { 0, 90, "lstrlen", 4 },
-    { 0, 91, "InitTask", 0 },
-    { 0, 152, "GetNumTasks", 0 },
-    { 1, 1, "MessageBox", 12 },
-    { 1, 5, "InitApp", 2 },
-    { 1, 13, "GetTickCount", 0 },
-    { 1, 179, "GetSystemMetrics", 2 },
-    { 1, 180, "GetSysColor", 2 },
+    { M_KERNEL, 3, "GetVersion", 0 },
+    { M_KERNEL, 30, "WaitEvent", 2 },
+    { M_KERNEL, 36, "GetCurrentTask", 0 },
+    { M_KERNEL, 49, "GetModuleFileName", 8 },
+    { M_KERNEL, 88, "lstrcpy", 8 },
+    { M_KERNEL, 89, "lstrcat", 8 },
+    { M_KERNEL, 90, "lstrlen", 4 },
+    { M_KERNEL, 91, "InitTask", 0 },
+    { M_KERNEL, 152, "GetNumTasks", 0 },
+    { M_USER, 1, "MessageBox", 12 },
+    { M_USER, 5, "InitApp", 2 },
+    { M_USER, 13, "GetTickCount", 0 },
+    { M_USER, 179, "GetSystemMetrics", 2 },
+    { M_USER, 180, "GetSysColor", 2 },
+    { M_USER, 6, "PostQuitMessage", 2 },
+    { M_USER, 39, "BeginPaint", 6 },
+    { M_USER, 40, "EndPaint", 6 },
+    { M_USER, 41, "CreateWindow", 30 },
+    { M_USER, 42, "ShowWindow", 4 },
+    { M_USER, 53, "DestroyWindow", 2 },
+    { M_USER, 57, "RegisterClass", 4 },
+    { M_USER, 107, "DefWindowProc", 10 },
+    { M_USER, 108, "GetMessage", 10 },
+    { M_USER, 113, "TranslateMessage", 4 },
+    { M_USER, 114, "DispatchMessage", 4 },
+    { M_USER, 124, "UpdateWindow", 2 },
+    { M_USER, 125, "InvalidateRect", 8 },
+    { M_USER, 173, "LoadCursor", 6 },
+    { M_USER, 174, "LoadIcon", 6 },
+    { M_USER, 420, "wsprintf", 0 },
+    { M_GDI, 33, "TextOut", 12 },
+    { M_GDI, 87, "GetStockObject", 2 },
 };
 
 static int service_index(const win_ne_import *imp)
 {
-    int user;
+    int module;
     if (name_eq(imp->module, "KERNEL") || name_eq(imp->module, "KERNEL.EXE"))
-        user = 0;
+        module = M_KERNEL;
     else if (name_eq(imp->module, "USER") || name_eq(imp->module, "USER.EXE"))
-        user = 1;
+        module = M_USER;
+    else if (name_eq(imp->module, "GDI") || name_eq(imp->module, "GDI.EXE"))
+        module = M_GDI;
     else
         return -1;
     for (int i = 0; i < (int)(sizeof(services) / sizeof(services[0])); i++)
-        if (services[i].user == user &&
+        if (services[i].module == module &&
             (imp->ordinal ? imp->ordinal == services[i].ordinal && !imp->procedure[0]
                           : name_eq(imp->procedure, services[i].name)))
             return i;
@@ -162,7 +185,7 @@ static int service_id(const win_ne_import *imp, uint16_t *id)
     int i = service_index(imp);
     if (i < 0)
         return 0;
-    *id = (uint16_t)((services[i].user ? 0x1000u : 0u) + services[i].ordinal);
+    *id = (uint16_t)(module_base[services[i].module] + services[i].ordinal);
     return 1;
 }
 
@@ -170,7 +193,7 @@ static int service_id(const win_ne_import *imp, uint16_t *id)
 static uint16_t service_args(uint16_t id)
 {
     for (unsigned i = 0; i < sizeof(services) / sizeof(services[0]); i++)
-        if ((services[i].user ? 0x1000u : 0u) + services[i].ordinal == id)
+        if (module_base[services[i].module] + services[i].ordinal == id)
             return services[i].args;
     return 0;
 }

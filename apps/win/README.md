@@ -29,27 +29,40 @@ goes on where it was. So a program busy computing does not stop the rest
 of the system, as it would in Windows 3.1, and one that never returns ends
 with Windows. Neither x86 CPU implementation is modified.
 
-Supported functions: KERNEL.3 GetVersion, KERNEL.30 WaitEvent, KERNEL.36
-GetCurrentTask, KERNEL.49 GetModuleFileName, KERNEL.88 lstrcpy, KERNEL.89
-lstrcat, KERNEL.90 lstrlen (checked selector:offset strings), KERNEL.91
-InitTask, KERNEL.152 GetNumTasks, USER.1 MessageBox, USER.5 InitApp,
-USER.13 GetTickCount, USER.179 GetSystemMetrics, USER.180 GetSysColor;
-INT 21h 30h (version) and 4Ch (exit), INT 20h. Its FAR ANSI strings are
-copied into bounded native buffers and the owner, pointers and style are
-read from the guest Pascal stack. A program importing anything else is
-refused before protected mode with the first function it lacks named; an
-INT 21h function WINN does not have ends it with that function named.
-Several NE programs can run at once, each as a WINN task: while one waits
-in a native call (a modal MessageBox), another starts or goes on.
+A program can have windows of its own classes: `RegisterClass` registers
+them with a native window procedure that calls the program's (USER's
+calls go through a callback entry of the trampoline, into protected mode
+and back, nesting as the procedure calls the API in turn), and its
+messages, painting and drawing are converted between the Win16 structures
+in the guest and the native ones; a message's `lParam` reaches the window
+procedure as it is (a native pointer, for the program to hand on to
+`DefWindowProc`).
+
+Supported functions (the table in `core/ne_guest.c`): KERNEL GetVersion,
+WaitEvent, GetCurrentTask, GetModuleFileName, lstrcpy, lstrcat, lstrlen,
+InitTask, GetNumTasks; USER MessageBox, InitApp, PostQuitMessage,
+BeginPaint, EndPaint, CreateWindow, ShowWindow, DestroyWindow,
+RegisterClass, DefWindowProc, GetMessage, TranslateMessage,
+DispatchMessage, UpdateWindow, InvalidateRect, LoadCursor and LoadIcon
+(the system's), wsprintf, GetTickCount, GetSystemMetrics, GetSysColor; GDI
+TextOut, GetStockObject; INT 21h 30h (version) and 4Ch (exit), INT 20h.
+Its FAR ANSI strings are copied into bounded native buffers. A program
+importing anything else is refused before protected mode with the first
+function it lacks named; an INT 21h function WINN does not have ends it
+with that function named. Several NE programs can run at once, each as a
+WINN task: while one waits in a native call (a modal MessageBox), another
+starts or goes on.
 
 `host/mkne_winexec.py`, `host/mkne_dialog.py`, `host/mkne_loop.py`,
 `host/mkne_fault.py` (`--hang` for `NEHANG.EXE`) and `host/mkne_watcom.py`
 generate `NEAPP.EXE`, `NEDIALOG.EXE`, `NELOOP.EXE`, `NEFAULT.EXE`,
-`NEHANG.EXE`, `OWHELLO.EXE` and `OWBUSY.EXE` (the last two built by Open
-Watcom, their sources in the script; `make NEFIXTURES` in `host/`). All have DOS MZ stubs that explain how to launch them under WINN
+`NEHANG.EXE`, `OWHELLO.EXE`, `OWBUSY.EXE` and `OWWIN.EXE` (the last three
+built by Open Watcom, their sources in the script; `make NEFIXTURES` in
+`host/`). All have DOS MZ stubs that explain how to launch them under WINN
 when invoked directly from DOS. `host/test_ne_run` runs them on the
 emulator's own i386 core (`src/i386.c` as it is, built for the host with
-the stand-ins in `host/x86run/`).
+the stand-ins in `host/x86run/`), and so does the host `winhost`: they are
+in its `HOSTWIN/` (`scripts/owwin.txt`).
 
     WINN [:] [program [arguments]]
 
@@ -211,6 +224,7 @@ use `ucontext`):
     ./winhost scripts/taskman.txt PROGMAN    # Task List: Ctrl+Esc, Switch To, Tile, End Task
     ./winhost scripts/mdimax.txt PROGMAN     # a maximized group in the menu bar, Alt+-
     ./winhost scripts/switch.txt PROGMAN     # Alt+Tab, Alt+Esc past a MessageBox; DEMO's Alt+letters
+    ./winhost scripts/owwin.txt PROGMAN      # a Win16 program's window, on the i386 core
     ./winhost scripts/winmine.txt WINMINE    # marks, a lost game, Expert, Best Times
     ./winhost scripts/logo.txt PROGMAN       # the logo (copy the BMPs into HOSTWIN first)
     ./winhost800 scripts/vga800.txt  # the VGA800 driver, built in

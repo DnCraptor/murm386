@@ -269,7 +269,7 @@ static void int21_like(emitter *e, uint16_t service, uint16_t pm_segment)
 
 int win_ne_dos_make(uint8_t stub[WIN_NE_DOS_STUB_BYTES], const win_ne_boot_args *a)
 {
-    if (!stub || !a || !a->pm_segment || (a->pm_segment & 7u))
+    if (!stub || !a || !a->pm_segment || (a->pm_segment & 7u) || !a->rm_segment)
         return 0;
     memset(stub, 0xcc, WIN_NE_DOS_STUB_BYTES);
     emitter e = { 0 };
@@ -282,7 +282,54 @@ int win_ne_dos_make(uint8_t stub[WIN_NE_DOS_STUB_BYTES], const win_ne_boot_args 
     if (e.n != WIN_NE_YIELD_OFFSET - WIN_NE_INT20_OFFSET)
         return 0;
     int21_like(&e, WIN_NE_SERVICE_YIELD, a->pm_segment);
-    if (e.overflow || e.n > WIN_NE_DOS_STUB_BYTES)
+
+    /* the callback: from Real Mode (CS the trampoline's segment) to PM */
+    while (e.n < WIN_NE_CALLBACK_OFFSET - WIN_NE_INT20_OFFSET)
+        b8(&e, 0xcc);
+    b8(&e, 0xfa);                              /* cli */
+    b8(&e, 0x8c); b8(&e, 0xc8);                /* mov ax,cs */
+    b8(&e, 0x8e); b8(&e, 0xd8);                /* mov ds,ax */
+    b8(&e, 0x0f); b8(&e, 0x01); b8(&e, 0x16);  /* lgdt [new_gdtr] */
+    b16(&e, WIN_NE_BOOT_NEW_GDTR_OFFSET);
+    b8(&e, 0x0f); b8(&e, 0x01); b8(&e, 0x1e);  /* lidt [private_idtr] */
+    b16(&e, WIN_NE_BOOT_NEW_IDTR_OFFSET);
+    b8(&e, 0x0f); b8(&e, 0x20); b8(&e, 0xc0);  /* mov eax,cr0 */
+    b8(&e, 0x0c); b8(&e, 0x01);                /* or al,1 */
+    b8(&e, 0x0f); b8(&e, 0x22); b8(&e, 0xc0);  /* mov cr0,eax */
+    b8(&e, 0xea);                              /* jmp far pm */
+    b16(&e, (uint16_t)(WIN_NE_INT20_OFFSET + e.n + 4u)); b16(&e, a->pm_segment);
+    b8(&e, 0x2e); b8(&e, 0x8e); b8(&e, 0x16);  /* mov ss,cs:[cb_ss] */
+    b16(&e, WIN_NE_CB_SS_OFFSET);
+    b8(&e, 0x2e); b8(&e, 0x8b); b8(&e, 0x26);  /* mov sp,cs:[cb_sp] */
+    b16(&e, WIN_NE_CB_SP_OFFSET);
+    b8(&e, 0x2e); b8(&e, 0xa1);                /* mov ax,cs:[cb_ds] */
+    b16(&e, WIN_NE_CB_DS_OFFSET);
+    b8(&e, 0x8e); b8(&e, 0xd8);                /* mov ds,ax (AX too: the */
+    b8(&e, 0x8e); b8(&e, 0xc0);                /* mov es,ax  prologue's DS) */
+    b8(&e, 0x2e); b8(&e, 0xff); b8(&e, 0x1e);  /* call far cs:[cb_proc] */
+    b16(&e, WIN_NE_CB_PROC_OFFSET);
+    b8(&e, 0x89); b8(&e, 0xc3);                /* mov bx,ax */
+    b8(&e, 0x89); b8(&e, 0xd1);                /* mov cx,dx */
+    b8(&e, 0xfa);                              /* cli */
+    b8(&e, 0x0f); b8(&e, 0x20); b8(&e, 0xc0);  /* mov eax,cr0 */
+    b8(&e, 0x24); b8(&e, 0xfe);                /* and al,~PE */
+    b8(&e, 0x0f); b8(&e, 0x22); b8(&e, 0xc0);  /* mov cr0,eax */
+    b8(&e, 0xea);                              /* jmp far rm */
+    b16(&e, (uint16_t)(WIN_NE_INT20_OFFSET + e.n + 4u - WIN_NE_BOOT_OFFSET));
+    b16(&e, a->rm_segment);
+    b8(&e, 0x8c); b8(&e, 0xc8);                /* mov ax,cs */
+    b8(&e, 0x8e); b8(&e, 0xd8);                /* mov ds,ax */
+    b8(&e, 0x8e); b8(&e, 0xd0);                /* mov ss,ax */
+    b8(&e, 0xbc); b16(&e, 0x00ee);             /* no pushes in RM */
+    b8(&e, 0x0f); b8(&e, 0x01); b8(&e, 0x1e);  /* lidt [saved_idtr] */
+    b16(&e, WIN_NE_BOOT_SAVED_IDTR_OFFSET);
+    b8(&e, 0x0f); b8(&e, 0x01); b8(&e, 0x16);  /* lgdt [saved_gdtr] */
+    b16(&e, WIN_NE_BOOT_SAVED_GDTR_OFFSET);
+    b8(&e, 0xba); b16(&e, WINX86_BRIDGE_PORT); /* mov dx,port */
+    b8(&e, 0xb8); b16(&e, WINX86_BRIDGE_RETURN); /* mov ax,return */
+    b8(&e, 0xef);                              /* out dx,ax */
+    b8(&e, 0xeb); b8(&e, 0xfe);                /* no return */
+    if (e.overflow || e.n > WIN_NE_CB_PROC_OFFSET - WIN_NE_INT20_OFFSET)
         return 0;
     memcpy(stub, e.bytes, e.n);
     return 1;

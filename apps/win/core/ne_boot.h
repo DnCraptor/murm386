@@ -39,6 +39,19 @@
 #define WIN_NE_INT20_OFFSET        WIN_NE_DOS_STUB_OFFSET
 #define WIN_NE_INT21_OFFSET        (WIN_NE_DOS_STUB_OFFSET + 3u)
 #define WIN_NE_YIELD_OFFSET        (WIN_NE_DOS_STUB_OFFSET + 16u)
+/* A callback (USER calling the program's window procedure): Real Mode
+ * entry at CALLBACK_OFFSET (in the trampoline's RM segment: minus
+ * WIN_NE_BOOT_OFFSET); it enters protected mode, takes SS:SP and DS from
+ * the CB_ words (the arguments are on that stack already), CALLs FAR the
+ * CB_PROC, and back in Real Mode reports WINX86_BRIDGE_RETURN with the
+ * result DX:AX in CX:BX. */
+#define WIN_NE_CALLBACK_OFFSET     (WIN_NE_DOS_STUB_OFFSET + 32u)
+#define WIN_NE_CB_PROC_OFFSET      (WIN_NE_DOS_STUB_OFFSET + 160u)
+#define WIN_NE_CB_SS_OFFSET        (WIN_NE_DOS_STUB_OFFSET + 164u)
+#define WIN_NE_CB_SP_OFFSET        (WIN_NE_DOS_STUB_OFFSET + 166u)
+#define WIN_NE_CB_DS_OFFSET        (WIN_NE_DOS_STUB_OFFSET + 168u)
+/* the gateway's scratch words, saved around a callback (it nests) */
+#define WIN_NE_BOOT_SCRATCH_BYTES  16u
 #define WIN_NE_FAULT_IDT_OFFSET    1536u
 #define WIN_NE_IDT_VECTORS         0x22u
 #define WIN_NE_FAULT_IDT_BYTES     (WIN_NE_IDT_VECTORS * 8u)
@@ -77,7 +90,8 @@ int win_ne_fault_make(uint8_t idt[WIN_NE_FAULT_IDT_BYTES],
                       const win_ne_boot_args *args);
 /* INT 21h: PUSH AX, the service WIN_NE_SERVICE_INT21 through the gateway,
  * IRET with the flags the native side left in the interrupt frame. INT 20h:
- * INT 21h AX=4C00h. The yield vector: the same with WIN_NE_SERVICE_YIELD. */
+ * INT 21h AX=4C00h. The yield vector: the same with WIN_NE_SERVICE_YIELD.
+ * Then the callback entry. */
 int win_ne_dos_make(uint8_t stub[WIN_NE_DOS_STUB_BYTES],
                     const win_ne_boot_args *args);
 #endif

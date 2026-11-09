@@ -244,6 +244,7 @@ BOOL WINAPI IsChild(HWND hp, HWND h)
 
 BOOL WINAPI IsWindowVisible(HWND h) { wwnd *w = user_wnd(h); return w && user_is_visible(w); }
 BOOL WINAPI IsWindowEnabled(HWND h) { wwnd *w = user_wnd(h); return w && !(w->style & WS_DISABLED); }
+HTASK WINAPI GetWindowTask(HWND h) { wwnd *w = user_wnd(h); return w ? w->task : 0; }
 BOOL WINAPI IsIconic(HWND h) { wwnd *w = user_wnd(h); return w && (w->style & WS_MINIMIZE); }
 BOOL WINAPI IsZoomed(HWND h) { wwnd *w = user_wnd(h); return w && (w->style & WS_MAXIMIZE); }
 

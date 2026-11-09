@@ -17,7 +17,8 @@
 #include <stdio.h>
 #include <string.h>
 #include "wincore.h"
-#if defined(__arm__) || defined(__thumb__)
+#if defined(__arm__) || defined(__thumb__) || defined(WINN_NE_HOST)
+#define TASK_NE 1                   /* Win16 programs on the 386 core */
 #include "dos-api.h"
 #include "ne.h"
 #include "ne_exec.h"
@@ -356,9 +357,7 @@ static int run_app(wtask *t)
     return t->entry(h);
 }
 
-#if defined(__arm__) || defined(__thumb__)
-/* Run the NE program on the current WINN ARM stack. A program that faults
- * ends with the Windows 3.1 "Application Error" message. */
+#ifdef TASK_NE
 /* A program's time slice is over: the other tasks' turn; it ends when its
  * task is to quit (Windows ends) */
 static int ne_yield(void)
@@ -367,6 +366,8 @@ static int ne_yield(void)
     return task_current()->quit;
 }
 
+/* Run the NE program on its task's stack. A program that faults ends with
+ * the Windows 3.1 "Application Error" message. */
 static int run_ne_app(wtask *t)
 {
     win_ne_result r;
@@ -466,6 +467,13 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
         rc = f ? -2 : -1;
         if (f)
             fclose(f);
+#ifdef TASK_NE
+        /* or a Win16 program, on the emulator's 386 core built in */
+        if (rc == -2 && win_ne_classify_launch(path, 3) == WIN_NE_LAUNCH_READY) {
+            ne_guest = 1;
+            rc = 0;
+        }
+#endif
     }
 #else
     int rc = win_ez_load(path, &img);
@@ -511,7 +519,7 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
     name[k] = 0;
     int (*runner)(wtask *) = run_app;
     void *ne_path = NULL;
-#if defined(__arm__) || defined(__thumb__)
+#ifdef TASK_NE
     if (ne_guest) {
         ne_path = win_strdup(path);  /* freed by the ordinary task reaper */
         if (!ne_path)

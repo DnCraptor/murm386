@@ -4,6 +4,13 @@
 
 #include "x86bridge.h"
 #include "ne_guest.h"
+#include "ne_exec.h"
+
+/* The guest's general registers at a call, as the gateway left them (the
+ * caller's SP: the gateway's return address just below) */
+typedef struct {
+    gprx_t gprx[8];
+} win_ne_regs;
 
 typedef struct {
     const win_ne_guest_image *image;
@@ -19,14 +26,42 @@ typedef struct {
     int (*yield)(void);     /* its time slice is over: other tasks run;
                              * nonzero: it is to end (stopped) */
     int stopped;
+    int dead;               /* faulted in a callback (fault) */
+    win_ne_fault fault;
+    void *exec;             /* ne_exec's, for callbacks */
+    void *user;             /* ne_guest_user's: classes, paints */
 } win_ne_guest_api_context;
 
 /* Marshals the declared Win16 PASCAL signatures, INT 21h from the guest's
  * registers. The caller MUST have switched the shared emulator to the
  * original DOS real-mode context before invoking this function: MessageBox
- * may run the native message loop. cpu is the guest's at the call: SP the
- * caller's (the gateway's return address just below). Returns 1, 0 when
- * the call is not supported, WINX86_SERVICE_EXIT when the program ends. */
-int win_ne_guest_api(void *opaque, CPU *cpu, uint16_t service);
+ * may run the native message loop. AX and DX of cpu are the results.
+ * Returns 1, 0 when the call is not supported, WINX86_SERVICE_EXIT when
+ * the program ends. */
+int win_ne_guest_api(void *opaque, win_ne_regs *cpu, uint16_t service);
+
+/* The window and GDI services (ne_guest_user.c; without it, as in the
+ * tests of the rest, there are none): 1 with the result in value (dword:
+ * DX too), 0 when not one of them. */
+int win_ne_guest_user(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint16_t service,
+                      uint32_t *value, int *dword);
+/* a program starts, ends (its classes and its window procedures) */
+void win_ne_user_start(win_ne_guest_api_context *ctx);
+void win_ne_user_end(win_ne_guest_api_context *ctx);
+
+/* For those services: the guest's memory, by selector:offset, checked
+ * against its segments (and PSP); an argument word at SP + offset; a NUL
+ * terminated string (0:0 is ""). */
+int win_ne_read(win_ne_guest_api_context *ctx, uint16_t sel, uint32_t off, void *dst, uint32_t n);
+int win_ne_write(win_ne_guest_api_context *ctx, uint16_t sel, uint32_t off, const void *src,
+                 uint32_t n);
+int win_ne_arg(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint32_t off, uint16_t *v);
+int win_ne_string(win_ne_guest_api_context *ctx, uint16_t sel, uint16_t off, char *dst,
+                  uint32_t cap);
+
+/* ne_exec.c: a FAR PASCAL procedure of the program (selector:offset),
+ * called with a window procedure's arguments; DX:AX */
+uint32_t win_ne_callback(win_ne_guest_api_context *ctx, uint32_t proc, uint16_t hwnd,
+                         uint16_t msg, uint16_t wp, uint32_t lp);
 
 #endif /* WINN_NE_GUEST_API_H */

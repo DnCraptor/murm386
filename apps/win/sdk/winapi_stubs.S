@@ -4750,6 +4750,23 @@ TileChildWindows:
     .ltorg
     .size TileChildWindows, .-TileChildWindows
 
+    .section .text.winapi.GetWindowTask,"ax",%progbits
+    .global GetWindowTask
+    .type GetWindowTask, %function
+    .thumb_func
+GetWindowTask:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =896
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetWindowTask, .-GetWindowTask
+
     .section .text.winapi.GetNextDlgGroupItem,"ax",%progbits
     .global GetNextDlgGroupItem
     .type GetNextDlgGroupItem, %function

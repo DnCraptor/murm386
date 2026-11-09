@@ -184,6 +184,7 @@ extern void GetWindowDC(void);
 extern void GetWindowLong(void);
 extern void GetWindowOrg(void);
 extern void GetWindowRect(void);
+extern void GetWindowTask(void);
 extern void GetWindowText(void);
 extern void GetWindowTextLength(void);
 extern void GetWindowWord(void);
@@ -643,6 +644,7 @@ static const void *const exports_user[484] = {
     [197] = (const void *)GetTabbedTextExtent,
     [198] = (const void *)CascadeChildWindows,
     [199] = (const void *)TileChildWindows,
+    [224] = (const void *)GetWindowTask,
     [227] = (const void *)GetNextDlgGroupItem,
     [228] = (const void *)GetNextDlgTabItem,
     [229] = (const void *)GetTopWindow,

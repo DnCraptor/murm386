@@ -30,7 +30,7 @@ typedef struct {
     win_ne_fault fault;     /* WIN_NE_EXEC_FAULT */
 } win_ne_result;
 
-#if defined(__arm__) || defined(__thumb__)
+#if defined(__arm__) || defined(__thumb__) || defined(WINN_NE_HOST)
 /* Run a Win16 program: its command line (after the program name) in its
  * PSP, nCmdShow for InitTask. yield lets other tasks run when the program
  * has run its time slice without calling the API; nonzero: it ends. */

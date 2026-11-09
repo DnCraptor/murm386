@@ -49,7 +49,7 @@ int MessageBox(uint16_t owner, const char *text, const char *title, unsigned typ
 
 int main(void)
 {
-    CPU cpu;
+    win_ne_regs cpu;
     memset(&cpu, 0, sizeof(cpu));
     cpu.gprx[regax].r32 = 0x1234FFFF;
     cpu.gprx[regdx].r32 = 0x5678FFFF;
@@ -70,7 +70,7 @@ int main(void)
     img.segments = segments;
     img.ss = 0x18;
     img.io.write = write_guest;
-    win_ne_guest_api_context ctx = { &img, read_guest, NULL, 0, "TEST.EXE", 1, 0, 0, 0, NULL, 0 };
+    win_ne_guest_api_context ctx = { .image = &img, .read = read_guest, .path = "TEST.EXE", .show = 1 };
     cpu.gprx[regsp].r16 = 0x80; /* SS:SP points at caller's far return IP */
     put16(0x80, 0x2222);
     put16(0x82, 0x0010);

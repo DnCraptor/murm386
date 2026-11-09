@@ -73,7 +73,7 @@ int win_ne_guest_unresolved(const char *path, win_ne_unresolved *u);
 
 /* Returns the DOS INT 21h-backed guest allocator on the RP2350 target.
  * Allocation/free must run before entering protected mode or after leaving it. */
-#if defined(__arm__) || defined(__thumb__)
+#if defined(__arm__) || defined(__thumb__) || defined(WINN_NE_HOST)
 const win_ne_guest_io *win_ne_guest_dos_io(void);
 #endif
 
