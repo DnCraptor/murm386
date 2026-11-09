@@ -304,13 +304,9 @@ static void mouse_button(int x, int y, int btn, int down)
             if (down)
                 MessageBeep(0);
             /* a click on a window disabled by a modal dialog brings the
-             * dialog forward */
-            wwnd *top = user_toplevel(w);
-            for (wwnd *t = U.desktop->child; down && t; t = t->next)
-                if (t->owner == top && user_is_visible(t)) {
-                    SetActiveWindow(t->h);
-                    break;
-                }
+             * application forward with the dialog active */
+            if (down)
+                user_switch_to(user_toplevel(w));
             return;
         }
         SendMessage(w->h, WM_SETCURSOR, w->h, MAKELPARAM(hit, m));

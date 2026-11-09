@@ -100,6 +100,9 @@ void    user_register_builtin(LPCSTR name, WNDPROC proc, UINT style, int extra,
                               HCURSOR cur, HBRUSH bg);
 void    user_init_windows(void);
 void    user_bring_to_top(wwnd *w);
+wwnd   *user_root_owner(wwnd *w);
+wwnd   *user_enabled_popup(wwnd *w);
+void    user_switch_to(wwnd *w);
 void    user_icon_slot(wwnd *w, RECT *r);     /* free place for w minimized */
 wwnd   *user_window_from_point(int x, int y, int *hit);
 void    user_set_window_rect(wwnd *w, const RECT *rc, UINT flags);

@@ -493,8 +493,8 @@ BOOL WINAPI IsDialogMessage(HWND dlg, LPMSG m)
             }
             return TRUE;
         }
-        if (m->message == WM_SYSCHAR)
-            return TRUE;
+        /* Alt and a key that is no control's: the window's menu, as in
+         * Windows (dispatched below) */
     }
     TranslateMessage(m);
     DispatchMessage(m);

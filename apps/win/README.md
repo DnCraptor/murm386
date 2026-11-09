@@ -196,6 +196,7 @@ use `ucontext`):
     ./winhost scripts/winfile.txt WINFILE    # tree, copy, move, rename, delete in HOSTWIN/DOCS
     ./winhost scripts/taskman.txt PROGMAN    # Task List: Ctrl+Esc, Switch To, Tile, End Task
     ./winhost scripts/mdimax.txt PROGMAN     # a maximized group in the menu bar, Alt+-
+    ./winhost scripts/switch.txt PROGMAN     # Alt+Tab, Alt+Esc past a MessageBox; DEMO's Alt+letters
     ./winhost scripts/winmine.txt WINMINE    # marks, a lost game, Expert, Best Times
     ./winhost scripts/logo.txt PROGMAN       # the logo (copy the BMPs into HOSTWIN first)
     ./winhost800 scripts/vga800.txt  # the VGA800 driver, built in
@@ -208,7 +209,8 @@ the host, drive `C:` is the harness directory itself.
 
 ## Keyboard
 
-Alt+Tab and Alt+Esc switch between windows; Ctrl+Esc (or a double click on
+Alt+Tab and Alt+Esc switch between applications (to one waiting in a
+modal dialog: to the dialog); Ctrl+Esc (or a double click on
 the desktop) opens the Task List, `TASKMAN.EXE` or SYSTEM.INI [boot]
 `taskman.exe`, whose Cascade, Tile and Arrange Icons work on the desktop
 through `CascadeChildWindows`, `TileChildWindows` and

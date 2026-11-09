@@ -844,6 +844,47 @@ void user_bring_to_top(wwnd *w)
     }
 }
 
+/* The unowned top-level window a window belongs with (itself, or the owner
+ * of its owner ...): what the switching lists show. */
+wwnd *user_root_owner(wwnd *w)
+{
+    while (w && w->owner)
+        w = w->owner;
+    return w;
+}
+
+/* The window that takes the activation for w: w, or while a modal dialog
+ * (a MessageBox) has disabled it, that dialog, or the one that disabled
+ * the dialog in turn (Windows: GetLastActivePopup). */
+wwnd *user_enabled_popup(wwnd *w)
+{
+    while (w && (w->style & WS_DISABLED)) {
+        wwnd *p = NULL;
+        for (wwnd *t = U.desktop->child; t && !p; t = t->next)
+            if (t->owner == w && user_is_visible(t))
+                p = t;
+        if (!p)
+            break;
+        w = p;
+    }
+    return w;
+}
+
+/* Switching to an application (Alt+Tab, Alt+Esc, a click on its disabled
+ * window): its window comes up with the windows it owns over it, the
+ * dialog it waits for, if any, is activated, and a minimized one is
+ * restored. */
+void user_switch_to(wwnd *w)
+{
+    w = user_root_owner(w);
+    if (!w || !IsWindow(w->h))
+        return;
+    user_bring_to_top(w);
+    SetActiveWindow(user_enabled_popup(w)->h);
+    if ((w->style & WS_MINIMIZE) && IsWindow(w->h))
+        SendMessage(w->h, WM_SYSCOMMAND, SC_RESTORE, 0);
+}
+
 BOOL WINAPI BringWindowToTop(HWND h)
 {
     wwnd *w = user_wnd(h);

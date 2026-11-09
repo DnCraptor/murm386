@@ -150,20 +150,20 @@ static LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
     case WM_CREATE:
-        CreateWindow("BUTTON", "&About...", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        CreateWindow("BUTTON", "&About...", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                      10, 80, 90, 26, h, (HMENU)ID_ABOUT, hinst, NULL);
-        CreateWindow("BUTTON", "&Settings...", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        CreateWindow("BUTTON", "&Settings...", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                      110, 80, 100, 26, h, (HMENU)ID_DIALOG, hinst, NULL);
-        CreateWindow("BUTTON", "&Quit", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        CreateWindow("BUTTON", "&Quit", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                      220, 80, 70, 26, h, (HMENU)ID_QUIT, hinst, NULL);
-        hedit = CreateWindow("EDIT", "type here", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+        hedit = CreateWindow("EDIT", "type here", WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL,
                              10, 120, 200, 22, h, (HMENU)ID_EDIT, hinst, NULL);
-        CreateWindow("BUTTON", "&Add", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        CreateWindow("BUTTON", "A&dd", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                      220, 118, 70, 26, h, (HMENU)ID_ADD, hinst, NULL);
-        hlist = CreateWindow("LISTBOX", "", WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | LBS_NOTIFY,
+        hlist = CreateWindow("LISTBOX", "", WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER | WS_VSCROLL | LBS_NOTIFY,
                              10, 150, 200, 100, h, (HMENU)ID_LIST, hinst, NULL);
         {
-            HWND chk = CreateWindow("BUTTON", "Tick timer", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            HWND chk = CreateWindow("BUTTON", "&Tick timer", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                                     220, 154, 120, 20, h, (HMENU)ID_CHECK, hinst, NULL);
             SendMessage(chk, BM_SETCHECK, 1, 0);
             SetTimer(h, 1, 500, NULL);
@@ -342,6 +342,8 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     MSG m;
     while (GetMessage(&m, 0, 0, 0)) {
         if (TranslateAccelerator(h, acc, &m))
+            continue;
+        if (IsDialogMessage(h, &m))     /* the buttons' Alt+letters, Tab */
             continue;
         TranslateMessage(&m);
         DispatchMessage(&m);

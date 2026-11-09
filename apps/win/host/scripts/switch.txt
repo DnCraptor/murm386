@@ -1,0 +1,55 @@
+# Switching tasks while one waits in a modal dialog, and the dialog keys of
+# a plain window: run with "./winhost scripts/switch.txt PROGMAN"
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type DEMO
+key RETURN
+wait 100
+# Alt+A: DEMO's About button, a MessageBox over its window
+keydown ALT
+key A
+keyup ALT
+wait 50
+snap sw_about.ppm
+# Alt+Tab: the Program Manager; the Demo window is not disabled for it
+keydown ALT
+key TAB
+keyup ALT
+wait 50
+snap sw_progman.ppm
+# Alt+Tab back: DEMO is in the list, its About box comes up active
+keydown ALT
+key TAB
+keyup ALT
+wait 50
+snap sw_back.ppm
+key RETURN
+wait 30
+# Alt+F still opens the menu; Esc closes it; Alt+D adds the edit's text
+keydown ALT
+key F
+keyup ALT
+wait 30
+snap sw_menu.ppm
+key ESC
+key ESC
+keydown ALT
+key D
+keyup ALT
+wait 30
+snap sw_add.ppm
+# Alt+Esc to the Program Manager and back
+keydown ALT
+key ESC
+keyup ALT
+wait 30
+snap sw_altesc.ppm
+keydown ALT
+key F4
+keyup ALT
+wait 30
+exit

@@ -831,19 +831,22 @@ static void switch_box(HDC dc, const RECT *box, wwnd *t)
 
 /* Alt+Tab, as the fast switching of Windows 3.1: while Alt is held, every
  * Tab (Shift+Tab back) shows the next window's name in a box; releasing
- * Alt switches to it, restoring it if it is minimized; Esc cancels. */
+ * Alt switches to it, restoring it if it is minimized; Esc cancels. The
+ * list has the unowned windows, also one disabled by its modal dialog:
+ * switching to it activates the dialog. */
 static void alt_tab(wwnd *from)
 {
     wwnd *list[32];
     int n = 0;
     for (wwnd *t = U.desktop->child; t && n < 32; t = t->next)
-        if (user_is_visible(t) && !(t->style & WS_DISABLED) && !t->owner)
+        if (user_is_visible(t) && !t->owner)
             list[n++] = t;
     if (n < 2)
         return;
     int cur = 0;
+    wwnd *active = user_root_owner(U.active);
     for (int i = 0; i < n; i++)
-        if (list[i] == U.active)
+        if (list[i] == active)
             cur = i;
     int sel = (cur + 1) % n;
     if (GetKeyState(VK_SHIFT) < 0)
@@ -882,12 +885,8 @@ static void alt_tab(wwnd *from)
     wrgn_set_rect(&g, &box);
     user_invalidate_screen(&g);
     wrgn_free(&g);
-    wwnd *t = list[sel];
-    if (cancel || !IsWindow(t->h))
-        return;
-    SetActiveWindow(t->h);
-    if (t->style & WS_MINIMIZE)
-        SendMessage(t->h, WM_SYSCOMMAND, SC_RESTORE, 0);
+    if (!cancel)
+        user_switch_to(list[sel]);
 }
 
 void user_alt_tab(wwnd *w) { alt_tab(w); }
@@ -921,13 +920,13 @@ void user_syscommand(wwnd *w, UINT cmd, int x, int y)
         user_menu_key(w, (int)(unsigned char)x);
         break;
     case SC_NEXTWINDOW: {
-        /* bottom-most activatable top-level window comes to the front */
-        wwnd *pick = NULL;
+        /* the bottom-most other application comes to the front */
+        wwnd *pick = NULL, *active = user_root_owner(U.active);
         for (wwnd *t = U.desktop->child; t; t = t->next)
-            if (t != U.active && user_is_visible(t) && !(t->style & WS_DISABLED) && !t->owner)
+            if (t != active && user_is_visible(t) && !t->owner)
                 pick = t;
         if (pick)
-            SetActiveWindow(pick->h);
+            user_switch_to(pick);
         break;
     }
     case SC_TASKLIST: {
