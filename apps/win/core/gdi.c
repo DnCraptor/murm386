@@ -268,6 +268,123 @@ HBITMAP WINAPI CreateCompatibleBitmap(HDC hdc, int w, int h)
     return bitmap_new(w, h, bpp);
 }
 
+/* ---------------------------------------------------------------- DIBs */
+
+/* A device-independent bitmap as Win16 resources hold them: a
+ * BITMAPCOREHEADER (12 bytes) or BITMAPINFOHEADER (40 or more, BI_RGB),
+ * the palette, the rows bottom up, each a multiple of 4 bytes; 1, 4, 8 or
+ * 24 bits a pixel. An icon's or a cursor's has twice its height (the XOR
+ * image, then the AND mask): halves 2. */
+int gdi_dib_parse(const uint8_t *d, uint32_t n, int halves, gdi_dib *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (!d || n < 12 || halves < 1)
+        return 0;
+    uint32_t hs = (uint32_t)d[0] | (uint32_t)d[1] << 8 | (uint32_t)d[2] << 16 | (uint32_t)d[3] << 24;
+    int32_t w, h;
+    int bpp, entry;
+    uint32_t colors;
+    if (hs == 12) {
+        w = d[4] | d[5] << 8;
+        h = d[6] | d[7] << 8;
+        bpp = d[10] | d[11] << 8;
+        colors = bpp <= 8 ? 1u << bpp : 0;
+        entry = 3;
+    } else if (hs >= 40 && hs <= n) {
+        w = (int32_t)(d[4] | d[5] << 8 | d[6] << 16 | (uint32_t)d[7] << 24);
+        h = (int32_t)(d[8] | d[9] << 8 | d[10] << 16 | (uint32_t)d[11] << 24);
+        bpp = d[14] | d[15] << 8;
+        uint32_t comp = d[16] | d[17] << 8 | d[18] << 16 | (uint32_t)d[19] << 24;
+        uint32_t used = d[32] | d[33] << 8 | d[34] << 16 | (uint32_t)d[35] << 24;
+        if (comp)
+            return 0;                   /* RLE: not here */
+        colors = bpp <= 8 ? (used && used < (1u << bpp) ? used : 1u << bpp) : 0;
+        entry = 4;
+    } else {
+        return 0;
+    }
+    if (bpp != 1 && bpp != 4 && bpp != 8 && bpp != 24)
+        return 0;
+    int top_down = h < 0;
+    if (top_down)
+        h = -h;
+    h /= halves;
+    if (w < 1 || h < 1 || w > 4096 || h > 4096)
+        return 0;
+    out->w = w;
+    out->h = h;
+    out->bpp = bpp;
+    out->top_down = top_down;
+    out->entry = entry;
+    out->colors = (int)colors;
+    out->pal = d + hs;
+    out->pitch = (int)(((uint32_t)w * (uint32_t)bpp + 31u) / 32u * 4u);
+    out->bits = out->pal + colors * (uint32_t)entry;
+    /* the image, then (an icon's, a cursor's) the mask: 1 bit a pixel */
+    uint64_t need = (uint64_t)(out->bits - d) + (uint64_t)out->pitch * (uint64_t)h +
+                    (halves > 1 ? ((uint64_t)w + 31u) / 32u * 4u * (uint64_t)h : 0);
+    if (need > n)
+        return 0;
+    return 1;
+}
+
+/* the raw value (a palette index, or 0xRRGGBB for 24 bits) of the pixel at
+ * x, y (y from the top) of the half (0 the XOR image, 1 the AND mask) */
+uint32_t gdi_dib_value(const gdi_dib *b, int half, int x, int y)
+{
+    int bpp = half ? 1 : b->bpp;
+    int pitch = half ? (int)(((uint32_t)b->w + 31u) / 32u * 4u) : b->pitch;
+    const uint8_t *base = half ? b->bits + (size_t)b->pitch * (size_t)b->h : b->bits;
+    int row = b->top_down ? y : b->h - 1 - y;
+    const uint8_t *r = base + (size_t)row * (size_t)pitch;
+    switch (bpp) {
+    case 1: return (r[x >> 3] >> (7 - (x & 7))) & 1;
+    case 4: return (r[x >> 1] >> (x & 1 ? 0 : 4)) & 15;
+    case 8: return r[x];
+    default: return (uint32_t)r[3 * x + 2] << 16 | (uint32_t)r[3 * x + 1] << 8 | r[3 * x];
+    }
+}
+
+/* the colour of the XOR image's pixel */
+COLORREF gdi_dib_pixel(const gdi_dib *b, int x, int y)
+{
+    uint32_t v = gdi_dib_value(b, 0, x, y);
+    if (b->bpp == 24)
+        return RGB(v >> 16, (v >> 8) & 255, v & 255);
+    if ((int)v >= b->colors)
+        return 0;
+    const uint8_t *e = b->pal + v * (uint32_t)b->entry;
+    return RGB(e[2], e[1], e[0]);
+}
+
+/* A bitmap from a DIB (LoadBitmap): monochrome from a 1-bit one, else of
+ * the screen's palette indices */
+HBITMAP gdi_bitmap_from_dib(const uint8_t *d, uint32_t n)
+{
+    gdi_dib b;
+    if (!gdi_dib_parse(d, n, 1, &b))
+        return 0;
+    int mono = b.bpp == 1;
+    HBITMAP hb = bitmap_new(b.w, b.h, mono ? 1 : 8);
+    wbitmap *bm = hb ? (wbitmap *)win_handle_get(hb, WOBJ_BITMAP) : NULL;
+    if (!bm)
+        return 0;
+    memset(bm->s.bits, 0, (size_t)bm->s.pitch * (size_t)bm->s.height);
+    for (int y = 0; y < b.h; y++) {
+        uint8_t *row = bm->s.bits + (size_t)y * (size_t)bm->s.pitch;
+        for (int x = 0; x < b.w; x++) {
+            COLORREF c = gdi_dib_pixel(&b, x, y);
+            if (mono) {
+                if (GetRValue(c) + GetGValue(c) + GetBValue(c) >= 384)
+                    row[x >> 3] |= (uint8_t)(0x80 >> (x & 7));
+            } else {
+                row[x] = nearest_index(c);
+            }
+        }
+    }
+    return hb;
+}
+
 LONG WINAPI SetBitmapBits(HBITMAP hb, DWORD count, const void *bits)
 {
     wbitmap *bm = (wbitmap *)win_handle_get(hb, WOBJ_BITMAP);

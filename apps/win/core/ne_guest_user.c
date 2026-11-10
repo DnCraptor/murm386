@@ -46,6 +46,9 @@ void win_ne_user_end(win_ne_guest_api_context *ctx)
             for (int i = 0; i < NE_ACCELS; i++)
                 if (u->accel[i])
                     DestroyAcceleratorTableN(u->accel[i]);
+            for (int i = 0; i < NE_IMAGES; i++)
+                if (u->image[i].h)
+                    DestroyIcon(u->image[i].h);
             ne_call_end(u);
             win_free(u);
             break;
@@ -531,6 +534,51 @@ done:
 
 /* ---------------------------------------------------------------- services */
 
+/* LoadCursor, LoadIcon, LoadBitmap: the system's (instance 0, a number),
+ * or the program's resources (ne_res.c); its icons and cursors once each,
+ * destroyed when it ends */
+static __attribute__((noinline)) uint16_t load_image(args *a, ne_user *u, uint16_t service)
+{
+    uint32_t far = dw(a, 4);
+    uint16_t inst = w(a, 8);
+    char name[32];
+    if (a->bad)
+        return 0;
+    if (!inst) {
+        if (far >> 16)
+            return 0;
+        return service == 0x10ad ? LoadCursor(0, MAKEINTRESOURCE((WORD)far)) :
+               service == 0x10ae ? LoadIcon(0, MAKEINTRESOURCE((WORD)far)) : 0;
+    }
+    uint16_t id = (uint16_t)far;
+    name[0] = 0;
+    if ((far >> 16) && !win_ne_string(a->ctx, (uint16_t)(far >> 16), (uint16_t)far, name,
+                                      sizeof(name)))
+        return a->bad = 1, 0;
+    const char *nm = (far >> 16) ? name : NULL;
+    if (service == 0x10af)
+        return win_ne_bitmap(a->ctx->path, id, nm);
+    int kind = service == 0x10ad ? 1 : 2, free_slot = -1;
+    for (int i = 0; i < NE_IMAGES; i++) {
+        if (!u->image[i].h) {
+            if (free_slot < 0)
+                free_slot = i;
+            continue;
+        }
+        if (u->image[i].kind == kind && u->image[i].id == (nm ? 0 : id) &&
+            !lstrcmpi(u->image[i].name, name))
+            return u->image[i].h;
+    }
+    HANDLE h = kind == 1 ? win_ne_cursor(a->ctx->path, id, nm) : win_ne_icon(a->ctx->path, id, nm);
+    if (h && free_slot >= 0) {
+        u->image[free_slot].h = h;
+        u->image[free_slot].kind = (uint8_t)kind;
+        u->image[free_slot].id = nm ? 0 : id;
+        lstrcpyn(u->image[free_slot].name, name, sizeof(u->image[free_slot].name));
+    }
+    return h;
+}
+
 /* the dialog item texts, each in a frame of its own (not in the
  * dispatcher's, which nested window procedures stack up) */
 static __attribute__((noinline)) void set_dlg_text(args *a, win_ne_guest_api_context *ctx)
@@ -757,15 +805,10 @@ int win_ne_guest_user(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint16_t 
         break;
     }
     case 0x10ad:                        /* LoadCursor(HINSTANCE, LPCSTR) */
-    case 0x10ae: {                      /* LoadIcon(HINSTANCE, LPCSTR) */
-        uint32_t name = dw(&a, 4);
-        uint16_t inst = w(&a, 8);
-        /* the system's (resources of its own: not yet) */
-        if (!a.bad && !inst && !(name >> 16))
-            v = service == 0x10ad ? LoadCursor(0, MAKEINTRESOURCE((WORD)name))
-                                  : LoadIcon(0, MAKEINTRESOURCE((WORD)name));
+    case 0x10ae:                        /* LoadIcon(HINSTANCE, LPCSTR) */
+    case 0x10af:                        /* LoadBitmap(HINSTANCE, LPCSTR) */
+        v = load_image(&a, u, service);
         break;
-    }
     case 0x11a4:                        /* wsprintf(LPSTR, LPCSTR, ...) */
         v = (uint16_t)ne_format(&a, dw(&a, 4), dw(&a, 8), 0);
         break;

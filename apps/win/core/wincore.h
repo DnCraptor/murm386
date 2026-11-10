@@ -249,6 +249,27 @@ void     cursor_set_shape(const uint8_t *and_mask, const uint8_t *xor_mask, int 
 int      cursor_show(int show);                 /* ShowCursor counter */
 enum { WCUR_ARROW, WCUR_IBEAM, WCUR_WAIT, WCUR_CROSS, WCUR_SIZEWE, WCUR_SIZENS, WCUR_COUNT };
 void     cursor_select_builtin(int id);
+/* icon.c: an icon (32x32, 16 colours) and a cursor (32x32 masks) made from
+ * bits, freed with DestroyIcon */
+HICON    user_icon_create(const winapp_icon *ic);
+HCURSOR  user_cursor_create(const uint8_t and_m[128], const uint8_t xor_m[128], int hx, int hy);
+
+/* gdi.c: device-independent bitmaps (Win16 resources) */
+typedef struct {
+    const uint8_t *pal, *bits;
+    int w, h, bpp, pitch, colors, entry, top_down;
+} gdi_dib;
+int      gdi_dib_parse(const uint8_t *d, uint32_t n, int halves, gdi_dib *out);
+uint32_t gdi_dib_value(const gdi_dib *b, int half, int x, int y);
+COLORREF gdi_dib_pixel(const gdi_dib *b, int x, int y);
+HBITMAP  gdi_bitmap_from_dib(const uint8_t *d, uint32_t n);
+
+/* ne_res.c: a Win16 program's (file's) icons and description, as an EZ
+ * application's; its icon, cursor and bitmap resources by number or name */
+winapp_info *win_ne_app_info(const char *path);
+HICON    win_ne_icon(const char *path, uint16_t id, const char *name);
+HCURSOR  win_ne_cursor(const char *path, uint16_t id, const char *name);
+HBITMAP  win_ne_bitmap(const char *path, uint16_t id, const char *name);
 
 /* ---------------------------------------------------------------- tasks (task.c) */
 

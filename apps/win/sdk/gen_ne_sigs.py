@@ -60,6 +60,9 @@ SKIP = {
     'CreateFontIndirect', 'CreatePenIndirect', 'CreateBrushIndirect', 'PtInRect',
     'WindowFromPoint', 'ChildWindowFromPoint', 'AnsiUpper', 'AnsiLower', 'AnsiNext',
     'AnsiPrev', 'wsprintf', 'wvsprintf',
+    # text, bitmaps, classes, huge files: ne_guest_call.c
+    'ExtTextOut', 'GetTextExtentPoint', 'TabbedTextOut', 'GetTabbedTextExtent', 'GetTextFace',
+    'CreateBitmap', 'GetBitmapBits', 'SetBitmapBits', 'GetClassInfo', '_hread', '_hwrite',
 }
 
 COUNTS = re.compile(r'^(n|c|cb|cch|count|len|nCount|cbString|size)$')

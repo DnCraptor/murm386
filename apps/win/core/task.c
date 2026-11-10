@@ -182,12 +182,19 @@ winapp_info *win_app_info(const char *path)
 #ifdef TASK_HOST
     const winapp_info *i = win_host_app_info(path);
     winapp_info *out = i ? (winapp_info *)win_alloc(i->size) : NULL;
-    if (out)
+    if (out) {
         memcpy(out, i, i->size);
-    return out;
+        return out;
+    }
 #else
-    return win_ez_read_info(path);
+    winapp_info *out = win_ez_read_info(path);
+    if (out)
+        return out;
 #endif
+    /* a Win16 program: its icon resources, its description */
+    char full[260];
+    win_path(path, full, sizeof(full));
+    return win_ne_app_info(full);
 }
 
 void task_init(void)
@@ -535,7 +542,7 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
     }
     t->module = ne_guest ? ne_path : img.raw;
     t->entry = ne_guest ? NULL : (int (*)(const win_app_host *))img.entry;
-    t->info = ne_guest ? NULL : win_app_info(path);
+    t->info = win_app_info(path);
     lstrcpyn(t->cmdline, args, sizeof(t->cmdline));
     t->show = (int)show;
     /* let it start right away, as Windows does */

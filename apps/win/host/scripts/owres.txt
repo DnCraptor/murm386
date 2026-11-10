@@ -1,0 +1,25 @@
+# A Win16 program's own resources on the i386 core: its icons, its cursor,
+# its bitmaps; ExtTextOut, TabbedTextOut, a superclassed BUTTON; then its
+# icon minimized and in Alt+Tab:
+#     ./winhost scripts/owres.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OWRES
+key RETURN
+wait 200
+move 150 180
+wait 20
+snap or_window.ppm
+click 327 72
+wait 50
+keydown ALT
+key TAB
+wait 30
+snap or_alttab.ppm
+keyup ALT
+wait 30
+exit

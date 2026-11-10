@@ -121,5 +121,11 @@ win_ne_launch_status win_ne_classify_launch(const char *path, unsigned cpu_gen);
  * frees them), WIN_NE_UNRESOLVED when there is none. */
 int win_ne_resource(const char *path, uint16_t type, uint16_t id, const char *name,
                     uint8_t **data, uint32_t *bytes);
+/* ... the n-th resource of the type (0 the first), as it is in the table */
+int win_ne_resource_nth(const char *path, uint16_t type, int n, uint8_t **data,
+                        uint32_t *bytes);
+/* The module's description (the first entry of its non-resident names):
+ * 1 with it in buf, 0 if there is none */
+int win_ne_description(const char *path, char *buf, uint32_t cap);
 
 #endif

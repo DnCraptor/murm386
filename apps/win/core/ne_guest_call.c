@@ -587,9 +587,14 @@ static void create_to_guest(ne_user *u, const CREATESTRUCT *cs, uint32_t far, ui
 
 /* The program's window (or dialog, subclass) procedure proc with a message:
  * lParam a guest copy where it points to a structure it may read. */
+static WNDPROC token_proc(uint32_t t);
+
 LRESULT ne_message(ne_user *u, uint32_t proc, HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
     win_ne_guest_api_context *c = u->ctx;
+    WNDPROC native = token_proc(proc);
+    if (native)                         /* a native one it holds (a superclass) */
+        return CallWindowProc(native, h, msg, wp, lp);
     uint8_t blob[160];
     uint16_t len = 0;
     const char *fmt = NULL;
@@ -860,13 +865,255 @@ static uint32_t set_wndproc(ne_user *u, HWND h, uint32_t proc)
 
 /* ---------------------------------------------------------------- the services */
 
+/* ---------------------------------------------------------------- text, bitmaps, classes */
+
+/* a string of n characters (-1: up to the NUL) at far, at most cap - 1 */
+static int text_in(args *a, uint32_t far, int n, char *buf, int cap)
+{
+    if (n < 0) {
+        if (!str(a, far, buf, (uint32_t)cap))
+            return -1;
+        return lstrlen(buf);
+    }
+    if (n >= cap)
+        n = cap - 1;
+    if (!rd(a, far, buf, (uint32_t)n))
+        return -1;
+    buf[n] = 0;
+    return n;
+}
+
+/* int FAR * of n entries (Win16 ints) as native ones */
+static int ints_in(args *a, uint32_t far, int n, int *out)
+{
+    uint8_t g[2 * 64];
+    if (!far || n <= 0)
+        return 1;
+    if (n > 64)
+        n = 64;
+    if (!rd(a, far, g, 2u * (uint32_t)n))
+        return 0;
+    for (int i = 0; i < n; i++)
+        out[i] = (int16_t)rd16(g + 2 * i);
+    return 1;
+}
+
+static __attribute__((noinline)) int text_service(args *a, uint16_t service, uint32_t *v,
+                                                  int *dword)
+{
+    char s[256];
+    int tabs[64], n;
+    switch (service) {
+    case 0x315f: {                      /* ExtTextOut(HDC, x, y, UINT, LPRECT, LPCSTR, UINT, LPINT) */
+        uint32_t dx = dw(a, 4), sp = dw(a, 10), rp = dw(a, 14);
+        int count = w(a, 8);
+        RECT rc;
+        int widths[256];
+        n = count ? text_in(a, sp, count, s, sizeof(s)) : 0;
+        if (a->bad || n < 0 || (rp && !struct_in(a, F_RECT, rp, &rc)))
+            return 1;
+        if (dx) {
+            for (int i = 0; i < n; i += 64)
+                if (!ints_in(a, dx + 2u * (uint32_t)i, n - i < 64 ? n - i : 64, widths + i))
+                    return 1;
+        }
+        *v = (uint16_t)ExtTextOut(w(a, 24), (int16_t)w(a, 22), (int16_t)w(a, 20), w(a, 18),
+                                  rp ? &rc : NULL, s, (UINT)n, dx ? widths : NULL);
+        return 1;
+    }
+    case 0x31d7: {                      /* GetTextExtentPoint(HDC, LPCSTR, int, LPSIZE) */
+        SIZE sz;
+        uint8_t g[4];
+        n = text_in(a, dw(a, 10), (int16_t)w(a, 8), s, sizeof(s));
+        if (a->bad || n < 0 || !GetTextExtentPoint(w(a, 14), s, n, &sz))
+            return 1;
+        wr16(g, (uint16_t)sz.cx);
+        wr16(g + 2, (uint16_t)sz.cy);
+        *v = (uint16_t)wr(a, dw(a, 4), g, 4);
+        return 1;
+    }
+    case 0x10c4: {                      /* TabbedTextOut(HDC, x, y, LPCSTR, n, ntabs, LPINT, origin) */
+        int nt = (int16_t)w(a, 10);
+        n = text_in(a, dw(a, 14), (int16_t)w(a, 12), s, sizeof(s));
+        if (a->bad || n < 0 || !ints_in(a, dw(a, 6), nt, tabs))
+            return 1;
+        *v = (uint32_t)TabbedTextOut(w(a, 22), (int16_t)w(a, 20), (int16_t)w(a, 18), s, n,
+                                     nt > 64 ? 64 : nt, dw(a, 6) ? tabs : NULL, (int16_t)w(a, 4));
+        *dword = 1;
+        return 1;
+    }
+    case 0x10c5: {                      /* GetTabbedTextExtent(HDC, LPCSTR, n, ntabs, LPINT) */
+        int nt = (int16_t)w(a, 8);
+        n = text_in(a, dw(a, 12), (int16_t)w(a, 10), s, sizeof(s));
+        if (a->bad || n < 0 || !ints_in(a, dw(a, 4), nt, tabs))
+            return 1;
+        *v = GetTabbedTextExtent(w(a, 16), s, n, nt > 64 ? 64 : nt, dw(a, 4) ? tabs : NULL);
+        *dword = 1;
+        return 1;
+    }
+    case 0x305c: {                      /* GetTextFace(HDC, int, LPSTR) */
+        int size = (int16_t)w(a, 8);
+        char face[64];
+        if (a->bad || size <= 0)
+            return 1;
+        n = GetTextFace(w(a, 10), sizeof(face), face);
+        if (n >= size)
+            n = size - 1;
+        face[n] = 0;
+        if (wr(a, dw(a, 4), face, (uint32_t)n + 1))
+            *v = (uint16_t)n;
+        return 1;
+    }
+    }
+    return 0;
+}
+
+/* the bits of a Win16 bitmap: rows of words (WINN's layout for 1 and 8
+ * bits a pixel); count bytes between the guest and a native buffer */
+static __attribute__((noinline)) int bitmap_service(args *a, uint16_t service, uint32_t *v,
+                                                    int *dword)
+{
+    switch (service) {
+    case 0x3030:                        /* CreateBitmap(w, h, planes, bpp, const void FAR *) */
+    case 0x3031: {                      /* CreateBitmapIndirect(const BITMAP FAR *) */
+        int wd, ht, planes, bpp;
+        uint32_t bits;
+        if (service == 0x3030) {
+            bits = dw(a, 4);
+            bpp = w(a, 8);
+            planes = w(a, 10);
+            ht = (int16_t)w(a, 12);
+            wd = (int16_t)w(a, 14);
+        } else {
+            uint8_t g[14];
+            if (!rd(a, dw(a, 4), g, sizeof(g)))
+                return 1;
+            wd = (int16_t)rd16(g + 2);
+            ht = (int16_t)rd16(g + 4);
+            planes = g[8];
+            bpp = g[9];
+            bits = rd32(g + 10);
+        }
+        if (a->bad || wd <= 0 || ht <= 0 || wd > 4096 || ht > 4096)
+            return 1;
+        int depth = planes * bpp;
+        uint32_t size = (uint32_t)gdi_bitmap_pitch(wd, depth == 1 ? 1 : 8) * (uint32_t)ht;
+        uint8_t *buf = bits && (depth == 1 || depth == 8) && size <= 0x10000u ?
+                       (uint8_t *)win_alloc(size) : NULL;
+        if (buf && !rd(a, bits, buf, size)) {
+            win_free(buf);
+            return 1;
+        }
+        *v = CreateBitmap(wd, ht, (UINT)planes, (UINT)bpp, buf);
+        win_free(buf);
+        return 1;
+    }
+    case 0x304a:                        /* GetBitmapBits(HBITMAP, LONG, LPVOID) */
+    case 0x306a: {                      /* SetBitmapBits(HBITMAP, DWORD, const void FAR *) */
+        uint32_t count = dw(a, 8), far = dw(a, 4);
+        if (count > 0x10000u - (far & 0xffffu))
+            count = 0x10000u - (far & 0xffffu);
+        uint8_t *buf = !a->bad && count ? (uint8_t *)win_alloc(count) : NULL;
+        if (!buf)
+            return 1;
+        if (service == 0x304a) {
+            LONG got = GetBitmapBits(w(a, 12), (LONG)count, buf);
+            if (got > 0 && wr(a, far, buf, (uint32_t)got))
+                *v = (uint32_t)got;
+        } else if (rd(a, far, buf, count)) {
+            *v = (uint32_t)SetBitmapBits(w(a, 12), count, buf);
+        }
+        win_free(buf);
+        *dword = 1;
+        return 1;
+    }
+    case 349:                           /* _hread(HFILE, void huge *, LONG) */
+    case 350: {                         /* _hwrite(HFILE, const void huge *, LONG) */
+        uint32_t n = dw(a, 4), far = dw(a, 8), done = 0;
+        HFILE f = (HFILE)w(a, 12);
+        uint8_t buf[256];
+        *dword = 1;
+        *v = (uint32_t)HFILE_ERROR;
+        if (a->bad)
+            return 1;
+        if (n > 0x10000u - (far & 0xffffu))     /* within its block */
+            n = 0x10000u - (far & 0xffffu);
+        while (done < n) {
+            uint32_t k = n - done < sizeof(buf) ? n - done : (uint32_t)sizeof(buf);
+            uint32_t at = (far & 0xffff0000u) | ((far + done) & 0xffffu);
+            LONG got;
+            if (service == 350) {
+                if (!rd(a, at, buf, k))
+                    return 1;
+                got = _hwrite(f, buf, (LONG)k);
+            } else {
+                got = _hread(f, buf, (LONG)k);
+                if (got > 0 && !wr(a, at, buf, (uint32_t)got))
+                    return 1;
+            }
+            if (got < 0)
+                return done ? (*v = done, 1) : 1;
+            done += (uint32_t)got;
+            if ((uint32_t)got < k)
+                break;
+        }
+        *v = done;
+        return 1;
+    }
+    }
+    return 0;
+}
+
+/* USER.404 GetClassInfo(HINSTANCE, LPCSTR, WNDCLASS FAR *): its own
+ * class's procedure and menu as it registered them, a native class's
+ * procedure as one it can call (CallWindowProc, or a superclass's) */
+static __attribute__((noinline)) uint16_t class_info(args *a, ne_user *u)
+{
+    uint32_t out = dw(a, 4), name_far = dw(a, 8);
+    char name[32];
+    WNDCLASS wc;
+    LPCSTR nm = name_or_atom(a, name_far, name, sizeof(name));
+    if (a->bad || (!GetClassInfo(w(a, 12) ? instance(u, w(a, 12)) : 0, nm, &wc) &&
+                   !GetClassInfo(0, nm, &wc)))
+        return 0;
+    uint32_t proc = 0, menu = 0;
+    for (int i = 0; i < NE_CLASSES; i++)
+        if (u->cls[i].proc && (name_far >> 16) && !lstrcmpi(u->cls[i].name, name)) {
+            proc = u->cls[i].proc;
+            menu = u->cls[i].menu_id;
+        }
+    if (!proc)
+        proc = token_of(wc.lpfnWndProc);
+    uint8_t g[26];
+    wr16(g, (uint16_t)wc.style);
+    wr32(g + 2, proc);
+    wr16(g + 6, (uint16_t)wc.cbClsExtra);
+    wr16(g + 8, (uint16_t)wc.cbWndExtra);
+    wr16(g + 10, wc.hInstance == (HINSTANCE)u->task ? dgroup_sel(a->ctx) : 0);
+    wr16(g + 12, (uint16_t)wc.hIcon);
+    wr16(g + 14, (uint16_t)wc.hCursor);
+    wr16(g + 16, (uint16_t)(uintptr_t)wc.hbrBackground);
+    wr32(g + 18, menu);
+    wr32(g + 22, name_far);
+    return (uint16_t)wr(a, out, g, sizeof(g));
+}
+
 int ne_call(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword)
 {
     win_ne_guest_api_context *c = a->ctx;
     if (service < 0x1000u && (local_service(a, u, service, v) || global_service(a, service, v, dword)))
         return 1;
-    if (ne_dos_service(a, u, service, v, dword))
+    if (ne_dos_service(a, u, service, v, dword) || text_service(a, service, v, dword) ||
+        bitmap_service(a, service, v, dword))
         return 1;
+    if (service == 0x1194) {            /* GetClassInfo */
+        *v = class_info(a, u);
+        return 1;
+    }
+    if (service == 0x11ca) {            /* DestroyCursor(HCURSOR) */
+        *v = (uint16_t)DestroyIcon(w(a, 4));
+        return 1;
+    }
     switch (service) {
     case 0x100a: {                      /* SetTimer(HWND, UINT, UINT, TIMERPROC) */
         uint32_t proc = dw(a, 4);

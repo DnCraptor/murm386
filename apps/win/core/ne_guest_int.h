@@ -19,6 +19,7 @@
 #define NE_SUBCLASSED 16
 #define NE_LOCALS  64
 #define NE_LENT    8
+#define NE_IMAGES  16
 
 typedef struct ne_user {
     struct ne_user *next;
@@ -53,6 +54,8 @@ typedef struct ne_user {
     struct { char spec[128]; uint16_t attr; int next; } find;
     uint16_t dos_error;
     uint16_t env;
+    /* its icons (kind 2) and cursors (1), by number or name */
+    struct { HANDLE h; uint8_t kind; uint16_t id; char name[32]; } image[NE_IMAGES];
 } ne_user;
 
 

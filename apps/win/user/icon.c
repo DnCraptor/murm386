@@ -48,6 +48,39 @@ typedef struct {
     HBITMAP  mask;                  /* 1: transparent */
 } uicon;
 
+/* a cursor of a program's own (its resources) */
+#define UCURSOR_MAGIC 0x52434355u   /* "UCCR" */
+typedef struct {
+    uint32_t magic;
+    uint8_t  and_m[128], xor_m[128];    /* 32x32, as cursor_set_shape takes them */
+    int      hx, hy;
+} ucursor;
+
+static ucursor *cursor_of(HCURSOR h)
+{
+    void *p = win_handle_get(h, WOBJ_CURSOR);
+    if ((uintptr_t)p < ICON_IDS)
+        return NULL;
+    ucursor *c = (ucursor *)p;
+    return c->magic == UCURSOR_MAGIC ? c : NULL;
+}
+
+HCURSOR user_cursor_create(const uint8_t and_m[128], const uint8_t xor_m[128], int hx, int hy)
+{
+    ucursor *c = (ucursor *)win_alloc(sizeof(ucursor));
+    if (!c)
+        return 0;
+    c->magic = UCURSOR_MAGIC;
+    memcpy(c->and_m, and_m, sizeof(c->and_m));
+    memcpy(c->xor_m, xor_m, sizeof(c->xor_m));
+    c->hx = hx;
+    c->hy = hy;
+    HCURSOR h = win_handle_alloc(WOBJ_CURSOR, c);
+    if (!h)
+        win_free(c);
+    return h;
+}
+
 static const COLORREF vga16[16] = {
     RGB(0, 0, 0), RGB(128, 0, 0), RGB(0, 128, 0), RGB(128, 128, 0),
     RGB(0, 0, 128), RGB(128, 0, 128), RGB(0, 128, 128), RGB(192, 192, 192),
@@ -69,7 +102,11 @@ static HICON icon_from_info(const winapp_info *inf, int n)
 {
     if (!inf || n < 0 || n >= inf->icon_count)
         return 0;
-    const winapp_icon *ic = &inf->icon[n];
+    return user_icon_create(&inf->icon[n]);
+}
+
+HICON user_icon_create(const winapp_icon *ic)
+{
     uicon *u = (uicon *)win_alloc(sizeof(uicon));
     if (!u)
         return 0;
@@ -103,6 +140,13 @@ static HICON icon_from_info(const winapp_info *inf, int n)
 BOOL WINAPI DestroyIcon(HICON icon)
 {
     uicon *u = icon_of(icon);
+    ucursor *c = u ? NULL : cursor_of(icon);
+    if (c) {                        /* a program's cursor */
+        c->magic = 0;
+        win_free(c);
+        win_handle_free(icon);
+        return TRUE;
+    }
     if (!u)
         return FALSE;               /* the built-in ones stay */
     DeleteObject(u->mask);
@@ -169,8 +213,12 @@ HCURSOR WINAPI SetCursor(HCURSOR c)
 {
     HCURSOR old = current_cursor;
     int id = (int)(intptr_t)win_handle_get(c, WOBJ_CURSOR);
+    ucursor *own = cursor_of(c);
     if (id >= 1 && id <= WCUR_COUNT) {
         cursor_select_builtin(id - 1);
+        current_cursor = c;
+    } else if (own) {
+        cursor_set_shape(own->and_m, own->xor_m, own->hx, own->hy);
         current_cursor = c;
     } else if (!c) {
         cursor_set_shape(NULL, NULL, 0, 0);

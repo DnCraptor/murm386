@@ -579,8 +579,9 @@ static int res_id_match(FILE *f, uint64_t size, uint64_t table, uint16_t v,
     return 1;
 }
 
-int win_ne_resource(const char *path, uint16_t type, uint16_t id, const char *name,
-                    uint8_t **data, uint32_t *bytes)
+/* the resource of type by id or name, or (nth >= 0) the nth of the type */
+static int find_resource(const char *path, uint16_t type, uint16_t id, const char *name,
+                         int nth, uint8_t **data, uint32_t *bytes)
 {
     *data = NULL;
     *bytes = 0;
@@ -626,7 +627,8 @@ int win_ne_resource(const char *path, uint16_t type, uint16_t id, const char *na
             uint8_t ni[12];
             if (!read_at(f, size, p, ni, sizeof(ni)))
                 goto out;
-            if (!this_type || !res_id_match(f, size, table, rd16(ni + 6), id, name))
+            if (!this_type || (nth >= 0 ? nth-- != 0
+                                            : !res_id_match(f, size, table, rd16(ni + 6), id, name)))
                 continue;
             uint64_t at = (uint64_t)rd16(ni) << shift;
             uint32_t len = (uint32_t)rd16(ni + 2) << shift;
@@ -649,4 +651,44 @@ int win_ne_resource(const char *path, uint16_t type, uint16_t id, const char *na
 out:
     fclose(f);
     return rc;
+}
+
+int win_ne_resource(const char *path, uint16_t type, uint16_t id, const char *name,
+                    uint8_t **data, uint32_t *bytes)
+{
+    return find_resource(path, type, id, name, -1, data, bytes);
+}
+
+int win_ne_resource_nth(const char *path, uint16_t type, int n, uint8_t **data,
+                        uint32_t *bytes)
+{
+    *data = NULL;
+    *bytes = 0;
+    return n < 0 ? WIN_NE_UNRESOLVED : find_resource(path, type, 0, NULL, n, data, bytes);
+}
+
+int win_ne_description(const char *path, char *buf, uint32_t cap)
+{
+    if (!buf || !cap)
+        return 0;
+    buf[0] = 0;
+    FILE *f = path ? fopen(path, "rb") : NULL;
+    if (!f)
+        return 0;
+    long end;
+    uint8_t mz[64], h[NE_HDR_SIZE], len = 0;
+    int ok = 0;
+    if (!fseek(f, 0, SEEK_END) && (end = ftell(f)) >= 0) {
+        uint64_t size = (uint64_t)end;
+        uint64_t base;
+        if (read_at(f, size, 0, mz, sizeof(mz)) && rd16(mz) == 0x5a4d &&
+            read_at(f, size, base = rd32(mz + 0x3c), h, sizeof(h)) && rd16(h) == 0x454e &&
+            rd16(h + 0x20) && read_at(f, size, rd32(h + 0x2c), &len, 1) && len) {
+            uint32_t n = len < cap ? len : cap - 1;
+            ok = read_at(f, size, (uint64_t)rd32(h + 0x2c) + 1, buf, n);
+            buf[ok ? n : 0] = 0;
+        }
+    }
+    fclose(f);
+    return ok;
 }

@@ -48,7 +48,14 @@ in the guest and the native ones; a message's `lParam` reaches the window
 procedure as it is (a native pointer, for the program to hand on to
 `DefWindowProc`). Its resources are read from its file as it asks for them:
 menus (`LoadMenu`, the menu of a class), accelerators, strings, dialogs
-(made native templates, their dialog procedures its own code as well).
+(made native templates, their dialog procedures its own code as well),
+icons and cursors (`LoadIcon`, `LoadCursor`: WINN's 32x32 16-colour icons,
+the group's entry closest to that, scaled; 32x32 cursors with their hot
+spot), bitmaps (`LoadBitmap`: DIBs of 1, 4, 8 and 24 bits, monochrome or of
+the screen's palette). Its icons and the description in its file are those
+the Program Manager, Alt+Tab and the Task List show, as an EZ
+application's. A class it registers with a native class's procedure
+(`GetClassInfo`: a superclass) works as that class.
 
 The functions a program can call: some 230 go the generic way
 (`core/ne_sigs.h`, made by `sdk/gen_ne_sigs.py` from the native prototypes:
@@ -63,7 +70,11 @@ selector of its own per block; LocalAlloc: in DGROUP's local heap, which
 grows past the stack up to 64K as in Windows: DGROUP moves, its selector
 stays), OpenFile, GetDOSEnvironment, KEYBOARD's AnsiToOem, OemToAnsi (the
 ...Buff ones), GetKBCodePage and GetKeyboardType,
-structures (TEXTMETRIC, LOGFONT, LOGPEN, LOGBRUSH, BITMAP), wsprintf. A
+structures (TEXTMETRIC, LOGFONT, LOGPEN, LOGBRUSH, BITMAP), wsprintf,
+ExtTextOut, GetTextExtentPoint, TabbedTextOut, GetTabbedTextExtent,
+GetTextFace, CreateBitmap(Indirect), Get/SetBitmapBits, GetClassInfo,
+_hread/_hwrite (within one block: a huge pointer's segments are not
+tiled). A
 window procedure gets WM_CREATE's CREATESTRUCT, WM_GETMINMAXINFO's,
 WM_WINDOWPOSCHANGING's and WM_NCCALCSIZE's structures as copies of its
 own, which its DefWindowProc gives back. DOS, as its C library (Open
@@ -87,13 +98,14 @@ generate `NEAPP.EXE`, `NEDIALOG.EXE`, `NELOOP.EXE`, `NEFAULT.EXE`,
 `NEHANG.EXE` and the `OW*.EXE`, built by Open Watcom, their sources in the
 script: `OWHELLO`, `OWBUSY`, `OWWIN`, `OWMENU` (resources), `OWSEGS` (three
 code segments), `OWDEMO` (many functions at once), `OWFILE` and `OWFILEL`
-(DOS through the C library, small and large model) (`make NEFIXTURES` in
+(DOS through the C library, small and large model), `OWRES` (icons, a
+cursor, bitmaps, text, a superclass) (`make NEFIXTURES` in
 `host/`). All have DOS MZ stubs that explain how to launch them under WINN
 when invoked directly from DOS. `host/test_ne_run` runs them on the
 emulator's own i386 core (`src/i386.c` as it is, built for the host with
 the stand-ins in `host/x86run/`), and so does the host `winhost`: they are
 in its `HOSTWIN/` (`scripts/owwin.txt`, `scripts/owmenu.txt`,
-`scripts/owdemo.txt`, `scripts/owfile.txt`).
+`scripts/owdemo.txt`, `scripts/owfile.txt`, `scripts/owres.txt`).
 
     WINN [:] [program [arguments]]
 
@@ -260,6 +272,7 @@ use `ucontext`):
     ./winhost scripts/owmenu.txt PROGMAN     # its menu, accelerator, string, dialog
     ./winhost scripts/owdemo.txt PROGMAN     # controls, GDI, timers, memory, a file, subclassing
     ./winhost scripts/owfile.txt PROGMAN     # its C library's DOS calls: files, find, directory, date
+    ./winhost scripts/owres.txt PROGMAN      # its icons, cursor, bitmaps; text; a superclass
     ./winhost scripts/winmine.txt WINMINE    # marks, a lost game, Expert, Best Times
     ./winhost scripts/logo.txt PROGMAN       # the logo (copy the BMPs into HOSTWIN first)
     ./winhost800 scripts/vga800.txt  # the VGA800 driver, built in
