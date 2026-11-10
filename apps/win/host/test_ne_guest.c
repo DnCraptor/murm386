@@ -110,6 +110,13 @@ static int write_block(void *unused, uint32_t linear, const void *p, uint32_t si
     memcpy(guest + linear, p, size);
     return 1;
 }
+static int read_block(void *unused, uint32_t linear, void *dst, uint32_t size)
+{
+    (void)unused;
+    if (linear >= MEM_BYTES || size > MEM_BYTES - linear) return 0;
+    memcpy(dst, guest + linear, size);
+    return 1;
+}
 static void reset_guest(void)
 {
     memset(guest, 0, sizeof(guest));
@@ -167,6 +174,48 @@ int main(void)
     };
     assert(!memcmp(guest + img.thunk_linear, stub, sizeof(stub)));
     assert(guest[img.thunk_linear + WIN_NE_THUNK_BYTES] == 0xcc);
+
+    /* GlobalAlloc: zero-fill and descriptor writes are both fallible. */
+    unsigned baseline = nactive;
+    fail_write = write_calls + 1u;
+    assert(!win_ne_guest_global_alloc(&img, 32));
+    assert(nactive == baseline);
+    fail_write = write_calls + 2u;
+    assert(!win_ne_guest_global_alloc(&img, 32));
+    assert(nactive == baseline);
+    fail_write = 0;
+    uint16_t h = win_ne_guest_global_alloc(&img, 32);
+    assert(h && win_ne_guest_global(&img, h));
+    win_ne_guest_segment *block = win_ne_guest_global(&img, h);
+    check_desc(guest + img.gdt_linear + h, block->linear, 32, 0);
+    for (unsigned i = 0; i < 32; i++) assert(!guest[block->linear + i]);
+    guest[block->linear] = 0xa5;
+    uint32_t original = block->linear;
+    baseline = nactive;
+
+    /* Failed copy/zero-fill/descriptor publication preserves old block. */
+    fail_write = write_calls + 1u;
+    assert(!win_ne_guest_global_realloc(&img, h, 64, read_block));
+    assert(block->linear == original && block->size == 32 && nactive == baseline);
+    fail_write = write_calls + 2u;
+    assert(!win_ne_guest_global_realloc(&img, h, 64, read_block));
+    assert(block->linear == original && block->size == 32 && nactive == baseline);
+    fail_write = 0;
+    assert(!win_ne_guest_global_realloc(&img, h, 64, NULL));
+    assert(block->linear == original && nactive == baseline);
+    assert(win_ne_guest_global_realloc(&img, h, 64, read_block));
+    assert(block->size == 64 && guest[block->linear] == 0xa5);
+    for (unsigned i = 32; i < 64; i++) assert(!guest[block->linear + i]);
+
+    fail_write = write_calls + 1u;
+    assert(!win_ne_guest_global_free(&img, h));
+    assert(win_ne_guest_global(&img, h) == block);
+    fail_write = 0;
+    assert(win_ne_guest_global_free(&img, h));
+    assert(!win_ne_guest_global(&img, h));
+    assert(!r32(guest + img.gdt_linear + h));
+    assert(nactive == baseline - 1u);
+
     win_ne_guest_release(&img);
     assert(!nactive && alloc_calls == free_calls && !img.gdt);
 

@@ -270,7 +270,13 @@ static __attribute__((noinline)) int generic(args *a, ne_user *u, uint16_t servi
             POINT *pts = (POINT *)take(&p, next * (uint32_t)sizeof(POINT));
             for (uint32_t k = 0; k < next && pts; k++) {
                 uint8_t g[4];
-                if (!rd(a, r + 4u * k, g, 4))
+                /* A 16:16 pointer must never carry its offset into the selector. */
+                uint32_t off = (r & 0xffffu) + 4u * k;
+                if (off > 0xfffcu) {
+                    a->bad = 1;
+                    break;
+                }
+                if (!rd(a, (r & 0xffff0000u) | off, g, 4))
                     break;
                 pts[k].x = (int16_t)rd16(g);
                 pts[k].y = (int16_t)rd16(g + 2);

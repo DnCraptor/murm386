@@ -470,10 +470,15 @@ fail:
 
 /* ---------------------------------------------------------------- global memory */
 
-static void set_descriptor(win_ne_guest_image *g, uint16_t sel, uint32_t linear, uint32_t size)
+/* Publish descriptor changes only after the guest GDT write succeeds. */
+static int set_descriptor(win_ne_guest_image *g, uint16_t sel, uint32_t linear, uint32_t size)
 {
-    descriptor(g->gdt + sel, linear, size, 0);
-    g->io.write(g->opaque, g->gdt_linear + sel, g->gdt + sel, GDT_ENTRY_BYTES);
+    uint8_t desc[GDT_ENTRY_BYTES];
+    descriptor(desc, linear, size, 0);
+    if (!g->io.write(g->opaque, g->gdt_linear + sel, desc, sizeof(desc)))
+        return 0;
+    memcpy(g->gdt + sel, desc, sizeof(desc));
+    return 1;
 }
 
 static uint16_t global_selector(const win_ne_guest_image *g, unsigned i)
@@ -501,14 +506,22 @@ uint16_t win_ne_guest_global_alloc(win_ne_guest_image *g, uint32_t bytes)
             return 0;
         uint8_t zero[256];
         memset(zero, 0, sizeof(zero));
-        for (uint32_t at = 0; at < bytes; at += sizeof(zero))
-            g->io.write(g->opaque, s->linear + at, zero,
-                        bytes - at < sizeof(zero) ? bytes - at : (uint32_t)sizeof(zero));
+        for (uint32_t at = 0; at < bytes; at += sizeof(zero)) {
+            uint32_t n = bytes - at < sizeof(zero) ? bytes - at : (uint32_t)sizeof(zero);
+            if (!g->io.write(g->opaque, s->linear + at, zero, n))
+                goto alloc_fail;
+        }
+        uint16_t selector = global_selector(g, i);
+        if (!set_descriptor(g, selector, s->linear, bytes))
+            goto alloc_fail;
         s->size = bytes;
         s->flags = 1;
-        s->selector = global_selector(g, i);
-        set_descriptor(g, s->selector, s->linear, bytes);
-        return s->selector;
+        s->selector = selector;
+        return selector;
+alloc_fail:
+        g->io.free(g->opaque, s->linear);
+        memset(s, 0, sizeof(*s));
+        return 0;
     }
     return 0;
 }
@@ -518,21 +531,27 @@ int win_ne_guest_global_realloc(win_ne_guest_image *g, uint16_t sel, uint32_t by
 {
     win_ne_guest_segment *s = win_ne_guest_global(g, sel);
     uint32_t linear;
-    if (!s || !bytes || bytes > 65536u || !guest_alloc(g, bytes, &linear))
+    if (!s || !read || !bytes || bytes > 65536u || !guest_alloc(g, bytes, &linear))
         return 0;
     uint8_t buf[256];
     for (uint32_t at = 0; at < bytes; at += sizeof(buf)) {
         uint32_t n = bytes - at < sizeof(buf) ? bytes - at : (uint32_t)sizeof(buf);
         memset(buf, 0, sizeof(buf));
-        if (at < s->size)
-            read(NULL, s->linear + at, buf, s->size - at < n ? s->size - at : n);
-        g->io.write(g->opaque, linear + at, buf, n);
+        if (at < s->size && !read(NULL, s->linear + at, buf,
+                                 s->size - at < n ? s->size - at : n))
+            goto realloc_fail;
+        if (!g->io.write(g->opaque, linear + at, buf, n))
+            goto realloc_fail;
     }
+    if (!set_descriptor(g, s->selector, linear, bytes))
+        goto realloc_fail;
     g->io.free(g->opaque, s->linear);
     s->linear = linear;
     s->size = bytes;
-    set_descriptor(g, s->selector, linear, bytes);
     return 1;
+realloc_fail:
+    g->io.free(g->opaque, linear);
+    return 0;
 }
 
 int win_ne_guest_global_free(win_ne_guest_image *g, uint16_t sel)
@@ -540,9 +559,13 @@ int win_ne_guest_global_free(win_ne_guest_image *g, uint16_t sel)
     win_ne_guest_segment *s = win_ne_guest_global(g, sel);
     if (!s)
         return 0;
+    uint8_t absent[GDT_ENTRY_BYTES] = {0};
+    /* A failed descriptor write must not release still-addressable memory. */
+    if (!g->io.write(g->opaque, g->gdt_linear + s->selector,
+                     absent, sizeof(absent)))
+        return 0;
+    memcpy(g->gdt + s->selector, absent, sizeof(absent));
     g->io.free(g->opaque, s->linear);
-    memset(g->gdt + s->selector, 0, GDT_ENTRY_BYTES);  /* not present */
-    g->io.write(g->opaque, g->gdt_linear + s->selector, g->gdt + s->selector, GDT_ENTRY_BYTES);
     memset(s, 0, sizeof(*s));
     return 1;
 }
