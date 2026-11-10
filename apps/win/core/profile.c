@@ -41,7 +41,39 @@ UINT WINAPI GetWindowsDirectory(LPSTR buf, UINT size)
     return (UINT)lstrlen(win_dir);
 }
 
-UINT WINAPI GetSystemDirectory(LPSTR buf, UINT size) { return GetWindowsDirectory(buf, size); }
+/* the Windows directory's SYSTEM, as Windows has it (its fonts, its DLLs);
+ * the Windows directory itself when there is none */
+UINT WINAPI GetSystemDirectory(LPSTR buf, UINT size)
+{
+    char sys[sizeof(win_dir) + 8];
+    win_path("SYSTEM", sys, sizeof(sys));
+    int attr = lstrcmp(win_dir, ".") ? win_file_attr(sys, 0, 0) : -1;
+    if (attr < 0 || !(attr & 0x10))
+        return GetWindowsDirectory(buf, size);
+    if (buf && size)
+        lstrcpyn(buf, sys, (int)size);
+    return (UINT)lstrlen(sys);
+}
+
+/* a file of the Windows directory's, or of the system one's when it is
+ * there only (WIN.INI's fonts, DLLs): its full path */
+void win_find_path(const char *name, char *out, int size)
+{
+    win_path(name, out, size);
+    if (win_file_attr(out, 0, 0) >= 0 || !lstrcmp(out, name))
+        return;
+    char sys[sizeof(win_dir) + 8], alt[160];
+    UINT n = GetSystemDirectory(sys, sizeof(sys));
+    if (!n || !lstrcmp(sys, win_dir))
+        return;
+#if defined(__arm__) || defined(__thumb__)
+    wsprintf(alt, "%s\\%s", sys, name);
+#else
+    wsprintf(alt, "%s/%s", sys, name);
+#endif
+    if (win_file_attr(alt, 0, 0) >= 0)
+        lstrcpyn(out, alt, size);
+}
 
 /* Full path of a file that belongs to the Windows directory. */
 void win_path(const char *name, char *out, int size)

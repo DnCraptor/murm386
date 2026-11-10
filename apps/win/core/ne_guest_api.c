@@ -369,6 +369,27 @@ int win_ne_arg(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint32_t off, ui
     return read_stack_word(ctx, cpu, off, v);
 }
 
+/* a selector the program may have in DS or ES (ne_guest.c's GDT; any
+ * without it) */
+__attribute__((weak)) int win_ne_guest_selector_live(const win_ne_guest_image *g, uint16_t sel)
+{
+    (void)g; (void)sel;
+    return 1;
+}
+
+/* DS and ES as the program gets them back: 0 for a selector there is no
+ * more (a block the call freed, FreeResource's, GlobalFree's ...), as
+ * Windows' KERNEL does; else loading it would fault */
+static void forget_dead(win_ne_guest_api_context *ctx, win_ne_regs *cpu)
+{
+    static const int at[2] = { FR_DS, FR_ES };
+    for (int i = 0; cpu->frame && i < 2; i++) {
+        uint16_t v;
+        if (frame_get(ctx, cpu, at[i], &v) && v && !win_ne_guest_selector_live(ctx->image, v))
+            frame_set(ctx, cpu, at[i], 0);
+    }
+}
+
 void win_ne_forget_selector(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint16_t sel)
 {
     static const int at[2] = { FR_DS, FR_ES };
@@ -548,5 +569,7 @@ int win_ne_guest_api(void *opaque, win_ne_regs *cpu, uint16_t service)
     }
     cpu->gprx[regax].r16 = (uint16_t)value;
     cpu->gprx[regdx].r16 = dword ? (uint16_t)(value >> 16) : 0;
+    if (ctx && ctx->image)
+        forget_dead(ctx, cpu);
     return 1;
 }

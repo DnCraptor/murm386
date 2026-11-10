@@ -35,16 +35,20 @@
 #define WIN_NE_SERVICE_WIN87EM  0x7000u
 #define WIN_NE_SERVICE_FPMATH   (WIN_NE_SERVICE_WIN87EM + 1u)
 /* Windows' own DLLs WINN has (ne_guest_sys.c): MMSYSTEM (its ordinals go
- * to 1226), TOOLHELP, VER, LZEXPAND */
+ * to 1226), TOOLHELP, VER */
 #define WIN_NE_SERVICE_MMSYSTEM 0x8000u
 #define WIN_NE_SERVICE_TOOLHELP 0x8800u
 #define WIN_NE_SERVICE_VER      0x8900u
-#define WIN_NE_SERVICE_LZEXPAND 0x8a00u
+/* the native DLLs' (core/windll.c): 9000h + the DLL's slot << 10 + the
+ * ordinal (below 1024); 12 slots */
+#define WIN_NE_SERVICE_DLL      0x9000u
+#define WIN_NE_DLL_SERVICE(slot, ord) ((uint16_t)(WIN_NE_SERVICE_DLL + ((unsigned)(slot) << 10) + (ord)))
 /* A function of Windows' WINN has not (of its modules, or of Windows' own
  * ones it has nothing of): the program loads, its call of it ends it, as
  * Windows' "undefined dynalink" would. C000h + the module (its index, 4
  * bits) << 10 + the ordinal (1016 + n: the nth imported by name) */
 #define WIN_NE_SERVICE_UNDEFINED 0xC000u
+_Static_assert(WIN_NE_SERVICE_DLL + (12u << 10) == WIN_NE_SERVICE_UNDEFINED, "the DLLs' services");
 /* GetWinFlags: protected mode, a 386, standard mode, a coprocessor */
 #define WIN_NE_WINFLAGS         0x0415u
 
@@ -150,17 +154,30 @@ int win_ne_guest_global_free(win_ne_guest_image *g, uint16_t sel);
 uint16_t win_ne_guest_selector_alloc(win_ne_guest_image *g, uint16_t like, int code);
 int win_ne_guest_selector_get(const win_ne_guest_image *g, uint16_t sel, uint32_t *base,
                               uint32_t *limit, int *code);
+/* a selector of the program's (one it may load): 1 */
+int win_ne_guest_selector_live(const win_ne_guest_image *g, uint16_t sel);
 int win_ne_guest_selector_set(win_ne_guest_image *g, uint16_t sel, uint32_t base,
                               uint32_t limit, int code);
 /* n empty selectors one after the other (AllocSelectorArray): the first */
 uint16_t win_ne_guest_selector_array(win_ne_guest_image *g, unsigned n);
 /* GetProcAddress of a module WINN has (0 KERNEL, 1 USER, 2 GDI, 3
- * KEYBOARD, 4 COMMDLG, 5 SHELL, 6 WIN87EM, 7 MMSYSTEM, 8 TOOLHELP, 9 VER,
- * 10 LZEXPAND; win_ne_guest_module gives the number of a
- * name, -1 for none): a thunk's far address, made now if the program had
- * none for it, 0 if WINN has not the function. */
+ * KEYBOARD, 4 COMMDLG, 5 SHELL, 6 WIN87EM, 7 MMSYSTEM, 8 TOOLHELP, 9 VER;
+ * win_ne_guest_module gives the number of a name, -1 for none): a thunk's
+ * far address, made now if the program had none for it, 0 if WINN has not
+ * the function. */
 uint32_t win_ne_guest_proc(win_ne_guest_image *g, unsigned module, uint16_t ordinal,
                            const char *name);
+/* ... the thunk of a service, a native DLL's (WIN_NE_DLL_SERVICE) */
+uint32_t win_ne_guest_thunk(win_ne_guest_image *g, uint16_t id);
+/* Native DLLs (core/windll.c, through ne_guest_sys.c; none in a program
+ * without them): the service of a module's export, the DLL loaded and the
+ * current task's use of it counted (1), no native DLL of the name (0), one
+ * without that function by name (-1); has: the same, the DLL let go after;
+ * the bytes of a service's PASCAL arguments; its name */
+int win_ne_native_import(const char *module, uint16_t ordinal, const char *name, uint16_t *id);
+int win_ne_native_has(const char *module, uint16_t ordinal, const char *name);
+uint16_t win_ne_native_args(uint16_t id);
+const char *win_ne_native_name(uint16_t id, char *buf, unsigned cap);
 int win_ne_guest_module(const char *name);
 /* ... and the name of number m (NULL past them) */
 const char *win_ne_guest_module_name(int m);

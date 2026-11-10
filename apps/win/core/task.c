@@ -246,6 +246,7 @@ static void task_start(void)
     cursor_wait_begin();
     user_task_ended(t->h);
     win_files_task_ended(t->h);
+    win_dll_task_end(t->h);             /* what DLLs kept for it, its uses of them */
     t->state = WTASK_DEAD;
     cursor_wait_end();
     switch_to(&kernel_task);
@@ -439,8 +440,12 @@ static int run_ne_app(wtask *t)
     if (!rc && r.stopped)           /* Windows ends */
         return 0;
     win_ne_unresolved u;
+    char fn[64];
     if (rc == WIN_NE_EXEC_UNSUPPORTED && r.unsupported >= WIN_NE_SERVICE_UNDEFINED)
         wsprintf(msg, "%s called %s, which WINN does not have yet.", file, r.undefined);
+    else if (rc == WIN_NE_EXEC_UNSUPPORTED && r.unsupported >= WIN_NE_SERVICE_DLL &&
+             win_ne_native_name(r.unsupported, fn, sizeof(fn)))
+        wsprintf(msg, "%s called %s, which WINN does not have yet.", file, fn);
     else if (rc == WIN_NE_EXEC_UNSUPPORTED && r.unsupported >= WIN_NE_SERVICE_INT21 &&
              r.unsupported < WIN_NE_SERVICE_INT21 + 0x100u)
         wsprintf(msg, "%s uses INT 21h function %02Xh, which WINN does not have yet.",

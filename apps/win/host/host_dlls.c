@@ -1,0 +1,15 @@
+/*
+ * host_dlls.c - the native DLLs (apps/windll) built into the host program,
+ * as core/windll.c finds them there instead of their files.
+ *
+ * Copyright (c) 2026 murm386 contributors. MIT License.
+ */
+#include <stddef.h>
+#include "windll.h"
+
+const win_dll_info *lzexpand_WinDllInit(void);
+
+const win_dll_builtin win_dll_builtins[] = {
+    { "LZEXPAND", lzexpand_WinDllInit },
+    { NULL, NULL },
+};

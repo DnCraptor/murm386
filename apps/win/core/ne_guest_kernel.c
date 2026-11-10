@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "wincore.h"
+#include "windll.h"
 #include "commdlg.h"
 #include "ne_guest_api.h"
 #include "ne_guest_int.h"
@@ -97,6 +98,8 @@ static uint16_t module_handle(args *a, uint32_t far)
     int m = win_ne_guest_module(name);
     if (m >= 0)
         return MODULE_HANDLE(m);
+    if ((m = win_dll_find(name)) >= 0)                  /* a native DLL loaded */
+        return win_dll_handle(m);
     if (own_module(a, name))
         return dgroup(a->ctx);
     const win_ne_guest_image *g = a->ctx->image;      /* a DLL it has loaded */
@@ -1089,6 +1092,11 @@ static __attribute__((noinline)) int kernel_misc(args *a, uint16_t service, uint
         if (!str_(a, dw(a, 8), cmd, 128))
             return 1;
         if (pb == 0xffffffffu) {
+            int s = win_dll_load(cmd);  /* a native DLL, used once more */
+            if (s >= 0) {
+                *v = win_dll_handle(s);
+                return 1;
+            }
             int d = win_ne_guest_load_library(g, cmd);
             if (d >= 0) {
                 win_ne_dll_init(c);
@@ -1207,17 +1215,25 @@ static __attribute__((noinline)) int kernel_strings(args *a, ne_user *u, uint16_
         *dword = 1;
         if (a->bad || ((far >> 16) && !str_(a, far, name, sizeof(name))))
             return 1;
-        int d = win_ne_guest_dll_of(g, h);
-        if (d >= 0)
+        int d = win_ne_guest_dll_of(g, h), s = win_dll_of(h);
+        const win_dll_export *e = s >= 0 ? win_dll_export_of(s, (uint16_t)far,
+                                                             (far >> 16) ? name : NULL) : NULL;
+        if (e)
+            *v = win_ne_guest_thunk(g, WIN_NE_DLL_SERVICE(s, e->ordinal));
+        else if (s >= 0)
+            *v = 0;
+        else if (d >= 0)
             *v = win_ne_guest_dll_proc(g, d, (uint16_t)far, (far >> 16) ? name : NULL);
         else if (win_ne_guest_module_name(m))
             *v = win_ne_guest_proc(g, m, (uint16_t)far, (far >> 16) ? name : NULL);
         return 1;
     }
-    case 95: {                          /* LoadLibrary: the modules WINN has, DLLs */
-        uint16_t h = module_handle(a, dw(a, 4));
-        char name[64];
-        if (!h && str_(a, dw(a, 4), name, sizeof(name)) && name[0]) {
+    case 95: {                          /* LoadLibrary: the modules WINN has, native DLLs
+                                         * (used once more), DLLs */
+        char name[64] = "";
+        int s = str_(a, dw(a, 4), name, sizeof(name)) && name[0] ? win_dll_load(name) : -1;
+        uint16_t h = s >= 0 ? win_dll_handle(s) : module_handle(a, dw(a, 4));
+        if (!h && name[0] && !a->bad) {
             int d = win_ne_guest_load_library(g, name);
             if (d >= 0) {
                 win_ne_dll_init(c);     /* its entry, and theirs it needs */
@@ -1358,7 +1374,8 @@ int ne_kernel_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *d
     case 92:                            /* GetTempDrive: C: */
         *v = 0x3a43;
         return 1;
-    case 96:                            /* FreeLibrary */
+    case 96:                            /* FreeLibrary: a native DLL used once less */
+        win_dll_unref(win_dll_of(w(a, 4)));
         *v = 0;
         return 1;
     case 97:

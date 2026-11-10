@@ -12,6 +12,12 @@ typedef void    (CALLBACK *TIMERPROC)(HWND, UINT, UINT, DWORD);
 typedef BOOL    (CALLBACK *WNDENUMPROC)(HWND, LPARAM);
 typedef WNDPROC FARPROC;
 
+/* modules: native DLLs (ddi/windll.h); GetProcAddress takes a name or an
+ * ordinal (MAKEINTRESOURCE) */
+HINSTANCE WINAPI LoadLibrary(LPCSTR name);
+void    WINAPI FreeLibrary(HINSTANCE h);
+FARPROC WINAPI GetProcAddress(HINSTANCE h, LPCSTR name);
+
 typedef struct tagMSG {
     HWND hwnd; UINT message; WPARAM wParam; LPARAM lParam;
     DWORD time; POINT pt;

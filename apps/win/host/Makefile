@@ -11,10 +11,12 @@ GDICORE  = $(filter-out ../core/exports.c ../core/task.c ../core/file.c ../core/
             ../core/ne.c ../core/ne_boot.c ../core/ne_exec.c \
             ../core/ne_guest.c ../core/ne_guest_api.c ../core/ne_guest_dos.c ../core/ne_guest_user.c \
             ../core/ne_res.c ../core/ne_guest_int21.c ../core/ne_guest_call.c ../core/ne_guest_kernel.c \
-            ../core/x86bridge.c,$(CORE))
+            ../core/x86bridge.c ../core/windll.c,$(CORE))
 
 # the applications, built in; each WinMain gets its own name
 APPS     = demo.o progman.o notepad.o clock.o calc.o control.o winfile.o taskman.o winmine.o appinfo.o
+# the native DLLs, built in (host_dlls.c names them); each WinDllInit its own
+DLLS     = lzexpand.o host_dlls.c
 
 all: test_gdi test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_launch test_ne_rm_gate test_ne_run NEFIXTURES winhost winhost800 HOSTWIN
 
@@ -149,6 +151,9 @@ taskman.o: ../../winapps/taskman/taskman.c
 winmine.o: ../../winapps/winmine/winmine.c
 	$(CC) $(CFLAGS) $(INC) -DWinMain=winmine_WinMain -c -o $@ $<
 
+lzexpand.o: ../../windll/lzexpand/lzexpand.c
+	$(CC) $(CFLAGS) $(INC) -DWinDllInit=lzexpand_WinDllInit -c -o $@ $<
+
 # their names and icons, from their CMakeLists.txt and .icon files
 appinfo.c: mkappinfo.py $(wildcard ../../winapps/*/CMakeLists.txt) $(wildcard ../../winapps/*/*.icon)
 	python3 mkappinfo.py ../../winapps > $@
@@ -157,7 +162,7 @@ appinfo.o: appinfo.c
 	$(CC) $(CFLAGS) $(INC) -c -o $@ $<
 
 # with Win16 programs, on the emulator's i386 core (as test_ne_run)
-winhost: $(CORE) $(USER) $(HOST) host_main.c $(APPS) $(X86RUN)
+winhost: $(CORE) $(USER) $(HOST) host_main.c $(APPS) $(DLLS) $(X86RUN)
 	$(CC) $(CFLAGS) $(INC) -DWINN_NE_HOST -Ix86run -o $@ $^ -lm
 
 # the VGA800 driver module, built in, with fake planar video memory

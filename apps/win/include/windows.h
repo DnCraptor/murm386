@@ -769,6 +769,21 @@ typedef int HFILE;
 #define OF_READ         0x0000
 #define OF_WRITE        0x0001
 #define OF_READWRITE    0x0002
+#define OF_PARSE        0x0100
+#define OF_DELETE       0x0200
+#define OF_CREATE       0x1000
+#define OF_PROMPT       0x2000
+#define OF_EXIST        0x4000
+#define OF_REOPEN       0x8000
+
+/* OpenFile's: as Win16 has it (136 bytes) */
+typedef struct tagOFSTRUCT {
+    BYTE cBytes, fFixedDisk;
+    WORD nErrCode;
+    BYTE reserved[4];               /* the file's DOS date and time (OF_EXIST) */
+    char szPathName[128];
+} OFSTRUCT, *LPOFSTRUCT;
+HFILE   WINAPI OpenFile(LPCSTR name, OFSTRUCT *of, UINT mode);
 
 HFILE   WINAPI _lopen(LPCSTR path, int mode);
 HFILE   WINAPI _lcreat(LPCSTR path, int attr);

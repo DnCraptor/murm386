@@ -1,6 +1,7 @@
 @echo off
 rem Rebuild everything of the native Windows: WINN.EXE (apps\win), the driver
-rem modules (apps\windrv\*) and the applications (apps\winapps\*), each in a
+rem modules (apps\windrv\*), the native DLLs (apps\windll\*) and the
+rem applications (apps\winapps\*), each in a
 rem fresh build directory, into apps\compiled. Mirrors build_win.sh.
 rem
 rem The same sources give byte-identical files only with the same toolchain,
@@ -70,6 +71,9 @@ set "OUTPUTS="
 rem the projects, in build order (the core first: it owns the export tables)
 call :build_one "%WIN_DIR%" || exit /b 1
 for /d %%D in ("%ROOT%\apps\windrv\*") do (
+    if exist "%%~fD\CMakeLists.txt" call :build_one "%%~fD" || exit /b 1
+)
+for /d %%D in ("%ROOT%\apps\windll\*") do (
     if exist "%%~fD\CMakeLists.txt" call :build_one "%%~fD" || exit /b 1
 )
 for /d %%D in ("%ROOT%\apps\winapps\*") do (

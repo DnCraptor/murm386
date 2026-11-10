@@ -273,7 +273,7 @@ HMODULE WINAPI GetModuleHandle(LPCSTR name)
     /* At this stage an application is one EZ image (one task). */
     if (!name || !*name || !lstrcmpi(name, t->name))
         return (HMODULE)t->h;
-    return 0;  /* Named DLLs are not loaded yet. */
+    return win_dll_handle(win_dll_find(name));      /* a native DLL loaded */
 }
 
 void WINAPI FatalExit(int code) { exit(code); }

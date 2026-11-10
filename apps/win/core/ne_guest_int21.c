@@ -408,93 +408,33 @@ int win_ne_dos(win_ne_guest_api_context *ctx, win_ne_dos_regs *r)
 
 /* ---------------------------------------------------------------- KERNEL and KEYBOARD */
 
-/* a name made full: the current directory's, with the drive, upper case */
-static void full_path(const char *name, char *out, int cap)
-{
-    char cwd[128];
-    if (name[0] && name[1] == ':') {
-        lstrcpyn(out, name, cap);
-    } else if (name[0] == '\\' || name[0] == '/') {
-        GetCurrentDirectoryN(cwd, sizeof(cwd));
-        cwd[2] = 0;
-        wsprintf(out, "%s%s", cwd, name);
-    } else {
-        int n = GetCurrentDirectoryN(cwd, sizeof(cwd));
-        wsprintf(out, n && cwd[n - 1] == '\\' ? "%s%s" : "%s\\%s", cwd, name);
-    }
-    for (char *p = out; *p; p++)
-        if (*p >= 'a' && *p <= 'z')
-            *p = (char)(*p - 32);
-        else if (*p == '/')
-            *p = '\\';
-}
-
-/* KERNEL.74 OpenFile(LPCSTR, OFSTRUCT FAR *, UINT): the file opened
- * (created, only looked for, deleted, its name only made full), found in
- * the current directory or the Windows one; the OFSTRUCT (cBytes,
- * fFixedDisk, nErrCode, 4 reserved, szPathName[128]) filled */
-enum { OF_PARSE_ = 0x100, OF_DELETE_ = 0x200, OF_CREATE_ = 0x1000, OF_EXIST_ = 0x4000,
-       OF_REOPEN_ = 0x8000 };
-
+/* KERNEL.74 OpenFile(LPCSTR, OFSTRUCT FAR *, UINT): file.c's, the
+ * program's OFSTRUCT (its name when reopening) in and out; given: that name
+ * instead of the program's */
 __attribute__((noinline)) uint16_t ne_open_file(args *a, const char *given)
 {
     UINT mode = w(a, 4);
     uint32_t ofs = dw(a, 6), name_far = dw(a, 10);
-    uint8_t of[136];
-    char name[128], path[128];
-    memset(of, 0, sizeof(of));
+    OFSTRUCT of;
+    char name[128];
+    _Static_assert(sizeof(OFSTRUCT) == 136, "OFSTRUCT as Win16's");
+    memset(&of, 0, sizeof(of));
+    name[0] = 0;
     if (a->bad)
         return (uint16_t)HFILE_ERROR;
     if (given) {
         lstrcpyn(name, given, sizeof(name));
-    } else if (mode & OF_REOPEN_) {
-        if (!win_ne_read(a->ctx, (uint16_t)(ofs >> 16), (uint16_t)ofs, of, sizeof(of)))
+        mode &= ~OF_REOPEN;
+    } else if (mode & OF_REOPEN) {
+        if (!win_ne_read(a->ctx, (uint16_t)(ofs >> 16), (uint16_t)ofs, &of, sizeof(of)))
             return a->bad = 1, (uint16_t)HFILE_ERROR;
-        lstrcpyn(name, (const char *)of + 8, sizeof(name));
+        of.szPathName[sizeof(of.szPathName) - 1] = 0;
     } else if (!win_ne_string(a->ctx, (uint16_t)(name_far >> 16), (uint16_t)name_far, name,
                               sizeof(name))) {
         return a->bad = 1, (uint16_t)HFILE_ERROR;
     }
-    full_path(name, path, sizeof(path));
-    HFILE f = HFILE_ERROR;
-    uint16_t err = 0;
-    if (mode & OF_PARSE_) {
-        f = 0;
-    } else if (mode & OF_DELETE_) {
-        f = DeleteFileN(path) ? 1 : HFILE_ERROR;
-        err = E_NO_FILE;
-    } else if (mode & OF_CREATE_) {
-        f = _lcreat(path, 0);
-        if (f != HFILE_ERROR && (mode & 3) != OF_WRITE) {   /* reopened for reading too */
-            _lclose(f);
-            f = _lopen(path, mode & 3);
-        }
-        err = E_ACCESS;
-    } else {
-        f = _lopen(path, mode & 3);
-        if (f == HFILE_ERROR && !(name[0] && name[1] == ':') && name[0] != '\\') {
-            char win[128];                  /* not here: in the Windows directory */
-            UINT n = GetWindowsDirectory(win, sizeof(win));
-            if (n && n < sizeof(win) - 14) {
-                wsprintf(path, win[n - 1] == '\\' ? "%s%s" : "%s\\%s", win, name);
-                full_path(path, path, sizeof(path));
-                f = _lopen(path, mode & 3);
-            }
-        }
-        err = win_file_attr(path, 0, 0) < 0 ? E_NO_FILE : E_ACCESS;
-        if (f != HFILE_ERROR && (mode & OF_EXIST_)) {
-            WORD date = 0, time_ = 0;
-            win_file_time(f, 0, &date, &time_);
-            wr16(of + 4, date);
-            wr16(of + 6, time_);
-            _lclose(f);
-        }
-    }
-    of[0] = (uint8_t)sizeof(of);
-    of[1] = path[0] >= 'C';                 /* a fixed disk */
-    wr16(of + 2, f == HFILE_ERROR ? err : 0);
-    lstrcpyn((char *)of + 8, path, 128);
-    if (!win_ne_write(a->ctx, (uint16_t)(ofs >> 16), (uint16_t)ofs, of, sizeof(of)))
+    HFILE f = OpenFile(name, &of, mode);
+    if (!win_ne_write(a->ctx, (uint16_t)(ofs >> 16), (uint16_t)ofs, &of, sizeof(of)))
         a->bad = 1;
     return (uint16_t)f;
 }

@@ -6,6 +6,9 @@
 void win_ddi_key_event(int vk, int sc, int down) { (void)vk; (void)sc; (void)down; }
 void win_ddi_mouse_event(int x, int y, unsigned b) { cursor_move(x, y); (void)b; }
 int user_init(void) { return 0; }   /* GDI only: no USER here */
+int win_file_attr(LPCSTR path, int set, UINT attr) { return -1; }   /* no files: no SYSTEM */
+int win_dll_find(const char *name) { return -1; }                    /* no DLLs */
+HANDLE win_dll_handle(int slot) { return 0; }
 wtask *task_current(void) { static wtask t; return &t; }   /* no tasks either */
 
 int main(void)

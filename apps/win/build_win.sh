@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Rebuild everything of the native Windows: WINN.EXE (apps/win), the driver
-# modules (apps/windrv/*) and the applications (apps/winapps/*), each in a
+# modules (apps/windrv/*), the native DLLs (apps/windll/*) and the
+# applications (apps/winapps/*), each in a
 # fresh build directory, into apps/compiled. Mirrors build_win.bat.
 #
 # The same sources give byte-identical files only with the same toolchain,
@@ -31,7 +32,7 @@ done
 
 # the projects, in build order (the core first: it owns the export tables)
 PROJECTS=("$WIN_DIR")
-for d in "$ROOT"/apps/windrv/*/ "$ROOT"/apps/winapps/*/; do
+for d in "$ROOT"/apps/windrv/*/ "$ROOT"/apps/windll/*/ "$ROOT"/apps/winapps/*/; do
     [[ -f "$d/CMakeLists.txt" ]] && PROJECTS+=("${d%/}")
 done
 

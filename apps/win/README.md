@@ -111,9 +111,19 @@ ModuleFindHandle (WINN's modules), MemoryRead and MemoryWrite,
 NotifyRegister and InterruptRegister (taken, never called); the heaps'
 walks find nothing; VER's GetFileVersionInfo(Size), VerQueryValue,
 GetFileResource(Size), VerLanguageName, VerFindFile and VerInstallFile (a
-copy, expanded); LZEXPAND: files compressed by COMPRESS.EXE ("SZDD"),
-read expanded (LZOpenFile finds FILE.TX_ for FILE.TXT, LZInit, LZRead,
-LZSeek, LZCopy, CopyLZFile, GetExpandedName), others as they are.
+copy, expanded by LZEXPAND's LZCopy). LZEXPAND is a native DLL (see
+Native DLLs): files compressed by COMPRESS.EXE ("SZDD"), read expanded
+(LZOpenFile finds FILE.TX_ for FILE.TXT, LZInit, LZRead, LZSeek, LZCopy,
+CopyLZFile, GetExpandedName), others as they are.
+
+When a program's call returns, a selector in its DS or ES that is no
+more (a block the call freed: GlobalFree, FreeResource, ...) is 0, as
+Windows' KERNEL makes it.
+
+GetSystemDirectory is the Windows directory's `SYSTEM` when it has one
+(the Windows directory itself otherwise); OpenFile (KERNEL's, native
+callers' too) looks for a file in the current directory, the Windows one,
+then the system one.
 
 The clipboard's data goes between a program's global blocks and WINN's
 (SetClipboardData copies the block, which is the clipboard's then and
@@ -174,8 +184,9 @@ GetMetaFile (a placeable one's header skipped), CopyMetaFile,
 Get/SetMetaFileBits (a global block of the program's), IsValidMetaFile;
 regions painted (FillRgn and the rest) in logical coordinates, as the
 mapping mode has them; fonts: Windows' raster font files (.FON, .FNT,
-versions 2 and 3) WIN.INI's [fonts] names in the Windows directory, as
-Windows has them ("MS Sans Serif 8,10,12,14,18,24 (VGA res)=SSERIFE.FON"),
+versions 2 and 3) WIN.INI's [fonts] names in the Windows directory or its
+SYSTEM, as Windows has them ("MS Sans Serif 8,10,12,14,18,24 (VGA
+res)=SSERIFE.FON"),
 and those AddFontResource adds (RemoveFontResource), their faces found by
 name (Helv, Arial and Helvetica for MS Sans Serif, Tms Rmn, Times and
 Times New Roman for MS Serif, Courier New for Courier) or by family and
@@ -283,6 +294,8 @@ nothing leaves the program from the command line in that part (`WINN DEMO`).
 | `sdk/` | for applications: API stubs by Win16 ordinal, `__ez_start`, `winapp.cmake`; `gen_exports.py` makes the export tables |
 | `../winapps/<name>/` | applications: `progman` (the Program Manager, the default shell), `winfile` (File Manager), `taskman` (Task List), `winmine` (Minesweeper), `notepad`, `clock`, `calc`, `control` (Control Panel), `demo` (a tour of the API) |
 | `../windrv/<name>/` | driver modules; `vga800` is VBE 102h 800x600 in 16 colours |
+| `ddi/windll.h`, `core/windll.c` | native DLLs: the interface, and their loading, uses and unloading |
+| `../windll/<name>/` | native DLLs: `lzexpand` (LZEXPAND.DLL) |
 | `host/` | the same sources on Linux with a snapshot display and scripted input |
 
 ## Drivers
@@ -305,6 +318,33 @@ support involved. `SYSTEM.INI` next to `WINN.EXE` names the modules:
 Without the file, or if a module fails to load, the built-in drivers are
 used. `VGA800.DRV` keeps an 8 bpp copy of the screen and converts changed
 rectangles to the four VGA planes, mapping colours to the standard 16.
+
+## Native DLLs
+
+Windows' own libraries are native DLLs of WINN's, loaded when a program
+needs one and unloaded when none does any more, as Windows 3.x does with
+its DLLs, instead of being built into `WINN.EXE`: `LZEXPAND.DLL` so far.
+A native DLL is an EZ image built with `sdk/windll.cmake` (no crt0; its
+`__ez_start`, from `sdk/windll_entry.c`, begins with a branch over the
+signature `NWDL`) whose `WinDllInit` gives its exports: the Win16
+ordinal and name programs import each by, the bytes of a Win16 caller's
+PASCAL arguments, the native function. It calls KERNEL, GDI and USER
+through the API stubs as an application does, and has Win16 programs'
+calls of its functions with their arguments and memory from the core
+(`win_dll_ne`).
+
+The core looks for `<NAME>.DLL` in the Windows directory (`WINN.EXE`'s),
+then its `SYSTEM`; a file there that is not a native DLL (Windows' own NE
+DLL of that name) is left to the Win16 loader, which then loads that one.
+There is one instance of a DLL for all tasks: what it keeps for a task it
+keeps by the task and lets go at the task's end (`task_end`); `term` is
+called as it is unloaded. A task uses a DLL by importing it (a Win16
+program) or by `LoadLibrary`, and lets it go by `FreeLibrary` or by
+ending; `GetModuleHandle` and `GetProcAddress` (by name or ordinal) find
+loaded DLLs, for native callers and Win16 programs alike, TOOLHELP's
+module list has them. A Win16 program's import of a function the DLL has
+not (by ordinal) is named when the program calls it. On the host the DLLs
+are built into `winhost` (`host/host_dlls.c`).
 
 ## Applications
 

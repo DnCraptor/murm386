@@ -30,6 +30,7 @@ enum {
     WOBJ_ACCEL,
     WOBJ_TASK,
     WOBJ_METAFILE,
+    WOBJ_MODULE,                 /* a native DLL (windll.c) */
 };
 
 HANDLE win_handle_alloc(int type, void *obj);
@@ -237,6 +238,9 @@ int      user_init(void);                        /* user/dialog.c */
 /* profile.c */
 void     win_set_home(const char *exe_path);
 void     win_path(const char *name, char *out, int size);
+/* profile.c: the Windows directory's file, or the system one's if only it
+ * has it */
+void     win_find_path(const char *name, char *out, int size);
 
 /* logo.c */
 void     win_logo_skip(void);
@@ -400,6 +404,19 @@ winapp_info *win_app_info(const char *path);            /* task.c: also the host
 /* the SDK's application entry starts with a branch over WINAPP_MAGIC */
 int    win_ez_entry_is_app(const win_ez_image *img);
 int    win_ez_is_app(const char *path);    /* the file, without loading it */
+
+/* windll.c: native DLLs (ddi/windll.h). A slot while loaded; the
+ * current task's uses of one, all of a task's let go at its end */
+#define WIN_DLL_SLOTS 12
+int    win_dll_load(const char *name);   /* its slot, used once more; -1 none */
+void   win_dll_unref(int slot);
+int    win_dll_find(const char *name);   /* loaded: its slot; -1 */
+int    win_dll_of(HANDLE h);             /* a module handle's slot; -1 */
+HANDLE win_dll_handle(int slot);
+const char *win_dll_path(int slot);
+const struct win_dll_info *win_dll_get(int slot);
+const struct win_dll_export *win_dll_export_of(int slot, uint16_t ordinal, const char *name);
+void   win_dll_task_end(HTASK task);
 
 /* gdi.c: set by USER, for FillRect(dc, rc, (HBRUSH)(COLOR_xxx + 1)) */
 extern HBRUSH (*gdi_sys_color_brush)(int index);

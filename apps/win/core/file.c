@@ -785,3 +785,83 @@ int win_file_environment(char *buf, int size)
     return n;
 #endif
 }
+
+/* ---------------------------------------------------------------- OpenFile */
+
+/* a name made full: the current directory's, with the drive, upper case */
+static void full_path(const char *name, char *out, int cap)
+{
+    char cwd[128];
+    if (name[0] && name[1] == ':') {
+        lstrcpyn(out, name, cap);
+    } else if (name[0] == '\\' || name[0] == '/') {
+        GetCurrentDirectoryN(cwd, sizeof(cwd));
+        cwd[2] = 0;
+        wsprintf(out, "%s%s", cwd, name);
+    } else {
+        int n = GetCurrentDirectoryN(cwd, sizeof(cwd));
+        wsprintf(out, n && cwd[n - 1] == '\\' ? "%s%s" : "%s\\%s", cwd, name);
+    }
+    for (char *p = out; *p; p++)
+        if (*p >= 'a' && *p <= 'z')
+            *p = (char)(*p - 32);
+        else if (*p == '/')
+            *p = '\\';
+}
+
+/* KERNEL.74: the file opened (created, only looked for, deleted, its name
+ * only made full), found in the current directory, the Windows one or the
+ * system one; the OFSTRUCT filled (OF_REOPEN: its name the one opened) */
+HFILE WINAPI OpenFile(LPCSTR given, OFSTRUCT *of, UINT mode)
+{
+    enum { E_NO_FILE = 2, E_ACCESS = 5 };
+    char name[128], path[128];
+    if (mode & OF_REOPEN)
+        lstrcpyn(name, of->szPathName, sizeof(name));
+    else
+        lstrcpyn(name, given ? given : "", sizeof(name));
+    memset(of, 0, sizeof(*of));
+    full_path(name, path, sizeof(path));
+    HFILE f = HFILE_ERROR;
+    WORD err = 0;
+    if (mode & OF_PARSE) {
+        f = 0;
+    } else if (mode & OF_DELETE) {
+        f = DeleteFileN(path) ? 1 : HFILE_ERROR;
+        err = E_NO_FILE;
+    } else if (mode & OF_CREATE) {
+        f = _lcreat(path, 0);
+        if (f != HFILE_ERROR && (mode & 3) != OF_WRITE) {   /* reopened for reading too */
+            _lclose(f);
+            f = _lopen(path, mode & 3);
+        }
+        err = E_ACCESS;
+    } else {
+        f = _lopen(path, mode & 3);
+        for (int pass = 0; f == HFILE_ERROR && pass < 2 && !(name[0] && name[1] == ':') &&
+                           name[0] != '\\'; pass++) {
+            char dir[128];              /* not here: in the Windows, the system directory */
+            UINT n = pass ? GetSystemDirectory(dir, sizeof(dir)) : GetWindowsDirectory(dir, sizeof(dir));
+            if (n && n < sizeof(dir) - 14) {
+                wsprintf(path, dir[n - 1] == '\\' ? "%s%s" : "%s\\%s", dir, name);
+                full_path(path, path, sizeof(path));
+                f = _lopen(path, mode & 3);
+            }
+        }
+        err = win_file_attr(path, 0, 0) < 0 ? E_NO_FILE : E_ACCESS;
+        if (f != HFILE_ERROR && (mode & OF_EXIST)) {
+            WORD date = 0, time_ = 0;
+            win_file_time(f, 0, &date, &time_);
+            of->reserved[0] = (BYTE)date;
+            of->reserved[1] = (BYTE)(date >> 8);
+            of->reserved[2] = (BYTE)time_;
+            of->reserved[3] = (BYTE)(time_ >> 8);
+            _lclose(f);
+        }
+    }
+    of->cBytes = (BYTE)sizeof(*of);
+    of->fFixedDisk = path[0] >= 'C';        /* a fixed disk */
+    of->nErrCode = f == HFILE_ERROR ? err : 0;
+    lstrcpyn(of->szPathName, path, sizeof(of->szPathName));
+    return f;
+}

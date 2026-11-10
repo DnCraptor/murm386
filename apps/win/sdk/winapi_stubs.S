@@ -296,6 +296,23 @@ GetModuleHandle:
     .ltorg
     .size GetModuleHandle, .-GetModuleHandle
 
+    .section .text.winapi.GetProcAddress,"ax",%progbits
+    .global GetProcAddress
+    .type GetProcAddress, %function
+    .thumb_func
+GetProcAddress:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =200
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetProcAddress, .-GetProcAddress
+
     .section .text.winapi.GetProfileInt,"ax",%progbits
     .global GetProfileInt
     .type GetProfileInt, %function
@@ -414,6 +431,23 @@ GetAtomName:
     bx   r12
     .ltorg
     .size GetAtomName, .-GetAtomName
+
+    .section .text.winapi.OpenFile,"ax",%progbits
+    .global OpenFile
+    .type OpenFile, %function
+    .thumb_func
+OpenFile:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =296
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size OpenFile, .-OpenFile
 
     .section .text.winapi._lclose,"ax",%progbits
     .global _lclose
@@ -567,6 +601,40 @@ lstrlen:
     bx   r12
     .ltorg
     .size lstrlen, .-lstrlen
+
+    .section .text.winapi.LoadLibrary,"ax",%progbits
+    .global LoadLibrary
+    .type LoadLibrary, %function
+    .thumb_func
+LoadLibrary:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =380
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size LoadLibrary, .-LoadLibrary
+
+    .section .text.winapi.FreeLibrary,"ax",%progbits
+    .global FreeLibrary
+    .type FreeLibrary, %function
+    .thumb_func
+FreeLibrary:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =384
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size FreeLibrary, .-FreeLibrary
 
     .section .text.winapi.OutputDebugString,"ax",%progbits
     .global OutputDebugString

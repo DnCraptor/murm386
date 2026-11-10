@@ -136,6 +136,7 @@ extern void FlashWindow(void);
 extern void FloodFill(void);
 extern void FrameRect(void);
 extern void FrameRgn(void);
+extern void FreeLibrary(void);
 extern void GetActiveWindow(void);
 extern void GetAppInfoN(void);
 extern void GetAsyncKeyState(void);
@@ -216,6 +217,7 @@ extern void GetPixel(void);
 extern void GetPolyFillMode(void);
 extern void GetPrivateProfileInt(void);
 extern void GetPrivateProfileString(void);
+extern void GetProcAddress(void);
 extern void GetProfileInt(void);
 extern void GetProfileString(void);
 extern void GetProp(void);
@@ -311,6 +313,7 @@ extern void LineDDA(void);
 extern void LineTo(void);
 extern void LoadCursor(void);
 extern void LoadIcon(void);
+extern void LoadLibrary(void);
 extern void LocalAlloc(void);
 extern void LocalFree(void);
 extern void LocalLock(void);
@@ -336,6 +339,7 @@ extern void OffsetViewportOrgEx(void);
 extern void OffsetWindowOrg(void);
 extern void OffsetWindowOrgEx(void);
 extern void OpenClipboard(void);
+extern void OpenFile(void);
 extern void OpenIcon(void);
 extern void OutputDebugString(void);
 extern void PaintRgn(void);
@@ -514,6 +518,7 @@ static const void *const exports_kernel[354] = {
     [29] = (const void *)Yield,
     [36] = (const void *)GetCurrentTask,
     [47] = (const void *)GetModuleHandle,
+    [50] = (const void *)GetProcAddress,
     [57] = (const void *)GetProfileInt,
     [58] = (const void *)GetProfileString,
     [59] = (const void *)WriteProfileString,
@@ -521,6 +526,7 @@ static const void *const exports_kernel[354] = {
     [70] = (const void *)AddAtom,
     [71] = (const void *)DeleteAtom,
     [72] = (const void *)GetAtomName,
+    [74] = (const void *)OpenFile,
     [81] = (const void *)_lclose,
     [82] = (const void *)_lread,
     [83] = (const void *)_lcreat,
@@ -530,6 +536,8 @@ static const void *const exports_kernel[354] = {
     [88] = (const void *)lstrcpy,
     [89] = (const void *)lstrcat,
     [90] = (const void *)lstrlen,
+    [95] = (const void *)LoadLibrary,
+    [96] = (const void *)FreeLibrary,
     [115] = (const void *)OutputDebugString,
     [127] = (const void *)GetPrivateProfileInt,
     [128] = (const void *)GetPrivateProfileString,

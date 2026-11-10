@@ -156,7 +156,7 @@ static void scan(void)
         char file[80], path[128];
         if (GetProfileString("fonts", keys + k, "", file, sizeof(file)) <= 0)
             continue;
-        win_path(file, path, sizeof(path));
+        win_find_path(file, path, sizeof(path));      /* Windows has them in SYSTEM */
         add_file(path);
     }
 }
@@ -168,7 +168,8 @@ int font_faces(wface *const **list)
     return nfaces;
 }
 
-/* a font file's name: as given if there is one, else the Windows directory's */
+/* a font file's name: as given if there is one, else the Windows
+ * directory's or the system one's */
 static void font_path(const char *name, char *path, int size)
 {
     uint32_t n = 0;
@@ -177,7 +178,7 @@ static void font_path(const char *name, char *path, int size)
         win_free(d);
         lstrcpyn(path, name, size);
     } else {
-        win_path(name, path, size);
+        win_find_path(name, path, size);
     }
 }
 

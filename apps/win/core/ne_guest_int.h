@@ -77,12 +77,10 @@ typedef struct ne_user {
     /* ne_guest_call.c: the clipboard's data it got, copies in its memory
      * (freed as it closes or empties the clipboard) */
     struct { UINT fmt; uint16_t sel; } clip[8];
-    /* ne_guest_sys.c: timeSetEvent's procedures, mmio's files (0: none),
-     * LZEXPAND's expanding files */
+    /* ne_guest_sys.c: timeSetEvent's procedures, mmio's files (0: none) */
     struct { UINT id; uint32_t proc, user, next; uint16_t delay, once; } mmtimer[8];
     HFILE mmio[8];
     uint8_t mmio_open[8];
-    struct ne_lz *lz[8];
     /* ne_guest_call.c: its hooks (SetWindowsHook(Ex)): the type, its
      * procedure, the task it is for (0 all its own), its number (HHOOK's
      * low word, made one after the other: the later the first called) */

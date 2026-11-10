@@ -185,15 +185,14 @@ static int assign_selector(void *opaque, uint16_t index, uint16_t flags,
  * 0x3000 + n, lives entirely inside WINN; it is not a guest pointer or an
  * emulated IRQ. */
 enum { M_KERNEL, M_USER, M_GDI, M_KEYBOARD, M_COMMDLG, M_SHELL, M_WIN87EM, M_MMSYSTEM,
-       M_TOOLHELP, M_VER, M_LZEXPAND, M_COUNT };
+       M_TOOLHELP, M_VER, M_COUNT };
 static const uint16_t module_base[] = { 0, 0x1000u, 0x3000u, WIN_NE_SERVICE_KEYBOARD,
                                         WIN_NE_SERVICE_COMMDLG, WIN_NE_SERVICE_SHELL,
                                         WIN_NE_SERVICE_WIN87EM, WIN_NE_SERVICE_MMSYSTEM,
-                                        WIN_NE_SERVICE_TOOLHELP, WIN_NE_SERVICE_VER,
-                                        WIN_NE_SERVICE_LZEXPAND };
+                                        WIN_NE_SERVICE_TOOLHELP, WIN_NE_SERVICE_VER };
 static const char *const module_names[M_COUNT] = { "KERNEL", "USER", "GDI", "KEYBOARD",
                                                    "COMMDLG", "SHELL", "WIN87EM", "MMSYSTEM",
-                                                   "TOOLHELP", "VER", "LZEXPAND" };
+                                                   "TOOLHELP", "VER" };
 static const struct {
     uint8_t module;                 /* M_* */
     uint16_t ordinal;
@@ -546,16 +545,6 @@ static const struct {
     { M_VER, 9, "VerInstallFile", 30 },
     { M_VER, 10, "VerLanguageName", 8 },
     { M_VER, 11, "VerQueryValue", 16 },
-    { M_LZEXPAND, 1, "LZCopy", 4 },
-    { M_LZEXPAND, 2, "LZOpenFile", 10 },
-    { M_LZEXPAND, 3, "LZInit", 2 },
-    { M_LZEXPAND, 4, "LZSeek", 8 },
-    { M_LZEXPAND, 5, "LZRead", 8 },
-    { M_LZEXPAND, 6, "LZClose", 2 },
-    { M_LZEXPAND, 7, "LZStart", 0 },
-    { M_LZEXPAND, 8, "CopyLZFile", 4 },
-    { M_LZEXPAND, 9, "LZDone", 0 },
-    { M_LZEXPAND, 10, "GetExpandedName", 8 },
     { M_USER, 218, "DialogBoxIndirect", 10 },
     { M_USER, 219, "CreateDialogIndirect", 12 },
     { M_USER, 222, "GetKeyboardState", 4 },
@@ -888,9 +877,32 @@ static int service_id(const win_ne_import *imp, uint16_t *id)
     return service_id_args(imp, id, &args);
 }
 
+/* without core/windll.c (the tests of the loader alone): no native DLLs */
+__attribute__((weak)) int win_ne_native_import(const char *module, uint16_t ordinal,
+                                               const char *name, uint16_t *id)
+{
+    (void)module; (void)ordinal; (void)name; (void)id;
+    return 0;
+}
+
+__attribute__((weak)) int win_ne_native_has(const char *module, uint16_t ordinal,
+                                            const char *name)
+{
+    (void)module; (void)ordinal; (void)name;
+    return 0;
+}
+
+__attribute__((weak)) uint16_t win_ne_native_args(uint16_t id)
+{
+    (void)id;
+    return 0;
+}
+
 /* Win16 PASCAL return releases the argument words after popping CS:IP. */
 static uint16_t service_args(uint16_t id)
 {
+    if (id >= WIN_NE_SERVICE_DLL && id < WIN_NE_SERVICE_UNDEFINED)
+        return win_ne_native_args(id);
     for (unsigned i = 0; i < sizeof(services) / sizeof(services[0]); i++)
         if (module_base[services[i].module] + services[i].ordinal == id)
             return services[i].args;
@@ -936,7 +948,12 @@ static int note_unresolved(void *opaque, const win_ne_import *imp)
     char dll[160];
     if (service_id(imp, &id) || constant_of(NULL, imp, &id))
         return 0;
-    if (module_of(imp) < 0 && locate_dll(sc->path, imp->module, dll, sizeof(dll)) &&
+    int native = module_of(imp) < 0 ? win_ne_native_has(imp->module, imp->ordinal,
+                                                        imp->procedure[0] ? imp->procedure : NULL)
+                                    : 0;
+    if (native > 0)
+        return 0;                       /* a native DLL's */
+    if (!native && module_of(imp) < 0 && locate_dll(sc->path, imp->module, dll, sizeof(dll)) &&
         dll_has(dll, imp->ordinal, imp->procedure[0] ? imp->procedure : NULL)) {
         /* its DLL has it; and what the DLL needs? */
         char base[16];
@@ -977,6 +994,8 @@ static int load_dll(win_ne_guest_image *g, const char *module, int depth);
 static int dll_export(win_ne_guest_image *g, int dll, uint16_t ordinal, const char *name,
                       uint16_t *selector, uint16_t *offset);
 
+static int thunk_slot(win_ne_guest_image *g, uint16_t id, uint16_t *selector, uint16_t *offset);
+
 static int resolve_import(void *opaque, const win_ne_import *imp,
                           uint16_t *selector, uint16_t *offset)
 {
@@ -987,16 +1006,32 @@ static int resolve_import(void *opaque, const win_ne_import *imp,
         *selector = *offset = id;
         return 1;
     }
-    if (module_of(imp) < 0) {           /* a DLL's (one of Windows' own, there may be none) */
-        int d = load_dll(g, imp->module, lc->depth);
-        if (d >= 0)
-            return dll_export(g, d, imp->ordinal, imp->procedure[0] ? imp->procedure : NULL,
-                              selector, offset);
-        if (trap_module(imp) < 0)
+    if (module_of(imp) < 0) {           /* a native DLL's, a DLL's (one of Windows' own, there
+                                         * may be none) */
+        int native = win_ne_native_import(imp->module, imp->ordinal,
+                                          imp->procedure[0] ? imp->procedure : NULL, &id);
+        if (native < 0)
             return 0;
-    }
-    if (!service_id(imp, &id) && !(id = undefined_id(g, imp)))
+        if (!native) {
+            int d = load_dll(g, imp->module, lc->depth);
+            if (d >= 0)
+                return dll_export(g, d, imp->ordinal, imp->procedure[0] ? imp->procedure : NULL,
+                                  selector, offset);
+            if (trap_module(imp) < 0)
+                return 0;
+        }
+        if (!native && !service_id(imp, &id) && !(id = undefined_id(g, imp)))
+            return 0;
+    } else if (!service_id(imp, &id) && !(id = undefined_id(g, imp))) {
         return 0;
+    }
+    return thunk_slot(g, id, selector, offset);
+}
+
+/* the program's thunk of a service: the one it has, or a new one (to be
+ * written) */
+static int thunk_slot(win_ne_guest_image *g, uint16_t id, uint16_t *selector, uint16_t *offset)
+{
     for (uint16_t i = 0; i < g->thunk_count; i++) {
         if (g->thunk_services[i] == id) {
             *selector = g->thunk3_selector;
@@ -1085,12 +1120,19 @@ uint32_t win_ne_guest_proc(win_ne_guest_image *g, unsigned module, uint16_t ordi
         lstrcpy_n(imp.procedure, name, sizeof(imp.procedure));
     else
         imp.ordinal = ordinal;
-    uint16_t id, sel, off;
+    uint16_t id;
     if (constant_of(g, &imp, &id) || !service_id(&imp, &id))
         return 0;
+    return win_ne_guest_thunk(g, id);
+}
+
+uint32_t win_ne_guest_thunk(win_ne_guest_image *g, uint16_t id)
+{
+    if (!g || !id)
+        return 0;
+    uint16_t sel, off;
     uint16_t before = g->thunk_count;
-    load_ctx lc = { g, -1, 0 };
-    if (!resolve_import(&lc, &imp, &sel, &off))
+    if (!thunk_slot(g, id, &sel, &off))
         return 0;
     if (g->thunk_count != before) {         /* a new one: written now */
         uint8_t p[THUNK_BYTES];
@@ -1350,6 +1392,13 @@ int win_ne_guest_global_free(win_ne_guest_image *g, uint16_t sel)
 
 /* a selector's descriptor (the host's copy of the GDT): its base, limit,
  * whether code; 0 if it is none of the program's */
+int win_ne_guest_selector_live(const win_ne_guest_image *g, uint16_t sel)
+{
+    uint32_t base, limit;
+    int code;
+    return !g || win_ne_guest_selector_get(g, sel, &base, &limit, &code);
+}
+
 int win_ne_guest_selector_get(const win_ne_guest_image *g, uint16_t sel, uint32_t *base,
                               uint32_t *limit, int *code)
 {

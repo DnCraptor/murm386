@@ -10,15 +10,17 @@
  *             GetFreeSpace has it, MemoryRead/Write; notifications and
  *             interrupt handlers taken, never called
  *   VER       a file's VERSIONINFO, VerQueryValue in its block,
- *             VerFindFile, VerInstallFile (a copy, expanded)
- *   LZEXPAND  files COMPRESS.EXE made ("SZDD"), read expanded; others as
- *             they are
+ *             VerFindFile, VerInstallFile (a copy, expanded by LZEXPAND's)
+ *
+ * and the native DLLs' calls (core/windll.c, ddi/windll.h): the program's
+ * arguments and memory for the DLL.
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
 #include <stdlib.h>
 #include <string.h>
 #include "wincore.h"
+#include "windll.h"
 #include "ne_guest_api.h"
 #include "ne_guest_int.h"
 
@@ -27,7 +29,6 @@
 #define MM WIN_NE_SERVICE_MMSYSTEM
 #define TH WIN_NE_SERVICE_TOOLHELP
 #define VR WIN_NE_SERVICE_VER
-#define LZ WIN_NE_SERVICE_LZEXPAND
 
 /* MMSYSTEM's errors */
 enum { MMSYSERR_BADDEVICEID = 2, MMSYSERR_INVALHANDLE = 5, MMSYSERR_NODRIVER = 6,
@@ -36,12 +37,6 @@ enum { MMSYSERR_BADDEVICEID = 2, MMSYSERR_INVALHANDLE = 5, MMSYSERR_NODRIVER = 6
        MMIOERR_CANNOTWRITE = 262, MMIOERR_CANNOTSEEK = 263, MMIOERR_CHUNKNOTFOUND = 265,
        MMIOERR_UNBUFFERED = 266 };
 
-/* LZEXPAND's */
-enum { LZERROR_BADINHANDLE = -1, LZERROR_BADOUTHANDLE = -2, LZERROR_READ = -3,
-       LZERROR_WRITE = -4, LZERROR_GLOBALLOC = -5, LZERROR_BADVALUE = -7,
-       LZERROR_UNKNOWNALG = -8 };
-
-#define LZ_HANDLE   0x400u          /* LZEXPAND's handles: 400h + n, as Windows' */
 #define MMIO_HANDLE 0x6d00u
 
 static int rd_(args *a, uint32_t far, void *d, uint32_t n)
@@ -120,321 +115,6 @@ static void join(char *out, uint32_t cap, const char *dir, const char *name)
         out[n++] = '\\', out[n] = 0;
     if (n < cap)
         lstrcpyn(out + n, name, (int)(cap - n));
-}
-
-/* ================================================================ LZEXPAND */
-
-/* COMPRESS.EXE's files: "SZDD" 88 F0 27 33, 'A', the name's last
- * character, the size expanded; then a flag byte for each 8 items (1 a
- * byte as it is, 0 two: 12 bits where in the 4K window, 4 bits the length
- * less 3), the window spaces at first, written from FF0h on */
-typedef struct ne_lz {
-    HFILE f;
-    uint32_t size;                  /* expanded */
-    uint32_t pos;                   /* the expanded bytes made so far */
-    uint32_t want;                  /* where the next read starts (LZSeek's) */
-    unsigned cur, flags, nflags, mpos, mlen;
-    unsigned in_at, in_n;
-    char last;
-    uint8_t in[256];
-    uint8_t win[4096];
-} ne_lz;
-
-static const uint8_t szdd[8] = { 'S', 'Z', 'D', 'D', 0x88, 0xf0, 0x27, 0x33 };
-
-static void lz_reset(ne_lz *z)
-{
-    _llseek(z->f, 14, 0);
-    memset(z->win, ' ', sizeof(z->win));
-    z->cur = 0xff0;
-    z->pos = z->flags = z->nflags = z->mlen = z->in_at = z->in_n = 0;
-}
-
-static int lz_in(ne_lz *z, unsigned *b)
-{
-    if (z->in_at == z->in_n) {
-        UINT n = _lread(z->f, z->in, sizeof(z->in));
-        if (n == (UINT)HFILE_ERROR || !n)
-            return 0;
-        z->in_at = 0;
-        z->in_n = n;
-    }
-    *b = z->in[z->in_at++];
-    return 1;
-}
-
-/* the next byte expanded; 0 at the end */
-static int lz_next(ne_lz *z, uint8_t *out)
-{
-    unsigned b, b2;
-    if (z->pos >= z->size)
-        return 0;
-    if (!z->mlen) {
-        if (!z->nflags) {
-            if (!lz_in(z, &z->flags))
-                return 0;
-            z->nflags = 8;
-        }
-        unsigned bit = z->flags & 1;
-        z->flags >>= 1;
-        z->nflags--;
-        if (bit) {
-            if (!lz_in(z, &b))
-                return 0;
-            z->win[z->cur] = (uint8_t)b;
-            z->cur = (z->cur + 1) & 0xfff;
-            z->pos++;
-            *out = (uint8_t)b;
-            return 1;
-        }
-        if (!lz_in(z, &b) || !lz_in(z, &b2))
-            return 0;
-        z->mpos = b | (b2 & 0xf0) << 4;
-        z->mlen = (b2 & 0x0f) + 3;
-    }
-    b = z->win[z->mpos & 0xfff];
-    z->mpos++;
-    z->mlen--;
-    z->win[z->cur] = (uint8_t)b;
-    z->cur = (z->cur + 1) & 0xfff;
-    z->pos++;
-    *out = (uint8_t)b;
-    return 1;
-}
-
-/* n bytes from want on; the number */
-static uint32_t lz_read(ne_lz *z, uint8_t *buf, uint32_t n)
-{
-    if (z->want < z->pos)
-        lz_reset(z);
-    uint8_t c;
-    while (z->pos < z->want && lz_next(z, &c))
-        ;
-    uint32_t got = 0;
-    while (got < n && z->pos == z->want && lz_next(z, &buf[got])) {
-        got++;
-        z->want++;
-    }
-    return got;
-}
-
-/* f's header: an expanding state of it (f its own then), or NULL with *err
- * 0 when it is not compressed (f back at its start) */
-static ne_lz *lz_of(HFILE f, int *err)
-{
-    uint8_t h[14];
-    *err = 0;
-    if (_llseek(f, 0, 0) != 0) {
-        *err = LZERROR_BADINHANDLE;
-        return NULL;
-    }
-    UINT n = _lread(f, h, sizeof(h));
-    if (n != sizeof(h) || memcmp(h, szdd, sizeof(szdd))) {
-        _llseek(f, 0, 0);
-        return NULL;
-    }
-    if (h[8] != 'A') {
-        *err = LZERROR_UNKNOWNALG;
-        return NULL;
-    }
-    ne_lz *z = (ne_lz *)win_alloc(sizeof(*z));
-    if (!z) {
-        *err = LZERROR_GLOBALLOC;
-        return NULL;
-    }
-    z->f = f;
-    z->last = (char)h[9];
-    z->size = rd32(h + 10);
-    lz_reset(z);
-    return z;
-}
-
-static ne_lz *lz_handle(ne_user *u, uint16_t h)
-{
-    unsigned i = (unsigned)h - LZ_HANDLE;
-    return h >= LZ_HANDLE && i < 8 ? u->lz[i] : NULL;
-}
-
-/* LZInit(HFILE): an LZ handle for a compressed file, the file's own else */
-static int lz_init(ne_user *u, HFILE f)
-{
-    int err;
-    ne_lz *z = lz_of(f, &err);
-    if (!z)
-        return err ? err : (int)f;
-    for (int i = 0; i < 8; i++)
-        if (!u->lz[i]) {
-            u->lz[i] = z;
-            return (int)(LZ_HANDLE + (unsigned)i);
-        }
-    win_free(z);
-    return LZERROR_GLOBALLOC;
-}
-
-/* src's bytes (expanded) to dst: their number, or an LZERROR */
-static int32_t lz_copy(ne_user *u, uint16_t src, HFILE dst)
-{
-    ne_lz *z = lz_handle(u, src), *own = NULL;
-    int err = 0;
-    if (!z && (int16_t)src >= 0 && !(own = lz_of((HFILE)src, &err)) && err)
-        return err;
-    if (own)
-        z = own;
-    else if (z)
-        z->want = 0;
-    uint8_t *buf = (uint8_t *)win_alloc(1024);
-    int32_t total = buf ? 0 : LZERROR_GLOBALLOC;
-    while (buf) {
-        uint32_t n = z ? lz_read(z, buf, 1024) : _lread((HFILE)src, buf, 1024);
-        if (n == (UINT)HFILE_ERROR) {
-            total = LZERROR_READ;
-            break;
-        }
-        if (!n)
-            break;
-        if (_lwrite(dst, buf, n) != n) {
-            total = LZERROR_WRITE;
-            break;
-        }
-        total += (int32_t)n;
-    }
-    win_free(buf);
-    win_free(own);                      /* the file stays the program's */
-    return total;
-}
-
-/* the name a compressed file has: its extension's last character '_' */
-static void compressed_name(const char *name, char *out, uint32_t cap)
-{
-    lstrcpyn(out, name, (int)cap);
-    char *dot = NULL, *slash = NULL;
-    for (char *p = out; *p; p++)
-        if (*p == '.')
-            dot = p;
-        else if (*p == '\\')
-            slash = p;
-    uint32_t n = (uint32_t)strlen(out);
-    if (!dot || (slash && dot < slash)) {
-        if (n + 2 < cap)
-            lstrcpyn(out + n, "._", (int)(cap - n));
-    } else if (strlen(dot) < 4) {
-        if (n + 1 < cap)
-            lstrcpyn(out + n, "_", (int)(cap - n));
-    } else {
-        out[n - 1] = '_';
-    }
-}
-
-static __attribute__((noinline)) int lz_service(args *a, ne_user *u, uint16_t service,
-                                               uint32_t *v, int *dword)
-{
-    switch (service) {
-    case LZ + 1: case LZ + 8: {         /* LZCopy, CopyLZFile(HFILE src, HFILE dst) */
-        HFILE dst = (HFILE)(int16_t)w(a, 4);
-        if ((int16_t)w(a, 4) < 0)
-            *v = (uint32_t)LZERROR_BADOUTHANDLE;
-        else
-            *v = (uint32_t)lz_copy(u, w(a, 6), dst);
-        *dword = 1;
-        return 1;
-    }
-    case LZ + 2: {                      /* LZOpenFile(LPSTR, OFSTRUCT FAR *, UINT) */
-        UINT mode = w(a, 4);
-        int16_t f = (int16_t)ne_open_file(a, NULL);
-        int plain = !(mode & 3) && !(mode & 0xf300u);    /* reading, nothing else */
-        if (f < 0 && plain && !a->bad) {
-            char name[128], packed[128];
-            if (str_(a, dw(a, 10), name, sizeof(name))) {
-                compressed_name(name, packed, sizeof(packed));
-                f = (int16_t)ne_open_file(a, packed);
-            }
-        }
-        *v = (uint16_t)(f >= 0 && plain ? lz_init(u, (HFILE)f) : f);
-        return 1;
-    }
-    case LZ + 3:                        /* LZInit(HFILE) */
-        *v = (uint16_t)lz_init(u, (HFILE)(int16_t)w(a, 4));
-        return 1;
-    case LZ + 4: {                      /* LZSeek(HFILE, LONG, int) */
-        int how = (int16_t)w(a, 4);
-        int32_t off = (int32_t)dw(a, 6);
-        uint16_t h = w(a, 10);
-        ne_lz *z = lz_handle(u, h);
-        int32_t at;
-        if (!z)
-            at = _llseek((HFILE)(int16_t)h, off, how);
-        else {
-            at = how == 0 ? off : how == 1 ? (int32_t)z->want + off : (int32_t)z->size + off;
-            if (at < 0 || (uint32_t)at > z->size || how < 0 || how > 2)
-                at = LZERROR_BADVALUE;
-            else
-                z->want = (uint32_t)at;
-        }
-        *v = (uint32_t)at;
-        *dword = 1;
-        return 1;
-    }
-    case LZ + 5: {                      /* LZRead(HFILE, LPSTR, int) */
-        uint32_t buf = dw(a, 6), n = in_segment(buf, w(a, 4));
-        uint16_t h = w(a, 10);
-        ne_lz *z = lz_handle(u, h);
-        uint8_t *tmp = n ? (uint8_t *)win_alloc(n) : NULL;
-        int32_t got = 0;
-        if (n && !tmp)
-            got = LZERROR_GLOBALLOC;
-        else if (n) {
-            got = z ? (int32_t)lz_read(z, tmp, n) : (int32_t)(int16_t)_lread((HFILE)(int16_t)h, tmp, n);
-            if (got > 0 && !wr_(a, buf, tmp, (uint32_t)got))
-                got = LZERROR_READ;
-        }
-        win_free(tmp);
-        *v = (uint16_t)got;
-        return 1;
-    }
-    case LZ + 6: {                      /* LZClose(HFILE) */
-        uint16_t h = w(a, 4);
-        ne_lz *z = lz_handle(u, h);
-        if (z) {
-            _lclose(z->f);
-            win_free(z);
-            u->lz[h - LZ_HANDLE] = NULL;
-        } else {
-            _lclose((HFILE)(int16_t)h);
-        }
-        return 1;
-    }
-    case LZ + 7:                        /* LZStart */
-        *v = 1;
-        return 1;
-    case LZ + 9:                        /* LZDone */
-        return 1;
-    case LZ + 10: {                     /* GetExpandedName(LPSTR in, LPSTR out) */
-        char name[128];
-        if (!str_(a, dw(a, 8), name, sizeof(name))) {
-            *v = (uint16_t)LZERROR_BADINHANDLE;
-            return 1;
-        }
-        HFILE f = _lopen(name, OF_READ);
-        if (f == HFILE_ERROR) {
-            *v = (uint16_t)LZERROR_BADINHANDLE;
-            return 1;
-        }
-        int err;
-        ne_lz *z = lz_of(f, &err);
-        _lclose(f);
-        uint32_t n = (uint32_t)strlen(name);
-        if (z && n && name[n - 1] == '_') {         /* the character the name lost */
-            char c = z->last;
-            int lower = n > 1 && name[n - 2] >= 'a' && name[n - 2] <= 'z';
-            name[n - 1] = (char)(lower && c >= 'A' && c <= 'Z' ? c + 32 : c);
-        }
-        win_free(z);
-        str_out(a, dw(a, 4), name, 128);
-        *v = 1;
-        return 1;
-    }
-    }
-    return 0;
 }
 
 /* ================================================================ MMSYSTEM */
@@ -876,9 +556,25 @@ static int task_entry(args *a, uint32_t far, HTASK t)
 }
 
 /* MODULEENTRY of WINN's module m */
-static int module_entry(args *a, uint32_t far, int m)
+/* the modules: WINN's own (F000h + n), then the native DLLs loaded (their
+ * handles); the one after h, 0 after the last */
+static uint16_t module_after(uint16_t h)
 {
-    const char *name = win_ne_guest_module_name(m);
+    int s = -1;
+    if (h >= 0xf000u && win_ne_guest_module_name(h - 0xf000 + 1))
+        return (uint16_t)(h + 1);
+    if (h < 0xf000u && (s = win_dll_of(h)) < 0)
+        return 0;
+    while (++s < WIN_DLL_SLOTS)
+        if (win_dll_get(s))
+            return win_dll_handle(s);
+    return 0;
+}
+
+static int module_entry(args *a, uint32_t far, uint16_t h)
+{
+    int m = h >= 0xf000u ? h - 0xf000 : -1, s = h < 0xf000u ? win_dll_of(h) : -1;
+    const char *name = m >= 0 ? win_ne_guest_module_name(m) : s >= 0 ? win_dll_get(s)->name : NULL;
     if (!name || !sized(a, far, 276))
         return 0;
     uint8_t e[276];
@@ -886,13 +582,17 @@ static int module_entry(args *a, uint32_t far, int m)
     memset(e, 0, sizeof(e));
     wr32(e, 276);
     lstrcpyn((char *)e + 4, name, 10);
-    wr16(e + 14, (uint16_t)(0xf000u + (unsigned)m));
+    wr16(e + 14, h);
     wr16(e + 16, 1);
-    UINT n = GetSystemDirectory(path, sizeof(path) - 16);
-    wsprintf(path + n, "%s%s.%s", n && path[n - 1] != '\\' ? "\\" : "", name,
-             m < 3 ? "EXE" : m == 3 ? "DRV" : "DLL");
+    if (s >= 0) {
+        lstrcpyn(path, win_dll_path(s), sizeof(path));
+    } else {
+        UINT n = GetSystemDirectory(path, sizeof(path) - 16);
+        wsprintf(path + n, "%s%s.%s", n && path[n - 1] != '\\' ? "\\" : "", name,
+                 m < 3 ? "EXE" : m == 3 ? "DRV" : "DLL");
+    }
     lstrcpyn((char *)e + 18, path, 256);
-    wr16(e + 274, win_ne_guest_module_name(m + 1) ? (uint16_t)(0xf001u + (unsigned)m) : 0);
+    wr16(e + 274, module_after(h));
     return wr_(a, far, e, sizeof(e));
 }
 
@@ -916,22 +616,24 @@ static __attribute__((noinline)) int th_service(args *a, ne_user *u, uint16_t se
         }
         return 1;
     case 59:                            /* ModuleFirst */
-        *v = (uint16_t)module_entry(a, dw(a, 4), 0);
+        *v = (uint16_t)module_entry(a, dw(a, 4), 0xf000u);
         return 1;
     case 60: {                          /* ModuleNext: its wNext */
         uint8_t b[2];
-        *v = rd_(a, dw(a, 4) + 274, b, 2) && rd16(b) >= 0xf000u ?
-             (uint16_t)module_entry(a, dw(a, 4), rd16(b) - 0xf000) : 0;
+        *v = rd_(a, dw(a, 4) + 274, b, 2) && rd16(b) ?
+             (uint16_t)module_entry(a, dw(a, 4), rd16(b)) : 0;
         return 1;
     }
     case 61: {                          /* ModuleFindName(MODULEENTRY FAR *, LPCSTR) */
         char name[16];
-        *v = str_(a, dw(a, 4), name, sizeof(name)) ?
-             (uint16_t)module_entry(a, dw(a, 8), win_ne_guest_module(name)) : 0;
+        int m = str_(a, dw(a, 4), name, sizeof(name)) ? win_ne_guest_module(name) : -1;
+        int s = m < 0 && name[0] ? win_dll_find(name) : -1;
+        *v = m >= 0 ? (uint16_t)module_entry(a, dw(a, 8), (uint16_t)(0xf000u + (unsigned)m)) :
+             s >= 0 ? (uint16_t)module_entry(a, dw(a, 8), win_dll_handle(s)) : 0;
         return 1;
     }
     case 62:                            /* ModuleFindHandle(MODULEENTRY FAR *, HMODULE) */
-        *v = w(a, 4) >= 0xf000u ? (uint16_t)module_entry(a, dw(a, 6), w(a, 4) - 0xf000) : 0;
+        *v = (uint16_t)module_entry(a, dw(a, 6), w(a, 4));
         return 1;
     case 63:                            /* TaskFirst */
         *v = (uint16_t)task_entry(a, dw(a, 4), task_next(0));
@@ -1109,7 +811,8 @@ static uint8_t *file_resource(args *a, uint32_t file, uint32_t type, uint32_t id
     return d;
 }
 
-/* src (srcdir) to dest (destdir), expanded as LZEXPAND does: 0 or VIF_... */
+/* src (srcdir) to dest (destdir), expanded by LZEXPAND's LZCopy (a copy
+ * as it is without the DLL): 0 or VIF_... */
 static uint32_t install_file(const char *src, const char *dest)
 {
     HFILE in = _lopen(src, OF_READ);
@@ -1120,21 +823,28 @@ static uint32_t install_file(const char *src, const char *dest)
         _lclose(in);
         return 0x800u;                  /* VIF_CANNOTCREATE */
     }
-    int err;
-    ne_lz *z = lz_of(in, &err);
-    uint8_t *buf = (uint8_t *)win_alloc(1024);
-    uint32_t r = buf && !err ? 0 : 0x8000u;        /* VIF_OUTOFMEMORY */
-    while (!r) {
-        uint32_t n = z ? lz_read(z, buf, 1024) : _lread(in, buf, 1024);
-        if (n == (UINT)HFILE_ERROR)
-            r = 0x10000u;
-        else if (!n)
-            break;
-        else if (_lwrite(out, buf, n) != n)
-            r = 0x100u;                 /* VIF_OUTOFSPACE */
+    uint32_t r = 0;
+    HINSTANCE lz = LoadLibrary("LZEXPAND");
+    LONG (WINAPI *copy)(HFILE, HFILE) =                        /* LZCopy */
+        (LONG (WINAPI *)(HFILE, HFILE))(void (*)(void))GetProcAddress(lz, (LPCSTR)(uintptr_t)1);
+    if (copy) {
+        LONG n = copy(in, out);
+        r = n >= 0 ? 0 : n == -4 ? 0x100u : n == -5 ? 0x8000u : 0x10000u;
+    } else {
+        uint8_t *buf = (uint8_t *)win_alloc(1024);
+        r = buf ? 0 : 0x8000u;          /* VIF_OUTOFMEMORY */
+        while (!r) {
+            uint32_t n = _lread(in, buf, 1024);
+            if (n == (UINT)HFILE_ERROR)
+                r = 0x10000u;
+            else if (!n)
+                break;
+            else if (_lwrite(out, buf, n) != n)
+                r = 0x100u;             /* VIF_OUTOFSPACE */
+        }
+        win_free(buf);
     }
-    win_free(buf);
-    win_free(z);
+    FreeLibrary(lz);
     _lclose(in);
     _lclose(out);
     return r;
@@ -1257,6 +967,99 @@ static __attribute__((noinline)) int ver_service(args *a, uint16_t service, uint
     return 0;
 }
 
+/* ================================================================ native DLLs */
+
+/* a call of the program's for a DLL: its arguments and memory */
+struct win_dll_call {
+    args *a;
+};
+
+static uint16_t call_arg16(win_dll_call *c, unsigned off) { return w(c->a, off); }
+static uint32_t call_arg32(win_dll_call *c, unsigned off) { return dw(c->a, off); }
+static int call_read(win_dll_call *c, uint32_t far, void *dst, uint32_t n) { return rd_(c->a, far, dst, n); }
+static int call_write(win_dll_call *c, uint32_t far, const void *src, uint32_t n)
+{
+    return wr_(c->a, far, src, n);
+}
+static int call_string(win_dll_call *c, uint32_t far, char *dst, uint32_t cap)
+{
+    return str_(c->a, far, dst, cap);
+}
+
+static const win_dll_ne dll_ne = {
+    sizeof(win_dll_ne), call_arg16, call_arg32, call_read, call_write, call_string,
+};
+
+const win_dll_ne *win_dll_ne_glue(void) { return &dll_ne; }
+
+static int dll_slot_of(uint16_t id, uint16_t *ord)
+{
+    *ord = (uint16_t)((id - WIN_NE_SERVICE_DLL) & 0x3ffu);
+    return (int)((id - WIN_NE_SERVICE_DLL) >> 10);
+}
+
+static __attribute__((noinline)) int dll_service(args *a, uint16_t service, uint32_t *v,
+                                                int *dword)
+{
+    uint16_t ord;
+    const win_dll_info *d = win_dll_get(dll_slot_of(service, &ord));
+    win_dll_call c = { a };
+    int r = d && d->ne_call ? d->ne_call(&c, ord, v) : WINDLL_NONE;
+    *dword = r == WINDLL_DWORD;
+    return r != WINDLL_NONE;
+}
+
+int win_ne_native_import(const char *module, uint16_t ordinal, const char *name, uint16_t *id)
+{
+    int s = win_dll_load(module);
+    if (s < 0)
+        return 0;
+    const win_dll_export *e = win_dll_export_of(s, ordinal, name);
+    if (!e && name) {
+        win_dll_unref(s);
+        return -1;
+    }
+    if (!e && ordinal >= 0x400u) {
+        win_dll_unref(s);
+        return -1;
+    }
+    *id = WIN_NE_DLL_SERVICE(s, e ? e->ordinal : ordinal);  /* none: not supported, at its call */
+    return 1;
+}
+
+int win_ne_native_has(const char *module, uint16_t ordinal, const char *name)
+{
+    uint16_t id;
+    int r = win_ne_native_import(module, ordinal, name, &id);
+    if (r > 0)
+        win_dll_unref(dll_slot_of(id, &ordinal));
+    return r;
+}
+
+uint16_t win_ne_native_args(uint16_t id)
+{
+    uint16_t ord;
+    int s = dll_slot_of(id, &ord);
+    const win_dll_export *e = win_dll_export_of(s, ord, NULL);
+    return e ? e->argbytes : 0;
+}
+
+const char *win_ne_native_name(uint16_t id, char *buf, unsigned cap)
+{
+    uint16_t ord;
+    int s = dll_slot_of(id, &ord);
+    const win_dll_info *d = win_dll_get(s);
+    const win_dll_export *e = win_dll_export_of(s, ord, NULL);
+    if (!d)
+        return NULL;
+    if (e && e->name)
+        wsprintf(buf, "%s.%s", d->name, e->name);
+    else
+        wsprintf(buf, "%s.%u", d->name, (unsigned)ord);
+    (void)cap;
+    return buf;
+}
+
 /* ================================================================ */
 
 int ne_sys_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword)
@@ -1267,8 +1070,8 @@ int ne_sys_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dwor
         return th_service(a, u, service, v, dword);
     if (service >= VR && service < VR + 0x100u)
         return ver_service(a, service, v, dword);
-    if (service >= LZ && service < LZ + 0x100u)
-        return lz_service(a, u, service, v, dword);
+    if (service >= WIN_NE_SERVICE_DLL && service < WIN_NE_SERVICE_UNDEFINED)
+        return dll_service(a, service, v, dword);
     return 0;
 }
 
@@ -1278,8 +1081,6 @@ void ne_sys_end(ne_user *u)
         if (u->mmtimer[i].proc)
             KillTimer(0, u->mmtimer[i].id);
         u->mmtimer[i].proc = 0;
-        win_free(u->lz[i]);             /* its files: closed with the task's */
-        u->lz[i] = NULL;
     }
 }
 
