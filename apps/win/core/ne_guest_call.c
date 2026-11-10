@@ -422,6 +422,31 @@ static uint32_t local_fit(ne_user *u, int heap, uint32_t lo, uint32_t hi, uint32
     return at && at + size <= hi ? at : 0;
 }
 
+/* the heap's segment at least end bytes (in 1K steps, 64K at most) */
+static int local_room(args *a, ne_user *u, int heap, uint32_t end)
+{
+    win_ne_guest_image *g = (win_ne_guest_image *)a->ctx->image;
+    uint16_t sel = u->heap[heap].sel;
+    win_ne_guest_segment *d = win_ne_guest_segment_of(g, sel);
+    if (!d)
+        return 0;
+    if (end <= d->size)
+        return 1;
+    uint32_t want = (end + 0x3ffu) & ~0x3ffu;
+    if (want > 0x10000u)
+        want = 0x10000u;
+    return win_ne_guest_grow(g, sel, want, a->ctx->read);
+}
+
+static void local_zero(args *a, uint16_t sel, uint32_t at, uint32_t size)
+{
+    uint8_t zero[64];
+    memset(zero, 0, sizeof(zero));
+    for (uint32_t k = 0; k < size; k += sizeof(zero))
+        win_ne_write(a->ctx, sel, at + k, zero,
+                     size - k < sizeof(zero) ? size - k : (uint32_t)sizeof(zero));
+}
+
 static uint16_t local_alloc(args *a, ne_user *u, int heap, uint32_t size)
 {
     if (!size || size > 0xfff0u || heap < 0)
@@ -429,18 +454,11 @@ static uint16_t local_alloc(args *a, ne_user *u, int heap, uint32_t size)
     size = (size + 1) & ~1u;
     /* in the heap, then beyond its segment's end: the segment made big
      * enough (in 1K steps, its offsets below 0xFFF0) */
-    win_ne_guest_image *g = (win_ne_guest_image *)a->ctx->image;
     uint16_t sel = u->heap[heap].sel;
-    win_ne_guest_segment *d = win_ne_guest_segment_of(g, sel);
     uint32_t at = local_fit(u, heap, u->heap[heap].lo, u->heap[heap].hi, size);
-    if (!at && d && (at = local_fit(u, heap, u->heap[heap].end, 0xfff0u, size)) != 0 &&
-        at + size > d->size) {
-        uint32_t want = (at + size + 0x3ffu) & ~0x3ffu;
-        if (want > 0x10000u)
-            want = 0x10000u;
-        if (!win_ne_guest_grow(g, sel, want, a->ctx->read))
-            at = 0;
-    }
+    if (!at && (at = local_fit(u, heap, u->heap[heap].end, 0xfff0u, size)) != 0 &&
+        !local_room(a, u, heap, at + size))
+        at = 0;
     if (!at)
         return 0;
     for (int i = 0; i < NE_LOCALS; i++)
@@ -448,11 +466,7 @@ static uint16_t local_alloc(args *a, ne_user *u, int heap, uint32_t size)
             u->local[i].at = (uint16_t)at;
             u->local[i].size = (uint16_t)size;
             u->local[i].heap = (uint8_t)heap;
-            uint8_t zero[64];
-            memset(zero, 0, sizeof(zero));
-            for (uint32_t k = 0; k < size; k += sizeof(zero))
-                win_ne_write(a->ctx, sel, at + k, zero,
-                             size - k < sizeof(zero) ? size - k : (uint32_t)sizeof(zero));
+            local_zero(a, sel, at, size);
             return (uint16_t)at;
         }
     return 0;
@@ -512,28 +526,40 @@ static int local_service(args *a, ne_user *u, uint16_t service, uint32_t *v)
         *v = local_alloc(a, u, heap, w(a, 4));
         return 1;
     case 6: {                           /* LocalReAlloc(h, size, flags) */
-        uint16_t h = w(a, 8), size = w(a, 6);
+        uint16_t h = w(a, 8), flags = w(a, 4);
+        uint32_t want = w(a, 6);
         *v = 0;
         if ((i = local_find(u, heap, h)) < 0)
             return 1;
-        uint16_t old = u->local[i].size;
-        u->local[i].size = 0;           /* the new one may overlap it */
-        uint16_t n = local_alloc(a, u, heap, size);
-        if (!n) {
-            u->local[i].size = old;
+        *v = h;
+        if (flags & 0x80)               /* LMEM_MODIFY: its flags only */
+            return 1;
+        want = want ? (want + 1) & ~1u : 2;
+        uint32_t old = u->local[i].size, tail = (uint32_t)h + old;
+        uint16_t sel = u->heap[heap].sel;
+        if (want <= old) {              /* smaller: where it is, what it has kept */
+            u->local[i].size = (uint16_t)want;
             return 1;
         }
-        uint8_t buf[64];
-        uint16_t sel = u->heap[heap].sel;
-        uint16_t keep = old < size ? old : size;
-        if (n != h)                     /* down: the regions may overlap */
-            for (uint32_t k = 0; k < keep; k += sizeof(buf)) {
-                uint32_t m = keep - k < sizeof(buf) ? keep - k : (uint32_t)sizeof(buf);
-                uint32_t from = n < h ? k : keep - k - m;
-                win_ne_read(a->ctx, sel, (uint32_t)h + from, buf, m);
-                win_ne_write(a->ctx, sel, (uint32_t)n + from, buf, m);
-            }
+        /* larger: where it is if what follows is free, the new part zero */
+        uint32_t hi = tail <= u->heap[heap].hi ? u->heap[heap].hi : 0xfff0u;
+        if (want <= 0xfff0u && local_fit(u, heap, tail, hi, want - old) == tail &&
+            local_room(a, u, heap, (uint32_t)h + want)) {
+            local_zero(a, sel, tail, want - old);
+            u->local[i].size = (uint16_t)want;
+            return 1;
+        }
+        uint16_t n = local_alloc(a, u, heap, want);     /* elsewhere: moved */
         *v = n;
+        if (!n)
+            return 1;
+        uint8_t buf[64];
+        for (uint32_t k = 0; k < old; k += sizeof(buf)) {
+            uint32_t m = old - k < sizeof(buf) ? old - k : (uint32_t)sizeof(buf);
+            win_ne_read(a->ctx, sel, (uint32_t)h + k, buf, m);
+            win_ne_write(a->ctx, sel, (uint32_t)n + k, buf, m);
+        }
+        u->local[i].size = 0;
         return 1;
     }
     case 7:                             /* LocalFree(h): 0 */

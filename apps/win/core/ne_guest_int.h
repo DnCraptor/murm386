@@ -165,6 +165,10 @@ void ne_call_end(ne_user *u);
 /* ne_guest_int21.c: KERNEL's DOS functions (OpenFile, GetDOSEnvironment
  * ...) and KEYBOARD's; 1 if it is one of them */
 int ne_dos_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword);
+/* user/dialog.c: the menu of the dialog made next (its window's then) */
+void user_dialog_menu(HMENU menu);
+/* ne_guest_int21.c: the DOS environment block, its selector in the PSP */
+void ne_environment(win_ne_guest_api_context *ctx, ne_user *u);
 /* ne_guest_int21.c: OpenFile's work, the name given (NULL: the
  * program's, its first argument) */
 uint16_t ne_open_file(args *a, const char *name);

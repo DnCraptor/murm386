@@ -80,6 +80,13 @@ program from loading: as Windows' "undefined dynalink" its call ends the
 program, the function named ("PROG.EXE called USER.231, which WINN does
 not have yet."). A program may import up to 384 of WINN's functions.
 
+A program's PSP has its DOS environment (2Ch), made before it runs, as
+DOS 3 has it: WINN's strings, the count 1, the program's path (a C
+startup reads it there, without GetDOSEnvironment, which gives the same
+block). LocalReAlloc keeps a block where it is when what follows it is
+free, its bytes whether moved or not. A dialog template's menu, or its
+class's, is the dialog's (a dialog as a program's main window).
+
 Windows' own DLLs WINN has (`core/ne_guest_sys.c`): MMSYSTEM with no
 devices (none of each kind: wave, MIDI, aux, joysticks, mixers; their
 opens fail, MCI has none, sndPlaySound and PlaySound play nothing), the

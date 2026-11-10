@@ -425,27 +425,43 @@ __attribute__((noinline)) uint16_t ne_open_file(args *a, const char *given)
     return (uint16_t)f;
 }
 
-/* KERNEL.131 GetDOSEnvironment(): WINN's DOS environment, in a block of
- * the program's own (its PSP's 2Ch too) */
+/* The program's DOS environment, made before it runs (a C startup reads it
+ * through its PSP's 2Ch, no call of KERNEL's): WINN's own strings in a
+ * block of the program's, then as DOS 3 has it the count 1 and the
+ * program's path; its selector in the PSP. KERNEL.131 GetDOSEnvironment
+ * gives the same block. */
+void ne_environment(win_ne_guest_api_context *ctx, ne_user *u)
+{
+    if (u->env)
+        return;
+    const char *path = ctx->path ? ctx->path : "";
+    int room = 4096, tail = 2 + lstrlen(path) + 1;
+    char *env = (char *)win_alloc((size_t)(room + tail));
+    if (!env)
+        return;
+    int n = win_file_environment(env, room);
+    if (n < 2) {                        /* none: the empty one */
+        env[0] = env[1] = 0;
+        n = 2;
+    }
+    env[n] = 1;
+    env[n + 1] = 0;
+    lstrcpy(env + n + 2, path);
+    n += tail;
+    win_ne_guest_image *g = (win_ne_guest_image *)ctx->image;
+    uint16_t sel = win_ne_guest_global_alloc(g, (uint32_t)n);
+    if (sel && win_ne_write(ctx, sel, 0, env, (uint32_t)n)) {
+        uint8_t w2[2];
+        wr16(w2, sel);
+        win_ne_write(ctx, g->psp.selector, 0x2c, w2, 2);
+        u->env = sel;
+    }
+    win_free(env);
+}
+
 static uint32_t dos_environment(args *a, ne_user *u)
 {
-    if (!u->env) {
-        char *env = (char *)win_alloc(4096);
-        int n = env ? win_file_environment(env, 4096) : 0;
-        if (n <= 0 && env) {
-            env[0] = env[1] = 0;
-            n = 2;
-        }
-        win_ne_guest_image *g = (win_ne_guest_image *)a->ctx->image;
-        uint16_t sel = env ? win_ne_guest_global_alloc(g, (uint32_t)n) : 0;
-        if (sel && win_ne_write(a->ctx, sel, 0, env, (uint32_t)n)) {
-            uint8_t w2[2];
-            wr16(w2, sel);
-            win_ne_write(a->ctx, g->psp.selector, 0x2c, w2, 2);
-            u->env = sel;
-        }
-        win_free(env);
-    }
+    ne_environment(a->ctx, u);
     return (uint32_t)u->env << 16;
 }
 

@@ -35,6 +35,7 @@ void win_ne_user_start(win_ne_guest_api_context *ctx)
     u->next = programs;
     programs = u;
     ctx->user = u;
+    ne_environment(ctx, u);
 }
 
 void win_ne_user_end(win_ne_guest_api_context *ctx)
@@ -514,6 +515,7 @@ static __attribute__((noinline)) int dialog_box(args *a, ne_user *u, int modeles
     DLGITEM_N items[64];
     memset(&t, 0, sizeof(t));
     int r = -1, k = 0;
+    HMENU hmenu = 0;
     if (n < 13)
         goto done;
     t.style = rd32(p);
@@ -523,15 +525,32 @@ static __attribute__((noinline)) int dialog_box(args *a, ne_user *u, int modeles
     t.cx = (int16_t)rd16(p + 9);
     t.cy = (int16_t)rd16(p + 11);
     p += 13;
-    if (p < end && *p == 0xff)                  /* a menu by number: none here */
+    const char *menu = NULL;
+    uint16_t menu_id = 0;
+    if (p + 3 <= end && *p == 0xff) {           /* its menu: a number or a name */
+        menu_id = rd16(p + 1);
         p += 3;
-    else if (!res_string(&p, end))
+    } else if (!(menu = res_string(&p, end))) {
         goto done;
+    }
     const char *cls = res_string(&p, end), *caption = res_string(&p, end);
     if (!cls || !caption)
         goto done;
     t.klass = *cls ? cls : NULL;
     t.caption = caption;
+    if (!(t.style & WS_CHILD)) {                /* ... or its class's, as a window's */
+        if (menu_id)
+            hmenu = load_menu(a, menu_id);
+        else if (menu && *menu)
+            hmenu = load_menu_named(a, menu);
+        for (int i = 0; !hmenu && t.klass && i < NE_CLASSES; i++)
+            if (u->cls[i].proc && !lstrcmpi(u->cls[i].name, t.klass)) {
+                if (u->cls[i].menu_id)
+                    hmenu = load_menu(a, u->cls[i].menu_id);
+                else if (u->cls[i].menu[0])
+                    hmenu = load_menu_named(a, u->cls[i].menu);
+            }
+    }
     if (t.style & DS_SETFONT) {
         if (p + 2 > end)
             goto done;
@@ -573,12 +592,16 @@ static __attribute__((noinline)) int dialog_box(args *a, ne_user *u, int modeles
         uint32_t outer = u->pending, outer_param = u->pending_param;
         u->pending = proc;
         u->pending_param = init;
+        user_dialog_menu(hmenu);
         r = modeless ? (int)CreateDialogIndirectN(instance(u, 1), &t, items, owner, ne_dlgproc)
                      : DialogBoxIndirectN(instance(u, 1), &t, items, owner, ne_dlgproc);
         u->pending = outer;
         u->pending_param = outer_param;
+        hmenu = 0;                            /* the window's now */
     }
 done:
+    if (hmenu)
+        DestroyMenu(hmenu);
     free(d);
     return r;
 }

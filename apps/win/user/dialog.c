@@ -305,6 +305,15 @@ BOOL WINAPI MapDialogRect(HWND h, LPRECT rc)
     return TRUE;
 }
 
+/* the menu of the dialog made next (a Win16 template's, its class's): the
+ * window's own then */
+static HMENU next_menu;
+
+void user_dialog_menu(HMENU menu)
+{
+    next_menu = menu;
+}
+
 HWND WINAPI CreateDialogIndirectN(HINSTANCE inst, const DLGTEMPLATE_N *t,
                                   const DLGITEM_N *items, HWND owner, DLGPROC proc)
 {
@@ -315,7 +324,9 @@ HWND WINAPI CreateDialogIndirectN(HINSTANCE inst, const DLGTEMPLATE_N *t,
     int bx = DLG_BASE_X, by = DLG_BASE_Y;
     HFONT font = template_font(t, &bx, &by);
     RECT rc = { 0, 0, t->cx * bx / 4, t->cy * by / 8 };
-    AdjustWindowRectEx(&rc, style, FALSE, ex);
+    HMENU menu = style & WS_CHILD ? 0 : next_menu;
+    next_menu = 0;
+    AdjustWindowRectEx(&rc, style, menu != 0, ex);
     int x = t->x * bx / 4 + rc.left, y = t->y * by / 8 + rc.top;
     wwnd *ow = user_wnd(owner);
     if (ow && !(style & WS_CHILD) && !(t->style & DS_ABSALIGN)) {
@@ -332,7 +343,7 @@ HWND WINAPI CreateDialogIndirectN(HINSTANCE inst, const DLGTEMPLATE_N *t,
     }
     LPCSTR klass = t->klass ? t->klass : "#32770";
     HWND h = CreateWindowEx(ex, klass, t->caption ? t->caption : "", style,
-                            x, y, ww, wh, owner, 0, inst, NULL);
+                            x, y, ww, wh, owner, menu, inst, NULL);
     wwnd *w = h ? user_wnd(h) : NULL;
     wdlg *d = h ? (wdlg *)win_alloc(sizeof(*d)) : NULL;
     if (!d || !w->extra || w->cb_extra < DLG_EXTRA) {
