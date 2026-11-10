@@ -242,7 +242,13 @@ int win_ne_fault_make(uint8_t idt[WIN_NE_FAULT_IDT_BYTES],
         unsigned pos = 6u * v;
         uint16_t off = (uint16_t)(WIN_NE_FAULT_CODE_OFFSET + pos);
         gate(idt, v, v == WIN_NE_YIELD_VECTOR ? (uint16_t)WIN_NE_YIELD_OFFSET : off,
-             a->pm_segment, 0);
+             a->pm_segment, WIN_NE_BIOS_VECTOR(v));
+        if (WIN_NE_BIOS_VECTOR(v)) {            /* push vector; jmp near bios (below) */
+            code[pos] = 0x6a;
+            code[pos + 1u] = (uint8_t)v;
+            code[pos + 2u] = 0xe9;
+            continue;
+        }
         code[pos] = 0xbb; /* mov bx,vector */
         put16(code + pos + 1u, (uint16_t)v);
         code[pos + 3u] = 0xe9; /* jmp near common */
@@ -270,8 +276,19 @@ int win_ne_fault_make(uint8_t idt[WIN_NE_FAULT_IDT_BYTES],
     b8(&e, 0xb8); b16(&e, WINX86_BRIDGE_FAULT);
     b8(&e, 0xef);                          /* OUT, from RM */
     b8(&e, 0xeb); b8(&e, 0xfe);            /* no return */
+    /* the BIOS interrupts (PM, ring 0): as INT 21h's, the vector above AX */
+    size_t bios = e.n;
+    b8(&e, 0x50);                              /* push ax */
+    b8(&e, 0xb8); b16(&e, WIN_NE_SERVICE_BIOS);  /* mov ax,service */
+    b8(&e, 0x9a); b16(&e, WIN_NE_BOOT_GATEWAY_OFFSET); /* call far gateway */
+    b16(&e, a->pm_segment);
+    b8(&e, 0x83); b8(&e, 0xc4); b8(&e, 0x04);  /* add sp,4 (AX, the vector) */
+    b8(&e, 0xcf);                              /* iret */
     if (e.overflow || common + e.n > WIN_NE_FAULT_CODE_BYTES)
         return 0;
+    for (unsigned v = 0; v < WIN_NE_FAULT_VECTORS; v++)
+        if (WIN_NE_BIOS_VECTOR(v))
+            put16(code + 6u * v + 3u, (uint16_t)(common + bios - (6u * v + 5u)));
     patch16(&e, rmref, (uint16_t)(WIN_NE_FAULT_CODE_OFFSET -
                                  WIN_NE_BOOT_OFFSET + common + rm));
     memcpy(code + common, e.bytes, e.n);

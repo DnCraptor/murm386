@@ -458,6 +458,7 @@ static uint32_t call_with(win_ne_guest_api_context *ctx, uint32_t proc, const ui
         result = ((uint32_t)cpu->gprx[regcx].r16 << 16) | cpu->gprx[regbx].r16;
     } else if (rc == WINX86_BAD_SERVICE) {
         ctx->dead = 1;                  /* a call WINN has not, in the procedure */
+        ctx->dead_call = 1;
     }
     restore_cpu(cpu, &here);
     guest_put16(tss + 2u, sp0);
@@ -586,7 +587,11 @@ static int execute(win_ne_guest_image *gp, const char *path, const char *cmdline
 
     const uint32_t result = ((uint32_t)cpu->gprx[regcx].r16 << 16) |
                              cpu->gprx[regbx].r16;
-    int guest_fault = rc == WINX86_FAULT || api.dead;
+    /* a call WINN has not (or refused) in a procedure it called: as one
+     * of the program's own, not a fault */
+    if (rc != WINX86_FAULT && api.dead_call)
+        rc = WINX86_BAD_SERVICE;
+    int guest_fault = rc == WINX86_FAULT || (api.dead && !api.dead_call);
     if (rc == WINX86_FAULT)
         fault_where(gp, &run.gate, cpu, &r->fault);
     else if (api.dead)

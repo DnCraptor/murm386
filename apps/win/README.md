@@ -87,6 +87,15 @@ block). LocalReAlloc keeps a block where it is when what follows it is
 free, its bytes whether moved or not. A dialog template's menu, or its
 class's, is the dialog's (a dialog as a program's main window).
 
+The BIOS's software interrupts a program calls itself (INT 10h, 11h, 12h,
+16h, 1Ah) are answered as Windows' DOS extender would: VGA, colour (the
+display combination, EGA's information, the mode), the equipment, 640K,
+the keyboard's shift state (no keys come this way), the clock (ticks, the
+RTC's time and date); nothing is set. INT 21h 66h gives or sets DOS's code
+page (DOS's own; 866 on the host). A call WINN has not, or refuses, in a
+procedure WINN called (a window's, a dialog's) is named as one in the
+program's own code is, not a fault.
+
 Windows' own DLLs WINN has (`core/ne_guest_sys.c`): MMSYSTEM with no
 devices (none of each kind: wave, MIDI, aux, joysticks, mixers; their
 opens fail, MCI has none, sndPlaySound and PlaySound play nothing), the

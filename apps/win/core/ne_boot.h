@@ -100,6 +100,13 @@
  * then the guest goes on where it was. */
 #define WIN_NE_YIELD_VECTOR      (WIN_NE_FAULT_VECTORS - 1u)
 #define WIN_NE_SERVICE_YIELD     0x2200u
+/* The BIOS's software interrupts a program may call (10h, 11h, 12h, 16h,
+ * 1Ah: vectors no CPU exception of WINN's guests uses): their gates DPL 3,
+ * the vector pushed, then as INT 21h with this service; the frame: AX, the
+ * vector, IP, CS, FLAGS. */
+#define WIN_NE_SERVICE_BIOS      0x2300u
+#define WIN_NE_BIOS_VECTOR(v)    ((v) == 0x10u || (v) == 0x11u || (v) == 0x12u || \
+                                  (v) == 0x16u || (v) == 0x1au)
 
 
 typedef struct {

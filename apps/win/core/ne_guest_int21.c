@@ -204,6 +204,70 @@ static __attribute__((noinline)) int paths(win_ne_guest_api_context *ctx, ne_use
     return 0;
 }
 
+static uint8_t bcd(unsigned v) { return (uint8_t)((v / 10u % 10u) << 4 | v % 10u); }
+
+void win_ne_bios(win_ne_guest_api_context *ctx, unsigned vector, win_ne_dos_regs *r)
+{
+    (void)ctx;
+    uint8_t ah = (uint8_t)(r->ax >> 8), al = (uint8_t)r->ax;
+    switch (vector) {
+    case 0x10:                          /* video: VGA's answers, nothing set */
+        if (ah == 0x0f)                 /* the mode: 12h, 80 columns, page 0 */
+            r->ax = 0x5012, r->bx &= 0x00ffu;
+        else if (r->ax == 0x1a00)       /* the display combination: VGA, colour */
+            r->ax = 0x001a, r->bx = 0x0008;
+        else if (ah == 0x12 && (r->bx & 0xff) == 0x10)  /* EGA's: colour, 256K */
+            r->bx = 0x0003, r->cx = 0x0009;
+        break;
+    case 0x11:                          /* the equipment: the coprocessor, 80x25 colour */
+        r->ax = 0x0022;
+        break;
+    case 0x12:                          /* conventional memory: 640K */
+        r->ax = 640;
+        break;
+    case 0x16:                          /* the keyboard: the program has its messages */
+        if (ah == 0x00 || ah == 0x10) { /* a key: none comes this way */
+            r->ax = 0;
+        } else if (ah == 0x01 || ah == 0x11) {  /* none waiting */
+            r->zero = 1;
+        } else if (ah == 0x02 || ah == 0x12) {  /* the shift keys' state */
+            uint8_t s = 0;
+            if (GetKeyState(VK_SHIFT) < 0) s |= 0x02;
+            if (GetKeyState(VK_CONTROL) < 0) s |= 0x04;
+            if (GetKeyState(VK_MENU) < 0) s |= 0x08;
+            if (GetKeyState(VK_SCROLL) & 1) s |= 0x10;
+            if (GetKeyState(VK_NUMLOCK) & 1) s |= 0x20;
+            if (GetKeyState(VK_CAPITAL) & 1) s |= 0x40;
+            r->ax = (uint16_t)((r->ax & 0xff00u) | s);
+        }
+        break;
+    case 0x1a: {                        /* the clock */
+        SYSTEMTIME_N t;
+        GetLocalTimeN(&t);
+        if (ah == 0x00) {               /* ticks since midnight, 18.2 a second */
+            uint32_t ms = ((t.wHour * 60u + t.wMinute) * 60u + t.wSecond) * 1000u +
+                          t.wMilliseconds;
+            uint32_t ticks = (uint32_t)((uint64_t)ms * 1193180u / 65536000u);
+            r->cx = (uint16_t)(ticks >> 16);
+            r->dx = (uint16_t)ticks;
+            r->ax = (uint16_t)(r->ax & 0xff00u);
+        } else if (ah == 0x02) {        /* the RTC's time, BCD */
+            r->cx = (uint16_t)(bcd(t.wHour) << 8 | bcd(t.wMinute));
+            r->dx = (uint16_t)(bcd(t.wSecond) << 8);
+            r->carry = 0;
+        } else if (ah == 0x04) {        /* the RTC's date, BCD */
+            r->cx = (uint16_t)(bcd(t.wYear / 100u) << 8 | bcd(t.wYear % 100u));
+            r->dx = (uint16_t)(bcd(t.wMonth) << 8 | bcd(t.wDay));
+            r->carry = 0;
+        }
+        break;
+    }
+    default:
+        break;
+    }
+    (void)al;
+}
+
 int win_ne_dos(win_ne_guest_api_context *ctx, win_ne_dos_regs *r)
 {
     ne_user *u = ctx ? (ne_user *)ctx->user : NULL;
@@ -324,6 +388,16 @@ int win_ne_dos(win_ne_guest_api_context *ctx, win_ne_dos_regs *r)
         r->bx = 0x0d01;                 /* class "not found"/action retry */
         r->cx = (uint16_t)(r->cx & 0xff) | 0x0200;     /* locus: block device */
         return 1;
+    case 0x66: {                        /* code pages: AL 1 get (BX, DX), 2 set (BX) */
+        UINT active = r->bx, system = 0;
+        if ((al != 1 && al != 2) || !win_file_codepage(al == 2, &active, &system))
+            return fail(u, r, al != 1 && al != 2 ? E_FUNCTION : 0x25);
+        if (al == 1) {
+            r->bx = (uint16_t)active;
+            r->dx = (uint16_t)system;
+        }
+        return ok(r);
+    }
     case 0x67:                          /* the number of handles: as it is */
         return ok(r);
     case 0x68:                          /* commit: written already */

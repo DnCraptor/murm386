@@ -69,8 +69,18 @@ int main(void)
         assert(r16(idt+v*8)==(v==WIN_NE_YIELD_VECTOR ? WIN_NE_YIELD_OFFSET :
                               WIN_NE_FAULT_CODE_OFFSET+pos));
         assert(r16(idt+v*8+2)==a.pm_segment);
-        assert(idt[v*8+4]==0 && idt[v*8+5]==0x86);  /* DPL 0: no INT n from ring 3 */
         assert(r16(idt+v*8+6)==0);
+        if (WIN_NE_BIOS_VECTOR(v)) {        /* DPL 3: push vector; jmp the BIOS stub */
+            assert(idt[v*8+4]==0 && idt[v*8+5]==0xe6);
+            assert(code[pos]==0x6a && code[pos+1]==v && code[pos+2]==0xe9);
+            unsigned to=pos+5+r16(code+pos+3);
+            const uint8_t bios[]={0x50,0xb8,WIN_NE_SERVICE_BIOS&255,WIN_NE_SERVICE_BIOS>>8,0x9a,
+                                  WIN_NE_BOOT_GATEWAY_OFFSET&255,WIN_NE_BOOT_GATEWAY_OFFSET>>8,
+                                  8,0,0x83,0xc4,0x04,0xcf};
+            assert(to+sizeof(bios)<=WIN_NE_FAULT_CODE_BYTES && !memcmp(code+to,bios,sizeof(bios)));
+            continue;
+        }
+        assert(idt[v*8+4]==0 && idt[v*8+5]==0x86);  /* DPL 0: no INT n from ring 3 */
         assert(code[pos]==0xbb && r16(code+pos+1)==v);
         assert(code[pos+3]==0xe9 && r16(code+pos+4)==
                WIN_NE_FAULT_VECTORS*6-(pos+6));

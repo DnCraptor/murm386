@@ -36,6 +36,7 @@ typedef struct {
                              * nonzero: it is to end (stopped) */
     int stopped;
     int dead;               /* faulted in a callback (fault) */
+    int dead_call;          /* ... or called there what WINN has not, or refused */
     win_ne_fault fault;
     void *exec;             /* ne_exec's, for callbacks */
     void *user;             /* ne_guest_user's: classes, paints */
@@ -54,10 +55,16 @@ int win_ne_guest_api(void *opaque, win_ne_regs *cpu, uint16_t service);
 typedef struct {
     uint16_t ax, bx, cx, dx, si, di, ds, es;
     int carry;
+    int zero;               /* the BIOS's: ZF (INT 16h's "no key") */
 } win_ne_dos_regs;
 /* The DOS functions (ne_guest_int21.c; without it, none): 1 when done,
  * 0 when WINN does not have it. 30h and 4Ch are the gateway's own. */
 int win_ne_dos(win_ne_guest_api_context *ctx, win_ne_dos_regs *r);
+/* The BIOS's software interrupts (10h, 11h, 12h, 16h, 1Ah) as Windows'
+ * DOS extender answers them for a program: the video and equipment
+ * questions, the keyboard's state, the clock; those it has not leave the
+ * registers as they were (ne_guest_int21.c; without it, all of them). */
+void win_ne_bios(win_ne_guest_api_context *ctx, unsigned vector, win_ne_dos_regs *r);
 
 /* The window and GDI services (ne_guest_user.c; without it, as in the
  * tests of the rest, there are none): 1 with the result in value (dword:

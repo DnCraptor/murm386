@@ -249,6 +249,35 @@ static int int21(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint32_t *valu
     return 1;
 }
 
+/* The BIOS interrupts: AX, the vector, then the interrupt's IP, CS, FLAGS
+ * above the gateway's return address; CF and ZF the results' too */
+static int bios(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint32_t *value)
+{
+    win_ne_dos_regs r, in;
+    uint16_t vector, flags;
+    memset(&r, 0, sizeof(r));
+    if (!frame_get(ctx, cpu, FR_AX, &r.ax) || !frame_get(ctx, cpu, 2, &vector) ||
+        !frame_get(ctx, cpu, FR_BX, &r.bx) || !frame_get(ctx, cpu, FR_CX, &r.cx) ||
+        !frame_get(ctx, cpu, FR_DX, &r.dx) || !frame_get(ctx, cpu, FR_SI, &r.si) ||
+        !frame_get(ctx, cpu, FR_DI, &r.di) || !frame_get(ctx, cpu, FR_DS, &r.ds) ||
+        !frame_get(ctx, cpu, FR_ES, &r.es) || !frame_get(ctx, cpu, FR_FLAGS + 2, &flags))
+        return 0;
+    r.carry = flags & 1u;
+    r.zero = (flags & 0x40u) != 0;
+    in = r;
+    win_ne_bios(ctx, vector, &r);
+    flags = (uint16_t)((flags & ~0x41u) | (r.carry ? 1u : 0u) | (r.zero ? 0x40u : 0u));
+    if ((r.bx != in.bx && !frame_set(ctx, cpu, FR_BX, r.bx)) ||
+        (r.cx != in.cx && !frame_set(ctx, cpu, FR_CX, r.cx)) ||
+        (r.si != in.si && !frame_set(ctx, cpu, FR_SI, r.si)) ||
+        (r.di != in.di && !frame_set(ctx, cpu, FR_DI, r.di)) ||
+        (r.es != in.es && !frame_set(ctx, cpu, FR_ES, r.es)) ||
+        !frame_set(ctx, cpu, FR_FLAGS + 2, flags))
+        return 0;
+    *value = ((uint32_t)r.dx << 16) | r.ax;
+    return 1;
+}
+
 /* Catch and Throw. Called through the API gate: the frame starts with the
  * caller's SP and SS (ring 3), the gateway's registers below it. A
  * CATCHBUF: Catch's return address (IP, CS), the SP after its return, BP,
@@ -318,6 +347,11 @@ __attribute__((weak)) int win_ne_dos(win_ne_guest_api_context *ctx, win_ne_dos_r
     return 0;
 }
 __attribute__((weak)) void win_ne_user_end(win_ne_guest_api_context *ctx) { (void)ctx; }
+__attribute__((weak)) void win_ne_bios(win_ne_guest_api_context *ctx, unsigned vector,
+                                       win_ne_dos_regs *r)
+{
+    (void)ctx; (void)vector; (void)r;
+}
 
 int win_ne_read(win_ne_guest_api_context *ctx, uint16_t sel, uint32_t off, void *dst, uint32_t n)
 {
@@ -438,6 +472,11 @@ int win_ne_guest_api(void *opaque, win_ne_regs *cpu, uint16_t service)
         dword = 1;
         break;
     }
+    case WIN_NE_SERVICE_BIOS:
+        if (!bios(ctx, cpu, &value))
+            return 0;
+        dword = 1;
+        break;
     case WIN_NE_SERVICE_INT21: {
         int r = int21(ctx, cpu, &value);
         if (r != 1)

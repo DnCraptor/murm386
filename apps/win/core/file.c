@@ -731,6 +731,31 @@ BOOL win_file_time(HFILE f, int set, WORD *date, WORD *time_)
 /* The DOS environment WINN.EXE got ("NAME=value" strings, each with its
  * NUL, and an empty one at the end) into buf; its bytes, 0 if it does not
  * fit. */
+/* DOS's code pages (INT 21h 66h): the active one and the system's (set:
+ * the active one made *active); 0 if DOS has none (no NLSFUNC, an older
+ * DOS) */
+int win_file_codepage(int set, UINT *active, UINT *system)
+{
+#ifdef FILE_HOST
+    if (set)
+        return *active == 866;
+    *active = *system = 866;            /* WINN's OEM glyphs' */
+    return 1;
+#else
+    union REGS r = { 0 };
+    r.w.ax = set ? 0x6602 : 0x6601;
+    r.w.bx = set ? (uint16_t)*active : 0;
+    int386(0x21, &r, &r);
+    if (r.w.cflag)
+        return 0;
+    if (!set) {
+        *active = r.w.bx;
+        *system = r.w.dx;
+    }
+    return 1;
+#endif
+}
+
 int win_file_environment(char *buf, int size)
 {
     if (!buf || size < 2)
