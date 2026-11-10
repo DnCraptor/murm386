@@ -8,6 +8,7 @@
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "ne_guest.h"
@@ -37,6 +38,8 @@ _Static_assert(WIN_NE_RING0_OFFSET + WIN_NE_RING0_BYTES <= WIN_NE_THUNK_SEGMENT_
  * gates, the TSS, the ring 0 area, the BIOS data (KERNEL's __0040H) */
 #define GDT_EXTRA(g) ((uint32_t)(g)->info.segment_count + 3u + WIN_NE_GUEST_GLOBALS)
 #define GDT_EXTRAS 7u
+/* then the DLLs' segments */
+#define GDT_DLL(g) (GDT_EXTRA(g) + GDT_EXTRAS)
 
 static void put16(uint8_t *p, uint16_t v)
 {
@@ -111,6 +114,9 @@ void win_ne_guest_release(win_ne_guest_image *image)
         for (unsigned i = 0; i < WIN_NE_GUEST_GLOBALS; i++)
             if (image->globals[i].linear)
                 image->io.free(image->opaque, image->globals[i].linear);
+        for (unsigned i = 0; i < WIN_NE_GUEST_DLL_SEGMENTS; i++)
+            if (image->dll_segments[i].linear)
+                image->io.free(image->opaque, image->dll_segments[i].linear);
     }
     free(image->segments);
     free(image->gdt);
@@ -131,10 +137,33 @@ static int guest_alloc(win_ne_guest_image *g, uint32_t bytes, uint32_t *linear)
     return 1;
 }
 
+/* what loading a module (the program: dll -1; a DLL) has at hand */
+typedef struct {
+    win_ne_guest_image *g;
+    int dll;
+    int depth;                          /* DLLs loading DLLs */
+} load_ctx;
+
 static int assign_selector(void *opaque, uint16_t index, uint16_t flags,
                            uint32_t bytes, uint16_t *selector)
 {
-    win_ne_guest_image *g = (win_ne_guest_image *)opaque;
+    load_ctx *lc = (load_ctx *)opaque;
+    win_ne_guest_image *g = lc->g;
+    if (lc->dll >= 0) {                 /* a DLL's: from the pool after the extras */
+        win_ne_guest_dll *d = &g->dlls[lc->dll];
+        if (!index || index > d->count || !bytes || bytes > 65536u)
+            return 0;
+        unsigned k = d->first + index - 1u;
+        win_ne_guest_segment *s = &g->dll_segments[k];
+        if (s->linear || !guest_alloc(g, bytes, &s->linear))
+            return 0;
+        s->size = bytes;
+        s->flags = flags;
+        s->selector = (uint16_t)((GDT_DLL(g) + k) * GDT_ENTRY_BYTES | 3u);
+        *selector = s->selector;
+        descriptor(g->gdt + (s->selector & ~7u), s->linear, s->size, !(flags & 1u));
+        return 1;
+    }
     if (!index || index > g->info.segment_count || !bytes || bytes > 65536u)
         return 0;
     win_ne_guest_segment *s = &g->segments[index];
@@ -374,6 +403,17 @@ static int generic_index(int module, const win_ne_import *imp)
     return -1;
 }
 
+const char *win_ne_service_name(uint16_t service)
+{
+    for (unsigned i = 0; i < sizeof(services) / sizeof(services[0]); i++)
+        if (module_base[services[i].module] + services[i].ordinal == service)
+            return services[i].name;
+    for (unsigned i = 0; i < sizeof(generic) / sizeof(generic[0]); i++)
+        if (module_base[generic[i].module] + generic[i].ordinal == service)
+            return generic[i].name;
+    return service == WIN_NE_SERVICE_INT21 ? "INT 21h" : NULL;
+}
+
 const char *win_ne_generic_sig(uint16_t service)
 {
     for (unsigned i = 0; i < sizeof(generic) / sizeof(generic[0]); i++)
@@ -464,12 +504,37 @@ static int constant_of(const win_ne_guest_image *g, const win_ne_import *imp, ui
     return 0;
 }
 
+static int locate_dll(const char *program, const char *module, char *out, size_t cap);
+static int dll_has(const char *dll, uint16_t ordinal, const char *name);
+static void module_stem(const char *module, char *out, size_t cap);
+
+typedef struct {
+    win_ne_unresolved *u;
+    const char *path;
+    int depth;
+    char checked[16];                   /* the DLL last looked into */
+} scan_ctx;
+
 static int note_unresolved(void *opaque, const win_ne_import *imp)
 {
     uint16_t id;
+    scan_ctx *sc = (scan_ctx *)opaque;
+    char dll[160];
     if (service_id(imp, &id) || constant_of(NULL, imp, &id))
         return 0;
-    win_ne_unresolved *u = (win_ne_unresolved *)opaque;
+    if (module_of(imp) < 0 && locate_dll(sc->path, imp->module, dll, sizeof(dll)) &&
+        dll_has(dll, imp->ordinal, imp->procedure[0] ? imp->procedure : NULL)) {
+        /* its DLL has it; and what the DLL needs? */
+        char base[16];
+        module_stem(imp->module, base, sizeof(base));
+        if (sc->depth >= 3 || !strcmp(sc->checked, base))
+            return 0;
+        lstrcpy_n(sc->checked, base, sizeof(sc->checked));
+        win_ne_info info;
+        scan_ctx inner = { sc->u, dll, sc->depth + 1, "" };
+        return win_ne_scan(dll, &info, note_unresolved, &inner) == WIN_NE_CANCELLED;
+    }
+    win_ne_unresolved *u = sc->u;
     size_t n = strlen(imp->module);
     if (n >= sizeof(u->module))
         n = sizeof(u->module) - 1;
@@ -488,17 +553,28 @@ int win_ne_guest_unresolved(const char *path, win_ne_unresolved *u)
 {
     memset(u, 0, sizeof(*u));
     win_ne_info info;
-    return win_ne_scan(path, &info, note_unresolved, u) == WIN_NE_CANCELLED;
+    scan_ctx sc = { u, path, 0, "" };
+    return win_ne_scan(path, &info, note_unresolved, &sc) == WIN_NE_CANCELLED;
 }
+
+static int load_dll(win_ne_guest_image *g, const char *module, int depth);
+static int dll_export(win_ne_guest_image *g, int dll, uint16_t ordinal, const char *name,
+                      uint16_t *selector, uint16_t *offset);
 
 static int resolve_import(void *opaque, const win_ne_import *imp,
                           uint16_t *selector, uint16_t *offset)
 {
-    win_ne_guest_image *g = (win_ne_guest_image *)opaque;
+    load_ctx *lc = (load_ctx *)opaque;
+    win_ne_guest_image *g = lc->g;
     uint16_t id;
     if (constant_of(g, imp, &id)) {
         *selector = *offset = id;
         return 1;
+    }
+    if (module_of(imp) < 0) {           /* a DLL's */
+        int d = load_dll(g, imp->module, lc->depth);
+        return d >= 0 && dll_export(g, d, imp->ordinal,
+                                    imp->procedure[0] ? imp->procedure : NULL, selector, offset);
     }
     if (!service_id(imp, &id))
         return 0;
@@ -556,7 +632,8 @@ uint32_t win_ne_guest_proc(win_ne_guest_image *g, unsigned module, uint16_t ordi
     if (constant_of(g, &imp, &id) || !service_id(&imp, &id))
         return 0;
     uint16_t before = g->thunk_count;
-    if (!resolve_import(g, &imp, &sel, &off))
+    load_ctx lc = { g, -1, 0 };
+    if (!resolve_import(&lc, &imp, &sel, &off))
         return 0;
     if (g->thunk_count != before) {         /* a new one: written now */
         uint8_t p[THUNK_BYTES];
@@ -602,8 +679,8 @@ int win_ne_guest_load(const char *path, win_ne_guest_image *out,
     out->segments = (win_ne_guest_segment *)calloc((size_t)info.segment_count + 1u,
                                                     sizeof(*out->segments));
     /* null, thunks, the segments, the PSP, the global blocks, the extras */
-    uint32_t gdtsize = ((uint32_t)info.segment_count + 3u + WIN_NE_GUEST_GLOBALS + GDT_EXTRAS) *
-                       GDT_ENTRY_BYTES;
+    uint32_t gdtsize = ((uint32_t)info.segment_count + 3u + WIN_NE_GUEST_GLOBALS + GDT_EXTRAS +
+                        WIN_NE_GUEST_DLL_SEGMENTS) * GDT_ENTRY_BYTES;
     out->gdt = (uint8_t *)calloc(gdtsize, 1);
     rc = WIN_NE_NO_MEMORY;
     if (!out->segments || !out->gdt)
@@ -639,9 +716,10 @@ int win_ne_guest_load(const char *path, win_ne_guest_image *out,
     out->psp.flags = 1;                 /* data */
     descriptor(out->gdt + (out->psp.selector & ~7u), out->psp.linear, WIN_NE_GUEST_PSP_BYTES, 0);
 
+    lstrcpy_n(out->path, path, sizeof(out->path));
     win_ne_image image;
-    rc = win_ne_load_image(path, &image, assign_selector,
-                           resolve_import, out);
+    load_ctx lc = { out, -1, 0 };
+    rc = win_ne_load_image(path, &image, assign_selector, resolve_import, &lc);
     if (rc)
         goto fail;
 
@@ -785,15 +863,6 @@ int win_ne_guest_global_realloc(win_ne_guest_image *g, uint16_t sel, uint32_t by
     return resize(g, win_ne_guest_global(g, sel), bytes, read);
 }
 
-int win_ne_guest_segment_grow(win_ne_guest_image *g, uint16_t index, uint32_t bytes,
-                              int (*read)(void *, uint32_t, void *, uint32_t))
-{
-    if (!index || index > g->info.segment_count || !(g->segments[index].flags & 1u) ||
-        bytes < g->segments[index].size)
-        return 0;
-    return bytes == g->segments[index].size || resize(g, &g->segments[index], bytes, read);
-}
-
 int win_ne_guest_global_free(win_ne_guest_image *g, uint16_t sel)
 {
     win_ne_guest_segment *s = win_ne_guest_global(g, sel);
@@ -808,4 +877,252 @@ int win_ne_guest_global_free(win_ne_guest_image *g, uint16_t sel)
     g->io.free(g->opaque, s->linear);
     memset(s, 0, sizeof(*s));
     return 1;
+}
+
+/* ---------------------------------------------------------------- DLLs */
+
+/* where a DLL's file is found: the program's directory, then the one
+ * WINN names (the Windows directory) */
+__attribute__((weak)) const char *win_ne_dll_dir(void)
+{
+    return NULL;
+}
+
+static void module_stem(const char *module, char *out, size_t cap)
+{
+    const char *b = module;
+    for (const char *p = module; *p; p++)
+        if (*p == '\\' || *p == '/' || *p == ':')
+            b = p + 1;
+    size_t n = 0;
+    while (b[n] && b[n] != '.' && n + 1 < cap) {
+        char c = b[n];
+        out[n++] = c >= 'a' && c <= 'z' ? (char)(c - 32) : c;
+    }
+    out[n] = 0;
+}
+
+static int file_exists(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (f)
+        fclose(f);
+    return f != NULL;
+}
+
+static int locate_dll(const char *program, const char *module, char *out, size_t cap)
+{
+    char base[16], name[24];
+    module_stem(module, base, sizeof(base));
+    if (!base[0])
+        return 0;
+    const char *dot = NULL;
+    for (const char *p = module; *p; p++)
+        if (*p == '.')
+            dot = p;
+    const char *ext = dot ? dot : ".DLL";
+    if (strlen(base) + strlen(ext) >= sizeof(name))
+        return 0;
+    strcpy(name, base);
+    strcat(name, ext);
+    const char *dirs[2] = { program, win_ne_dll_dir() };
+    for (int i = 0; i < 2; i++) {
+        if (!dirs[i])
+            continue;
+        size_t n = strlen(dirs[i]);
+        if (i == 0)                     /* the program's: its path up to the name */
+            while (n && dirs[i][n - 1] != '\\' && dirs[i][n - 1] != '/' && dirs[i][n - 1] != ':')
+                n--;
+        if (n + strlen(name) + 2 > cap)
+            continue;
+        memcpy(out, dirs[i], n);
+        if (i == 1 && n && out[n - 1] != '\\' && out[n - 1] != '/')
+            out[n++] = dirs[i][0] && strchr(dirs[i], '\\') ? '\\' : '/';
+        strcpy(out + n, name);
+        if (file_exists(out))
+            return 1;
+    }
+    return 0;
+}
+
+static int dll_has(const char *dll, uint16_t ordinal, const char *name)
+{
+    uint8_t flags;
+    uint16_t seg, off;
+    if (name)
+        ordinal = win_ne_ordinal(dll, name);
+    return ordinal && win_ne_entry(dll, ordinal, &flags, &seg, &off) == WIN_NE_OK;
+}
+
+static int dll_export(win_ne_guest_image *g, int dll, uint16_t ordinal, const char *name,
+                      uint16_t *selector, uint16_t *offset)
+{
+    const win_ne_guest_dll *d = &g->dlls[dll];
+    uint8_t flags;
+    uint16_t seg, off;
+    if (name)
+        ordinal = win_ne_ordinal(d->path, name);
+    if (!ordinal || win_ne_entry(d->path, ordinal, &flags, &seg, &off) != WIN_NE_OK ||
+        !seg || seg > d->count)
+        return 0;
+    *selector = g->dll_segments[d->first + seg - 1u].selector;
+    *offset = off;
+    return 1;
+}
+
+/* An exported procedure of a DLL starts by taking DS for its own (PUSH DS;
+ * POP AX or MOV AX,DS; NOP); its caller's is not: as Windows does, its
+ * DGROUP goes there (MOV AX,DGROUP) */
+static void patch_exports(win_ne_guest_image *g, int dll, win_ne_image *image)
+{
+    const win_ne_guest_dll *d = &g->dlls[dll];
+    if (!d->auto_data)
+        return;
+    uint16_t dgroup = g->dll_segments[d->first + d->auto_data - 1u].selector;
+    for (uint16_t o = 1; o < 1024; o++) {
+        uint8_t flags;
+        uint16_t seg, off;
+        int rc = win_ne_entry(d->path, o, &flags, &seg, &off);
+        if (rc == WIN_NE_CANCELLED)
+            break;
+        if (rc != WIN_NE_OK || !(flags & 1) || !seg || seg > d->count ||
+            (image->segments[seg].flags & 1u) || off + 3u > image->segments[seg].size)
+            continue;
+        uint8_t *p = image->segments[seg].data + off;
+        if ((p[0] == 0x1e && p[1] == 0x58 && p[2] == 0x90) ||
+            (p[0] == 0x8c && p[1] == 0xd8 && p[2] == 0x90)) {
+            p[0] = 0xb8;
+            put16(p + 1, dgroup);
+        }
+    }
+}
+
+static int load_dll(win_ne_guest_image *g, const char *module, int depth)
+{
+    char base[16], path[160];
+    module_stem(module, base, sizeof(base));
+    for (int i = 0; i < g->dll_count; i++)
+        if (!strcmp(g->dlls[i].name, base))
+            return g->dlls[i].count ? i : -1;
+    win_ne_info info;
+    if (depth > 4 || g->dll_count >= WIN_NE_GUEST_DLLS || strlen(base) > 8 ||
+        !locate_dll(g->path, module, path, sizeof(path)) ||
+        win_ne_scan(path, &info, NULL, NULL) || !(info.module_flags & 0x8000u) ||
+        info.target_os != 2u ||
+        info.segment_count > WIN_NE_GUEST_DLL_SEGMENTS - g->dll_segment_count)
+        return -1;
+    int i = g->dll_count++;
+    win_ne_guest_dll *d = &g->dlls[i];
+    memset(d, 0, sizeof(*d));
+    strcpy(d->name, base);
+    lstrcpy_n(d->path, path, sizeof(d->path));
+    d->first = g->dll_segment_count;
+    d->count = info.segment_count;
+    d->auto_data = info.auto_data;
+    d->heap_size = info.heap_size;
+    g->dll_segment_count = (uint16_t)(g->dll_segment_count + info.segment_count);
+    win_ne_image image;
+    load_ctx lc = { g, i, depth + 1 };
+    int rc = win_ne_load_image(path, &image, assign_selector, resolve_import, &lc);
+    if (!rc) {
+        patch_exports(g, i, &image);
+        for (uint16_t k = 1; !rc && k <= d->count; k++) {
+            const win_ne_guest_segment *s = &g->dll_segments[d->first + k - 1u];
+            if (!g->io.write(g->opaque, s->linear, image.segments[k].data, s->size))
+                rc = WIN_NE_IO_ERROR;
+        }
+        win_ne_free_image(&image);
+    }
+    if (rc) {                           /* its slots stay, unused */
+        for (uint16_t k = 0; k < d->count; k++) {
+            win_ne_guest_segment *s = &g->dll_segments[d->first + k];
+            if (s->linear)
+                g->io.free(g->opaque, s->linear);
+            memset(s, 0, sizeof(*s));
+        }
+        d->count = 0;
+        return -1;
+    }
+    if (info.cs_index) {
+        d->cs = g->dll_segments[d->first + info.cs_index - 1u].selector;
+        d->ip = info.ip;
+    }
+    d->order = ++g->dll_order;
+    return i;
+}
+
+int win_ne_guest_load_library(win_ne_guest_image *g, const char *name)
+{
+    uint16_t before = g->dll_count;
+    int d = load_dll(g, name, 0);
+    /* new descriptors: into the guest's GDT (and new thunks, made as the
+     * DLLs were resolved) */
+    if (d >= 0 && g->dll_count != before) {
+        if (!g->io.write(g->opaque, g->gdt_linear, g->gdt, (uint32_t)g->gdt_limit + 1u))
+            return -1;
+        for (uint16_t t = 0; t < g->thunk_count; t++) {
+            uint8_t p[THUNK_BYTES];
+            thunk_bytes(g, g->thunk_services[t], p);
+            if (!g->io.write(g->opaque, g->thunk_linear + t * THUNK_BYTES, p, sizeof(p)))
+                return -1;
+        }
+    }
+    return d;
+}
+
+uint32_t win_ne_guest_dll_proc(win_ne_guest_image *g, int dll, uint16_t ordinal,
+                               const char *name)
+{
+    uint16_t sel, off;
+    if (dll < 0 || dll >= g->dll_count || !g->dlls[dll].count ||
+        !dll_export(g, dll, ordinal, name, &sel, &off))
+        return 0;
+    return (uint32_t)sel << 16 | off;
+}
+
+uint16_t win_ne_guest_dll_instance(const win_ne_guest_image *g, int dll)
+{
+    const win_ne_guest_dll *d = &g->dlls[dll];
+    if (!d->count)
+        return 0;
+    return g->dll_segments[d->first + (d->auto_data ? d->auto_data : 1u) - 1u].selector;
+}
+
+int win_ne_guest_dll_of(const win_ne_guest_image *g, uint16_t instance)
+{
+    for (int i = 0; i < g->dll_count; i++) {
+        const win_ne_guest_dll *d = &g->dlls[i];
+        for (uint16_t k = 0; instance && k < d->count; k++)
+            if ((g->dll_segments[d->first + k].selector & ~3u) == (instance & ~3u))
+                return i;
+    }
+    return -1;
+}
+
+const char *win_ne_guest_path_of(const win_ne_guest_image *g, uint16_t instance,
+                                 const char *program)
+{
+    int d = g ? win_ne_guest_dll_of(g, instance) : -1;
+    return d >= 0 ? g->dlls[d].path : program;
+}
+
+win_ne_guest_segment *win_ne_guest_segment_of(win_ne_guest_image *g, uint16_t sel)
+{
+    sel &= (uint16_t)~3u;
+    for (uint16_t i = 1; i <= g->info.segment_count; i++)
+        if ((g->segments[i].selector & ~3u) == sel)
+            return &g->segments[i];
+    for (unsigned i = 0; i < g->dll_segment_count; i++)
+        if (g->dll_segments[i].linear && (g->dll_segments[i].selector & ~3u) == sel)
+            return &g->dll_segments[i];
+    return win_ne_guest_global(g, sel);
+}
+
+int win_ne_guest_grow(win_ne_guest_image *g, uint16_t sel, uint32_t bytes,
+                      int (*read)(void *, uint32_t, void *, uint32_t))
+{
+    win_ne_guest_segment *s = win_ne_guest_segment_of(g, sel);
+    if (!s || !(s->flags & 1u) || bytes < s->size)
+        return 0;
+    return bytes == s->size || resize(g, s, bytes, read);
 }

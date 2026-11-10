@@ -57,6 +57,22 @@ the Program Manager, Alt+Tab and the Task List show, as an EZ
 application's. A class it registers with a native class's procedure
 (`GetClassInfo`: a superclass) works as that class.
 
+A Win16 program's own DLLs (NE libraries) are loaded with it, from its
+directory or the Windows one: those it imports from (by name or ordinal,
+and those they import from in turn) as it is loaded, others when it calls
+`LoadLibrary`, `GetProcAddress` finding their exports. Their segments get
+selectors of the program's own (each program its own copy of a DLL: no
+data shared between programs), the exported procedures' prologue gets
+their DGROUP (`MOV AX,DGROUP`, as Windows patches it), and their entries
+(`LibEntry`: DS their DGROUP, DI their instance, CX their heap's size) are
+called before the program's `InitTask` returns, those they need first.
+`LocalAlloc` and the rest work in the caller's DS's heap (the program's
+DGROUP, or a DLL's, as `LocalInit` makes it); a DLL's instance handle
+finds its resources (strings, menus, dialogs, icons, bitmaps). A DLL
+stays until its program ends (`FreeLibrary` frees nothing); `WEP` is not
+called. A program that needs a DLL which is not there, or a function one
+has not, is named in the message.
+
 The functions a program can call: some 230 go the generic way
 (`core/ne_sigs.h`, made by `sdk/gen_ne_sigs.py` from the native prototypes:
 words, signed words, dwords, strings, buffers with their sizes, RECTs,
@@ -75,8 +91,8 @@ ExtTextOut, GetTextExtentPoint, TabbedTextOut, GetTabbedTextExtent,
 GetTextFace, CreateBitmap(Indirect), Get/SetBitmapBits, GetClassInfo,
 _hread/_hwrite (within one block: a huge pointer's segments are not
 tiled); KERNEL's GetModuleHandle, LoadLibrary and GetProcAddress for the
-modules WINN has (KERNEL, USER, GDI, KEYBOARD, COMMDLG, SHELL: no DLLs of
-its own yet), FindResource, LoadResource, LockResource, SizeofResource,
+modules WINN has (KERNEL, USER, GDI, KEYBOARD, COMMDLG, SHELL) and its own
+DLLs (below), FindResource, LoadResource, LockResource, SizeofResource,
 Catch and Throw, GetTempFileName, GetWinFlags, WinExec, SetErrorMode,
 FatalAppExit and the constants __AHINCR, __AHSHIFT, __WINFLAGS, __0040H
 (the BIOS data, read only); palettes, CreateDC, SetSysColors; the mapping
@@ -110,15 +126,15 @@ generate `NEAPP.EXE`, `NEDIALOG.EXE`, `NELOOP.EXE`, `NEFAULT.EXE`,
 script: `OWHELLO`, `OWBUSY`, `OWWIN`, `OWMENU` (resources), `OWSEGS` (three
 code segments), `OWDEMO` (many functions at once), `OWFILE` and `OWFILEL`
 (DOS through the C library, small and large model), `OWRES` (icons, a
-cursor, bitmaps, text, a superclass), `OWKERN` (KERNEL, COMMDLG, SHELL)
-(`make NEFIXTURES` in
+cursor, bitmaps, text, a superclass), `OWKERN` (KERNEL, COMMDLG, SHELL),
+`OWUSE` with `OWDLL.DLL` and `OWDLL2.DLL` (its DLLs) (`make NEFIXTURES` in
 `host/`). All have DOS MZ stubs that explain how to launch them under WINN
 when invoked directly from DOS. `host/test_ne_run` runs them on the
 emulator's own i386 core (`src/i386.c` as it is, built for the host with
 the stand-ins in `host/x86run/`), and so does the host `winhost`: they are
 in its `HOSTWIN/` (`scripts/owwin.txt`, `scripts/owmenu.txt`,
 `scripts/owdemo.txt`, `scripts/owfile.txt`, `scripts/owres.txt`,
-`scripts/owkern.txt`).
+`scripts/owkern.txt`, `scripts/owdll.txt`).
 
     WINN [:] [program [arguments]]
 
@@ -287,6 +303,7 @@ use `ucontext`):
     ./winhost scripts/owfile.txt PROGMAN     # its C library's DOS calls: files, find, directory, date
     ./winhost scripts/owres.txt PROGMAN      # its icons, cursor, bitmaps; text; a superclass
     ./winhost scripts/owkern.txt PROGMAN     # Catch/Throw, GetProcAddress, Open, Find, ShellAbout
+    ./winhost scripts/owdll.txt PROGMAN      # its DLLs: imports, LoadLibrary, their data, heap, class
     ./winhost scripts/winmine.txt WINMINE    # marks, a lost game, Expert, Best Times
     ./winhost scripts/logo.txt PROGMAN       # the logo (copy the BMPs into HOSTWIN first)
     ./winhost800 scripts/vga800.txt  # the VGA800 driver, built in
@@ -312,4 +329,5 @@ Text is ANSI Windows-1251 and is drawn with the CP866 VGA font.
 ## Not yet
 
 Resources (stage 2 brings the NE loader), printing, `.GRP`
-files (`PROGMAN.INI` holds the groups as text), DLLs (`LoadLibrary`).
+files (`PROGMAN.INI` holds the groups as text), DLLs (`LoadLibrary`) of
+native applications.

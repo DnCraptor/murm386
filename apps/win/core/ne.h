@@ -44,6 +44,7 @@ typedef struct {
     uint16_t heap_size, stack_size;     /* added to it when it is loaded */
     uint32_t fixup_records, import_records;
     uint8_t target_os;
+    uint16_t module_flags;         /* 8000h: a library (DLL) */
 } win_ne_info;
 
 /* This describes one IMPORT fixup record, not each location in its source
@@ -124,6 +125,14 @@ int win_ne_resource(const char *path, uint16_t type, uint16_t id, const char *na
 /* ... the n-th resource of the type (0 the first), as it is in the table */
 int win_ne_resource_nth(const char *path, uint16_t type, int n, uint8_t **data,
                         uint32_t *bytes);
+/* An entry of a module (an exported procedure): by its ordinal, its flags
+ * (1: exported, 2: uses the module's DGROUP) and where it is (a segment
+ * number, an offset). WIN_NE_OK, WIN_NE_UNRESOLVED for an unused ordinal,
+ * WIN_NE_CANCELLED past the last. The ordinal of an exported name (the
+ * resident and the non-resident names, any case), 0 if none. */
+int win_ne_entry(const char *path, uint16_t ordinal, uint8_t *flags, uint16_t *segment,
+                 uint16_t *offset);
+uint16_t win_ne_ordinal(const char *path, const char *name);
 /* The module's description (the first entry of its non-resident names):
  * 1 with it in buf, 0 if there is none */
 int win_ne_description(const char *path, char *buf, uint32_t cap);

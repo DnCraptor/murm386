@@ -48,6 +48,22 @@ typedef struct {
     uint16_t flags;
 } win_ne_guest_segment;
 
+/* A DLL the program imports from (or loads): its module name, its file,
+ * its segments (dll_segments[first ..], count of them), its DGROUP (a
+ * segment number of its own, 0 none), its entry (LibEntry, selector and
+ * offset; cs 0 none) and local heap's size; when it was loaded completely
+ * (its dependencies first: the order its entries are called in), whether
+ * that has been done. */
+#define WIN_NE_GUEST_DLLS 8u
+#define WIN_NE_GUEST_DLL_SEGMENTS 48u
+typedef struct {
+    char name[9];
+    char path[160];
+    uint16_t first, count, auto_data;
+    uint16_t cs, ip, heap_size;
+    uint8_t order, initialized;
+} win_ne_guest_dll;
+
 typedef struct {
     win_ne_info info;
     win_ne_guest_io io;
@@ -71,6 +87,12 @@ typedef struct {
     uint16_t thunk_services[WIN_NE_GUEST_ACTIVE_THUNKS];
     /* Owned host-side descriptor image; copied into guest RAM on success. */
     uint8_t *gdt;
+    char path[160];                 /* the program's file (DLLs are looked for by it) */
+    /* its DLLs, their segments (selectors after the GDT's extras) */
+    win_ne_guest_dll dlls[WIN_NE_GUEST_DLLS];
+    uint16_t dll_count, dll_segment_count;
+    uint8_t dll_order;
+    win_ne_guest_segment dll_segments[WIN_NE_GUEST_DLL_SEGMENTS];
 } win_ne_guest_image;
 
 /* Complete staging is atomic with respect to allocations (all allocated
@@ -104,10 +126,26 @@ int win_ne_guest_global_free(win_ne_guest_image *g, uint16_t sel);
 uint32_t win_ne_guest_proc(win_ne_guest_image *g, unsigned module, uint16_t ordinal,
                            const char *name);
 int win_ne_guest_module(const char *name);
-/* A data segment of the program (index) made bigger, moved as GlobalReAlloc
- * moves a block: DGROUP when its local heap grows. */
-int win_ne_guest_segment_grow(win_ne_guest_image *g, uint16_t index, uint32_t bytes,
-                              int (*read)(void *, uint32_t, void *, uint32_t));
+/* DLLs. LoadLibrary: the DLL's index (loaded now if it was not: its
+ * segments, its descriptors in the guest's GDT, the DLLs it needs), -1 if
+ * it cannot be; its entry is the caller's to call. The far address of one
+ * of its exports (by ordinal, or by name), 0 if none. Its instance handle
+ * (its DGROUP's selector, else its first segment's). The file a module
+ * (an instance handle: the program's, a DLL's) has its resources in. */
+int win_ne_guest_load_library(win_ne_guest_image *g, const char *name);
+uint32_t win_ne_guest_dll_proc(win_ne_guest_image *g, int dll, uint16_t ordinal,
+                               const char *name);
+uint16_t win_ne_guest_dll_instance(const win_ne_guest_image *g, int dll);
+int win_ne_guest_dll_of(const win_ne_guest_image *g, uint16_t instance);
+const char *win_ne_guest_path_of(const win_ne_guest_image *g, uint16_t instance,
+                                 const char *program);
+/* the segment (the program's, its PSP, a global block, a DLL's) a selector
+ * is of, NULL if none; it made bigger (a data segment) */
+win_ne_guest_segment *win_ne_guest_segment_of(win_ne_guest_image *g, uint16_t sel);
+int win_ne_guest_grow(win_ne_guest_image *g, uint16_t sel, uint32_t bytes,
+                      int (*read)(void *, uint32_t, void *, uint32_t));
+/* the name of a service (a Win16 function), NULL if WINN has none */
+const char *win_ne_service_name(uint16_t service);
 win_ne_guest_segment *win_ne_guest_global(win_ne_guest_image *g, uint16_t sel);
 
 /* The marshalling of a generic function (core/ne_sigs.h) by its service

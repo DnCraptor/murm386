@@ -153,7 +153,7 @@ int main(void)
     assert(img.info.segment_count == 1 && img.thunk_count == 1);
     /* null, thunks, the segment, the PSP, the globals, then the ring 3
      * alias of the thunks, three call gates, the TSS, the ring 0 area */
-    assert(img.gdt_limit == 8 * (4 + WIN_NE_GUEST_GLOBALS + 7) - 1 && img.cs == 0x13 && img.ss == 0x13);
+    assert(img.gdt_limit == 8 * (4 + WIN_NE_GUEST_GLOBALS + 7 + WIN_NE_GUEST_DLL_SEGMENTS) - 1 && img.cs == 0x13 && img.ss == 0x13);
     assert(img.ip == 0 && img.sp == 0x40 && img.thunk_selector == 0x08);
     assert(nactive == 4 && img.gdt_linear && img.thunk_linear && img.psp.linear);
     assert(img.psp.selector == 0x1b);

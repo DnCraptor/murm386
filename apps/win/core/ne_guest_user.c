@@ -292,6 +292,13 @@ enum { RT_MENU_ = 4, RT_DIALOG_ = 5, RT_STRING_ = 6, RT_ACCELERATOR_ = 9 };
 
 /* a resource named by a LPCSTR of the program: a number (selector 0) or a
  * name; malloc'd bytes */
+/* the file the module of a->inst (the program, or one of its DLLs) has its
+ * resources in */
+static const char *res_path(args *a)
+{
+    return win_ne_guest_path_of(a->ctx->image, a->inst, a->ctx->path);
+}
+
 static uint8_t *resource(args *a, uint16_t type, uint32_t far, uint32_t *n)
 {
     char name[64];
@@ -299,9 +306,9 @@ static uint8_t *resource(args *a, uint16_t type, uint32_t far, uint32_t *n)
     if (far >> 16) {
         if (!win_ne_string(a->ctx, (uint16_t)(far >> 16), (uint16_t)far, name, sizeof(name)))
             return a->bad = 1, NULL;
-        win_ne_resource(a->ctx->path, type, 0, name, &d, n);
+        win_ne_resource(res_path(a), type, 0, name, &d, n);
     } else {
-        win_ne_resource(a->ctx->path, type, (uint16_t)far, NULL, &d, n);
+        win_ne_resource(res_path(a), type, (uint16_t)far, NULL, &d, n);
     }
     return d;
 }
@@ -374,7 +381,7 @@ static HMENU load_menu_named(args *a, const char *name)
 {
     uint32_t n;
     uint8_t *d = NULL;
-    win_ne_resource(a->ctx->path, RT_MENU_, 0, name, &d, &n);
+    win_ne_resource(res_path(a), RT_MENU_, 0, name, &d, &n);
     if (!d)
         return 0;
     HMENU m = CreateMenu();
@@ -419,6 +426,7 @@ static __attribute__((noinline)) uint16_t load_string(args *a)
     int max = (int16_t)w(a, 4);
     uint32_t buf = dw(a, 6);
     uint16_t id = w(a, 10);
+    a->inst = w(a, 12);
     if (a->bad || max <= 0)
         return 0;
     uint32_t n;
@@ -454,6 +462,7 @@ static __attribute__((noinline)) int dialog_box(args *a, ne_user *u, int modeles
     uint32_t proc = dw(a, 4);
     HWND owner = w(a, 8);
     uint32_t name = dw(a, 10);
+    a->inst = w(a, 14);
     if (a->bad)
         return -1;
     uint32_t n;
@@ -556,8 +565,10 @@ static __attribute__((noinline)) uint16_t load_image(args *a, ne_user *u, uint16
                                       sizeof(name)))
         return a->bad = 1, 0;
     const char *nm = (far >> 16) ? name : NULL;
+    a->inst = inst;
+    const char *path = res_path(a);
     if (service == 0x10af)
-        return win_ne_bitmap(a->ctx->path, id, nm);
+        return win_ne_bitmap(path, id, nm);
     int kind = service == 0x10ad ? 1 : 2, free_slot = -1;
     for (int i = 0; i < NE_IMAGES; i++) {
         if (!u->image[i].h) {
@@ -566,14 +577,17 @@ static __attribute__((noinline)) uint16_t load_image(args *a, ne_user *u, uint16
             continue;
         }
         if (u->image[i].kind == kind && u->image[i].id == (nm ? 0 : id) &&
+            (win_ne_guest_dll_of(a->ctx->image, u->image[i].inst) ==
+             win_ne_guest_dll_of(a->ctx->image, inst)) &&
             !lstrcmpi(u->image[i].name, name))
             return u->image[i].h;
     }
-    HANDLE h = kind == 1 ? win_ne_cursor(a->ctx->path, id, nm) : win_ne_icon(a->ctx->path, id, nm);
+    HANDLE h = kind == 1 ? win_ne_cursor(path, id, nm) : win_ne_icon(path, id, nm);
     if (h && free_slot >= 0) {
         u->image[free_slot].h = h;
         u->image[free_slot].kind = (uint8_t)kind;
         u->image[free_slot].id = nm ? 0 : id;
+        u->image[free_slot].inst = inst;
         lstrcpyn(u->image[free_slot].name, name, sizeof(u->image[free_slot].name));
     }
     return h;
@@ -612,7 +626,7 @@ int win_ne_guest_user(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint16_t 
     ne_user *u = ctx ? (ne_user *)ctx->user : NULL;
     if (!u)
         return 0;
-    args a = { ctx, cpu, 0 };
+    args a = { ctx, cpu, 0, 0 };
     uint32_t v = 0;
     switch (service) {
     case 0x1006:                        /* PostQuitMessage(int) */
@@ -737,12 +751,14 @@ int win_ne_guest_user(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint16_t 
         break;
     }
     case 0x1096:                        /* LoadMenu(HINSTANCE, LPCSTR) */
+        a.inst = w(&a, 8);
         v = load_menu(&a, dw(&a, 4));
         break;
     case 0x10b0:                        /* LoadString(HINSTANCE, UINT, LPSTR, int) */
         v = load_string(&a);
         break;
     case 0x10b1:                        /* LoadAccelerators(HINSTANCE, LPCSTR) */
+        a.inst = w(&a, 8);
         v = load_accelerators(&a, u, dw(&a, 4));
         break;
     case 0x10b2: {                      /* TranslateAccelerator(HWND, HACCEL, LPMSG) */

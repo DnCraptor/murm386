@@ -97,7 +97,18 @@ static uint16_t module_handle(args *a, uint32_t far)
     int m = win_ne_guest_module(name);
     if (m >= 0)
         return MODULE_HANDLE(m);
-    return own_module(a, name) ? dgroup(a->ctx) : 0;
+    if (own_module(a, name))
+        return dgroup(a->ctx);
+    const win_ne_guest_image *g = a->ctx->image;      /* a DLL it has loaded */
+    char base[16];
+    lstrcpyn(base, name, sizeof(base));
+    char *dot = strchr(base, '.');
+    if (dot)
+        *dot = 0;
+    for (int i = 0; i < g->dll_count; i++)
+        if (g->dlls[i].count && !lstrcmpi(g->dlls[i].name, base))
+            return win_ne_guest_dll_instance(g, i);
+    return 0;
 }
 
 /* a resource the program found: its type and its number or name */
@@ -109,7 +120,8 @@ static int resource_index(ne_user *u, uint16_t h)
 
 static int resource_bytes(args *a, ne_user *u, int i, uint8_t **d, uint32_t *n)
 {
-    return win_ne_resource(a->ctx->path, u->res[i].type, u->res[i].id,
+    return win_ne_resource(win_ne_guest_path_of(a->ctx->image, u->res[i].inst, a->ctx->path),
+                           u->res[i].type, u->res[i].id,
                            u->res[i].name[0] ? u->res[i].name : NULL, d, n) == WIN_NE_OK;
 }
 
@@ -118,6 +130,8 @@ static int resource_bytes(args *a, ne_user *u, int i, uint8_t **d, uint32_t *n)
 static uint16_t find_resource(args *a, ne_user *u)
 {
     uint32_t type_far = dw(a, 4), name_far = dw(a, 8);
+    uint16_t inst = w(a, 12);
+    const char *path = win_ne_guest_path_of(a->ctx->image, inst, a->ctx->path);
     char name[32], type[16];
     uint16_t t = (uint16_t)type_far, id = (uint16_t)name_far;
     if (a->bad)
@@ -138,18 +152,20 @@ static uint16_t find_resource(args *a, ne_user *u)
             if (free_slot < 0)
                 free_slot = i;
         } else if (u->res[i].type == t && u->res[i].id == (name[0] ? 0 : id) &&
-                   !lstrcmpi(u->res[i].name, name)) {
+                   !lstrcmpi(u->res[i].name, name) &&
+                   win_ne_guest_path_of(a->ctx->image, u->res[i].inst, a->ctx->path) == path) {
             return RESOURCE_HANDLE(i);
         }
     }
     uint8_t *d;
     uint32_t n;
-    if (free_slot < 0 || win_ne_resource(a->ctx->path, t, name[0] ? 0 : id,
+    if (free_slot < 0 || win_ne_resource(path, t, name[0] ? 0 : id,
                                          name[0] ? name : NULL, &d, &n) != WIN_NE_OK)
         return 0;
     free(d);
     u->res[free_slot].type = t;
     u->res[free_slot].id = name[0] ? 0 : id;
+    u->res[free_slot].inst = inst;
     lstrcpyn(u->res[free_slot].name, name, sizeof(u->res[free_slot].name));
     return RESOURCE_HANDLE(free_slot);
 }
@@ -348,7 +364,7 @@ uint32_t ne_find_message(ne_user *u, LPARAM lp)
         struct ne_find *nf = &u->find_dlg[i];
         if (!nf->fr || (LPARAM)(uintptr_t)nf->fr != lp)
             continue;
-        args a = { u->ctx, NULL, 0 };
+        args a = { u->ctx, NULL, 0, 0 };
         uint8_t g[36];
         if (rd_(&a, nf->guest, g, sizeof(g))) {
             wr32(g + 8, nf->fr->Flags);
@@ -528,12 +544,16 @@ int ne_kernel_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *d
         return 1;
     case 50: {                          /* GetProcAddress(HMODULE, LPCSTR) */
         uint32_t far = dw(a, 4);
-        uint16_t m = (uint16_t)(w(a, 8) - 0xf000u);
+        uint16_t h = w(a, 8), m = (uint16_t)(h - 0xf000u);
         char name[64];
         *dword = 1;
-        if (a->bad || m >= 6 || ((far >> 16) && !str_(a, far, name, sizeof(name))))
+        if (a->bad || ((far >> 16) && !str_(a, far, name, sizeof(name))))
             return 1;
-        *v = win_ne_guest_proc(g, m, (uint16_t)far, (far >> 16) ? name : NULL);
+        int d = win_ne_guest_dll_of(g, h);
+        if (d >= 0)
+            *v = win_ne_guest_dll_proc(g, d, (uint16_t)far, (far >> 16) ? name : NULL);
+        else if (m < 6)
+            *v = win_ne_guest_proc(g, m, (uint16_t)far, (far >> 16) ? name : NULL);
         return 1;
     }
     case 54:                            /* GetInstanceData: no other instance */
@@ -565,9 +585,17 @@ int ne_kernel_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *d
     case 92:                            /* GetTempDrive: C: */
         *v = 0x3a43;
         return 1;
-    case 95: {                          /* LoadLibrary: the modules WINN has, no others */
+    case 95: {                          /* LoadLibrary: the modules WINN has, DLLs */
         uint16_t h = module_handle(a, dw(a, 4));
-        *v = h ? h : 2;
+        char name[64];
+        if (!h && str_(a, dw(a, 4), name, sizeof(name)) && name[0]) {
+            int d = win_ne_guest_load_library(g, name);
+            if (d >= 0) {
+                win_ne_dll_init(c);     /* its entry, and theirs it needs */
+                h = win_ne_guest_dll_instance(g, d);
+            }
+        }
+        *v = h ? h : 2;                 /* file not found */
         return 1;
     }
     case 96:                            /* FreeLibrary */

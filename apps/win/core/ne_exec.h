@@ -28,6 +28,9 @@ typedef struct {
     uint16_t unsupported;   /* WIN_NE_EXEC_UNSUPPORTED: the call it made,
                              * KERNEL n, USER 1000h + n, INT 21h 2100h + AH */
     win_ne_fault fault;     /* WIN_NE_EXEC_FAULT */
+    uint16_t invalid_call;  /* WIN_NE_EXEC_BAD_ARGS: the first call WINN refused,
+                             * its arguments pointing outside the program's
+                             * memory (as unsupported) */
 } win_ne_result;
 
 #if defined(__arm__) || defined(__thumb__) || defined(WINN_NE_HOST)

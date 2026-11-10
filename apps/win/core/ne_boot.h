@@ -59,19 +59,23 @@
  * entry at CALLBACK_OFFSET (in the trampoline's RM segment: minus
  * WIN_NE_BOOT_OFFSET); it enters protected mode, loads the TSS, and from
  * the ring 0 stack at CB_R0SP returns into the CB_PROC in ring 3 with
- * SS:SP and DS from the CB_ words (the arguments and the return address,
+ * SS:SP, DS, DI and CX from the CB_ words (the arguments and the return address,
  * the CBRET stub, on that stack already). The procedure's return comes
  * through the callback-return gate to CBRET (ring 0), which reports
  * WINX86_BRIDGE_RETURN from Real Mode with the result DX:AX in CX:BX. */
 #define WIN_NE_CALLBACK_OFFSET     (WIN_NE_DOS_STUB_OFFSET + 32u)
-#define WIN_NE_CBRET_OFFSET        (WIN_NE_DOS_STUB_OFFSET + 112u)
-#define WIN_NE_EXIT_STUB_OFFSET    (WIN_NE_DOS_STUB_OFFSET + 160u)  /* ring 3 */
-#define WIN_NE_CBRET_STUB_OFFSET   (WIN_NE_DOS_STUB_OFFSET + 168u)  /* ring 3 */
+#define WIN_NE_CBRET_OFFSET        (WIN_NE_DOS_STUB_OFFSET + 120u)
+#define WIN_NE_EXIT_STUB_OFFSET    (WIN_NE_DOS_STUB_OFFSET + 168u)  /* ring 3 */
+#define WIN_NE_CBRET_STUB_OFFSET   (WIN_NE_DOS_STUB_OFFSET + 176u)  /* ring 3 */
 #define WIN_NE_CB_PROC_OFFSET      (WIN_NE_DOS_STUB_OFFSET + 192u)
 #define WIN_NE_CB_SS_OFFSET        (WIN_NE_DOS_STUB_OFFSET + 196u)
 #define WIN_NE_CB_SP_OFFSET        (WIN_NE_DOS_STUB_OFFSET + 198u)
 #define WIN_NE_CB_DS_OFFSET        (WIN_NE_DOS_STUB_OFFSET + 200u)
 #define WIN_NE_CB_R0SP_OFFSET      (WIN_NE_DOS_STUB_OFFSET + 202u)
+/* DI and CX for the procedure: a DLL's entry (LibEntry) takes its
+ * instance and its local heap's size there */
+#define WIN_NE_CB_DI_OFFSET        (WIN_NE_DOS_STUB_OFFSET + 204u)
+#define WIN_NE_CB_CX_OFFSET        (WIN_NE_DOS_STUB_OFFSET + 206u)
 #define WIN_NE_FAULT_IDT_OFFSET    (WIN_NE_DOS_STUB_OFFSET + WIN_NE_DOS_STUB_BYTES)
 #define WIN_NE_IDT_VECTORS         0x22u
 #define WIN_NE_FAULT_IDT_BYTES     (WIN_NE_IDT_VECTORS * 8u)

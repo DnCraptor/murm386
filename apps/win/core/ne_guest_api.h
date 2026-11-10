@@ -16,6 +16,7 @@ typedef struct {
     gprx_t gprx[8];
     uint16_t ss;
     uint32_t frame;
+    uint16_t ds;        /* the caller's DS: its local heap's (a DLL's or the program's) */
 } win_ne_regs;
 
 typedef struct {
@@ -23,6 +24,7 @@ typedef struct {
     int (*read)(void *opaque, uint32_t linear, void *dest, uint32_t bytes);
     void *opaque;
     int invalid_args;  /* latched; reported only after the CPU leaves PE */
+    uint16_t invalid_call;  /* the first call refused for it (its service) */
     const char *path;  /* the program file (GetModuleFileName) */
     int show;          /* nCmdShow (InitTask) */
     int exited;        /* it ended itself (INT 21h 4Ch), with exit_code */
@@ -86,5 +88,8 @@ uint32_t win_ne_callback(win_ne_guest_api_context *ctx, uint32_t proc, uint16_t 
 uint32_t win_ne_call(win_ne_guest_api_context *ctx, uint32_t proc, const uint16_t *words,
                      int n, void *blob, uint16_t len);
 uint32_t win_ne_blob_far(win_ne_guest_api_context *ctx, uint16_t len);
+/* the DLLs the program loaded and has not started: their entries called
+ * (ne_exec.c; without it, nothing) */
+void win_ne_dll_init(win_ne_guest_api_context *ctx);
 
 #endif /* WINN_NE_GUEST_API_H */

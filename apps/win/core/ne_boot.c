@@ -341,6 +341,11 @@ int win_ne_dos_make(uint8_t stub[WIN_NE_DOS_STUB_BYTES], const win_ne_boot_args 
     b16(&e, WIN_NE_CB_DS_OFFSET);
     b8(&e, 0x8e); b8(&e, 0xd8);                /* mov ds,ax (AX too: the */
     b8(&e, 0x8e); b8(&e, 0xc0);                /* mov es,ax  prologue's DS) */
+    b8(&e, 0x2e); b8(&e, 0x8b); b8(&e, 0x3e);  /* mov di,cs:[cb_di] */
+    b16(&e, WIN_NE_CB_DI_OFFSET);
+    b8(&e, 0x2e); b8(&e, 0x8b); b8(&e, 0x0e);  /* mov cx,cs:[cb_cx] */
+    b16(&e, WIN_NE_CB_CX_OFFSET);
+    b8(&e, 0x31); b8(&e, 0xf6);                /* xor si,si (a DLL's ES:SI) */
     b8(&e, 0xcb);                              /* retf: ring 3 */
 
     /* the procedure returned to the callback-return stub, which called the

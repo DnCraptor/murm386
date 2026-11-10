@@ -436,3 +436,10 @@ UINT WINAPI GetProfileInt(LPCSTR section, LPCSTR key, int def)
 {
     return GetPrivateProfileInt(section, key, def, "WIN.INI");
 }
+
+/* ne_guest.c: where a Win16 program's DLLs are looked for after its own
+ * directory */
+const char *win_ne_dll_dir(void)
+{
+    return win_dir;
+}

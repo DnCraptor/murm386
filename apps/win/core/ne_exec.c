@@ -184,11 +184,15 @@ static int invoke_native(void *opaque, CPU *cpu, uint16_t service)
     if (!call_sp)
         return 0;
     guest.frame = gate->ring0_linear + call_sp + 4u;
+    guest.ds = guest_get16(guest.frame - 22u);          /* as the gateway saved it */
 
     win_cpu_snapshot transient;
     save_cpu(cpu, &transient);
     restore_cpu(cpu, gate->dos_context);
+    int bad_before = gate->api->invalid_args;
     int handled = win_ne_guest_api(gate->api, &guest, service);
+    if (gate->api->invalid_args && !bad_before && !gate->api->invalid_call)
+        gate->api->invalid_call = service;
     /* a fault or an exit in a callback this call made ends the program */
     if (handled == 1 && (gate->api->dead || gate->api->exited || gate->api->stopped))
         handled = WINX86_SERVICE_EXIT;
@@ -359,8 +363,40 @@ uint32_t win_ne_callback(win_ne_guest_api_context *ctx, uint32_t proc, uint16_t 
     return win_ne_call(ctx, proc, words, 5, NULL, 0);
 }
 
+static uint32_t call_with(win_ne_guest_api_context *ctx, uint32_t proc, const uint16_t *words,
+                          int n, void *blob, uint16_t len, uint16_t ds, uint16_t di, uint16_t cx);
+
 uint32_t win_ne_call(win_ne_guest_api_context *ctx, uint32_t proc, const uint16_t *words,
                      int n, void *blob, uint16_t len)
+{
+    return call_with(ctx, proc, words, n, blob, len, 0, 0, 0);
+}
+
+/* The DLLs loaded and not yet started: their entries (LibEntry: DS its
+ * DGROUP, DI its instance, CX its local heap's size), those they need
+ * first. One that refuses (AX 0) stays loaded, as nothing undoes it. */
+void win_ne_dll_init(win_ne_guest_api_context *ctx)
+{
+    win_ne_guest_image *g = ctx ? (win_ne_guest_image *)ctx->image : NULL;
+    for (unsigned round = 0; g && round < WIN_NE_GUEST_DLLS; round++) {
+        int next = -1;
+        for (int i = 0; i < g->dll_count; i++)
+            if (g->dlls[i].count && !g->dlls[i].initialized &&
+                (next < 0 || g->dlls[i].order < g->dlls[next].order))
+                next = i;
+        if (next < 0)
+            return;
+        win_ne_guest_dll *d = &g->dlls[next];
+        d->initialized = 1;
+        uint16_t inst = win_ne_guest_dll_instance(g, next);
+        if (d->cs)
+            call_with(ctx, (uint32_t)d->cs << 16 | d->ip, NULL, 0, NULL, 0, inst, inst,
+                      d->heap_size);
+    }
+}
+
+static uint32_t call_with(win_ne_guest_api_context *ctx, uint32_t proc, const uint16_t *words,
+                          int n, void *blob, uint16_t len, uint16_t ds, uint16_t di, uint16_t cx)
 {
     PC *pc = get_PC();
     ne_run *run = ctx ? (ne_run *)ctx->exec : NULL;
@@ -397,8 +433,10 @@ uint32_t win_ne_call(win_ne_guest_api_context *ctx, uint32_t proc, const uint16_
     guest_put16(thunks + WIN_NE_CB_PROC_OFFSET + 2, (uint16_t)(proc >> 16));
     guest_put16(thunks + WIN_NE_CB_SS_OFFSET, ss);
     guest_put16(thunks + WIN_NE_CB_SP_OFFSET, sp);
-    guest_put16(thunks + WIN_NE_CB_DS_OFFSET,
+    guest_put16(thunks + WIN_NE_CB_DS_OFFSET, ds ? ds :
                 g->segments[g->info.auto_data ? g->info.auto_data : g->info.ss_index].selector);
+    guest_put16(thunks + WIN_NE_CB_DI_OFFSET, di);
+    guest_put16(thunks + WIN_NE_CB_CX_OFFSET, cx);
     guest_put16(thunks + WIN_NE_CB_R0SP_OFFSET, r0sp);
     guest_put16(tss + 2u, r0sp);
 
@@ -553,6 +591,7 @@ int win_ne_execute(const char *path, const char *cmdline, int show, int (*yield)
     r->stopped = api.stopped;
     r->value = api.exited ? api.exit_code : guest_fault ? 0 : result;
     r->unsupported = api.unsupported;
+    r->invalid_call = api.invalid_call;
     rc = guest_fault ? WIN_NE_EXEC_FAULT :
          rc == WINX86_BAD_SERVICE && api.unsupported ? WIN_NE_EXEC_UNSUPPORTED :
          rc == WINX86_BAD_SERVICE || api.invalid_args ? WIN_NE_EXEC_BAD_ARGS : WIN_NE_OK;

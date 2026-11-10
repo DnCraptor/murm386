@@ -1,0 +1,21 @@
+# A Win16 program and its DLLs on the i386 core: OWUSE imports OWDLL (by
+# name, by ordinal, after LoadLibrary), which needs OWDLL2 (started first);
+# the DLL's data, local heap, strings and a window class of its own; then
+# it ends (Alt+F4) with nothing to report:
+#     ./winhost scripts/owdll.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OWUSE
+key RETURN
+wait 200
+snap od_window.ppm
+keydown ALT
+key F4
+keyup ALT
+wait 100
+snap od_closed.ppm
+exit

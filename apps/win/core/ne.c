@@ -109,6 +109,7 @@ int win_ne_scan(const char *path, win_ne_info *info,
     found.heap_size = rd16(hdr + 0x10);
     found.stack_size = rd16(hdr + 0x12);
     found.target_os = hdr[0x36];
+    found.module_flags = rd16(hdr + 0x0c);
     if (found.cs_index > nseg || found.ss_index > nseg || found.auto_data > nseg)
         goto done;
 
@@ -691,4 +692,103 @@ int win_ne_description(const char *path, char *buf, uint32_t cap)
     }
     fclose(f);
     return ok;
+}
+
+/* the file and its NE header; NULL if it is none */
+static FILE *open_header(const char *path, uint64_t *size, uint64_t *base,
+                         uint8_t h[NE_HDR_SIZE])
+{
+    FILE *f = path ? fopen(path, "rb") : NULL;
+    long end;
+    uint8_t mz[64];
+    if (!f)
+        return NULL;
+    if (!fseek(f, 0, SEEK_END) && (end = ftell(f)) >= 0) {
+        *size = (uint64_t)end;
+        if (read_at(f, *size, 0, mz, sizeof(mz)) && rd16(mz) == 0x5a4d &&
+            read_at(f, *size, *base = rd32(mz + 0x3c), h, NE_HDR_SIZE) && rd16(h) == 0x454e)
+            return f;
+    }
+    fclose(f);
+    return NULL;
+}
+
+int win_ne_entry(const char *path, uint16_t ordinal, uint8_t *flags, uint16_t *segment,
+                 uint16_t *offset)
+{
+    uint64_t size, base;
+    uint8_t h[NE_HDR_SIZE];
+    FILE *f = open_header(path, &size, &base, h);
+    if (!f)
+        return WIN_NE_NO_FILE;
+    int rc = WIN_NE_CANCELLED;          /* past the last */
+    uint64_t at = base + rd16(h + 4), end = at + rd16(h + 6);
+    uint32_t current = 1;
+    while (ordinal && at < end && end <= size) {
+        uint8_t count, type;
+        if (!read_at(f, size, at++, &count, 1) || !count)
+            break;
+        if (!read_at(f, size, at++, &type, 1))
+            break;
+        unsigned width = type == 0 ? 0 : type == 0xffu ? 6 : 3;
+        if (ordinal >= current && ordinal < current + count) {
+            uint8_t e[6];
+            rc = WIN_NE_UNRESOLVED;     /* an unused one */
+            if (type && type != 0xfeu &&
+                read_at(f, size, at + (uint64_t)(ordinal - current) * width, e, width)) {
+                *flags = e[0];
+                *segment = type == 0xffu ? e[3] : type;
+                *offset = type == 0xffu ? rd16(e + 4) : rd16(e + 1);
+                rc = WIN_NE_OK;
+            }
+            break;
+        }
+        current += count;
+        at += (uint64_t)count * width;
+    }
+    fclose(f);
+    return rc;
+}
+
+/* a names table (length-prefixed names, each with its ordinal; a zero
+ * length ends it; the first is the module's): the ordinal of name */
+static uint16_t names_ordinal(FILE *f, uint64_t size, uint64_t at, const char *name)
+{
+    size_t n = strlen(name);
+    int first = 1;
+    for (;;) {
+        uint8_t len, w[2];
+        char buf[256];
+        if (!read_at(f, size, at, &len, 1) || !len || !read_at(f, size, at + 1, buf, len) ||
+            !read_at(f, size, at + 1 + len, w, 2))
+            return 0;
+        if (!first && len == n) {
+            size_t i = 0;
+            for (; i < n; i++) {
+                char a = buf[i], b = name[i];
+                if (a >= 'a' && a <= 'z') a = (char)(a - 32);
+                if (b >= 'a' && b <= 'z') b = (char)(b - 32);
+                if (a != b)
+                    break;
+            }
+            if (i == n)
+                return rd16(w);
+        }
+        first = 0;
+        at += 3u + len;
+    }
+}
+
+uint16_t win_ne_ordinal(const char *path, const char *name)
+{
+    uint64_t size, base;
+    uint8_t h[NE_HDR_SIZE];
+    FILE *f = name ? open_header(path, &size, &base, h) : NULL;
+    if (!f)
+        return 0;
+    uint16_t o = names_ordinal(f, size, base + rd16(h + 0x26), name);
+    if (!o && rd16(h + 0x20))
+        o = names_ordinal(f, size, rd32(h + 0x2c), name);
+    fclose(f);
+    return o;
 }

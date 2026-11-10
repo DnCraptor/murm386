@@ -423,6 +423,10 @@ static int run_ne_app(wtask *t)
         else
             wsprintf(msg, "%s needs %s.%s, which WINN does not have yet.", file, u.module,
                      u.name);
+    } else if (rc == WIN_NE_EXEC_BAD_ARGS && r.invalid_call &&
+               win_ne_service_name(r.invalid_call)) {
+        wsprintf(msg, "%s called %s with a pointer outside its memory; WINN refused "
+                 "that call.", file, win_ne_service_name(r.invalid_call));
     } else if (rc)
         wsprintf(msg, "NE program %s: unsupported or failed (%d)", t->name, rc);
     else                            /* an entry that returned (the probes) */

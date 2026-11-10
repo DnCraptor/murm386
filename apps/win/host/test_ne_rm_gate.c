@@ -15,6 +15,17 @@
 #include "../core/ne_exec.c"
 
 uint8_t test_guest_ram[0x100000];
+/* what the executor needs beyond the gate under test (no guest runs here) */
+int winx86_run(CPU *c, winx86_service_fn service, void *opaque, unsigned max_bursts)
+{
+    (void)c; (void)service; (void)opaque; (void)max_bursts;
+    return WINX86_BAD_CONTEXT;
+}
+uint16_t win_ne_guest_dll_instance(const win_ne_guest_image *g, int dll)
+{
+    (void)g; (void)dll;
+    return 0;
+}
 static CPU cpu;
 static PC pc = { &cpu };
 static CPU_ext_accessors_t ext;

@@ -18,6 +18,7 @@
 #define NE_TIMERS  16
 #define NE_SUBCLASSED 16
 #define NE_LOCALS  64
+#define NE_HEAPS   4
 #define NE_LENT    8
 #define NE_IMAGES  16
 #define NE_RESOURCES 16
@@ -44,8 +45,11 @@ typedef struct ne_user {
     /* windows it subclassed: their procedure (its own), the one before */
     struct { HWND hwnd; uint32_t proc; WNDPROC old; } sub[NE_SUBCLASSED];
     /* its local heap in DGROUP: blocks (offset, size) */
-    uint16_t heap_lo, heap_hi;
-    struct { uint16_t at, size; } local[NE_LOCALS];
+    /* the local heaps (heap 0 DGROUP's, the others its DLLs'): the
+     * segment's selector, the heap's place in it, where it grows from (the
+     * segment's end as it was); blocks (offset, size) of each */
+    struct { uint16_t sel, lo, hi, end; } heap[NE_HEAPS];
+    struct { uint16_t at, size; uint8_t heap; } local[NE_LOCALS];
     /* native pointers handed to its procedures as guest copies (lParam of
      * WM_CREATE, WM_GETMINMAXINFO ...), for DefWindowProc to take back */
     struct { uint32_t far; void *native; UINT msg; } lent[NE_LENT];
@@ -57,11 +61,11 @@ typedef struct ne_user {
     uint16_t dos_error;
     uint16_t env;
     /* its icons (kind 2) and cursors (1), by number or name */
-    struct { HANDLE h; uint8_t kind; uint16_t id; char name[32]; } image[NE_IMAGES];
+    struct { HANDLE h; uint8_t kind; uint16_t id, inst; char name[32]; } image[NE_IMAGES];
     /* ne_guest_kernel.c: the resources it found (FindResource), its error
      * mode, its Find/Replace dialogs (the native FINDREPLACE, its strings,
      * the program's FINDREPLACE; the native one is left to the dialog) */
-    struct { uint16_t type, id; char name[32]; } res[NE_RESOURCES];
+    struct { uint16_t type, id, inst; char name[32]; } res[NE_RESOURCES];
     uint16_t error_mode;
     struct ne_find {
         struct tagFINDREPLACE *fr;
@@ -76,6 +80,7 @@ typedef struct {
     win_ne_guest_api_context *ctx;
     win_ne_regs *cpu;
     int bad;
+    uint16_t inst;          /* the module its resources come from: 0 the program's */
 } args;
 
 static inline uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | p[1] << 8); }

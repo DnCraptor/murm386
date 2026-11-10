@@ -341,25 +341,13 @@ static __attribute__((noinline)) int generic(args *a, ne_user *u, uint16_t servi
 
 /* ---------------------------------------------------------------- local heap */
 
-/* LocalAlloc and the rest: blocks in DGROUP's local heap (between its data
- * and its stack, as the NE header sizes them, then beyond the stack: DGROUP
- * grows, up to 64K, as Windows grows it); a handle is the offset. The
- * first 256 bytes are left to the start-up code (Watcom's copies the
- * command line there). */
-static int heap_bounds(ne_user *u, win_ne_guest_api_context *c)
-{
-    if (u->heap_hi)
-        return 1;
-    const win_ne_guest_image *g = c->image;
-    uint32_t top = g->sp ? g->sp : 0x10000u;
-    uint32_t hi = top - g->info.stack_size, lo = hi - g->info.heap_size + 256u;
-    if (g->info.heap_size <= 256u || lo >= hi)
-        lo = hi;                        /* none there: beyond the stack only */
-    u->heap_lo = (uint16_t)lo;
-    u->heap_hi = (uint16_t)hi;
-    return 1;
-}
-
+/* LocalAlloc and the rest: blocks in a local heap, the caller's DS's (the
+ * program's DGROUP, or a DLL's); a handle is the offset. DGROUP's is
+ * between its data and its stack, as the NE header sizes it, then beyond
+ * the stack: DGROUP grows, up to 64K, as Windows grows it. Its first 256
+ * bytes are left to the start-up code (Watcom's copies the command line
+ * there). A DLL's is where its LocalInit puts it (after its data, by
+ * default: the end of its DGROUP), then grows the same way. */
 static uint16_t dgroup_index(win_ne_guest_api_context *c)
 {
     const win_ne_guest_image *g = c->image;
@@ -371,46 +359,85 @@ static uint16_t dgroup_sel(win_ne_guest_api_context *c)
     return c->image->segments[dgroup_index(c)].selector;
 }
 
-static int local_find(ne_user *u, uint16_t h)
+/* the heap of the caller's DS (made at the first call: DGROUP's from the
+ * header, a DLL's at its segment's end), -1 if none can be */
+static int heap_of(args *a, ne_user *u, uint16_t ds)
+{
+    win_ne_guest_image *g = (win_ne_guest_image *)a->ctx->image;
+    uint16_t own = dgroup_sel(a->ctx);
+    if (!ds || win_ne_guest_dll_of(g, ds) < 0)
+        ds = own;
+    int free_slot = -1;
+    for (int i = 0; i < NE_HEAPS; i++) {
+        if (u->heap[i].sel && (u->heap[i].sel & ~3u) == (ds & ~3u))
+            return i;
+        if (!u->heap[i].sel && free_slot < 0)
+            free_slot = i;
+    }
+    win_ne_guest_segment *s = win_ne_guest_segment_of(g, ds);
+    if (free_slot < 0 || !s)
+        return -1;
+    uint32_t lo, hi, end;
+    if ((ds & ~3u) == (own & ~3u)) {
+        end = g->sp ? g->sp : s->size;
+        hi = end - g->info.stack_size;
+        lo = hi - g->info.heap_size + 256u;
+        if (g->info.heap_size <= 256u || lo >= hi)
+            lo = hi;                    /* none there: beyond the stack only */
+    } else {                            /* a DLL's: its header's size at the end */
+        const win_ne_guest_dll *d = &g->dlls[win_ne_guest_dll_of(g, ds)];
+        end = hi = s->size;
+        lo = d->heap_size < hi ? hi - d->heap_size : hi;
+    }
+    u->heap[free_slot].sel = ds;
+    u->heap[free_slot].lo = (uint16_t)lo;
+    u->heap[free_slot].hi = (uint16_t)hi;
+    u->heap[free_slot].end = (uint16_t)(end > 0xfff0u ? 0xfff0u : end);
+    return free_slot;
+}
+
+static int local_find(ne_user *u, int heap, uint16_t h)
 {
     for (int i = 0; i < NE_LOCALS; i++)
-        if (u->local[i].size && u->local[i].at == h)
+        if (u->local[i].size && u->local[i].heap == heap && u->local[i].at == h)
             return i;
     return -1;
 }
 
 /* the first place for size bytes in [lo, hi) clear of the blocks, or 0 */
-static uint32_t local_fit(ne_user *u, uint32_t lo, uint32_t hi, uint32_t size)
+static uint32_t local_fit(ne_user *u, int heap, uint32_t lo, uint32_t hi, uint32_t size)
 {
     uint32_t at = lo;
     for (int again = 1; again;) {
         again = 0;
         for (int i = 0; i < NE_LOCALS; i++)
-            if (u->local[i].size && at < (uint32_t)u->local[i].at + u->local[i].size &&
+            if (u->local[i].size && u->local[i].heap == heap &&
+                at < (uint32_t)u->local[i].at + u->local[i].size &&
                 u->local[i].at < at + size) {
                 at = (uint32_t)u->local[i].at + u->local[i].size;
                 again = 1;
             }
     }
-    return at + size <= hi ? at : 0;
+    return at && at + size <= hi ? at : 0;
 }
 
-static uint16_t local_alloc(args *a, ne_user *u, uint32_t size)
+static uint16_t local_alloc(args *a, ne_user *u, int heap, uint32_t size)
 {
-    if (!size || size > 0xfff0u || !heap_bounds(u, a->ctx))
+    if (!size || size > 0xfff0u || heap < 0)
         return 0;
     size = (size + 1) & ~1u;
-    /* below the stack, then beyond it: DGROUP made big enough (in 1K
-     * steps, its offsets below 0xFFF0) */
+    /* in the heap, then beyond its segment's end: the segment made big
+     * enough (in 1K steps, its offsets below 0xFFF0) */
     win_ne_guest_image *g = (win_ne_guest_image *)a->ctx->image;
-    win_ne_guest_segment *d = &g->segments[dgroup_index(a->ctx)];
-    uint32_t end = g->sp ? g->sp : d->size;
-    uint32_t at = local_fit(u, u->heap_lo, u->heap_hi, size);
-    if (!at && (at = local_fit(u, end, 0xfff0u, size)) != 0 && at + size > d->size) {
+    uint16_t sel = u->heap[heap].sel;
+    win_ne_guest_segment *d = win_ne_guest_segment_of(g, sel);
+    uint32_t at = local_fit(u, heap, u->heap[heap].lo, u->heap[heap].hi, size);
+    if (!at && d && (at = local_fit(u, heap, u->heap[heap].end, 0xfff0u, size)) != 0 &&
+        at + size > d->size) {
         uint32_t want = (at + size + 0x3ffu) & ~0x3ffu;
         if (want > 0x10000u)
             want = 0x10000u;
-        if (!win_ne_guest_segment_grow(g, dgroup_index(a->ctx), want, a->ctx->read))
+        if (!win_ne_guest_grow(g, sel, want, a->ctx->read))
             at = 0;
     }
     if (!at)
@@ -419,10 +446,11 @@ static uint16_t local_alloc(args *a, ne_user *u, uint32_t size)
         if (!u->local[i].size) {
             u->local[i].at = (uint16_t)at;
             u->local[i].size = (uint16_t)size;
+            u->local[i].heap = (uint8_t)heap;
             uint8_t zero[64];
             memset(zero, 0, sizeof(zero));
             for (uint32_t k = 0; k < size; k += sizeof(zero))
-                win_ne_write(a->ctx, dgroup_sel(a->ctx), at + k, zero,
+                win_ne_write(a->ctx, sel, at + k, zero,
                              size - k < sizeof(zero) ? size - k : (uint32_t)sizeof(zero));
             return (uint16_t)at;
         }
@@ -432,27 +460,44 @@ static uint16_t local_alloc(args *a, ne_user *u, uint32_t size)
 static int local_service(args *a, ne_user *u, uint16_t service, uint32_t *v)
 {
     int i;
+    if (service < 4 || service > 10)
+        return 0;
+    int heap = heap_of(a, u, a->cpu ? a->cpu->ds : 0);
     switch (service) {
-    case 4:                             /* LocalInit(seg, start, end): DGROUP's is there */
-        *v = 1;
+    case 4: {                           /* LocalInit(seg, start, end) */
+        uint16_t seg = w(a, 8), start = w(a, 6), end = w(a, 4);
+        int h = seg ? heap_of(a, u, seg) : heap;
+        *v = h >= 0;
+        if (h < 0 || (u->heap[h].sel & ~3u) == (dgroup_sel(a->ctx) & ~3u))
+            return 1;                   /* DGROUP's is the header's */
+        /* a DLL's: start 0, end its size, after the data (the heap's
+         * place as made); else start..end */
+        if (start && end > start) {
+            u->heap[h].lo = start;
+            u->heap[h].hi = end;
+        } else if (end) {
+            u->heap[h].hi = (uint16_t)((uint32_t)u->heap[h].lo + end > u->heap[h].end ?
+                                       u->heap[h].end : u->heap[h].lo + end);
+        }
         return 1;
+    }
     case 5:                             /* LocalAlloc(flags, size) */
-        *v = local_alloc(a, u, w(a, 4));
+        *v = local_alloc(a, u, heap, w(a, 4));
         return 1;
     case 6: {                           /* LocalReAlloc(h, size, flags) */
         uint16_t h = w(a, 8), size = w(a, 6);
         *v = 0;
-        if ((i = local_find(u, h)) < 0)
+        if ((i = local_find(u, heap, h)) < 0)
             return 1;
         uint16_t old = u->local[i].size;
         u->local[i].size = 0;           /* the new one may overlap it */
-        uint16_t n = local_alloc(a, u, size);
+        uint16_t n = local_alloc(a, u, heap, size);
         if (!n) {
             u->local[i].size = old;
             return 1;
         }
         uint8_t buf[64];
-        uint16_t sel = dgroup_sel(a->ctx);
+        uint16_t sel = u->heap[heap].sel;
         uint16_t keep = old < size ? old : size;
         if (n != h)                     /* down: the regions may overlap */
             for (uint32_t k = 0; k < keep; k += sizeof(buf)) {
@@ -465,18 +510,18 @@ static int local_service(args *a, ne_user *u, uint16_t service, uint32_t *v)
         return 1;
     }
     case 7:                             /* LocalFree(h): 0 */
-        if ((i = local_find(u, w(a, 4))) >= 0)
+        if ((i = local_find(u, heap, w(a, 4))) >= 0)
             u->local[i].size = 0;
         *v = i >= 0 ? 0 : w(a, 4);
         return 1;
     case 8:                             /* LocalLock(h): the near pointer */
-        *v = local_find(u, w(a, 4)) >= 0 ? w(a, 4) : 0;
+        *v = local_find(u, heap, w(a, 4)) >= 0 ? w(a, 4) : 0;
         return 1;
     case 9:                             /* LocalUnlock */
         *v = 0;
         return 1;
     case 10:                            /* LocalSize */
-        *v = (i = local_find(u, w(a, 4))) >= 0 ? u->local[i].size : 0;
+        *v = (i = local_find(u, heap, w(a, 4))) >= 0 ? u->local[i].size : 0;
         return 1;
     }
     return 0;

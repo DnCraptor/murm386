@@ -32,6 +32,9 @@ static const win_ne_guest_segment *lookup_segment(
     for (unsigned i = 0; i < WIN_NE_GUEST_GLOBALS; i++)     /* GlobalAlloc's */
         if (g->globals[i].linear && (g->globals[i].selector & ~3u) == (selector & ~3u))
             return &g->globals[i];
+    for (unsigned i = 0; i < g->dll_segment_count; i++)     /* its DLLs' */
+        if (g->dll_segments[i].linear && (g->dll_segments[i].selector & ~3u) == (selector & ~3u))
+            return &g->dll_segments[i];
     return NULL;
 }
 
@@ -300,6 +303,7 @@ __attribute__((weak)) int win_ne_guest_user(win_ne_guest_api_context *ctx, win_n
     return 0;
 }
 __attribute__((weak)) void win_ne_user_start(win_ne_guest_api_context *ctx) { (void)ctx; }
+__attribute__((weak)) void win_ne_dll_init(win_ne_guest_api_context *ctx) { (void)ctx; }
 __attribute__((weak)) int win_ne_dos(win_ne_guest_api_context *ctx, win_ne_dos_regs *r)
 {
     (void)ctx; (void)r;
@@ -358,7 +362,8 @@ int win_ne_guest_api(void *opaque, win_ne_regs *cpu, uint16_t service)
     int dword = 0;
     uint16_t arg, ptr_seg;
     switch (service) {
-    case 91:      /* KERNEL.InitTask: registers */
+    case 91:      /* KERNEL.InitTask: registers; the DLLs it needs started first */
+        win_ne_dll_init(ctx);
         if (!init_task(ctx, cpu, &value)) {
             ctx->invalid_args = 1;
             value = 0;
