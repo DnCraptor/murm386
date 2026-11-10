@@ -96,12 +96,18 @@ test_ne_run: test_ne_run.c $(X86RUN) ../core/ne_exec.c ../core/ne_guest.c ../cor
 test_ne_boot: ../core/ne_boot.c test_ne_boot.c
 	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ $^
 
+# Host cursor regression is 64-bit safe and does not need native GDI.
+all check: test_cursor_wait
+test_cursor_wait: ../core/cursor.c test_cursor_wait.c
+	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined $(INC) -o $@ $^
+
 # The tests that take a file
 check: test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_launch test_ne_rm_gate test_ne_run NEFIXTURES
 	./test_x86bridge && ./test_ne && ./test_ne_image && ./test_ne_guest && ./test_ne_guest_api && \
 	./test_ne_boot && ./test_ne_multi NEAPP-fixture.exe && ./test_ne_launch NELOOP-fixture.exe && \
 	./test_ne_rm_gate && ./test_ne_run NEDIALOG.EXE NELOOP-fixture.exe NEFAULT.EXE NEHANG.EXE \
 		NESTACK.EXE NECLI.EXE NEOUT.EXE NECR0.EXE NEHLT.EXE OWHELLO.EXE OWBUSY.EXE OWSEGS.EXE
+	./test_cursor_wait
 
 demo.o: ../../winapps/demo/demo.c
 	$(CC) $(CFLAGS) $(INC) -DWinMain=demo_WinMain -c -o $@ $<
@@ -161,3 +167,8 @@ clean:
 	rm -rf test_gdi test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_launch test_ne_rm_gate test_ne_run i386-host.o *-fixture.exe NEDIALOG.EXE NEFAULT.EXE NEHANG.EXE NESTACK.EXE NECLI.EXE NEOUT.EXE NECR0.EXE NEHLT.EXE OWHELLO.EXE OWBUSY.EXE OWWIN.EXE OWMENU.EXE OWSEGS.EXE OWDEMO.EXE OWDEMO.TMP OWFILE.EXE OWFILEL.EXE OWRES.EXE OWKERN.EXE winhost winhost800 *.o *.ppm *.png appinfo.c HOSTWIN
 
 .PHONY: all check clean HOSTWIN NEFIXTURES
+
+clean: clean_cursor_wait
+clean_cursor_wait:
+	rm -f test_cursor_wait
+.PHONY: clean_cursor_wait

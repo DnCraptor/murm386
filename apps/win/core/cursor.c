@@ -13,6 +13,11 @@
 #include "wincore.h"
 
 static int exclude_depth;
+/* A launch keeps the hourglass on screen while other USER cursor changes
+ * are deferred. Nested WinExec calls share the same visible cursor. */
+static unsigned wait_depth;
+static const uint8_t *wait_and, *wait_xor;
+static int wait_hx, wait_hy;
 
 static void cur_rect(RECT *r)
 {
@@ -103,6 +108,13 @@ void cursor_move(int x, int y)
 
 void cursor_set_shape(const uint8_t *and_mask, const uint8_t *xor_mask, int hx, int hy)
 {
+    if (wait_depth) {
+        wait_and = and_mask;
+        wait_xor = xor_mask;
+        wait_hx = hx;
+        wait_hy = hy;
+        return;
+    }
     if (and_mask == win_sys.cur_and && xor_mask == win_sys.cur_xor)
         return;
     cur_erase();
@@ -112,6 +124,27 @@ void cursor_set_shape(const uint8_t *and_mask, const uint8_t *xor_mask, int hx, 
     win_sys.cur_hot_y = hy;
     if (!exclude_depth)
         cur_draw();
+}
+
+void cursor_wait_begin(void)
+{
+    if (wait_depth) {
+        ++wait_depth;
+        return;
+    }
+    wait_and = win_sys.cur_and;
+    wait_xor = win_sys.cur_xor;
+    wait_hx = win_sys.cur_hot_x;
+    wait_hy = win_sys.cur_hot_y;
+    cursor_select_builtin(WCUR_WAIT);
+    wait_depth = 1;
+}
+
+void cursor_wait_end(void)
+{
+    if (!wait_depth || --wait_depth)
+        return;
+    cursor_set_shape(wait_and, wait_xor, wait_hx, wait_hy);
 }
 
 /* ShowCursor semantics: counter, visible while >= 0. */
@@ -290,6 +323,7 @@ void cursor_select_builtin(int id)
 void cursor_init(void)
 {
     exclude_depth = 0;
+    wait_depth = 0;
     win_sys.cur_drawn = 0;
     win_sys.cur_shown = 0;
     win_sys.cur_x = win_sys.screen.width / 2;

@@ -461,6 +461,7 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
     if (!dot && lstrlen(prog) + 4 < (int)sizeof(prog))
         lstrcat(prog, ".EXE");
     win_path(prog, path, sizeof(path));
+    cursor_wait_begin();
 
     win_ez_image img;
     int ne_guest = 0;
@@ -495,8 +496,10 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
         unsigned gen = pc && pc->cpu ? pc->cpu->gen : 0;
         switch (win_ne_classify_launch(path, gen)) {
         case WIN_NE_LAUNCH_REQUIRES_386:
+            cursor_wait_end();
             return WIN_EXEC_NE_REQUIRES_386;
         case WIN_NE_LAUNCH_UNSUPPORTED:
+            cursor_wait_end();
             return WIN_EXEC_NE_UNSUPPORTED;
         case WIN_NE_LAUNCH_READY:
             ne_guest = 1;
@@ -508,10 +511,14 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
         }
     }
 #endif
-    if (rc == -1)
+    if (rc == -1) {
+        cursor_wait_end();
         return 2;                   /* file not found */
-    if (rc)
+    }
+    if (rc) {
+        cursor_wait_end();
         return 11;                  /* invalid .EXE */
+    }
     /* the module name is the file name without directory and extension */
     const char *base = prog;
     for (const char *p = prog; *p; p++)
@@ -529,8 +536,10 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
 #ifdef TASK_NE
     if (ne_guest) {
         ne_path = win_strdup(path);  /* freed by the ordinary task reaper */
-        if (!ne_path)
+        if (!ne_path) {
+            cursor_wait_end();
             return 8;
+        }
         runner = run_ne_app;
     }
 #endif
@@ -538,6 +547,7 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
     if (!t) {
         win_free(ne_path);
         win_free(img.raw);
+        cursor_wait_end();
         return 8;                   /* out of memory */
     }
     t->module = ne_guest ? ne_path : img.raw;
@@ -545,6 +555,9 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
     t->info = win_app_info(path);
     lstrcpyn(t->cmdline, args, sizeof(t->cmdline));
     t->show = (int)show;
+    /* Loading is complete. Do not hold the hourglass through the task's
+     * message loop or a modal dialog in its first time slice. */
+    cursor_wait_end();
     /* let it start right away, as Windows does */
     task_run_now(t);
     return t->h;

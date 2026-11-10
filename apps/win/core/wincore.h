@@ -247,6 +247,8 @@ void     cursor_exclude(const RECT *rc);
 void     cursor_unexclude(void);
 void     cursor_set_shape(const uint8_t *and_mask, const uint8_t *xor_mask, int hx, int hy);
 int      cursor_show(int show);                 /* ShowCursor counter */
+void     cursor_wait_begin(void);              /* nested WinExec loading */
+void     cursor_wait_end(void);
 enum { WCUR_ARROW, WCUR_IBEAM, WCUR_WAIT, WCUR_CROSS, WCUR_SIZEWE, WCUR_SIZENS, WCUR_COUNT };
 void     cursor_select_builtin(int id);
 /* icon.c: an icon (32x32, 16 colours) and a cursor (32x32 masks) made from
