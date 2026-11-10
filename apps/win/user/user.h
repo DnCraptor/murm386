@@ -54,6 +54,7 @@ typedef struct wwnd {
     int       alt_tap;           /* Alt pressed with nothing else yet */
     HTASK     task;              /* owner task; 0 = the desktop */
     int       dialog;            /* made by the dialog manager */
+    int       need_size;         /* overlapped: WM_SIZE, WM_MOVE at its first ShowWindow */
 } wwnd;
 
 /* Global USER state. */

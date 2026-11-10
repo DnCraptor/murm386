@@ -1315,7 +1315,7 @@ void user_icon_slot(wwnd *w, RECT *r)
     }
 }
 
-BOOL WINAPI ShowWindow(HWND h, int cmd)
+static BOOL show_window(HWND h, int cmd)
 {
     wwnd *w = user_wnd(h);
     if (!w || w == U.desktop)
@@ -1410,6 +1410,25 @@ BOOL WINAPI ShowWindow(HWND h, int cmd)
     return was;
 }
 
+/* An overlapped window has its first WM_SIZE and WM_MOVE here, as in
+ * Windows: not from CreateWindow (a program makes what they need in
+ * between: Solitaire its game) */
+BOOL WINAPI ShowWindow(HWND h, int cmd)
+{
+    BOOL was = show_window(h, cmd);
+    wwnd *w = user_wnd(h);
+    if (w && w->need_size && !w->destroying) {
+        w->need_size = 0;
+        RECT c = w->client;
+        rect_to_parent(w, &c);
+        WPARAM t = (w->style & WS_MAXIMIZE) ? SIZE_MAXIMIZED :
+                   (w->style & WS_MINIMIZE) ? SIZE_MINIMIZED : SIZE_RESTORED;
+        SendMessage(h, WM_SIZE, t, MAKELPARAM(c.right - c.left, c.bottom - c.top));
+        SendMessage(h, WM_MOVE, 0, MAKELPARAM(c.left, c.top));
+    }
+    return was;
+}
+
 /* ---------------------------------------------------------------- create / destroy */
 
 static int cascade;
@@ -1461,8 +1480,10 @@ HWND WINAPI CreateWindowEx(DWORD ex, LPCSTR klass, LPCSTR title, DWORD style,
     wrgn_init(&w->update);
     w->vs.max = w->hs.max = 100;
 
-    if (!(style & (WS_CHILD | WS_POPUP)))
+    if (!(style & (WS_CHILD | WS_POPUP))) {
         style |= WS_CAPTION | WS_CLIPSIBLINGS;    /* overlapped windows */
+        w->need_size = 1;
+    }
     DWORD want_vis = style & WS_VISIBLE;
     w->style = style & ~WS_VISIBLE;
 
@@ -1517,7 +1538,7 @@ HWND WINAPI CreateWindowEx(DWORD ex, LPCSTR klass, LPCSTR title, DWORD style,
     }
     if (!IsWindow(h))
         return 0;
-    {
+    if (!w->need_size) {                /* child and pop-up windows: now */
         RECT cl = w->client;
         rect_to_parent(w, &cl);
         SendMessage(h, WM_SIZE, SIZE_RESTORED, MAKELPARAM(cl.right - cl.left, cl.bottom - cl.top));
