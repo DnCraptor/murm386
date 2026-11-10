@@ -59,12 +59,22 @@ the rest have code of their own (the table in `core/ne_guest.c`): start-up
 SendMessage and PostMessage (strings for the controls made native),
 SetTimer with a procedure of its own, EnumWindows, subclassing
 (SetWindowLong GWL_WNDPROC, CallWindowProc), memory (GlobalAlloc: a
-selector of its own per block; LocalAlloc: in DGROUP's local heap),
+selector of its own per block; LocalAlloc: in DGROUP's local heap, which
+grows past the stack up to 64K as in Windows: DGROUP moves, its selector
+stays), OpenFile, GetDOSEnvironment, KEYBOARD's AnsiToOem, OemToAnsi (the
+...Buff ones), GetKBCodePage and GetKeyboardType,
 structures (TEXTMETRIC, LOGFONT, LOGPEN, LOGBRUSH, BITMAP), wsprintf. A
 window procedure gets WM_CREATE's CREATESTRUCT, WM_GETMINMAXINFO's,
 WM_WINDOWPOSCHANGING's and WM_NCCALCSIZE's structures as copies of its
-own, which its DefWindowProc gives back; INT 21h 30h (version) and 4Ch
-(exit), INT 20h. Its FAR ANSI strings are copied into bounded native buffers. A program
+own, which its DefWindowProc gives back. DOS, as its C library (Open
+Watcom's) calls it, by INT 21h or DOS3Call: files (3Ch, 3Dh, 3Eh, 3Fh, 40h,
+42h, 5Bh, 57h, 68h; IOCTL 4400h), names (41h, 43h, 56h; find 4Eh/4Fh with
+the DTA, 1Ah/2Fh), directories and drives (39h, 3Ah, 3Bh, 47h, 0Eh, 19h,
+36h), the date and time (2Ah, 2Ch), its PSP (51h/62h), the version (30h),
+exit (4Ch, INT 20h), and a few that need nothing (25h/35h: no handlers of
+its own, 33h, 59h, 67h): done with WINN's own file functions, its files
+closed when its task ends; the standard handles 0-4 are no console (a
+write goes nowhere, a read gets nothing). Its FAR ANSI strings are copied into bounded native buffers. A program
 importing anything else is refused before protected mode with the first
 function it lacks named; an INT 21h function WINN does not have ends it
 with that function named. Several NE programs can run at once, each as a
@@ -76,13 +86,14 @@ starts or goes on.
 generate `NEAPP.EXE`, `NEDIALOG.EXE`, `NELOOP.EXE`, `NEFAULT.EXE`,
 `NEHANG.EXE` and the `OW*.EXE`, built by Open Watcom, their sources in the
 script: `OWHELLO`, `OWBUSY`, `OWWIN`, `OWMENU` (resources), `OWSEGS` (three
-code segments), `OWDEMO` (many functions at once) (`make NEFIXTURES` in
+code segments), `OWDEMO` (many functions at once), `OWFILE` and `OWFILEL`
+(DOS through the C library, small and large model) (`make NEFIXTURES` in
 `host/`). All have DOS MZ stubs that explain how to launch them under WINN
 when invoked directly from DOS. `host/test_ne_run` runs them on the
 emulator's own i386 core (`src/i386.c` as it is, built for the host with
 the stand-ins in `host/x86run/`), and so does the host `winhost`: they are
 in its `HOSTWIN/` (`scripts/owwin.txt`, `scripts/owmenu.txt`,
-`scripts/owdemo.txt`).
+`scripts/owdemo.txt`, `scripts/owfile.txt`).
 
     WINN [:] [program [arguments]]
 
@@ -248,6 +259,7 @@ use `ucontext`):
     ./winhost scripts/owwin.txt PROGMAN      # a Win16 program's window, on the i386 core
     ./winhost scripts/owmenu.txt PROGMAN     # its menu, accelerator, string, dialog
     ./winhost scripts/owdemo.txt PROGMAN     # controls, GDI, timers, memory, a file, subclassing
+    ./winhost scripts/owfile.txt PROGMAN     # its C library's DOS calls: files, find, directory, date
     ./winhost scripts/winmine.txt WINMINE    # marks, a lost game, Expert, Best Times
     ./winhost scripts/logo.txt PROGMAN       # the logo (copy the BMPs into HOSTWIN first)
     ./winhost800 scripts/vga800.txt  # the VGA800 driver, built in

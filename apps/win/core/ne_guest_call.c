@@ -341,7 +341,8 @@ static __attribute__((noinline)) int generic(args *a, ne_user *u, uint16_t servi
 /* ---------------------------------------------------------------- local heap */
 
 /* LocalAlloc and the rest: blocks in DGROUP's local heap (between its data
- * and its stack, as the NE header sizes them); a handle is the offset. The
+ * and its stack, as the NE header sizes them, then beyond the stack: DGROUP
+ * grows, up to 64K, as Windows grows it); a handle is the offset. The
  * first 256 bytes are left to the start-up code (Watcom's copies the
  * command line there). */
 static int heap_bounds(ne_user *u, win_ne_guest_api_context *c)
@@ -352,16 +353,21 @@ static int heap_bounds(ne_user *u, win_ne_guest_api_context *c)
     uint32_t top = g->sp ? g->sp : 0x10000u;
     uint32_t hi = top - g->info.stack_size, lo = hi - g->info.heap_size + 256u;
     if (g->info.heap_size <= 256u || lo >= hi)
-        return 0;
+        lo = hi;                        /* none there: beyond the stack only */
     u->heap_lo = (uint16_t)lo;
     u->heap_hi = (uint16_t)hi;
     return 1;
 }
 
-static uint16_t dgroup_sel(win_ne_guest_api_context *c)
+static uint16_t dgroup_index(win_ne_guest_api_context *c)
 {
     const win_ne_guest_image *g = c->image;
-    return g->segments[g->info.auto_data ? g->info.auto_data : g->info.ss_index].selector;
+    return g->info.auto_data ? g->info.auto_data : g->info.ss_index;
+}
+
+static uint16_t dgroup_sel(win_ne_guest_api_context *c)
+{
+    return c->image->segments[dgroup_index(c)].selector;
 }
 
 static int local_find(ne_user *u, uint16_t h)
@@ -372,12 +378,10 @@ static int local_find(ne_user *u, uint16_t h)
     return -1;
 }
 
-static uint16_t local_alloc(args *a, ne_user *u, uint32_t size)
+/* the first place for size bytes in [lo, hi) clear of the blocks, or 0 */
+static uint32_t local_fit(ne_user *u, uint32_t lo, uint32_t hi, uint32_t size)
 {
-    if (!size || size > 0xfff0u || !heap_bounds(u, a->ctx))
-        return 0;
-    size = (size + 1) & ~1u;
-    uint32_t at = u->heap_lo;
+    uint32_t at = lo;
     for (int again = 1; again;) {
         again = 0;
         for (int i = 0; i < NE_LOCALS; i++)
@@ -387,7 +391,28 @@ static uint16_t local_alloc(args *a, ne_user *u, uint32_t size)
                 again = 1;
             }
     }
-    if (at + size > u->heap_hi)
+    return at + size <= hi ? at : 0;
+}
+
+static uint16_t local_alloc(args *a, ne_user *u, uint32_t size)
+{
+    if (!size || size > 0xfff0u || !heap_bounds(u, a->ctx))
+        return 0;
+    size = (size + 1) & ~1u;
+    /* below the stack, then beyond it: DGROUP made big enough (in 1K
+     * steps, its offsets below 0xFFF0) */
+    win_ne_guest_image *g = (win_ne_guest_image *)a->ctx->image;
+    win_ne_guest_segment *d = &g->segments[dgroup_index(a->ctx)];
+    uint32_t end = g->sp ? g->sp : d->size;
+    uint32_t at = local_fit(u, u->heap_lo, u->heap_hi, size);
+    if (!at && (at = local_fit(u, end, 0xfff0u, size)) != 0 && at + size > d->size) {
+        uint32_t want = (at + size + 0x3ffu) & ~0x3ffu;
+        if (want > 0x10000u)
+            want = 0x10000u;
+        if (!win_ne_guest_segment_grow(g, dgroup_index(a->ctx), want, a->ctx->read))
+            at = 0;
+    }
+    if (!at)
         return 0;
     for (int i = 0; i < NE_LOCALS; i++)
         if (!u->local[i].size) {
@@ -839,6 +864,8 @@ int ne_call(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword)
 {
     win_ne_guest_api_context *c = a->ctx;
     if (service < 0x1000u && (local_service(a, u, service, v) || global_service(a, service, v, dword)))
+        return 1;
+    if (ne_dos_service(a, u, service, v, dword))
         return 1;
     switch (service) {
     case 0x100a: {                      /* SetTimer(HWND, UINT, UINT, TIMERPROC) */

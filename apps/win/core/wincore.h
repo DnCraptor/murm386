@@ -318,6 +318,16 @@ extern HBRUSH (*gdi_sys_color_brush)(int index);
 /* file.c */
 void   win_files_task_ended(HTASK task);
 void   win_files_init(void);
+/* file.c: DOS's functions for Win16 programs (INT 21h 3Bh, 19h/0Eh, 43h,
+ * 57h; the environment) */
+BOOL   win_file_chdir(LPCSTR path);
+int    win_file_drive(int set);
+int    win_file_attr(LPCSTR path, int set, UINT attr);
+BOOL   win_file_time(HFILE f, int set, WORD *date, WORD *time_);
+int    win_file_environment(char *buf, int size);
+/* gdi_text.c: a character between Windows-1251 (ANSI) and CP866 (OEM) */
+uint8_t win_ansi_to_oem(uint8_t c);
+uint8_t win_oem_to_ansi(uint8_t c);
 
 #if !(defined(__arm__) || defined(__thumb__))
 /* host tests: applications built into the harness, by file name */

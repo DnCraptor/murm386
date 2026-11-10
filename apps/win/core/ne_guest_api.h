@@ -46,6 +46,16 @@ typedef struct {
  * the program ends. */
 int win_ne_guest_api(void *opaque, win_ne_regs *cpu, uint16_t service);
 
+/* An INT 21h of the program (or its DOS3Call): its registers, as DOS
+ * takes and gives them, and the carry flag (an error: its code in AX) */
+typedef struct {
+    uint16_t ax, bx, cx, dx, si, di, ds, es;
+    int carry;
+} win_ne_dos_regs;
+/* The DOS functions (ne_guest_int21.c; without it, none): 1 when done,
+ * 0 when WINN does not have it. 30h and 4Ch are the gateway's own. */
+int win_ne_dos(win_ne_guest_api_context *ctx, win_ne_dos_regs *r);
+
 /* The window and GDI services (ne_guest_user.c; without it, as in the
  * tests of the rest, there are none): 1 with the result in value (dword:
  * DX too), 0 when not one of them. */

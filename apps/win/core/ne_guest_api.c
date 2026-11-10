@@ -202,33 +202,47 @@ static int init_task(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint32_t *
     return 1;
 }
 
-/* INT 21h: the guest's AX is the frame's first word, then the interrupt's IP, CS,
- * FLAGS (its carry: the error); DX stays the guest's unless the function
- * sets it. */
+/* INT 21h: the guest's AX is the frame's first word, then the interrupt's
+ * IP, CS, FLAGS (its carry: the error); the other registers as the gateway
+ * saved them, those a function sets written back. DX stays the guest's
+ * unless the function sets it. */
 static int int21(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint32_t *value)
 {
-    uint16_t ax, dx, flags;
-    if (!frame_get(ctx, cpu, FR_AX, &ax) || !frame_get(ctx, cpu, FR_DX, &dx) ||
+    win_ne_dos_regs r, in;
+    uint16_t flags;
+    memset(&r, 0, sizeof(r));
+    if (!frame_get(ctx, cpu, FR_AX, &r.ax) || !frame_get(ctx, cpu, FR_BX, &r.bx) ||
+        !frame_get(ctx, cpu, FR_CX, &r.cx) || !frame_get(ctx, cpu, FR_DX, &r.dx) ||
+        !frame_get(ctx, cpu, FR_SI, &r.si) || !frame_get(ctx, cpu, FR_DI, &r.di) ||
+        !frame_get(ctx, cpu, FR_DS, &r.ds) || !frame_get(ctx, cpu, FR_ES, &r.es) ||
         !frame_get(ctx, cpu, FR_FLAGS, &flags))
         return 0;
-    switch (ax >> 8) {
+    in = r;
+    switch (r.ax >> 8) {
     case 0x30:                  /* DOS version: 7.0, as GetVersion says */
-        ax = 0x0007;
-        if (!frame_set(ctx, cpu, FR_BX, 0) || !frame_set(ctx, cpu, FR_CX, 0))
-            return 0;
+        r.ax = 0x0007;
+        r.bx = r.cx = 0;
         break;
     case 0x4c:                  /* exit */
         ctx->exited = 1;
-        ctx->exit_code = (uint8_t)ax;
+        ctx->exit_code = (uint8_t)r.ax;
         return WINX86_SERVICE_EXIT;
     default:
-        ctx->unsupported = (uint16_t)(WIN_NE_SERVICE_INT21 + (ax >> 8));
-        return 0;
+        if (!win_ne_dos(ctx, &r)) {
+            ctx->unsupported = (uint16_t)(WIN_NE_SERVICE_INT21 + (in.ax >> 8));
+            return 0;
+        }
+        break;
     }
-    flags &= (uint16_t)~1u;     /* CF: no error */
-    if (!frame_set(ctx, cpu, FR_FLAGS, flags))
+    flags = (uint16_t)(r.carry ? flags | 1u : flags & ~1u);   /* CF: the error */
+    if ((r.bx != in.bx && !frame_set(ctx, cpu, FR_BX, r.bx)) ||
+        (r.cx != in.cx && !frame_set(ctx, cpu, FR_CX, r.cx)) ||
+        (r.si != in.si && !frame_set(ctx, cpu, FR_SI, r.si)) ||
+        (r.di != in.di && !frame_set(ctx, cpu, FR_DI, r.di)) ||
+        (r.es != in.es && !frame_set(ctx, cpu, FR_ES, r.es)) ||
+        !frame_set(ctx, cpu, FR_FLAGS, flags))
         return 0;
-    *value = ((uint32_t)dx << 16) | ax;
+    *value = ((uint32_t)r.dx << 16) | r.ax;
     return 1;
 }
 
@@ -240,6 +254,11 @@ __attribute__((weak)) int win_ne_guest_user(win_ne_guest_api_context *ctx, win_n
     return 0;
 }
 __attribute__((weak)) void win_ne_user_start(win_ne_guest_api_context *ctx) { (void)ctx; }
+__attribute__((weak)) int win_ne_dos(win_ne_guest_api_context *ctx, win_ne_dos_regs *r)
+{
+    (void)ctx; (void)r;
+    return 0;
+}
 __attribute__((weak)) void win_ne_user_end(win_ne_guest_api_context *ctx) { (void)ctx; }
 
 int win_ne_read(win_ne_guest_api_context *ctx, uint16_t sel, uint32_t off, void *dst, uint32_t n)

@@ -1,0 +1,29 @@
+# A Win16 program's DOS calls on the i386 core, through its C library:
+# files written, read, renamed, found, deleted; the current directory, the
+# date; OpenFile, DOS3Call, AnsiToOem. Small model, then large; each says
+# "line 2|18|1|C:\|1":
+#     ./winhost scripts/owfile.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OWFILE
+key RETURN
+wait 200
+snap of_small.ppm
+key RETURN
+wait 50
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OWFILEL
+key RETURN
+wait 200
+snap of_large.ppm
+key RETURN
+wait 50
+exit

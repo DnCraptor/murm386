@@ -30,6 +30,22 @@ static const uint8_t ansi_to_oem[128] = {
     /* F0 */ 0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xEB, 0xEC, 0xED, 0xEE, 0xEF,
 };
 
+uint8_t win_ansi_to_oem(uint8_t c)
+{
+    return c < 0x80 ? c : ansi_to_oem[c - 0x80];
+}
+
+/* the first ANSI character drawn with the glyph; '?' for those none is */
+uint8_t win_oem_to_ansi(uint8_t c)
+{
+    if (c < 0x80)
+        return c;
+    for (int i = 0; i < 128; i++)
+        if (ansi_to_oem[i] == c)
+            return (uint8_t)(0x80 + i);
+    return '?';
+}
+
 /* Per glyph: first used column and used width (proportional face). */
 static uint8_t glyph_left[256], glyph_width[256];
 

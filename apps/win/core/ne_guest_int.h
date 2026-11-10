@@ -47,6 +47,12 @@ typedef struct ne_user {
      * WM_CREATE, WM_GETMINMAXINFO ...), for DefWindowProc to take back */
     struct { uint32_t far; void *native; UINT msg; } lent[NE_LENT];
     int lents;
+    /* DOS (ne_guest_int21.c): the DTA (0: the PSP's), the search, the last
+     * error, the environment's block */
+    uint32_t dta;
+    struct { char spec[128]; uint16_t attr; int next; } find;
+    uint16_t dos_error;
+    uint16_t env;
 } ne_user;
 
 
@@ -126,6 +132,9 @@ int ne_own_window(ne_user *u, HWND h);
  * messages with pointers, timers, subclassing; 1 if it is one of them */
 int ne_call(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword);
 void ne_call_end(ne_user *u);
+/* ne_guest_int21.c: KERNEL's DOS functions (OpenFile, GetDOSEnvironment
+ * ...) and KEYBOARD's; 1 if it is one of them */
+int ne_dos_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword);
 /* a procedure of the program with a message, lParam lent as a guest copy
  * when it points to a structure; a native one (DefWindowProc ...) with
  * lParam from the program, a lent copy given back */

@@ -144,8 +144,8 @@ static int assign_selector(void *opaque, uint16_t index, uint16_t flags,
  * does). The service number, KERNEL ordinal n, USER 0x1000 + n, GDI
  * 0x3000 + n, lives entirely inside WINN; it is not a guest pointer or an
  * emulated IRQ. */
-enum { M_KERNEL, M_USER, M_GDI };
-static const uint16_t module_base[] = { 0, 0x1000u, 0x3000u };
+enum { M_KERNEL, M_USER, M_GDI, M_KEYBOARD };
+static const uint16_t module_base[] = { 0, 0x1000u, 0x3000u, WIN_NE_SERVICE_KEYBOARD };
 static const struct {
     uint8_t module;                 /* M_* */
     uint16_t ordinal;
@@ -153,6 +153,17 @@ static const struct {
     uint16_t args;
 } services[] = {
     { M_KERNEL, 3, "GetVersion", 0 },
+    /* DOS: its INT 21h in the thunk itself (ne_guest_int21.c) */
+    { M_KERNEL, 102, "DOS3Call", 0 },
+    { M_KERNEL, 74, "OpenFile", 10 },
+    { M_KERNEL, 131, "GetDOSEnvironment", 0 },
+    { M_KERNEL, 207, "IsDBCSLeadByte", 2 },
+    { M_KEYBOARD, 5, "AnsiToOem", 8 },
+    { M_KEYBOARD, 6, "OemToAnsi", 8 },
+    { M_KEYBOARD, 130, "GetKeyboardType", 2 },
+    { M_KEYBOARD, 132, "GetKBCodePage", 0 },
+    { M_KEYBOARD, 134, "AnsiToOemBuff", 10 },
+    { M_KEYBOARD, 135, "OemToAnsiBuff", 10 },
     { M_KERNEL, 30, "WaitEvent", 2 },
     { M_KERNEL, 36, "GetCurrentTask", 0 },
     { M_KERNEL, 49, "GetModuleFileName", 8 },
@@ -293,6 +304,8 @@ static int module_of(const win_ne_import *imp)
         return M_USER;
     if (name_eq(imp->module, "GDI") || name_eq(imp->module, "GDI.EXE"))
         return M_GDI;
+    if (name_eq(imp->module, "KEYBOARD") || name_eq(imp->module, "KEYBOARD.DRV"))
+        return M_KEYBOARD;
     return -1;
 }
 
@@ -473,14 +486,19 @@ int win_ne_guest_load(const char *path, win_ne_guest_image *out,
              * its native handler to use DOS/BIOS. RETF imm16 restores the
              * Win16 PASCAL caller's SP. */
             uint16_t args = service_args(id);
-            p[0] = 0xb8; put16(p + 1, id); /* mov ax,service */
-            p[3] = 0x9a;                   /* call far api gate */
-            put16(p + 4, 0);
-            put16(p + 6, out->api_gate);
-            if (args) {
-                p[8] = 0xca; put16(p + 9, args);
+            if (id == WIN_NE_SERVICE_DOS3CALL) {
+                p[0] = 0xcd; p[1] = 0x21;  /* int 21h, with its registers */
+                p[2] = 0xcb;               /* retf */
             } else {
-                p[8] = 0xcb;
+                p[0] = 0xb8; put16(p + 1, id); /* mov ax,service */
+                p[3] = 0x9a;               /* call far api gate */
+                put16(p + 4, 0);
+                put16(p + 6, out->api_gate);
+                if (args) {
+                    p[8] = 0xca; put16(p + 9, args);
+                } else {
+                    p[8] = 0xcb;
+                }
             }
         }
         if (!io->write(opaque, out->thunk_linear + i * THUNK_BYTES, p, sizeof(p)))
@@ -566,10 +584,11 @@ alloc_fail:
     return 0;
 }
 
-int win_ne_guest_global_realloc(win_ne_guest_image *g, uint16_t sel, uint32_t bytes,
-                                int (*read)(void *, uint32_t, void *, uint32_t))
+/* a data segment moved to a block of the new size, its selector kept: the
+ * old contents copied, the rest zeroed; untouched if any of it fails */
+static int resize(win_ne_guest_image *g, win_ne_guest_segment *s, uint32_t bytes,
+                  int (*read)(void *, uint32_t, void *, uint32_t))
 {
-    win_ne_guest_segment *s = win_ne_guest_global(g, sel);
     uint32_t linear;
     if (!s || !read || !bytes || bytes > 65536u || !guest_alloc(g, bytes, &linear))
         return 0;
@@ -592,6 +611,21 @@ int win_ne_guest_global_realloc(win_ne_guest_image *g, uint16_t sel, uint32_t by
 realloc_fail:
     g->io.free(g->opaque, linear);
     return 0;
+}
+
+int win_ne_guest_global_realloc(win_ne_guest_image *g, uint16_t sel, uint32_t bytes,
+                                int (*read)(void *, uint32_t, void *, uint32_t))
+{
+    return resize(g, win_ne_guest_global(g, sel), bytes, read);
+}
+
+int win_ne_guest_segment_grow(win_ne_guest_image *g, uint16_t index, uint32_t bytes,
+                              int (*read)(void *, uint32_t, void *, uint32_t))
+{
+    if (!index || index > g->info.segment_count || !(g->segments[index].flags & 1u) ||
+        bytes < g->segments[index].size)
+        return 0;
+    return bytes == g->segments[index].size || resize(g, &g->segments[index], bytes, read);
 }
 
 int win_ne_guest_global_free(win_ne_guest_image *g, uint16_t sel)

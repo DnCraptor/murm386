@@ -22,6 +22,11 @@
 #define WIN_NE_GUEST_PSP_BYTES 256u
 /* GDT entries for the program's global memory blocks (GlobalAlloc) */
 #define WIN_NE_GUEST_GLOBALS 64u
+/* Service numbers beyond KERNEL's (its ordinals), USER's (0x1000 + n) and
+ * GDI's (0x3000 + n): KEYBOARD's, and KERNEL.102 DOS3Call, whose thunk is
+ * an INT 21h of its own (the registers are its arguments) */
+#define WIN_NE_SERVICE_KEYBOARD 0x4000u
+#define WIN_NE_SERVICE_DOS3CALL 102u
 
 /* Guest linear allocations must be addressable via an x86 segment base and
  * remain allocated until the entire staged image is released. The callbacks
@@ -87,6 +92,10 @@ uint16_t win_ne_guest_global_alloc(win_ne_guest_image *g, uint32_t bytes);
 int win_ne_guest_global_realloc(win_ne_guest_image *g, uint16_t sel, uint32_t bytes,
                                 int (*read)(void *, uint32_t, void *, uint32_t));
 int win_ne_guest_global_free(win_ne_guest_image *g, uint16_t sel);
+/* A data segment of the program (index) made bigger, moved as GlobalReAlloc
+ * moves a block: DGROUP when its local heap grows. */
+int win_ne_guest_segment_grow(win_ne_guest_image *g, uint16_t index, uint32_t bytes,
+                              int (*read)(void *, uint32_t, void *, uint32_t));
 win_ne_guest_segment *win_ne_guest_global(win_ne_guest_image *g, uint16_t sel);
 
 /* The marshalling of a generic function (core/ne_sigs.h) by its service

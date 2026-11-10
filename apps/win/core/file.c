@@ -61,17 +61,20 @@ static int tracked(HFILE f)
 }
 
 #ifdef FILE_HOST
+/* host tests: the current directory of drive C: below the test directory
+ * ("" its root, else "DIR/SUB") */
+static char host_cwd[128];
+
 /* host tests: DOS paths to Linux ones; drive C: is the test directory */
 static const char *host_path_to(const char *p, char *buf, int size)
 {
-    if (p[0] && p[1] == ':') {
+    if (p[0] && p[1] == ':')
         p += 2;
-        if (*p == '\\' || *p == '/') {
-            lstrcpyn(buf, ".", size);
-            lstrcpyn(buf + 1, p, size - 1);
-        } else {
-            lstrcpyn(buf, p, size);
-        }
+    if (*p == '\\' || *p == '/') {
+        lstrcpyn(buf, ".", size);
+        lstrcpyn(buf + 1, p, size - 1);
+    } else if (host_cwd[0]) {
+        snprintf(buf, (size_t)size, "%s/%s", host_cwd, p);
     } else {
         lstrcpyn(buf, p, size);
     }
@@ -512,6 +515,10 @@ int WINAPI GetCurrentDirectoryN(LPSTR buf, int size)
         return 0;
 #ifdef FILE_HOST
     lstrcpyn(buf, "C:\\", size);
+    lstrcpyn(buf + 3, host_cwd, size - 3);
+    for (char *q = buf; *q; q++)
+        if (*q == '/')
+            *q = '\\';
 #else
     union REGS r = { 0 };
     r.h.ah = 0x19;
@@ -557,5 +564,173 @@ UINT WINAPI GetDriveType(int drive)
     if (r.x.cflag)
         return DRIVE_FIXED;
     return r.w.ax == 0 ? DRIVE_REMOVABLE : DRIVE_FIXED;
+#endif
+}
+
+/* ---------------------------------------------------------------- DOS for Win16 programs */
+
+/* What a Win16 program asks DOS for (INT 21h, ne_guest_int21.c) beyond
+ * the functions above, with DOS's meaning. */
+
+/* INT 21h 3Bh: the current directory of the path's drive */
+BOOL win_file_chdir(LPCSTR path)
+{
+    if (!path)
+        return FALSE;
+#ifdef FILE_HOST
+    char d[256], full[256];
+    struct stat st;
+    host_path_to(path, d, sizeof(d));
+    if (stat(d, &st) || !S_ISDIR(st.st_mode))
+        return FALSE;
+    /* the new one below the test directory, "." and ".." resolved */
+    char out[128] = "";
+    lstrcpyn(full, d[0] == '.' && (d[1] == '/' || !d[1]) ? d + 1 : d, sizeof(full));
+    for (char *t = strtok(full, "/"); t; t = strtok(NULL, "/")) {
+        if (!strcmp(t, "."))
+            continue;
+        if (!strcmp(t, "..")) {
+            char *slash = strrchr(out, '/');
+            if (slash)
+                *slash = 0;
+            else
+                out[0] = 0;
+            continue;
+        }
+        if (strlen(out) + strlen(t) + 2 > sizeof(out))
+            return FALSE;
+        if (out[0])
+            strcat(out, "/");
+        strcat(out, t);
+    }
+    lstrcpyn(host_cwd, out, sizeof(host_cwd));
+    return TRUE;
+#else
+    return dos_path_op(0x3B, path);
+#endif
+}
+
+/* INT 21h 19h (set < 0: the current drive, 0 A:) and 0Eh (select drive
+ * set: the number of drives) */
+int win_file_drive(int set)
+{
+#ifdef FILE_HOST
+    return set < 0 ? 2 : 26;
+#else
+    union REGS r = { 0 };
+    r.h.ah = set < 0 ? 0x19 : 0x0E;
+    r.h.dl = (uint8_t)(set < 0 ? 0 : set);
+    int386(0x21, &r, &r);
+    return r.h.al;
+#endif
+}
+
+/* INT 21h 43h: a file's attributes (set: changed to attr); -1 if there is
+ * no such file */
+int win_file_attr(LPCSTR path, int set, UINT attr)
+{
+    if (!path)
+        return -1;
+#ifdef FILE_HOST
+    struct stat st;
+    const char *h = host_path(path);
+    if (stat(h, &st))
+        return -1;
+    if (set) {
+        mode_t m = attr & 0x01 ? st.st_mode & ~0222u : st.st_mode | 0200u;
+        return chmod(h, m) ? -1 : (int)attr;
+    }
+    return (S_ISDIR(st.st_mode) ? 0x10 : 0x20) | (st.st_mode & 0200 ? 0 : 0x01);
+#else
+    if (!dos_path(DB_PATH1, path))
+        return -1;
+    union REGS r = { 0 };
+    r.w.ax = set ? 0x4301 : 0x4300;
+    r.w.cx = (uint16_t)attr;
+    r.w.dx = DB_PATH1;
+    return dos_call(&r) ? (set ? (int)attr : r.w.cx) : -1;
+#endif
+}
+
+/* INT 21h 57h: an open file's date and time (set: changed to them) */
+BOOL win_file_time(HFILE f, int set, WORD *date, WORD *time_)
+{
+    if (tracked(f) < 0 || !date || !time_)
+        return FALSE;
+#ifdef FILE_HOST
+    struct stat st;
+    if (fstat((int)f, &st))
+        return FALSE;
+    if (set) {
+        struct tm tm;
+        memset(&tm, 0, sizeof(tm));
+        tm.tm_year = (*date >> 9) + 80;
+        tm.tm_mon = ((*date >> 5) & 15) - 1;
+        tm.tm_mday = *date & 31;
+        tm.tm_hour = *time_ >> 11;
+        tm.tm_min = (*time_ >> 5) & 63;
+        tm.tm_sec = (*time_ & 31) * 2;
+        tm.tm_isdst = -1;
+        struct timespec ts[2];
+        ts[0].tv_sec = ts[1].tv_sec = mktime(&tm);
+        ts[0].tv_nsec = ts[1].tv_nsec = 0;
+        return !futimens((int)f, ts);
+    }
+    struct tm *t = localtime(&st.st_mtime);
+    if (!t || t->tm_year < 80) {
+        *date = (1 << 5) | 1;
+        *time_ = 0;
+    } else {
+        *date = (WORD)(((t->tm_year - 80) << 9) | ((t->tm_mon + 1) << 5) | t->tm_mday);
+        *time_ = (WORD)((t->tm_hour << 11) | (t->tm_min << 5) | (t->tm_sec / 2));
+    }
+    return TRUE;
+#else
+    union REGS r = { 0 };
+    r.w.ax = set ? 0x5701 : 0x5700;
+    r.w.bx = (uint16_t)f;
+    r.w.cx = *time_;
+    r.w.dx = *date;
+    int386(0x21, &r, &r);
+    if (r.x.cflag)
+        return FALSE;
+    if (!set) {
+        *time_ = r.w.cx;
+        *date = r.w.dx;
+    }
+    return TRUE;
+#endif
+}
+
+/* The DOS environment WINN.EXE got ("NAME=value" strings, each with its
+ * NUL, and an empty one at the end) into buf; its bytes, 0 if it does not
+ * fit. */
+int win_file_environment(char *buf, int size)
+{
+    if (!buf || size < 2)
+        return 0;
+#ifdef FILE_HOST
+    static const char env[] = "COMSPEC=C:\\COMMAND.COM\0PATH=C:\\\0TEMP=C:\\\0";
+    if (size < (int)sizeof(env))
+        return 0;
+    memcpy(buf, env, sizeof(env));
+    return (int)sizeof(env);
+#else
+    union REGS r = { 0 };
+    r.h.ah = 0x62;                          /* WINN.EXE's PSP */
+    int386(0x21, &r, &r);
+    const uint8_t *psp = (const uint8_t *)dos_guest_far_ptr(r.w.bx, 0);
+    uint16_t seg = (uint16_t)(psp[0x2C] | psp[0x2D] << 8);
+    if (!seg)
+        return 0;
+    const char *env = (const char *)dos_guest_far_ptr(seg, 0);
+    int n = 0;
+    while (n + 1 < 32768 && (env[n] || env[n + 1]))
+        n++;
+    n = env[0] ? n + 2 : 1;                 /* the last string's NUL, the empty one */
+    if (n > size)
+        return 0;
+    memcpy(buf, env, (size_t)n);
+    return n;
 #endif
 }
