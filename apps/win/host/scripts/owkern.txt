@@ -1,0 +1,47 @@
+# KERNEL, COMMDLG and SHELL for a Win16 program on the i386 core: a message
+# box through GetProcAddress, then its window (Catch/Throw, a resource, a
+# temporary file, a palette ...), the Open dialog, the Find dialog (its
+# messages: Find Next, then Esc ends it), ShellAbout:
+#     ./winhost scripts/owkern.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OWKERN
+key RETURN
+wait 200
+snap ok_procaddress.ppm
+key RETURN
+wait 100
+snap ok_window.ppm
+keydown ALT
+key F
+keyup ALT
+key O
+wait 50
+snap ok_open.ppm
+type README.TXT
+key RETURN
+wait 50
+keydown ALT
+key F
+keyup ALT
+key F
+wait 50
+type pin
+key RETURN
+wait 50
+snap ok_find.ppm
+key ESC
+wait 50
+keydown ALT
+key F
+keyup ALT
+key A
+wait 50
+snap ok_about.ppm
+key RETURN
+wait 30
+exit

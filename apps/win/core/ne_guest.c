@@ -34,9 +34,9 @@ _Static_assert(WIN_NE_RING0_OFFSET + WIN_NE_RING0_BYTES <= WIN_NE_THUNK_SEGMENT_
                "NE ring 0 area exceeds the thunk segment");
 
 /* the GDT after the globals: the ring 3 alias of the thunks, three call
- * gates, the TSS, the ring 0 area */
+ * gates, the TSS, the ring 0 area, the BIOS data (KERNEL's __0040H) */
 #define GDT_EXTRA(g) ((uint32_t)(g)->info.segment_count + 3u + WIN_NE_GUEST_GLOBALS)
-#define GDT_EXTRAS 6u
+#define GDT_EXTRAS 7u
 
 static void put16(uint8_t *p, uint16_t v)
 {
@@ -71,6 +71,15 @@ static void call_gate(uint8_t *p, uint16_t selector, uint16_t offset)
     p[4] = 0;
     p[5] = 0xe4;
     put16(p + 6, 0);
+}
+
+static void lstrcpy_n(char *d, const char *s, size_t cap)
+{
+    size_t n = strlen(s);
+    if (n >= cap)
+        n = cap - 1;
+    memcpy(d, s, n);
+    d[n] = 0;
 }
 
 static int name_eq(const char *a, const char *b)
@@ -144,8 +153,11 @@ static int assign_selector(void *opaque, uint16_t index, uint16_t flags,
  * does). The service number, KERNEL ordinal n, USER 0x1000 + n, GDI
  * 0x3000 + n, lives entirely inside WINN; it is not a guest pointer or an
  * emulated IRQ. */
-enum { M_KERNEL, M_USER, M_GDI, M_KEYBOARD };
-static const uint16_t module_base[] = { 0, 0x1000u, 0x3000u, WIN_NE_SERVICE_KEYBOARD };
+enum { M_KERNEL, M_USER, M_GDI, M_KEYBOARD, M_COMMDLG, M_SHELL, M_COUNT };
+static const uint16_t module_base[] = { 0, 0x1000u, 0x3000u, WIN_NE_SERVICE_KEYBOARD,
+                                        WIN_NE_SERVICE_COMMDLG, WIN_NE_SERVICE_SHELL };
+static const char *const module_names[M_COUNT] = { "KERNEL", "USER", "GDI", "KEYBOARD",
+                                                   "COMMDLG", "SHELL" };
 static const struct {
     uint8_t module;                 /* M_* */
     uint16_t ordinal;
@@ -208,6 +220,66 @@ static const struct {
     { M_GDI, 106, "SetBitmapBits", 10 },
     { M_GDI, 351, "ExtTextOut", 22 },
     { M_GDI, 471, "GetTextExtentPoint", 12 },
+    /* KERNEL: modules, resources, Catch/Throw, the rest (ne_guest_kernel.c) */
+    { M_KERNEL, 25, "GlobalCompact", 4 },
+    { M_KERNEL, 37, "GetCurrentPDB", 0 },
+    { M_KERNEL, 47, "GetModuleHandle", 4 },
+    { M_KERNEL, 48, "GetModuleUsage", 2 },
+    { M_KERNEL, 50, "GetProcAddress", 6 },
+    { M_KERNEL, 54, "GetInstanceData", 6 },
+    { M_KERNEL, 55, "Catch", 4 },
+    { M_KERNEL, 56, "Throw", 6 },
+    { M_KERNEL, 60, "FindResource", 10 },
+    { M_KERNEL, 61, "LoadResource", 4 },
+    { M_KERNEL, 62, "LockResource", 2 },
+    { M_KERNEL, 63, "FreeResource", 2 },
+    { M_KERNEL, 65, "SizeofResource", 4 },
+    { M_KERNEL, 92, "GetTempDrive", 2 },
+    { M_KERNEL, 95, "LoadLibrary", 4 },
+    { M_KERNEL, 96, "FreeLibrary", 2 },
+    { M_KERNEL, 97, "GetTempFileName", 10 },
+    { M_KERNEL, 107, "SetErrorMode", 2 },
+    { M_KERNEL, 132, "GetWinFlags", 0 },
+    { M_KERNEL, 133, "GetExePtr", 2 },
+    { M_KERNEL, 137, "FatalAppExit", 6 },
+    { M_KERNEL, 155, "GetTaskDS", 0 },
+    { M_KERNEL, 166, "WinExec", 6 },
+    { M_KERNEL, 169, "GetFreeSpace", 2 },
+    { M_USER, 16, "ClipCursor", 4 },
+    { M_USER, 181, "SetSysColors", 10 },
+    { M_USER, 284, "GetFreeSystemResources", 2 },
+    { M_USER, 451, "TranslateMDISysAccel", 6 },
+    /* GDI: the mapping mode (MM_TEXT only), palettes, a DC, Escape */
+    { M_GDI, 3, "SetMapMode", 4 },
+    { M_GDI, 12, "SetWindowExt", 6 },
+    { M_GDI, 14, "SetViewportExt", 6 },
+    { M_GDI, 38, "Escape", 12 },
+    { M_GDI, 53, "CreateDC", 16 },
+    { M_GDI, 67, "DPtoLP", 8 },
+    { M_GDI, 81, "GetMapMode", 2 },
+    { M_GDI, 94, "GetViewportExt", 2 },
+    { M_GDI, 96, "GetWindowExt", 2 },
+    { M_GDI, 99, "LPtoDP", 8 },
+    { M_GDI, 360, "CreatePalette", 4 },
+    { M_GDI, 363, "GetPaletteEntries", 10 },
+    { M_GDI, 364, "SetPaletteEntries", 10 },
+    { M_GDI, 375, "GetSystemPaletteEntries", 10 },
+    { M_COMMDLG, 1, "GetOpenFileName", 4 },
+    { M_COMMDLG, 2, "GetSaveFileName", 4 },
+    { M_COMMDLG, 11, "FindText", 4 },
+    { M_COMMDLG, 12, "ReplaceText", 4 },
+    { M_COMMDLG, 26, "CommDlgExtendedError", 0 },
+    { M_COMMDLG, 27, "GetFileTitle", 10 },
+    { M_SHELL, 1, "RegOpenKey", 10 },
+    { M_SHELL, 2, "RegCreateKey", 10 },
+    { M_SHELL, 3, "RegCloseKey", 4 },
+    { M_SHELL, 6, "RegQueryValue", 16 },
+    { M_SHELL, 9, "DragAcceptFiles", 4 },
+    { M_SHELL, 12, "DragFinish", 2 },
+    { M_SHELL, 20, "ShellExecute", 20 },
+    { M_SHELL, 21, "FindExecutable", 12 },
+    { M_SHELL, 22, "ShellAbout", 12 },
+    { M_SHELL, 34, "ExtractIcon", 8 },
     { M_USER, 420, "wsprintf", 0 },
     { M_USER, 87, "DialogBox", 12 },
     { M_USER, 88, "EndDialog", 4 },
@@ -320,6 +392,10 @@ static int module_of(const win_ne_import *imp)
         return M_GDI;
     if (name_eq(imp->module, "KEYBOARD") || name_eq(imp->module, "KEYBOARD.DRV"))
         return M_KEYBOARD;
+    if (name_eq(imp->module, "COMMDLG") || name_eq(imp->module, "COMMDLG.DLL"))
+        return M_COMMDLG;
+    if (name_eq(imp->module, "SHELL") || name_eq(imp->module, "SHELL.DLL"))
+        return M_SHELL;
     return -1;
 }
 
@@ -368,10 +444,30 @@ static uint16_t service_args(uint16_t id)
     return sig ? sig_args(sig) : 0;
 }
 
+/* KERNEL's constants a program imports as values, not as procedures:
+ * __AHSHIFT, __AHINCR (a huge pointer's next 64K: no further selectors
+ * are tiled), __WINFLAGS, __0040H (the BIOS data, a selector of its own) */
+static int constant_of(const win_ne_guest_image *g, const win_ne_import *imp, uint16_t *value)
+{
+    static const struct { uint16_t ordinal; const char *name; uint16_t value; } k[] = {
+        { 113, "__AHSHIFT", 3 }, { 114, "__AHINCR", 8 },
+        { 178, "__WINFLAGS", WIN_NE_WINFLAGS }, { 193, "__0040H", 0 },
+    };
+    if (module_of(imp) != M_KERNEL)
+        return 0;
+    for (unsigned i = 0; i < sizeof(k) / sizeof(k[0]); i++)
+        if (imp->ordinal ? imp->ordinal == k[i].ordinal && !imp->procedure[0]
+                         : name_eq(imp->procedure, k[i].name)) {
+            *value = k[i].value ? k[i].value : g ? g->bios_selector : 1;
+            return 1;
+        }
+    return 0;
+}
+
 static int note_unresolved(void *opaque, const win_ne_import *imp)
 {
     uint16_t id;
-    if (service_id(imp, &id))
+    if (service_id(imp, &id) || constant_of(NULL, imp, &id))
         return 0;
     win_ne_unresolved *u = (win_ne_unresolved *)opaque;
     size_t n = strlen(imp->module);
@@ -400,6 +496,10 @@ static int resolve_import(void *opaque, const win_ne_import *imp,
 {
     win_ne_guest_image *g = (win_ne_guest_image *)opaque;
     uint16_t id;
+    if (constant_of(g, imp, &id)) {
+        *selector = *offset = id;
+        return 1;
+    }
     if (!service_id(imp, &id))
         return 0;
     for (uint16_t i = 0; i < g->thunk_count; i++) {
@@ -416,6 +516,70 @@ static int resolve_import(void *opaque, const win_ne_import *imp,
     *selector = g->thunk3_selector;
     *offset = (uint16_t)(slot * THUNK_BYTES);
     return 1;
+}
+
+/* A thunk: the service's number, CALL FAR the API gate (ring 0), RETF
+ * releasing its PASCAL arguments; DOS3Call's an INT 21h of its own */
+static void thunk_bytes(const win_ne_guest_image *g, uint16_t id, uint8_t p[THUNK_BYTES])
+{
+    uint16_t args = service_args(id);
+    memset(p, 0xcc, THUNK_BYTES);
+    if (id == WIN_NE_SERVICE_DOS3CALL) {
+        p[0] = 0xcd; p[1] = 0x21;          /* int 21h, with its registers */
+        p[2] = 0xcb;                       /* retf */
+        return;
+    }
+    p[0] = 0xb8; put16(p + 1, id);         /* mov ax,service */
+    p[3] = 0x9a;                           /* call far api gate */
+    put16(p + 4, 0);
+    put16(p + 6, g->api_gate);
+    if (args) {
+        p[8] = 0xca; put16(p + 9, args);
+    } else {
+        p[8] = 0xcb;
+    }
+}
+
+uint32_t win_ne_guest_proc(win_ne_guest_image *g, unsigned module, uint16_t ordinal,
+                           const char *name)
+{
+    if (!g || module >= M_COUNT)
+        return 0;
+    win_ne_import imp;
+    memset(&imp, 0, sizeof(imp));
+    lstrcpy_n(imp.module, module_names[module], sizeof(imp.module));
+    if (name)
+        lstrcpy_n(imp.procedure, name, sizeof(imp.procedure));
+    else
+        imp.ordinal = ordinal;
+    uint16_t id, sel, off;
+    if (constant_of(g, &imp, &id) || !service_id(&imp, &id))
+        return 0;
+    uint16_t before = g->thunk_count;
+    if (!resolve_import(g, &imp, &sel, &off))
+        return 0;
+    if (g->thunk_count != before) {         /* a new one: written now */
+        uint8_t p[THUNK_BYTES];
+        thunk_bytes(g, id, p);
+        if (!g->io.write(g->opaque, g->thunk_linear + off, p, sizeof(p))) {
+            g->thunk_count = before;
+            return 0;
+        }
+    }
+    return (uint32_t)sel << 16 | off;
+}
+
+int win_ne_guest_module(const char *name)
+{
+    char base[16];
+    unsigned n = 0;
+    for (const char *p = name; *p && *p != '.' && n + 1 < sizeof(base); p++)
+        base[n++] = *p;
+    base[n] = 0;
+    for (int i = 0; i < M_COUNT; i++)
+        if (name_eq(base, module_names[i]))
+            return i;
+    return -1;
 }
 
 int win_ne_guest_load(const char *path, win_ne_guest_image *out,
@@ -454,6 +618,7 @@ int win_ne_guest_load(const char *path, win_ne_guest_image *out,
     out->cbret_gate = (uint16_t)((x + 3u) * GDT_ENTRY_BYTES | 3u);
     out->tss_selector = (uint16_t)((x + 4u) * GDT_ENTRY_BYTES);
     out->ring0_selector = (uint16_t)((x + 5u) * GDT_ENTRY_BYTES);
+    out->bios_selector = (uint16_t)((x + 6u) * GDT_ENTRY_BYTES | 3u);
     if (!guest_alloc(out, gdtsize, &out->gdt_linear) ||
         !guest_alloc(out, WIN_NE_THUNK_SEGMENT_BYTES, &out->thunk_linear) ||
         !guest_alloc(out, WIN_NE_GUEST_PSP_BYTES, &out->psp.linear))
@@ -469,6 +634,7 @@ int win_ne_guest_load(const char *path, win_ne_guest_image *out,
                    WIN_NE_TSS_BYTES, 0x81);         /* 16-bit TSS, available */
     seg_descriptor(out->gdt + out->ring0_selector, out->thunk_linear + WIN_NE_RING0_OFFSET,
                    WIN_NE_RING0_BYTES, 0x92);
+    seg_descriptor(out->gdt + (out->bios_selector & ~7u), 0x400u, 0x300u, 0xf0);  /* read-only */
     out->psp.size = WIN_NE_GUEST_PSP_BYTES;
     out->psp.flags = 1;                 /* data */
     descriptor(out->gdt + (out->psp.selector & ~7u), out->psp.linear, WIN_NE_GUEST_PSP_BYTES, 0);
@@ -499,21 +665,7 @@ int win_ne_guest_load(const char *path, win_ne_guest_image *out,
              * gate (to ring 0). The OUT is executed in real mode, allowing
              * its native handler to use DOS/BIOS. RETF imm16 restores the
              * Win16 PASCAL caller's SP. */
-            uint16_t args = service_args(id);
-            if (id == WIN_NE_SERVICE_DOS3CALL) {
-                p[0] = 0xcd; p[1] = 0x21;  /* int 21h, with its registers */
-                p[2] = 0xcb;               /* retf */
-            } else {
-                p[0] = 0xb8; put16(p + 1, id); /* mov ax,service */
-                p[3] = 0x9a;               /* call far api gate */
-                put16(p + 4, 0);
-                put16(p + 6, out->api_gate);
-                if (args) {
-                    p[8] = 0xca; put16(p + 9, args);
-                } else {
-                    p[8] = 0xcb;
-                }
-            }
+            thunk_bytes(out, id, p);
         }
         if (!io->write(opaque, out->thunk_linear + i * THUNK_BYTES, p, sizeof(p)))
             goto loaded_fail;

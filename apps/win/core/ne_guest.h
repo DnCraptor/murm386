@@ -27,6 +27,10 @@
  * an INT 21h of its own (the registers are its arguments) */
 #define WIN_NE_SERVICE_KEYBOARD 0x4000u
 #define WIN_NE_SERVICE_DOS3CALL 102u
+#define WIN_NE_SERVICE_COMMDLG  0x5000u
+#define WIN_NE_SERVICE_SHELL    0x6000u
+/* GetWinFlags: protected mode, a 386, standard mode, a coprocessor */
+#define WIN_NE_WINFLAGS         0x0415u
 
 /* Guest linear allocations must be addressable via an x86 segment base and
  * remain allocated until the entire staged image is released. The callbacks
@@ -57,6 +61,7 @@ typedef struct {
      * ring 0 area's data */
     uint16_t thunk_selector, thunk3_selector;
     uint16_t api_gate, exit_gate, cbret_gate, tss_selector, ring0_selector;
+    uint16_t bios_selector;        /* the BIOS data area (__0040H), read only */
     win_ne_guest_segment psp;       /* a data segment of its own */
     /* its global memory blocks, a selector each (0: a free entry) */
     win_ne_guest_segment globals[WIN_NE_GUEST_GLOBALS];
@@ -92,6 +97,13 @@ uint16_t win_ne_guest_global_alloc(win_ne_guest_image *g, uint32_t bytes);
 int win_ne_guest_global_realloc(win_ne_guest_image *g, uint16_t sel, uint32_t bytes,
                                 int (*read)(void *, uint32_t, void *, uint32_t));
 int win_ne_guest_global_free(win_ne_guest_image *g, uint16_t sel);
+/* GetProcAddress of a module WINN has (0 KERNEL, 1 USER, 2 GDI, 3
+ * KEYBOARD, 4 COMMDLG, 5 SHELL; win_ne_guest_module gives the number of a
+ * name, -1 for none): a thunk's far address, made now if the program had
+ * none for it, 0 if WINN has not the function. */
+uint32_t win_ne_guest_proc(win_ne_guest_image *g, unsigned module, uint16_t ordinal,
+                           const char *name);
+int win_ne_guest_module(const char *name);
 /* A data segment of the program (index) made bigger, moved as GlobalReAlloc
  * moves a block: DGROUP when its local heap grows. */
 int win_ne_guest_segment_grow(win_ne_guest_image *g, uint16_t index, uint32_t bytes,

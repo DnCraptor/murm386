@@ -74,7 +74,18 @@ structures (TEXTMETRIC, LOGFONT, LOGPEN, LOGBRUSH, BITMAP), wsprintf,
 ExtTextOut, GetTextExtentPoint, TabbedTextOut, GetTabbedTextExtent,
 GetTextFace, CreateBitmap(Indirect), Get/SetBitmapBits, GetClassInfo,
 _hread/_hwrite (within one block: a huge pointer's segments are not
-tiled). A
+tiled); KERNEL's GetModuleHandle, LoadLibrary and GetProcAddress for the
+modules WINN has (KERNEL, USER, GDI, KEYBOARD, COMMDLG, SHELL: no DLLs of
+its own yet), FindResource, LoadResource, LockResource, SizeofResource,
+Catch and Throw, GetTempFileName, GetWinFlags, WinExec, SetErrorMode,
+FatalAppExit and the constants __AHINCR, __AHSHIFT, __WINFLAGS, __0040H
+(the BIOS data, read only); palettes, CreateDC, SetSysColors; the mapping
+mode is MM_TEXT, all there is (SetMapMode and the extents accept others
+and keep it; DPtoLP and LPtoDP go by the origins); COMMDLG's Open and
+Save dialogs, Find and Replace (its FINDREPLACE in the messages, its own),
+GetFileTitle; SHELL's ShellExecute (a program, or a document by WIN.INI's
+[Extensions]), FindExecutable, ShellAbout, ExtractIcon, DragAcceptFiles,
+and no registration database. A
 window procedure gets WM_CREATE's CREATESTRUCT, WM_GETMINMAXINFO's,
 WM_WINDOWPOSCHANGING's and WM_NCCALCSIZE's structures as copies of its
 own, which its DefWindowProc gives back. DOS, as its C library (Open
@@ -99,13 +110,15 @@ generate `NEAPP.EXE`, `NEDIALOG.EXE`, `NELOOP.EXE`, `NEFAULT.EXE`,
 script: `OWHELLO`, `OWBUSY`, `OWWIN`, `OWMENU` (resources), `OWSEGS` (three
 code segments), `OWDEMO` (many functions at once), `OWFILE` and `OWFILEL`
 (DOS through the C library, small and large model), `OWRES` (icons, a
-cursor, bitmaps, text, a superclass) (`make NEFIXTURES` in
+cursor, bitmaps, text, a superclass), `OWKERN` (KERNEL, COMMDLG, SHELL)
+(`make NEFIXTURES` in
 `host/`). All have DOS MZ stubs that explain how to launch them under WINN
 when invoked directly from DOS. `host/test_ne_run` runs them on the
 emulator's own i386 core (`src/i386.c` as it is, built for the host with
 the stand-ins in `host/x86run/`), and so does the host `winhost`: they are
 in its `HOSTWIN/` (`scripts/owwin.txt`, `scripts/owmenu.txt`,
-`scripts/owdemo.txt`, `scripts/owfile.txt`, `scripts/owres.txt`).
+`scripts/owdemo.txt`, `scripts/owfile.txt`, `scripts/owres.txt`,
+`scripts/owkern.txt`).
 
     WINN [:] [program [arguments]]
 
@@ -273,6 +286,7 @@ use `ucontext`):
     ./winhost scripts/owdemo.txt PROGMAN     # controls, GDI, timers, memory, a file, subclassing
     ./winhost scripts/owfile.txt PROGMAN     # its C library's DOS calls: files, find, directory, date
     ./winhost scripts/owres.txt PROGMAN      # its icons, cursor, bitmaps; text; a superclass
+    ./winhost scripts/owkern.txt PROGMAN     # Catch/Throw, GetProcAddress, Open, Find, ShellAbout
     ./winhost scripts/winmine.txt WINMINE    # marks, a lost game, Expert, Best Times
     ./winhost scripts/logo.txt PROGMAN       # the logo (copy the BMPs into HOSTWIN first)
     ./winhost800 scripts/vga800.txt  # the VGA800 driver, built in

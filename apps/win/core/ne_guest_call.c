@@ -15,6 +15,7 @@
 #include "wincore.h"
 #include "ne_guest_api.h"
 #include "ne_guest_int.h"
+#include "commdlg.h"
 
 #if defined(__arm__) || defined(__thumb__) || defined(WINN_NE_HOST)
 
@@ -595,6 +596,15 @@ LRESULT ne_message(ne_user *u, uint32_t proc, HWND h, UINT msg, WPARAM wp, LPARA
     WNDPROC native = token_proc(proc);
     if (native)                         /* a native one it holds (a superclass) */
         return CallWindowProc(native, h, msg, wp, lp);
+    static UINT find_msg;
+    if (!find_msg)
+        find_msg = RegisterWindowMessage(FINDMSGSTRING);
+    if (msg == find_msg && lp) {        /* its Find/Replace dialog's: its FINDREPLACE */
+        uint32_t far = ne_find_message(u, lp);
+        if (far)
+            return (LRESULT)(int32_t)win_ne_callback(c, proc, (uint16_t)h, (uint16_t)msg,
+                                                     (uint16_t)wp, far);
+    }
     uint8_t blob[160];
     uint16_t len = 0;
     const char *fmt = NULL;
@@ -1104,7 +1114,7 @@ int ne_call(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword)
     if (service < 0x1000u && (local_service(a, u, service, v) || global_service(a, service, v, dword)))
         return 1;
     if (ne_dos_service(a, u, service, v, dword) || text_service(a, service, v, dword) ||
-        bitmap_service(a, service, v, dword))
+        bitmap_service(a, service, v, dword) || ne_kernel_service(a, u, service, v, dword))
         return 1;
     if (service == 0x1194) {            /* GetClassInfo */
         *v = class_info(a, u);

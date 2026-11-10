@@ -36,6 +36,13 @@ OWRES: resources of its own: its icons (the class's, another drawn), its
     TabbedTextOut, GetTextFace, CreateBitmap and GetBitmapBits, a BUTTON
     superclassed through GetClassInfo, _hwrite/_hread: "own 1, bits
     f0000f00, huge io", "extent 48x16, face System"
+
+OWKERN: KERNEL and the modules around it: GetWinFlags, GetModuleHandle and
+    GetProcAddress (MessageBox through it), LoadLibrary, Catch and Throw, an
+    RCDATA resource, GetTempFileName, a palette, DPtoLP, the error mode;
+    COMMDLG's Open and Find (its messages) dialogs, SHELL's ShellAbout:
+    "flags 415, user 1, box 1, dlg 1", "caught 42, custom resource, 16
+    bytes, temp ~owk", "palette 200,100,50 30, dp->lp 15,25, mode 1"
 """
 import sys
 
@@ -2209,6 +2216,366 @@ PROGRAMS = {
             '3ffffff83fffc0000003c0000003c0000003c0000003c0000003fff83ffffff83ffffff83ffffff83ffffff8'
             '3ffffff83ffffff83ffffff83ffffff83ffffff83ffffff83fffffffffffffffffff00000200010020004000'
             '01000100340100000400'
+        )),
+    'OWKERN': (
+        # wcl -bt=windows -l=windows -ms owkern.c commdlg.lib shell.lib;
+        # wrc owkern.rc owkern.exe, with owkern.rc:
+        #     #include <windows.h>
+        #     DATA RCDATA { "custom resource", "\0" }
+        #     MAIN MENU
+        #     BEGIN
+        #         POPUP "&File"
+        #         BEGIN
+        #             MENUITEM "&Open...", 1
+        #             MENUITEM "&Find...", 2
+        #             MENUITEM "&About", 3
+        #         END
+        #     END
+        #
+        # #include <windows.h>
+        # #include <commdlg.h>
+        # /* not in Open Watcom's Win16 headers */
+        # #define FINDMSGSTRING "commdlg_FindReplace"
+        # int FAR PASCAL ShellAbout(HWND, LPCSTR, LPCSTR, HICON);
+        # #include <stdio.h>
+        # #include <string.h>
+        #
+        # /* KERNEL and the modules around it: GetWinFlags, GetModuleHandle and
+        #  * GetProcAddress (MessageBox called through it), LoadLibrary, Catch and
+        #  * Throw, a resource of its own (RCDATA), GetTempFileName, a palette,
+        #  * DPtoLP; COMMDLG's Open and Find dialogs, SHELL's ShellAbout. What each
+        #  * gave in its window. */
+        # typedef int (FAR PASCAL *MSGBOX)(HWND, LPCSTR, LPCSTR, UINT);
+        # static char lines[6][96];
+        # static UINT find_msg;
+        # static FINDREPLACE fr;
+        # static char what[64] = "needle";
+        # static HWND find_dlg;
+        # static CATCHBUF jump;
+        #
+        # static int deep(int n)
+        # {
+        #     if (n == 3)
+        #         Throw(jump, 42);
+        #     return deep(n + 1) + 1;
+        # }
+        #
+        # long FAR PASCAL WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+        # {
+        #     if (msg == find_msg) {
+        #         LPFINDREPLACE f = (LPFINDREPLACE)lp;
+        #         char text[32];
+        #         _fstrncpy(text, f->lpstrFindWhat, sizeof(text) - 1);
+        #         text[sizeof(text) - 1] = 0;
+        #         sprintf(lines[5], "find '%s' %s%s", text,
+        #                 f->Flags & FR_FINDNEXT ? "next" : "", f->Flags & FR_DIALOGTERM ? "end" : "");
+        #         if (f->Flags & FR_DIALOGTERM)
+        #             find_dlg = 0;
+        #         InvalidateRect(h, NULL, TRUE);
+        #         return 0;
+        #     }
+        #     switch (msg) {
+        #     case WM_COMMAND:
+        #         if (wp == 1) {
+        #             OPENFILENAME ofn;
+        #             char file[128] = "", title[32] = "";
+        #             memset(&ofn, 0, sizeof(ofn));
+        #             ofn.lStructSize = sizeof(ofn);
+        #             ofn.hwndOwner = h;
+        #             ofn.lpstrFilter = "Text (*.TXT)\0*.TXT\0All\0*.*\0";
+        #             ofn.nFilterIndex = 1;
+        #             ofn.lpstrFile = file;
+        #             ofn.nMaxFile = sizeof(file);
+        #             ofn.lpstrFileTitle = title;
+        #             ofn.nMaxFileTitle = sizeof(title);
+        #             ofn.Flags = OFN_FILEMUSTEXIST;
+        #             if (GetOpenFileName(&ofn))
+        #                 sprintf(lines[4], "open %s (%s) %u", file, title, ofn.nFileOffset);
+        #             else
+        #                 sprintf(lines[4], "open cancelled %lx", CommDlgExtendedError());
+        #             InvalidateRect(h, NULL, TRUE);
+        #         } else if (wp == 2 && !find_dlg) {
+        #             memset(&fr, 0, sizeof(fr));
+        #             fr.lStructSize = sizeof(fr);
+        #             fr.hwndOwner = h;
+        #             fr.lpstrFindWhat = what;
+        #             fr.wFindWhatLen = sizeof(what);
+        #             fr.Flags = FR_DOWN;
+        #             find_dlg = FindText(&fr);
+        #         } else if (wp == 3) {
+        #             ShellAbout(h, "OwKern#OwKern", "KERNEL, COMMDLG, SHELL", LoadIcon(NULL, IDI_APPLICATION));
+        #         }
+        #         return 0;
+        #     case WM_PAINT: {
+        #         PAINTSTRUCT ps;
+        #         HDC dc = BeginPaint(h, &ps);
+        #         int i;
+        #         for (i = 0; i < 6; i++)
+        #             TextOut(dc, 4, 4 + 18 * i, lines[i], strlen(lines[i]));
+        #         EndPaint(h, &ps);
+        #         return 0;
+        #     }
+        #     case WM_DESTROY:
+        #         PostQuitMessage(0);
+        #         return 0;
+        #     }
+        #     return DefWindowProc(h, msg, wp, lp);
+        # }
+        #
+        # int PASCAL WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
+        # {
+        #     WNDCLASS wc;
+        #     MSG msg;
+        #     HWND w;
+        #     HMODULE user = GetModuleHandle("USER");
+        #     MSGBOX box = (MSGBOX)GetProcAddress(user, "MessageBox");
+        #     HINSTANCE dlg = LoadLibrary("COMMDLG.DLL");
+        #     HRSRC rs = FindResource(hInstance, "DATA", RT_RCDATA);
+        #     HGLOBAL rg = LoadResource(hInstance, rs);
+        #     LPSTR rp = LockResource(rg);
+        #     char tmp[144], *base, rtext[32];
+        #     int caught;
+        #     PALETTEENTRY pe[2] = { { 10, 20, 30, 0 }, { 200, 100, 50, 0 } }, back[2];
+        #     struct { WORD v, n; PALETTEENTRY e[2]; } lp = { 0x300, 2 };
+        #     HPALETTE pal;
+        #     POINT pt;
+        #     HDC dc;
+        #
+        #     sprintf(lines[0], "flags %lx, user %x, box %d, dlg %d", GetWinFlags(), user != 0,
+        #             box ? box(NULL, "through GetProcAddress", "OwKern", MB_OK) : -1, dlg >= 32);
+        #     caught = Catch(jump);
+        #     if (!caught)
+        #         deep(0);
+        #     GetTempFileName(0, "owk", 0, tmp);
+        #     base = strrchr(tmp, '\\');
+        #     _fstrncpy(rtext, rp ? rp : "-", sizeof(rtext) - 1);
+        #     rtext[sizeof(rtext) - 1] = 0;
+        #     sprintf(lines[1], "caught %d, %s, %lu bytes, temp %.4s", caught, rtext,
+        #             SizeofResource(hInstance, rs), base ? base + 1 : tmp);
+        #     OpenFile(tmp, (OFSTRUCT FAR *)back, OF_DELETE);
+        #     FreeResource(rg);
+        #     memcpy(lp.e, pe, sizeof(pe));
+        #     pal = CreatePalette((LOGPALETTE FAR *)&lp);
+        #     memset(back, 0, sizeof(back));
+        #     GetPaletteEntries(pal, 0, 2, back);
+        #     DeleteObject(pal);
+        #     dc = GetDC(NULL);
+        #     SetWindowOrg(dc, 10, 20);
+        #     pt.x = 5;
+        #     pt.y = 5;
+        #     DPtoLP(dc, &pt, 1);
+        #     ReleaseDC(NULL, dc);
+        #     sprintf(lines[2], "palette %d,%d,%d %d, dp->lp %d,%d, mode %d", back[1].peRed, back[1].peGreen,
+        #             back[1].peBlue, back[0].peBlue, pt.x, pt.y, GetMapMode(GetDC(NULL)));
+        #     sprintf(lines[3], "error mode %u", SetErrorMode(1));
+        #     find_msg = RegisterWindowMessage(FINDMSGSTRING);
+        #     memset(&wc, 0, sizeof(wc));
+        #     wc.lpfnWndProc = WndProc;
+        #     wc.hInstance = hInstance;
+        #     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        #     wc.hbrBackground = GetStockObject(WHITE_BRUSH);
+        #     wc.lpszMenuName = "MAIN";
+        #     wc.lpszClassName = "OwKern";
+        #     RegisterClass(&wc);
+        #     w = CreateWindow("OwKern", "Kernel", WS_OVERLAPPEDWINDOW, 20, 40, 440, 190, NULL, NULL,
+        #                      hInstance, NULL);
+        #     ShowWindow(w, nCmdShow);
+        #     UpdateWindow(w);
+        #     while (GetMessage(&msg, NULL, 0, 0)) {
+        #         if (find_dlg && IsDialogMessage(find_dlg, &msg))
+        #             continue;
+        #         TranslateMessage(&msg);
+        #         DispatchMessage(&msg);
+        #     }
+        #     if (dlg >= 32)
+        #         FreeLibrary(dlg);
+        #     return msg.wParam;
+        # }
+        bytes.fromhex(
+            '4d5a80000100000004000000ffff0000b8000000000000004000000000000000000000000000000000000000'
+            '00000000000000000000000000000000800000000e1fba0e00b409cd21b8014ccd2154686973206973206120'
+            '57696e646f77732031362d6269742065786563757461626c650d0a240000000000000000000000004e450501'
+            'c4000200000000000203020000040020f806010000000200020006000e0040005000860090009c0046010000'
+            '0000010002000208aa00090f00000a03aa005818400d5818cb0db003410c300701000a80010000000000ab0f'
+            '080030002c00000000000480010000000000b30f1900301031000000000000000444415441044d41494e064f'
+            '574b45524e000000010008000d0015001b001f0000064b45524e454c045553455207434f4d4d444c47055348'
+            '454c4c03474449084b4559424f41524400000a6f776b65726e2e657865000000ccebfd909090900050b81000'
+            'e8fc05585351525689c63d0300750e1eb8140650b82a00509affff00008d4401e8d9ff405e5a595bc31e5890'
+            '455589e51e8ed8b84201e8c605565781ec2a018b76068b5e088b560a8b460c3b062806754189f7895ef8b81f'
+            '00508ec3268b5c0c268b4c0e8cda8d4698e8c505c646b7008e46f826f64408407405b81000eb03b81400508e'
+            '46f826f64508087407b81500eb05eb3cb81400508d469850b81a0050b8900550e8bf0583c40a8e46f826f645'
+            '0840740531c0a32606ff760e31c05050b80100509affff000031c031d2e9e5013d110174133d0f0074083d02'
+            '007406e9c701e96501e9b60183fa017403e9dc00b940008cd88ec08dbed0febe0602f3a5b910008d7eb8be86'
+            '02f3a5bb480031d28d8650ffe86405c78650ff4800c78652ff00008b460e898654ffc78658ff29008c9e5aff'
+            'c78664ff0100c78666ff00008d96d0fe899668ff8c9e6affc7866cff8000c7866eff00008d56b8899670ff8c'
+            '9e72ffc78674ff2000c78676ff0000c746800010c7468200008d9650ff1e529affff000085c0741cff76848d'
+            '46b8508d86d0fe50b8450050b8300550e8c70483c40aeb159affff00005250b8550050b8300550e8b00483c4'
+            '08ff760e31c05050b80100509affff0000e9fdfe83fa02754e833e2606007547bb240031d2b8f005e89804c7'
+            '06f005240031c0a3f2058b460ea3f405c706fc05c6018c1efe05c70604064000c706f805010031c0a3fa051e'
+            'b8f005509affff0000a32606e9aafe83fa037403e9a2feff760e1eb87f00501eb868005031c05050b8007f50'
+            '9affff0000509affff0000e97ffeff760e8d56d81e529affff000089c731f657b8040050b10389f0d3e001f0'
+            'd1e00504005089f0d1e0d1e029f0b105d3e005b0031e50e81404509affff00004683fe067ccdff760e8d56d8'
+            '1e529affff0000e92bfe31c0509affff0000e920feff760e505253569affff00008d66fa5f5e1f5d4dca0a00'
+            '5589e5b83401e83603565781ec0e011eb88d00509affff00008946f4501eb89200509affff00008946ea8956'
+            'ec1eb89d00509affff00008946ee8946f6ff760c1eb8a9005031c050b80a00509affff00008946f0ff760c50'
+            '9affff00008946f2509affff00008946f88956fa8cd88ec08d7ed6bea602a5a5a5a58d7ecabeae02a5a5a5a5'
+            'a5a5837eee207205b80100eb0231c050837eec007506837eea00741531c0501eb8b500501eb8ae005031c050'
+            'ff5eeaeb03b8ffff508b46f485c07403b80100509affff00005250b8cc0050b8b00350e8d00283c40e1eb814'
+            '06509affff000089c785c07503e850fc31c0501eb8ef005031c0508d96eefe1e529affff0000ba5c008d86ee'
+            'fee8e10289c6b81f0050837efa007506837ef80074088b5ef88b4efaeb05bbf3008cd98cda8d867effe83d02'
+            'c6469d0085f674058d4401eb048d86eefe50ff760cff76f09affff000052508d867eff5057b8f50050b81004'
+            '50e8420283c40e8d96eefe1e528d56de1e52b80002509affff0000ff76f29affff0000bb08008d56d68d46ce'
+            'e880028d56ca1e529affff000089c6bb080031d28d46dee815025631c050b80200508d56de1e529affff0000'
+            '569affff000031c0509affff000089c650b80a0050b81400509affff0000b805008946e68946e8568d56e61e'
+            '52b80100509affff000031c050569affff000031c0509affff0000509affff000050ff76e8ff76e68a46e030'
+            'e4508a46e4508a46e3508a46e250b8190150b8700450e87d0183c412b80100509affff000050b8440150b8d0'
+            '0450e8650183c4061eb85201509affff0000a32806bb1a0031d28d469ee85f01c746a0ffffc746a2ffff8b46'
+            '0c8946a831c05050b8007f509affff00008946ac31c0509affff00008946aec746b066018c5eb2c746b4ae00'
+            '8c5eb68d569e1e529affff00001eb8ae00501eb86b0150b8cf005031c050b8140050b8280050b8b80150b8be'
+            '005031c05050ff760c50509affff000089c650ff76049affff0000569affff00008d56b81e5231c05050509a'
+            'ffff000085c0742ca1260685c0740f508d56b81e529affff000085c075d78d56b81e529affff00008d56b81e'
+            '529affff0000ebc18b46f63d20007206509affff00008b46bc8d66fc5f5e5dc20a008c16ba02c33bc473132b'
+            'c4f7d83b060a0077068cd03b06ba027401c30e5ab82d06bb0100e96c02537461636b204f766572666c6f7721'
+            '005589e5565789c789ce8b4e0489d885c9750889f85f5e5dc202008ec21e968ed857acaa84c0e0fa33c0d1e9'
+            'f3ab13c9f3aa581febdf5589e553528b46048d5e088b5606e841025a5b5dc3515789c789d988d0571e078ae0'
+            'd1e9f3ab13c9f3aa5f89f85f59c3515789c78cd88ec083c9ff33c0f2aef7d14989c85f59c3515789c78cd88e'
+            'c0b9ffff32c0f2aef7d14f8ac2fdf2aefc75038bcf4189c85f59c351565789d989d689c7578cd88ec0d1e9f3'
+            'a513c9f3a45f89f85f5e59c3eb0203009affff00000bc0750e5033c0ba0f00e88e0258b44ccd218c06c00257'
+            '5606535253be2b078936db028c1edd02268a078804464384c075f589360a005b2bc0509affff000057579aff'
+            'ff0000fc1e07b92b07bfb0032bcf32c0f3aab84208a3d702b8ffffa3d902b430cd21a2c2028826c3029affff'
+            '0000a2c4028826c50286e0a3c60254583bc475120f01e0a90100740ab001a2c802b003a2c9021ebfe30257b8'
+            '9000509affff0000b8e302893edf028c1ee102b8ff00e88f01e814fbe91d014f70656e20576174636f6d2043'
+            '2f432b2b31362052756e2d54696d652073797374656d2e20436f7079726967687420286329204f70656e2057'
+            '6174636f6d20436f6e7472696275746f727320323030322d323032362e20506f7274696f6e7320436f707972'
+            '6967687420284329205379626173652c20496e632e20313938382d323030322e00c3cb005589e551565781ec'
+            '800089c689df8d9e7aff8cd98ec2268a0484c074173c0d74138d46f939c3730c268a048ec14626880743ebe0'
+            '31c08ec15026c607001e8d9e7aff531eb872015031c0509affff000089f8e96800515689c189d6e8570185c0'
+            '750689c889f2eb9889d8e95000535689c38b378d440189078814ff470a5e5bc3515689c6b9b108e8640a01c6'
+            'c604005e59c3c3c3535289c3833e9a03007404ff169a03ff167403baff00b81000e8a800ff167403ff167603'
+            '89d8e904fe5289c2ff167403ff16760389d0e9f4fd5589e5535289c3833f0075078d66fc5a5b5dc31eff171f'
+            'ebf35589e5535289c38b47028b1785c0750485d274df1eff1f1febd95589e5535152565789c11ee8effebfb0'
+            '0389fabba40389fe88c839fb7316803f02750583c306ebf23a470172f689de8a4701ebef39fe74158d440280'
+            '3c007508e88affc60402ebcbe89bffebf61f8d66f65f5e5a595b5dc35589e55351565789c11ee898fe88d5bf'
+            'b00389fabbb00389fe88c839fb7316803f02750583c306ebf23a470177f689de8a4701ebef39fe741c3a6c01'
+            '7305c60402ebd18d4402803c007505e827ffebeee83bffebe91f8d66f85f5eeb9f803e780300750331c0c352'
+            '50cceb0657564944454fb8010083c404c3535689c689d3c7470200008a043c2d740b3c23750d804f020146eb'
+            'ef804f0208ebf73c2b750a804f0204806702fdebe93c20750cf647020475df804f0202ebd93c307505884719'
+            'ebd089f05e5bc351565789c689d189dac6471920e8a2ff89c7c74706000089c6803d2a74228a043c307c2e3c'
+            '397f2aba0a008b4706f7ea89c28a04982d300001c246895706ebde89cf8305028b3d8b45fe89470685c07c38'
+            '46c74708ffff803c2e754846c747080000803c2a742b8a043c307c373c397f33ba0a008b4708f7ea89c28a04'
+            '982d300001c246895708ebdef75f06804f0208ebbf89cf8305028b3d8b45fe89470885c07c21468a048d5401'
+            '3c68731e3c4c73573c497555807c01367536807c02347530e97700c74708ffffebd88d7c02770e807c016875'
+            '5089fe804f0210eb133c7473153c6c75263a4401751689fe804f028089f05f5e59c3764f3c7a744b3c7775f0'
+            '46804f0240ebe9eb0aeb1c3c6a75e189d6ebd9762a3c5774123c4e75d389d6804f0302ebcbeb0b3c4675c546'
+            '804f0304ebbe89d6804f0220ebb683c603ebad89d6804f0301eba946eba6565789c689d789da8ec731c039d0'
+            '740c89f34626803f00740340ebf05f5ec35589e551565783ec0289de89c389d731c983feff75278ec7268b07'
+            '85c0741489c28d46f883c302e83f093dffff74e701c1ebe389c88d66fa5f5e595dc38ec7268b0785c0741839'
+            'f17f1489c28d46f883c302e814093dffff74e301c1ebdf39f17ed189f0ebcf5589e5515683ec0a5289d9bb10'
+            '008d56f2e852098d46f28b5ef0e852fa89c601cb89c889f24e85d27e0f89c24b4885d27e078a52f28817ebea'
+            '8b76f001c689c24e4885d27e05c60430ebf38b5ef001cbc607008d66fce97aff5589e5565783ec0889c68956'
+            'f8895ef6894efa85c97c288b5ef8837f08ff7505c747080400bb0a008b46fa89f2e8dd088976f48d4401803c'
+            '00741489c6ebf4f75efac6042df75ef6835efa0046ebc88b5ef8837f08007435c6042e31ff89c68b5ef83b7f'
+            '087d238b46f6bb0a0031d231c9c746fa0000e8af088956fa8946f68a46fa043047880446ebd5c60400f646f7'
+            '8074423b76f474114e803c2e75014e803c397538c60430ebeac60431468a048d7c013c30750489feebf33c2e'
+            '7510c604308d75018805803c30750346ebf8c6043046c604008d66fc5f5e5dc3fe04ebf55389c3f647020875'
+            '22807f1930751c8b47062b470c2b470e2b47102b47122b47142b471685c07e0301470e5bc35589e5565783ec'
+            '0689c78956fa894ef8837f10007eb28e46fa8d46f6268b15e87b0783c70289c13dffff74e43b47107f198d76'
+            'f64983f9ff74d68a049889c289d846ff56f8ff4f10ebeac747100000e976ffb40e1d13ff121d13b40e4510b4'
+            '0e1d131d131d131d131d131d131d131d133c121d131d1388101d131d131d131d1305111d131d131d131d131d'
+            '131d131d131d13b40e9d11b1125211b40e4510b40e1d1352111d131d131d131d131d13a4113c121d131d1388'
+            '101d1352111d131d1305115589e5565783ec125089d789dec7471600008946f48b4716894714894712894710'
+            '89470e89470c8a47188c5ef63c6973393c64756a8a4402a88074618305088b1d8b47fc8946f28b47fa8946f0'
+            '8b47f88b4ffe8946eee9e5008b46e889f389faff46f4ff169c03e9b50176c93c7875238a4402a88074308305'
+            '088b1d8b47fc8946f28b47fa8946f08b47f88b4ffe8946eeeb293c7574d93c6f74d5eb1feb653c6274cd3c58'
+            'ebf2a840742a8305048b1d8b47fc8946f88b47fe8946fa8a44182c41c746ec0a003c37775130e489c3d1e32e'
+            'ffa7eb0d8305028b1d8b47fec746fa00008946f8f64402207407c746fa0000ebcaf644021074c48a46f830e4'
+            '8946f830c0ebb5a84074168305048b1d8b47fc8946f88b47fe8946faeb23e9a4038305028b1d8b47fe998946'
+            'f88a44028956faa82074618b46f8998946f88956fa30c0f6440280745985c97c10750a837ef2007504837ef0'
+            '0084c0745a8b440c89c28b5ee84201c389540cc6072df6440280743631c02b46ee8946eeb800001b46f08946'
+            'f0b800001b46f28946f2b8000019c889c1e927ffa81074a58a46f898eb98837efa007cb5ebaff75efaf75ef8'
+            '835efa00e908ff8a4402a80474148b440c89c28b5ee84201c389540cc6072be9edfea8027503e9e6fe8b440c'
+            '89c28b5ee84201c389540cc60720e9d2fef64402207503e966fe8305048b1d8b47fc89f28946f88b47fe8b5e'
+            'f88946fa89c18b46e8e820fcbbffff8b46e88cdae837fb89441089f08b56f6e8eafc8b46f4e9d9fc8b5ee8c6'
+            '07008a4403a804753fa8028305028b1d8b5ffe85db74068c5ef6895ef4807c1853754ef6440220743a8b46f4'
+            '8b56f68b5c08e8edfa894410837c08007cb03b44087eab8b4408eba38305048b1d8b47fe8b7ffc85c0750485'
+            'ff74c2897ef48946f6ebba8b46f48b56f68b5c08e8d2faebc4f644024075ecebb08a4402a8017441a8807503'
+            'e9820085c97512837ef200750c837ef0007506837eee0074248b440c89c28b5ee84201c389540cc607308b44'
+            '0c8b5ee889c201c3428a441889540c8807c746ec1000837c08ff7404c64419208b5ee8035c0c8c5ef6895ef4'
+            'f6440280743d837c0800753985c97535837ef200752f837ef0007529837eee0075238e46f631c026c60700eb'
+            '488b46fa0b46f8eb8ac746ec0200ebaec746ec0800eba7eb5cff76ec8b46e88b5ef203440c8b56ee5089c88b'
+            '4ef0e81404807c185875068b46e8e82005bbffff8b46f48b56f6e8d1f989441089c23b44087c4af644020175'
+            '03e98afe837eec0a7df785c07409c45ef426803f3074eaff440ee971fe837c0800750e8b46fa0b46f875068e'
+            '46f6e972ff8b5ee88b4eec8b46f88b56fa035c0ce8e204eb948b440829d089440ee93efe837c0600750bf644'
+            '03047458c744060900806402f98305028b1d8b4ffef6440304744883c302891d8b56e88b47febb0400e8c3f9'
+            '8b5ee889c88d5705c647043abb0400e8b1f9807c185075068b46e8e86304bbffff8b46f48b56f6e814f98944'
+            '0ce9dafdc744060400eba6bb04008b56e889c8ebcec744100100f644024075108305028b1d8a47fe8b5ee888'
+            '07e9aefd8305028b1d8d46ea8b57fee85c023dffff7503e998fd8b5ee88a46ea880730e4e8960485c074ec8a'
+            '46eb884701ff440ce97bfd8305028b1d8b46e88b57fee829023dffff7403e962fdc744100000e95dfdc74406'
+            '00008b5ee88a44188807c7440c0100e948fd5589e5565783ec6a5389cfc646fa00c746dc0000c746dec800c7'
+            '46e400008946da8956f88b5ef88a0784c074588d4f013c25740d9889c28d46da894ef8ffd7ebe38d5eda8d56'
+            '9089c8e8e5f689c38a07438846f2895ef884c0742a3c6e755c8a46dda8047422834690048b5e908b76908b5f'
+            'fc8e44fe8a46dca810741f8a46e4268807eb9fe976018b5e9083c302a8028cd8895e908ec08b5ffeebdaa820'
+            '74098b46e4268907e97bffa84074108b46e49926890726895702e969ffeb1fa88074df8b46e499268907b10f'
+            '2689570226d3fa2689570426895706e948ff8d4efa8d5eda8d56908d4692e83efa89c68b46e60346e80346ea'
+            '0346ec0346ee0346f08956f62946e0f646dc0874198d5e92837ee6007e298a079889c28d46da43ffd7ff4ee6'
+            'ebea807ef32075e1837ee0007edbba20008d46daffd7ff4ee0ebed837ee8007e0dba30008d46daffd7ff4ee8'
+            'ebed8a46f23c737540f646dc40751a837eea007e218e46f6268a049889c28d46da46ffd7ff4eeaebe68d5eda'
+            '8b56f689f989f0e8e3f8837eec007e2bba30008d46daffd7ff4eecebed3c5374dc837eea007ee38e46f6268a'
+            '049889c28d46da46ffd7ff4eeaebe6837eee007e148e46f6268a049889c28d46da46ffd7ff4eeeebe6837ef0'
+            '007e0dba30008d46daffd7ff4ef0ebedf646dc087503e939fe837ee0007ef7ba20008d46daffd7ff4ee0ebed'
+            '8b46e4e92bf85389c385c0740df6c6ff740a8837b802008857015bc3b8010088175bc35589e551565783ec24'
+            '5289d9c646d6008d76d789d78d5ef8894ef833d2f737890789d38a87a00188048b46f84685c075e44e8a0488'
+            '054784c075f68b46d48d66fa5f5e595dc35689d683fb0a750485c07c07e8abff89f05ec3f7d842c6042debf1'
+            '9350920bc07402f7e2910bc07404f7e303c858f7e303d1c35352bb0100b87e018cdae9c0f25589e5565783ec'
+            '48538b76048976f88d76b5c646b4008976fa8b76068b5eb28976f68d76f68bfa85c074278bd08bc333db3b14'
+            '72098bd88bc233d2f73493f73491f73497f73489148bd08bc38bd98bcfeb2c85db74148bd38bc133db33c93b'
+            '1472df8bc88bc233d2ebd48bd18bc733c933ff3b1472ce8bf88bc233d2ebc38b7ef689de895eb28a9da0018b'
+            '7efaff46fa881d85c0758385f67403e97cff85c975f985d275f5ff4efa8b76fa8a048b76f8ff46f8880484c0'
+            '75ec8b46048d66fc5f5e5dc204005589e5565783ec028b76048976fa837e060a750c85c07c15750685db7502'
+            '85c9ff7606ff76fae812ff89f0ebca31ff29d789fabf000019cf89f9bf000019df89fbbf000019c789f88d7c'
+            '01c6042d897efaebcd535289c289c38a0784c0740f2c613c19760343ebf104418807ebf789d05a5bc35589e5'
+            '565783ec245351c646d8008d76d989df8b5ed4895efa8d5efa33c93b1772069287d1f73791f73789178bd18b'
+            '5efa8a9fa001881c4685d275d785c075d34e8a0488054784c075f68b46d68d66fc5f5e5dc35689de83f90a75'
+            '0485d27c07e89dff89f05ec3f7dac6072df7d883da0043ebec5389c38a9f2b0680e30130e789d85bc331c0e9'
+            '57005352bb010131c031d2a3a203a3a003b82a06e8d8ee5a5bc35589e553515250c746f80000eb0aff46f881'
+            '7ef80001731f8a46f830e4509affff000085c074e78b5ef8c706a2030100c6872b0601ebd78d66fa5a595b5d'
+            'c353515289c2e8a1ff83faff743e83fafe743983fafd744983fafc7526bb1f00ba0100b8ac06e86eeebb1d00'
+            'ba0100b80b07e862eec706a2030100c706a003a403eb1e85d27405b80100eb179affff00003d030a72f1e869'
+            'ff9affff0000a3a00331c05a595bc3003b0003012500010038000301d10002007d0003018c01030001000301'
+            'b10103001a000301d10102007d000301210203000b00030149020200ae0003014f020400160003015f020200'
+            '270003019002050021000301a302020028000301ae02020006000301bd0202006b000301e10201002f000301'
+            'ef02010032000301ff0201005f000301190301003c000301250301003d0003012e0301003e00030191030100'
+            '84000301ab03010037000301ca030100610003011904010041000301430401004a0003014b0401003f000301'
+            '6104050068010301800405006b01030186040500450003018e040200420003019e0405000b000301b6040500'
+            '43000301bf04020044000301c704020042000301cd04050051000301fd0401006b0003011605020076000500'
+            '2b05010035000200300501003500030141050200ad0003014c05050057000301690502003900030198050200'
+            '29000301a30502002a000301a90502007c000301b80502006c000301ce0502005a000301dc05020071000301'
+            'e605020072000301f605010060000301fd0601005b0003013c0701001e00030143070200050002005d070100'
+            'f80603016e07010003000301a0070100310003019008020001000301d1170100cf0003013d18010003000301'
+            '4a18060084000000000000000000000000000000000000000000050000000000000000000000656e6400006e'
+            '6578740066696e6420272573272025732573005465787420282a2e54585429002a2e54585400416c6c002a2e'
+            '2a00006f70656e2025732028257329202575006f70656e2063616e63656c6c656420256c78004b45524e454c'
+            '2c20434f4d4d444c472c205348454c4c004f774b65726e234f774b65726e0055534552004d65737361676542'
+            '6f7800434f4d4d444c472e444c4c0044415441004f774b65726e007468726f7567682047657450726f634164'
+            '647265737300666c61677320256c782c20757365722025782c20626f782025642c20646c67202564006f776b'
+            '002d006361756768742025642c2025732c20256c752062797465732c2074656d7020252e34730070616c6574'
+            '74652025642c25642c25642025642c2064702d3e6c702025642c25642c206d6f6465202564006572726f7220'
+            '6d6f646520257500636f6d6d646c675f46696e645265706c616365004d41494e004b65726e656c004f70656e'
+            '20576174636f6d00466c6f6174696e672d706f696e7420737570706f7274206e6f74206c6f61646564003031'
+            '32333435363738396162636465666768696a6b6c6d6e6f707172737475767778797a00006e6565646c650000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '000000000000000000000000000000000000000000000000000000000000000000000000000000000a141e00'
+            'c86432000003020000000000000000000000ffff00000000000000000000000c000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000d708d7080000000000000000000000000000'
+            '00000000000000000000000000000000000000000000cc15cc15000000000020060600000020951700000000'
+            '0000000000000000000000000000637573746f6d207265736f75726365000000000090002646696c65000000'
+            '0100264f70656e2e2e2e00000002002646696e642e2e2e00800003002641626f75740000'
         )),
 }
 

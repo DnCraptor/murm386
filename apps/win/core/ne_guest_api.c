@@ -246,6 +246,52 @@ static int int21(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint32_t *valu
     return 1;
 }
 
+/* Catch and Throw. Called through the API gate: the frame starts with the
+ * caller's SP and SS (ring 3), the gateway's registers below it. A
+ * CATCHBUF: Catch's return address (IP, CS), the SP after its return, BP,
+ * SI, DI, DS, SS. Throw returns there: its thunk's RETF 6 finds Catch's
+ * return address at the new SP, with room for Throw's arguments above. */
+static int catch_throw(win_ne_guest_api_context *ctx, win_ne_regs *cpu, int throw_,
+                       uint32_t *value)
+{
+    uint16_t buf_off, buf_sel, ret, w[9];
+    uint8_t b[18];
+    if (!read_stack_word(ctx, cpu, throw_ ? 6 : 4, &buf_off) ||
+        !read_stack_word(ctx, cpu, throw_ ? 8 : 6, &buf_sel))
+        return 0;
+    if (!throw_) {
+        uint16_t sp = cpu->gprx[regsp].r16;
+        if (!read_stack_word(ctx, cpu, 0, &w[0]) || !read_stack_word(ctx, cpu, 2, &w[1]) ||
+            !frame_get(ctx, cpu, FR_BP, &w[3]) || !frame_get(ctx, cpu, FR_SI, &w[4]) ||
+            !frame_get(ctx, cpu, FR_DI, &w[5]) || !frame_get(ctx, cpu, FR_DS, &w[6]))
+            return 0;
+        w[2] = (uint16_t)(sp + 8u);
+        w[7] = cpu->ss;
+        w[8] = 0;
+        for (int i = 0; i < 9; i++) {
+            b[2 * i] = (uint8_t)w[i];
+            b[2 * i + 1] = (uint8_t)(w[i] >> 8);
+        }
+        if (!write_segment(ctx, buf_sel, buf_off, b, sizeof(b)))
+            return 0;
+        *value = 0;
+        return 1;
+    }
+    if (!read_stack_word(ctx, cpu, 4, &ret) || !read_segment(ctx, buf_sel, buf_off, b, sizeof(b)))
+        return 0;
+    for (int i = 0; i < 9; i++)
+        w[i] = (uint16_t)(b[2 * i] | b[2 * i + 1] << 8);
+    uint16_t sp = (uint16_t)(w[2] - 10u);
+    uint8_t to[4] = { b[0], b[1], b[2], b[3] };      /* Catch's return address */
+    if (w[2] < 10u || !write_segment(ctx, w[7], sp, to, 4) ||
+        !frame_set(ctx, cpu, 0, sp) || !frame_set(ctx, cpu, 2, w[7]) ||
+        !frame_set(ctx, cpu, FR_BP, w[3]) || !frame_set(ctx, cpu, FR_SI, w[4]) ||
+        !frame_set(ctx, cpu, FR_DI, w[5]) || !frame_set(ctx, cpu, FR_DS, w[6]))
+        return 0;
+    *value = ret;
+    return 1;
+}
+
 /* no window services where ne_guest_user.c is not linked in */
 __attribute__((weak)) int win_ne_guest_user(win_ne_guest_api_context *ctx, win_ne_regs *cpu,
                                             uint16_t service, uint32_t *value, int *dword)
@@ -342,6 +388,13 @@ int win_ne_guest_api(void *opaque, win_ne_regs *cpu, uint16_t service)
             ctx->invalid_args = 1;
         else
             value = n;
+        break;
+    }
+    case 55:      /* KERNEL.Catch(LPCATCHBUF): 0, and where it returns to */
+    case 56: {    /* KERNEL.Throw(LPCATCHBUF, int): back there, Catch giving the int */
+        int r = catch_throw(ctx, cpu, service == 56, &value);
+        if (r != 1)
+            return r;
         break;
     }
     case WIN_NE_SERVICE_YIELD: {
