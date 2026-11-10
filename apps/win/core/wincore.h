@@ -270,6 +270,7 @@ int      gdi_dy_to_ly(const wdc *dc, int dy);
 int      gdi_lx_to_dx(const wdc *dc, int lx);
 int      gdi_ly_to_dy(const wdc *dc, int ly);
 int      gdi_char_width(const wfont *f, unsigned char ch);
+BOOL     gdi_font_filed(HFONT h);               /* a font file's face, not the VGA glyphs */
 
 /* metafile.c: a metafile DC's records. mf_rec: n words as the function
  * has its arguments (a DWORD as MF_DW's two), kept in the record's order

@@ -277,6 +277,13 @@ static int char_width(const wreal *r, const wfont *f, unsigned char ch)
     return w * r->scale + r->bold;
 }
 
+/* the font a font file's face (not the VGA glyphs) at its own height */
+BOOL gdi_font_filed(HFONT h)
+{
+    const wfont *f = (const wfont *)win_handle_get(h, WOBJ_FONT);
+    return f && realize(NULL, f)->face != NULL;
+}
+
 int gdi_char_width(const wfont *f, unsigned char ch)
 {
     return char_width(realize(NULL, f), f, ch);

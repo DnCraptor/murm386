@@ -165,7 +165,11 @@ name (Helv, Arial and Helvetica for MS Sans Serif, Tms Rmn, Times and
 Times New Roman for MS Serif, Courier New for Courier) or by family and
 pitch, the nearest size, made larger by whole numbers (up to 8 times);
 else the VGA glyphs, made larger the same way; bold and italic made when
-the face is not; GetTextFace the realized face's; EnumFonts and
+the face is not; GetTextFace the realized face's; a dialog whose template
+names a font (DS_SETFONT) a font file has is laid out in that font's
+units, bold as Windows 3.x has it, its controls drawn in it (the edit
+controls', list boxes' and combo boxes' lines its height; MapDialogRect,
+WM_GETFONT), the others as before in the system font; EnumFonts and
 EnumFontFamilies (the stock fonts and the files' faces), GetCharWidth, LineDDA, SetTextCharacterExtra; no printers
 (StartDoc and the rest fail, Escape does nothing); no serial or parallel
 ports (OpenComm fails with IE_HARDWARE, the other comm functions with
@@ -232,7 +236,7 @@ WINN has not), `OWMETA` (a metafile recorded, played, scaled, enumerated
 record by record, its bits and a file), `OWSYS` (MMSYSTEM, TOOLHELP, VER,
 LZEXPAND), `OWFONT` (a raster font file's faces, `WINNTEST.FON` beside
 it, made by `host/mkfon.py`: its sizes, larger, bold, italic; the VGA
-glyphs larger) (`make NEFIXTURES` in
+glyphs larger; a dialog in the font) (`make NEFIXTURES` in
 `host/`). All have DOS MZ stubs that explain how to launch them under WINN
 when invoked directly from DOS. `host/test_ne_run` runs them on the
 emulator's own i386 core (`src/i386.c` as it is, built for the host with

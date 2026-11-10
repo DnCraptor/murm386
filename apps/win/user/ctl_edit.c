@@ -79,6 +79,7 @@ static void measure(HWND h, wedit *e)
     TEXTMETRIC tm;
     GetTextMetrics(dc, &tm);
     ReleaseDC(h, dc);
+    e->lh = tm.tmHeight > 0 ? tm.tmHeight : 16;
     e->tabw = 8 * (tm.tmAveCharWidth > 0 ? tm.tmAveCharWidth : 8);
     e->cw['\t'] = 0;
     e->cw_ok = 1;

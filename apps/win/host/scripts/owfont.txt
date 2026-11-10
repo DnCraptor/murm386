@@ -1,7 +1,8 @@
 # Fonts of a raster font file for a Win16 program on the i386 core
 # (WINNTEST.FON beside it, AddFontResource): its two sizes, the nearest,
 # twice as large, bold and italic made, underlined and struck out; the
-# VGA glyphs twice as large and italic; their metrics and extents:
+# VGA glyphs twice as large and italic; their metrics and extents; then
+# (SPACE) a dialog with the font in its template, its combo box dropped:
 #     ./winhost scripts/owfont.txt PROGMAN
 wait 100
 keydown ALT
@@ -13,6 +14,18 @@ type OWFONT
 key RETURN
 wait 1000
 snap ok_font.ppm
+key SPACE
+wait 200
+snap ok_font_dlg.ppm
+key TAB
+key TAB
+key TAB
+key F4
+wait 100
+snap ok_font_combo.ppm
+key ESC
+key RETURN
+wait 100
 keydown ALT
 key F4
 keyup ALT

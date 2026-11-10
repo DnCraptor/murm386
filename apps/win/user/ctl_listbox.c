@@ -199,6 +199,10 @@ LRESULT CALLBACK user_listbox_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     case WM_SETFONT:
         SetProp(h, MAKEINTATOM(1), (HANDLE)wp);
+        if (l) {                        /* its lines the font's height */
+            l->ih = user_ctl_line(h);
+            update_scroll(h, l);
+        }
         if (lp)
             InvalidateRect(h, NULL, TRUE);
         return 0;

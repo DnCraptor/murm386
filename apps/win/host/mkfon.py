@@ -4,7 +4,7 @@ file, its RT_FONT resources FNT version 2), the face "Winn Test" at two
 sizes, made from WINN's own VGA glyphs (core/sysfont.c, CP866; the
 characters 80h to FFh Windows-1251's, as WINN maps them):
 
-    12 pixels: the glyphs' rows 2..15 every 7th left out, proportional
+    12 pixels: the glyphs' rows 1..14, two of them left out, proportional
     24 pixels: 1.5 times the 16 rows, each pixel 2 wide (bold, 700)
 
     mkfon.py OUTPUT.FON
@@ -81,10 +81,10 @@ def fnt(points, height, ascent, weight, make):
     t = b''.join(struct.pack('<HH', w, o) for w, o in entries)
     return h + t + bytes(data) + face
 
-def small(ch):                               # 12 pixels: rows 2..15, two left out
+def small(ch):                               # 12 pixels: rows 1..14, two left out
     rows, w = trim(glyph_rows(ch))
-    rows = rows[2:16]
-    rows = [r << 8 for i, r in enumerate(rows) if i not in (3, 10)]
+    rows = rows[1:15]
+    rows = [r << 8 for i, r in enumerate(rows) if i not in (3, 8)]
     return w, rows, 16
 
 def large(ch):                               # 24 pixels, each pixel 2 wide

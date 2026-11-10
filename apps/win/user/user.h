@@ -165,6 +165,7 @@ LRESULT CALLBACK user_mdiclient_proc(HWND, UINT, WPARAM, LPARAM);
 
 /* control helpers */
 HFONT   user_ctl_font(HWND h);
+int     user_ctl_line(HWND h);      /* its font's line height: 16 the system font's */
 HBRUSH  user_ctl_color(HWND h, HDC dc, int type);
 
 /* keyboard.c */

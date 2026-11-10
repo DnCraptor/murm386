@@ -152,7 +152,7 @@ static void list_item_at(wcombo *c, int sx, int sy, int *index)
     if (!PtInRect(&l->client, p))
         return;
     int top = (int)SendMessage(c->list, LB_GETTOPINDEX, 0, 0);
-    int i = top + (sy - l->client.top) / 16;
+    int i = top + (sy - l->client.top) / user_ctl_line(c->list);
     if (i < (int)SendMessage(c->list, LB_GETCOUNT, 0, 0))
         *index = i;
 }
@@ -182,7 +182,7 @@ static void drop_down(HWND h, wcombo *c, int by_mouse)
     notify(h, CBN_DROPDOWN);
     wwnd *w = user_wnd(h);
     int n = (int)SendMessage(c->list, LB_GETCOUNT, 0, 0);
-    int lh = n * 16 + 2;
+    int lh = n * user_ctl_line(c->list) + 2;
     int max_h = c->drop_h - FIELD_H;
     if (max_h < 18) max_h = 18;
     if (lh > max_h) lh = max_h;

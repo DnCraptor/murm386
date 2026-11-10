@@ -19,7 +19,8 @@ typedef struct {
     int     ended, result;
     int     defid;
     HWND    focus;          /* restored on activation */
-    HFONT   font;
+    HFONT   font;           /* DS_SETFONT's (a font file's face): the controls', its own */
+    int     bx, by;         /* its base units: the font's, or the system font's */
 } wdlg;
 
 static wdlg *dlg_state(HWND h)
@@ -36,8 +37,34 @@ static wdlg *dlg_state(HWND h)
 
 DWORD WINAPI GetDialogBaseUnits(void) { return (DWORD)MAKELONG(DLG_BASE_X, DLG_BASE_Y); }
 
-static int du_x(int v) { return v * DLG_BASE_X / 4; }
-static int du_y(int v) { return v * DLG_BASE_Y / 8; }
+/* DS_SETFONT: the template's font, bold as Windows 3.x makes it, when a
+ * font file has the face (the VGA glyphs are the system font: the dialog
+ * as without it); its base units, the average of the letters' widths and
+ * its height */
+static HFONT template_font(const DLGTEMPLATE_N *t, int *bx, int *by)
+{
+    if (!(t->style & DS_SETFONT) || !t->font || !t->pointsize)
+        return 0;
+    HFONT f = CreateFont(-(int)((t->pointsize * 96u + 36) / 72), 0, 0, 0, FW_BOLD, 0, 0, 0, 0,
+                         0, 0, 0, 0, t->font);
+    if (!f || !gdi_font_filed(f)) {
+        if (f)
+            DeleteObject(f);
+        return 0;
+    }
+    HDC dc = GetDC(0);
+    HGDIOBJ old = SelectObject(dc, f);
+    SIZE sz;
+    TEXTMETRIC tm;
+    if (GetTextExtentPoint(dc, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz", 52, &sz) &&
+        GetTextMetrics(dc, &tm) && sz.cx > 0 && tm.tmHeight > 0) {
+        *bx = (sz.cx / 26 + 1) / 2;
+        *by = tm.tmHeight;
+    }
+    SelectObject(dc, old);
+    ReleaseDC(0, dc);
+    return f;
+}
 
 /* ---------------------------------------------------------------- navigation */
 
@@ -219,8 +246,12 @@ LRESULT WINAPI DefDlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             set_default_button(h, GetFocus());
         }
         return TRUE;
+    case WM_GETFONT:
+        return d ? d->font : 0;
     case WM_NCDESTROY:
         if (d) {
+            if (d->font)
+                DeleteObject(d->font);
             win_free(d);
             wwnd *w = user_wnd(h);
             memset(w->extra + DLG_STATE_OFS, 0, sizeof(void *));
@@ -265,11 +296,12 @@ static LPCSTR ctl_class(LPCSTR k)
 /* dialog units to pixels, as the dialog manager places its controls */
 BOOL WINAPI MapDialogRect(HWND h, LPRECT rc)
 {
-    (void)h;
-    rc->left = du_x(rc->left);
-    rc->right = du_x(rc->right);
-    rc->top = du_y(rc->top);
-    rc->bottom = du_y(rc->bottom);
+    wdlg *d = dlg_state(h);
+    int bx = d && d->bx ? d->bx : DLG_BASE_X, by = d && d->by ? d->by : DLG_BASE_Y;
+    rc->left = rc->left * bx / 4;
+    rc->right = rc->right * bx / 4;
+    rc->top = rc->top * by / 8;
+    rc->bottom = rc->bottom * by / 8;
     return TRUE;
 }
 
@@ -280,9 +312,11 @@ HWND WINAPI CreateDialogIndirectN(HINSTANCE inst, const DLGTEMPLATE_N *t,
     DWORD ex = (t->style & DS_MODALFRAME) ? WS_EX_DLGMODALFRAME : 0;
     if (t->caption && !(style & WS_CHILD))
         style |= WS_CAPTION;
-    RECT rc = { 0, 0, du_x(t->cx), du_y(t->cy) };
+    int bx = DLG_BASE_X, by = DLG_BASE_Y;
+    HFONT font = template_font(t, &bx, &by);
+    RECT rc = { 0, 0, t->cx * bx / 4, t->cy * by / 8 };
     AdjustWindowRectEx(&rc, style, FALSE, ex);
-    int x = du_x(t->x) + rc.left, y = du_y(t->y) + rc.top;
+    int x = t->x * bx / 4 + rc.left, y = t->y * by / 8 + rc.top;
     wwnd *ow = user_wnd(owner);
     if (ow && !(style & WS_CHILD) && !(t->style & DS_ABSALIGN)) {
         x += ow->client.left;
@@ -299,17 +333,21 @@ HWND WINAPI CreateDialogIndirectN(HINSTANCE inst, const DLGTEMPLATE_N *t,
     LPCSTR klass = t->klass ? t->klass : "#32770";
     HWND h = CreateWindowEx(ex, klass, t->caption ? t->caption : "", style,
                             x, y, ww, wh, owner, 0, inst, NULL);
-    if (!h)
-        return 0;
-    wwnd *w = user_wnd(h);
-    wdlg *d = (wdlg *)win_alloc(sizeof(*d));
+    wwnd *w = h ? user_wnd(h) : NULL;
+    wdlg *d = h ? (wdlg *)win_alloc(sizeof(*d)) : NULL;
     if (!d || !w->extra || w->cb_extra < DLG_EXTRA) {
         win_free(d);
-        DestroyWindow(h);
+        if (font)
+            DeleteObject(font);
+        if (h)
+            DestroyWindow(h);
         return 0;
     }
     d->proc = proc;
     d->defid = IDOK;
+    d->font = font;
+    d->bx = bx;
+    d->by = by;
     memcpy(w->extra + DLG_STATE_OFS, &d, sizeof(d));
     w->dialog = 1;
 
@@ -320,15 +358,19 @@ HWND WINAPI CreateDialogIndirectN(HINSTANCE inst, const DLGTEMPLATE_N *t,
         DWORD cs = it->style | WS_CHILD;
         DWORD cex = WS_EX_NOPARENTNOTIFY;
         HWND c = CreateWindowEx(cex, k, it->text ? it->text : "", cs,
-                                du_x(it->x), du_y(it->y), du_x(it->cx), du_y(it->cy),
+                                it->x * bx / 4, it->y * by / 8, it->cx * bx / 4, it->cy * by / 8,
                                 h, (HMENU)it->id, inst, NULL);
         if (!c)
             continue;
+        if (font)
+            SendMessage(c, WM_SETFONT, (WPARAM)font, 0);
         if (!lstrcmpi(k, "BUTTON") && (cs & 0x0F) == BS_DEFPUSHBUTTON)
             d->defid = it->id;
         if (!first_tab && tabbable(c))
             first_tab = c;
     }
+    if (font && proc)
+        proc(h, WM_SETFONT, (WPARAM)font, 0);
     if (proc && proc(h, WM_INITDIALOG, first_tab, 0) && first_tab)
         dlg_focus(h, first_tab);
     else if (first_tab && !d->focus)

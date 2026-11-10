@@ -30,6 +30,19 @@ HFONT user_ctl_font(HWND h)
     return f ? f : GetStockObject(SYSTEM_FONT);
 }
 
+int user_ctl_line(HWND h)
+{
+    if (!GetProp(h, MAKEINTATOM(1)))
+        return 16;
+    HDC dc = GetDC(h);
+    TEXTMETRIC tm;
+    HGDIOBJ old = SelectObject(dc, user_ctl_font(h));
+    int lh = GetTextMetrics(dc, &tm) && tm.tmHeight > 0 ? tm.tmHeight : 16;
+    SelectObject(dc, old);
+    ReleaseDC(h, dc);
+    return lh;
+}
+
 static void notify(HWND h, int code)
 {
     wwnd *w = user_wnd(h);
