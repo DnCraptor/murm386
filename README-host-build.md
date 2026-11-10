@@ -11,7 +11,7 @@ CPU_TARGET=286
 CPU_TARGET=386
 ```
 
-On Windows, `build.bat` exposes both targets and `build_all.bat` includes both in the release matrix. `CPU_TARGET=386` enables the full i386 core with `I386_MODE=1`. The Unix `build.sh` / `build_all.sh` wrappers have not been changed in this release and continue to use the 286 path.
+Both Windows (`build.bat`, `build_all.bat`) and Unix (`build.sh`, `build_all.sh`) wrappers support 286 and 386 targets. `CPU_TARGET=386` enables the full i386 core with `I386_MODE=1`.
 
 ## Toolchain
 
@@ -64,7 +64,7 @@ Defaults:
 
 | Setting | Default |
 |---|---|
-| CPU target | `286` (Windows: selectable; Unix wrapper: fixed) |
+| CPU target | `286` (both wrappers; selectable) |
 | Board | `M1` |
 | Video | `RUNTIME` |
 | Audio | `I2S` |
@@ -72,13 +72,13 @@ Defaults:
 | PSRAM max clock | `66` MHz |
 | Build type | `Release` |
 | Build directory | `build` |
-| Clean configure | enabled (`CLEAN=1`) |
+| Clean configure | Windows: enabled (`CLEAN=1`); Unix: disabled (`CLEAN=0`) |
 
 ### Main options
 
 | Option | Values / meaning |
 |---|---|
-| `--cpu` | Windows only: `286` or `386` |
+| `--cpu` | `286` or `386` (both wrappers) |
 | `-b`, `--board` | `M1`, `M2`, `PC`, `Z2`, `C2` |
 | `-v`, `--video` | `RUNTIME`, `MCGA`, `EGA128`, `VGA128`, `VGA256` |
 | `-c`, `--clock` | RP2350 clock in MHz |
@@ -97,7 +97,7 @@ Defaults:
 Short forms are also accepted:
 
 ```text
--286 -386                  (Windows only)
+-286 -386
 -M1 -M2 -PC -Z2 -C2
 -RUNTIME -MCGA -EGA128 -VGA128 -VGA256
 -252 -378 -504
@@ -109,7 +109,7 @@ Examples:
 ./build.sh -M1 -VGA256 -504 -p 66 --clean
 ./build.sh -M1 -EGA128 -504 -p 66
 ./build.sh -M2 -VGA128 --hdmi
-./build.sh -Z2 -VGA128
+./build.sh --cpu 386 -Z2 -VGA128
 ```
 
 Windows uses the same options:
@@ -128,7 +128,7 @@ Audio is no longer a build-script dimension. M1, M2 and Z2 firmware contain both
 Linux/macOS/WSL:
 
 ```sh
-./build_all.sh 286
+./build_all.sh all
 ```
 
 Windows:
@@ -137,12 +137,12 @@ Windows:
 build_all.bat all
 ```
 
-On Windows, the CPU argument is optional and defaults to `all` (both 286 and 386). Pass `286` or `386` to build only that CPU target. The Unix script retains its existing 286-only behaviour.
+On both hosts the CPU argument is optional and defaults to `all` (both 286 and 386). Pass `286` or `386` to build only that CPU target, e.g. `./build_all.sh 386`.
 
-Additional options are forwarded to every `build.sh` / `build.bat` invocation. `--emm` is intentionally rejected here because `build_all` controls EMM itself and builds both states. For example:
+Additional options are forwarded to every `build.sh` / `build.bat` invocation. `--emm` is intentionally rejected here because `build_all` controls EMM itself and builds both states. Use the first positional argument instead of `--cpu` in `build_all.sh`. For example:
 
 ```sh
-build_all.bat all -504 -p 66 --clean
+./build_all.sh 386 -504 -p 66 --clean
 ```
 
 The production matrix now has two firmware classes for each board/EMM combination:
@@ -150,7 +150,7 @@ The production matrix now has two firmware classes for each board/EMM combinatio
 1. `RUNTIME` — paging firmware. Win+F11 selects `MCGA 64K`, `EGA 128K`, `EGA 256K`, `VGA 128K` or `VGA 256K`; the selected profile is stored as `video=` in `./config/286/config.ini` and takes effect after restart.
 2. `VGA256 --no-paging` — separate direct-QSPI guest-RAM firmware (`-np`). `RUNTIME` cannot be combined with `--no-paging`.
 
-With five boards and two EMM states this gives 20 builds per CPU target. `build_all.bat all` therefore produces **40 builds** total. Audio does not multiply the matrix because it is selected at runtime.
+With five boards and two EMM states this gives 20 builds per CPU target. Both release-matrix wrappers build **40 variants** for `all`. Audio does not multiply the build matrix because it is selected at runtime.
 
 Each variant gets a separate directory below:
 
@@ -233,4 +233,4 @@ The data directory is tied to `CPU_TARGET` by CMake. Each CPU target uses its ma
 
 ## Release script
 
-`release.sh` is a separate legacy release-packaging workflow and is not used by `build_all.sh` / `build_all.bat`. When release policy is updated, it should be reviewed independently against the current Windows 286/386 release matrix rather than assumed to match these scripts automatically.
+`release.sh` is a separate legacy release-packaging workflow and is not used by `build_all.sh` / `build_all.bat`. When release policy is updated, it should be reviewed independently against the current 286/386 release matrices rather than assumed to match these scripts automatically.

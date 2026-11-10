@@ -2,11 +2,12 @@
 set -euo pipefail
 
 # Build one supported murm386/FRANK RP2350 firmware variant.
-# The production build scripts intentionally build the 286 core only.
+# Both 286 and 386 CPU targets are supported.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+CPU_TARGET="286"
 BOARD="M1"
 VIDEO_MODE="RUNTIME"
 CPU_SPEED="504"
@@ -26,9 +27,10 @@ usage() {
     cat <<'USAGE'
 Usage: ./build.sh [options]
 
-Supported production CPU target: 286
+Supported CPU targets: 286, 386 (default: 286)
 
 Main options:
+      --cpu 286|386                 Emulated CPU target (default: 286)
   -b, --board M1|M2|PC|Z2|C2       Board variant (default: M1)
   -v, --video RUNTIME|MCGA|EGA128|VGA128|VGA256
                                       Video profile (default: RUNTIME)
@@ -47,6 +49,7 @@ Main options:
   -h, --help                        Show this help
 
 Short forms:
+  -286 -386
   -M1 -M2 -PC -Z2 -C2
   -RUNTIME -MCGA -EGA128 -VGA128 -VGA256
   -252 -378 -504
@@ -54,6 +57,7 @@ Short forms:
 Examples:
   ./build.sh -M1 -VGA256 -504 -p 66 --clean
   ./build.sh -M2 -VGA128 --hdmi
+  ./build.sh --cpu 386 -M2 -RUNTIME --hdmi
 USAGE
 }
 
@@ -66,6 +70,7 @@ need_arg() {
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --cpu) need_arg "$@"; CPU_TARGET="$2"; shift 2 ;;
         -b|--board) need_arg "$@"; BOARD="${2^^}"; shift 2 ;;
         -v|--video) need_arg "$@"; VIDEO_MODE="${2^^}"; shift 2 ;;
         -c|--clock) need_arg "$@"; CPU_SPEED="$2"; shift 2 ;;
@@ -74,6 +79,7 @@ while [[ $# -gt 0 ]]; do
         --build-dir) need_arg "$@"; BUILD_DIR="$2"; shift 2 ;;
         -j|--jobs) need_arg "$@"; JOBS="$2"; shift 2 ;;
 
+        -286|-386) CPU_TARGET="${1#-}"; shift ;;
         -M1|-M2|-PC|-Z2|-C2) BOARD="${1#-}"; shift ;;
         -RUNTIME|-MCGA|-EGA128|-VGA128|-VGA256) VIDEO_MODE="${1#-}"; shift ;;
         -252|-378|-504) CPU_SPEED="${1#-}"; shift ;;
@@ -90,6 +96,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+case "$CPU_TARGET" in 286|386) ;; *) echo "Invalid CPU target: $CPU_TARGET" >&2; exit 2 ;; esac
 case "$BOARD" in M1|M2|PC|Z2|C2) ;; *) echo "Invalid board: $BOARD" >&2; exit 2 ;; esac
 case "$VIDEO_MODE" in RUNTIME|MCGA|EGA128|VGA128|VGA256) ;; *) echo "Invalid video mode: $VIDEO_MODE" >&2; exit 2 ;; esac
 if [[ "$VIDEO_MODE" == "RUNTIME" && "$NO_PAGING" == "ON" ]]; then
@@ -116,7 +123,7 @@ CMAKE_ARGS=(
     -S "$SCRIPT_DIR"
     -B "$BUILD_DIR"
     "-DCMAKE_BUILD_TYPE=$BUILD_TYPE"
-    "-DCPU_TARGET=286"
+    "-DCPU_TARGET=$CPU_TARGET"
     "-DBOARD=$BOARD"
     "-DVIDEO_MODE=$VIDEO_MODE"
     "-DCPU_SPEED=$CPU_SPEED"
@@ -130,10 +137,9 @@ CMAKE_ARGS=(
 )
 
 printf 'murm386 build\n'
-printf '  CPU target : 286\n'
+printf '  CPU target : %s\n' "$CPU_TARGET"
 printf '  Board      : %s\n' "$BOARD"
 printf '  Video mode : %s\n' "$VIDEO_MODE"
-printf '  Audio      : %s\n' "$AUDIO"
 printf '  RP2350     : %s MHz\n' "$CPU_SPEED"
 printf '  PSRAM max  : %s MHz\n' "$PSRAM_SPEED"
 printf '  EMM        : %s\n' "$EMM"

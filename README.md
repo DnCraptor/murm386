@@ -19,7 +19,7 @@ The authoritative GPIO map is `src/board_config.h`. Board-specific Pico SDK head
 ## CPU and DOS
 
 - Supported CPU targets: **286** (`CPU_TARGET=286`) and **386** (`CPU_TARGET=386`, `I386_MODE=1`).
-- The Windows build wrappers expose both targets; the Unix shell wrappers still default to the 286 release path.
+- Both Windows and Unix build wrappers support 286 and 386 CPU targets.
 - The DOS environment uses the RP2350 port of the FreeDOS kernel in `src/fdos/`.
 - The native command shell is FCOM (`src/fdos/fcom/`).
 - BIOS and DOS services are integrated into the firmware; the project is no longer the old “SeaBIOS + external VGA BIOS” layout described by earlier versions of this README.
@@ -102,7 +102,7 @@ The recommended entry points are:
 - Linux/macOS/WSL: `./build.sh`
 - Windows: `build.bat`
 - Windows 286+386 release matrix: `build_all.bat`
-- Unix 286 release matrix: `build_all.sh`
+- Unix 286+386 release matrix: `build_all.sh`
 
 Examples:
 
@@ -110,11 +110,13 @@ Examples:
 ./build.sh -M1 -RUNTIME -504 -p 66 --clean
 ./build.sh -M2 -RUNTIME --hdmi
 ./build.sh -M2 -VGA256 --no-paging
+./build.sh --cpu 386 -M1 -RUNTIME -504 -p 66 --clean
+./build_all.sh all
 build.bat --cpu 386 -M1 -RUNTIME -504 -p 66 --clean
 build_all.bat all
 ```
 
-On Windows, `build.bat` defaults to 286 and accepts `--cpu 286|386` (or `-286` / `-386`). `build_all.bat` defaults to both CPU targets; an optional first argument `286`, `386` or `all` can restrict the matrix. For each CPU target it builds both `EMM=OFF` and `EMM=ON` variants and, for each board/EMM combination, one `RUNTIME` paging firmware plus one `VGA256 --no-paging` firmware: **20 builds per CPU target, 40 for `all`**. The Unix shell wrappers remain on the existing 286-only path. Audio output is runtime-selected and does not multiply the build matrix.
+Both `build.sh` and `build.bat` default to 286 and accept `--cpu 286|386` (or `-286` / `-386`). Both `build_all` wrappers default to `all` (286 and 386); an optional first argument `286`, `386` or `all` selects the release matrix. For each CPU target it builds both `EMM=OFF` and `EMM=ON` variants and, for each board/EMM combination, one `RUNTIME` paging firmware plus one `VGA256 --no-paging` firmware: **20 builds per CPU target, 40 for `all`**. Audio output is runtime-selected and does not multiply the build matrix.
 
 The single-build wrappers default to `RUNTIME` with paging enabled. `--no-paging` is reserved for the separate `VGA256` direct-QSPI memory model.
 
