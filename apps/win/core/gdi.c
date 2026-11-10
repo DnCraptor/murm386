@@ -1,10 +1,12 @@
 /*
  * gdi.c - device contexts, GDI objects, palette and drawing primitives.
  *
- * Only MM_TEXT mapping exists: logical -> device is a translation by
- * (viewport org - window org); device -> surface adds the DC origin, which
- * USER sets to the window position for window DCs. Clipping regions are kept
- * in surface coordinates.
+ * The mapping modes: logical -> device is (logical - window org) scaled by
+ * viewport ext / window ext, plus viewport org (MM_TEXT: no scale; the
+ * metric and English ones and MM_TWIPS at 96 pixels an inch, y up;
+ * MM_ISOTROPIC keeping the axes alike); device -> surface adds the DC
+ * origin, which USER sets to the window position for window DCs. Clipping
+ * regions are kept in surface coordinates.
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
@@ -12,6 +14,8 @@
 #include "wincore.h"
 
 void (*gdi_overlay_hook)(HWND source, const RECT *damage);
+
+#define DC_OR_RET(h, r) wdc *dc = gdi_dc(h); if (!dc) return r
 
 /* ---------------------------------------------------------------- palette */
 
@@ -357,6 +361,34 @@ COLORREF gdi_dib_pixel(const gdi_dib *b, int x, int y)
     return RGB(e[2], e[1], e[0]);
 }
 
+/* a bitmap's row y from the DIB's row sy (from the top): monochrome, or
+ * the screen's palette indices */
+static void dib_row_to(const gdi_dib *b, int sy, wsurf *s, int y)
+{
+    uint8_t *row = s->bits + (size_t)y * (size_t)s->pitch;
+    if (s->bpp == 1)
+        memset(row, 0, (size_t)s->pitch);
+    for (int x = 0; x < b->w && x < s->width; x++) {
+        COLORREF c = gdi_dib_pixel(b, x, sy);
+        if (s->bpp != 1)
+            row[x] = nearest_index(c);
+        else if (GetRValue(c) + GetGValue(c) + GetBValue(c) >= 384)
+            row[x >> 3] |= (uint8_t)(0x80 >> (x & 7));
+    }
+}
+
+/* a bitmap of a parsed DIB: monochrome (mono), or of palette indices */
+static HBITMAP bitmap_of_dib(const gdi_dib *b, int mono)
+{
+    HBITMAP hb = bitmap_new(b->w, b->h, mono ? 1 : 8);
+    wbitmap *bm = hb ? (wbitmap *)win_handle_get(hb, WOBJ_BITMAP) : NULL;
+    if (!bm)
+        return 0;
+    for (int y = 0; y < b->h; y++)
+        dib_row_to(b, y, &bm->s, y);
+    return hb;
+}
+
 /* A bitmap from a DIB (LoadBitmap): monochrome from a 1-bit one, else of
  * the screen's palette indices */
 HBITMAP gdi_bitmap_from_dib(const uint8_t *d, uint32_t n)
@@ -364,25 +396,271 @@ HBITMAP gdi_bitmap_from_dib(const uint8_t *d, uint32_t n)
     gdi_dib b;
     if (!gdi_dib_parse(d, n, 1, &b))
         return 0;
-    int mono = b.bpp == 1;
-    HBITMAP hb = bitmap_new(b.w, b.h, mono ? 1 : 8);
+    return bitmap_of_dib(&b, b.bpp == 1);
+}
+
+/*
+ * A DIB as the API has it: a header (BITMAPINFO or BITMAPCOREINFO, its
+ * colours after it) and the bits apart, lines rows of them (0: all).
+ * DIB_PAL_COLORS: the colours are indices into the DC's palette, made
+ * colours in tmp (256 RGBQUADs).
+ */
+static int dib_of(wdc *dc, const BITMAPINFO *bi, const void *bits, UINT usage, int lines,
+                  gdi_dib *b, RGBQUAD *tmp)
+{
+    if (!bi || !bits || !gdi_dib_parse((const uint8_t *)bi, 0x7fffffffu, 1, b))
+        return 0;
+    if (usage == DIB_PAL_COLORS && b->colors) {
+        wpalette *p = dc ? dc_palette(dc) : NULL;
+        const uint8_t *ix = (const uint8_t *)bi + bi->bmiHeader.biSize;
+        for (int i = 0; i < b->colors && i < 256; i++) {
+            int k = ix[2 * i] | ix[2 * i + 1] << 8;
+            const PALETTEENTRY *e = p && k < p->n ? &p->e[k] : NULL;
+            COLORREF c = e ? RGB(e->peRed, e->peGreen, e->peBlue)
+                           : index_color(&win_sys.screen, (uint8_t)k);
+            tmp[i].rgbRed = GetRValue(c);
+            tmp[i].rgbGreen = GetGValue(c);
+            tmp[i].rgbBlue = GetBValue(c);
+            tmp[i].rgbReserved = 0;
+        }
+        b->pal = (const uint8_t *)tmp;
+        b->entry = 4;
+    }
+    b->bits = (const uint8_t *)bits;
+    if (lines > 0 && lines < b->h)
+        b->h = lines;
+    return 1;
+}
+
+/* a DIB's rows (a band of them) drawn: a bitmap of them, blitted */
+static int dib_draw(HDC h, wdc *dc, const gdi_dib *b, int x, int y, int w, int hh, int sx,
+                    int sy, int sw, int sh, DWORD rop, int stretch)
+{
+    HBITMAP hb = bitmap_of_dib(b, dc->surf->bpp == 1);
+    HDC mem = hb ? CreateCompatibleDC(h) : 0;
+    if (!mem) {
+        if (hb)
+            DeleteObject(hb);
+        return 0;
+    }
+    HGDIOBJ old = SelectObject(mem, hb);
+    if (stretch)
+        StretchBlt(h, x, y, w, hh, mem, sx, sy, sw, sh, rop);
+    else
+        BitBlt(h, x, y, w, hh, mem, sx, sy, rop);
+    SelectObject(mem, old);
+    DeleteDC(mem);
+    DeleteObject(hb);
+    return 1;
+}
+
+/* the source's y from the bottom (as a DIB counts, the bits of a band
+ * starting at row start) made from the top of those rows */
+static int dib_top(const gdi_dib *b, int start, int sy, int sh)
+{
+    return b->top_down ? sy - start : b->h - (sy - start) - sh;
+}
+
+int WINAPI SetDIBitsToDevice(HDC h, int x, int y, int w, int hh, int sx, int sy,
+                             UINT start, UINT lines, const void *bits, const BITMAPINFO *bi,
+                             UINT usage)
+{
+    DC_OR_RET(h, 0);
+    RGBQUAD tmp[256];
+    gdi_dib b;
+    if (!lines || !dib_of(dc, bi, bits, usage, (int)lines, &b, tmp))
+        return 0;
+    return dib_draw(h, dc, &b, x, y, w, hh, sx, dib_top(&b, (int)start, sy, hh), w, hh,
+                    SRCCOPY, 0) ? (int)lines : 0;
+}
+
+int WINAPI StretchDIBits(HDC h, int x, int y, int w, int hh, int sx, int sy, int sw, int sh,
+                         const void *bits, const BITMAPINFO *bi, UINT usage, DWORD rop)
+{
+    DC_OR_RET(h, 0);
+    RGBQUAD tmp[256];
+    gdi_dib b;
+    if (!dib_of(dc, bi, bits, usage, 0, &b, tmp))
+        return 0;
+    return dib_draw(h, dc, &b, x, y, w, hh, sx, dib_top(&b, 0, sy, sh), sw, sh, rop, 1) ? sh : 0;
+}
+
+/* rows of a DIB into a bitmap: the band's from row start (from the
+ * bottom); the number set */
+int WINAPI SetDIBits(HDC h, HBITMAP hb, UINT start, UINT lines, const void *bits,
+                     const BITMAPINFO *bi, UINT usage)
+{
+    wbitmap *bm = (wbitmap *)win_handle_get(hb, WOBJ_BITMAP);
+    RGBQUAD tmp[256];
+    gdi_dib b;
+    if (!bm || !lines || !dib_of(gdi_dc(h), bi, bits, usage, (int)lines, &b, tmp))
+        return 0;
+    int n = 0;
+    for (int r = 0; r < b.h; r++) {
+        int y = b.top_down ? (int)start + r : bm->s.height - 1 - ((int)start + (b.h - 1 - r));
+        if (y < 0 || y >= bm->s.height)
+            continue;
+        dib_row_to(&b, r, &bm->s, y);
+        n++;
+    }
+    return n;
+}
+
+/* a bitmap the DC's kind (monochrome for a monochrome one), its bits from
+ * the DIB if CBM_INIT */
+HBITMAP WINAPI CreateDIBitmap(HDC h, const BITMAPINFOHEADER *bih, DWORD init, const void *bits,
+                              const BITMAPINFO *bi, UINT usage)
+{
+    if (!bih)
+        return 0;
+    int w, hh;
+    if (bih->biSize == sizeof(BITMAPCOREHEADER)) {
+        const BITMAPCOREHEADER *c = (const BITMAPCOREHEADER *)bih;
+        w = c->bcWidth;
+        hh = c->bcHeight;
+    } else {
+        w = (int)bih->biWidth;
+        hh = (int)(bih->biHeight < 0 ? -bih->biHeight : bih->biHeight);
+    }
+    wdc *dc = gdi_dc(h);
+    HBITMAP hb = bitmap_new(w, hh, dc && dc->surf->bpp == 1 ? 1 : 8);
     wbitmap *bm = hb ? (wbitmap *)win_handle_get(hb, WOBJ_BITMAP) : NULL;
     if (!bm)
         return 0;
     memset(bm->s.bits, 0, (size_t)bm->s.pitch * (size_t)bm->s.height);
-    for (int y = 0; y < b.h; y++) {
-        uint8_t *row = bm->s.bits + (size_t)y * (size_t)bm->s.pitch;
-        for (int x = 0; x < b.w; x++) {
-            COLORREF c = gdi_dib_pixel(&b, x, y);
-            if (mono) {
-                if (GetRValue(c) + GetGValue(c) + GetBValue(c) >= 384)
-                    row[x >> 3] |= (uint8_t)(0x80 >> (x & 7));
-            } else {
-                row[x] = nearest_index(c);
-            }
+    if ((init & CBM_INIT) && bits && bi)
+        SetDIBits(h, hb, 0, (UINT)hh, bits, bi, usage);
+    return hb;
+}
+
+/* the 16 colours a 4-bit DIB of GetDIBits has */
+static const COLORREF dib16[16] = {
+    RGB(0, 0, 0), RGB(128, 0, 0), RGB(0, 128, 0), RGB(128, 128, 0),
+    RGB(0, 0, 128), RGB(128, 0, 128), RGB(0, 128, 128), RGB(192, 192, 192),
+    RGB(128, 128, 128), RGB(255, 0, 0), RGB(0, 255, 0), RGB(255, 255, 0),
+    RGB(0, 0, 255), RGB(255, 0, 255), RGB(0, 255, 255), RGB(255, 255, 255),
+};
+
+static int nearest_of(const COLORREF *t, int n, COLORREF c)
+{
+    long best = 0x7fffffff;
+    int bi = 0;
+    for (int i = 0; i < n; i++) {
+        long dr = (long)GetRValue(c) - GetRValue(t[i]), dg = (long)GetGValue(c) - GetGValue(t[i]),
+             db = (long)GetBValue(c) - GetBValue(t[i]);
+        long d = dr * dr + dg * dg + db * db;
+        if (d < best) {
+            best = d;
+            bi = i;
         }
     }
-    return hb;
+    return bi;
+}
+
+/*
+ * A bitmap's rows as a DIB of the header's format (1, 4, 8 or 24 bits; 0:
+ * the header filled in, the bitmap's own), the colours after the header;
+ * the band's rows from row start (from the bottom); the number got.
+ */
+int WINAPI GetDIBits(HDC h, HBITMAP hb, UINT start, UINT lines, void *bits, BITMAPINFO *bi,
+                     UINT usage)
+{
+    (void)usage;
+    wbitmap *bm = (wbitmap *)win_handle_get(hb, WOBJ_BITMAP);
+    if (!bm || !bi || bi->bmiHeader.biSize < sizeof(BITMAPINFOHEADER))
+        return 0;
+    (void)h;
+    BITMAPINFOHEADER *hd = &bi->bmiHeader;
+    if (!hd->biBitCount) {
+        hd->biWidth = bm->s.width;
+        hd->biHeight = bm->s.height;
+        hd->biPlanes = 1;
+        hd->biBitCount = (WORD)(bm->s.bpp == 1 ? 1 : 8);
+        hd->biCompression = BI_RGB;
+        hd->biSizeImage = (DWORD)((bm->s.width * hd->biBitCount + 31) / 32 * 4) *
+                          (DWORD)bm->s.height;
+        hd->biClrUsed = hd->biClrImportant = 0;
+        return 1;
+    }
+    int bpp = hd->biBitCount;
+    if (bpp != 1 && bpp != 4 && bpp != 8 && bpp != 24)
+        return 0;
+    int w = bm->s.width, hh = bm->s.height, pitch = (w * bpp + 31) / 32 * 4;
+    hd->biWidth = w;
+    hd->biHeight = hh;
+    hd->biPlanes = 1;
+    hd->biCompression = BI_RGB;
+    hd->biSizeImage = (DWORD)pitch * (DWORD)hh;
+    hd->biClrUsed = hd->biClrImportant = 0;
+    int ncol = bpp == 24 ? 0 : 1 << bpp;
+    RGBQUAD *col = (RGBQUAD *)((uint8_t *)bi + hd->biSize);
+    for (int i = 0; i < ncol; i++) {
+        COLORREF c = bpp == 1 ? (i ? RGB(255, 255, 255) : 0)
+                     : bpp == 4 ? dib16[i] : index_color(&win_sys.screen, (uint8_t)i);
+        col[i].rgbRed = GetRValue(c);
+        col[i].rgbGreen = GetGValue(c);
+        col[i].rgbBlue = GetBValue(c);
+        col[i].rgbReserved = 0;
+    }
+    if (!bits)
+        return hh;
+    int n = 0;
+    for (UINT r = 0; r < lines; r++) {
+        int y = hh - 1 - (int)(start + r);     /* bottom up */
+        if (y < 0 || y >= hh)
+            break;
+        uint8_t *out = (uint8_t *)bits + (size_t)r * (size_t)pitch;
+        memset(out, 0, (size_t)pitch);
+        for (int x = 0; x < w; x++) {
+            uint8_t v = dib_get_pixel(&bm->s, x, y);
+            COLORREF c = index_color(&bm->s, v);
+            switch (bpp) {
+            case 1:
+                if (GetRValue(c) + GetGValue(c) + GetBValue(c) >= 384)
+                    out[x >> 3] |= (uint8_t)(0x80 >> (x & 7));
+                break;
+            case 4:
+                out[x >> 1] |= (uint8_t)(nearest_of(dib16, 16, c) << (x & 1 ? 0 : 4));
+                break;
+            case 8:
+                out[x] = bm->s.bpp == 8 ? v : nearest_index(c);
+                break;
+            default:
+                out[3 * x] = GetBValue(c);
+                out[3 * x + 1] = GetGValue(c);
+                out[3 * x + 2] = GetRValue(c);
+                break;
+            }
+        }
+        n++;
+    }
+    return n;
+}
+
+/* a pattern brush of a packed DIB (a global block's) */
+HBRUSH WINAPI CreateDIBPatternBrush(HGLOBAL hg, UINT usage)
+{
+    const BITMAPINFO *bi = (const BITMAPINFO *)GlobalLock(hg);
+    RGBQUAD tmp[256];
+    gdi_dib b;
+    HBRUSH br = 0;
+    /* the bits after the colours: RGBQUADs, or (DIB_PAL_COLORS) indices */
+    if (bi && gdi_dib_parse((const uint8_t *)bi, GlobalSize(hg), 1, &b) &&
+        dib_of(NULL, bi, usage == DIB_PAL_COLORS ? (const uint8_t *)bi + bi->bmiHeader.biSize +
+                                                   2u * (uint32_t)b.colors : b.bits,
+               usage, 0, &b, tmp)) {
+        HBITMAP hb = bitmap_of_dib(&b, 0);
+        if (hb) {
+            br = CreatePatternBrush(hb);
+            wbrush *w = br ? (wbrush *)win_handle_get(br, WOBJ_BRUSH) : NULL;
+            if (w)
+                w->pattern = 0;         /* its own copy of the pattern */
+            DeleteObject(hb);
+        }
+    }
+    if (bi)
+        GlobalUnlock(hg);
+    return br;
 }
 
 LONG WINAPI SetBitmapBits(HBITMAP hb, DWORD count, const void *bits)
@@ -682,8 +960,12 @@ static void dc_defaults(wdc *dc)
     dc->bkmode = OPAQUE;
     dc->rop2 = R2_COPYPEN;
     dc->polyfill = ALTERNATE;
+    dc->stretch = BLACKONWHITE;
+    dc->char_extra = dc->break_extra = dc->break_count = 0;
     dc->align = TA_TOP | TA_LEFT | TA_NOUPDATECP;
     dc->vp_x = dc->vp_y = dc->win_x = dc->win_y = 0;
+    dc->mapmode = MM_TEXT;
+    dc->wex = dc->wey = dc->vex = dc->vey = 1;
     dc->brush_x = dc->brush_y = 0;
     dc->cur.x = dc->cur.y = 0;
 }
@@ -845,8 +1127,12 @@ BOOL WINAPI RestoreDC(HDC h, int level)
             dc->pen = s->pen; dc->brush = s->brush; dc->font = s->font;
             dc->pal = s->pal; dc->text = s->text; dc->bk = s->bk;
             dc->bkmode = s->bkmode; dc->rop2 = s->rop2; dc->polyfill = s->polyfill;
+            dc->stretch = s->stretch; dc->char_extra = s->char_extra;
+            dc->break_extra = s->break_extra; dc->break_count = s->break_count;
             dc->align = s->align; dc->vp_x = s->vp_x; dc->vp_y = s->vp_y;
             dc->win_x = s->win_x; dc->win_y = s->win_y;
+            dc->mapmode = s->mapmode;
+            dc->wex = s->wex; dc->wey = s->wey; dc->vex = s->vex; dc->vey = s->vey;
             dc->brush_x = s->brush_x; dc->brush_y = s->brush_y; dc->cur = s->cur;
             dc->has_clip = s->has_clip;
             wrgn_copy(&dc->clip, &s->clip);
@@ -876,6 +1162,22 @@ int WINAPI GetDeviceCaps(HDC h, int index)
             return (int)GetDisplayDriverInfoN(NULL, 0);
         return 20;
     case LOGPIXELSX: case LOGPIXELSY: return 96;
+    case HORZSIZE: return s->width * 254 / 960;     /* mm, at 96 an inch */
+    case VERTSIZE: return s->height * 254 / 960;
+    case ASPECTX: case ASPECTY: return 10;          /* square pixels */
+    case ASPECTXY: return 14;
+    case TECHNOLOGY: return DT_RASDISPLAY;
+    case DRIVERVERSION: return 0x300;
+    case CLIPCAPS: return CP_RECTANGLE;
+    case CURVECAPS: return CC_CIRCLES | CC_PIE | CC_CHORD | CC_ELLIPSES | CC_WIDE |
+                           CC_INTERIORS | CC_ROUNDRECT;
+    case LINECAPS: return LC_POLYLINE | LC_WIDE | LC_STYLED | LC_INTERIORS;
+    case POLYGONALCAPS: return PC_POLYGON | PC_RECTANGLE | PC_SCANLINE | PC_WIDE |
+                               PC_INTERIORS;
+    case TEXTCAPS: return 0;
+    case NUMBRUSHES: return -1;
+    case NUMPENS: case NUMFONTS: return s->bpp == 1 ? 2 : 16;
+    case COLORRES: return s->bpp == 8 ? 18 : 0;
     case SIZEPALETTE: return s->bpp == 8 ? 256 : 0;
     case NUMRESERVED: return s->bpp == 8 ? 20 : 0;
     case RASTERCAPS: return s->bpp == 8 ? RC_PALETTE : 0;
@@ -998,7 +1300,6 @@ int WINAPI GetObject(HGDIOBJ obj, int size, LPVOID buf)
 
 /* ---------------------------------------------------------------- attributes */
 
-#define DC_OR_RET(h, r) wdc *dc = gdi_dc(h); if (!dc) return r
 
 COLORREF WINAPI SetTextColor(HDC h, COLORREF c) { DC_OR_RET(h, 0); COLORREF o = dc->text; dc->text = c; return o; }
 COLORREF WINAPI GetTextColor(HDC h) { DC_OR_RET(h, 0); return dc->text; }
@@ -1014,22 +1315,253 @@ int WINAPI SetPolyFillMode(HDC h, int m) { DC_OR_RET(h, 0); int o = dc->polyfill
 
 #define MKDW(x, y) ((DWORD)(WORD)(x) | ((DWORD)(WORD)(y) << 16))
 
+int WINAPI GetPolyFillMode(HDC h) { DC_OR_RET(h, 0); return dc->polyfill; }
+
+/* ---------------------------------------------------------------- mapping */
+
+/* v * num / den rounded to the nearest */
+static int scale(long v, long num, long den)
+{
+    long long p = (long long)v * num;
+    if (!den)
+        return 0;
+    return (int)((p < 0) == (den < 0) ? (p + den / 2) / den : (p - den / 2) / den);
+}
+
+int gdi_lx_to_dx(const wdc *dc, int lx) { return scale(lx, dc->vex, dc->wex); }
+int gdi_ly_to_dy(const wdc *dc, int ly) { return scale(ly, dc->vey, dc->wey); }
+int gdi_dx_to_lx(const wdc *dc, int dx) { return scale(dx, dc->wex, dc->vex); }
+int gdi_dy_to_ly(const wdc *dc, int dy) { return scale(dy, dc->wey, dc->vey); }
+
+/* a size in logical units as device pixels, at least one if it had any */
+static int dev_size(const wdc *dc, int l, int y)
+{
+    int d = y ? gdi_ly_to_dy(dc, l) : gdi_lx_to_dx(dc, l);
+    if (d < 0)
+        d = -d;
+    return l && !d ? 1 : d;
+}
+
+/* MM_ISOTROPIC: the viewport made as large on both axes as the smaller */
+static void isotropic(wdc *dc)
+{
+    if (dc->mapmode != MM_ISOTROPIC)
+        return;
+    long long xs = (long long)(dc->vex < 0 ? -dc->vex : dc->vex) * (dc->wey < 0 ? -dc->wey : dc->wey);
+    long long ys = (long long)(dc->vey < 0 ? -dc->vey : dc->vey) * (dc->wex < 0 ? -dc->wex : dc->wex);
+    if (xs > ys) {
+        int v = scale(dc->vey < 0 ? -dc->vey : dc->vey, dc->wex < 0 ? -dc->wex : dc->wex,
+                      dc->wey < 0 ? -dc->wey : dc->wey);
+        dc->vex = (dc->vex < 0 ? -1 : 1) * (v ? v : 1);
+    } else if (ys > xs) {
+        int v = scale(dc->vex < 0 ? -dc->vex : dc->vex, dc->wey < 0 ? -dc->wey : dc->wey,
+                      dc->wex < 0 ? -dc->wex : dc->wex);
+        dc->vey = (dc->vey < 0 ? -1 : 1) * (v ? v : 1);
+    }
+}
+
+int WINAPI SetMapMode(HDC h, int mode)
+{
+    DC_OR_RET(h, 0);
+    int old = dc->mapmode;
+    static const int units[] = { 0, 0, 254, 2540, 100, 1000, 1440 };   /* an inch */
+    if (mode < MM_TEXT || mode > MM_ANISOTROPIC)
+        return 0;
+    dc->mapmode = mode;
+    if (mode == MM_TEXT) {
+        dc->wex = dc->wey = dc->vex = dc->vey = 1;
+    } else if (mode <= MM_TWIPS) {
+        dc->wex = dc->wey = units[mode];
+        dc->vex = 96;
+        dc->vey = -96;
+    } else if (mode == MM_ISOTROPIC && old != MM_ISOTROPIC && old != MM_ANISOTROPIC) {
+        dc->wex = dc->wey = 254;        /* as MM_LOMETRIC, until set */
+        dc->vex = 96;
+        dc->vey = -96;
+    }
+    return old;
+}
+
+int WINAPI GetMapMode(HDC h) { DC_OR_RET(h, 0); return dc->mapmode; }
+
+/* an extent: only MM_ISOTROPIC's and MM_ANISOTROPIC's change; none is 0 */
+static BOOL set_ext(wdc *dc, int view, int x, int y, LPSIZE old)
+{
+    if (old) {
+        old->cx = view ? dc->vex : dc->wex;
+        old->cy = view ? dc->vey : dc->wey;
+    }
+    if (dc->mapmode != MM_ISOTROPIC && dc->mapmode != MM_ANISOTROPIC)
+        return TRUE;
+    if (!x || !y)
+        return FALSE;
+    if (view) {
+        dc->vex = x;
+        dc->vey = y;
+    } else {
+        dc->wex = x;
+        dc->wey = y;
+    }
+    isotropic(dc);
+    return TRUE;
+}
+
+BOOL WINAPI SetWindowExtEx(HDC h, int x, int y, LPSIZE old)
+{
+    DC_OR_RET(h, FALSE);
+    return set_ext(dc, 0, x, y, old);
+}
+
+BOOL WINAPI SetViewportExtEx(HDC h, int x, int y, LPSIZE old)
+{
+    DC_OR_RET(h, FALSE);
+    return set_ext(dc, 1, x, y, old);
+}
+
+DWORD WINAPI SetWindowExt(HDC h, int x, int y)
+{
+    SIZE o = { 0, 0 };
+    return SetWindowExtEx(h, x, y, &o) ? MKDW(o.cx, o.cy) : 0;
+}
+
+DWORD WINAPI SetViewportExt(HDC h, int x, int y)
+{
+    SIZE o = { 0, 0 };
+    return SetViewportExtEx(h, x, y, &o) ? MKDW(o.cx, o.cy) : 0;
+}
+
+BOOL WINAPI GetWindowExtEx(HDC h, LPSIZE sz)
+{
+    DC_OR_RET(h, FALSE);
+    sz->cx = dc->wex;
+    sz->cy = dc->wey;
+    return TRUE;
+}
+
+BOOL WINAPI GetViewportExtEx(HDC h, LPSIZE sz)
+{
+    DC_OR_RET(h, FALSE);
+    sz->cx = dc->vex;
+    sz->cy = dc->vey;
+    return TRUE;
+}
+
+DWORD WINAPI GetWindowExt(HDC h) { DC_OR_RET(h, 0); return MKDW(dc->wex, dc->wey); }
+DWORD WINAPI GetViewportExt(HDC h) { DC_OR_RET(h, 0); return MKDW(dc->vex, dc->vey); }
+
+/* ScaleViewportExt, ScaleWindowExt: ext * xn / xd, ext * yn / yd */
+static BOOL scale_ext(wdc *dc, int view, int xn, int xd, int yn, int yd, LPSIZE old)
+{
+    if (!xd || !yd)
+        return FALSE;
+    int x = scale(view ? dc->vex : dc->wex, xn, xd), y = scale(view ? dc->vey : dc->wey, yn, yd);
+    return set_ext(dc, view, x, y, old);
+}
+
+BOOL WINAPI ScaleViewportExtEx(HDC h, int xn, int xd, int yn, int yd, LPSIZE old)
+{
+    DC_OR_RET(h, FALSE);
+    return scale_ext(dc, 1, xn, xd, yn, yd, old);
+}
+
+BOOL WINAPI ScaleWindowExtEx(HDC h, int xn, int xd, int yn, int yd, LPSIZE old)
+{
+    DC_OR_RET(h, FALSE);
+    return scale_ext(dc, 0, xn, xd, yn, yd, old);
+}
+
+DWORD WINAPI ScaleViewportExt(HDC h, int xn, int xd, int yn, int yd)
+{
+    SIZE o = { 0, 0 };
+    return ScaleViewportExtEx(h, xn, xd, yn, yd, &o) ? MKDW(o.cx, o.cy) : 0;
+}
+
+DWORD WINAPI ScaleWindowExt(HDC h, int xn, int xd, int yn, int yd)
+{
+    SIZE o = { 0, 0 };
+    return ScaleWindowExtEx(h, xn, xd, yn, yd, &o) ? MKDW(o.cx, o.cy) : 0;
+}
+
+/* the origins: set, got, moved by (dx, dy) */
+static BOOL set_org(wdc *dc, int view, int x, int y, int rel, LPPOINT old)
+{
+    int *px = view ? &dc->vp_x : &dc->win_x, *py = view ? &dc->vp_y : &dc->win_y;
+    if (old) {
+        old->x = *px;
+        old->y = *py;
+    }
+    *px = rel ? *px + x : x;
+    *py = rel ? *py + y : y;
+    return TRUE;
+}
+
+BOOL WINAPI SetWindowOrgEx(HDC h, int x, int y, LPPOINT old)
+{
+    DC_OR_RET(h, FALSE);
+    return set_org(dc, 0, x, y, 0, old);
+}
+
+BOOL WINAPI SetViewportOrgEx(HDC h, int x, int y, LPPOINT old)
+{
+    DC_OR_RET(h, FALSE);
+    return set_org(dc, 1, x, y, 0, old);
+}
+
+BOOL WINAPI OffsetWindowOrgEx(HDC h, int x, int y, LPPOINT old)
+{
+    DC_OR_RET(h, FALSE);
+    return set_org(dc, 0, x, y, 1, old);
+}
+
+BOOL WINAPI OffsetViewportOrgEx(HDC h, int x, int y, LPPOINT old)
+{
+    DC_OR_RET(h, FALSE);
+    return set_org(dc, 1, x, y, 1, old);
+}
+
 DWORD WINAPI SetWindowOrg(HDC h, int x, int y)
 {
-    DC_OR_RET(h, 0);
-    DWORD o = MKDW(dc->win_x, dc->win_y);
-    dc->win_x = x; dc->win_y = y;
-    return o;
+    POINT o = { 0, 0 };
+    return SetWindowOrgEx(h, x, y, &o) ? MKDW(o.x, o.y) : 0;
 }
-DWORD WINAPI GetWindowOrg(HDC h) { DC_OR_RET(h, 0); return MKDW(dc->win_x, dc->win_y); }
+
 DWORD WINAPI SetViewportOrg(HDC h, int x, int y)
 {
-    DC_OR_RET(h, 0);
-    DWORD o = MKDW(dc->vp_x, dc->vp_y);
-    dc->vp_x = x; dc->vp_y = y;
-    return o;
+    POINT o = { 0, 0 };
+    return SetViewportOrgEx(h, x, y, &o) ? MKDW(o.x, o.y) : 0;
 }
+
+DWORD WINAPI OffsetWindowOrg(HDC h, int x, int y)
+{
+    POINT o = { 0, 0 };
+    return OffsetWindowOrgEx(h, x, y, &o) ? MKDW(o.x, o.y) : 0;
+}
+
+DWORD WINAPI OffsetViewportOrg(HDC h, int x, int y)
+{
+    POINT o = { 0, 0 };
+    return OffsetViewportOrgEx(h, x, y, &o) ? MKDW(o.x, o.y) : 0;
+}
+
+DWORD WINAPI GetWindowOrg(HDC h) { DC_OR_RET(h, 0); return MKDW(dc->win_x, dc->win_y); }
 DWORD WINAPI GetViewportOrg(HDC h) { DC_OR_RET(h, 0); return MKDW(dc->vp_x, dc->vp_y); }
+
+BOOL WINAPI GetWindowOrgEx(HDC h, LPPOINT pt)
+{
+    DC_OR_RET(h, FALSE);
+    pt->x = dc->win_x;
+    pt->y = dc->win_y;
+    return TRUE;
+}
+
+BOOL WINAPI GetViewportOrgEx(HDC h, LPPOINT pt)
+{
+    DC_OR_RET(h, FALSE);
+    pt->x = dc->vp_x;
+    pt->y = dc->vp_y;
+    return TRUE;
+}
+
 DWORD WINAPI SetBrushOrg(HDC h, int x, int y)
 {
     DC_OR_RET(h, 0);
@@ -1037,6 +1569,28 @@ DWORD WINAPI SetBrushOrg(HDC h, int x, int y)
     dc->brush_x = x; dc->brush_y = y;
     return o;
 }
+
+DWORD WINAPI GetBrushOrg(HDC h) { DC_OR_RET(h, 0); return MKDW(dc->brush_x, dc->brush_y); }
+
+BOOL WINAPI GetBrushOrgEx(HDC h, LPPOINT pt)
+{
+    DC_OR_RET(h, FALSE);
+    pt->x = dc->brush_x;
+    pt->y = dc->brush_y;
+    return TRUE;
+}
+
+DWORD WINAPI GetCurrentPosition(HDC h) { DC_OR_RET(h, 0); return MKDW(dc->cur.x, dc->cur.y); }
+
+BOOL WINAPI GetCurrentPositionEx(HDC h, LPPOINT pt)
+{
+    DC_OR_RET(h, FALSE);
+    *pt = dc->cur;
+    return TRUE;
+}
+
+/* the DC's origin on the screen (its window's client area) */
+DWORD WINAPI GetDCOrg(HDC h) { DC_OR_RET(h, 0); return MKDW(dc->org_x, dc->org_y); }
 
 COLORREF WINAPI GetNearestColor(HDC h, COLORREF c)
 {
@@ -1049,8 +1603,13 @@ COLORREF WINAPI GetNearestColor(HDC h, COLORREF c)
 /* logical -> surface */
 void gdi_lp_to_dp(wdc *dc, int *x, int *y)
 {
-    *x = *x - dc->win_x + dc->vp_x + dc->org_x;
-    *y = *y - dc->win_y + dc->vp_y + dc->org_y;
+    if (dc->mapmode == MM_TEXT) {
+        *x = *x - dc->win_x + dc->vp_x + dc->org_x;
+        *y = *y - dc->win_y + dc->vp_y + dc->org_y;
+        return;
+    }
+    *x = scale(*x - dc->win_x, dc->vex, dc->wex) + dc->vp_x + dc->org_x;
+    *y = scale(*y - dc->win_y, dc->vey, dc->wey) + dc->vp_y + dc->org_y;
 }
 
 static void lp_rect(wdc *dc, RECT *r)
@@ -1130,8 +1689,31 @@ int WINAPI ExcludeClipRect(HDC h, int l, int t, int r, int b)
 /* surface -> logical */
 static void dp_to_lp(wdc *dc, int *x, int *y)
 {
-    *x = *x - dc->org_x - dc->vp_x + dc->win_x;
-    *y = *y - dc->org_y - dc->vp_y + dc->win_y;
+    *x = scale(*x - dc->org_x - dc->vp_x, dc->wex, dc->vex) + dc->win_x;
+    *y = scale(*y - dc->org_y - dc->vp_y, dc->wey, dc->vey) + dc->win_y;
+}
+
+/* LPtoDP, DPtoLP: logical and device (the DC's, not the surface's) points */
+BOOL WINAPI LPtoDP(HDC h, LPPOINT pts, int n)
+{
+    DC_OR_RET(h, FALSE);
+    for (int i = 0; i < n; i++) {
+        gdi_lp_to_dp(dc, &pts[i].x, &pts[i].y);
+        pts[i].x -= dc->org_x;
+        pts[i].y -= dc->org_y;
+    }
+    return TRUE;
+}
+
+BOOL WINAPI DPtoLP(HDC h, LPPOINT pts, int n)
+{
+    DC_OR_RET(h, FALSE);
+    for (int i = 0; i < n; i++) {
+        pts[i].x += dc->org_x;
+        pts[i].y += dc->org_y;
+        dp_to_lp(dc, &pts[i].x, &pts[i].y);
+    }
+    return TRUE;
 }
 
 int WINAPI GetClipBox(HDC h, LPRECT rc)
@@ -1234,10 +1816,18 @@ void gdi_realize_brush(wdc *dc, HBRUSH hb, wfill *f)
     }
 }
 
+/* the DC's pen; its width (logical) in pixels if the mapping mode scales */
 static wpen *dc_pen(wdc *dc)
 {
+    static wpen scaled;
     wpen *p = (wpen *)win_handle_get(dc->pen, WOBJ_PEN);
-    return p ? p : (wpen *)win_handle_get(win_sys.stock[BLACK_PEN], WOBJ_PEN);
+    if (!p)
+        p = (wpen *)win_handle_get(win_sys.stock[BLACK_PEN], WOBJ_PEN);
+    if (dc->mapmode == MM_TEXT || p->width <= 1)
+        return p;
+    scaled = *p;
+    scaled.width = dev_size(dc, p->width, 0);
+    return &scaled;
 }
 
 static void fill_rect_dev(wdc *dc, const RECT *rc, const wfill *f, int rop3)
@@ -1571,7 +2161,7 @@ BOOL WINAPI RoundRect(HDC h, int l, int t, int r, int b, int w, int hh)
     DC_OR_RET(h, FALSE);
     RECT box;
     if (shape_box(dc, l, t, r, b, &box))
-        draw_shape(dc, box, w < 0 ? -w : w, hh < 0 ? -hh : hh);
+        draw_shape(dc, box, dev_size(dc, w < 0 ? -w : w, 0), dev_size(dc, hh < 0 ? -hh : hh, 1));
     return TRUE;
 }
 
@@ -1584,43 +2174,37 @@ BOOL WINAPI Ellipse(HDC h, int l, int t, int r, int b)
     return TRUE;
 }
 
-/* Scanline polygon fill: pixel centres, ALTERNATE (even-odd) or WINDING. */
-BOOL WINAPI Polygon(HDC h, const POINT *pts, int n)
-{
-    DC_OR_RET(h, FALSE);
-    if (n < 2)
-        return FALSE;
-    POINT *dp = (POINT *)win_alloc(sizeof(POINT) * (size_t)(n + 1));
-    int *xs = (int *)win_alloc(sizeof(int) * (size_t)n);
-    int *dir = (int *)win_alloc(sizeof(int) * (size_t)n);
-    if (!dp || !xs || !dir) {
-        win_free(dp); win_free(xs); win_free(dir);
-        return FALSE;
-    }
-    for (int i = 0; i < n; i++) {
-        dp[i] = pts[i];
-        gdi_lp_to_dp(dc, &dp[i].x, &dp[i].y);
-    }
-    dp[n] = dp[0];
-    wpen *p = dc_pen(dc);
-    RECT b;
-    points_bounds(dc, pts, n, p->width, &b);
-    gdi_begin_draw(dc, &b);
+/* The spans of polygons (device points; npoly of them, counts[i] points
+ * each, closed): pixel centres, ALTERNATE (even-odd) or WINDING; span(x0,
+ * x1 exclusive, y) for each. */
+typedef void (*span_fn)(void *ctx, int x0, int x1, int y);
 
-    wfill bf;
-    gdi_realize_brush(dc, dc->brush, &bf);
-    if (bf.kind != WFILL_NONE) {
-        int rop = dib_rop2_to_rop3(dc->rop2);
-        int ymin = dp[0].y, ymax = dp[0].y;
-        for (int i = 1; i < n; i++) {
-            if (dp[i].y < ymin) ymin = dp[i].y;
-            if (dp[i].y > ymax) ymax = dp[i].y;
-        }
-        for (int y = ymin; y < ymax; y++) {
-            int k = 0;
-            long yc2 = 2L * y + 1;                 /* doubled pixel centre */
-            for (int i = 0; i < n; i++) {
-                POINT a = dp[i], c = dp[i + 1];
+static int poly_spans(const POINT *dp, const int *counts, int npoly, int mode, span_fn span,
+                      void *ctx)
+{
+    int total = 0;
+    for (int p = 0; p < npoly; p++)
+        total += counts[p];
+    if (total < 2)
+        return 1;
+    int *xs = (int *)win_alloc(sizeof(int) * (size_t)total);
+    int *dir = (int *)win_alloc(sizeof(int) * (size_t)total);
+    if (!xs || !dir) {
+        win_free(xs);
+        win_free(dir);
+        return 0;
+    }
+    int ymin = dp[0].y, ymax = dp[0].y;
+    for (int i = 1; i < total; i++) {
+        if (dp[i].y < ymin) ymin = dp[i].y;
+        if (dp[i].y > ymax) ymax = dp[i].y;
+    }
+    for (int y = ymin; y < ymax; y++) {
+        int k = 0;
+        long yc2 = 2L * y + 1;                 /* doubled pixel centre */
+        for (int p = 0, base = 0; p < npoly; base += counts[p], p++)
+            for (int i = 0; i < counts[p]; i++) {
+                POINT a = dp[base + i], c = dp[base + (i + 1) % counts[p]];
                 if (a.y == c.y)
                     continue;
                 int d = 1;
@@ -1634,34 +2218,243 @@ BOOL WINAPI Polygon(HDC h, const POINT *pts, int n)
                 dir[k] = d;
                 k++;
             }
-            for (int i = 1; i < k; i++)                 /* insertion sort */
-                for (int j = i; j > 0 && xs[j] < xs[j - 1]; j--) {
-                    int t = xs[j]; xs[j] = xs[j - 1]; xs[j - 1] = t;
-                    t = dir[j]; dir[j] = dir[j - 1]; dir[j - 1] = t;
-                }
-            if (dc->polyfill == WINDING) {
-                int wsum = 0;
-                for (int i = 0; i + 1 < k; i++) {
-                    wsum += dir[i];
-                    if (wsum) {
-                        RECT r = { xs[i], y, xs[i + 1], y + 1 };
-                        fill_rect_dev(dc, &r, &bf, rop);
-                    }
-                }
-            } else {
-                for (int i = 0; i + 1 < k; i += 2) {
-                    RECT r = { xs[i], y, xs[i + 1], y + 1 };
-                    fill_rect_dev(dc, &r, &bf, rop);
-                }
+        for (int i = 1; i < k; i++)                 /* insertion sort */
+            for (int j = i; j > 0 && xs[j] < xs[j - 1]; j--) {
+                int t = xs[j]; xs[j] = xs[j - 1]; xs[j - 1] = t;
+                t = dir[j]; dir[j] = dir[j - 1]; dir[j - 1] = t;
+            }
+        if (mode == WINDING) {
+            int wsum = 0;
+            for (int i = 0; i + 1 < k; i++) {
+                wsum += dir[i];
+                if (wsum && xs[i] < xs[i + 1])
+                    span(ctx, xs[i], xs[i + 1], y);
+            }
+        } else {
+            for (int i = 0; i + 1 < k; i += 2)
+                if (xs[i] < xs[i + 1])
+                    span(ctx, xs[i], xs[i + 1], y);
+        }
+    }
+    win_free(xs);
+    win_free(dir);
+    return 1;
+}
+
+typedef struct { wdc *dc; const wfill *f; int rop; } fill_ctx;
+
+static void fill_span(void *ctx, int x0, int x1, int y)
+{
+    const fill_ctx *c = (const fill_ctx *)ctx;
+    RECT r = { x0, y, x1, y + 1 };
+    fill_rect_dev(c->dc, &r, c->f, c->rop);
+}
+
+/* Polygons filled with the brush, outlined with the pen */
+static BOOL poly_polygon(wdc *dc, const POINT *pts, const int *counts, int npoly)
+{
+    int total = 0;
+    for (int p = 0; p < npoly; p++) {
+        if (counts[p] < 2)
+            return FALSE;
+        total += counts[p];
+    }
+    if (!total)
+        return FALSE;
+    POINT *dp = (POINT *)win_alloc(sizeof(POINT) * (size_t)total);
+    if (!dp)
+        return FALSE;
+    for (int i = 0; i < total; i++) {
+        dp[i] = pts[i];
+        gdi_lp_to_dp(dc, &dp[i].x, &dp[i].y);
+    }
+    wpen *p = dc_pen(dc);
+    RECT b;
+    points_bounds(dc, pts, total, p->width, &b);
+    gdi_begin_draw(dc, &b);
+    wfill bf;
+    gdi_realize_brush(dc, dc->brush, &bf);
+    if (bf.kind != WFILL_NONE) {
+        fill_ctx fc = { dc, &bf, dib_rop2_to_rop3(dc->rop2) };
+        poly_spans(dp, counts, npoly, dc->polyfill, fill_span, &fc);
+    }
+    if (p->style != PS_NULL)
+        for (int q = 0, base = 0; q < npoly; base += counts[q], q++)
+            for (int i = 0; i < counts[q]; i++) {
+                const POINT *a = &dp[base + i], *c = &dp[base + (i + 1) % counts[q]];
+                line_dev(dc, p, a->x, a->y, c->x, c->y, 1);
+            }
+    gdi_end_draw(dc, &b);
+    win_free(dp);
+    return TRUE;
+}
+
+BOOL WINAPI Polygon(HDC h, const POINT *pts, int n)
+{
+    DC_OR_RET(h, FALSE);
+    return n >= 2 && poly_polygon(dc, pts, &n, 1);
+}
+
+BOOL WINAPI PolyPolygon(HDC h, const POINT *pts, const int *counts, int npoly)
+{
+    DC_OR_RET(h, FALSE);
+    return npoly > 0 && poly_polygon(dc, pts, counts, npoly);
+}
+
+/* ---------------------------------------------------------------- arcs */
+
+/* whether v (y up) is in the sweep counterclockwise from s to e */
+static int in_sweep(long long sx, long long sy, long long ex, long long ey, long long vx,
+                    long long vy)
+{
+    long long se = sx * ey - sy * ex;
+    if (se >= 0)
+        return sx * vy - sy * vx >= 0 && vx * ey - vy * ex >= 0;
+    return !(ex * vy - ey * vx > 0 && vx * sy - vy * sx > 0);
+}
+
+/* the point of the ellipse (box, exclusive) in the direction of p: the
+ * ends of an arc */
+static POINT ellipse_point(const RECT *box, POINT p)
+{
+    long long a2 = box->right - box->left - 1, b2 = box->bottom - box->top - 1;   /* doubled axes */
+    long long cx2 = box->left + box->right - 1, cy2 = box->top + box->bottom - 1;
+    long long vx = 2LL * p.x - cx2, vy = 2LL * p.y - cy2;
+    POINT r = { (int)(cx2 / 2), (int)(cy2 / 2) };
+    unsigned long long d = isqrt64((unsigned long long)(vx * vx * b2 * b2 + vy * vy * a2 * a2));
+    if (!d)
+        return r;
+    r.x = (int)((cx2 + vx * a2 * b2 / (long long)d) / 2);
+    r.y = (int)((cy2 + vy * a2 * b2 / (long long)d) / 2);
+    return r;
+}
+
+enum { ARC_ARC, ARC_CHORD, ARC_PIE };
+
+typedef struct {
+    wdc *dc;
+    const wclip *c;
+    int rop;
+} run_ctx;
+
+static void run_fill(const run_ctx *r, int x0, int x1, int y, const wfill *f)
+{
+    if (x0 < x1) {
+        RECT rc = { x0, y, x1, y + 1 };
+        dib_fill_rect(r->dc->surf, r->c, &rc, f, r->rop);
+    }
+}
+
+/*
+ * Arc, Chord, Pie: the ellipse in box (device, exclusive), the part from the
+ * radial through s to the one through e counterclockwise (as it is seen);
+ * the arc with the pen, a chord's or a pie's inside with the brush, their
+ * straight edges with the pen.
+ */
+static void draw_arc(wdc *dc, RECT box, POINT s, POINT e, int kind)
+{
+    wpen *p = dc_pen(dc);
+    int has_pen = p->style != PS_NULL;
+    int pw = has_pen ? p->width : 0;
+    if (!has_pen) {
+        box.right--;
+        box.bottom--;
+    } else if (pw > 1 && p->style != PS_INSIDEFRAME) {
+        int o = (pw - 1) / 2;
+        InflateRect(&box, o, o);
+    }
+    if (box.left >= box.right || box.top >= box.bottom)
+        return;
+    long long cx2 = box.left + box.right - 1, cy2 = box.top + box.bottom - 1;
+    long long sx = 2LL * s.x - cx2, sy = -(2LL * s.y - cy2);
+    long long ex = 2LL * e.x - cx2, ey = -(2LL * e.y - cy2);
+    int full = (!sx && !sy) || (!ex && !ey) || (sx * ey - sy * ex == 0 && sx * ex + sy * ey > 0);
+    POINT ps = ellipse_point(&box, s), pe = ellipse_point(&box, e);
+    long long cx = ps.x - pe.x, cy = -(ps.y - pe.y);   /* the chord, e to s (y up) */
+
+    wfill bf, pf;
+    gdi_realize_brush(dc, dc->brush, &bf);
+    memset(&pf, 0, sizeof(pf));
+    pf.kind = WFILL_SOLID;
+    pf.solid = has_pen ? gdi_color_index(dc, p->color) : 0;
+    int fill = kind != ARC_ARC && bf.kind != WFILL_NONE;
+    int w = box.right - box.left, h = box.bottom - box.top;
+    int iw = w - 2 * pw, ih = h - 2 * pw;
+
+    RECT bounds = box;
+    InflateRect(&bounds, pw, pw);
+    gdi_begin_draw(dc, &bounds);
+    wclip cl;
+    run_ctx rc = { dc, gdi_dc_clip(dc, &cl), dib_rop2_to_rop3(dc->rop2) };
+    for (int y = box.top; y < box.bottom; y++) {
+        int ol, orr, il = 0, ir = -1;
+        if (!shape_row(box.left, box.top, box.right, box.bottom, w, h, y, &ol, &orr))
+            continue;
+        int inner = iw > 0 && ih > 0 &&
+                    shape_row(box.left + pw, box.top + pw, box.right - pw, box.bottom - pw,
+                              iw, ih, y, &il, &ir) && il <= ir;
+        /* runs of one kind: 0 nothing, 1 the pen, 2 the brush */
+        int run = 0, from = ol;
+        for (int x = ol; x <= orr + 1; x++) {
+            int k = 0;
+            if (x <= orr) {
+                long long vx = 2LL * x - cx2, vy = -(2LL * y - cy2);
+                int ring = !inner || x < il || x > ir;
+                int swept = full || in_sweep(sx, sy, ex, ey, vx, vy);
+                int inside = kind == ARC_PIE ? swept :     /* a chord's: left of e to s */
+                             full || cx * -(long long)(y - pe.y) - cy * (x - pe.x) >= 0;
+                if (ring && has_pen && swept)
+                    k = 1;
+                else if (fill && inside && (!ring || !has_pen))
+                    k = 2;
+            }
+            if (k != run || x > orr) {
+                if (run)
+                    run_fill(&rc, from, x, y, run == 1 ? &pf : &bf);
+                run = k;
+                from = x;
             }
         }
     }
-    if (p->style != PS_NULL)
-        for (int i = 0; i < n; i++)
-            line_dev(dc, p, dp[i].x, dp[i].y, dp[i + 1].x, dp[i + 1].y, 1);
-    gdi_end_draw(dc, &b);
-    win_free(dp); win_free(xs); win_free(dir);
+    if (has_pen && kind != ARC_ARC && !full) {
+        POINT c = { (int)(cx2 / 2), (int)(cy2 / 2) };
+        if (kind == ARC_PIE) {
+            line_dev(dc, p, c.x, c.y, ps.x, ps.y, 0);
+            line_dev(dc, p, c.x, c.y, pe.x, pe.y, 0);
+        } else {
+            line_dev(dc, p, ps.x, ps.y, pe.x, pe.y, 0);
+        }
+    }
+    gdi_end_draw(dc, &bounds);
+}
+
+static BOOL arc_call(HDC h, int l, int t, int r, int b, int x1, int y1, int x2, int y2,
+                     int kind)
+{
+    DC_OR_RET(h, FALSE);
+    RECT box;
+    if (!shape_box(dc, l, t, r, b, &box))
+        return TRUE;
+    POINT s = { x1, y1 }, e = { x2, y2 };
+    gdi_lp_to_dp(dc, &s.x, &s.y);
+    gdi_lp_to_dp(dc, &e.x, &e.y);
+    draw_arc(dc, box, s, e, kind);
     return TRUE;
+}
+
+BOOL WINAPI Arc(HDC h, int l, int t, int r, int b, int x1, int y1, int x2, int y2)
+{
+    return arc_call(h, l, t, r, b, x1, y1, x2, y2, ARC_ARC);
+}
+
+BOOL WINAPI Chord(HDC h, int l, int t, int r, int b, int x1, int y1, int x2, int y2)
+{
+    return arc_call(h, l, t, r, b, x1, y1, x2, y2, ARC_CHORD);
+}
+
+BOOL WINAPI Pie(HDC h, int l, int t, int r, int b, int x1, int y1, int x2, int y2)
+{
+    return arc_call(h, l, t, r, b, x1, y1, x2, y2, ARC_PIE);
 }
 
 /* USER's system colour brushes: FillRect takes COLOR_xxx + 1 as a brush,
@@ -1785,6 +2578,11 @@ BOOL WINAPI BitBlt(HDC hd, int x, int y, int w, int h, HDC hs, int sx, int sy, D
     int need_src = ((r3 >> 2) & 0x33) != (r3 & 0x33);
     if (need_src && !s)
         return FALSE;
+    /* a mapping mode that scales: both rectangles in pixels, stretched
+     * (turned over) if they differ */
+    if (d->mapmode != MM_TEXT || (need_src && s->mapmode != MM_TEXT))
+        return need_src ? StretchBlt(hd, x, y, w, h, hs, sx, sy, w, h, rop)
+                        : PatBlt(hd, x, y, w, h, rop);
     gdi_lp_to_dp(d, &x, &y);
     if (s)
         gdi_lp_to_dp(s, &sx, &sy);
@@ -1814,8 +2612,23 @@ BOOL WINAPI StretchBlt(HDC hd, int x, int y, int w, int h,
     wdc *d = gdi_dc(hd), *s = gdi_dc(hs);
     if (!d || !s)
         return FALSE;
+    int x2 = x + w, y2 = y + h, sx2 = sx + sw, sy2 = sy + sh;   /* the corners, in pixels */
     gdi_lp_to_dp(d, &x, &y);
+    gdi_lp_to_dp(d, &x2, &y2);
     gdi_lp_to_dp(s, &sx, &sy);
+    gdi_lp_to_dp(s, &sx2, &sy2);
+    w = x2 - x;
+    h = y2 - y;
+    sw = sx2 - sx;
+    sh = sy2 - sy;
+    if (w < 0 && sw < 0) {              /* both the other way: not turned over */
+        x = x2; w = -w;
+        sx = sx2; sw = -sw;
+    }
+    if (h < 0 && sh < 0) {
+        y = y2; h = -h;
+        sy = sy2; sh = -sh;
+    }
     RECT b = { x < x + w ? x : x + w, y < y + h ? y : y + h,
                x > x + w ? x : x + w, y > y + h ? y : y + h };
     wfill f;
@@ -1858,4 +2671,322 @@ BOOL WINAPI PaintRgn(HDC h, HRGN hr)
     DC_OR_RET(h, FALSE);
     wrgn *g = gdi_region(hr);
     return g ? fill_region(dc, g, dc->brush, dib_rop2_to_rop3(dc->rop2)) : FALSE;
+}
+
+BOOL WINAPI InvertRgn(HDC h, HRGN hr)
+{
+    DC_OR_RET(h, FALSE);
+    wrgn *g = gdi_region(hr);
+    return g ? fill_region(dc, g, 0, 0x55) : FALSE;      /* DSTINVERT */
+}
+
+/* the region's border w wide, h high, inside it: the region less itself
+ * moved each way */
+BOOL WINAPI FrameRgn(HDC h, HRGN hr, HBRUSH br, int w, int hh)
+{
+    DC_OR_RET(h, FALSE);
+    wrgn *g = gdi_region(hr);
+    if (!g || w < 1 || hh < 1)
+        return FALSE;
+    wrgn in, t, sh;
+    wrgn_init(&in);
+    wrgn_init(&t);
+    wrgn_init(&sh);
+    wrgn_copy(&in, g);
+    static const int d[4][2] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } };
+    for (int i = 0; i < 4; i++) {
+        wrgn_copy(&sh, g);
+        wrgn_offset(&sh, d[i][0] * w, d[i][1] * hh);
+        wrgn_and(&t, &in, &sh);
+        wrgn_copy(&in, &t);
+    }
+    wrgn_diff(&t, g, &in);
+    BOOL ok = fill_region(dc, &t, br, 0xF0);
+    wrgn_free(&in);
+    wrgn_free(&t);
+    wrgn_free(&sh);
+    return ok;
+}
+
+/* ---------------------------------------------------------------- region shapes */
+
+static HRGN region_new(wrgn **g)
+{
+    HRGN h = new_obj(WOBJ_REGION, sizeof(**g), (void **)g);
+    if (h)
+        wrgn_init(*g);
+    return h;
+}
+
+/* a rounded rectangle's region (an ellipse's: corners as large as it) */
+HRGN WINAPI CreateRoundRectRgn(int l, int t, int r, int b, int w, int hh)
+{
+    wrgn *g;
+    HRGN h = region_new(&g);
+    if (!h)
+        return 0;
+    if (l > r) { int x = l; l = r; r = x; }
+    if (t > b) { int x = t; t = b; b = x; }
+    for (int y = t; y < b; y++) {
+        int xl, xr;
+        if (shape_row(l, t, r, b, w < 0 ? -w : w, hh < 0 ? -hh : hh, y, &xl, &xr)) {
+            RECT rc = { xl, y, xr + 1, y + 1 };
+            wrgn_add(g, &rc);
+        }
+    }
+    wrgn_done(g);
+    return h;
+}
+
+HRGN WINAPI CreateEllipticRgn(int l, int t, int r, int b)
+{
+    return CreateRoundRectRgn(l, t, r, b, r > l ? r - l : l - r, b > t ? b - t : t - b);
+}
+
+HRGN WINAPI CreateEllipticRgnIndirect(const RECT *rc)
+{
+    return CreateEllipticRgn(rc->left, rc->top, rc->right, rc->bottom);
+}
+
+static void region_span(void *ctx, int x0, int x1, int y)
+{
+    RECT rc = { x0, y, x1, y + 1 };
+    wrgn_add((wrgn *)ctx, &rc);
+}
+
+HRGN WINAPI CreatePolyPolygonRgn(const POINT *pts, const int *counts, int npoly, int mode)
+{
+    wrgn *g;
+    HRGN h = region_new(&g);
+    if (!h)
+        return 0;
+    for (int i = 0; i < npoly; i++)
+        if (counts[i] < 2) {
+            npoly = 0;
+            break;
+        }
+    if (npoly > 0)
+        poly_spans(pts, counts, npoly, mode, region_span, g);
+    wrgn_done(g);
+    return h;
+}
+
+HRGN WINAPI CreatePolygonRgn(const POINT *pts, int n, int mode)
+{
+    return CreatePolyPolygonRgn(pts, &n, 1, mode);
+}
+
+int WINAPI OffsetClipRgn(HDC h, int x, int y)
+{
+    DC_OR_RET(h, ERROR);
+    if (dc->has_clip) {
+        wrgn_offset(&dc->clip, dc->mapmode == MM_TEXT ? x : gdi_lx_to_dx(dc, x),
+                    dc->mapmode == MM_TEXT ? y : gdi_ly_to_dy(dc, y));
+        dc->eff_dirty = 1;
+    }
+    return wrgn_type(dc_eff(dc));
+}
+
+/* ---------------------------------------------------------------- flood fill */
+
+/*
+ * FloodFill, ExtFloodFill: from (x, y) the pixels bounded by colour c
+ * (FLOODFILLBORDER), or of colour c (FLOODFILLSURFACE), within the clip,
+ * filled with the brush. The spans found first, filled after: the brush
+ * may well be of those colours.
+ */
+BOOL WINAPI ExtFloodFill(HDC h, int x, int y, COLORREF c, UINT type)
+{
+    DC_OR_RET(h, FALSE);
+    gdi_lp_to_dp(dc, &x, &y);
+    wrgn *e = dc_eff(dc);
+    if (!wrgn_pt_in(e, x, y))
+        return FALSE;
+    RECT box = e->box;
+    int bw = box.right - box.left, bh = box.bottom - box.top;
+    uint8_t want = gdi_color_index(dc, c);
+    uint8_t *seen = (uint8_t *)win_alloc(((size_t)bw * (size_t)bh + 7) / 8);
+    int cap = 256, top = 0;
+    POINT *stack = (POINT *)win_alloc(sizeof(POINT) * (size_t)cap);
+    wrgn spans;
+    wrgn_init(&spans);
+    if (!seen || !stack) {
+        win_free(seen);
+        win_free(stack);
+        return FALSE;
+    }
+    gdi_begin_draw(dc, &box);
+#define FF_SEEN(px, py) (seen[((size_t)((py) - box.top) * (size_t)bw + (size_t)((px) - box.left)) >> 3] & \
+                         (1u << ((((size_t)((py) - box.top) * (size_t)bw + (size_t)((px) - box.left))) & 7)))
+#define FF_MARK(px, py) (seen[((size_t)((py) - box.top) * (size_t)bw + (size_t)((px) - box.left)) >> 3] |= \
+                         (uint8_t)(1u << ((((size_t)((py) - box.top) * (size_t)bw + (size_t)((px) - box.left))) & 7)))
+#define FF_IN(px, py) (wrgn_pt_in(e, px, py) && !FF_SEEN(px, py) && \
+                       ((dib_get_pixel(dc->surf, px, py) == want) == (type == FLOODFILLSURFACE)))
+    int ok = FF_IN(x, y);
+    if (ok)
+        stack[top++] = (POINT){ x, y };
+    while (top) {
+        POINT p = stack[--top];
+        if (!FF_IN(p.x, p.y))
+            continue;
+        int l = p.x, r = p.x;
+        while (l > box.left && FF_IN(l - 1, p.y))
+            l--;
+        while (r + 1 < box.right && FF_IN(r + 1, p.y))
+            r++;
+        for (int i = l; i <= r; i++)
+            FF_MARK(i, p.y);
+        RECT rc = { l, p.y, r + 1, p.y + 1 };
+        wrgn_add(&spans, &rc);
+        for (int dy = -1; dy <= 1; dy += 2) {
+            int ny = p.y + dy;
+            if (ny < box.top || ny >= box.bottom)
+                continue;
+            for (int i = l; i <= r; i++) {
+                if (!FF_IN(i, ny))
+                    continue;
+                if (top == cap) {
+                    POINT *n = (POINT *)win_realloc(stack, sizeof(POINT) * (size_t)cap * 2);
+                    if (!n)
+                        break;
+                    stack = n;
+                    cap *= 2;
+                }
+                stack[top++] = (POINT){ i, ny };
+                while (i + 1 <= r && FF_IN(i + 1, ny))
+                    i++;
+            }
+        }
+    }
+#undef FF_SEEN
+#undef FF_MARK
+#undef FF_IN
+    if (dc->is_screen)
+        cursor_unexclude();
+    win_free(seen);
+    win_free(stack);
+    wrgn_done(&spans);
+    if (ok) {
+        wfill f;
+        gdi_realize_brush(dc, dc->brush, &f);
+        gdi_begin_draw(dc, &spans.box);
+        for (int i = 0; i < spans.n; i++)
+            fill_rect_dev(dc, &spans.r[i], &f, 0xF0);
+        gdi_end_draw(dc, &spans.box);
+    }
+    wrgn_free(&spans);
+    return ok;
+}
+
+BOOL WINAPI FloodFill(HDC h, int x, int y, COLORREF c)
+{
+    return ExtFloodFill(h, x, y, c, FLOODFILLBORDER);
+}
+
+/* ---------------------------------------------------------------- the rest */
+
+int WINAPI SetStretchBltMode(HDC h, int m) { DC_OR_RET(h, 0); int o = dc->stretch; dc->stretch = m; return o; }
+int WINAPI GetStretchBltMode(HDC h) { DC_OR_RET(h, 0); return dc->stretch; }
+
+int WINAPI SetTextCharacterExtra(HDC h, int n)
+{
+    DC_OR_RET(h, 0x8000);
+    int o = dc->char_extra;
+    dc->char_extra = n;
+    return o;
+}
+
+int WINAPI GetTextCharacterExtra(HDC h) { DC_OR_RET(h, 0x8000); return dc->char_extra; }
+
+/* the extra space for the breaks of the next line (noted, not drawn) */
+int WINAPI SetTextJustification(HDC h, int extra, int count)
+{
+    DC_OR_RET(h, 0);
+    dc->break_extra = extra;
+    dc->break_count = count;
+    return 1;
+}
+
+/* a brush's pattern lines up with the brush origin as it is drawn: nothing
+ * to undo */
+BOOL WINAPI UnrealizeObject(HGDIOBJ obj) { return obj != 0; }
+
+HDC WINAPI CreateIC(LPCSTR driver, LPCSTR device, LPCSTR output, const void *init)
+{
+    return CreateDC(driver, device, output, init);
+}
+
+HBITMAP WINAPI CreateDiscardableBitmap(HDC hdc, int w, int h)
+{
+    return CreateCompatibleBitmap(hdc, w, h);
+}
+
+BOOL WINAPI SetBitmapDimensionEx(HBITMAP hb, int x, int y, LPSIZE old)
+{
+    wbitmap *bm = (wbitmap *)win_handle_get(hb, WOBJ_BITMAP);
+    if (!bm)
+        return FALSE;
+    if (old) {
+        old->cx = bm->dim_x;
+        old->cy = bm->dim_y;
+    }
+    bm->dim_x = x;
+    bm->dim_y = y;
+    return TRUE;
+}
+
+BOOL WINAPI GetBitmapDimensionEx(HBITMAP hb, LPSIZE sz)
+{
+    wbitmap *bm = (wbitmap *)win_handle_get(hb, WOBJ_BITMAP);
+    if (!bm)
+        return FALSE;
+    sz->cx = bm->dim_x;
+    sz->cy = bm->dim_y;
+    return TRUE;
+}
+
+DWORD WINAPI SetBitmapDimension(HBITMAP hb, int x, int y)
+{
+    SIZE o = { 0, 0 };
+    return SetBitmapDimensionEx(hb, x, y, &o) ? MKDW(o.cx, o.cy) : 0;
+}
+
+DWORD WINAPI GetBitmapDimension(HBITMAP hb)
+{
+    SIZE s = { 0, 0 };
+    return GetBitmapDimensionEx(hb, &s) ? MKDW(s.cx, s.cy) : 0;
+}
+
+/* the entry of the logical palette nearest the colour */
+UINT WINAPI GetNearestPaletteIndex(HPALETTE hp, COLORREF c)
+{
+    wpalette *p = (wpalette *)win_handle_get(hp, WOBJ_PALETTE);
+    UINT best = 0;
+    long bd = 0x7fffffff;
+    for (int i = 0; p && i < p->n; i++) {
+        long dr = (long)p->e[i].peRed - GetRValue(c), dg = (long)p->e[i].peGreen - GetGValue(c),
+             db = (long)p->e[i].peBlue - GetBValue(c);
+        long d = dr * dr + dg * dg + db * db;
+        if (d < bd) {
+            bd = d;
+            best = (UINT)i;
+        }
+    }
+    return best;
+}
+
+/* the points of a line (as LineTo has them, the last one not), each to proc */
+void WINAPI LineDDA(int x0, int y0, int x1, int y1, LINEDDAPROC proc, LPARAM lp)
+{
+    int dx = x1 - x0, dy = y1 - y0;
+    int sx = dx < 0 ? -1 : 1, sy = dy < 0 ? -1 : 1;
+    dx = dx < 0 ? -dx : dx;
+    dy = dy < 0 ? -dy : dy;
+    int steps = dx > dy ? dx : dy, err = (dx > dy ? dx : -dy) / 2, x = x0, y = y0;
+    for (int n = 0; n < steps; n++) {
+        proc(x, y, lp);
+        int e2 = err;
+        if (e2 > -dx) { err -= dy; x += sx; }
+        if (e2 < dy) { err += dx; y += sy; }
+    }
 }

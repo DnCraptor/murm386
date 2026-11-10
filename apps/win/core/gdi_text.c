@@ -168,8 +168,14 @@ BOOL WINAPI GetTextExtentPoint(HDC h, LPCSTR s, int n, LPSIZE sz)
         return FALSE;
     if (n < 0)
         n = lstrlen(s);
-    sz->cx = text_width(f, s, n);
+    sz->cx = text_width(f, s, n) + dc->char_extra * n;
     sz->cy = f->height;
+    if (dc->mapmode != MM_TEXT) {       /* in logical units */
+        sz->cx = gdi_dx_to_lx(dc, sz->cx);
+        sz->cy = gdi_dy_to_ly(dc, sz->cy);
+        if (sz->cx < 0) sz->cx = -sz->cx;
+        if (sz->cy < 0) sz->cy = -sz->cy;
+    }
     return TRUE;
 }
 
@@ -180,12 +186,9 @@ DWORD WINAPI GetTextExtent(HDC h, LPCSTR s, int n)
     return (DWORD)(WORD)sz.cx | ((DWORD)(WORD)sz.cy << 16);
 }
 
-BOOL WINAPI GetTextMetrics(HDC h, LPTEXTMETRIC tm)
+/* a font's metrics, in pixels */
+static void font_metrics(const wfont *f, LPTEXTMETRIC tm)
 {
-    const wfont *f;
-    wdc *dc = text_dc(h, &f);
-    if (!dc || !tm)
-        return FALSE;
     memset(tm, 0, sizeof(*tm));
     tm->tmHeight = f->height;
     tm->tmAscent = ASCENT;
@@ -207,7 +210,73 @@ BOOL WINAPI GetTextMetrics(HDC h, LPTEXTMETRIC tm)
     tm->tmCharSet = f->lf.lfCharSet;
     tm->tmOverhang = f->bold;
     tm->tmDigitizedAspectX = tm->tmDigitizedAspectY = 96;
+}
+
+BOOL WINAPI GetTextMetrics(HDC h, LPTEXTMETRIC tm)
+{
+    const wfont *f;
+    wdc *dc = text_dc(h, &f);
+    if (!dc || !tm)
+        return FALSE;
+    font_metrics(f, tm);
+    if (dc->mapmode != MM_TEXT) {       /* in logical units */
+        int *v[] = { &tm->tmHeight, &tm->tmAscent, &tm->tmDescent, &tm->tmInternalLeading,
+                     &tm->tmExternalLeading, &tm->tmAveCharWidth, &tm->tmMaxCharWidth,
+                     &tm->tmOverhang };
+        for (unsigned i = 0; i < sizeof(v) / sizeof(v[0]); i++) {
+            int l = i >= 5 ? gdi_dx_to_lx(dc, *v[i]) : gdi_dy_to_ly(dc, *v[i]);
+            *v[i] = l < 0 ? -l : l;
+        }
+    }
     return TRUE;
+}
+
+/* the widths of the characters first..last (logical units) */
+BOOL WINAPI GetCharWidth(HDC h, UINT first, UINT last, int *widths)
+{
+    const wfont *f;
+    wdc *dc = text_dc(h, &f);
+    if (!dc || !widths || first > last || last > 255)
+        return FALSE;
+    for (UINT c = first; c <= last; c++) {
+        int w = gdi_char_width(f, (unsigned char)c);
+        if (dc->mapmode != MM_TEXT) {
+            w = gdi_dx_to_lx(dc, w);
+            w = w < 0 ? -w : w;
+        }
+        widths[c - first] = w;
+    }
+    return TRUE;
+}
+
+/* EnumFonts, EnumFontFamilies: the stock fonts' faces (all of one size), one
+ * each, or the one named; what proc returned last (0 stops) */
+static int enum_fonts(LPCSTR face, FONTENUMPROC proc, LPARAM lp)
+{
+    static const int stock[] = { SYSTEM_FONT, ANSI_VAR_FONT, SYSTEM_FIXED_FONT,
+                                 ANSI_FIXED_FONT, OEM_FIXED_FONT };
+    int r = 1;
+    for (unsigned i = 0; r && i < sizeof(stock) / sizeof(stock[0]); i++) {
+        const wfont *f = gdi_font(win_sys.stock[stock[i]]);
+        if (face && *face && lstrcmpi(face, f->lf.lfFaceName))
+            continue;
+        TEXTMETRIC tm;
+        font_metrics(f, &tm);
+        r = proc(&f->lf, &tm, RASTER_FONTTYPE, lp);
+    }
+    return r;
+}
+
+int WINAPI EnumFonts(HDC h, LPCSTR face, FONTENUMPROC proc, LPARAM lp)
+{
+    (void)h;
+    return proc ? enum_fonts(face, proc, lp) : 0;
+}
+
+int WINAPI EnumFontFamilies(HDC h, LPCSTR family, FONTENUMPROC proc, LPARAM lp)
+{
+    (void)h;
+    return proc ? enum_fonts(family, proc, lp) : 0;
 }
 
 int WINAPI GetTextFace(HDC h, int n, LPSTR face)
@@ -231,7 +300,7 @@ static int draw_glyphs(wdc *dc, const wclip *c, const wfont *f, int x, int y,
     int x0 = x;
     for (int i = 0; i < n; i++) {
         unsigned g = glyph_of(f, (unsigned char)s[i]);
-        int adv = dx ? dx[i] : gdi_char_width(f, (unsigned char)s[i]);
+        int adv = dx ? dx[i] : gdi_char_width(f, (unsigned char)s[i]) + dc->char_extra;
         if (f->fixed)
             dib_glyph8(dc->surf, c, x, y, &win_font8x16[g * CELL_H], CELL_H, 8, 0, color, f->bold);
         else
@@ -275,28 +344,30 @@ BOOL WINAPI ExtTextOut(HDC h, int x, int y, UINT opts, const RECT *rc,
         for (UINT i = 0; i < n; i++)
             w += dx[i];
     else
-        w = text_width(f, s, (int)n);
+        w = text_width(f, s, (int)n) + dc->char_extra * (int)n;
 
-    int lx = x, ly = y;
+    /* the reference point on the device, the text placed from it in pixels
+     * (the glyphs are the font's own size whatever the mapping mode) */
+    int sx = x, sy = y;
+    gdi_lp_to_dp(dc, &sx, &sy);
     switch (dc->align & TA_CENTER) {
-    case TA_RIGHT:  lx -= w; break;
-    case TA_CENTER: lx -= w / 2; break;
+    case TA_RIGHT:  sx -= w; break;
+    case TA_CENTER: sx -= w / 2; break;
     default: break;
     }
     switch (dc->align & TA_BASELINE) {
-    case TA_BOTTOM:   ly -= f->height; break;
-    case TA_BASELINE: ly -= ASCENT; break;
+    case TA_BOTTOM:   sy -= f->height; break;
+    case TA_BASELINE: sy -= ASCENT; break;
     default: break;
     }
     if (dc->align & TA_UPDATECP) {
+        int lw = dc->mapmode == MM_TEXT ? w : gdi_dx_to_lx(dc, w);
         if ((dc->align & TA_CENTER) == TA_RIGHT)
-            dc->cur.x = x - w;
+            dc->cur.x = x - lw;
         else if ((dc->align & TA_CENTER) != TA_CENTER)
-            dc->cur.x = x + w;
+            dc->cur.x = x + lw;
     }
 
-    int sx = lx, sy = ly;
-    gdi_lp_to_dp(dc, &sx, &sy);
     RECT tb = { sx, sy, sx + w + f->bold, sy + f->height };
     RECT orc = { 0, 0, 0, 0 };
     if (rc && (opts & (ETO_OPAQUE | ETO_CLIPPED))) {
@@ -385,7 +456,7 @@ static LONG tabbed(HDC h, int x, int y, LPCSTR s, int n, int ntabs,
             if (len > 0) {
                 if (draw)
                     ExtTextOut(h, pos, y, 0, NULL, s + start, (UINT)len, NULL);
-                pos += text_width(f, s + start, len);
+                pos += text_width(f, s + start, len) + dc->char_extra * len;
             }
             if (i < n) {
                 int nt = next_tab(pos, origin, ntabs, tabs, avg);

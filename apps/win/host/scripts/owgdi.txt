@@ -1,0 +1,22 @@
+# GDI beyond the basics for a Win16 program on the i386 core: Arc, Pie,
+# Chord, PolyPolygon, FloodFill; elliptic, rounded and polygonal regions,
+# FrameRgn, InvertRgn; MM_ISOTROPIC and MM_LOENGLISH; DIBs
+# (SetDIBitsToDevice, StretchDIBits, CreateDIBitmap, GetDIBits, a DIB
+# pattern brush); EnumFonts, GetCharWidth, LineDDA:
+#     ./winhost scripts/owgdi.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OWGDI
+key RETURN
+wait 200
+snap ok_gdi.ppm
+keydown ALT
+key F4
+keyup ALT
+wait 50
+snap ok_gdi_end.ppm
+exit

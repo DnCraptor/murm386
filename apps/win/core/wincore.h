@@ -65,6 +65,8 @@ void wrgn_xor(wrgn *d, const wrgn *a, const wrgn *b);
 void wrgn_and_rect(wrgn *g, const RECT *rc);      /* in place */
 void wrgn_diff_rect(wrgn *g, const RECT *rc);     /* in place */
 void wrgn_or_rect(wrgn *g, const RECT *rc);       /* in place */
+void wrgn_add(wrgn *g, const RECT *rc);           /* one not touching the others */
+void wrgn_done(wrgn *g);                          /* after the adds */
 void wrgn_offset(wrgn *g, int dx, int dy);
 int  wrgn_type(const wrgn *g);
 int  wrgn_pt_in(const wrgn *g, int x, int y);
@@ -142,6 +144,7 @@ typedef struct wfont {
 typedef struct wbitmap {
     wsurf    s;
     int      selected;      /* selected into a memory DC */
+    int      dim_x, dim_y;  /* SetBitmapDimension's (0.1 mm) */
 } wbitmap;
 
 /* Bitmap row size as Win16 reports it (rows padded to 16 bits). */
@@ -163,6 +166,8 @@ typedef struct wdc {
     HWND     hwnd;          /* window DC (USER) */
     int      org_x, org_y;  /* device origin inside the surface */
     int      vp_x, vp_y, win_x, win_y;
+    int      mapmode;       /* MM_*: logical = (device - vp) * win ext / vp ext + win */
+    int      wex, wey, vex, vey;
     wrgn     vis;           /* visible area, surface coordinates (USER) */
     int      has_clip;
     wrgn     clip;          /* app clip region, surface coordinates */
@@ -174,6 +179,9 @@ typedef struct wdc {
     HPALETTE pal;
     COLORREF text, bk;
     int      bkmode, rop2, polyfill;
+    int      stretch;       /* SetStretchBltMode's (noted) */
+    int      char_extra;    /* SetTextCharacterExtra's: added to each character */
+    int      break_extra, break_count;  /* SetTextJustification's (noted) */
     UINT     align;
     int      brush_x, brush_y;
     POINT    cur;
@@ -238,6 +246,12 @@ void     gdi_end_draw(wdc *dc, const RECT *dev_bounds);     /* flush, cursor */
 extern void (*gdi_overlay_hook)(HWND source, const RECT *damage);
 void     gdi_text_init(void);
 const wfont *gdi_font(HFONT h);
+/* the mapping mode's scale for sizes: device -> logical, logical -> device
+ * (signed: an axis may turn over) */
+int      gdi_dx_to_lx(const wdc *dc, int dx);
+int      gdi_dy_to_ly(const wdc *dc, int dy);
+int      gdi_lx_to_dx(const wdc *dc, int lx);
+int      gdi_ly_to_dy(const wdc *dc, int ly);
 int      gdi_char_width(const wfont *f, unsigned char ch);
 
 /* cursor.c */

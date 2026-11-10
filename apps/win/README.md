@@ -86,7 +86,7 @@ the status word, clear, "a coprocessor": others return 0);
 `__WinEm87Info`, `__WinEm87Save` and `__WinEm87Restore` do nothing (the
 tasks share the coprocessor, as they share Windows' one).
 
-The functions a program can call: some 260 go the generic way
+The functions a program can call: some 310 go the generic way
 (`core/ne_sigs.h`, made by `sdk/gen_ne_sigs.py` from the native prototypes:
 words, signed words, dwords, strings, buffers with their sizes, RECTs,
 POINTs, converted and handed to the function of the native export table);
@@ -108,9 +108,18 @@ modules WINN has (KERNEL, USER, GDI, KEYBOARD, COMMDLG, SHELL, WIN87EM) and its 
 DLLs (below), FindResource, LoadResource, LockResource, SizeofResource,
 Catch and Throw, GetTempFileName, GetWinFlags, WinExec, SetErrorMode,
 FatalAppExit and the constants __AHINCR, __AHSHIFT, __WINFLAGS, __0040H
-(the BIOS data, read only); palettes, CreateDC, SetSysColors; the mapping
-mode is MM_TEXT, all there is (SetMapMode and the extents accept others
-and keep it; DPtoLP and LPtoDP go by the origins); COMMDLG's Open and
+(the BIOS data, read only); palettes, CreateDC and CreateIC, SetSysColors;
+the mapping modes (all of them: the metric and English ones and MM_TWIPS
+at 96 pixels an inch, MM_ISOTROPIC keeping the axes alike; pens, rounded
+corners and blits scale, the one font stays its size, its metrics and
+extents in logical units), the Ex functions of the origins and extents,
+DPtoLP and LPtoDP; Arc, Pie, Chord, PolyPolygon, FloodFill and
+ExtFloodFill; elliptic, rounded and polygonal regions, FrameRgn,
+InvertRgn, OffsetClipRgn; DIBs: SetDIBitsToDevice, StretchDIBits,
+CreateDIBitmap, SetDIBits, GetDIBits, CreateDIBPatternBrush (within one
+block, 1, 4, 8 or 24 bits, no RLE); EnumFonts and EnumFontFamilies (the
+stock fonts), GetCharWidth, LineDDA, SetTextCharacterExtra; no printers
+(StartDoc and the rest fail, Escape does nothing); COMMDLG's Open and
 Save dialogs, Find and Replace (its FINDREPLACE in the messages, its own),
 GetFileTitle; SHELL's ShellExecute (a program, or a document by WIN.INI's
 [Extensions]), FindExecutable, ShellAbout, ExtractIcon, DragAcceptFiles,
@@ -158,14 +167,16 @@ code segments), `OWDEMO` (many functions at once), `OWFILE` and `OWFILEL`
 cursor, bitmaps, text, a superclass), `OWKERN` (KERNEL, COMMDLG, SHELL),
 `OWUSE` with `OWDLL.DLL` and `OWDLL2.DLL` (its DLLs), `OWFPU` (floating
 point: WIN87EM), `OWAPI` (KERNEL and USER beyond the basics: selectors,
-pointers, dialogs with an lParam, class words, hooks) (`make NEFIXTURES` in
+pointers, dialogs with an lParam, class words, hooks), `OWGDI` (GDI beyond
+the basics: arcs, flood fill, regions, the mapping modes, DIBs, fonts
+enumerated) (`make NEFIXTURES` in
 `host/`). All have DOS MZ stubs that explain how to launch them under WINN
 when invoked directly from DOS. `host/test_ne_run` runs them on the
 emulator's own i386 core (`src/i386.c` as it is, built for the host with
 the stand-ins in `host/x86run/`), and so does the host `winhost`: they are
 in its `HOSTWIN/` (`scripts/owwin.txt`, `scripts/owmenu.txt`,
 `scripts/owdemo.txt`, `scripts/owfile.txt`, `scripts/owres.txt`,
-`scripts/owkern.txt`, `scripts/owdll.txt`, `scripts/owfpu.txt`, `scripts/owapi.txt`).
+`scripts/owkern.txt`, `scripts/owdll.txt`, `scripts/owfpu.txt`, `scripts/owapi.txt`, `scripts/owgdi.txt`).
 
     WINN [:] [program [arguments]]
 
@@ -337,6 +348,7 @@ use `ucontext`):
     ./winhost scripts/owdll.txt PROGMAN      # its DLLs: imports, LoadLibrary, their data, heap, class
     ./winhost scripts/owfpu.txt PROGMAN      # floating point: sqrt, sin, exp, printf's %f (WIN87EM)
     ./winhost scripts/owapi.txt PROGMAN      # selectors, IsBad*Ptr, DialogBoxParam, class words, hooks
+    ./winhost scripts/owgdi.txt PROGMAN      # arcs, FloodFill, regions, MM_ISOTROPIC, DIBs, EnumFonts
     ./winhost scripts/winmine.txt WINMINE    # marks, a lost game, Expert, Best Times
     ./winhost scripts/logo.txt PROGMAN       # the logo (copy the BMPs into HOSTWIN first)
     ./winhost800 scripts/vga800.txt  # the VGA800 driver, built in

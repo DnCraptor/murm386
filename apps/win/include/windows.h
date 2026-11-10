@@ -287,6 +287,62 @@ UINT    WINAPI GlobalGetAtomName(ATOM a, LPSTR buf, int size);
 #define NUMRESERVED     106
 #define RASTERCAPS      38
 #define RC_PALETTE      0x0100
+#define DRIVERVERSION   0
+#define TECHNOLOGY      2
+#define HORZSIZE        4
+#define VERTSIZE        6
+#define NUMBRUSHES      16
+#define NUMPENS         18
+#define NUMFONTS        22
+#define CURVECAPS       28
+#define LINECAPS        30
+#define POLYGONALCAPS   32
+#define TEXTCAPS        34
+#define CLIPCAPS        36
+#define ASPECTX         40
+#define ASPECTY         42
+#define ASPECTXY        44
+#define COLORRES        108
+#define DT_RASDISPLAY   1
+#define CP_RECTANGLE    1
+#define CC_CIRCLES      0x0001
+#define CC_PIE          0x0002
+#define CC_CHORD        0x0004
+#define CC_ELLIPSES     0x0008
+#define CC_WIDE         0x0010
+#define CC_INTERIORS    0x0080
+#define CC_ROUNDRECT    0x0100
+#define LC_POLYLINE     0x0002
+#define LC_WIDE         0x0010
+#define LC_STYLED       0x0020
+#define LC_INTERIORS    0x0080
+#define PC_POLYGON      0x0001
+#define PC_RECTANGLE    0x0002
+#define PC_SCANLINE     0x0008
+#define PC_WIDE         0x0010
+#define PC_INTERIORS    0x0080
+
+/* the mapping modes */
+#define MM_TEXT         1
+#define MM_LOMETRIC     2
+#define MM_HIMETRIC     3
+#define MM_LOENGLISH    4
+#define MM_HIENGLISH    5
+#define MM_TWIPS        6
+#define MM_ISOTROPIC    7
+#define MM_ANISOTROPIC  8
+
+#define FLOODFILLBORDER  0
+#define FLOODFILLSURFACE 1
+#define BLACKONWHITE    1
+#define WHITEONBLACK    2
+#define COLORONCOLOR    3
+
+/* DIBs */
+#define BI_RGB          0
+#define DIB_RGB_COLORS  0
+#define DIB_PAL_COLORS  1
+#define CBM_INIT        0x00000004
 
 #define ETO_OPAQUE      0x0002
 #define ETO_CLIPPED     0x0004
@@ -337,6 +393,29 @@ typedef struct tagBITMAP {
     BYTE bmPlanes, bmBitsPixel;
     LPVOID bmBits;
 } BITMAP, *LPBITMAP;
+
+typedef struct tagBITMAPINFOHEADER {
+    DWORD biSize;
+    LONG  biWidth, biHeight;
+    WORD  biPlanes, biBitCount;
+    DWORD biCompression, biSizeImage;
+    LONG  biXPelsPerMeter, biYPelsPerMeter;
+    DWORD biClrUsed, biClrImportant;
+} BITMAPINFOHEADER, *LPBITMAPINFOHEADER;
+
+typedef struct tagBITMAPCOREHEADER {
+    DWORD bcSize;
+    WORD  bcWidth, bcHeight, bcPlanes, bcBitCount;
+} BITMAPCOREHEADER, *LPBITMAPCOREHEADER;
+
+typedef struct tagRGBQUAD {
+    BYTE rgbBlue, rgbGreen, rgbRed, rgbReserved;
+} RGBQUAD;
+
+typedef struct tagBITMAPINFO {
+    BITMAPINFOHEADER bmiHeader;
+    RGBQUAD bmiColors[1];
+} BITMAPINFO, *LPBITMAPINFO;
 
 typedef struct tagPALETTEENTRY {
     BYTE peRed, peGreen, peBlue, peFlags;
@@ -390,7 +469,66 @@ DWORD   WINAPI GetWindowOrg(HDC hdc);
 DWORD   WINAPI SetViewportOrg(HDC hdc, int x, int y);
 DWORD   WINAPI GetViewportOrg(HDC hdc);
 DWORD   WINAPI SetBrushOrg(HDC hdc, int x, int y);
+DWORD   WINAPI GetBrushOrg(HDC hdc);
+BOOL    WINAPI GetBrushOrgEx(HDC hdc, LPPOINT pt);
 COLORREF WINAPI GetNearestColor(HDC hdc, COLORREF c);
+
+/* the mapping modes */
+int     WINAPI SetMapMode(HDC hdc, int mode);
+int     WINAPI GetMapMode(HDC hdc);
+DWORD   WINAPI SetWindowExt(HDC hdc, int x, int y);
+DWORD   WINAPI SetViewportExt(HDC hdc, int x, int y);
+DWORD   WINAPI GetWindowExt(HDC hdc);
+DWORD   WINAPI GetViewportExt(HDC hdc);
+BOOL    WINAPI SetWindowExtEx(HDC hdc, int x, int y, LPSIZE old);
+BOOL    WINAPI SetViewportExtEx(HDC hdc, int x, int y, LPSIZE old);
+BOOL    WINAPI GetWindowExtEx(HDC hdc, LPSIZE sz);
+BOOL    WINAPI GetViewportExtEx(HDC hdc, LPSIZE sz);
+DWORD   WINAPI ScaleViewportExt(HDC hdc, int xn, int xd, int yn, int yd);
+DWORD   WINAPI ScaleWindowExt(HDC hdc, int xn, int xd, int yn, int yd);
+BOOL    WINAPI ScaleViewportExtEx(HDC hdc, int xn, int xd, int yn, int yd, LPSIZE old);
+BOOL    WINAPI ScaleWindowExtEx(HDC hdc, int xn, int xd, int yn, int yd, LPSIZE old);
+BOOL    WINAPI SetWindowOrgEx(HDC hdc, int x, int y, LPPOINT old);
+BOOL    WINAPI SetViewportOrgEx(HDC hdc, int x, int y, LPPOINT old);
+BOOL    WINAPI GetWindowOrgEx(HDC hdc, LPPOINT pt);
+BOOL    WINAPI GetViewportOrgEx(HDC hdc, LPPOINT pt);
+DWORD   WINAPI OffsetWindowOrg(HDC hdc, int x, int y);
+DWORD   WINAPI OffsetViewportOrg(HDC hdc, int x, int y);
+BOOL    WINAPI OffsetWindowOrgEx(HDC hdc, int x, int y, LPPOINT old);
+BOOL    WINAPI OffsetViewportOrgEx(HDC hdc, int x, int y, LPPOINT old);
+BOOL    WINAPI LPtoDP(HDC hdc, LPPOINT pts, int n);
+BOOL    WINAPI DPtoLP(HDC hdc, LPPOINT pts, int n);
+DWORD   WINAPI GetCurrentPosition(HDC hdc);
+BOOL    WINAPI GetCurrentPositionEx(HDC hdc, LPPOINT pt);
+DWORD   WINAPI GetDCOrg(HDC hdc);
+int     WINAPI SetStretchBltMode(HDC hdc, int mode);
+int     WINAPI GetStretchBltMode(HDC hdc);
+int     WINAPI SetTextCharacterExtra(HDC hdc, int n);
+int     WINAPI GetTextCharacterExtra(HDC hdc);
+int     WINAPI SetTextJustification(HDC hdc, int extra, int count);
+BOOL    WINAPI UnrealizeObject(HGDIOBJ obj);
+HDC     WINAPI CreateIC(LPCSTR driver, LPCSTR device, LPCSTR output, const void *init);
+HBITMAP WINAPI CreateDiscardableBitmap(HDC hdc, int w, int h);
+DWORD   WINAPI SetBitmapDimension(HBITMAP bmp, int x, int y);
+DWORD   WINAPI GetBitmapDimension(HBITMAP bmp);
+BOOL    WINAPI SetBitmapDimensionEx(HBITMAP bmp, int x, int y, LPSIZE old);
+BOOL    WINAPI GetBitmapDimensionEx(HBITMAP bmp, LPSIZE sz);
+UINT    WINAPI GetNearestPaletteIndex(HPALETTE pal, COLORREF c);
+
+/* DIBs: a header (BITMAPINFO, its colours after it) and the bits apart */
+int     WINAPI SetDIBitsToDevice(HDC hdc, int x, int y, int w, int h, int sx, int sy,
+                                 UINT start, UINT lines, const void *bits,
+                                 const BITMAPINFO *bi, UINT usage);
+int     WINAPI StretchDIBits(HDC hdc, int x, int y, int w, int h, int sx, int sy, int sw,
+                             int sh, const void *bits, const BITMAPINFO *bi, UINT usage,
+                             DWORD rop);
+HBITMAP WINAPI CreateDIBitmap(HDC hdc, const BITMAPINFOHEADER *bih, DWORD init,
+                              const void *bits, const BITMAPINFO *bi, UINT usage);
+int     WINAPI SetDIBits(HDC hdc, HBITMAP bmp, UINT start, UINT lines, const void *bits,
+                         const BITMAPINFO *bi, UINT usage);
+int     WINAPI GetDIBits(HDC hdc, HBITMAP bmp, UINT start, UINT lines, void *bits,
+                         BITMAPINFO *bi, UINT usage);
+HBRUSH  WINAPI CreateDIBPatternBrush(HGLOBAL dib, UINT usage);
 
 COLORREF WINAPI SetPixel(HDC hdc, int x, int y, COLORREF c);
 COLORREF WINAPI GetPixel(HDC hdc, int x, int y);
@@ -400,6 +538,15 @@ BOOL    WINAPI LineTo(HDC hdc, int x, int y);
 BOOL    WINAPI Polyline(HDC hdc, const POINT *pts, int n);
 BOOL    WINAPI Polygon(HDC hdc, const POINT *pts, int n);
 int     WINAPI SetPolyFillMode(HDC hdc, int mode);
+int     WINAPI GetPolyFillMode(HDC hdc);
+BOOL    WINAPI PolyPolygon(HDC hdc, const POINT *pts, const int *counts, int npoly);
+BOOL    WINAPI Arc(HDC hdc, int l, int t, int r, int b, int x1, int y1, int x2, int y2);
+BOOL    WINAPI Chord(HDC hdc, int l, int t, int r, int b, int x1, int y1, int x2, int y2);
+BOOL    WINAPI Pie(HDC hdc, int l, int t, int r, int b, int x1, int y1, int x2, int y2);
+BOOL    WINAPI FloodFill(HDC hdc, int x, int y, COLORREF c);
+BOOL    WINAPI ExtFloodFill(HDC hdc, int x, int y, COLORREF c, UINT type);
+typedef void (CALLBACK *LINEDDAPROC)(int x, int y, LPARAM lp);
+void    WINAPI LineDDA(int x0, int y0, int x1, int y1, LINEDDAPROC proc, LPARAM lp);
 BOOL    WINAPI Rectangle(HDC hdc, int l, int t, int r, int b);
 int     WINAPI MulDiv(int a, int b, int c);
 BOOL    WINAPI RoundRect(HDC hdc, int l, int t, int r, int b, int w, int h);
@@ -414,6 +561,8 @@ BOOL    WINAPI StretchBlt(HDC dst, int x, int y, int w, int h,
                           HDC src, int sx, int sy, int sw, int sh, DWORD rop);
 BOOL    WINAPI FillRgn(HDC hdc, HRGN rgn, HBRUSH br);
 BOOL    WINAPI PaintRgn(HDC hdc, HRGN rgn);
+BOOL    WINAPI InvertRgn(HDC hdc, HRGN rgn);
+BOOL    WINAPI FrameRgn(HDC hdc, HRGN rgn, HBRUSH br, int w, int h);
 
 BOOL    WINAPI TextOut(HDC hdc, int x, int y, LPCSTR s, int n);
 BOOL    WINAPI ExtTextOut(HDC hdc, int x, int y, UINT opts, const RECT *rc,
@@ -422,12 +571,24 @@ DWORD   WINAPI GetTextExtent(HDC hdc, LPCSTR s, int n);
 BOOL    WINAPI GetTextExtentPoint(HDC hdc, LPCSTR s, int n, LPSIZE sz);
 BOOL    WINAPI GetTextMetrics(HDC hdc, LPTEXTMETRIC tm);
 int     WINAPI GetTextFace(HDC hdc, int n, LPSTR face);
+BOOL    WINAPI GetCharWidth(HDC hdc, UINT first, UINT last, int *widths);
+#define RASTER_FONTTYPE 0x0001
+typedef int (CALLBACK *FONTENUMPROC)(const LOGFONT *lf, const TEXTMETRIC *tm, int type,
+                                     LPARAM lp);
+int     WINAPI EnumFonts(HDC hdc, LPCSTR face, FONTENUMPROC proc, LPARAM lp);
+int     WINAPI EnumFontFamilies(HDC hdc, LPCSTR family, FONTENUMPROC proc, LPARAM lp);
 DWORD   WINAPI GetTabbedTextExtent(HDC hdc, LPCSTR s, int n, int ntabs, const int *tabs);
 LONG    WINAPI TabbedTextOut(HDC hdc, int x, int y, LPCSTR s, int n,
                              int ntabs, const int *tabs, int origin);
 
 HRGN    WINAPI CreateRectRgn(int l, int t, int r, int b);
 HRGN    WINAPI CreateRectRgnIndirect(const RECT *rc);
+HRGN    WINAPI CreateRoundRectRgn(int l, int t, int r, int b, int w, int h);
+HRGN    WINAPI CreateEllipticRgn(int l, int t, int r, int b);
+HRGN    WINAPI CreateEllipticRgnIndirect(const RECT *rc);
+HRGN    WINAPI CreatePolygonRgn(const POINT *pts, int n, int mode);
+HRGN    WINAPI CreatePolyPolygonRgn(const POINT *pts, const int *counts, int npoly, int mode);
+int     WINAPI OffsetClipRgn(HDC hdc, int x, int y);
 void    WINAPI SetRectRgn(HRGN rgn, int l, int t, int r, int b);
 int     WINAPI CombineRgn(HRGN dst, HRGN a, HRGN b, int mode);
 BOOL    WINAPI EqualRgn(HRGN a, HRGN b);

@@ -67,6 +67,14 @@ OWAPI: KERNEL and USER beyond the basics: an alias selector (AllocSelector,
     ok 0, code-write 1, str 0, free 0", "dos 1, muldiv 67 -11 -32768, ver
     30a, chars 101", "atom WinnAtom 1, buff MIXeD, heap 1", "class 1234,
     mapped 530,170, keys 0, hook 1, menu 0, popup 0", "dialogs 7 7, queue 20"
+
+OWGDI: GDI beyond the basics: Arc, Pie, Chord, PolyPolygon (WINDING),
+    FloodFill; elliptic, rounded and polygonal regions, FrameRgn,
+    InvertRgn; MM_ISOTROPIC (a circle, y up) and MM_LOENGLISH (an inch);
+    DIBs (SetDIBitsToDevice, StretchDIBits, CreateDIBitmap, GetDIBits, a
+    DIB pattern brush); EnumFonts, GetCharWidth, LineDDA: "dib back: 09 aa
+    b0, top-left blue 1", "iso 327,133, map 1, horz 169mm, aspect 10",
+    "fonts 5 System,MS Sans Serif,Fixedsys, W 8 X 8, dda 40"
 """
 import sys
 
@@ -3832,6 +3840,326 @@ PROGRAMS = {
             '0000000000000000000000000020c807000000000000000000000000000000000000c000c880021400140096'
             '0032000000506172616d00080048656c76000800080082000a0064000000025082000037001e0028000e0001'
             '0001000150804f4b0000'
+        )),
+    'OWGDI': (
+        # wcl -bt=windows -l=windows -ms owgdi.c
+        # #include <windows.h>
+        # #include <string.h>
+        #
+        # /* GDI beyond the basics, in one window: arcs, pies and chords; FloodFill;
+        #  * PolyPolygon; regions (elliptic, rounded, polygonal; framed, inverted);
+        #  * the mapping modes (MM_ISOTROPIC, MM_LOENGLISH); DIBs (SetDIBitsToDevice,
+        #  * StretchDIBits, CreateDIBitmap, GetDIBits, a DIB pattern brush); fonts
+        #  * enumerated, character widths, LineDDA; what it found as text */
+        # static char info[3][96];
+        # static int fonts, dda;
+        # static char names[64];
+        #
+        # int FAR PASCAL FontProc(const LOGFONT FAR *lf, const TEXTMETRIC FAR *tm, int type, LPARAM lp)
+        # {
+        #     if (fonts++ < 3) {
+        #         lstrcat(names, lf->lfFaceName);
+        #         lstrcat(names, ",");
+        #     }
+        #     return tm->tmHeight > 0;
+        # }
+        #
+        # void FAR PASCAL DdaProc(int x, int y, LPARAM lp)
+        # {
+        #     dda++;
+        #     SetPixel((HDC)LOWORD(lp), x, y, RGB(255, 0, 0));
+        # }
+        #
+        # /* a 16x16 4-bit DIB: four colour quarters, a diagonal */
+        # static struct { BITMAPINFOHEADER h; RGBQUAD c[16]; } dib;
+        # static BYTE bits[16 * 8];
+        #
+        # static void make_dib(void)
+        # {
+        #     static const RGBQUAD pal[4] = { { 0, 0, 255, 0 }, { 0, 255, 0, 0 }, { 255, 0, 0, 0 },
+        #                                     { 0, 255, 255, 0 } };
+        #     int x, y;
+        #     dib.h.biSize = sizeof(BITMAPINFOHEADER);
+        #     dib.h.biWidth = 16;
+        #     dib.h.biHeight = 16;
+        #     dib.h.biPlanes = 1;
+        #     dib.h.biBitCount = 4;
+        #     for (x = 0; x < 4; x++)
+        #         dib.c[x] = pal[x];
+        #     dib.c[15].rgbRed = dib.c[15].rgbGreen = dib.c[15].rgbBlue = 0;
+        #     for (y = 0; y < 16; y++)            /* bottom up */
+        #         for (x = 0; x < 16; x++) {
+        #             int c = x == y ? 15 : (y >= 8) * 2 + (x >= 8);
+        #             bits[y * 8 + x / 2] |= (BYTE)(c << (x & 1 ? 0 : 4));
+        #         }
+        # }
+        #
+        # static void paint(HWND h, HDC dc)
+        # {
+        #     POINT pp[6] = { { 230, 20 }, { 290, 20 }, { 260, 70 }, { 230, 50 }, { 290, 50 }, { 260, 0 } };
+        #     int counts[2] = { 3, 3 };
+        #     POINT tri[3] = { { 340, 20 }, { 390, 70 }, { 330, 70 } };
+        #     HRGN r1, r2, r3;
+        #     HBRUSH red = CreateSolidBrush(RGB(255, 0, 0)), blue = CreateSolidBrush(RGB(0, 0, 255));
+        #     HBRUSH green = CreateSolidBrush(RGB(0, 160, 0));
+        #     HBRUSH pat;
+        #     HGLOBAL hp;
+        #     HBITMAP bm;
+        #     HDC mem;
+        #     BYTE back[16 * 8];
+        #     struct { BITMAPINFOHEADER h; RGBQUAD c[16]; } got;
+        #     POINT pt;
+        #     int i;
+        #
+        #     /* arcs, pies, chords */
+        #     SelectObject(dc, green);
+        #     Arc(dc, 10, 10, 70, 70, 70, 40, 40, 10);
+        #     Pie(dc, 80, 10, 140, 70, 140, 40, 110, 10);
+        #     Chord(dc, 150, 10, 210, 70, 210, 40, 150, 40);
+        #     /* PolyPolygon: two triangles, WINDING */
+        #     SetPolyFillMode(dc, WINDING);
+        #     SelectObject(dc, blue);
+        #     PolyPolygon(dc, pp, counts, 2);
+        #     SetPolyFillMode(dc, ALTERNATE);
+        #     /* FloodFill inside a black outline */
+        #     SelectObject(dc, GetStockObject(NULL_BRUSH));
+        #     Polygon(dc, tri, 3);
+        #     SelectObject(dc, red);
+        #     FloodFill(dc, 360, 60, RGB(0, 0, 0));
+        #     /* regions */
+        #     r1 = CreateEllipticRgn(410, 10, 480, 70);
+        #     r2 = CreateRoundRectRgn(490, 10, 560, 70, 20, 20);
+        #     r3 = CreatePolygonRgn(tri, 3, ALTERNATE);
+        #     OffsetRgn(r3, 230, 70);
+        #     FillRgn(dc, r1, blue);
+        #     FrameRgn(dc, r2, red, 3, 3);
+        #     FillRgn(dc, r3, green);
+        #     InvertRgn(dc, r1);
+        #     DeleteObject(r1);
+        #     DeleteObject(r2);
+        #     DeleteObject(r3);
+        #
+        #     /* DIBs: as they are, four times as large, a bitmap of one, read back */
+        #     SetDIBitsToDevice(dc, 10, 90, 16, 16, 0, 0, 0, 16, bits, (BITMAPINFO FAR *)&dib, DIB_RGB_COLORS);
+        #     StretchDIBits(dc, 40, 90, 64, 64, 0, 0, 16, 16, bits, (BITMAPINFO FAR *)&dib, DIB_RGB_COLORS,
+        #                   SRCCOPY);
+        #     bm = CreateDIBitmap(dc, &dib.h, CBM_INIT, bits, (BITMAPINFO FAR *)&dib, DIB_RGB_COLORS);
+        #     mem = CreateCompatibleDC(dc);
+        #     SelectObject(mem, bm);
+        #     BitBlt(dc, 120, 90, 16, 16, mem, 0, 0, SRCCOPY);
+        #     DeleteDC(mem);
+        #     got.h = dib.h;
+        #     GetDIBits(dc, bm, 0, 16, back, (BITMAPINFO FAR *)&got, DIB_RGB_COLORS);
+        #     DeleteObject(bm);
+        #     /* a pattern brush of a packed DIB */
+        #     hp = GlobalAlloc(GMEM_MOVEABLE, sizeof(dib) + sizeof(bits));
+        #     {
+        #         BYTE FAR *q = (BYTE FAR *)GlobalLock(hp);
+        #         _fmemcpy(q, &dib, sizeof(dib));
+        #         _fmemcpy(q + sizeof(dib), bits, sizeof(bits));
+        #         GlobalUnlock(hp);
+        #     }
+        #     pat = CreateDIBPatternBrush(hp, DIB_RGB_COLORS);
+        #     SelectObject(dc, pat);
+        #     Rectangle(dc, 150, 90, 214, 154);
+        #     SelectObject(dc, GetStockObject(WHITE_BRUSH));
+        #     DeleteObject(pat);
+        #     GlobalFree(hp);
+        #     wsprintf(info[0], "dib back: %02x %02x %02x, top-left blue %d", back[0], back[4], back[15 * 8 + 7],
+        #              GetPixel(dc, 40, 90) == RGB(0, 0, 255));
+        #
+        #     /* MM_ISOTROPIC: a circle of 100 units in a 120-pixel box, y up */
+        #     SaveDC(dc);
+        #     SetMapMode(dc, MM_ISOTROPIC);
+        #     SetWindowExt(dc, 220, 220);
+        #     SetViewportExt(dc, 120, -60);
+        #     SetViewportOrg(dc, 300, 160);
+        #     Ellipse(dc, -100, -100, 100, 100);
+        #     MoveTo(dc, 0, 0);
+        #     LineTo(dc, 0, 90);                  /* up */
+        #     MoveTo(dc, 0, 0);
+        #     LineTo(dc, 90, 0);                  /* right */
+        #     pt.x = 100; pt.y = 100;
+        #     LPtoDP(dc, &pt, 1);
+        #     RestoreDC(dc, -1);
+        #     /* MM_LOENGLISH: a rectangle an inch wide, half an inch high */
+        #     SaveDC(dc);
+        #     SetMapMode(dc, MM_LOENGLISH);
+        #     SetViewportOrg(dc, 380, 110);
+        #     Rectangle(dc, 0, 0, 100, -50);
+        #     TextOut(dc, 5, -5, "1 inch", 6);
+        #     RestoreDC(dc, -1);
+        #     wsprintf(info[1], "iso %d,%d, map %d, horz %dmm, aspect %d", pt.x, pt.y, GetMapMode(dc),
+        #              GetDeviceCaps(dc, HORZSIZE), GetDeviceCaps(dc, ASPECTX));
+        #
+        #     /* fonts, widths, LineDDA */
+        #     {
+        #         int wd[2];
+        #         FARPROC fp = MakeProcInstance((FARPROC)FontProc, GetWindowWord(h, GWW_HINSTANCE));
+        #         FARPROC dp = MakeProcInstance((FARPROC)DdaProc, GetWindowWord(h, GWW_HINSTANCE));
+        #         fonts = dda = 0;
+        #         names[0] = 0;
+        #         EnumFonts(dc, NULL, (OLDFONTENUMPROC)fp, 0);
+        #         GetCharWidth(dc, 'W', 'X', wd);
+        #         LineDDA(240, 140, 280, 150, (LINEDDAPROC)dp, (LPARAM)(UINT)dc);
+        #         wsprintf(info[2], "fonts %d %s W %d X %d, dda %d", fonts, (LPSTR)names, wd[0], wd[1], dda);
+        #     }
+        #     for (i = 0; i < 3; i++)
+        #         TextOut(dc, 10, 230 + i * 18, info[i], lstrlen(info[i]));
+        #     DeleteObject(red);
+        #     DeleteObject(blue);
+        #     DeleteObject(green);
+        # }
+        #
+        # LRESULT FAR PASCAL WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+        # {
+        #     if (msg == WM_PAINT) {
+        #         PAINTSTRUCT ps;
+        #         HDC dc = BeginPaint(h, &ps);
+        #         paint(h, dc);
+        #         EndPaint(h, &ps);
+        #         return 0;
+        #     }
+        #     if (msg == WM_DESTROY) {
+        #         PostQuitMessage(0);
+        #         return 0;
+        #     }
+        #     return DefWindowProc(h, msg, wp, lp);
+        # }
+        #
+        # int PASCAL WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR cmd, int show)
+        # {
+        #     WNDCLASS wc;
+        #     HWND h;
+        #     MSG m;
+        #     make_dib();
+        #     _fmemset(&wc, 0, sizeof(wc));
+        #     wc.lpfnWndProc = WndProc;
+        #     wc.hInstance = hInstance;
+        #     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        #     wc.hbrBackground = GetStockObject(WHITE_BRUSH);
+        #     wc.lpszClassName = "OwGdi";
+        #     RegisterClass(&wc);
+        #     h = CreateWindow("OwGdi", "GDI", WS_OVERLAPPEDWINDOW, 10, 10, 600, 330, NULL, NULL,
+        #                      hInstance, NULL);
+        #     ShowWindow(h, show);
+        #     UpdateWindow(h);
+        #     while (GetMessage(&m, NULL, 0, 0)) {
+        #         TranslateMessage(&m);
+        #         DispatchMessage(&m);
+        #     }
+        #     return m.wParam;
+        # }
+        bytes.fromhex(
+            '4d5a80000100000004000000ffff0000b8000000000000004000000000000000000000000000000000000000'
+            '00000000000000000000000000000000800000000e1fba0e00b409cd21b8014ccd2154686973206973206120'
+            '57696e646f77732031362d6269742065786563757461626c650d0a240000000000000000000000004e450501'
+            '700002000000000002030200000400206409010000000200020003000d0040005000500059005f00f2000000'
+            '0000010000000200000000000000000380005e0c400d5e0c7008c001410c1004054f57474449000000010008'
+            '000c0000064b45524e454c0347444904555345520000096f776764692e65786500000000ccebfd9090909000'
+            '1e5890455589e51e8ed8b81000e8dd08a1080489c242891608043d03007d231eb8a802508b4610051200ff76'
+            '12509affff00001eb8a802501eb81000509affff0000c45e0c26833f007e05b80100eb0231c01f5d4dca0e00'
+            '1e5890455589e51e8ed8b81200e88508ff7606ff760cff760a31c050b8ff0050ff060a049affff00001f5d4d'
+            'ca0800b81000e8600853515256575589e583ec02c706c001280031c0a3c201c706c4011000a3c601c706c801'
+            '1000a3ca01c706cc010100c706ce01040031db89ded1e6d1e68b84a0008b8ca2008984e801898cea014383fb'
+            '047ce430c0a22402a22502a2260231ffeb064783ff107d5a31dbeb4d83ff087c05b90100eb0231c989c8d1e0'
+            '83fb087c05b90100eb0231c901c1894efeb10389fed3e689d8992bc2d1f801c68db42802f6c301740431c9eb'
+            '03b904008b46fed3e008044383fb107da939fb75afb90f00ebc889ec5d5f5e5a595bc35589e550b85601e88c'
+            '07585351565781ec26015052b90c008cd88ec08d7ebabeb000f3a5a1c8008946dea1ca008946e08d7ed2becc'
+            '00a5a5a5a5a5a531c050b8ff00509affff00008946f68946f0b8ff005031c0509affff000089c68946f231c0'
+            '50b800a0509affff00008946f48946eeffb6cefe509affff0000ffb6cefeb80a005050b84600505050b82800'
+            '5050b80a00509affff0000ffb6cefeb8500050b80a0050b88c0050b8460050b88c0050b8280050b86e0050b8'
+            '0a00509affff0000ffb6cefeb8960050b80a0050b8d20050b8460050b8d20050b8280050b8960050b8280050'
+            '9affff0000ffb6cefeb80200509affff0000ffb6cefe569affff0000ffb6cefe8d56ba1e528d56de1e52b802'
+            '00509affff0000ffb6cefeb80100509affff0000ffb6cefeb80500509affff0000509affff0000ffb6cefe8d'
+            '56d21e52b80300509affff0000ffb6cefeff76f69affff0000ffb6cefeb8680150b83c005031c050509affff'
+            '0000b89a0150b80a0050b8e00150b84600509affff00008946eab8ea0150b80a0050b8300250b8460050b814'
+            '0050509affff00008946ec8d56d21e52b8030050b80100509affff000089c750b8e60050b84600509affff00'
+            '00ffb6cefeff76ea569affff0000ffb6cefeff76ecff76f6b8030050509affff0000ffb6cefe57ff76f49aff'
+            'ff0000ffb6cefeff76ea9affff0000ff76ea9affff0000ff76ec9affff0000579affff0000ffb6cefeb80a00'
+            '50b85a0050b81000505031c0505050b81000501eb82802501eb8c0015031c0509affff0000ffb6cefeb82800'
+            '50b85a0050b84000505031c05050b8100050501eb82802501eb8c0015031c050b8cc0050b82000509affff00'
+            '00ffb6cefe1eb8c0015031c050b80400501eb82802501eb8c0015031c0509affff00008946ecffb6cefe9aff'
+            'ff000089c650ff76ec9affff0000ffb6cefeb8780050b85a0050b8100050505631c05050b8cc0050b8200050'
+            '9affff0000569affff0000b914008cd88ec08dbe52ffbec001f3a5ffb6cefeff76ec31c050b81000508d96d2'
+            'fe1e528d9652ff1e5231c0509affff0000ff76ec9affff0000b802005031c050b8e800509affff000089c750'
+            '9affff00008946ec89d6b8680050bbc0018cd98b46ece88e04b88000508b46ec056800bb28028cd989f2e87a'
+            '04579affff00005731c0509affff000089c6ffb6cefe509affff0000ffb6cefeb8960050b85a0050b8d60050'
+            'b89a00509affff0000ffb6cefe31c0509affff0000509affff0000569affff0000579affff0000ffb6cefeb8'
+            '280050b85a00509affff000081faff00750985c07505b80100eb0231c0508a8651ff30e4508a86d6fe508a86'
+            'd2fe501eb81200501eb8e802509affff000083c410ffb6cefe9affff0000ffb6cefeb80700509affff0000ff'
+            'b6cefeb8dc0050509affff0000ffb6cefeb8780050b8c4ff509affff0000ffb6cefeb82c0150b8a000509aff'
+            'ff0000ffb6cefeb89cff5050b8640050509affff0000ffb6cefe31c050509affff0000ffb6cefe31c050b85a'
+            '00509affff0000ffb6cefe31c050509affff0000ffb6cefeb85a005031c0509affff0000b864008946e28946'
+            'e4ffb6cefe8d56e21e52b80100509affff0000ffb6cefeb8ffff509affff0000ffb6cefe9affff0000ffb6ce'
+            'feb80400509affff0000ffb6cefeb87c0150b86e00509affff0000ffb6cefe31c05050b8640050b8ceff509a'
+            'ffff0000ffb6cefeb8050050b8fbff501eb83d0050b80600509affff0000ffb6cefeb8ffff509affff0000ff'
+            'b6cefeb82800509affff000050ffb6cefeb80400509affff000050ffb6cefe9affff000050ff76e4ff76e21e'
+            'b84400501eb84803509affff000083c412b8ffff50b8ffff50ffb6d0feb8faff509affff0000509affff0000'
+            '89c78956ecb8ffff50b8ffff50ffb6d0feb8faff509affff0000509affff00008946ea89d631c0a30a04a308'
+            '0430c0a2a802ffb6cefe30e45050ff76ec5750509affff0000ffb6cefeb8570050b85800508d56e61e529aff'
+            'ff0000b8f00050b88c0050b8180150b896005056ff76ea31c050ffb6cefe9affff0000ff360a04ff76e8ff76'
+            'e61eb8a80250ff3608041eb86c00501eb8a803509affff000083c41431f6ffb6cefeb80a0050b10389f0d3e0'
+            '01f0d1e005e6005089f0d1e0d1e029f0b105d3e0bae80201c21e521e529affff0000509affff00004683fe03'
+            '7cc4ff76f09affff0000ff76f29affff0000ff76ee9affff00008d66f85f5e595b5dc31e5890455589e51e8e'
+            'd8b83400e82a015683ec208b460c8b760e3d0f007523568d56dc1e529affff000089c289f0e873f9568d56dc'
+            '1e529affff000031c031d2eb1f3d0200750a31c0509affff0000ebeb5650ff760aff7608ff76069affff0000'
+            '8d66fc5e1f5d4dca0a005589e5b85000e8c6005683ec2c8b760ce856f8b91a0031db8cda8d46d2e80601c746'
+            'd4ffffc746d6ffff8976dc31c05050b8007f509affff00008946e031c0509affff00008946e2c746e88a008c'
+            '5eea8d56d21e529affff00001eb88a00501eb8900050b8cf005031c050b80a005050b8580250b84a015031c0'
+            '50505650509affff000089c650ff76049affff0000569affff00008d56ec1e5231c05050509affff000085c0'
+            '74168d56ec1e529affff00008d56ec1e529affff0000ebd78b46f08d66fe5e5dc20a00008c16d800c33bc473'
+            '132bc4f7d83b060a0077068cd03b06d8007401c30e5ab81709bb0100e9ee01537461636b204f766572666c6f'
+            '7721005589e5565789c78b460489de8ec21e57918ed8d1e9f3a513c9f3a45f1f89f85f5e5dc202005789c788'
+            'd88ec2578ae0d1e9f3ab13c9f3aa5f89f85fc300eb0203009affff00000bc0750e5033c0ba0f00e86a0258b4'
+            '4ccd218c06de00575606535253be0c048936f9008c1efb00268a078804464384c075f589360a005b2bc0509a'
+            'ffff000057579affff0000fc1e07b90c04bfc0012bcf32c0f3aab8ae0aa3f500b8ffffa3f700b430cd21a2e0'
+            '008826e1009affff0000a2e2008826e30086e0a3e40054583bc475120f01e0a90100740ab001a2e600b003a2'
+            'e7001ebf010157b89000509affff0000b80101893efd008c1eff00b8ff00e86b01e802fee9f9004f70656e20'
+            '576174636f6d20432f432b2b31362052756e2d54696d652073797374656d2e20436f70797269676874202863'
+            '29204f70656e20576174636f6d20436f6e7472696275746f727320323030322d323032362e20506f7274696f'
+            '6e7320436f7079726967687420284329205379626173652c20496e632e20313938382d323030322e00c3cb00'
+            '5589e551565781ec800089c689df8d9e7aff8cd98ec2268a0484c074173c0d74138d46f939c3730c268a048e'
+            'c14626880743ebe031c08ec15026c607001e8d9e7aff531eb894005031c0509affff000089f8e94400515689'
+            'c189d6e8330185c0750689c889f2eb9889d8e92c0000c3c3535289c3833eb801007404ff16b801ff169201ba'
+            'ff00b81000e8a800ff169201ff16940189d8e928fe5289c2ff169201ff16940189d0e918fe5589e5535289c3'
+            '833f0075078d66fc5a5b5dc31eff171febf35589e5535289c38b47028b1785c0750485d274df1eff1f1febd9'
+            '5589e5535152565789c11ee813ffbfc00189fabbba0189fe88c839fb7316803f02750583c306ebf23a470172'
+            'f689de8a4701ebef39fe74158d4402803c007508e88affc60402ebcbe89bffebf61f8d66f65f5e5a595b5dc3'
+            '5589e55351565789c11ee8bcfe88d5bfc00189fabbc00189fe88c839fb7316803f02750583c306ebf23a4701'
+            '77f689de8a4701ebef39fe741c3a6c017305c60402ebd18d4402803c007505e827ffebeee83bffebe91f8d66'
+            'f85f5eeb9f803e960100750331c0c35250cceb0657564944454fb8010083c404c30070000301120602000300'
+            '0301230602000d000301380602001b00030152060200210003015f060200270003016c060200500003017a06'
+            '02005000030184060200510003019a060300a4010200a206010008000500a606010008000301b20603008500'
+            '0301b806010033000200c206010060000500c606010060000301d206030085000301d806010033000301fd06'
+            '020046000301130702005e010301330702006400030155070300a40103018a0701005a000301900702002100'
+            '03019e07020045000301a607020045000301ae07020045000301e107030027000301f3070300280003010608'
+            '030006000301180803006b00050049080100bb0702004e080100bb0703015c080300ad000301670802005700'
+            '03017c08030039000301a608030029000301b10803002a000301b70803007c000301c60803006c000301d408'
+            '030071000301de08030072000301690901005b000301a80901001e000301af09030005000200c90901006409'
+            '0301da090100030003010c0a010031000301fc0a030001000301370001005900030146000100590003018500'
+            '02001f000301a301020042000301b501020042000301c601020042000301d60102002d000301f30102001700'
+            '03011c0202001a000301450202005c01030152020200060003015c0202002d00030173020200c20103018002'
+            '0200060003018d02020057000301930202002d000301a502020024000301b10202002d000301c60202001900'
+            '0301db02020036000301f8020200bc0103010d0302003f0003011d030200650003012a030200280003013e03'
+            '0200290003014b03020028000301570302002a0003015f0302004500030167030200450003016d0302004500'
+            '030199030200bb010301cd030200b7010301ef030200ba010301fb03020034000301060402002d0003012904'
+            '0200220003012f0402004400030161040200b90103016904020045000301790401000f000301810401001200'
+            '0301af04010013000301b8040200bd010301c40402002d000301dd0402001b000301e904020057000301ef04'
+            '02002d000301f504020045000301fb040100110003010c050200530003013e050300a40103014a0502001e00'
+            '03015705020003000301650502000c000301760502000e000301870502000d0003019a05020018000301a705'
+            '020014000301b705020013000301c405020014000301d405020013000301ef05020063000301fc0502002700'
+            '0301050602001e00000000000500000000000000000000002c00646962206261636b3a202530327820253032'
+            '7820253032782c20746f702d6c65667420626c7565202564003120696e63680069736f2025642c25642c206d'
+            '61702025642c20686f727a2025646d6d2c2061737065637420256400666f6e74732025642025732057202564'
+            '20582025642c20646461202564004f7747646900474449004f70656e20576174636f6d000000ff0000ff0000'
+            'ff00000000ffff00e60014002201140004014600e60032002201320004010000030003005401140086014600'
+            '4a0146000000ffff00000000000000000000000c000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '00000000000000000000000000001f0b1f0b0000000000000000000000000000000000000000000000000000'
+            '000000000000000000000020f0080000'
         )),
 }
 

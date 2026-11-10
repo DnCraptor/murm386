@@ -385,42 +385,331 @@ uint32_t ne_find_message(ne_user *u, LPARAM lp)
 
 /* ---------------------------------------------------------------- the services */
 
+/* points of the program's (POINT FAR *, n of them) natively, at most 1024 */
+static POINT *points_in(args *a, uint32_t far, int n)
+{
+    if (n <= 0 || n > 1024)
+        return NULL;
+    uint8_t *g = (uint8_t *)win_alloc(4u * (uint32_t)n);
+    POINT *p = (POINT *)win_alloc(sizeof(POINT) * (size_t)n);
+    if (g && p && rd_(a, far, g, 4u * (uint32_t)n)) {
+        for (int i = 0; i < n; i++) {
+            p[i].x = (int16_t)rd16(g + 4 * i);
+            p[i].y = (int16_t)rd16(g + 4 * i + 2);
+        }
+        win_free(g);
+        return p;
+    }
+    win_free(g);
+    win_free(p);
+    return NULL;
+}
+
+/* PolyPolygon, CreatePolyPolygonRgn: the points and their counts */
+static __attribute__((noinline)) int poly_polygon(args *a, int region, uint32_t *v)
+{
+    int n = (int16_t)w(a, region ? 6 : 4);
+    uint32_t counts = dw(a, region ? 8 : 6), pts = dw(a, region ? 12 : 10);
+    if (n <= 0 || n > 64)
+        return 1;
+    uint8_t c16[128];
+    int c[64], total = 0;
+    if (!rd_(a, counts, c16, 2u * (uint32_t)n))
+        return 1;
+    for (int i = 0; i < n; i++)
+        total += c[i] = (int16_t)rd16(c16 + 2 * i);
+    POINT *p = points_in(a, pts, total);
+    if (p)
+        *v = region ? (uint32_t)CreatePolyPolygonRgn(p, c, n, (int16_t)w(a, 4))
+                    : (uint32_t)PolyPolygon(w(a, 14), p, c, n);
+    win_free(p);
+    return 1;
+}
+
+/* EnumFonts, EnumFontFamilies(HDC, LPCSTR, proc, LPARAM): each font's
+ * LOGFONT and TEXTMETRIC (NEWTEXTMETRIC's 10 bytes more, NEWLOGFONT's 96)
+ * on the program's stack for its procedure */
+typedef struct {
+    win_ne_guest_api_context *c;
+    uint32_t proc, lp;
+    int family;
+} font_enum;
+
+static int CALLBACK ne_fontproc(const LOGFONT *lf, const TEXTMETRIC *tm, int type, LPARAM lp)
+{
+    const font_enum *e = (const font_enum *)(uintptr_t)lp;
+    uint8_t blob[146 + 42];
+    uint16_t lfn = e->family ? 146 : 50, tmn = e->family ? 42 : 32;   /* even */
+    memset(blob, 0, sizeof(blob));
+    uint8_t *g = blob;
+    wr16(g, (uint16_t)lf->lfHeight); wr16(g + 2, (uint16_t)lf->lfWidth);
+    wr16(g + 4, (uint16_t)lf->lfEscapement); wr16(g + 6, (uint16_t)lf->lfOrientation);
+    wr16(g + 8, (uint16_t)lf->lfWeight);
+    g[10] = lf->lfItalic; g[11] = lf->lfUnderline; g[12] = lf->lfStrikeOut;
+    g[13] = lf->lfCharSet; g[14] = lf->lfOutPrecision; g[15] = lf->lfClipPrecision;
+    g[16] = lf->lfQuality; g[17] = lf->lfPitchAndFamily;
+    memcpy(g + 18, lf->lfFaceName, LF_FACESIZE);
+    if (e->family)                      /* NEWLOGFONT: its full name, its style */
+        lstrcpyn((char *)g + 50, lf->lfFaceName, 64);
+    g = blob + lfn;
+    const int v16[] = { tm->tmHeight, tm->tmAscent, tm->tmDescent, tm->tmInternalLeading,
+                        tm->tmExternalLeading, tm->tmAveCharWidth, tm->tmMaxCharWidth,
+                        tm->tmWeight };
+    for (int i = 0; i < 8; i++)
+        wr16(g + 2 * i, (uint16_t)v16[i]);
+    g[16] = tm->tmItalic; g[17] = tm->tmUnderlined; g[18] = tm->tmStruckOut;
+    g[19] = tm->tmFirstChar; g[20] = tm->tmLastChar; g[21] = tm->tmDefaultChar;
+    g[22] = tm->tmBreakChar; g[23] = tm->tmPitchAndFamily; g[24] = tm->tmCharSet;
+    wr16(g + 25, (uint16_t)tm->tmOverhang); wr16(g + 27, (uint16_t)tm->tmDigitizedAspectX);
+    wr16(g + 29, (uint16_t)tm->tmDigitizedAspectY);
+    if (e->family) {                    /* NEWTEXTMETRIC: flags, em, cell height, average */
+        wr16(g + 35, (uint16_t)tm->tmHeight);
+        wr16(g + 37, (uint16_t)tm->tmHeight);
+        wr16(g + 39, (uint16_t)tm->tmAveCharWidth);
+    }
+    uint16_t len = (uint16_t)(lfn + tmn);
+    uint32_t far = win_ne_blob_far(e->c, len);
+    const uint16_t words[7] = { (uint16_t)(far >> 16), (uint16_t)far, (uint16_t)(far >> 16),
+                                (uint16_t)(far + lfn), (uint16_t)type, (uint16_t)(e->lp >> 16),
+                                (uint16_t)e->lp };
+    return (int16_t)win_ne_call(e->c, e->proc, words, 7, blob, len);
+}
+
+/* LineDDA's points to the program's procedure (x, y, LPARAM) */
+typedef struct {
+    win_ne_guest_api_context *c;
+    uint32_t proc, lp;
+} dda_ctx;
+
+static void CALLBACK ne_ddaproc(int x, int y, LPARAM lp)
+{
+    const dda_ctx *d = (const dda_ctx *)(uintptr_t)lp;
+    const uint16_t words[4] = { (uint16_t)x, (uint16_t)y, (uint16_t)(d->lp >> 16),
+                                (uint16_t)d->lp };
+    win_ne_call(d->c, d->proc, words, 4, NULL, 0);
+}
+
+/* A DIB's header of the program's (BITMAPINFOHEADER or BITMAPCOREHEADER,
+ * its colours after it: RGBQUADs, RGBTRIPLEs, DIB_PAL_COLORS' indices;
+ * usage -1: the header alone) as a native one, room for 256 colours more;
+ * its bytes a row, its rows */
+static uint8_t *dib_info_in(args *a, uint32_t far, int usage, uint32_t *len, uint32_t *pitch,
+                            uint32_t *rows)
+{
+    uint8_t h[40];
+    if (!rd_(a, far, h, 4))
+        return NULL;
+    uint32_t hs = rd16(h) | (uint32_t)rd16(h + 2) << 16;
+    if ((hs != 12 && hs != 40) || !rd_(a, far, h, hs))
+        return NULL;
+    uint32_t wd = hs == 12 ? rd16(h + 4) : rd16(h + 4) | (uint32_t)rd16(h + 6) << 16;
+    int32_t ht = hs == 12 ? rd16(h + 6) : (int32_t)(rd16(h + 8) | (uint32_t)rd16(h + 10) << 16);
+    uint32_t bpp = hs == 12 ? rd16(h + 10) : rd16(h + 14);
+    uint32_t used = hs == 12 ? 0 : rd16(h + 32) | (uint32_t)rd16(h + 34) << 16;
+    if (wd > 4096 || bpp > 32)
+        return NULL;
+    uint32_t colors = bpp <= 8 ? (used && used < (1u << bpp) ? used : 1u << bpp) : 0;
+    uint32_t entry = usage == DIB_PAL_COLORS ? 2 : hs == 12 ? 3 : 4;
+    *len = hs + (usage < 0 ? 0 : colors * entry);
+    *pitch = (wd * bpp + 31u) / 32u * 4u;
+    *rows = (uint32_t)(ht < 0 ? -ht : ht);
+    uint8_t *bi = (uint8_t *)win_alloc(hs + 256u * 4u);
+    if (bi && !rd_(a, far, bi, *len)) {
+        win_free(bi);
+        bi = NULL;
+    }
+    return bi;
+}
+
+/* n bytes of the program's at far, in its segment */
+static uint8_t *bytes_in(args *a, uint32_t far, uint32_t n)
+{
+    if (!n || (uint32_t)(uint16_t)far + n > 0x10000u)
+        return NULL;
+    uint8_t *d = (uint8_t *)win_alloc(n);
+    if (d && !rd_(a, far, d, n)) {
+        win_free(d);
+        d = NULL;
+    }
+    return d;
+}
+
+/* SetDIBitsToDevice, StretchDIBits, CreateDIBitmap, SetDIBits, GetDIBits,
+ * CreateDIBPatternBrush */
+static __attribute__((noinline)) int dib_service(args *a, uint16_t service, uint32_t *v)
+{
+    win_ne_guest_api_context *c = a->ctx;
+    uint32_t len = 0, pitch = 0, rows = 0, bfar, bits_far, n;
+    int usage;
+    uint8_t *bi = NULL, *bits = NULL;
+    switch (service) {
+    case 0x31bb:                        /* SetDIBitsToDevice(HDC, x, y, w, h, sx, sy, start,
+                                         * lines, bits, BITMAPINFO FAR *, usage) */
+        usage = w(a, 4);
+        bfar = dw(a, 6);
+        bits_far = dw(a, 10);
+        if ((bi = dib_info_in(a, bfar, usage, &len, &pitch, &rows)) &&
+            (bits = bytes_in(a, bits_far, pitch * w(a, 14))))
+            *v = (uint16_t)SetDIBitsToDevice(w(a, 30), (int16_t)w(a, 28), (int16_t)w(a, 26),
+                                             (int16_t)w(a, 24), (int16_t)w(a, 22),
+                                             (int16_t)w(a, 20), (int16_t)w(a, 18), w(a, 16),
+                                             w(a, 14), bits, (const BITMAPINFO *)bi, usage);
+        break;
+    case 0x31b7:                        /* StretchDIBits(HDC, x, y, w, h, sx, sy, sw, sh, bits,
+                                         * BITMAPINFO FAR *, usage, rop) */
+        usage = w(a, 8);
+        bfar = dw(a, 10);
+        bits_far = dw(a, 14);
+        if ((bi = dib_info_in(a, bfar, usage, &len, &pitch, &rows)) &&
+            (bits = bytes_in(a, bits_far, pitch * rows)))
+            *v = (uint16_t)StretchDIBits(w(a, 34), (int16_t)w(a, 32), (int16_t)w(a, 30),
+                                         (int16_t)w(a, 28), (int16_t)w(a, 26),
+                                         (int16_t)w(a, 24), (int16_t)w(a, 22),
+                                         (int16_t)w(a, 20), (int16_t)w(a, 18), bits,
+                                         (const BITMAPINFO *)bi, usage, dw(a, 4));
+        break;
+    case 0x31ba: {                      /* CreateDIBitmap(HDC, BITMAPINFOHEADER FAR *, init,
+                                         * bits, BITMAPINFO FAR *, usage) */
+        uint8_t *bih;
+        uint32_t hl, hp, hr;
+        usage = w(a, 4);
+        if (!(bih = dib_info_in(a, dw(a, 18), -1, &hl, &hp, &hr)))
+            break;
+        if ((dw(a, 14) & CBM_INIT) && dw(a, 10) && dw(a, 6) &&
+            (bi = dib_info_in(a, dw(a, 6), usage, &len, &pitch, &rows)))
+            bits = bytes_in(a, dw(a, 10), pitch * rows);
+        *v = (uint16_t)CreateDIBitmap(w(a, 22), (const BITMAPINFOHEADER *)bih,
+                                      bits ? dw(a, 14) : 0, bits, (const BITMAPINFO *)bi, usage);
+        win_free(bih);
+        break;
+    }
+    case 0x31b8:                        /* SetDIBits(HDC, HBITMAP, start, lines, bits,
+                                         * BITMAPINFO FAR *, usage) */
+        usage = w(a, 4);
+        if ((bi = dib_info_in(a, dw(a, 6), usage, &len, &pitch, &rows)) &&
+            (bits = bytes_in(a, dw(a, 10), pitch * w(a, 14))))
+            *v = (uint16_t)SetDIBits(w(a, 20), w(a, 18), w(a, 16), w(a, 14), bits,
+                                     (const BITMAPINFO *)bi, usage);
+        break;
+    case 0x31b9: {                      /* GetDIBits(HDC, HBITMAP, start, lines, bits,
+                                         * BITMAPINFO FAR *, usage) */
+        BITMAP bm;
+        usage = w(a, 4);
+        bfar = dw(a, 6);
+        bits_far = dw(a, 10);
+        if (!GetObject(w(a, 18), sizeof(bm), &bm) ||
+            !(bi = dib_info_in(a, bfar, -1, &len, &pitch, &rows)))
+            break;
+        n = w(a, 14);
+        uint32_t want = ((const BITMAPINFOHEADER *)bi)->biBitCount, out = 0;
+        uint32_t bpitch = ((uint32_t)bm.bmWidth * want + 31u) / 32u * 4u;
+        if (bits_far && want && (uint32_t)(uint16_t)bits_far + bpitch * n > 0x10000u)
+            break;
+        uint32_t size = bpitch * n;
+        if (bits_far && want)
+            bits = (uint8_t *)win_alloc(size ? size : 1u);
+        if (bits_far && want && !bits)
+            break;
+        *v = (uint16_t)GetDIBits(w(a, 20), w(a, 18), w(a, 16), n, bits,
+                                 (BITMAPINFO *)bi, usage);
+        want = ((const BITMAPINFOHEADER *)bi)->biBitCount;
+        out = 40u + (want && want <= 8 ? 4u << want : 0u);
+        wr_(a, bfar, bi, out);
+        if (bits)
+            wr_(a, bits_far, bits, bpitch * n);
+        break;
+    }
+    case 0x31bd: {                      /* CreateDIBPatternBrush(HGLOBAL, usage): its block */
+        win_ne_guest_segment *s = win_ne_guest_global((win_ne_guest_image *)c->image, w(a, 6));
+        uint8_t *d = s ? bytes_in(a, (uint32_t)w(a, 6) << 16, s->size) : NULL;
+        HGLOBAL hg = d ? GlobalAlloc(GMEM_MOVEABLE, s->size) : 0;
+        void *p = hg ? GlobalLock(hg) : NULL;
+        if (p) {
+            memcpy(p, d, s->size);
+            GlobalUnlock(hg);
+            *v = (uint16_t)CreateDIBPatternBrush(hg, w(a, 4));
+        }
+        if (hg)
+            GlobalFree(hg);
+        win_free(d);
+        break;
+    }
+    default:
+        return 0;
+    }
+    win_free(bi);
+    win_free(bits);
+    return 1;
+}
+
 static __attribute__((noinline)) int gdi_more(args *a, uint16_t service, uint32_t *v, int *dword)
 {
+    if (dib_service(a, service, v))
+        return 1;
     switch (service) {
-    case 0x3003: case 0x3051:           /* SetMapMode, GetMapMode: MM_TEXT, all there is */
-        *v = 1;                         /* MM_TEXT */
-        return 1;
-    case 0x300c: case 0x300e:           /* SetWindowExt, SetViewportExt: 1:1 */
-    case 0x305e: case 0x3060:           /* GetViewportExt, GetWindowExt */
-        *v = 0x00010001u;
-        *dword = 1;
-        return 1;
-    case 0x3043: case 0x3063: {         /* DPtoLP, LPtoDP(HDC, LPPOINT, int): the origins */
+    case 0x3043: case 0x3063: {         /* DPtoLP, LPtoDP(HDC, LPPOINT, int) */
         int n = (int16_t)w(a, 4);
         uint32_t pts = dw(a, 6);
         HDC dc = w(a, 10);
-        DWORD wo = GetWindowOrg(dc), vo = GetViewportOrg(dc);
-        int dx = (int16_t)LOWORD(wo) - (int16_t)LOWORD(vo), dy = (int16_t)HIWORD(wo) - (int16_t)HIWORD(vo);
-        if (service == 0x3063) {
-            dx = -dx;
-            dy = -dy;
-        }
         for (int i = 0; i < n && !a->bad; i++) {
             uint8_t p[4];
             if (!rd_(a, pts + 4u * (uint32_t)i, p, 4))
                 break;
-            wr16(p, (uint16_t)((int16_t)rd16(p) + dx));
-            wr16(p + 2, (uint16_t)((int16_t)rd16(p + 2) + dy));
+            POINT pt = { (int16_t)rd16(p), (int16_t)rd16(p + 2) };
+            if (service == 0x3063)
+                LPtoDP(dc, &pt, 1);
+            else
+                DPtoLP(dc, &pt, 1);
+            wr16(p, (uint16_t)pt.x);
+            wr16(p + 2, (uint16_t)pt.y);
             wr_(a, pts + 4u * (uint32_t)i, p, 4);
         }
         *v = !a->bad;
         return 1;
     }
+    case 0x31c2: case 0x31c3:           /* PolyPolygon, CreatePolyPolygonRgn */
+        return poly_polygon(a, service == 0x31c3, v);
+    case 0x315e: {                      /* GetCharWidth(HDC, first, last, int FAR *) */
+        UINT first = w(a, 10), last = w(a, 8);
+        int wd[256];
+        uint8_t g[512];
+        if (last > 255 || first > last || !GetCharWidth(w(a, 12), first, last, wd))
+            return 1;
+        for (UINT i = 0; i <= last - first; i++)
+            wr16(g + 2 * i, (uint16_t)wd[i]);
+        *v = wr_(a, dw(a, 4), g, 2u * (last - first + 1u));
+        return 1;
+    }
+    case 0x3064: {                      /* LineDDA(x0, y0, x1, y1, proc, LPARAM) */
+        dda_ctx d = { a->ctx, dw(a, 8), dw(a, 4) };
+        if (!a->bad && d.proc)
+            LineDDA((int16_t)w(a, 18), (int16_t)w(a, 16), (int16_t)w(a, 14), (int16_t)w(a, 12),
+                    ne_ddaproc, (LPARAM)(uintptr_t)&d);
+        return 1;
+    }
+    case 0x3046: case 0x314a: {         /* EnumFonts, EnumFontFamilies(HDC, LPCSTR, proc, LPARAM) */
+        char face[LF_FACESIZE];
+        font_enum e = { a->ctx, dw(a, 8), dw(a, 4), service == 0x314a };
+        face[0] = 0;
+        if (dw(a, 12) && !str_(a, dw(a, 12), face, sizeof(face)))
+            return 1;
+        if (e.proc)
+            *v = (uint16_t)EnumFonts(w(a, 16), face, ne_fontproc, (LPARAM)(uintptr_t)&e);
+        return 1;
+    }
+    /* printing: no printers */
+    case 0x3179: case 0x317d:           /* StartDoc(HDC, DOCINFO FAR *), SetAbortProc */
+    case 0x317a: case 0x317b:           /* EndDoc, StartPage */
+    case 0x317c: case 0x317e:           /* EndPage, AbortDoc */
+        *v = 0xffff;                    /* SP_ERROR */
+        return 1;
+    case 0x309b:                        /* QueryAbort(HDC, int): stop */
+        *v = 0;
+        return 1;
     case 0x3026:                        /* Escape: no printer escapes */
         *v = 0;
         return 1;
-    case 0x3035: {                      /* CreateDC(driver, device, output, init) */
+    case 0x3035: case 0x3099: {         /* CreateDC, CreateIC(driver, device, output, init) */
         char drv[32], dev[32], out[32];
         if (str_(a, dw(a, 16), drv, sizeof(drv)) && str_(a, dw(a, 12), dev, sizeof(dev)) &&
             str_(a, dw(a, 8), out, sizeof(out)))

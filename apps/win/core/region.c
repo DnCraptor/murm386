@@ -200,6 +200,9 @@ static void wrgn_finish(wrgn *g)
     wrgn_update_box(g);
 }
 
+void wrgn_add(wrgn *g, const RECT *rc) { wrgn_push(g, rc->left, rc->top, rc->right, rc->bottom); }
+void wrgn_done(wrgn *g) { wrgn_finish(g); }
+
 void wrgn_set_rect(wrgn *g, const RECT *rc)
 {
     g->n = 0;

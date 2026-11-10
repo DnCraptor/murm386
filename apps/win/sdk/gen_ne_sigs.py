@@ -68,6 +68,8 @@ SKIP = {
     'GetSystemPaletteEntries', 'SetSysColors', 'TranslateMDISysAccel',
     # strings changed in place, the keys (256 bytes): ne_guest_user.c
     'AnsiUpperBuff', 'AnsiLowerBuff', 'GetKeyboardState', 'SetKeyboardState',
+    # points and widths by the count, a global block's DIB: ne_guest_kernel.c
+    'LPtoDP', 'DPtoLP', 'GetCharWidth', 'CreateDIBPatternBrush',
 }
 
 COUNTS = re.compile(r'^(n|c|cb|cch|count|len|nCount|cbString|size)$')
@@ -129,8 +131,8 @@ def kind(t):
         return 'r'
     if base == 'POINT' and ptr == 1 and const:
         return 'A'
-    if base in ('LPPOINT',) or (base == 'POINT' and ptr == 1):
-        return 'p'
+    if base in ('LPPOINT', 'LPSIZE') or (base in ('POINT', 'SIZE') and ptr == 1):
+        return 'p'                      # a SIZE: two ints as well
     if ptr:
         return None
     if base == 'HINSTANCE':
