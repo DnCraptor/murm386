@@ -144,6 +144,32 @@ LONG WINAPI _llseek(HFILE f, LONG off, int origin)
     return r < 0 ? HFILE_ERROR : r;
 }
 
+BOOL win_file_save(const char *path, const void *p, uint32_t size)
+{
+    HFILE f = path ? _lcreat(path, 0) : HFILE_ERROR;
+    if (f == HFILE_ERROR)
+        return FALSE;
+    BOOL ok = !size || _hwrite(f, p, (LONG)size) == (LONG)size;
+    return _lclose(f) == 0 && ok;
+}
+
+uint8_t *win_file_load(const char *path, uint32_t *size, uint32_t max)
+{
+    HFILE f = path ? _lopen(path, OF_READ) : HFILE_ERROR;
+    if (f == HFILE_ERROR)
+        return NULL;
+    LONG n = _llseek(f, 0, 2);
+    uint8_t *b = n > 0 && (uint32_t)n <= max ? (uint8_t *)win_alloc((size_t)n) : NULL;
+    if (b && (_llseek(f, 0, 0) != 0 || _hread(f, b, n) != n)) {
+        win_free(b);
+        b = NULL;
+    }
+    _lclose(f);
+    if (b)
+        *size = (uint32_t)n;
+    return b;
+}
+
 /* a task ended: the files it left open are closed */
 void win_files_task_ended(HTASK task)
 {

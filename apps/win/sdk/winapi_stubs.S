@@ -2387,6 +2387,91 @@ SetBitmapBits:
     .ltorg
     .size SetBitmapBits, .-SetBitmapBits
 
+    .section .text.winapi.PlayMetaFile,"ax",%progbits
+    .global PlayMetaFile
+    .type PlayMetaFile, %function
+    .thumb_func
+PlayMetaFile:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =492
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size PlayMetaFile, .-PlayMetaFile
+
+    .section .text.winapi.GetMetaFile,"ax",%progbits
+    .global GetMetaFile
+    .type GetMetaFile, %function
+    .thumb_func
+GetMetaFile:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =496
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetMetaFile, .-GetMetaFile
+
+    .section .text.winapi.CreateMetaFile,"ax",%progbits
+    .global CreateMetaFile
+    .type CreateMetaFile, %function
+    .thumb_func
+CreateMetaFile:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =500
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size CreateMetaFile, .-CreateMetaFile
+
+    .section .text.winapi.CloseMetaFile,"ax",%progbits
+    .global CloseMetaFile
+    .type CloseMetaFile, %function
+    .thumb_func
+CloseMetaFile:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =504
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size CloseMetaFile, .-CloseMetaFile
+
+    .section .text.winapi.DeleteMetaFile,"ax",%progbits
+    .global DeleteMetaFile
+    .type DeleteMetaFile, %function
+    .thumb_func
+DeleteMetaFile:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =508
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size DeleteMetaFile, .-DeleteMetaFile
+
     .section .text.winapi.MulDiv,"ax",%progbits
     .global MulDiv
     .type MulDiv, %function
@@ -2472,6 +2557,23 @@ UnrealizeObject:
     .ltorg
     .size UnrealizeObject, .-UnrealizeObject
 
+    .section .text.winapi.CopyMetaFile,"ax",%progbits
+    .global CopyMetaFile
+    .type CopyMetaFile, %function
+    .thumb_func
+CopyMetaFile:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =604
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size CopyMetaFile, .-CopyMetaFile
+
     .section .text.winapi.CreateIC,"ax",%progbits
     .global CreateIC
     .type CreateIC, %function
@@ -2522,6 +2624,40 @@ CreateDiscardableBitmap:
     bx   r12
     .ltorg
     .size CreateDiscardableBitmap, .-CreateDiscardableBitmap
+
+    .section .text.winapi.GetMetaFileBits,"ax",%progbits
+    .global GetMetaFileBits
+    .type GetMetaFileBits, %function
+    .thumb_func
+GetMetaFileBits:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =636
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetMetaFileBits, .-GetMetaFileBits
+
+    .section .text.winapi.SetMetaFileBits,"ax",%progbits
+    .global SetMetaFileBits
+    .type SetMetaFileBits, %function
+    .thumb_func
+SetMetaFileBits:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =640
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SetMetaFileBits, .-SetMetaFileBits
 
     .section .text.winapi.PtInRegion,"ax",%progbits
     .global PtInRegion
@@ -2590,6 +2726,57 @@ SetRectRgn:
     bx   r12
     .ltorg
     .size SetRectRgn, .-SetRectRgn
+
+    .section .text.winapi.EnumMetaFile,"ax",%progbits
+    .global EnumMetaFile
+    .type EnumMetaFile, %function
+    .thumb_func
+EnumMetaFile:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =700
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size EnumMetaFile, .-EnumMetaFile
+
+    .section .text.winapi.PlayMetaFileRecord,"ax",%progbits
+    .global PlayMetaFileRecord
+    .type PlayMetaFileRecord, %function
+    .thumb_func
+PlayMetaFileRecord:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =704
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size PlayMetaFileRecord, .-PlayMetaFileRecord
+
+    .section .text.winapi.SetMetaFileBitsBetter,"ax",%progbits
+    .global SetMetaFileBitsBetter
+    .type SetMetaFileBitsBetter, %function
+    .thumb_func
+SetMetaFileBitsBetter:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =784
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SetMetaFileBitsBetter, .-SetMetaFileBitsBetter
 
     .section .text.winapi.EnumFontFamilies,"ax",%progbits
     .global EnumFontFamilies
@@ -2794,6 +2981,23 @@ GetSystemPaletteEntries:
     bx   r12
     .ltorg
     .size GetSystemPaletteEntries, .-GetSystemPaletteEntries
+
+    .section .text.winapi.IsValidMetaFile,"ax",%progbits
+    .global IsValidMetaFile
+    .type IsValidMetaFile, %function
+    .thumb_func
+IsValidMetaFile:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =1640
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size IsValidMetaFile, .-IsValidMetaFile
 
     .section .text.winapi.StretchDIBits,"ax",%progbits
     .global StretchDIBits

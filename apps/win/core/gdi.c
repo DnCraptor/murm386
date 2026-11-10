@@ -466,6 +466,10 @@ int WINAPI SetDIBitsToDevice(HDC h, int x, int y, int w, int hh, int sx, int sy,
                              UINT usage)
 {
     DC_OR_RET(h, 0);
+    if (dc->meta) {
+        const int a[9] = { x, y, w, hh, sx, sy, (int)start, (int)lines, (int)usage };
+        return mf_dib(dc, META_SETDIBTODEV, a, 9, bi, bits, usage, (int)lines) ? (int)lines : 0;
+    }
     RGBQUAD *tmp = (RGBQUAD *)win_alloc(256 * sizeof(RGBQUAD));
     gdi_dib b;
     int r = tmp && lines && dib_of(dc, bi, bits, usage, (int)lines, &b, tmp) &&
@@ -479,6 +483,10 @@ int WINAPI StretchDIBits(HDC h, int x, int y, int w, int hh, int sx, int sy, int
                          const void *bits, const BITMAPINFO *bi, UINT usage, DWORD rop)
 {
     DC_OR_RET(h, 0);
+    if (dc->meta) {
+        const int a[11] = { x, y, w, hh, sx, sy, sw, sh, (int)usage, MF_DW(rop) };
+        return mf_dib(dc, META_STRETCHDIB, a, 11, bi, bits, usage, 0) ? sh : 0;
+    }
     RGBQUAD *tmp = (RGBQUAD *)win_alloc(256 * sizeof(RGBQUAD));
     gdi_dib b;
     int r = tmp && dib_of(dc, bi, bits, usage, 0, &b, tmp) &&
@@ -798,6 +806,8 @@ HPALETTE WINAPI SelectPalette(HDC hdc, HPALETTE hp, BOOL bg)
     wdc *dc = gdi_dc(hdc);
     if (!dc || !win_handle_get(hp, WOBJ_PALETTE))
         return 0;
+    if (dc->meta)
+        mf_select(dc, hp);
     HPALETTE old = dc->pal ? dc->pal : win_sys.stock[DEFAULT_PALETTE];
     dc->pal = hp;
     return old;
@@ -810,6 +820,7 @@ UINT WINAPI RealizePalette(HDC hdc)
     wdc *dc = gdi_dc(hdc);
     if (!dc)
         return 0;
+    MF_REC(dc, META_REALIZEPALETTE, 0);
     wpalette *p = dc_palette(dc);
     if (!p || p == win_handle_get(win_sys.stock[DEFAULT_PALETTE], WOBJ_PALETTE))
         return 0;
@@ -1081,6 +1092,7 @@ BOOL WINAPI DeleteDC(HDC h)
     wdc *dc = gdi_dc(h);
     if (!dc)
         return FALSE;
+    mf_dc_gone(dc);
     gdi_reset_dc(h);
     if (dc->bitmap && dc->bitmap != stock_bitmap) {
         wbitmap *bm = (wbitmap *)win_handle_get(dc->bitmap, WOBJ_BITMAP);
@@ -1100,6 +1112,7 @@ int WINAPI SaveDC(HDC h)
     wdc *dc = gdi_dc(h);
     if (!dc)
         return 0;
+    MF_REC(dc, META_SAVEDC, 0);
     wdc *s = (wdc *)win_alloc(sizeof(*s));
     if (!s)
         return 0;
@@ -1118,6 +1131,7 @@ BOOL WINAPI RestoreDC(HDC h, int level)
     wdc *dc = gdi_dc(h);
     if (!dc)
         return FALSE;
+    MF_REC(dc, META_RESTOREDC, 1, level);
     if (level < 0)
         level = dc->save_level + level + 1;
     if (level <= 0 || level > dc->save_level)
@@ -1199,6 +1213,8 @@ HGDIOBJ WINAPI SelectObject(HDC h, HGDIOBJ obj)
     if (!dc)
         return 0;
     HGDIOBJ old;
+    if (dc->meta && win_handle_type(obj) != WOBJ_REGION)
+        mf_select(dc, obj);             /* a region: SelectClipRgn records it */
     switch (win_handle_type(obj)) {
     case WOBJ_PEN:   old = dc->pen;   dc->pen = obj;   return old;
     case WOBJ_BRUSH: old = dc->brush; dc->brush = obj; return old;
@@ -1231,6 +1247,7 @@ BOOL WINAPI DeleteObject(HGDIOBJ obj)
 {
     if (win_handle_is_stock(obj))
         return TRUE;
+    mf_forget(obj);
     int t = win_handle_type(obj);
     void *o = win_handle_get(obj, t);
     if (!o)
@@ -1307,17 +1324,17 @@ int WINAPI GetObject(HGDIOBJ obj, int size, LPVOID buf)
 /* ---------------------------------------------------------------- attributes */
 
 
-COLORREF WINAPI SetTextColor(HDC h, COLORREF c) { DC_OR_RET(h, 0); COLORREF o = dc->text; dc->text = c; return o; }
+COLORREF WINAPI SetTextColor(HDC h, COLORREF c) { DC_OR_RET(h, 0); MF_REC(dc, META_SETTEXTCOLOR, 2, MF_DW(c)); COLORREF o = dc->text; dc->text = c; return o; }
 COLORREF WINAPI GetTextColor(HDC h) { DC_OR_RET(h, 0); return dc->text; }
-COLORREF WINAPI SetBkColor(HDC h, COLORREF c) { DC_OR_RET(h, 0); COLORREF o = dc->bk; dc->bk = c; return o; }
+COLORREF WINAPI SetBkColor(HDC h, COLORREF c) { DC_OR_RET(h, 0); MF_REC(dc, META_SETBKCOLOR, 2, MF_DW(c)); COLORREF o = dc->bk; dc->bk = c; return o; }
 COLORREF WINAPI GetBkColor(HDC h) { DC_OR_RET(h, 0); return dc->bk; }
-int WINAPI SetBkMode(HDC h, int m) { DC_OR_RET(h, 0); int o = dc->bkmode; dc->bkmode = m; return o; }
+int WINAPI SetBkMode(HDC h, int m) { DC_OR_RET(h, 0); MF_REC(dc, META_SETBKMODE, 1, m); int o = dc->bkmode; dc->bkmode = m; return o; }
 int WINAPI GetBkMode(HDC h) { DC_OR_RET(h, 0); return dc->bkmode; }
-int WINAPI SetROP2(HDC h, int r) { DC_OR_RET(h, 0); int o = dc->rop2; if (r >= 1 && r <= 16) dc->rop2 = r; return o; }
+int WINAPI SetROP2(HDC h, int r) { DC_OR_RET(h, 0); MF_REC(dc, META_SETROP2, 1, r); int o = dc->rop2; if (r >= 1 && r <= 16) dc->rop2 = r; return o; }
 int WINAPI GetROP2(HDC h) { DC_OR_RET(h, 0); return dc->rop2; }
-UINT WINAPI SetTextAlign(HDC h, UINT a) { DC_OR_RET(h, 0); UINT o = dc->align; dc->align = a; return o; }
+UINT WINAPI SetTextAlign(HDC h, UINT a) { DC_OR_RET(h, 0); MF_REC(dc, META_SETTEXTALIGN, 1, (int)a); UINT o = dc->align; dc->align = a; return o; }
 UINT WINAPI GetTextAlign(HDC h) { DC_OR_RET(h, 0); return dc->align; }
-int WINAPI SetPolyFillMode(HDC h, int m) { DC_OR_RET(h, 0); int o = dc->polyfill; dc->polyfill = m; return o; }
+int WINAPI SetPolyFillMode(HDC h, int m) { DC_OR_RET(h, 0); MF_REC(dc, META_SETPOLYFILLMODE, 1, m); int o = dc->polyfill; dc->polyfill = m; return o; }
 
 #define MKDW(x, y) ((DWORD)(WORD)(x) | ((DWORD)(WORD)(y) << 16))
 
@@ -1369,6 +1386,7 @@ static void isotropic(wdc *dc)
 int WINAPI SetMapMode(HDC h, int mode)
 {
     DC_OR_RET(h, 0);
+    MF_REC(dc, META_SETMAPMODE, 1, mode);
     int old = dc->mapmode;
     static const int units[] = { 0, 0, 254, 2540, 100, 1000, 1440 };   /* an inch */
     if (mode < MM_TEXT || mode > MM_ANISOTROPIC)
@@ -1415,12 +1433,14 @@ static BOOL set_ext(wdc *dc, int view, int x, int y, LPSIZE old)
 BOOL WINAPI SetWindowExtEx(HDC h, int x, int y, LPSIZE old)
 {
     DC_OR_RET(h, FALSE);
+    MF_REC(dc, META_SETWINDOWEXT, 2, x, y);
     return set_ext(dc, 0, x, y, old);
 }
 
 BOOL WINAPI SetViewportExtEx(HDC h, int x, int y, LPSIZE old)
 {
     DC_OR_RET(h, FALSE);
+    MF_REC(dc, META_SETVIEWPORTEXT, 2, x, y);
     return set_ext(dc, 1, x, y, old);
 }
 
@@ -1467,12 +1487,14 @@ static BOOL scale_ext(wdc *dc, int view, int xn, int xd, int yn, int yd, LPSIZE 
 BOOL WINAPI ScaleViewportExtEx(HDC h, int xn, int xd, int yn, int yd, LPSIZE old)
 {
     DC_OR_RET(h, FALSE);
+    MF_REC(dc, META_SCALEVIEWPORTEXT, 4, xn, xd, yn, yd);
     return scale_ext(dc, 1, xn, xd, yn, yd, old);
 }
 
 BOOL WINAPI ScaleWindowExtEx(HDC h, int xn, int xd, int yn, int yd, LPSIZE old)
 {
     DC_OR_RET(h, FALSE);
+    MF_REC(dc, META_SCALEWINDOWEXT, 4, xn, xd, yn, yd);
     return scale_ext(dc, 0, xn, xd, yn, yd, old);
 }
 
@@ -1504,24 +1526,28 @@ static BOOL set_org(wdc *dc, int view, int x, int y, int rel, LPPOINT old)
 BOOL WINAPI SetWindowOrgEx(HDC h, int x, int y, LPPOINT old)
 {
     DC_OR_RET(h, FALSE);
+    MF_REC(dc, META_SETWINDOWORG, 2, x, y);
     return set_org(dc, 0, x, y, 0, old);
 }
 
 BOOL WINAPI SetViewportOrgEx(HDC h, int x, int y, LPPOINT old)
 {
     DC_OR_RET(h, FALSE);
+    MF_REC(dc, META_SETVIEWPORTORG, 2, x, y);
     return set_org(dc, 1, x, y, 0, old);
 }
 
 BOOL WINAPI OffsetWindowOrgEx(HDC h, int x, int y, LPPOINT old)
 {
     DC_OR_RET(h, FALSE);
+    MF_REC(dc, META_OFFSETWINDOWORG, 2, x, y);
     return set_org(dc, 0, x, y, 1, old);
 }
 
 BOOL WINAPI OffsetViewportOrgEx(HDC h, int x, int y, LPPOINT old)
 {
     DC_OR_RET(h, FALSE);
+    MF_REC(dc, META_OFFSETVIEWPORTORG, 2, x, y);
     return set_org(dc, 1, x, y, 1, old);
 }
 
@@ -1659,6 +1685,7 @@ static void dc_clip_start(wdc *dc)
 int WINAPI SelectClipRgn(HDC h, HRGN hr)
 {
     DC_OR_RET(h, ERROR);
+    MF_REC(dc, META_SELECTCLIPREGION, 1, hr ? mf_object(dc, hr) : -1);  /* -1: none */
     wrgn *g = gdi_region(hr);
     if (!g) {
         dc->has_clip = 0;
@@ -1675,6 +1702,7 @@ int WINAPI SelectClipRgn(HDC h, HRGN hr)
 int WINAPI IntersectClipRect(HDC h, int l, int t, int r, int b)
 {
     DC_OR_RET(h, ERROR);
+    MF_REC(dc, META_INTERSECTCLIPRECT, 4, l, t, r, b);
     RECT rc = { l, t, r, b };
     lp_rect(dc, &rc);
     dc_clip_start(dc);
@@ -1685,6 +1713,7 @@ int WINAPI IntersectClipRect(HDC h, int l, int t, int r, int b)
 int WINAPI ExcludeClipRect(HDC h, int l, int t, int r, int b)
 {
     DC_OR_RET(h, ERROR);
+    MF_REC(dc, META_EXCLUDECLIPRECT, 4, l, t, r, b);
     RECT rc = { l, t, r, b };
     lp_rect(dc, &rc);
     dc_clip_start(dc);
@@ -1847,6 +1876,8 @@ static void fill_rect_dev(wdc *dc, const RECT *rc, const wfill *f, int rop3)
 COLORREF WINAPI SetPixel(HDC h, int x, int y, COLORREF c)
 {
     DC_OR_RET(h, (COLORREF)-1);
+    if (dc->meta)
+        return mf_rec(dc, META_SETPIXEL, 4, x, y, MF_DW(c)) ? c : (COLORREF)-1;
     gdi_lp_to_dp(dc, &x, &y);
     uint8_t idx = gdi_color_index(dc, c);
     RECT b = { x, y, x + 1, y + 1 };
@@ -1874,6 +1905,7 @@ COLORREF WINAPI GetPixel(HDC h, int x, int y)
 DWORD WINAPI MoveTo(HDC h, int x, int y)
 {
     DC_OR_RET(h, 0);
+    MF_REC(dc, META_MOVETO, 2, x, y);
     DWORD o = MKDW(dc->cur.x, dc->cur.y);
     dc->cur.x = x; dc->cur.y = y;
     return o;
@@ -1882,6 +1914,7 @@ DWORD WINAPI MoveTo(HDC h, int x, int y)
 BOOL WINAPI MoveToEx(HDC h, int x, int y, LPPOINT old)
 {
     DC_OR_RET(h, FALSE);
+    MF_REC(dc, META_MOVETO, 2, x, y);
     if (old)
         *old = dc->cur;
     dc->cur.x = x; dc->cur.y = y;
@@ -1942,6 +1975,8 @@ static void line_dev(wdc *dc, wpen *p, int x0, int y0, int x1, int y1, int skip_
 BOOL WINAPI LineTo(HDC h, int x, int y)
 {
     DC_OR_RET(h, FALSE);
+    if (dc->meta)
+        return mf_rec(dc, META_LINETO, 2, x, y);
     wpen *p = dc_pen(dc);
     int x0 = dc->cur.x, y0 = dc->cur.y;
     dc->cur.x = x; dc->cur.y = y;
@@ -1981,6 +2016,8 @@ static void points_bounds(wdc *dc, const POINT *pts, int n, int pad, RECT *b)
 BOOL WINAPI Polyline(HDC h, const POINT *pts, int n)
 {
     DC_OR_RET(h, FALSE);
+    if (dc->meta)
+        return mf_points(dc, pts, &n, 1, META_POLYLINE);
     if (n < 2)
         return FALSE;
     wpen *p = dc_pen(dc);
@@ -2156,6 +2193,8 @@ int WINAPI MulDiv(int a, int b, int c)
 BOOL WINAPI Rectangle(HDC h, int l, int t, int r, int b)
 {
     DC_OR_RET(h, FALSE);
+    if (dc->meta)
+        return mf_rec(dc, META_RECTANGLE, 4, l, t, r, b);
     RECT box;
     if (shape_box(dc, l, t, r, b, &box))
         draw_shape(dc, box, 0, 0);
@@ -2165,6 +2204,8 @@ BOOL WINAPI Rectangle(HDC h, int l, int t, int r, int b)
 BOOL WINAPI RoundRect(HDC h, int l, int t, int r, int b, int w, int hh)
 {
     DC_OR_RET(h, FALSE);
+    if (dc->meta)
+        return mf_rec(dc, META_ROUNDRECT, 6, l, t, r, b, w, hh);
     RECT box;
     if (shape_box(dc, l, t, r, b, &box))
         draw_shape(dc, box, dev_size(dc, w < 0 ? -w : w, 0), dev_size(dc, hh < 0 ? -hh : hh, 1));
@@ -2174,6 +2215,8 @@ BOOL WINAPI RoundRect(HDC h, int l, int t, int r, int b, int w, int hh)
 BOOL WINAPI Ellipse(HDC h, int l, int t, int r, int b)
 {
     DC_OR_RET(h, FALSE);
+    if (dc->meta)
+        return mf_rec(dc, META_ELLIPSE, 4, l, t, r, b);
     RECT box;
     if (shape_box(dc, l, t, r, b, &box))
         draw_shape(dc, box, box.right - box.left, box.bottom - box.top);
@@ -2298,12 +2341,16 @@ static BOOL poly_polygon(wdc *dc, const POINT *pts, const int *counts, int npoly
 BOOL WINAPI Polygon(HDC h, const POINT *pts, int n)
 {
     DC_OR_RET(h, FALSE);
+    if (dc->meta)
+        return mf_points(dc, pts, &n, 1, META_POLYGON);
     return n >= 2 && poly_polygon(dc, pts, &n, 1);
 }
 
 BOOL WINAPI PolyPolygon(HDC h, const POINT *pts, const int *counts, int npoly)
 {
     DC_OR_RET(h, FALSE);
+    if (dc->meta)
+        return mf_points(dc, pts, counts, npoly, META_POLYPOLYGON);
     return npoly > 0 && poly_polygon(dc, pts, counts, npoly);
 }
 
@@ -2438,6 +2485,9 @@ static BOOL arc_call(HDC h, int l, int t, int r, int b, int x1, int y1, int x2, 
                      int kind)
 {
     DC_OR_RET(h, FALSE);
+    if (dc->meta)
+        return mf_rec(dc, kind == ARC_ARC ? META_ARC : kind == ARC_PIE ? META_PIE : META_CHORD,
+                      8, l, t, r, b, x1, y1, x2, y2);
     RECT box;
     if (!shape_box(dc, l, t, r, b, &box))
         return TRUE;
@@ -2467,12 +2517,31 @@ BOOL WINAPI Pie(HDC h, int l, int t, int r, int b, int x1, int y1, int x2, int y
  * as in Windows 3.x */
 HBRUSH (*gdi_sys_color_brush)(int index);
 
+/* FillRect, FrameRect recorded: the brush selected, PATBLTs, the DC's again */
+static int meta_rect(wdc *dc, const RECT *rc, HBRUSH br, int frame)
+{
+    int l = rc->left, t = rc->top, w = rc->right - l, hh = rc->bottom - t;
+    mf_select(dc, br);
+    if (!frame) {
+        mf_rec(dc, META_PATBLT, 6, l, t, w, hh, MF_DW(PATCOPY));
+    } else {
+        mf_rec(dc, META_PATBLT, 6, l, t, w, 1, MF_DW(PATCOPY));
+        mf_rec(dc, META_PATBLT, 6, l, t + hh - 1, w, 1, MF_DW(PATCOPY));
+        mf_rec(dc, META_PATBLT, 6, l, t + 1, 1, hh - 2, MF_DW(PATCOPY));
+        mf_rec(dc, META_PATBLT, 6, l + w - 1, t + 1, 1, hh - 2, MF_DW(PATCOPY));
+    }
+    mf_select(dc, dc->brush);
+    return 1;
+}
+
 int WINAPI FillRect(HDC h, const RECT *rc, HBRUSH br)
 {
     DC_OR_RET(h, 0);
     if (br && (uintptr_t)br <= COLOR_MAX && gdi_sys_color_brush &&
         !win_handle_get(br, WOBJ_BRUSH))
         br = gdi_sys_color_brush((int)(uintptr_t)br - 1);
+    if (dc->meta)
+        return meta_rect(dc, rc, br, 0);
     RECT r = *rc;
     lp_rect(dc, &r);
     if (IsRectEmpty(&r))
@@ -2488,6 +2557,8 @@ int WINAPI FillRect(HDC h, const RECT *rc, HBRUSH br)
 int WINAPI FrameRect(HDC h, const RECT *rc, HBRUSH br)
 {
     DC_OR_RET(h, 0);
+    if (dc->meta)
+        return meta_rect(dc, rc, br, 1);
     RECT r = *rc;
     lp_rect(dc, &r);
     if (IsRectEmpty(&r))
@@ -2512,6 +2583,11 @@ void WINAPI InvertRect(HDC h, const RECT *rc)
     wdc *dc = gdi_dc(h);
     if (!dc)
         return;
+    if (dc->meta) {
+        mf_rec(dc, META_PATBLT, 6, rc->left, rc->top, rc->right - rc->left, rc->bottom - rc->top,
+               MF_DW(DSTINVERT));
+        return;
+    }
     RECT r = *rc;
     lp_rect(dc, &r);
     gdi_begin_draw(dc, &r);
@@ -2552,6 +2628,8 @@ void WINAPI DrawFocusRect(HDC h, const RECT *rc)
 BOOL WINAPI PatBlt(HDC h, int x, int y, int w, int hh, DWORD rop)
 {
     DC_OR_RET(h, FALSE);
+    if (dc->meta)
+        return mf_rec(dc, META_PATBLT, 6, x, y, w, hh, MF_DW(rop));
     RECT r = { x, y, x + w, y + hh };
     lp_rect(dc, &r);
     wfill f;
@@ -2580,6 +2658,8 @@ BOOL WINAPI BitBlt(HDC hd, int x, int y, int w, int h, HDC hs, int sx, int sy, D
     wdc *d = gdi_dc(hd), *s = gdi_dc(hs);
     if (!d)
         return FALSE;
+    if (d->meta)
+        return mf_blt(d, x, y, w, h, hs, sx, sy, w, h, rop, 0);
     int r3 = (int)((rop >> 16) & 0xFF);
     int need_src = ((r3 >> 2) & 0x33) != (r3 & 0x33);
     if (need_src && !s)
@@ -2616,6 +2696,8 @@ BOOL WINAPI StretchBlt(HDC hd, int x, int y, int w, int h,
                        HDC hs, int sx, int sy, int sw, int sh, DWORD rop)
 {
     wdc *d = gdi_dc(hd), *s = gdi_dc(hs);
+    if (d && d->meta)
+        return mf_blt(d, x, y, w, h, hs, sx, sy, sw, sh, rop, 1);
     if (!d || !s)
         return FALSE;
     int x2 = x + w, y2 = y + h, sx2 = sx + sw, sy2 = sy + sh;   /* the corners, in pixels */
@@ -2649,12 +2731,28 @@ BOOL WINAPI StretchBlt(HDC hd, int x, int y, int w, int h,
     return TRUE;
 }
 
+/* a region's logical rectangles in the surface's pixels */
+static void region_dev(wdc *dc, const wrgn *g, wrgn *t)
+{
+    if (dc->mapmode == MM_TEXT) {
+        wrgn_copy(t, g);
+        wrgn_offset(t, dc->vp_x - dc->win_x + dc->org_x, dc->vp_y - dc->win_y + dc->org_y);
+        return;
+    }
+    wrgn_clear(t);                      /* scaled: they may touch now */
+    for (int i = 0; i < g->n; i++) {
+        RECT r = g->r[i];
+        lp_rect(dc, &r);
+        if (r.left < r.right && r.top < r.bottom)
+            wrgn_or_rect(t, &r);
+    }
+}
+
 static BOOL fill_region(wdc *dc, wrgn *g, HBRUSH br, int rop3)
 {
     wrgn t;
     wrgn_init(&t);
-    wrgn_copy(&t, g);
-    wrgn_offset(&t, dc->org_x, dc->org_y);
+    region_dev(dc, g, &t);
     wfill f;
     gdi_realize_brush(dc, br, &f);
     gdi_begin_draw(dc, &t.box);
@@ -2668,6 +2766,8 @@ static BOOL fill_region(wdc *dc, wrgn *g, HBRUSH br, int rop3)
 BOOL WINAPI FillRgn(HDC h, HRGN hr, HBRUSH br)
 {
     DC_OR_RET(h, FALSE);
+    if (dc->meta)
+        return mf_region_op(dc, META_FILLREGION, hr, br, 0, 0);
     wrgn *g = gdi_region(hr);
     return g ? fill_region(dc, g, br, 0xF0) : FALSE;
 }
@@ -2675,6 +2775,8 @@ BOOL WINAPI FillRgn(HDC h, HRGN hr, HBRUSH br)
 BOOL WINAPI PaintRgn(HDC h, HRGN hr)
 {
     DC_OR_RET(h, FALSE);
+    if (dc->meta)
+        return mf_region_op(dc, META_PAINTREGION, hr, 0, 0, 0);
     wrgn *g = gdi_region(hr);
     return g ? fill_region(dc, g, dc->brush, dib_rop2_to_rop3(dc->rop2)) : FALSE;
 }
@@ -2682,6 +2784,8 @@ BOOL WINAPI PaintRgn(HDC h, HRGN hr)
 BOOL WINAPI InvertRgn(HDC h, HRGN hr)
 {
     DC_OR_RET(h, FALSE);
+    if (dc->meta)
+        return mf_region_op(dc, META_INVERTREGION, hr, 0, 0, 0);
     wrgn *g = gdi_region(hr);
     return g ? fill_region(dc, g, 0, 0x55) : FALSE;      /* DSTINVERT */
 }
@@ -2691,6 +2795,8 @@ BOOL WINAPI InvertRgn(HDC h, HRGN hr)
 BOOL WINAPI FrameRgn(HDC h, HRGN hr, HBRUSH br, int w, int hh)
 {
     DC_OR_RET(h, FALSE);
+    if (dc->meta)
+        return mf_region_op(dc, META_FRAMEREGION, hr, br, w, hh);
     wrgn *g = gdi_region(hr);
     if (!g || w < 1 || hh < 1)
         return FALSE;
@@ -2785,6 +2891,7 @@ HRGN WINAPI CreatePolygonRgn(const POINT *pts, int n, int mode)
 int WINAPI OffsetClipRgn(HDC h, int x, int y)
 {
     DC_OR_RET(h, ERROR);
+    MF_REC(dc, META_OFFSETCLIPRGN, 2, x, y);
     if (dc->has_clip) {
         wrgn_offset(&dc->clip, dc->mapmode == MM_TEXT ? x : gdi_lx_to_dx(dc, x),
                     dc->mapmode == MM_TEXT ? y : gdi_ly_to_dy(dc, y));
@@ -2804,6 +2911,8 @@ int WINAPI OffsetClipRgn(HDC h, int x, int y)
 BOOL WINAPI ExtFloodFill(HDC h, int x, int y, COLORREF c, UINT type)
 {
     DC_OR_RET(h, FALSE);
+    if (dc->meta)
+        return mf_rec(dc, META_EXTFLOODFILL, 5, x, y, MF_DW(c), (int)type);
     gdi_lp_to_dp(dc, &x, &y);
     wrgn *e = dc_eff(dc);
     if (!wrgn_pt_in(e, x, y))
@@ -2891,12 +3000,13 @@ BOOL WINAPI FloodFill(HDC h, int x, int y, COLORREF c)
 
 /* ---------------------------------------------------------------- the rest */
 
-int WINAPI SetStretchBltMode(HDC h, int m) { DC_OR_RET(h, 0); int o = dc->stretch; dc->stretch = m; return o; }
+int WINAPI SetStretchBltMode(HDC h, int m) { DC_OR_RET(h, 0); MF_REC(dc, META_SETSTRETCHBLTMODE, 1, m); int o = dc->stretch; dc->stretch = m; return o; }
 int WINAPI GetStretchBltMode(HDC h) { DC_OR_RET(h, 0); return dc->stretch; }
 
 int WINAPI SetTextCharacterExtra(HDC h, int n)
 {
     DC_OR_RET(h, 0x8000);
+    MF_REC(dc, META_SETTEXTCHAREXTRA, 1, n);
     int o = dc->char_extra;
     dc->char_extra = n;
     return o;
@@ -2908,6 +3018,7 @@ int WINAPI GetTextCharacterExtra(HDC h) { DC_OR_RET(h, 0x8000); return dc->char_
 int WINAPI SetTextJustification(HDC h, int extra, int count)
 {
     DC_OR_RET(h, 0);
+    MF_REC(dc, META_SETTEXTJUSTIFICATION, 2, extra, count);
     dc->break_extra = extra;
     dc->break_count = count;
     return 1;

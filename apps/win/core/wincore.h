@@ -29,6 +29,7 @@ enum {
     WOBJ_CLASS,
     WOBJ_ACCEL,
     WOBJ_TASK,
+    WOBJ_METAFILE,
 };
 
 HANDLE win_handle_alloc(int type, void *obj);
@@ -187,6 +188,7 @@ typedef struct wdc {
     POINT    cur;
     int      save_level;
     struct wdc *saved;
+    struct wmrec *meta;     /* CreateMetaFile's: what it records (metafile.c) */
 } wdc;
 
 /* Screen and system state shared by GDI and USER. */
@@ -253,6 +255,38 @@ int      gdi_dy_to_ly(const wdc *dc, int dy);
 int      gdi_lx_to_dx(const wdc *dc, int lx);
 int      gdi_ly_to_dy(const wdc *dc, int ly);
 int      gdi_char_width(const wfont *f, unsigned char ch);
+
+/* metafile.c: a metafile DC's records. mf_rec: n words as the function
+ * has its arguments (a DWORD as MF_DW's two), kept in the record's order
+ * (the last argument first); TRUE once recorded */
+BOOL     mf_rec(wdc *dc, int fn, int n, ...);
+#define  MF_DW(v) (int)((DWORD)(v) >> 16), (int)((DWORD)(v) & 0xffffu)
+#define  MF_REC(dc, ...) do { if ((dc)->meta) mf_rec(dc, __VA_ARGS__); } while (0)
+void     mf_select(wdc *dc, HGDIOBJ obj);       /* SELECTOBJECT, its object made */
+int      mf_object(wdc *dc, HGDIOBJ obj);       /* its index; -1 */
+void     mf_forget(HGDIOBJ obj);                /* DeleteObject: DELETEOBJECT */
+void     mf_dc_gone(wdc *dc);                   /* DeleteDC of one recording */
+BOOL     mf_text(wdc *dc, int x, int y, UINT opts, const RECT *rc, LPCSTR s, int n,
+                 const int *dx, int ext);
+BOOL     mf_points(wdc *dc, const POINT *pts, const int *counts, int npoly, int fn);
+BOOL     mf_dib(wdc *dc, int fn, const int *words, int n, const BITMAPINFO *bi,
+                const void *bits, UINT usage, int lines);
+BOOL     mf_blt(wdc *dc, int x, int y, int w, int h, HDC src, int sx, int sy, int sw, int sh,
+                DWORD rop, int stretch);
+BOOL     mf_region_op(wdc *dc, int fn, HRGN rgn, HBRUSH br, int w, int h);
+/* file.c: a file of size bytes; a whole file's bytes (win_alloc's, at most
+ * max), NULL if not */
+BOOL     win_file_save(const char *path, const void *p, uint32_t size);
+uint8_t *win_file_load(const char *path, uint32_t *size, uint32_t max);
+/* a metafile's bits (its header first), and one of a copy of them */
+const uint8_t *mf_bits(HMETAFILE mf, uint32_t *size);
+HMETAFILE mf_from_bits(const uint8_t *p, uint32_t size);
+/* EnumMetaFile's way: each record to fn (0: stop), the table of the
+ * objects the records made; mf_play_record plays one */
+typedef int (*mf_enum_fn)(void *ctx, HDC h, HGDIOBJ *table, int n, const uint8_t *rec,
+                          uint32_t bytes);
+BOOL     mf_enum(HDC h, HMETAFILE mf, mf_enum_fn fn, void *ctx);
+void     mf_play_record(HDC h, HGDIOBJ *table, int n, const uint8_t *rec, uint32_t bytes);
 
 /* cursor.c */
 void     cursor_init(void);

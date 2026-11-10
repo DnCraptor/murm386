@@ -28,11 +28,13 @@ extern void ChildWindowFromPoint(void);
 extern void Chord(void);
 extern void ClientToScreen(void);
 extern void CloseClipboard(void);
+extern void CloseMetaFile(void);
 extern void CloseWindow(void);
 extern void CombineRgn(void);
 extern void CommDlgExtendedError(void);
 extern void CopyCursor(void);
 extern void CopyIcon(void);
+extern void CopyMetaFile(void);
 extern void CopyRect(void);
 extern void CountClipboardFormats(void);
 extern void CreateAcceleratorTableN(void);
@@ -56,6 +58,7 @@ extern void CreateHatchBrush(void);
 extern void CreateIC(void);
 extern void CreateIcon(void);
 extern void CreateMenu(void);
+extern void CreateMetaFile(void);
 extern void CreatePalette(void);
 extern void CreatePatternBrush(void);
 extern void CreatePen(void);
@@ -79,6 +82,7 @@ extern void DeleteAtom(void);
 extern void DeleteDC(void);
 extern void DeleteFileN(void);
 extern void DeleteMenu(void);
+extern void DeleteMetaFile(void);
 extern void DeleteObject(void);
 extern void DestroyAcceleratorTableN(void);
 extern void DestroyCaret(void);
@@ -109,6 +113,7 @@ extern void EnumChildWindows(void);
 extern void EnumClipboardFormats(void);
 extern void EnumFontFamilies(void);
 extern void EnumFonts(void);
+extern void EnumMetaFile(void);
 extern void EnumProps(void);
 extern void EnumWindows(void);
 extern void EqualRect(void);
@@ -193,6 +198,8 @@ extern void GetMessage(void);
 extern void GetMessageExtraInfo(void);
 extern void GetMessagePos(void);
 extern void GetMessageTime(void);
+extern void GetMetaFile(void);
+extern void GetMetaFileBits(void);
 extern void GetModuleHandle(void);
 extern void GetNearestColor(void);
 extern void GetNearestPaletteIndex(void);
@@ -291,6 +298,7 @@ extern void IsIconic(void);
 extern void IsMenu(void);
 extern void IsRectEmpty(void);
 extern void IsTask(void);
+extern void IsValidMetaFile(void);
 extern void IsWinAppN(void);
 extern void IsWindow(void);
 extern void IsWindowEnabled(void);
@@ -333,6 +341,8 @@ extern void PaintRgn(void);
 extern void PatBlt(void);
 extern void PeekMessage(void);
 extern void Pie(void);
+extern void PlayMetaFile(void);
+extern void PlayMetaFileRecord(void);
 extern void PolyPolygon(void);
 extern void Polygon(void);
 extern void Polyline(void);
@@ -399,6 +409,8 @@ extern void SetLocalTimeN(void);
 extern void SetMapMode(void);
 extern void SetMenu(void);
 extern void SetMenuItemBitmaps(void);
+extern void SetMetaFileBits(void);
+extern void SetMetaFileBitsBetter(void);
 extern void SetPaletteEntries(void);
 extern void SetParent(void);
 extern void SetPixel(void);
@@ -626,18 +638,29 @@ static const void *const exports_gdi[486] = {
     [101] = (const void *)OffsetRgn,
     [103] = (const void *)PtVisible,
     [106] = (const void *)SetBitmapBits,
+    [123] = (const void *)PlayMetaFile,
+    [124] = (const void *)GetMetaFile,
+    [125] = (const void *)CreateMetaFile,
+    [126] = (const void *)CloseMetaFile,
+    [127] = (const void *)DeleteMetaFile,
     [128] = (const void *)MulDiv,
     [134] = (const void *)GetRgnBox,
     [148] = (const void *)SetBrushOrg,
     [149] = (const void *)GetBrushOrg,
     [150] = (const void *)UnrealizeObject,
+    [151] = (const void *)CopyMetaFile,
     [153] = (const void *)CreateIC,
     [154] = (const void *)GetNearestColor,
     [156] = (const void *)CreateDiscardableBitmap,
+    [159] = (const void *)GetMetaFileBits,
+    [160] = (const void *)SetMetaFileBits,
     [161] = (const void *)PtInRegion,
     [162] = (const void *)GetBitmapDimension,
     [163] = (const void *)SetBitmapDimension,
     [172] = (const void *)SetRectRgn,
+    [175] = (const void *)EnumMetaFile,
+    [176] = (const void *)PlayMetaFileRecord,
+    [196] = (const void *)SetMetaFileBitsBetter,
     [330] = (const void *)EnumFontFamilies,
     [345] = (const void *)GetTextAlign,
     [346] = (const void *)SetTextAlign,
@@ -650,6 +673,7 @@ static const void *const exports_gdi[486] = {
     [370] = (const void *)GetNearestPaletteIndex,
     [372] = (const void *)ExtFloodFill,
     [375] = (const void *)GetSystemPaletteEntries,
+    [410] = (const void *)IsValidMetaFile,
     [439] = (const void *)StretchDIBits,
     [440] = (const void *)SetDIBits,
     [441] = (const void *)GetDIBits,

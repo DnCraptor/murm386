@@ -610,6 +610,125 @@ UINT    WINAPI GetPaletteEntries(HPALETTE pal, UINT first, UINT n, LPPALETTEENTR
 UINT    WINAPI SetPaletteEntries(HPALETTE pal, UINT first, UINT n, const PALETTEENTRY *pe);
 UINT    WINAPI GetSystemPaletteEntries(HDC hdc, UINT first, UINT n, LPPALETTEENTRY pe);
 
+/* ---------------------------------------------------------------- metafiles */
+
+/* A metafile: the GDI calls made on a DC of CreateMetaFile's, as records
+ * (Windows 3.x's), played on another DC */
+typedef HANDLE          HMETAFILE;
+
+typedef struct tagMETAHEADER {
+    WORD  mtType, mtHeaderSize, mtVersion;
+    DWORD mtSize;                   /* in words, as the records' sizes */
+    WORD  mtNoObjects;
+    DWORD mtMaxRecord;
+    WORD  mtNoParameters;
+} METAHEADER;                       /* 18 bytes in a file: packed there */
+
+typedef struct tagMETARECORD {
+    DWORD rdSize;                   /* in words, these 3 too */
+    WORD  rdFunction;
+    WORD  rdParm[1];
+} METARECORD, *LPMETARECORD;
+
+typedef struct tagHANDLETABLE {
+    HGDIOBJ objectHandle[1];
+} HANDLETABLE, *LPHANDLETABLE;
+
+typedef struct tagMETAFILEPICT {
+    int mm, xExt, yExt;
+    HMETAFILE hMF;
+} METAFILEPICT, *LPMETAFILEPICT;
+
+#define META_SETBKCOLOR             0x0201
+#define META_SETBKMODE              0x0102
+#define META_SETMAPMODE             0x0103
+#define META_SETROP2                0x0104
+#define META_SETRELABS              0x0105
+#define META_SETPOLYFILLMODE        0x0106
+#define META_SETSTRETCHBLTMODE      0x0107
+#define META_SETTEXTCHAREXTRA       0x0108
+#define META_SETTEXTCOLOR           0x0209
+#define META_SETTEXTJUSTIFICATION   0x020A
+#define META_SETWINDOWORG           0x020B
+#define META_SETWINDOWEXT           0x020C
+#define META_SETVIEWPORTORG         0x020D
+#define META_SETVIEWPORTEXT         0x020E
+#define META_OFFSETWINDOWORG        0x020F
+#define META_SCALEWINDOWEXT         0x0410
+#define META_OFFSETVIEWPORTORG      0x0211
+#define META_SCALEVIEWPORTEXT       0x0412
+#define META_LINETO                 0x0213
+#define META_MOVETO                 0x0214
+#define META_EXCLUDECLIPRECT        0x0415
+#define META_INTERSECTCLIPRECT      0x0416
+#define META_ARC                    0x0817
+#define META_ELLIPSE                0x0418
+#define META_FLOODFILL              0x0419
+#define META_PIE                    0x081A
+#define META_RECTANGLE              0x041B
+#define META_ROUNDRECT              0x061C
+#define META_PATBLT                 0x061D
+#define META_SAVEDC                 0x001E
+#define META_SETPIXEL               0x041F
+#define META_OFFSETCLIPRGN          0x0220
+#define META_TEXTOUT                0x0521
+#define META_BITBLT                 0x0922
+#define META_STRETCHBLT             0x0B23
+#define META_POLYGON                0x0324
+#define META_POLYLINE               0x0325
+#define META_ESCAPE                 0x0626
+#define META_RESTOREDC              0x0127
+#define META_FILLREGION             0x0228
+#define META_FRAMEREGION            0x0429
+#define META_INVERTREGION           0x012A
+#define META_PAINTREGION            0x012B
+#define META_SELECTCLIPREGION       0x012C
+#define META_SELECTOBJECT           0x012D
+#define META_SETTEXTALIGN           0x012E
+#define META_DRAWTEXT               0x062F
+#define META_CHORD                  0x0830
+#define META_SETMAPPERFLAGS         0x0231
+#define META_EXTTEXTOUT             0x0A32
+#define META_SETDIBTODEV            0x0D33
+#define META_SELECTPALETTE          0x0234
+#define META_REALIZEPALETTE         0x0035
+#define META_ANIMATEPALETTE         0x0436
+#define META_SETPALENTRIES          0x0037
+#define META_POLYPOLYGON            0x0538
+#define META_RESIZEPALETTE          0x0139
+#define META_DIBBITBLT              0x0940
+#define META_DIBSTRETCHBLT          0x0B41
+#define META_DIBCREATEPATTERNBRUSH  0x0142
+#define META_STRETCHDIB             0x0F43
+#define META_EXTFLOODFILL           0x0548
+#define META_DELETEOBJECT           0x01F0
+#define META_CREATEPALETTE          0x00F7
+#define META_CREATEBRUSH            0x00F8
+#define META_CREATEPATTERNBRUSH     0x01F9
+#define META_CREATEPENINDIRECT      0x02FA
+#define META_CREATEFONTINDIRECT     0x02FB
+#define META_CREATEBRUSHINDIRECT    0x02FC
+#define META_CREATEBITMAPINDIRECT   0x02FD
+#define META_CREATEBITMAP           0x06FE
+#define META_CREATEREGION           0x06FF
+
+HDC       WINAPI CreateMetaFile(LPCSTR file);
+HMETAFILE WINAPI CloseMetaFile(HDC hdc);
+BOOL      WINAPI DeleteMetaFile(HMETAFILE mf);
+BOOL      WINAPI PlayMetaFile(HDC hdc, HMETAFILE mf);
+HMETAFILE WINAPI GetMetaFile(LPCSTR file);
+HMETAFILE WINAPI CopyMetaFile(HMETAFILE mf, LPCSTR file);
+BOOL      WINAPI IsValidMetaFile(HMETAFILE mf);
+/* the bits in a global block of their own, the metafile gone; the block's
+ * bits a metafile, the block freed */
+HGLOBAL   WINAPI GetMetaFileBits(HMETAFILE mf);
+HMETAFILE WINAPI SetMetaFileBits(HGLOBAL bits);
+HMETAFILE WINAPI SetMetaFileBitsBetter(HGLOBAL bits);
+typedef int (CALLBACK *MFENUMPROC)(HDC hdc, HANDLETABLE *ht, METARECORD *mr, int n,
+                                   LPARAM lp);
+BOOL      WINAPI EnumMetaFile(HDC hdc, HMETAFILE mf, MFENUMPROC proc, LPARAM lp);
+void      WINAPI PlayMetaFileRecord(HDC hdc, HANDLETABLE *ht, METARECORD *mr, UINT n);
+
 /* ---------------------------------------------------------------- RECT */
 
 BOOL    WINAPI SetRect(LPRECT rc, int l, int t, int r, int b);

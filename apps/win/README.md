@@ -99,7 +99,7 @@ the status word, clear, "a coprocessor": others return 0);
 `__WinEm87Info`, `__WinEm87Save` and `__WinEm87Restore` do nothing (the
 tasks share the coprocessor, as they share Windows' one).
 
-The functions a program can call: some 320 go the generic way
+The functions a program can call: some 330 go the generic way
 (`core/ne_sigs.h`, made by `sdk/gen_ne_sigs.py` from the native prototypes:
 words, signed words, dwords, strings, buffers with their sizes, RECTs,
 POINTs, converted and handed to the function of the native export table);
@@ -130,9 +130,20 @@ DPtoLP and LPtoDP; Arc, Pie, Chord, PolyPolygon, FloodFill and
 ExtFloodFill; elliptic, rounded and polygonal regions, FrameRgn,
 InvertRgn, OffsetClipRgn; DIBs: SetDIBitsToDevice, StretchDIBits,
 CreateDIBitmap, SetDIBits, GetDIBits, CreateDIBPatternBrush (within one
-block, 1, 4, 8 or 24 bits, no RLE); EnumFonts and EnumFontFamilies (the
+block, 1, 4, 8 or 24 bits, no RLE); metafiles: CreateMetaFile records
+(Windows 3.x's records: pens, brushes, fonts, regions and palettes made
+as they are selected, shapes, text, PatBlt, BitBlt and StretchBlt with
+the source's pixels as a DIB, the DIB functions, the attributes, origins,
+extents and clipping), CloseMetaFile, PlayMetaFile, EnumMetaFile and
+PlayMetaFileRecord (the table of objects in the program's memory),
+GetMetaFile (a placeable one's header skipped), CopyMetaFile,
+Get/SetMetaFileBits (a global block of the program's), IsValidMetaFile;
+regions painted (FillRgn and the rest) in logical coordinates, as the
+mapping mode has them; EnumFonts and EnumFontFamilies (the
 stock fonts), GetCharWidth, LineDDA, SetTextCharacterExtra; no printers
-(StartDoc and the rest fail, Escape does nothing); COMMDLG's Open and
+(StartDoc and the rest fail, Escape does nothing); no serial or parallel
+ports (OpenComm fails with IE_HARDWARE, the other comm functions with
+their errors); COMMDLG's Open and
 Save dialogs, Find and Replace (its FINDREPLACE in the messages, its own),
 GetFileTitle; SHELL's ShellExecute (a program, or a document by WIN.INI's
 [Extensions]), FindExecutable, ShellAbout, ExtractIcon, DragAcceptFiles,
@@ -190,8 +201,9 @@ point: WIN87EM), `OWAPI` (KERNEL and USER beyond the basics: selectors,
 pointers, dialogs with an lParam, class words, hooks), `OWGDI` (GDI beyond
 the basics: arcs, flood fill, regions, the mapping modes, DIBs, fonts
 enumerated), `OWAPI2` (the clipboard, DlgDirList, window placement,
-properties, menus from memory, cursors and icons of bits; a call WINN has
-not) (`make NEFIXTURES` in
+properties, menus from memory, cursors and icons of bits; OpenComm; a call
+WINN has not), `OWMETA` (a metafile recorded, played, scaled, enumerated
+record by record, its bits and a file) (`make NEFIXTURES` in
 `host/`). All have DOS MZ stubs that explain how to launch them under WINN
 when invoked directly from DOS. `host/test_ne_run` runs them on the
 emulator's own i386 core (`src/i386.c` as it is, built for the host with
@@ -199,7 +211,7 @@ the stand-ins in `host/x86run/`), and so does the host `winhost`: they are
 in its `HOSTWIN/` (`scripts/owwin.txt`, `scripts/owmenu.txt`,
 `scripts/owdemo.txt`, `scripts/owfile.txt`, `scripts/owres.txt`,
 `scripts/owkern.txt`, `scripts/owdll.txt`, `scripts/owfpu.txt`, `scripts/owapi.txt`, `scripts/owgdi.txt`,
-`scripts/owapi2.txt`).
+`scripts/owapi2.txt`, `scripts/owmeta.txt`).
 
     WINN [:] [program [arguments]]
 

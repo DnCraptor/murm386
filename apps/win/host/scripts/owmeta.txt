@@ -1,0 +1,22 @@
+# Metafiles for a Win16 program on the i386 core: one recorded
+# (CreateMetaFile), played as it is, into half the size (MM_ANISOTROPIC)
+# and record by record (EnumMetaFile, PlayMetaFileRecord); its bits
+# (GetMetaFileBits, SetMetaFileBits) and a file (CopyMetaFile,
+# GetMetaFile) and back:
+#     ./winhost scripts/owmeta.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OWMETA
+key RETURN
+wait 200
+snap ok_meta.ppm
+keydown ALT
+key F4
+keyup ALT
+wait 50
+snap ok_meta_end.ppm
+exit

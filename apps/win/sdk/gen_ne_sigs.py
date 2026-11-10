@@ -74,6 +74,8 @@ SKIP = {
     'SetClipboardData', 'GetClipboardData', 'CloseClipboard', 'EmptyClipboard',
     # a spec changed in place, a selection's text (no size): ne_guest_call.c
     'DlgDirList', 'DlgDirListComboBox', 'DlgDirSelect', 'DlgDirSelectComboBox',
+    # a metafile's bits in global blocks, its records to a procedure: ne_guest_kernel.c
+    'GetMetaFileBits', 'SetMetaFileBits', 'SetMetaFileBitsBetter',
 }
 
 COUNTS = re.compile(r'^(n|c|cb|cch|count|len|nCount|cbString|size)$')

@@ -679,9 +679,110 @@ static __attribute__((noinline)) int gdi_buffers(args *a, uint16_t service, uint
     return 0;
 }
 
+/* EnumMetaFile's procedure of the program's: (HDC, HANDLETABLE FAR *,
+ * METARECORD FAR *, int, LPARAM); the table on its stack (its changes
+ * back), the record in a block of the program's, as large as the longest */
+typedef struct {
+    args *a;
+    uint32_t proc, lp;
+    uint16_t sel;                       /* the record's block */
+    uint32_t size;
+} mf_enum_ctx;
+
+static int ne_mfproc(void *ctx, HDC h, HGDIOBJ *table, int n, const uint8_t *rec, uint32_t bytes)
+{
+    mf_enum_ctx *e = (mf_enum_ctx *)ctx;
+    uint8_t t[2 * 256];
+    if (n > 256 || bytes > e->size || !wr_(e->a, (uint32_t)e->sel << 16, rec, bytes))
+        return 0;
+    for (int i = 0; i < n; i++)
+        wr16(t + 2 * i, table[i]);
+    uint16_t len = (uint16_t)(2 * (n ? n : 1));
+    uint32_t far = win_ne_blob_far(e->a->ctx, len);
+    const uint16_t words[8] = { h, (uint16_t)(far >> 16), (uint16_t)far, e->sel, 0, (uint16_t)n,
+                                (uint16_t)(e->lp >> 16), (uint16_t)e->lp };
+    int r = (int16_t)win_ne_call(e->a->ctx, e->proc, words, 8, t, len);
+    for (int i = 0; i < n; i++)                 /* PlayMetaFileRecord's objects */
+        table[i] = rd16(t + 2 * i);
+    return r;
+}
+
+/* the metafiles' bits in the program's global blocks, the records to its
+ * procedure, one record of its played */
+static __attribute__((noinline)) int metafile_service(args *a, uint16_t service, uint32_t *v)
+{
+    win_ne_guest_image *g = (win_ne_guest_image *)a->ctx->image;
+    switch (service) {
+    case 0x309f: {                      /* GetMetaFileBits(HMETAFILE): a block of its bits */
+        uint32_t n = 0;
+        const uint8_t *p = mf_bits(w(a, 4), &n);
+        uint16_t sel = p && n <= 0x10000u ? win_ne_guest_global_alloc(g, n) : 0;
+        if (sel && !wr_(a, (uint32_t)sel << 16, p, n)) {
+            win_ne_guest_global_free(g, sel);
+            sel = 0;
+        }
+        if (sel)
+            DeleteMetaFile(w(a, 4));
+        *v = sel;
+        return 1;
+    }
+    case 0x30a0: case 0x30c4: {         /* SetMetaFileBits(Better)(HGLOBAL): the block taken */
+        uint16_t sel = w(a, 4);
+        win_ne_guest_segment *s = win_ne_guest_global(g, sel);
+        uint8_t *p = s ? bytes_in(a, (uint32_t)sel << 16, s->size) : NULL;
+        *v = p ? mf_from_bits(p, s->size) : 0;
+        win_free(p);
+        if (*v) {
+            win_ne_guest_global_free(g, sel);
+            win_ne_forget_selector(a->ctx, a->cpu, sel);
+        }
+        return 1;
+    }
+    case 0x30af: {                      /* EnumMetaFile(HDC, HMETAFILE, proc, LPARAM) */
+        uint32_t n = 0;
+        const uint8_t *p = mf_bits(w(a, 12), &n);
+        mf_enum_ctx e = { a, dw(a, 8), dw(a, 4), 0, 0 };
+        if (p && n >= 18)
+            e.size = (uint32_t)(p[12] | p[13] << 8 | p[14] << 16 | (uint32_t)p[15] << 24) * 2u;
+        if (a->bad || !e.proc || !e.size || e.size > 0x10000u ||
+            !(e.sel = win_ne_guest_global_alloc(g, e.size)))
+            return 1;
+        *v = (uint16_t)mf_enum(w(a, 14), w(a, 12), ne_mfproc, &e);
+        win_ne_guest_global_free(g, e.sel);
+        win_ne_forget_selector(a->ctx, a->cpu, e.sel);
+        return 1;
+    }
+    case 0x30b0: {                      /* PlayMetaFileRecord(HDC, HANDLETABLE FAR *,
+                                         * METARECORD FAR *, UINT) */
+        int n = w(a, 4);
+        uint32_t ht = dw(a, 10), mr = dw(a, 6);
+        uint8_t head[4], t[2 * 256];
+        HGDIOBJ table[256];
+        if (a->bad || n > 256 || !rd_(a, mr, head, 4) || !rd_(a, ht, t, 2u * (uint32_t)n))
+            return 1;
+        uint32_t bytes = rd16(head) * 2u;
+        uint8_t *rec = rd16(head + 2) || bytes < 6 ? NULL : bytes_in(a, mr, bytes);
+        if (!rec)
+            return 1;
+        for (int i = 0; i < n; i++)
+            table[i] = rd16(t + 2 * i);
+        mf_play_record(w(a, 14), table, n, rec, bytes);
+        win_free(rec);
+        for (int i = 0; i < n; i++)
+            wr16(t + 2 * i, table[i]);
+        wr_(a, ht, t, 2u * (uint32_t)n);
+        return 1;
+    }
+    default:
+        return 0;
+    }
+}
+
 static __attribute__((noinline)) int gdi_more(args *a, uint16_t service, uint32_t *v, int *dword)
 {
     if (dib_service(a, service, v))
+        return 1;
+    if (metafile_service(a, service, v))
         return 1;
     switch (service) {
     case 0x3043: case 0x3063: {         /* DPtoLP, LPtoDP(HDC, LPPOINT, int) */
@@ -1107,6 +1208,26 @@ int ne_kernel_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *d
     if (gdi_more(a, service, v, dword))
         return 1;
     switch (service) {
+    /* the serial and parallel ports: none (USER's comm functions) */
+    case 0x10c8:                        /* OpenComm(LPCSTR, UINT, UINT) */
+        *v = (uint16_t)-10;             /* IE_HARDWARE */
+        return 1;
+    case 0x10cb:                        /* GetCommError(int, COMSTAT FAR *) */
+        *v = 0x8000;                    /* CE_MODE: no such device */
+        return 1;
+    case 0x10d0: case 0x10d1:           /* SetCommEventMask: no event word, GetCommEventMask */
+    case 0x10f5:                        /* EnableCommNotification: FALSE */
+        *v = 0;
+        *dword = service == 0x10d0;
+        return 1;
+    case 0x10c9: case 0x10ca: case 0x10cc: case 0x10cd: case 0x10ce: case 0x10cf:
+    case 0x10d2: case 0x10d3: case 0x10d4: case 0x10d5: case 0x10d7:
+        *v = (uint16_t)-1;              /* the rest of them: an error */
+        return 1;
+    case 0x10d6:                        /* EscapeCommFunction: a LONG */
+        *v = 0xffffffffu;
+        *dword = 1;
+        return 1;
     case 25: case 169:                  /* GlobalCompact, GetFreeSpace: what DOS has left */
         *v = 0x00080000u;
         *dword = 1;

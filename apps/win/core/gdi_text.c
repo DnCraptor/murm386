@@ -335,6 +335,8 @@ BOOL WINAPI ExtTextOut(HDC h, int x, int y, UINT opts, const RECT *rc,
         return FALSE;
     if (!s)
         n = 0;
+    if (dc->meta)
+        return mf_text(dc, x, y, opts, rc, s, (int)n, dx, 1);
     if (dc->align & TA_UPDATECP) {
         x = dc->cur.x;
         y = dc->cur.y;
@@ -414,6 +416,9 @@ BOOL WINAPI TextOut(HDC h, int x, int y, LPCSTR s, int n)
 {
     if (n < 0)
         n = lstrlen(s);
+    wdc *dc = gdi_dc(h);
+    if (dc && dc->meta)
+        return mf_text(dc, x, y, 0, NULL, s, n, NULL, 0);
     return ExtTextOut(h, x, y, 0, NULL, s, (UINT)n, NULL);
 }
 
