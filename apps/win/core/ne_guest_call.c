@@ -457,13 +457,39 @@ static uint16_t local_alloc(args *a, ne_user *u, int heap, uint32_t size)
     return 0;
 }
 
+/* the bytes of a heap's blocks */
+static uint32_t local_used(ne_user *u, int heap)
+{
+    uint32_t n = 0;
+    for (int i = 0; i < NE_LOCALS; i++)
+        if (u->local[i].size && u->local[i].heap == heap)
+            n += u->local[i].size;
+    return n;
+}
+
 static int local_service(args *a, ne_user *u, uint16_t service, uint32_t *v)
 {
     int i;
-    if (service < 4 || service > 10)
+    if ((service < 4 || service > 13) && service != 121 && service != 161 && service != 162)
         return 0;
     int heap = heap_of(a, u, a->cpu ? a->cpu->ds : 0);
+    /* the heap's size: its place in the segment, and as far as it may grow */
+    uint32_t size = heap < 0 ? 0 : (uint32_t)(u->heap[heap].hi - u->heap[heap].lo) +
+                                   (0xfff0u - u->heap[heap].end);
     switch (service) {
+    case 11:                            /* LocalHandle(near pointer): the handle is it */
+        *v = local_find(u, heap, w(a, 4)) >= 0 ? w(a, 4) : 0;
+        return 1;
+    case 12:                            /* LocalFlags: fixed, not locked */
+        *v = 0;
+        return 1;
+    case 13: case 121:                  /* LocalCompact(UINT), LocalShrink(HLOCAL, UINT) */
+    case 161: case 162:                 /* LocalCountFree, LocalHeapSize */
+        *v = service == 162 || service == 121 ? size :
+             heap < 0 ? 0 : size - local_used(u, heap);
+        if (*v > 0xfff0u)
+            *v = 0xfff0u;
+        return 1;
     case 4: {                           /* LocalInit(seg, start, end) */
         uint16_t seg = w(a, 8), start = w(a, 6), end = w(a, 4);
         int h = seg ? heap_of(a, u, seg) : heap;
@@ -546,15 +572,23 @@ static int global_service(args *a, uint16_t service, uint32_t *v, int *dword)
         return 1;
     case 17:                            /* GlobalFree(h): 0 */
         h = w(a, 4);
-        *v = win_ne_guest_global_free(g, h) ? 0 : h;
+        *v = h;
+        if (win_ne_guest_global_free(g, h)) {
+            win_ne_forget_selector(a->ctx, a->cpu, h);
+            *v = 0;
+        }
         return 1;
-    case 18:                            /* GlobalLock(h): sel:0 */
+    case 18: case 111:                  /* GlobalLock, GlobalWire(h): sel:0 */
         h = w(a, 4);
         *v = win_ne_guest_global(g, h) ? (uint32_t)(h & ~7u) << 16 : 0;
         *dword = 1;
         return 1;
     case 19: case 24:                   /* GlobalUnlock, UnlockSegment */
+    case 192: case 197: case 198:       /* GlobalPageUnlock, GlobalFix, GlobalUnfix */
         *v = 0;
+        return 1;
+    case 112: case 191:                 /* GlobalUnWire: TRUE; GlobalPageLock: its count */
+        *v = win_ne_guest_global(g, w(a, 4)) != NULL;
         return 1;
     case 20:                            /* GlobalSize(h): DWORD */
         s = win_ne_guest_global(g, w(a, 4));
@@ -832,11 +866,14 @@ typedef struct {
     ne_user *u;
     uint32_t proc;
     uint32_t lp;
+    HTASK task;                         /* EnumTaskWindows': its windows only */
 } enum_ctx;
 
 static BOOL CALLBACK ne_enumproc(HWND h, LPARAM lp)
 {
     const enum_ctx *e = (const enum_ctx *)(uintptr_t)lp;
+    if (e->task && GetWindowTask(h) != e->task)
+        return TRUE;
     const uint16_t words[3] = { (uint16_t)h, (uint16_t)(e->lp >> 16), (uint16_t)e->lp };
     return (uint16_t)win_ne_call(e->u->ctx, e->proc, words, 3, NULL, 0) != 0;
 }
@@ -875,6 +912,18 @@ static uint32_t token_of(WNDPROC p)
 static WNDPROC token_proc(uint32_t t)
 {
     return (t >> 16) == 0xffffu && (t & 0xffffu) < 32 ? tokens[t & 0xffffu] : NULL;
+}
+
+/* the program's class (its index) a window is of, -1 if none */
+static int class_of(ne_user *u, HWND h)
+{
+    char cls[32];
+    if (!GetClassName(h, cls, sizeof(cls)))
+        return -1;
+    for (int i = 0; i < NE_CLASSES; i++)
+        if (u->cls[i].proc && !lstrcmpi(u->cls[i].name, cls))
+            return i;
+    return -1;
 }
 
 /* the window procedure of a window, as the program sees it */
@@ -1221,7 +1270,7 @@ int ne_call(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword)
     }
     case 0x1036: case 0x1037: {         /* EnumWindows(proc, LPARAM),
                                          * EnumChildWindows(HWND, proc, LPARAM) */
-        enum_ctx e = { u, dw(a, 8), dw(a, 4) };
+        enum_ctx e = { u, dw(a, 8), dw(a, 4), 0 };
         if (a->bad)
             return 1;
         *v = (uint16_t)(service == 0x1036 ? EnumWindows(ne_enumproc, (LPARAM)(uintptr_t)&e)
@@ -1285,10 +1334,124 @@ int ne_call(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword)
     case 0x1081: case 0x1083: {         /* GetClassWord, GetClassLong(HWND, int) */
         int idx = (int16_t)w(a, 4);
         HWND h = w(a, 6);
+        int own = class_of(u, h);
         if (service == 0x1081)
             *v = GetClassWord(h, idx);
+        else if (idx == GCL_WNDPROC)    /* its own procedure, or a native one's token */
+            *v = own >= 0 ? u->cls[own].proc :
+                 token_of((WNDPROC)(intptr_t)GetClassLong(h, idx)), *dword = 1;
         else
             *v = (uint32_t)GetClassLong(h, idx), *dword = 1;
+        return 1;
+    }
+    case 0x1082:                        /* SetClassWord(HWND, int, WORD) */
+        *v = SetClassWord(w(a, 8), (int16_t)w(a, 6), w(a, 4));
+        return 1;
+    case 0x1084: {                      /* SetClassLong(HWND, int, LONG) */
+        int idx = (int16_t)w(a, 6), own = class_of(u, w(a, 8));
+        uint32_t x = dw(a, 4);
+        *dword = 1;
+        if (idx != GCL_WNDPROC)
+            *v = (uint32_t)SetClassLong(w(a, 8), idx, (LONG)x);
+        else if (own >= 0 && x && !token_proc(x)) {
+            *v = u->cls[own].proc;      /* its class's windows (those there too) */
+            u->cls[own].proc = x;
+        }
+        return 1;
+    }
+    case 0x10de: case 0x10df: {         /* GetKeyboardState, SetKeyboardState(LPBYTE) */
+        BYTE keys[256];
+        if (service == 0x10de) {
+            GetKeyboardState(keys);
+            wr(a, dw(a, 4), keys, sizeof(keys));
+        } else if (rd(a, dw(a, 4), keys, sizeof(keys))) {
+            SetKeyboardState(keys);
+        }
+        return 1;
+    }
+    case 0x1102: {                      /* MapWindowPoints(HWND, HWND, LPPOINT, UINT) */
+        UINT n = w(a, 4);
+        uint32_t p = dw(a, 6);
+        HWND from = w(a, 12), to = w(a, 10);
+        for (UINT i = 0; !a->bad && i < n; i++, p += 4) {
+            uint8_t g[4];
+            if (!rd(a, p, g, sizeof(g)))
+                break;
+            POINT pt = { (int16_t)rd16(g), (int16_t)rd16(g + 2) };
+            MapWindowPoints(from, to, &pt, 1);
+            wr16(g, (uint16_t)pt.x);
+            wr16(g + 2, (uint16_t)pt.y);
+            wr(a, p, g, sizeof(g));
+        }
+        return 1;
+    }
+    case 0x10e1: {                      /* EnumTaskWindows(HTASK, proc, LPARAM) */
+        enum_ctx e = { u, dw(a, 8), dw(a, 4), w(a, 12) };
+        if (!a->bad && e.task)
+            *v = (uint16_t)EnumWindows(ne_enumproc, (LPARAM)(uintptr_t)&e);
+        return 1;
+    }
+    /* hooks: taken, never called (a message filter, a keyboard hook ... sees
+     * nothing); the next one in the chain is none */
+    case 0x1079:                        /* SetWindowsHook(int, HOOKPROC): the one before */
+    case 0x10eb:                        /* DefHookProc(int, WPARAM, LPARAM, HHOOK FAR *) */
+    case 0x1125:                        /* CallNextHookEx(HHOOK, int, WPARAM, LPARAM) */
+        *v = 0;
+        *dword = 1;
+        return 1;
+    case 0x1123:                        /* SetWindowsHookEx(int, HOOKPROC, HINSTANCE, HTASK) */
+        *v = 0x484b0000u | (uint16_t)w(a, 12);
+        *dword = 1;
+        return 1;
+    case 0x10ea: case 0x1124:           /* UnhookWindowsHook, UnhookWindowsHookEx */
+        *v = 1;
+        return 1;
+    case 0x107b:                        /* CallMsgFilter(LPMSG, int): not handled */
+        *v = 0;
+        return 1;
+    case 0x10b9: {                      /* GrayString(HDC, HBRUSH, proc, LPARAM, n, x, y, cx, cy) */
+        HDC dc = w(a, 24);
+        uint32_t proc = dw(a, 18), lp = dw(a, 14);
+        int n = (int16_t)w(a, 12), x = (int16_t)w(a, 10), y = (int16_t)w(a, 8);
+        if (a->bad)
+            return 1;
+        if (proc) {                     /* its own drawing, as it is (not grayed) */
+            const uint16_t words[4] = { (uint16_t)dc, (uint16_t)(lp >> 16), (uint16_t)lp,
+                                        (uint16_t)n };
+            *v = (uint16_t)win_ne_call(c, proc, words, 4, NULL, 0) != 0;
+            return 1;
+        }
+        char text[256];
+        if (!str(a, lp, text, sizeof(text)))
+            return 1;
+        if (n <= 0 || n > (int)strlen(text))
+            n = (int)strlen(text);
+        COLORREF old = SetTextColor(dc, GetSysColor(COLOR_GRAYTEXT));
+        int mode = SetBkMode(dc, TRANSPARENT);
+        *v = (uint16_t)TextOut(dc, x, y, text, n);
+        SetBkMode(dc, mode);
+        SetTextColor(dc, old);
+        return 1;
+    }
+    case 0x11b5: case 0x11b6: {         /* AnsiUpperBuff, AnsiLowerBuff(LPSTR, UINT) */
+        uint32_t n = w(a, 4) ? w(a, 4) : 0x10000u, p = dw(a, 6), base, limit;
+        int code;
+        char buf[128];
+        /* 0: 64K, as far as its segment goes */
+        if (win_ne_guest_selector_get(c->image, (uint16_t)(p >> 16), &base, &limit, &code) &&
+            (uint16_t)p <= limit && n > limit - (uint16_t)p + 1u)
+            n = limit - (uint16_t)p + 1u;
+        for (uint32_t k = 0; !a->bad && k < n; k += sizeof(buf)) {
+            uint32_t m = n - k < sizeof(buf) ? n - k : (uint32_t)sizeof(buf);
+            if (!rd(a, p + k, buf, m))
+                break;
+            if (service == 0x11b5)
+                AnsiUpperBuff(buf, m);
+            else
+                AnsiLowerBuff(buf, m);
+            wr(a, p + k, buf, m);
+        }
+        *v = (uint16_t)n;
         return 1;
     }
     case 0x1085: case 0x1087: {         /* GetWindowWord, GetWindowLong(HWND, int) */

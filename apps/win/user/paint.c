@@ -248,6 +248,24 @@ int WINAPI GetUpdateRgn(HWND hwnd, HRGN hr, BOOL erase)
     return wrgn_type(g);
 }
 
+/* the window's update region (client coordinates) out of the DC's clip */
+int WINAPI ExcludeUpdateRgn(HDC hdc, HWND hwnd)
+{
+    wwnd *w = user_wnd(hwnd);
+    if (!w)
+        return ERROR;
+    wrgn g;
+    wrgn_init(&g);
+    wrgn_copy(&g, &w->update);
+    wrgn_and_rect(&g, &w->client);
+    wrgn_offset(&g, -w->client.left, -w->client.top);
+    for (int i = 0; i < g.n; i++)
+        ExcludeClipRect(hdc, g.r[i].left, g.r[i].top, g.r[i].right, g.r[i].bottom);
+    wrgn_free(&g);
+    RECT rc;
+    return GetClipBox(hdc, &rc);
+}
+
 BOOL WINAPI UpdateWindow(HWND hwnd)
 {
     wwnd *w = user_wnd(hwnd);

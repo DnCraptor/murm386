@@ -58,6 +58,8 @@ static HMENU menu_new(int popup)
 HMENU WINAPI CreateMenu(void) { return menu_new(0); }
 HMENU WINAPI CreatePopupMenu(void) { return menu_new(1); }
 
+BOOL WINAPI IsMenu(HMENU h) { return menu_get(h) != NULL; }
+
 BOOL WINAPI DestroyMenu(HMENU h)
 {
     wmenu *m = menu_get(h);

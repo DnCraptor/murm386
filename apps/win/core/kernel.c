@@ -335,6 +335,28 @@ LPSTR WINAPI AnsiLower(LPSTR s)
     return s;
 }
 
+UINT WINAPI AnsiUpperBuff(LPSTR s, UINT n)
+{
+    UINT len = n ? n : 65536u;
+    for (UINT i = 0; i < len; i++)
+        s[i] = (char)to_upper((unsigned char)s[i]);
+    return len;
+}
+
+UINT WINAPI AnsiLowerBuff(LPSTR s, UINT n)
+{
+    UINT len = n ? n : 65536u;
+    for (UINT i = 0; i < len; i++)
+        s[i] = (char)to_lower((unsigned char)s[i]);
+    return len;
+}
+
+/* the character classes, as AnsiUpper and AnsiLower have them */
+BOOL WINAPI IsCharUpper(char c) { return c >= 'A' && c <= 'Z'; }
+BOOL WINAPI IsCharLower(char c) { return c >= 'a' && c <= 'z'; }
+BOOL WINAPI IsCharAlpha(char c) { return IsCharUpper(c) || IsCharLower(c); }
+BOOL WINAPI IsCharAlphaNumeric(char c) { return IsCharAlpha(c) || (c >= '0' && c <= '9'); }
+
 LPSTR WINAPI AnsiNext(LPCSTR s) { return (LPSTR)(*s ? s + 1 : s); }
 LPSTR WINAPI AnsiPrev(LPCSTR start, LPCSTR s) { return (LPSTR)(s > start ? s - 1 : start); }
 
@@ -523,6 +545,12 @@ ATOM WINAPI DeleteAtom(ATOM a)
     }
     return 0;
 }
+
+/* the global atom table: the same one (WINN has one for all) */
+ATOM WINAPI GlobalAddAtom(LPCSTR name) { return AddAtom(name); }
+ATOM WINAPI GlobalFindAtom(LPCSTR name) { return FindAtom(name); }
+ATOM WINAPI GlobalDeleteAtom(ATOM a) { return DeleteAtom(a); }
+UINT WINAPI GlobalGetAtomName(ATOM a, LPSTR buf, int size) { return GetAtomName(a, buf, size); }
 
 UINT WINAPI GetAtomName(ATOM a, LPSTR buf, int size)
 {

@@ -262,6 +262,17 @@ static LPCSTR ctl_class(LPCSTR k)
     }
 }
 
+/* dialog units to pixels, as the dialog manager places its controls */
+BOOL WINAPI MapDialogRect(HWND h, LPRECT rc)
+{
+    (void)h;
+    rc->left = du_x(rc->left);
+    rc->right = du_x(rc->right);
+    rc->top = du_y(rc->top);
+    rc->bottom = du_y(rc->bottom);
+    return TRUE;
+}
+
 HWND WINAPI CreateDialogIndirectN(HINSTANCE inst, const DLGTEMPLATE_N *t,
                                   const DLGITEM_N *items, HWND owner, DLGPROC proc)
 {

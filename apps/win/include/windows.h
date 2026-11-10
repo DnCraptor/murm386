@@ -166,11 +166,21 @@ LPSTR   WINAPI AnsiUpper(LPSTR s);
 LPSTR   WINAPI AnsiLower(LPSTR s);
 LPSTR   WINAPI AnsiNext(LPCSTR s);
 LPSTR   WINAPI AnsiPrev(LPCSTR start, LPCSTR s);
+UINT    WINAPI AnsiUpperBuff(LPSTR s, UINT n);
+UINT    WINAPI AnsiLowerBuff(LPSTR s, UINT n);
+BOOL    WINAPI IsCharAlpha(char c);
+BOOL    WINAPI IsCharAlphaNumeric(char c);
+BOOL    WINAPI IsCharUpper(char c);
+BOOL    WINAPI IsCharLower(char c);
 
 ATOM    WINAPI AddAtom(LPCSTR name);
 ATOM    WINAPI FindAtom(LPCSTR name);
 ATOM    WINAPI DeleteAtom(ATOM a);
 UINT    WINAPI GetAtomName(ATOM a, LPSTR buf, int size);
+ATOM    WINAPI GlobalAddAtom(LPCSTR name);
+ATOM    WINAPI GlobalFindAtom(LPCSTR name);
+ATOM    WINAPI GlobalDeleteAtom(ATOM a);
+UINT    WINAPI GlobalGetAtomName(ATOM a, LPSTR buf, int size);
 
 /* ---------------------------------------------------------------- GDI */
 
@@ -391,6 +401,7 @@ BOOL    WINAPI Polyline(HDC hdc, const POINT *pts, int n);
 BOOL    WINAPI Polygon(HDC hdc, const POINT *pts, int n);
 int     WINAPI SetPolyFillMode(HDC hdc, int mode);
 BOOL    WINAPI Rectangle(HDC hdc, int l, int t, int r, int b);
+int     WINAPI MulDiv(int a, int b, int c);
 BOOL    WINAPI RoundRect(HDC hdc, int l, int t, int r, int b, int w, int h);
 BOOL    WINAPI Ellipse(HDC hdc, int l, int t, int r, int b);
 int     WINAPI FillRect(HDC hdc, const RECT *rc, HBRUSH br);

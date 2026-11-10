@@ -74,6 +74,10 @@ int win_ne_read(win_ne_guest_api_context *ctx, uint16_t sel, uint32_t off, void 
 int win_ne_write(win_ne_guest_api_context *ctx, uint16_t sel, uint32_t off, const void *src,
                  uint32_t n);
 int win_ne_arg(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint32_t off, uint16_t *v);
+/* a selector freed (GlobalFree, FreeSelector ...): DS and ES of the caller
+ * no longer it (0, as Windows does), lest they fault as they are loaded
+ * again on the way back */
+void win_ne_forget_selector(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint16_t sel);
 int win_ne_string(win_ne_guest_api_context *ctx, uint16_t sel, uint16_t off, char *dst,
                   uint32_t cap);
 

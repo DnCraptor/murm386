@@ -118,10 +118,13 @@ static BOOL CALLBACK ne_dlgproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
                 slot = i;
                 u->dlg[i].hwnd = h;
                 u->dlg[i].proc = u->pending;
+                u->dlg[i].param = u->pending_param;
                 u->pending = 0;
             }
         if (slot < 0)
             return FALSE;
+        if (msg == WM_INITDIALOG)       /* DialogBoxParam's ... */
+            lp = (LPARAM)u->dlg[slot].param;
         BOOL r = (uint16_t)ne_message(u, u->dlg[slot].proc, h, msg, wp, lp) != 0;
         if (msg == WM_NCDESTROY)
             u->dlg[slot].hwnd = 0;
@@ -259,8 +262,11 @@ static HMENU load_menu_named(args *a, const char *name);
 
 /* USER.41 CreateWindow(class, title, style, x, y, cx, cy, parent, menu,
  * instance, param) */
-static __attribute__((noinline)) uint32_t ne_createwindow(args *a, ne_user *u)
+/* CreateWindow(class, title, style, x, y, cx, cy, parent, menu, inst,
+ * param); CreateWindowEx's the extended style before them */
+static __attribute__((noinline)) uint32_t ne_createwindow(args *a, ne_user *u, int ex)
 {
+    DWORD exstyle = ex ? dw(a, 34) : 0;
     char cls[64], title[128];
     LPCSTR c = name_or_atom(a, dw(a, 30), cls, sizeof(cls));
     uint32_t t = dw(a, 26);
@@ -283,7 +289,8 @@ static __attribute__((noinline)) uint32_t ne_createwindow(args *a, ne_user *u)
             else if (u->cls[i].menu[0])
                 menu = load_menu_named(a, u->cls[i].menu);
         }
-    return CreateWindow(c, title, style, x, y, cx, cy, parent, menu, inst, (LPVOID)(uintptr_t)param);
+    return CreateWindowEx(exstyle, c, title, style, x, y, cx, cy, parent, menu, inst,
+                          (LPVOID)(uintptr_t)param);
 }
 
 /* ---------------------------------------------------------------- resources */
@@ -451,22 +458,54 @@ static __attribute__((noinline)) uint16_t load_string(args *a)
     return (uint16_t)len;
 }
 
-/* USER.87 DialogBox(HINSTANCE, LPCSTR, HWND, DLGPROC): the Win16 template
- * (style, count, x, y, cx, cy, menu, class, caption, [point size, face];
- * then each item: x, y, cx, cy, id, style, class (80h.. the built-in
- * ones), text, extra bytes) made a native one */
-static __attribute__((noinline)) int dialog_box(args *a, ne_user *u, int modeless)
+/* a dialog template in the program's memory: at a far pointer (at most
+ * 4K of it, to its segment's end), or a global block's (HGLOBAL) */
+static uint8_t *template_at(args *a, uint32_t far, int global, uint32_t *n)
+{
+    win_ne_guest_image *g = (win_ne_guest_image *)a->ctx->image;
+    uint32_t base, limit;
+    int code;
+    if (global)
+        far = far << 16;                /* the block's selector, offset 0 */
+    if (!win_ne_guest_selector_get(g, (uint16_t)(far >> 16), &base, &limit, &code) ||
+        (uint16_t)far > limit)
+        return NULL;
+    *n = limit - (uint16_t)far + 1u;
+    if (*n > 4096u)
+        *n = 4096u;
+    uint8_t *d = (uint8_t *)malloc(*n);
+    if (d && !win_ne_read(a->ctx, (uint16_t)(far >> 16), (uint16_t)far, d, *n)) {
+        free(d);
+        d = NULL;
+    }
+    return d;
+}
+
+/* USER.87 DialogBox(HINSTANCE, LPCSTR, HWND, DLGPROC) and the rest: the
+ * Win16 template (style, count, x, y, cx, cy, menu, class, caption, [point
+ * size, face]; then each item: x, y, cx, cy, id, style, class (80h.. the
+ * built-in ones), text, extra bytes) made a native one. Its arguments from
+ * at (the dialog procedure's): HWND, the template, HINSTANCE; the template
+ * a resource's name, a far pointer, a global block (how); an lParam for
+ * WM_INITDIALOG before them (param). */
+enum { TPL_RESOURCE, TPL_FAR, TPL_GLOBAL };
+
+static __attribute__((noinline)) int dialog_box(args *a, ne_user *u, int modeless, int how,
+                                                int param)
 {
     static const char *const builtin[] = { "BUTTON", "EDIT", "STATIC", "LISTBOX",
                                            "SCROLLBAR", "COMBOBOX" };
-    uint32_t proc = dw(a, 4);
-    HWND owner = w(a, 8);
-    uint32_t name = dw(a, 10);
-    a->inst = w(a, 14);
+    uint32_t at = param ? 8 : 4;
+    uint32_t init = param ? dw(a, 4) : 0;
+    uint32_t proc = dw(a, at);
+    HWND owner = w(a, at + 4);
+    uint32_t name = how == TPL_GLOBAL ? w(a, at + 6) : dw(a, at + 6);
+    a->inst = w(a, at + (how == TPL_GLOBAL ? 8 : 10));
     if (a->bad)
         return -1;
     uint32_t n;
-    uint8_t *d = resource(a, RT_DIALOG_, name, &n);
+    uint8_t *d = how == TPL_RESOURCE ? resource(a, RT_DIALOG_, name, &n)
+                                     : template_at(a, name, how == TPL_GLOBAL, &n);
     if (!d)
         return -1;
     const uint8_t *p = d, *end = d + n;
@@ -530,11 +569,13 @@ static __attribute__((noinline)) int dialog_box(args *a, ne_user *u, int modeles
     }
     t.cdit = (BYTE)k;
     {
-        uint32_t outer = u->pending;
+        uint32_t outer = u->pending, outer_param = u->pending_param;
         u->pending = proc;
+        u->pending_param = init;
         r = modeless ? (int)CreateDialogIndirectN(instance(u, 1), &t, items, owner, ne_dlgproc)
                      : DialogBoxIndirectN(instance(u, 1), &t, items, owner, ne_dlgproc);
         u->pending = outer;
+        u->pending_param = outer_param;
     }
 done:
     free(d);
@@ -666,8 +707,8 @@ int win_ne_guest_user(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint16_t 
             }
         break;
     }
-    case 0x1029:                        /* CreateWindow */
-        v = ne_createwindow(&a, u);
+    case 0x1029: case 0x11c4:           /* CreateWindow, CreateWindowEx */
+        v = ne_createwindow(&a, u, service == 0x11c4);
         break;
     case 0x102a:                        /* ShowWindow(HWND, int) */
         v = (uint16_t)ShowWindow(w(&a, 6), (int16_t)w(&a, 4));
@@ -720,10 +761,19 @@ int win_ne_guest_user(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint16_t 
     case 52:                            /* FreeProcInstance(FARPROC) */
         break;
     case 0x1057:                        /* DialogBox(HINSTANCE, LPCSTR, HWND, DLGPROC) */
-        v = (uint16_t)dialog_box(&a, u, 0);
+    case 0x1059:                        /* CreateDialog */
+        v = (uint16_t)dialog_box(&a, u, service == 0x1059, TPL_RESOURCE, 0);
         break;
-    case 0x1059:                        /* CreateDialog(HINSTANCE, LPCSTR, HWND, DLGPROC) */
-        v = (uint16_t)dialog_box(&a, u, 1);
+    case 0x10ef: case 0x10f1:           /* DialogBoxParam, CreateDialogParam(..., LPARAM) */
+        v = (uint16_t)dialog_box(&a, u, service == 0x10f1, TPL_RESOURCE, 1);
+        break;
+    case 0x10da: case 0x10f0:           /* DialogBoxIndirect(HINSTANCE, HGLOBAL, HWND, DLGPROC),
+                                         * DialogBoxIndirectParam */
+        v = (uint16_t)dialog_box(&a, u, 0, TPL_GLOBAL, service == 0x10f0);
+        break;
+    case 0x10db: case 0x10f2:           /* CreateDialogIndirect(HINSTANCE, const void FAR *,
+                                         * HWND, DLGPROC), CreateDialogIndirectParam */
+        v = (uint16_t)dialog_box(&a, u, 1, TPL_FAR, service == 0x10f2);
         break;
     case 0x1058:                        /* EndDialog(HWND, int) */
         v = (uint16_t)EndDialog(w(&a, 6), (int16_t)w(&a, 4));

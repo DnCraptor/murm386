@@ -75,7 +75,10 @@ ATOM WINAPI RegisterClass(const WNDCLASS *wc)
         return 0;
     }
     c->atom = AddAtom(wc->lpszClassName);
-    if (!c->atom) {
+    c->extra = wc->cbClsExtra > 0 ? (uint8_t *)win_alloc((size_t)wc->cbClsExtra) : NULL;
+    if (!c->atom || (wc->cbClsExtra > 0 && !c->extra)) {
+        if (c->atom)
+            DeleteAtom(c->atom);
         win_free(c->name);
         win_free(c);
         return 0;
@@ -124,6 +127,7 @@ BOOL WINAPI UnregisterClass(LPCSTR name, HINSTANCE inst)
             *pp = c->next;
             DeleteAtom(c->atom);
             win_free(c->name);
+            win_free(c->extra);
             win_free(c);
             return TRUE;
         }
@@ -150,24 +154,91 @@ int WINAPI GetClassName(HWND h, LPSTR buf, int max)
     return lstrlen(buf);
 }
 
+/* the class's extra bytes at index, n of them: NULL if beyond */
+static uint8_t *class_extra(wwnd *w, int index, int n)
+{
+    return w && index >= 0 && w->cls->extra && index + n <= w->cls->wc.cbClsExtra ?
+           w->cls->extra + index : NULL;
+}
+
+/* a WORD of the class's: its extra bytes, or one of its fields */
+static WORD *class_word(wwnd *w, int index)
+{
+    if (!w)
+        return NULL;
+    switch (index) {
+    case GCW_HBRBACKGROUND: return &w->cls->wc.hbrBackground;
+    case GCW_HCURSOR: return &w->cls->wc.hCursor;
+    case GCW_HICON: return &w->cls->wc.hIcon;
+    case GCW_HMODULE: return &w->cls->wc.hInstance;
+    }
+    return NULL;
+}
+
 LONG WINAPI GetClassLong(HWND h, int index)
 {
     wwnd *w = user_wnd(h);
-    if (!w)
-        return 0;
-    if (index == GCL_WNDPROC)
+    uint8_t *p = class_extra(w, index, 4);
+    if (p)
+        return (LONG)(p[0] | p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24);
+    if (w && index == GCL_WNDPROC)
         return (LONG)(intptr_t)w->cls->wc.lpfnWndProc;
     return 0;
+}
+
+LONG WINAPI SetClassLong(HWND h, int index, LONG v)
+{
+    wwnd *w = user_wnd(h);
+    LONG old = GetClassLong(h, index);
+    uint8_t *p = class_extra(w, index, 4);
+    if (p) {
+        p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8);
+        p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
+    } else if (w && index == GCL_WNDPROC) {     /* the class's windows made from now on */
+        w->cls->wc.lpfnWndProc = (WNDPROC)(intptr_t)v;
+    } else {
+        return 0;
+    }
+    return old;
 }
 
 WORD WINAPI GetClassWord(HWND h, int index)
 {
     wwnd *w = user_wnd(h);
+    uint8_t *p = class_extra(w, index, 2);
+    WORD *f = class_word(w, index);
+    if (p)
+        return (WORD)(p[0] | p[1] << 8);
+    if (f)
+        return *f;
     if (!w)
         return 0;
-    if (index == GCW_HBRBACKGROUND)
-        return w->cls->wc.hbrBackground;
+    switch (index) {
+    case GCW_STYLE: return (WORD)w->cls->wc.style;
+    case GCW_CBWNDEXTRA: return (WORD)w->cls->wc.cbWndExtra;
+    case GCW_CBCLSEXTRA: return (WORD)w->cls->wc.cbClsExtra;
+    case GCW_ATOM: return w->cls->atom;
+    }
     return 0;
+}
+
+WORD WINAPI SetClassWord(HWND h, int index, WORD v)
+{
+    wwnd *w = user_wnd(h);
+    WORD old = GetClassWord(h, index);
+    uint8_t *p = class_extra(w, index, 2);
+    WORD *f = class_word(w, index);
+    if (p) {
+        p[0] = (uint8_t)v;
+        p[1] = (uint8_t)(v >> 8);
+    } else if (f) {
+        *f = v;
+    } else if (w && index == GCW_STYLE) {
+        w->cls->wc.style = v;
+    } else {
+        return 0;
+    }
+    return old;
 }
 
 /* ---------------------------------------------------------------- tree */
@@ -325,6 +396,99 @@ HWND WINAPI FindWindow(LPCSTR klass, LPCSTR title)
         return w->h;
     }
     return 0;
+}
+
+HWND WINAPI GetNextWindow(HWND h, UINT cmd) { return GetWindow(h, cmd); }
+
+/* a visible top-level window that has an owner or is a pop-up */
+BOOL WINAPI AnyPopup(void)
+{
+    for (wwnd *w = U.desktop->child; w; w = w->next)
+        if ((w->style & WS_VISIBLE) && (w->owner || (w->style & WS_POPUP)))
+            return TRUE;
+    return FALSE;
+}
+
+/* the caption the other way (invert), or as it is; how it was drawn */
+BOOL WINAPI FlashWindow(HWND h, BOOL invert)
+{
+    wwnd *w = user_wnd(h);
+    if (!w)
+        return FALSE;
+    BOOL was = w->active_frame;
+    SendMessage(h, WM_NCACTIVATE, invert ? !was : user_toplevel(w) == U.active, 0);
+    return was;
+}
+
+BOOL WINAPI CloseWindow(HWND h)
+{
+    wwnd *w = user_wnd(h);
+    if (!w || (w->style & WS_CHILD))
+        return FALSE;
+    ShowWindow(h, SW_MINIMIZE);
+    return TRUE;
+}
+
+BOOL WINAPI OpenIcon(HWND h)
+{
+    if (!IsWindow(h))
+        return FALSE;
+    if (IsIconic(h))
+        ShowWindow(h, SW_SHOWNORMAL);
+    return TRUE;
+}
+
+/* its pop-ups (top-level windows it owns) shown or hidden */
+void WINAPI ShowOwnedPopups(HWND h, BOOL show)
+{
+    wwnd *o = user_wnd(h);
+    for (wwnd *w = U.desktop->child, *n; o && w; w = n) {
+        n = w->next;
+        if (w->owner == o && (w->style & WS_POPUP) && !(w->style & WS_VISIBLE) == !!show)
+            ShowWindow(w->h, show ? SW_SHOWNA : SW_HIDE);
+    }
+}
+
+/* the window it owns that was active last: the active one, if it is */
+HWND WINAPI GetLastActivePopup(HWND h)
+{
+    for (wwnd *w = U.active ? U.active->owner : NULL; w; w = w->owner)
+        if (w->h == h)
+            return U.active->h;
+    return h;
+}
+
+/* drawing is not held back: the window paints as it goes */
+BOOL WINAPI LockWindowUpdate(HWND h) { (void)h; return TRUE; }
+
+/* the positions of several windows at once: each set as it comes */
+HDWP WINAPI BeginDeferWindowPos(int n) { (void)n; return 1; }
+
+HDWP WINAPI DeferWindowPos(HDWP d, HWND h, HWND after, int x, int y, int cx, int cy,
+                           UINT flags)
+{
+    return d && SetWindowPos(h, after, x, y, cx, cy, flags) ? d : 0;
+}
+
+BOOL WINAPI EndDeferWindowPos(HDWP d) { return d != 0; }
+
+/* the system-modal window: noted, not enforced */
+static HWND sys_modal;
+
+HWND WINAPI SetSysModalWindow(HWND h)
+{
+    HWND old = GetSysModalWindow();
+    sys_modal = h;
+    return old;
+}
+
+HWND WINAPI GetSysModalWindow(void) { return IsWindow(sys_modal) ? sys_modal : 0; }
+
+/* no Help program: HELP_QUIT (nothing to end) is all that succeeds */
+BOOL WINAPI WinHelp(HWND h, LPCSTR file, UINT cmd, DWORD data)
+{
+    (void)h; (void)file; (void)data;
+    return cmd == HELP_QUIT;
 }
 
 BOOL WINAPI EnumWindows(WNDENUMPROC proc, LPARAM lp)

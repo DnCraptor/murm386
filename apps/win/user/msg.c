@@ -584,6 +584,49 @@ static int get_one(MSG *out, HWND h, UINT first, UINT last, int remove)
     return 0;
 }
 
+/* What the task's queue has (QS_*), current and new alike: input (keys,
+ * the mouse's moves and buttons), posted messages, a timer due, a window
+ * to paint. Sent messages are delivered at once: never any. */
+DWORD WINAPI GetQueueStatus(UINT flags)
+{
+    pump_input();
+    wtask *me = task_current();
+    UINT has = 0;
+    for (int i = 0; i < q_count; i++) {
+        HTASK owner = qtask[(q_head + i) % QSIZE];
+        UINT m = q_at(i)->message;
+        if (owner && owner != me->h)
+            continue;
+        if (m >= WM_KEYFIRST && m <= WM_KEYLAST)
+            has |= QS_KEY;
+        else if (m == WM_MOUSEMOVE || m == WM_NCMOUSEMOVE)
+            has |= QS_MOUSEMOVE;
+        else if ((m >= WM_MOUSEFIRST && m <= WM_MOUSELAST) ||
+                 (m >= WM_NCMOUSEMOVE && m <= WM_NCMBUTTONDBLCLK))
+            has |= QS_MOUSEBUTTON;
+        else
+            has |= QS_POSTMESSAGE;
+    }
+    if (timer_due(me->h))
+        has |= QS_TIMER;
+    if (user_find_paint(me->h))
+        has |= QS_PAINT;
+    has &= flags;
+    return MAKELONG(has, has);
+}
+
+BOOL WINAPI GetInputState(void)
+{
+    return (LOWORD(GetQueueStatus(QS_INPUT)) & QS_INPUT) != 0;
+}
+
+/* a sent message is handled as it is sent: nobody waits for a reply */
+void WINAPI ReplyMessage(LRESULT result) { (void)result; }
+
+/* the keys as WINN has them: bit 7 down, bit 0 toggled */
+void WINAPI GetKeyboardState(BYTE *keys) { memcpy(keys, U.keys, sizeof(U.keys)); }
+void WINAPI SetKeyboardState(const BYTE *keys) { memcpy(U.keys, keys, sizeof(U.keys)); }
+
 /* Nothing for this task: let the others run, or idle when nobody can. */
 static void wait_turn(void)
 {

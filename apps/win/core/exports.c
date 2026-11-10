@@ -5,11 +5,15 @@ extern void AddAtom(void);
 extern void AdjustWindowRect(void);
 extern void AdjustWindowRectEx(void);
 extern void AnsiLower(void);
+extern void AnsiLowerBuff(void);
 extern void AnsiNext(void);
 extern void AnsiPrev(void);
 extern void AnsiUpper(void);
+extern void AnsiUpperBuff(void);
+extern void AnyPopup(void);
 extern void AppendMenu(void);
 extern void ArrangeIconicWindows(void);
+extern void BeginDeferWindowPos(void);
 extern void BeginPaint(void);
 extern void BitBlt(void);
 extern void BringWindowToTop(void);
@@ -21,6 +25,7 @@ extern void CheckRadioButton(void);
 extern void ChildWindowFromPoint(void);
 extern void ClientToScreen(void);
 extern void CloseClipboard(void);
+extern void CloseWindow(void);
 extern void CombineRgn(void);
 extern void CommDlgExtendedError(void);
 extern void CopyRect(void);
@@ -52,6 +57,7 @@ extern void DefDlgProc(void);
 extern void DefFrameProc(void);
 extern void DefMDIChildProc(void);
 extern void DefWindowProc(void);
+extern void DeferWindowPos(void);
 extern void DeleteAtom(void);
 extern void DeleteDC(void);
 extern void DeleteFileN(void);
@@ -72,6 +78,7 @@ extern void Ellipse(void);
 extern void EmptyClipboard(void);
 extern void EnableMenuItem(void);
 extern void EnableWindow(void);
+extern void EndDeferWindowPos(void);
 extern void EndDialog(void);
 extern void EndPaint(void);
 extern void EnumChildWindows(void);
@@ -80,6 +87,7 @@ extern void EnumWindows(void);
 extern void EqualRect(void);
 extern void EqualRgn(void);
 extern void ExcludeClipRect(void);
+extern void ExcludeUpdateRgn(void);
 extern void ExitWindows(void);
 extern void ExtTextOut(void);
 extern void ExtractIconExN(void);
@@ -90,6 +98,7 @@ extern void FillRgn(void);
 extern void FindAtom(void);
 extern void FindText(void);
 extern void FindWindow(void);
+extern void FlashWindow(void);
 extern void FrameRect(void);
 extern void GetActiveWindow(void);
 extern void GetAppInfoN(void);
@@ -113,6 +122,7 @@ extern void GetClipboardOwner(void);
 extern void GetCurrentDirectoryN(void);
 extern void GetCurrentTask(void);
 extern void GetCurrentTime(void);
+extern void GetCursor(void);
 extern void GetCursorPos(void);
 extern void GetDC(void);
 extern void GetDesktopWindow(void);
@@ -128,7 +138,10 @@ extern void GetDoubleClickTime(void);
 extern void GetDriveType(void);
 extern void GetFileTitle(void);
 extern void GetFocus(void);
+extern void GetInputState(void);
 extern void GetKeyState(void);
+extern void GetKeyboardState(void);
+extern void GetLastActivePopup(void);
 extern void GetLocalTimeN(void);
 extern void GetMenu(void);
 extern void GetMenuItemCount(void);
@@ -142,6 +155,7 @@ extern void GetModuleHandle(void);
 extern void GetNearestColor(void);
 extern void GetNextDlgGroupItem(void);
 extern void GetNextDlgTabItem(void);
+extern void GetNextWindow(void);
 extern void GetNumTasks(void);
 extern void GetObject(void);
 extern void GetOpenFileName(void);
@@ -153,6 +167,7 @@ extern void GetPrivateProfileString(void);
 extern void GetProfileInt(void);
 extern void GetProfileString(void);
 extern void GetProp(void);
+extern void GetQueueStatus(void);
 extern void GetROP2(void);
 extern void GetRgnBox(void);
 extern void GetSaveFileName(void);
@@ -162,6 +177,7 @@ extern void GetStockObject(void);
 extern void GetSubMenu(void);
 extern void GetSysColor(void);
 extern void GetSysColorBrush(void);
+extern void GetSysModalWindow(void);
 extern void GetSystemDirectory(void);
 extern void GetSystemMenu(void);
 extern void GetSystemMetrics(void);
@@ -189,8 +205,12 @@ extern void GetWindowText(void);
 extern void GetWindowTextLength(void);
 extern void GetWindowWord(void);
 extern void GetWindowsDirectory(void);
+extern void GlobalAddAtom(void);
 extern void GlobalAlloc(void);
+extern void GlobalDeleteAtom(void);
+extern void GlobalFindAtom(void);
 extern void GlobalFree(void);
+extern void GlobalGetAtomName(void);
 extern void GlobalLock(void);
 extern void GlobalReAlloc(void);
 extern void GlobalSize(void);
@@ -205,11 +225,16 @@ extern void IntersectRect(void);
 extern void InvalidateRect(void);
 extern void InvalidateRgn(void);
 extern void InvertRect(void);
+extern void IsCharAlpha(void);
+extern void IsCharAlphaNumeric(void);
+extern void IsCharLower(void);
+extern void IsCharUpper(void);
 extern void IsChild(void);
 extern void IsClipboardFormatAvailable(void);
 extern void IsDialogMessage(void);
 extern void IsDlgButtonChecked(void);
 extern void IsIconic(void);
+extern void IsMenu(void);
 extern void IsRectEmpty(void);
 extern void IsTask(void);
 extern void IsWinAppN(void);
@@ -227,6 +252,8 @@ extern void LocalLock(void);
 extern void LocalReAlloc(void);
 extern void LocalSize(void);
 extern void LocalUnlock(void);
+extern void LockWindowUpdate(void);
+extern void MapDialogRect(void);
 extern void MapWindowPoints(void);
 extern void MessageBeep(void);
 extern void MessageBox(void);
@@ -235,9 +262,11 @@ extern void MoveFileN(void);
 extern void MoveTo(void);
 extern void MoveToEx(void);
 extern void MoveWindow(void);
+extern void MulDiv(void);
 extern void OffsetRect(void);
 extern void OffsetRgn(void);
 extern void OpenClipboard(void);
+extern void OpenIcon(void);
 extern void OutputDebugString(void);
 extern void PaintRgn(void);
 extern void PatBlt(void);
@@ -264,6 +293,7 @@ extern void RemoveDirectoryN(void);
 extern void RemoveMenu(void);
 extern void RemoveProp(void);
 extern void ReplaceText(void);
+extern void ReplyMessage(void);
 extern void RestoreDC(void);
 extern void RoundRect(void);
 extern void SaveDC(void);
@@ -289,6 +319,7 @@ extern void SetDlgItemInt(void);
 extern void SetDlgItemText(void);
 extern void SetDoubleClickTime(void);
 extern void SetFocus(void);
+extern void SetKeyboardState(void);
 extern void SetLocalTimeN(void);
 extern void SetMenu(void);
 extern void SetPaletteEntries(void);
@@ -303,6 +334,7 @@ extern void SetRectRgn(void);
 extern void SetScrollPos(void);
 extern void SetScrollRange(void);
 extern void SetSysColors(void);
+extern void SetSysModalWindow(void);
 extern void SetTextAlign(void);
 extern void SetTextColor(void);
 extern void SetTimer(void);
@@ -314,6 +346,7 @@ extern void SetWindowText(void);
 extern void SetWindowWord(void);
 extern void ShowCaret(void);
 extern void ShowCursor(void);
+extern void ShowOwnedPopups(void);
 extern void ShowScrollBar(void);
 extern void ShowWindow(void);
 extern void StretchBlt(void);
@@ -337,6 +370,7 @@ extern void WinDirListAttrN(void);
 extern void WinDirListN(void);
 extern void WinExec(void);
 extern void WinFindFilesN(void);
+extern void WinHelp(void);
 extern void WindowFromPoint(void);
 extern void WritePrivateProfileString(void);
 extern void WriteProfileString(void);
@@ -471,6 +505,7 @@ static const void *const exports_gdi[484] = {
     [101] = (const void *)OffsetRgn,
     [103] = (const void *)PtVisible,
     [106] = (const void *)SetBitmapBits,
+    [128] = (const void *)MulDiv,
     [134] = (const void *)GetRgnBox,
     [148] = (const void *)SetBrushOrg,
     [154] = (const void *)GetNearestColor,
@@ -522,12 +557,15 @@ static const void *const exports_user[484] = {
     [40] = (const void *)EndPaint,
     [41] = (const void *)CreateWindow,
     [42] = (const void *)ShowWindow,
+    [43] = (const void *)CloseWindow,
+    [44] = (const void *)OpenIcon,
     [45] = (const void *)BringWindowToTop,
     [46] = (const void *)GetParent,
     [47] = (const void *)IsWindow,
     [48] = (const void *)IsChild,
     [49] = (const void *)IsWindowVisible,
     [50] = (const void *)FindWindow,
+    [52] = (const void *)AnyPopup,
     [53] = (const void *)DestroyWindow,
     [54] = (const void *)EnumWindows,
     [55] = (const void *)EnumChildWindows,
@@ -573,7 +611,9 @@ static const void *const exports_user[484] = {
     [98] = (const void *)IsDlgButtonChecked,
     [101] = (const void *)SendDlgItemMessage,
     [102] = (const void *)AdjustWindowRect,
+    [103] = (const void *)MapDialogRect,
     [104] = (const void *)MessageBeep,
+    [105] = (const void *)FlashWindow,
     [106] = (const void *)GetKeyState,
     [107] = (const void *)DefWindowProc,
     [108] = (const void *)GetMessage,
@@ -583,6 +623,7 @@ static const void *const exports_user[484] = {
     [112] = (const void *)WaitMessage,
     [113] = (const void *)TranslateMessage,
     [114] = (const void *)DispatchMessage,
+    [115] = (const void *)ReplyMessage,
     [116] = (const void *)PostAppMessage,
     [118] = (const void *)RegisterWindowMessage,
     [119] = (const void *)GetMessagePos,
@@ -628,6 +669,7 @@ static const void *const exports_user[484] = {
     [168] = (const void *)SetCaretBlinkTime,
     [169] = (const void *)GetCaretBlinkTime,
     [170] = (const void *)ArrangeIconicWindows,
+    [171] = (const void *)WinHelp,
     [173] = (const void *)LoadCursor,
     [174] = (const void *)LoadIcon,
     [178] = (const void *)TranslateAccelerator,
@@ -636,6 +678,8 @@ static const void *const exports_user[484] = {
     [181] = (const void *)SetSysColors,
     [183] = (const void *)GetCaretPos,
     [186] = (const void *)SwapMouseButton,
+    [188] = (const void *)SetSysModalWindow,
+    [189] = (const void *)GetSysModalWindow,
     [190] = (const void *)GetUpdateRect,
     [191] = (const void *)ChildWindowFromPoint,
     [192] = (const void *)InSendMessage,
@@ -644,31 +688,49 @@ static const void *const exports_user[484] = {
     [197] = (const void *)GetTabbedTextExtent,
     [198] = (const void *)CascadeChildWindows,
     [199] = (const void *)TileChildWindows,
+    [222] = (const void *)GetKeyboardState,
+    [223] = (const void *)SetKeyboardState,
     [224] = (const void *)GetWindowTask,
     [227] = (const void *)GetNextDlgGroupItem,
     [228] = (const void *)GetNextDlgTabItem,
     [229] = (const void *)GetTopWindow,
+    [230] = (const void *)GetNextWindow,
     [232] = (const void *)SetWindowPos,
     [233] = (const void *)SetParent,
     [236] = (const void *)GetCapture,
     [237] = (const void *)GetUpdateRgn,
+    [238] = (const void *)ExcludeUpdateRgn,
     [243] = (const void *)GetDialogBaseUnits,
     [244] = (const void *)EqualRect,
+    [247] = (const void *)GetCursor,
     [249] = (const void *)GetAsyncKeyState,
     [250] = (const void *)GetMenuState,
     [258] = (const void *)MapWindowPoints,
+    [259] = (const void *)BeginDeferWindowPos,
+    [260] = (const void *)DeferWindowPos,
+    [261] = (const void *)EndDeferWindowPos,
     [262] = (const void *)GetWindow,
     [263] = (const void *)GetMenuItemCount,
     [264] = (const void *)GetMenuItemID,
+    [265] = (const void *)ShowOwnedPopups,
     [267] = (const void *)ShowScrollBar,
+    [268] = (const void *)GlobalAddAtom,
+    [269] = (const void *)GlobalDeleteAtom,
+    [270] = (const void *)GlobalFindAtom,
+    [271] = (const void *)GlobalGetAtomName,
     [272] = (const void *)IsZoomed,
     [277] = (const void *)GetDlgCtrlID,
     [281] = (const void *)GetSysColorBrush,
     [282] = (const void *)SelectPalette,
     [283] = (const void *)RealizePalette,
     [286] = (const void *)GetDesktopWindow,
+    [287] = (const void *)GetLastActivePopup,
     [290] = (const void *)RedrawWindow,
+    [294] = (const void *)LockWindowUpdate,
     [308] = (const void *)DefDlgProc,
+    [334] = (const void *)GetQueueStatus,
+    [335] = (const void *)GetInputState,
+    [358] = (const void *)IsMenu,
     [373] = (const void *)SubtractRect,
     [403] = (const void *)UnregisterClass,
     [404] = (const void *)GetClassInfo,
@@ -684,6 +746,12 @@ static const void *const exports_user[484] = {
     [430] = (const void *)lstrcmp,
     [431] = (const void *)AnsiUpper,
     [432] = (const void *)AnsiLower,
+    [433] = (const void *)IsCharAlpha,
+    [434] = (const void *)IsCharAlphaNumeric,
+    [435] = (const void *)IsCharUpper,
+    [436] = (const void *)IsCharLower,
+    [437] = (const void *)AnsiUpperBuff,
+    [438] = (const void *)AnsiLowerBuff,
     [445] = (const void *)DefFrameProc,
     [447] = (const void *)DefMDIChildProc,
     [451] = (const void *)TranslateMDISysAccel,

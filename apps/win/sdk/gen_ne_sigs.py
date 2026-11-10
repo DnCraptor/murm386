@@ -66,6 +66,8 @@ SKIP = {
     # palettes, a DC, the system colours, MDI: ne_guest_kernel.c
     'CreateDC', 'CreatePalette', 'GetPaletteEntries', 'SetPaletteEntries',
     'GetSystemPaletteEntries', 'SetSysColors', 'TranslateMDISysAccel',
+    # strings changed in place, the keys (256 bytes): ne_guest_user.c
+    'AnsiUpperBuff', 'AnsiLowerBuff', 'GetKeyboardState', 'SetKeyboardState',
 }
 
 COUNTS = re.compile(r'^(n|c|cb|cch|count|len|nCount|cbString|size)$')

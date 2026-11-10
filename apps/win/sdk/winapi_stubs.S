@@ -1860,6 +1860,23 @@ SetBitmapBits:
     .ltorg
     .size SetBitmapBits, .-SetBitmapBits
 
+    .section .text.winapi.MulDiv,"ax",%progbits
+    .global MulDiv
+    .type MulDiv, %function
+    .thumb_func
+MulDiv:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =512
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size MulDiv, .-MulDiv
+
     .section .text.winapi.GetRgnBox,"ax",%progbits
     .global GetRgnBox
     .type GetRgnBox, %function
@@ -2676,6 +2693,40 @@ ShowWindow:
     .ltorg
     .size ShowWindow, .-ShowWindow
 
+    .section .text.winapi.CloseWindow,"ax",%progbits
+    .global CloseWindow
+    .type CloseWindow, %function
+    .thumb_func
+CloseWindow:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =172
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size CloseWindow, .-CloseWindow
+
+    .section .text.winapi.OpenIcon,"ax",%progbits
+    .global OpenIcon
+    .type OpenIcon, %function
+    .thumb_func
+OpenIcon:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =176
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size OpenIcon, .-OpenIcon
+
     .section .text.winapi.BringWindowToTop,"ax",%progbits
     .global BringWindowToTop
     .type BringWindowToTop, %function
@@ -2777,6 +2828,23 @@ FindWindow:
     bx   r12
     .ltorg
     .size FindWindow, .-FindWindow
+
+    .section .text.winapi.AnyPopup,"ax",%progbits
+    .global AnyPopup
+    .type AnyPopup, %function
+    .thumb_func
+AnyPopup:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =208
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size AnyPopup, .-AnyPopup
 
     .section .text.winapi.DestroyWindow,"ax",%progbits
     .global DestroyWindow
@@ -3543,6 +3611,23 @@ AdjustWindowRect:
     .ltorg
     .size AdjustWindowRect, .-AdjustWindowRect
 
+    .section .text.winapi.MapDialogRect,"ax",%progbits
+    .global MapDialogRect
+    .type MapDialogRect, %function
+    .thumb_func
+MapDialogRect:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =412
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size MapDialogRect, .-MapDialogRect
+
     .section .text.winapi.MessageBeep,"ax",%progbits
     .global MessageBeep
     .type MessageBeep, %function
@@ -3559,6 +3644,23 @@ MessageBeep:
     bx   r12
     .ltorg
     .size MessageBeep, .-MessageBeep
+
+    .section .text.winapi.FlashWindow,"ax",%progbits
+    .global FlashWindow
+    .type FlashWindow, %function
+    .thumb_func
+FlashWindow:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =420
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size FlashWindow, .-FlashWindow
 
     .section .text.winapi.GetKeyState,"ax",%progbits
     .global GetKeyState
@@ -3712,6 +3814,23 @@ DispatchMessage:
     bx   r12
     .ltorg
     .size DispatchMessage, .-DispatchMessage
+
+    .section .text.winapi.ReplyMessage,"ax",%progbits
+    .global ReplyMessage
+    .type ReplyMessage, %function
+    .thumb_func
+ReplyMessage:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =460
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size ReplyMessage, .-ReplyMessage
 
     .section .text.winapi.PostAppMessage,"ax",%progbits
     .global PostAppMessage
@@ -4478,6 +4597,23 @@ ArrangeIconicWindows:
     .ltorg
     .size ArrangeIconicWindows, .-ArrangeIconicWindows
 
+    .section .text.winapi.WinHelp,"ax",%progbits
+    .global WinHelp
+    .type WinHelp, %function
+    .thumb_func
+WinHelp:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =684
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size WinHelp, .-WinHelp
+
     .section .text.winapi.LoadCursor,"ax",%progbits
     .global LoadCursor
     .type LoadCursor, %function
@@ -4613,6 +4749,40 @@ SwapMouseButton:
     bx   r12
     .ltorg
     .size SwapMouseButton, .-SwapMouseButton
+
+    .section .text.winapi.SetSysModalWindow,"ax",%progbits
+    .global SetSysModalWindow
+    .type SetSysModalWindow, %function
+    .thumb_func
+SetSysModalWindow:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =752
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SetSysModalWindow, .-SetSysModalWindow
+
+    .section .text.winapi.GetSysModalWindow,"ax",%progbits
+    .global GetSysModalWindow
+    .type GetSysModalWindow, %function
+    .thumb_func
+GetSysModalWindow:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =756
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetSysModalWindow, .-GetSysModalWindow
 
     .section .text.winapi.GetUpdateRect,"ax",%progbits
     .global GetUpdateRect
@@ -4750,6 +4920,40 @@ TileChildWindows:
     .ltorg
     .size TileChildWindows, .-TileChildWindows
 
+    .section .text.winapi.GetKeyboardState,"ax",%progbits
+    .global GetKeyboardState
+    .type GetKeyboardState, %function
+    .thumb_func
+GetKeyboardState:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =888
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetKeyboardState, .-GetKeyboardState
+
+    .section .text.winapi.SetKeyboardState,"ax",%progbits
+    .global SetKeyboardState
+    .type SetKeyboardState, %function
+    .thumb_func
+SetKeyboardState:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =892
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SetKeyboardState, .-SetKeyboardState
+
     .section .text.winapi.GetWindowTask,"ax",%progbits
     .global GetWindowTask
     .type GetWindowTask, %function
@@ -4817,6 +5021,23 @@ GetTopWindow:
     bx   r12
     .ltorg
     .size GetTopWindow, .-GetTopWindow
+
+    .section .text.winapi.GetNextWindow,"ax",%progbits
+    .global GetNextWindow
+    .type GetNextWindow, %function
+    .thumb_func
+GetNextWindow:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =920
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetNextWindow, .-GetNextWindow
 
     .section .text.winapi.SetWindowPos,"ax",%progbits
     .global SetWindowPos
@@ -4886,6 +5107,23 @@ GetUpdateRgn:
     .ltorg
     .size GetUpdateRgn, .-GetUpdateRgn
 
+    .section .text.winapi.ExcludeUpdateRgn,"ax",%progbits
+    .global ExcludeUpdateRgn
+    .type ExcludeUpdateRgn, %function
+    .thumb_func
+ExcludeUpdateRgn:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =952
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size ExcludeUpdateRgn, .-ExcludeUpdateRgn
+
     .section .text.winapi.GetDialogBaseUnits,"ax",%progbits
     .global GetDialogBaseUnits
     .type GetDialogBaseUnits, %function
@@ -4919,6 +5157,23 @@ EqualRect:
     bx   r12
     .ltorg
     .size EqualRect, .-EqualRect
+
+    .section .text.winapi.GetCursor,"ax",%progbits
+    .global GetCursor
+    .type GetCursor, %function
+    .thumb_func
+GetCursor:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =988
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetCursor, .-GetCursor
 
     .section .text.winapi.GetAsyncKeyState,"ax",%progbits
     .global GetAsyncKeyState
@@ -4971,6 +5226,57 @@ MapWindowPoints:
     .ltorg
     .size MapWindowPoints, .-MapWindowPoints
 
+    .section .text.winapi.BeginDeferWindowPos,"ax",%progbits
+    .global BeginDeferWindowPos
+    .type BeginDeferWindowPos, %function
+    .thumb_func
+BeginDeferWindowPos:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1036
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size BeginDeferWindowPos, .-BeginDeferWindowPos
+
+    .section .text.winapi.DeferWindowPos,"ax",%progbits
+    .global DeferWindowPos
+    .type DeferWindowPos, %function
+    .thumb_func
+DeferWindowPos:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1040
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size DeferWindowPos, .-DeferWindowPos
+
+    .section .text.winapi.EndDeferWindowPos,"ax",%progbits
+    .global EndDeferWindowPos
+    .type EndDeferWindowPos, %function
+    .thumb_func
+EndDeferWindowPos:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1044
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size EndDeferWindowPos, .-EndDeferWindowPos
+
     .section .text.winapi.GetWindow,"ax",%progbits
     .global GetWindow
     .type GetWindow, %function
@@ -5022,6 +5328,23 @@ GetMenuItemID:
     .ltorg
     .size GetMenuItemID, .-GetMenuItemID
 
+    .section .text.winapi.ShowOwnedPopups,"ax",%progbits
+    .global ShowOwnedPopups
+    .type ShowOwnedPopups, %function
+    .thumb_func
+ShowOwnedPopups:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1060
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size ShowOwnedPopups, .-ShowOwnedPopups
+
     .section .text.winapi.ShowScrollBar,"ax",%progbits
     .global ShowScrollBar
     .type ShowScrollBar, %function
@@ -5038,6 +5361,74 @@ ShowScrollBar:
     bx   r12
     .ltorg
     .size ShowScrollBar, .-ShowScrollBar
+
+    .section .text.winapi.GlobalAddAtom,"ax",%progbits
+    .global GlobalAddAtom
+    .type GlobalAddAtom, %function
+    .thumb_func
+GlobalAddAtom:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1072
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GlobalAddAtom, .-GlobalAddAtom
+
+    .section .text.winapi.GlobalDeleteAtom,"ax",%progbits
+    .global GlobalDeleteAtom
+    .type GlobalDeleteAtom, %function
+    .thumb_func
+GlobalDeleteAtom:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1076
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GlobalDeleteAtom, .-GlobalDeleteAtom
+
+    .section .text.winapi.GlobalFindAtom,"ax",%progbits
+    .global GlobalFindAtom
+    .type GlobalFindAtom, %function
+    .thumb_func
+GlobalFindAtom:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1080
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GlobalFindAtom, .-GlobalFindAtom
+
+    .section .text.winapi.GlobalGetAtomName,"ax",%progbits
+    .global GlobalGetAtomName
+    .type GlobalGetAtomName, %function
+    .thumb_func
+GlobalGetAtomName:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1084
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GlobalGetAtomName, .-GlobalGetAtomName
 
     .section .text.winapi.IsZoomed,"ax",%progbits
     .global IsZoomed
@@ -5141,6 +5532,23 @@ GetDesktopWindow:
     .ltorg
     .size GetDesktopWindow, .-GetDesktopWindow
 
+    .section .text.winapi.GetLastActivePopup,"ax",%progbits
+    .global GetLastActivePopup
+    .type GetLastActivePopup, %function
+    .thumb_func
+GetLastActivePopup:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1148
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetLastActivePopup, .-GetLastActivePopup
+
     .section .text.winapi.RedrawWindow,"ax",%progbits
     .global RedrawWindow
     .type RedrawWindow, %function
@@ -5158,6 +5566,23 @@ RedrawWindow:
     .ltorg
     .size RedrawWindow, .-RedrawWindow
 
+    .section .text.winapi.LockWindowUpdate,"ax",%progbits
+    .global LockWindowUpdate
+    .type LockWindowUpdate, %function
+    .thumb_func
+LockWindowUpdate:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1176
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size LockWindowUpdate, .-LockWindowUpdate
+
     .section .text.winapi.DefDlgProc,"ax",%progbits
     .global DefDlgProc
     .type DefDlgProc, %function
@@ -5174,6 +5599,57 @@ DefDlgProc:
     bx   r12
     .ltorg
     .size DefDlgProc, .-DefDlgProc
+
+    .section .text.winapi.GetQueueStatus,"ax",%progbits
+    .global GetQueueStatus
+    .type GetQueueStatus, %function
+    .thumb_func
+GetQueueStatus:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1336
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetQueueStatus, .-GetQueueStatus
+
+    .section .text.winapi.GetInputState,"ax",%progbits
+    .global GetInputState
+    .type GetInputState, %function
+    .thumb_func
+GetInputState:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1340
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetInputState, .-GetInputState
+
+    .section .text.winapi.IsMenu,"ax",%progbits
+    .global IsMenu
+    .type IsMenu, %function
+    .thumb_func
+IsMenu:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1432
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size IsMenu, .-IsMenu
 
     .section .text.winapi.SubtractRect,"ax",%progbits
     .global SubtractRect
@@ -5429,6 +5905,108 @@ AnsiLower:
     bx   r12
     .ltorg
     .size AnsiLower, .-AnsiLower
+
+    .section .text.winapi.IsCharAlpha,"ax",%progbits
+    .global IsCharAlpha
+    .type IsCharAlpha, %function
+    .thumb_func
+IsCharAlpha:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1732
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size IsCharAlpha, .-IsCharAlpha
+
+    .section .text.winapi.IsCharAlphaNumeric,"ax",%progbits
+    .global IsCharAlphaNumeric
+    .type IsCharAlphaNumeric, %function
+    .thumb_func
+IsCharAlphaNumeric:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1736
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size IsCharAlphaNumeric, .-IsCharAlphaNumeric
+
+    .section .text.winapi.IsCharUpper,"ax",%progbits
+    .global IsCharUpper
+    .type IsCharUpper, %function
+    .thumb_func
+IsCharUpper:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1740
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size IsCharUpper, .-IsCharUpper
+
+    .section .text.winapi.IsCharLower,"ax",%progbits
+    .global IsCharLower
+    .type IsCharLower, %function
+    .thumb_func
+IsCharLower:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1744
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size IsCharLower, .-IsCharLower
+
+    .section .text.winapi.AnsiUpperBuff,"ax",%progbits
+    .global AnsiUpperBuff
+    .type AnsiUpperBuff, %function
+    .thumb_func
+AnsiUpperBuff:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1748
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size AnsiUpperBuff, .-AnsiUpperBuff
+
+    .section .text.winapi.AnsiLowerBuff,"ax",%progbits
+    .global AnsiLowerBuff
+    .type AnsiLowerBuff, %function
+    .thumb_func
+AnsiLowerBuff:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1752
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size AnsiLowerBuff, .-AnsiLowerBuff
 
     .section .text.winapi.DefFrameProc,"ax",%progbits
     .global DefFrameProc

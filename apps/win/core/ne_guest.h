@@ -123,6 +123,17 @@ uint16_t win_ne_guest_global_alloc(win_ne_guest_image *g, uint32_t bytes);
 int win_ne_guest_global_realloc(win_ne_guest_image *g, uint16_t sel, uint32_t bytes,
                                 int (*read)(void *, uint32_t, void *, uint32_t));
 int win_ne_guest_global_free(win_ne_guest_image *g, uint16_t sel);
+/* Selectors of its own (AllocSelector ...), global entries with no memory
+ * of their own (flags WIN_NE_GUEST_ALIAS; freed as a global block is): a
+ * copy of another's descriptor (like 0: base 0, limit 0), code (1), data
+ * (0) or as that one (-1). A descriptor's base, limit and kind (0 if the
+ * selector is none of the program's); an alias's set. */
+#define WIN_NE_GUEST_ALIAS 0x8000u
+uint16_t win_ne_guest_selector_alloc(win_ne_guest_image *g, uint16_t like, int code);
+int win_ne_guest_selector_get(const win_ne_guest_image *g, uint16_t sel, uint32_t *base,
+                              uint32_t *limit, int *code);
+int win_ne_guest_selector_set(win_ne_guest_image *g, uint16_t sel, uint32_t base,
+                              uint32_t limit, int code);
 /* GetProcAddress of a module WINN has (0 KERNEL, 1 USER, 2 GDI, 3
  * KEYBOARD, 4 COMMDLG, 5 SHELL; win_ne_guest_module gives the number of a
  * name, -1 for none): a thunk's far address, made now if the program had

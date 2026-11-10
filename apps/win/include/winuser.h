@@ -404,8 +404,16 @@ typedef struct {
 #define GWW_ID              (-12)
 #define GWL_STYLE           (-16)
 #define GWL_EXSTYLE         (-20)
-#define GCL_WNDPROC         (-24)
+#define GCL_MENUNAME        (-8)
 #define GCW_HBRBACKGROUND   (-10)
+#define GCW_HCURSOR         (-12)
+#define GCW_HICON           (-14)
+#define GCW_HMODULE         (-16)
+#define GCW_CBWNDEXTRA      (-18)
+#define GCW_CBCLSEXTRA      (-20)
+#define GCL_WNDPROC         (-24)
+#define GCW_STYLE           (-26)
+#define GCW_ATOM            (-32)
 #define DWL_MSGRESULT       0
 #define DWL_DLGPROC         4
 #define DWL_USER            8
@@ -573,6 +581,8 @@ BOOL    WINAPI GetClassInfo(HINSTANCE inst, LPCSTR name, LPWNDCLASS wc);
 int     WINAPI GetClassName(HWND hwnd, LPSTR buf, int max);
 LONG    WINAPI GetClassLong(HWND hwnd, int index);
 WORD    WINAPI GetClassWord(HWND hwnd, int index);
+LONG    WINAPI SetClassLong(HWND hwnd, int index, LONG v);
+WORD    WINAPI SetClassWord(HWND hwnd, int index, WORD v);
 
 HWND    WINAPI CreateWindow(LPCSTR klass, LPCSTR title, DWORD style,
                             int x, int y, int w, int h, HWND parent, HMENU menu,
@@ -597,6 +607,29 @@ HWND    WINAPI GetParent(HWND hwnd);
 HWND    WINAPI SetParent(HWND hwnd, HWND parent);
 HWND    WINAPI GetWindow(HWND hwnd, UINT cmd);
 HWND    WINAPI GetTopWindow(HWND hwnd);
+HWND    WINAPI GetNextWindow(HWND hwnd, UINT cmd);
+BOOL    WINAPI AnyPopup(void);
+BOOL    WINAPI FlashWindow(HWND hwnd, BOOL invert);
+BOOL    WINAPI CloseWindow(HWND hwnd);
+BOOL    WINAPI OpenIcon(HWND hwnd);
+void    WINAPI ShowOwnedPopups(HWND hwnd, BOOL show);
+HWND    WINAPI GetLastActivePopup(HWND hwnd);
+BOOL    WINAPI LockWindowUpdate(HWND hwnd);
+typedef HANDLE HDWP;
+HDWP    WINAPI BeginDeferWindowPos(int n);
+HDWP    WINAPI DeferWindowPos(HDWP d, HWND hwnd, HWND after, int x, int y, int cx, int cy,
+                              UINT flags);
+BOOL    WINAPI EndDeferWindowPos(HDWP d);
+HWND    WINAPI SetSysModalWindow(HWND hwnd);
+HWND    WINAPI GetSysModalWindow(void);
+/* WinHelp */
+#define HELP_CONTEXT        0x0001
+#define HELP_QUIT           0x0002
+#define HELP_INDEX          0x0003
+#define HELP_CONTENTS       0x0003
+#define HELP_HELPONHELP     0x0004
+#define HELP_KEY            0x0101
+BOOL    WINAPI WinHelp(HWND hwnd, LPCSTR file, UINT cmd, DWORD data);
 HWND    WINAPI GetDesktopWindow(void);
 HWND    WINAPI FindWindow(LPCSTR klass, LPCSTR title);
 BOOL    WINAPI EnumWindows(WNDENUMPROC proc, LPARAM lp);
@@ -653,6 +686,7 @@ void    WINAPI ValidateRect(HWND hwnd, const RECT *rc);
 void    WINAPI ValidateRgn(HWND hwnd, HRGN rgn);
 BOOL    WINAPI GetUpdateRect(HWND hwnd, LPRECT rc, BOOL erase);
 int     WINAPI GetUpdateRgn(HWND hwnd, HRGN rgn, BOOL erase);
+int     WINAPI ExcludeUpdateRgn(HDC hdc, HWND hwnd);
 BOOL    WINAPI RedrawWindow(HWND hwnd, const RECT *rc, HRGN rgn, UINT flags);
 void    WINAPI ScrollWindow(HWND hwnd, int dx, int dy, const RECT *rc, const RECT *clip);
 
@@ -665,6 +699,23 @@ void    WINAPI ReleaseCapture(void);
 HWND    WINAPI GetCapture(void);
 int     WINAPI GetKeyState(int vk);
 int     WINAPI GetAsyncKeyState(int vk);
+void    WINAPI GetKeyboardState(BYTE *keys);
+void    WINAPI SetKeyboardState(const BYTE *keys);
+
+/* GetQueueStatus */
+#define QS_KEY              0x0001
+#define QS_MOUSEMOVE        0x0002
+#define QS_MOUSEBUTTON      0x0004
+#define QS_MOUSE            (QS_MOUSEMOVE | QS_MOUSEBUTTON)
+#define QS_POSTMESSAGE      0x0008
+#define QS_TIMER            0x0010
+#define QS_PAINT            0x0020
+#define QS_SENDMESSAGE      0x0040
+#define QS_INPUT            (QS_MOUSE | QS_KEY)
+#define QS_ALLINPUT         0x007F
+DWORD   WINAPI GetQueueStatus(UINT flags);
+BOOL    WINAPI GetInputState(void);
+void    WINAPI ReplyMessage(LRESULT result);
 
 UINT    WINAPI SetTimer(HWND hwnd, UINT id, UINT elapse, TIMERPROC proc);
 BOOL    WINAPI KillTimer(HWND hwnd, UINT id);
@@ -672,6 +723,7 @@ BOOL    WINAPI KillTimer(HWND hwnd, UINT id);
 HCURSOR WINAPI LoadCursor(HINSTANCE inst, LPCSTR name);
 HICON   WINAPI LoadIcon(HINSTANCE inst, LPCSTR name);
 HCURSOR WINAPI SetCursor(HCURSOR cur);
+HCURSOR WINAPI GetCursor(void);
 void    WINAPI GetCursorPos(LPPOINT pt);
 void    WINAPI SetCursorPos(int x, int y);
 int     WINAPI ShowCursor(BOOL show);
@@ -706,6 +758,7 @@ void    WINAPI CheckRadioButton(HWND dlg, int first, int last, int check);
 HWND    WINAPI GetNextDlgTabItem(HWND dlg, HWND ctl, BOOL prev);
 HWND    WINAPI GetNextDlgGroupItem(HWND dlg, HWND ctl, BOOL prev);
 DWORD   WINAPI GetDialogBaseUnits(void);
+BOOL    WINAPI MapDialogRect(HWND hwnd, LPRECT rc);
 
 /* ---------------------------------------------------------------- more constants */
 
@@ -940,6 +993,7 @@ BOOL    WINAPI SetMenu(HWND hwnd, HMENU menu);
 void    WINAPI DrawMenuBar(HWND hwnd);
 HMENU   WINAPI GetSubMenu(HMENU menu, int pos);
 int     WINAPI GetMenuItemCount(HMENU menu);
+BOOL    WINAPI IsMenu(HMENU menu);
 UINT    WINAPI GetMenuItemID(HMENU menu, int pos);
 UINT    WINAPI GetMenuState(HMENU menu, UINT id, UINT flags);
 int     WINAPI GetMenuString(HMENU menu, UINT id, LPSTR buf, int max, UINT flags);

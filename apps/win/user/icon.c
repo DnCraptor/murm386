@@ -209,6 +209,8 @@ HICON WINAPI LoadIcon(HINSTANCE inst, LPCSTR name)
 
 static HCURSOR current_cursor;
 
+HCURSOR WINAPI GetCursor(void) { return current_cursor; }
+
 HCURSOR WINAPI SetCursor(HCURSOR c)
 {
     HCURSOR old = current_cursor;

@@ -461,6 +461,175 @@ static __attribute__((noinline)) int gdi_more(args *a, uint16_t service, uint32_
     return 0;
 }
 
+/* whether the program may read (or write, or run) n bytes at far: a
+ * selector of its own, the bytes within its limit */
+static int good_ptr(args *a, uint32_t far, uint32_t n, int write, int code)
+{
+    const win_ne_guest_image *g = a->ctx->image;
+    uint32_t base, limit, off = (uint16_t)far;
+    int is_code;
+    if (!win_ne_guest_selector_get(g, (uint16_t)(far >> 16), &base, &limit, &is_code))
+        return 0;
+    if ((write && is_code) || (code && !is_code))
+        return 0;
+    return !n || (off <= limit && n - 1u <= limit - off);
+}
+
+/* a string at far of up to n characters (to its NUL) readable */
+static int good_string(args *a, uint32_t far, uint32_t n)
+{
+    uint32_t base, limit, off = (uint16_t)far;
+    int code;
+    uint16_t sel = (uint16_t)(far >> 16);
+    if (!win_ne_guest_selector_get(a->ctx->image, sel, &base, &limit, &code) || off > limit)
+        return 0;
+    while (n) {
+        uint8_t buf[32];
+        uint32_t k = limit - off + 1u < sizeof(buf) ? limit - off + 1u : (uint32_t)sizeof(buf);
+        if (k > n)
+            k = n;
+        if (!k || !win_ne_read(a->ctx, sel, off, buf, k))
+            return 0;
+        for (uint32_t i = 0; i < k; i++)
+            if (!buf[i])
+                return 1;
+        n -= k;
+        off += k;
+        if (n && off > limit)
+            return 0;
+    }
+    return 1;
+}
+
+/* KERNEL's memory, selectors and the rest a program asks for */
+static __attribute__((noinline)) int kernel_misc(args *a, uint16_t service, uint32_t *v,
+                                                 int *dword)
+{
+    win_ne_guest_api_context *c = a->ctx;
+    win_ne_guest_image *g = (win_ne_guest_image *)c->image;
+    uint32_t base, limit;
+    int code;
+    switch (service) {
+    case 1:                             /* FatalExit(int): the end */
+        c->exited = 1;
+        c->exit_code = w(a, 4);
+        return 1;
+    case 29:                            /* Yield: the other tasks' turn */
+        Yield();
+        return 1;
+    case 105: case 167:                 /* GetExeVersion, GetExpWinVer(HINSTANCE) */
+        *v = 0x030a;
+        return 1;
+    case 199:                           /* SetHandleCount(UINT): as many */
+        *v = w(a, 4);
+        return 1;
+    case 203:                           /* DebugBreak */
+        return 1;
+    case 353: {                         /* lstrcpyn(LPSTR, LPCSTR, int): dst */
+        int n = (int16_t)w(a, 4);
+        uint32_t src = dw(a, 6), dst = dw(a, 10);
+        char s[256];
+        *dword = 1;
+        if (a->bad || n <= 0)
+            return 1;
+        if (n > (int)sizeof(s))
+            n = (int)sizeof(s);
+        s[0] = 0;
+        for (int i = 0; i < n - 1; i++) {   /* the source may end at its segment's end */
+            if (!rd_(a, src + (uint32_t)i, &s[i], 1))
+                return 1;
+            if (!s[i])
+                break;
+            s[i + 1] = 0;
+        }
+        s[n - 1] = 0;
+        if (wr_(a, dst, s, (uint32_t)strlen(s) + 1u))
+            *v = dst;
+        return 1;
+    }
+    case 348: {                         /* hmemcpy(void huge *, const void huge *, LONG) */
+        uint32_t n = dw(a, 4), src = dw(a, 8), dst = dw(a, 12);
+        uint8_t buf[128];
+        /* within the blocks: a block is 64K at most here, no selectors
+         * tiled beyond (__AHINCR), so a copy past 64K ends there */
+        while (!a->bad && n) {
+            uint32_t k = n < sizeof(buf) ? n : (uint32_t)sizeof(buf);
+            if (0x10000u - (uint16_t)src < k)
+                k = 0x10000u - (uint16_t)src;
+            if (0x10000u - (uint16_t)dst < k)
+                k = 0x10000u - (uint16_t)dst;
+            if (!rd_(a, src, buf, k) || !wr_(a, dst, buf, k))
+                break;
+            n -= k;
+            src += k;
+            dst += k;
+            if (!(uint16_t)src || !(uint16_t)dst)
+                break;
+        }
+        return 1;
+    }
+    case 334: case 346:                 /* IsBadReadPtr(LPVOID, UINT), IsBadHugeReadPtr(, DWORD) */
+    case 335: case 347:                 /* IsBadWritePtr, IsBadHugeWritePtr */
+        *v = !good_ptr(a, dw(a, service >= 346 ? 8 : 6),
+                       service >= 346 ? dw(a, 4) : w(a, 4), service == 335 || service == 347, 0);
+        return 1;
+    case 336:                           /* IsBadCodePtr(FARPROC) */
+        *v = !good_ptr(a, dw(a, 4), 1, 0, 1);
+        return 1;
+    case 337:                           /* IsBadStringPtr(LPCSTR, UINT) */
+        *v = !good_string(a, dw(a, 6), w(a, 4));
+        return 1;
+    /* selectors of its own: aliases (ne_guest.c) */
+    case 175:                           /* AllocSelector(UINT): a copy of it (0: an empty one) */
+        *v = win_ne_guest_selector_alloc(g, w(a, 4), -1);
+        return 1;
+    case 170: case 171:                 /* AllocCStoDSAlias, AllocDStoCSAlias(UINT) */
+        *v = win_ne_guest_selector_alloc(g, w(a, 4), service == 171);
+        return 1;
+    case 176: case 185: {               /* FreeSelector, GlobalDOSFree(UINT): 0 */
+        uint16_t sel = w(a, 4);
+        *v = sel;
+        if (win_ne_guest_global_free(g, sel)) {
+            win_ne_forget_selector(c, a->cpu, sel);
+            *v = 0;
+        }
+        return 1;
+    }
+    case 177: {                         /* PrestoChangoSelector(src, dst): dst, the other kind */
+        uint16_t dst = w(a, 4);
+        *v = win_ne_guest_selector_get(g, w(a, 6), &base, &limit, &code) &&
+             win_ne_guest_selector_set(g, dst, base, limit, !code) ? dst : 0;
+        return 1;
+    }
+    case 186: case 188:                 /* GetSelectorBase, GetSelectorLimit(UINT): DWORD */
+        *v = win_ne_guest_selector_get(g, w(a, 4), &base, &limit, &code) ?
+             (service == 186 ? base : limit) : 0;
+        *dword = 1;
+        return 1;
+    case 187: case 189: {               /* SetSelectorBase(UINT, DWORD): it; SetSelectorLimit: 0 */
+        uint16_t sel = w(a, 8);
+        uint32_t x = dw(a, 4);
+        int ok = win_ne_guest_selector_get(g, sel, &base, &limit, &code) &&
+                 win_ne_guest_selector_set(g, sel, service == 187 ? x : base,
+                                           service == 189 ? x : limit, code);
+        *v = service == 187 ? (ok ? sel : 0) : 0;
+        return 1;
+    }
+    case 184: {                         /* GlobalDOSAlloc(DWORD): segment and selector */
+        uint32_t bytes = dw(a, 4);
+        uint16_t sel = a->bad ? 0 : win_ne_guest_global_alloc(g, bytes ? bytes : 1);
+        win_ne_guest_segment *s = sel ? win_ne_guest_global(g, sel) : NULL;
+        *dword = 1;
+        if (s && !(s->linear & 15u) && s->linear < 0x100000u)
+            *v = (s->linear >> 4) << 16 | sel;
+        else if (sel)
+            win_ne_guest_global_free(g, sel);
+        return 1;
+    }
+    }
+    return 0;
+}
+
 static __attribute__((noinline)) int shell_service(args *a, uint16_t service, uint32_t *v)
 {
     char file[128], params[128], cmd[300];
@@ -526,6 +695,8 @@ int ne_kernel_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *d
     win_ne_guest_image *g = (win_ne_guest_image *)c->image;
     if (service >= WIN_NE_SERVICE_SHELL && service < WIN_NE_SERVICE_SHELL + 0x1000u)
         return shell_service(a, service, v);
+    if (kernel_misc(a, service, v, dword))
+        return 1;
     switch (service) {
     case WIN_NE_SERVICE_WIN87EM + 3:    /* __WinEm87Info, __WinEm87Restore, */
     case WIN_NE_SERVICE_WIN87EM + 4:    /* __WinEm87Save(LPVOID, int): the */

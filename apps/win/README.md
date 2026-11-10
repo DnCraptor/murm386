@@ -86,7 +86,7 @@ the status word, clear, "a coprocessor": others return 0);
 `__WinEm87Info`, `__WinEm87Save` and `__WinEm87Restore` do nothing (the
 tasks share the coprocessor, as they share Windows' one).
 
-The functions a program can call: some 230 go the generic way
+The functions a program can call: some 260 go the generic way
 (`core/ne_sigs.h`, made by `sdk/gen_ne_sigs.py` from the native prototypes:
 words, signed words, dwords, strings, buffers with their sizes, RECTs,
 POINTs, converted and handed to the function of the native export table);
@@ -114,7 +114,22 @@ and keep it; DPtoLP and LPtoDP go by the origins); COMMDLG's Open and
 Save dialogs, Find and Replace (its FINDREPLACE in the messages, its own),
 GetFileTitle; SHELL's ShellExecute (a program, or a document by WIN.INI's
 [Extensions]), FindExecutable, ShellAbout, ExtractIcon, DragAcceptFiles,
-and no registration database. A
+and no registration database; selectors of its own (AllocSelector,
+AllocCStoDSAlias, AllocDStoCSAlias, PrestoChangoSelector, Get/Set
+SelectorBase and Limit, FreeSelector: aliases, global entries with no
+memory of their own), GlobalDOSAlloc, GlobalWire and the rest of the
+locks, LocalHandle, LocalCompact, LocalHeapSize and their kind, lstrcpyn,
+hmemcpy (within a block), IsBadReadPtr and the other IsBad*Ptr (the
+selector and its limit), Yield, FatalExit, SetHandleCount, GetExpWinVer;
+DialogBoxParam, CreateDialogParam and the Indirect ones (a template in its
+memory: a far pointer, or a global block), with their WM_INITDIALOG
+lParam; SetClassWord, SetClassLong (the class's extra bytes, its procedure
+for its own classes), CreateWindowEx, MapWindowPoints, Get/SetKeyboardState,
+EnumTaskWindows, GrayString (a string grayed; a procedure of its own draws
+as it is), AnsiUpperBuff and AnsiLowerBuff; hooks are taken and never
+called (SetWindowsHook(Ex), CallNextHookEx ...). Freeing a selector
+(GlobalFree, FreeSelector) clears the caller's DS and ES if they hold it, as
+Windows does. A
 window procedure gets WM_CREATE's CREATESTRUCT, WM_GETMINMAXINFO's,
 WM_WINDOWPOSCHANGING's and WM_NCCALCSIZE's structures as copies of its
 own, which its DefWindowProc gives back. DOS, as its C library (Open
@@ -142,14 +157,15 @@ code segments), `OWDEMO` (many functions at once), `OWFILE` and `OWFILEL`
 (DOS through the C library, small and large model), `OWRES` (icons, a
 cursor, bitmaps, text, a superclass), `OWKERN` (KERNEL, COMMDLG, SHELL),
 `OWUSE` with `OWDLL.DLL` and `OWDLL2.DLL` (its DLLs), `OWFPU` (floating
-point: WIN87EM) (`make NEFIXTURES` in
+point: WIN87EM), `OWAPI` (KERNEL and USER beyond the basics: selectors,
+pointers, dialogs with an lParam, class words, hooks) (`make NEFIXTURES` in
 `host/`). All have DOS MZ stubs that explain how to launch them under WINN
 when invoked directly from DOS. `host/test_ne_run` runs them on the
 emulator's own i386 core (`src/i386.c` as it is, built for the host with
 the stand-ins in `host/x86run/`), and so does the host `winhost`: they are
 in its `HOSTWIN/` (`scripts/owwin.txt`, `scripts/owmenu.txt`,
 `scripts/owdemo.txt`, `scripts/owfile.txt`, `scripts/owres.txt`,
-`scripts/owkern.txt`, `scripts/owdll.txt`, `scripts/owfpu.txt`).
+`scripts/owkern.txt`, `scripts/owdll.txt`, `scripts/owfpu.txt`, `scripts/owapi.txt`).
 
     WINN [:] [program [arguments]]
 
@@ -320,6 +336,7 @@ use `ucontext`):
     ./winhost scripts/owkern.txt PROGMAN     # Catch/Throw, GetProcAddress, Open, Find, ShellAbout
     ./winhost scripts/owdll.txt PROGMAN      # its DLLs: imports, LoadLibrary, their data, heap, class
     ./winhost scripts/owfpu.txt PROGMAN      # floating point: sqrt, sin, exp, printf's %f (WIN87EM)
+    ./winhost scripts/owapi.txt PROGMAN      # selectors, IsBad*Ptr, DialogBoxParam, class words, hooks
     ./winhost scripts/winmine.txt WINMINE    # marks, a lost game, Expert, Best Times
     ./winhost scripts/logo.txt PROGMAN       # the logo (copy the BMPs into HOSTWIN first)
     ./winhost800 scripts/vga800.txt  # the VGA800 driver, built in

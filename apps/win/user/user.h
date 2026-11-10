@@ -13,6 +13,7 @@ typedef struct wclass {
     char     *name;
     ATOM      atom;
     WNDCLASS  wc;
+    uint8_t  *extra;             /* cbClsExtra bytes (SetClassWord 0..) */
 } wclass;
 
 typedef struct wprop {

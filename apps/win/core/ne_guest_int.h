@@ -35,10 +35,10 @@ typedef struct ne_user {
         uint16_t menu_id;           /* or a number */
     } cls[NE_CLASSES];
     struct { HWND hwnd; PAINTSTRUCT ps; } paint[NE_PAINTS];
-    /* the dialog procedures of its dialogs, and the one of the dialog
-     * being made */
-    struct { HWND hwnd; uint32_t proc; } dlg[NE_DIALOGS];
-    uint32_t pending;
+    /* the dialog procedures of its dialogs (and the lParam of their
+     * WM_INITDIALOG), and those of the dialog being made */
+    struct { HWND hwnd; uint32_t proc, param; } dlg[NE_DIALOGS];
+    uint32_t pending, pending_param;
     HACCEL accel[NE_ACCELS];        /* destroyed at the end */
     /* its timers with procedures of its own */
     struct { HWND hwnd; UINT id; uint32_t proc; } timer[NE_TIMERS];

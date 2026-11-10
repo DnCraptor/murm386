@@ -1,0 +1,29 @@
+# KERNEL and USER beyond the basics for a Win16 program on the i386 core:
+# selectors (an alias), lstrcpyn, hmemcpy, IsBad*Ptr, GlobalDOSAlloc,
+# MulDiv, global atoms, AnsiUpperBuff; class words, CreateWindowEx,
+# DeferWindowPos, MapWindowPoints, hooks; DialogBoxParam (its resource)
+# and DialogBoxIndirectParam (a template in memory) with their lParam;
+# GrayString:
+#     ./winhost scripts/owapi.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OWAPI
+key RETURN
+wait 200
+snap ok_param.ppm
+key RETURN
+wait 50
+snap ok_indirect.ppm
+key RETURN
+wait 100
+snap ok_lines.ppm
+keydown ALT
+key F4
+keyup ALT
+wait 50
+snap ok_end.ppm
+exit

@@ -1547,6 +1547,16 @@ static int shape_box(wdc *dc, int l, int t, int r, int b, RECT *out)
     return rc.left < rc.right && rc.top < rc.bottom;
 }
 
+/* a * b / c rounded (Win16's: -32768 for c 0 or a result past 16 bits) */
+int WINAPI MulDiv(int a, int b, int c)
+{
+    if (!c)
+        return -32768;
+    long long p = (long long)a * b;
+    long long q = (p < 0) == (c < 0) ? (p + c / 2) / c : (p - c / 2) / c;
+    return q < -32768 || q > 32767 ? -32768 : (int)q;
+}
+
 BOOL WINAPI Rectangle(HDC h, int l, int t, int r, int b)
 {
     DC_OR_RET(h, FALSE);

@@ -114,7 +114,7 @@ void win_ne_guest_release(win_ne_guest_image *image)
         if (image->psp.linear)
             image->io.free(image->opaque, image->psp.linear);
         for (unsigned i = 0; i < WIN_NE_GUEST_GLOBALS; i++)
-            if (image->globals[i].linear)
+            if (image->globals[i].linear && !(image->globals[i].flags & WIN_NE_GUEST_ALIAS))
                 image->io.free(image->opaque, image->globals[i].linear);
         for (unsigned i = 0; i < WIN_NE_GUEST_DLL_SEGMENTS; i++)
             if (image->dll_segments[i].linear)
@@ -277,6 +277,70 @@ static const struct {
     { M_KERNEL, 155, "GetTaskDS", 0 },
     { M_KERNEL, 166, "WinExec", 6 },
     { M_KERNEL, 169, "GetFreeSpace", 2 },
+    /* KERNEL: memory, selectors, pointers, strings, the rest (ne_guest_kernel.c,
+     * the local and global heaps' in ne_guest_call.c) */
+    { M_KERNEL, 1, "FatalExit", 2 },
+    { M_KERNEL, 11, "LocalHandle", 2 },
+    { M_KERNEL, 12, "LocalFlags", 2 },
+    { M_KERNEL, 13, "LocalCompact", 2 },
+    { M_KERNEL, 29, "Yield", 0 },
+    { M_KERNEL, 105, "GetExeVersion", 0 },
+    { M_KERNEL, 111, "GlobalWire", 2 },
+    { M_KERNEL, 112, "GlobalUnWire", 2 },
+    { M_KERNEL, 121, "LocalShrink", 4 },
+    { M_KERNEL, 161, "LocalCountFree", 0 },
+    { M_KERNEL, 162, "LocalHeapSize", 0 },
+    { M_KERNEL, 167, "GetExpWinVer", 2 },
+    { M_KERNEL, 170, "AllocCStoDSAlias", 2 },
+    { M_KERNEL, 171, "AllocDStoCSAlias", 2 },
+    { M_KERNEL, 175, "AllocSelector", 2 },
+    { M_KERNEL, 176, "FreeSelector", 2 },
+    { M_KERNEL, 177, "PrestoChangoSelector", 4 },
+    { M_KERNEL, 184, "GlobalDOSAlloc", 4 },
+    { M_KERNEL, 185, "GlobalDOSFree", 2 },
+    { M_KERNEL, 186, "GetSelectorBase", 2 },
+    { M_KERNEL, 187, "SetSelectorBase", 6 },
+    { M_KERNEL, 188, "GetSelectorLimit", 2 },
+    { M_KERNEL, 189, "SetSelectorLimit", 6 },
+    { M_KERNEL, 191, "GlobalPageLock", 2 },
+    { M_KERNEL, 192, "GlobalPageUnlock", 2 },
+    { M_KERNEL, 197, "GlobalFix", 2 },
+    { M_KERNEL, 198, "GlobalUnfix", 2 },
+    { M_KERNEL, 199, "SetHandleCount", 2 },
+    { M_KERNEL, 203, "DebugBreak", 0 },
+    { M_KERNEL, 334, "IsBadReadPtr", 6 },
+    { M_KERNEL, 335, "IsBadWritePtr", 6 },
+    { M_KERNEL, 336, "IsBadCodePtr", 4 },
+    { M_KERNEL, 337, "IsBadStringPtr", 6 },
+    { M_KERNEL, 346, "IsBadHugeReadPtr", 8 },
+    { M_KERNEL, 347, "IsBadHugeWritePtr", 8 },
+    { M_KERNEL, 348, "hmemcpy", 12 },
+    { M_KERNEL, 353, "lstrcpyn", 10 },
+    /* USER: dialogs, classes, the keyboard, hooks and the rest (ne_guest_user.c,
+     * ne_guest_call.c) */
+    { M_USER, 123, "CallMsgFilter", 6 },
+    { M_USER, 121, "SetWindowsHook", 6 },
+    { M_USER, 130, "SetClassWord", 6 },
+    { M_USER, 132, "SetClassLong", 8 },
+    { M_USER, 185, "GrayString", 22 },
+    { M_USER, 218, "DialogBoxIndirect", 10 },
+    { M_USER, 219, "CreateDialogIndirect", 12 },
+    { M_USER, 222, "GetKeyboardState", 4 },
+    { M_USER, 223, "SetKeyboardState", 4 },
+    { M_USER, 225, "EnumTaskWindows", 10 },
+    { M_USER, 234, "UnhookWindowsHook", 6 },
+    { M_USER, 235, "DefHookProc", 12 },
+    { M_USER, 239, "DialogBoxParam", 16 },
+    { M_USER, 240, "DialogBoxIndirectParam", 14 },
+    { M_USER, 241, "CreateDialogParam", 16 },
+    { M_USER, 242, "CreateDialogIndirectParam", 16 },
+    { M_USER, 258, "MapWindowPoints", 10 },
+    { M_USER, 291, "SetWindowsHookEx", 10 },
+    { M_USER, 292, "UnhookWindowsHookEx", 4 },
+    { M_USER, 293, "CallNextHookEx", 12 },
+    { M_USER, 437, "AnsiUpperBuff", 6 },
+    { M_USER, 438, "AnsiLowerBuff", 6 },
+    { M_USER, 452, "CreateWindowEx", 34 },
     { M_USER, 16, "ClipCursor", 4 },
     { M_USER, 181, "SetSysColors", 10 },
     { M_USER, 284, "GetFreeSystemResources", 2 },
@@ -841,7 +905,7 @@ static uint16_t global_selector(const win_ne_guest_image *g, unsigned i)
 win_ne_guest_segment *win_ne_guest_global(win_ne_guest_image *g, uint16_t sel)
 {
     for (unsigned i = 0; i < WIN_NE_GUEST_GLOBALS; i++)
-        if (g->globals[i].linear && (g->globals[i].selector & ~7u) == (sel & ~7u))
+        if (g->globals[i].selector && (g->globals[i].selector & ~7u) == (sel & ~7u))
             return &g->globals[i];
     return NULL;
 }
@@ -852,7 +916,7 @@ uint16_t win_ne_guest_global_alloc(win_ne_guest_image *g, uint32_t bytes)
         return 0;
     for (unsigned i = 0; i < WIN_NE_GUEST_GLOBALS; i++) {
         win_ne_guest_segment *s = &g->globals[i];
-        if (s->linear)
+        if (s->selector)
             continue;
         if (!guest_alloc(g, bytes, &s->linear))
             return 0;
@@ -910,7 +974,8 @@ realloc_fail:
 int win_ne_guest_global_realloc(win_ne_guest_image *g, uint16_t sel, uint32_t bytes,
                                 int (*read)(void *, uint32_t, void *, uint32_t))
 {
-    return resize(g, win_ne_guest_global(g, sel), bytes, read);
+    win_ne_guest_segment *s = win_ne_guest_global(g, sel);
+    return s && !(s->flags & WIN_NE_GUEST_ALIAS) && resize(g, s, bytes, read);
 }
 
 int win_ne_guest_global_free(win_ne_guest_image *g, uint16_t sel)
@@ -924,9 +989,74 @@ int win_ne_guest_global_free(win_ne_guest_image *g, uint16_t sel)
                      absent, sizeof(absent)))
         return 0;
     memcpy(g->gdt + (s->selector & ~7u), absent, sizeof(absent));
-    g->io.free(g->opaque, s->linear);
+    if (!(s->flags & WIN_NE_GUEST_ALIAS))
+        g->io.free(g->opaque, s->linear);
     memset(s, 0, sizeof(*s));
     return 1;
+}
+
+/* ---------------------------------------------------------------- selectors */
+
+/* a selector's descriptor (the host's copy of the GDT): its base, limit,
+ * whether code; 0 if it is none of the program's */
+int win_ne_guest_selector_get(const win_ne_guest_image *g, uint16_t sel, uint32_t *base,
+                              uint32_t *limit, int *code)
+{
+    uint32_t at = sel & ~7u;
+    if (!at || (sel & 4u) || at + GDT_ENTRY_BYTES > (uint32_t)g->gdt_limit + 1u)
+        return 0;
+    const uint8_t *p = g->gdt + at;
+    if (!(p[5] & 0x80u) || !(p[5] & 0x10u) || (p[5] & 0x60u) != 0x60u)
+        return 0;                       /* not present, a system one, not ring 3 */
+    *base = p[2] | (uint32_t)p[3] << 8 | (uint32_t)p[4] << 16 | (uint32_t)p[7] << 24;
+    *limit = p[0] | (uint32_t)p[1] << 8 | (uint32_t)(p[6] & 0x0fu) << 16;
+    *code = !!(p[5] & 0x08u);
+    return 1;
+}
+
+static int alias_write(win_ne_guest_image *g, win_ne_guest_segment *s, uint32_t base,
+                       uint32_t size, int code)
+{
+    uint8_t desc[GDT_ENTRY_BYTES];
+    descriptor(desc, base, size, code);
+    if (!g->io.write(g->opaque, g->gdt_linear + (s->selector & ~7u), desc, sizeof(desc)))
+        return 0;
+    memcpy(g->gdt + (s->selector & ~7u), desc, sizeof(desc));
+    s->linear = base;
+    s->size = size;
+    s->flags = (uint16_t)(WIN_NE_GUEST_ALIAS | (code ? 0u : 1u));
+    return 1;
+}
+
+uint16_t win_ne_guest_selector_alloc(win_ne_guest_image *g, uint16_t like, int code)
+{
+    uint32_t base = 0, limit = 0;
+    int was_code = 0;
+    if (like && !win_ne_guest_selector_get(g, like, &base, &limit, &was_code))
+        return 0;
+    if (code < 0)
+        code = was_code;
+    for (unsigned i = 0; i < WIN_NE_GUEST_GLOBALS; i++) {
+        win_ne_guest_segment *s = &g->globals[i];
+        if (s->selector)
+            continue;
+        s->selector = global_selector(g, i);
+        if (!alias_write(g, s, base, limit + 1u, code)) {
+            memset(s, 0, sizeof(*s));
+            return 0;
+        }
+        return s->selector;
+    }
+    return 0;
+}
+
+int win_ne_guest_selector_set(win_ne_guest_image *g, uint16_t sel, uint32_t base,
+                              uint32_t limit, int code)
+{
+    win_ne_guest_segment *s = win_ne_guest_global(g, sel);
+    if (!s || !(s->flags & WIN_NE_GUEST_ALIAS) || limit > 0xffffu)
+        return 0;
+    return alias_write(g, s, base, limit + 1u, code);
 }
 
 /* ---------------------------------------------------------------- DLLs */

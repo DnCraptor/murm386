@@ -327,6 +327,16 @@ int win_ne_arg(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint32_t off, ui
     return read_stack_word(ctx, cpu, off, v);
 }
 
+void win_ne_forget_selector(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint16_t sel)
+{
+    static const int at[2] = { FR_DS, FR_ES };
+    for (int i = 0; cpu && i < 2; i++) {
+        uint16_t v;
+        if (frame_get(ctx, cpu, at[i], &v) && v && (v & ~3u) == (sel & ~3u))
+            frame_set(ctx, cpu, at[i], 0);
+    }
+}
+
 int win_ne_string(win_ne_guest_api_context *ctx, uint16_t sel, uint16_t off, char *dst,
                   uint32_t cap)
 {
