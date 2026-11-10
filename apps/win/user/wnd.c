@@ -1497,6 +1497,16 @@ HWND WINAPI CreateWindowEx(DWORD ex, LPCSTR klass, LPCSTR title, DWORD style,
         link_top(w);
 
     CREATESTRUCT cs = { param, inst, menu, hparent, cy, cx, y, x, (LONG)style, title, klass, ex };
+    /* HCBT_CREATEWND: the window there, before its first message (MFC's
+     * hook takes the window for its object then, subclasses it); its
+     * place and size as worked out already */
+    CBT_CREATEWND cbt = { &cs, 0 };
+    if (user_hook(WH_CBT, HCBT_CREATEWND, (WPARAM)h, (LPARAM)(intptr_t)&cbt)) {
+        DestroyWindow(h);
+        return 0;
+    }
+    if (!IsWindow(h))
+        return 0;
     if (!SendMessage(h, WM_NCCREATE, 0, (LPARAM)(intptr_t)&cs)) {
         DestroyWindow(h);
         return 0;

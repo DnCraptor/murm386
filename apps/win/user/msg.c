@@ -115,6 +115,32 @@ void WINAPI PostQuitMessage(int code)
     t->quit_code = code;
 }
 
+static unsigned hook_types;
+static LRESULT (*hook_call)(int, int, WPARAM, LPARAM);
+
+void user_set_hooks(unsigned types, LRESULT (*call)(int type, int code, WPARAM wp, LPARAM lp))
+{
+    hook_types = call ? types : 0;
+    hook_call = call;
+}
+
+LRESULT user_hook(int type, int code, WPARAM wp, LPARAM lp)
+{
+    return hook_types & (1u << type) ? hook_call(type, code, wp, lp) : 0;
+}
+
+/* WH_CALLWNDPROC's hooks with the message (they may subclass the window,
+ * destroy it): its procedure then, NULL if it is gone */
+static WNDPROC send_hook(HWND h, UINT m, WPARAM wp, LPARAM lp, int same)
+{
+    if (hook_types & (1u << WH_CALLWNDPROC)) {
+        CWPSTRUCT cwp = { lp, wp, m, h };
+        hook_call(WH_CALLWNDPROC, HC_ACTION, (WPARAM)same, (LPARAM)(intptr_t)&cwp);
+    }
+    wwnd *w = user_wnd(h);
+    return w ? w->proc : NULL;
+}
+
 LRESULT WINAPI SendMessage(HWND h, UINT m, WPARAM wp, LPARAM lp)
 {
     if (h == 0xFFFF) {
@@ -130,10 +156,13 @@ LRESULT WINAPI SendMessage(HWND h, UINT m, WPARAM wp, LPARAM lp)
     /* Keep the synchronous call, but attribute API calls inside its
      * window procedure to the window's owning task, not to the sender. */
     wtask *owner = task_from_handle(w->task);
-    if (!owner || owner == task_current())
-        return w->proc(h, m, wp, lp);
+    if (!owner || owner == task_current()) {
+        WNDPROC proc = send_hook(h, m, wp, lp, 1);
+        return proc ? proc(h, m, wp, lp) : 0;
+    }
     wtask *previous = task_set_dispatch_owner(owner);
-    LRESULT result = w->proc(h, m, wp, lp);
+    WNDPROC proc = send_hook(h, m, wp, lp, 0);
+    LRESULT result = proc ? proc(h, m, wp, lp) : 0;
     task_set_dispatch_owner(previous);
     return result;
 }

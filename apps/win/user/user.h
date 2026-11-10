@@ -165,6 +165,11 @@ LRESULT CALLBACK user_mdiclient_proc(HWND, UINT, WPARAM, LPARAM);
 
 /* control helpers */
 void    user_dialog_menu(HMENU menu);   /* the next dialog's menu */
+/* the programs' hooks: the types there are (bits 1 << WH_...), what
+ * calls them (WH_CBT's HCBT_CREATEWND: nonzero, the window is not made;
+ * WH_CALLWNDPROC: a CWPSTRUCT of the message sent) */
+void    user_set_hooks(unsigned types, LRESULT (*call)(int type, int code, WPARAM wp, LPARAM lp));
+LRESULT user_hook(int type, int code, WPARAM wp, LPARAM lp);
 HFONT   user_ctl_font(HWND h);
 int     user_ctl_line(HWND h);      /* its font's line height: 16 the system font's */
 HBRUSH  user_ctl_color(HWND h, HDC dc, int type);

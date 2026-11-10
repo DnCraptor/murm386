@@ -1476,6 +1476,176 @@ static __attribute__((noinline)) int call_strings(args *a, uint16_t service, uin
     return 0;
 }
 
+/* ---------------------------------------------------------------- hooks */
+
+/* The program's hooks are taken (SetWindowsHook, SetWindowsHookEx); USER
+ * calls two kinds: WH_CALLWNDPROC's with each message sent to a window of
+ * its task (before its procedure: the hook may subclass it), WH_CBT's
+ * with HCBT_CREATEWND as its task makes a window (MFC's way to take one
+ * for its object). The others (a message filter, a keyboard hook ...)
+ * see nothing. HHOOK: "HK" and the hook's number; the next in the chain
+ * the one made before it. */
+#define WH_CALLWNDPROC_ 4
+#define WH_CBT_ 5
+static uint16_t hook_ids;
+static int hook_counts[2];              /* WH_CALLWNDPROC's, WH_CBT's */
+static LRESULT ne_hook(int type, int code, WPARAM wp, LPARAM lp);
+
+static void hooks_count(int type, int add)
+{
+    if (type == WH_CALLWNDPROC_ || type == WH_CBT_)
+        hook_counts[type - WH_CALLWNDPROC_] += add;
+    unsigned types = (hook_counts[0] > 0 ? 1u << WH_CALLWNDPROC_ : 0) |
+                     (hook_counts[1] > 0 ? 1u << WH_CBT_ : 0);
+    user_set_hooks(types, types ? ne_hook : NULL);
+}
+
+/* the hook before the one numbered id (0: the last made) of the type */
+static int hook_next(ne_user *u, int type, uint16_t id)
+{
+    int best = -1;
+    for (int i = 0; i < NE_HOOKS; i++) {
+        uint16_t k = u->hook[i].id;
+        if (k && u->hook[i].type == type && (!id || k < id) &&
+            (!u->hook[i].task || u->hook[i].task == (uint16_t)u->task) &&
+            (best < 0 || k > u->hook[best].id))
+            best = i;
+    }
+    return best;
+}
+
+static uint32_t hook_call(ne_user *u, int i, int code, uint16_t wp, uint32_t lp,
+                          uint8_t *blob, uint16_t len)
+{
+    const uint16_t words[4] = { (uint16_t)code, wp, (uint16_t)(lp >> 16), (uint16_t)lp };
+    return win_ne_call(u->ctx, u->hook[i].proc, words, 4, blob, len);
+}
+
+static uint16_t hook_add(ne_user *u, int type, uint32_t proc, uint16_t task)
+{
+    for (int i = 0; i < NE_HOOKS; i++)
+        if (!u->hook[i].id) {
+            if (!++hook_ids)
+                hook_ids = 1;
+            u->hook[i].type = (int16_t)type;
+            u->hook[i].proc = proc;
+            u->hook[i].task = task;
+            u->hook[i].id = hook_ids;
+            hooks_count(type, 1);
+            return hook_ids;
+        }
+    return 0;
+}
+
+static void hook_remove(ne_user *u, int i)
+{
+    int type = u->hook[i].type;
+    memset(&u->hook[i], 0, sizeof(u->hook[i]));
+    hooks_count(type, -1);
+}
+
+/* USER's call: the program's hook with copies of what lParam points to (a
+ * CWPSTRUCT, a CBT_CREATEWND; their CREATESTRUCT for WM_CREATE ...);
+ * what it returns. The program: CBT, the task making the window; a
+ * message, the window's. */
+static __attribute__((noinline)) LRESULT ne_hook(int type, int code, WPARAM wp, LPARAM lp)
+{
+    if (!lp || (type == WH_CBT_ && code != HCBT_CREATEWND))
+        return 0;
+    const CWPSTRUCT *cwp = (const CWPSTRUCT *)(uintptr_t)lp;
+    const CBT_CREATEWND *cw = (const CBT_CREATEWND *)(uintptr_t)lp;
+    ne_user *u = ne_user_of(type == WH_CBT_ ? GetCurrentTask() : GetWindowTask(cwp->hwnd));
+    win_ne_guest_api_context *c = u ? u->ctx : NULL;
+    if (!c || c->dead || c->exited || c->stopped)
+        return 0;
+    int i = hook_next(u, type, 0);
+    if (i < 0)
+        return 0;
+    uint8_t blob[10 + 30 + 64 + 64];
+    const CREATESTRUCT *cs = type == WH_CBT_ ? cw->lpcs :
+                             (cwp->message == WM_CREATE || cwp->message == WM_NCCREATE) &&
+                             cwp->lParam ? (const CREATESTRUCT *)(uintptr_t)cwp->lParam : NULL;
+    uint16_t head = type == WH_CBT_ ? 6 : 10;
+    uint16_t len = (uint16_t)(head + (cs ? create_size(cs) : 0));
+    uint32_t far = win_ne_blob_far(c, len);
+    if (cs)
+        create_to_guest(u, cs, far + head, blob + head);
+    if (type == WH_CBT_) {
+        wr32(blob, far + head);
+        wr16(blob + 4, (uint16_t)cw->hwndInsertAfter);
+    } else {                            /* lParam, wParam, message, hwnd */
+        wr32(blob, cs ? far + head : (uint32_t)cwp->lParam);
+        wr16(blob + 4, (uint16_t)cwp->wParam);
+        wr16(blob + 6, (uint16_t)cwp->message);
+        wr16(blob + 8, (uint16_t)cwp->hwnd);
+    }
+    return (LRESULT)(int32_t)hook_call(u, i, code, (uint16_t)wp, far, blob, len);
+}
+
+static int hook_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword)
+{
+    switch (service) {
+    case 0x1123:                        /* SetWindowsHookEx(int, HOOKPROC, HINSTANCE, HTASK) */
+        *v = a->bad ? 0 : hook_add(u, (int16_t)w(a, 12), dw(a, 8), w(a, 4));
+        if (*v)
+            *v |= 0x484b0000u;
+        *dword = 1;
+        return 1;
+    case 0x1079: {                      /* SetWindowsHook(int, HOOKPROC): the one before */
+        int type = (int16_t)w(a, 8), i = hook_next(u, type, 0);
+        *v = i >= 0 ? u->hook[i].proc : 0;
+        *dword = 1;
+        if (!a->bad)
+            hook_add(u, type, dw(a, 4), 0);
+        return 1;
+    }
+    case 0x1124:                        /* UnhookWindowsHookEx(HHOOK) */
+    case 0x10ea: {                      /* UnhookWindowsHook(int, HOOKPROC) */
+        uint32_t h = dw(a, 4);
+        int type = (int16_t)w(a, 8);
+        *v = 0;
+        for (int i = 0; !a->bad && i < NE_HOOKS; i++)
+            if (u->hook[i].id && (service == 0x1124 ? u->hook[i].id == (uint16_t)h :
+                                  u->hook[i].type == type && u->hook[i].proc == h)) {
+                hook_remove(u, i);
+                *v = 1;
+                break;
+            }
+        if (service == 0x1124 && (h >> 16) != 0x484bu)
+            *v = 1;                     /* not one of these: nothing to undo */
+        return 1;
+    }
+    case 0x1125: {                      /* CallNextHookEx(HHOOK, int, WPARAM, LPARAM) */
+        uint32_t h = dw(a, 12);
+        int at = -1, i = -1;
+        for (int k = 0; k < NE_HOOKS; k++)
+            if (u->hook[k].id && u->hook[k].id == (uint16_t)h)
+                at = k;
+        if (!a->bad && (h >> 16) == 0x484bu && at >= 0)
+            i = hook_next(u, u->hook[at].type, u->hook[at].id);
+        *v = i >= 0 ? hook_call(u, i, (int16_t)w(a, 10), w(a, 8), dw(a, 4), NULL, 0) : 0;
+        *dword = 1;
+        return 1;
+    }
+    case 0x10eb: {                      /* DefHookProc(int, WPARAM, LPARAM, HHOOK FAR *): the
+                                         * one before (that *lphhook has), if any */
+        uint8_t b[4] = { 0 };
+        uint32_t prev = !a->bad && dw(a, 4) && rd(a, dw(a, 4), b, 4) ? rd32(b) : 0;
+        int i = -1;
+        for (int k = 0; prev && k < NE_HOOKS; k++)
+            if (u->hook[k].id && u->hook[k].proc == prev)
+                i = k;
+        *v = i >= 0 ? hook_call(u, i, (int16_t)w(a, 14), w(a, 12), dw(a, 8), NULL, 0) : 0;
+        *dword = 1;
+        return 1;
+    }
+    case 0x107b:                        /* CallMsgFilter(LPMSG, int): not handled */
+        *v = 0;
+        return 1;
+    }
+    return 0;
+}
+
 int ne_call(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword)
 {
     win_ne_guest_api_context *c = a->ctx;
@@ -1690,24 +1860,9 @@ int ne_call(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword)
             *v = (uint16_t)EnumWindows(ne_enumproc, (LPARAM)(uintptr_t)&e);
         return 1;
     }
-    /* hooks: taken, never called (a message filter, a keyboard hook ... sees
-     * nothing); the next one in the chain is none */
-    case 0x1079:                        /* SetWindowsHook(int, HOOKPROC): the one before */
-    case 0x10eb:                        /* DefHookProc(int, WPARAM, LPARAM, HHOOK FAR *) */
-    case 0x1125:                        /* CallNextHookEx(HHOOK, int, WPARAM, LPARAM) */
-        *v = 0;
-        *dword = 1;
-        return 1;
-    case 0x1123:                        /* SetWindowsHookEx(int, HOOKPROC, HINSTANCE, HTASK) */
-        *v = 0x484b0000u | (uint16_t)w(a, 12);
-        *dword = 1;
-        return 1;
-    case 0x10ea: case 0x1124:           /* UnhookWindowsHook, UnhookWindowsHookEx */
-        *v = 1;
-        return 1;
-    case 0x107b:                        /* CallMsgFilter(LPMSG, int): not handled */
-        *v = 0;
-        return 1;
+    case 0x1079: case 0x10eb: case 0x1125: case 0x1123: case 0x10ea: case 0x1124:
+    case 0x107b:                        /* hooks */
+        return hook_service(a, u, service, v, dword);
     case 0x1085: case 0x1087: {         /* GetWindowWord, GetWindowLong(HWND, int) */
         int idx = (int16_t)w(a, 4);
         HWND h = w(a, 6);
@@ -1800,6 +1955,9 @@ int ne_call(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword)
 
 void ne_call_end(ne_user *u)
 {
+    for (int i = 0; i < NE_HOOKS; i++)
+        if (u->hook[i].id)
+            hook_remove(u, i);
     for (int i = 0; i < NE_TIMERS; i++)
         if (u->timer[i].proc)
             KillTimer(u->timer[i].hwnd, u->timer[i].id);

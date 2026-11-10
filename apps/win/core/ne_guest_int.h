@@ -23,6 +23,7 @@
 #define NE_IMAGES  16
 #define NE_RESOURCES 16
 #define NE_FINDS   2
+#define NE_HOOKS   8
 
 typedef struct ne_user {
     struct ne_user *next;
@@ -82,6 +83,10 @@ typedef struct ne_user {
     HFILE mmio[8];
     uint8_t mmio_open[8];
     struct ne_lz *lz[8];
+    /* ne_guest_call.c: its hooks (SetWindowsHook(Ex)): the type, its
+     * procedure, the task it is for (0 all its own), its number (HHOOK's
+     * low word, made one after the other: the later the first called) */
+    struct { int16_t type; uint16_t task, id; uint32_t proc; } hook[NE_HOOKS];
 } ne_user;
 
 
@@ -167,6 +172,8 @@ void ne_call_end(ne_user *u);
 int ne_dos_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword);
 /* user/dialog.c: the menu of the dialog made next (its window's then) */
 void user_dialog_menu(HMENU menu);
+/* user/msg.c: the hooks USER calls (WH_CBT's HCBT_CREATEWND, WH_CALLWNDPROC) */
+void user_set_hooks(unsigned types, LRESULT (*call)(int type, int code, WPARAM wp, LPARAM lp));
 /* ne_guest_int21.c: the DOS environment block, its selector in the PSP */
 void ne_environment(win_ne_guest_api_context *ctx, ne_user *u);
 /* ne_guest_int21.c: OpenFile's work, the name given (NULL: the

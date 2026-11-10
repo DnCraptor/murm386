@@ -28,6 +28,19 @@ typedef struct tagCREATESTRUCT {
     int cy, cx, y, x; LONG style; LPCSTR lpszName, lpszClass; DWORD dwExStyle;
 } CREATESTRUCT, *LPCREATESTRUCT;
 
+/* hooks: a message sent (WH_CALLWNDPROC), the computer-based-training
+ * one's window being made (WH_CBT, HCBT_CREATEWND) */
+#define WH_CALLWNDPROC  4
+#define WH_CBT          5
+#define HC_ACTION       0
+#define HCBT_CREATEWND  3
+typedef struct tagCWPSTRUCT {
+    LPARAM lParam; WPARAM wParam; UINT message; HWND hwnd;
+} CWPSTRUCT, *LPCWPSTRUCT;
+typedef struct tagCBT_CREATEWND {
+    LPCREATESTRUCT lpcs; HWND hwndInsertAfter;
+} CBT_CREATEWND, *LPCBT_CREATEWND;
+
 typedef struct tagPAINTSTRUCT {
     HDC hdc; BOOL fErase; RECT rcPaint; BOOL fRestore, fIncUpdate;
     BYTE rgbReserved[16];
