@@ -3,7 +3,12 @@
  * calls through the RM gateway, exceptions and the yield vector (another
  * task's turn) through the private IDT, back to the DOS context.
  *
+ * The program runs in ring 3: what it may not do (CLI, an OUT of its own,
+ * leave protected mode, HLT) faults, a fault with its stack gone still has
+ * one (ring 0's), and WINN gets the CPU back.
+ *
  *     ./test_ne_run NEDIALOG.EXE NELOOP-fixture.exe NEFAULT.EXE NEHANG.EXE \
+ *                   NESTACK.EXE NECLI.EXE NEOUT.EXE NECR0.EXE NEHLT.EXE \
  *                   OWHELLO.EXE OWBUSY.EXE OWSEGS.EXE
  */
 #include <assert.h>
@@ -80,6 +85,14 @@ int main(int argc, char **argv)
             assert(rc == 0 && boxes == 1);
         else if (ends_with(f, "NEFAULT.EXE"))
             assert(rc == WIN_NE_EXEC_FAULT && r.fault.vector == 6 && r.fault.segment == 1);
+        else if (ends_with(f, "NESTACK.EXE"))     /* #UD with SP 0: the frame in ring 0 */
+            assert(rc == WIN_NE_EXEC_FAULT && r.fault.vector == 6 && r.fault.segment == 1 &&
+                   (r.fault.cs & 3) == 3 && r.fault.ip == 7);
+        else if (ends_with(f, "NECLI.EXE") || ends_with(f, "NEOUT.EXE") ||
+                 ends_with(f, "NECR0.EXE") || ends_with(f, "NEHLT.EXE"))  /* #GP */
+            assert(rc == WIN_NE_EXEC_FAULT && r.fault.vector == 13 && r.fault.segment == 1 &&
+                   (r.fault.cs & 3) == 3 &&
+                   r.fault.ip == (ends_with(f, "NEOUT.EXE") ? 11 : 5));
         else if (ends_with(f, "NEHANG.EXE"))     /* other tasks run; it ends when told */
             assert(rc == 0 && r.stopped && yields == 3);
         else if (ends_with(f, "NELOOP-fixture.exe"))

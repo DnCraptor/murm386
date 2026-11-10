@@ -129,12 +129,12 @@ static void save_fixture(const char *path, uint8_t *b)
     FILE *f = fopen(path, "wb");
     assert(f && fwrite(b, 1, IMAGE_BYTES, f) == IMAGE_BYTES && !fclose(f));
 }
-static void check_desc(const uint8_t *p, uint32_t base, uint32_t size, int code)
+static void check_desc(const uint8_t *p, uint32_t base, uint32_t size, uint8_t access)
 {
     assert(r16(p) == size - 1u);
     assert(r16(p + 2) == (uint16_t)base);
     assert(p[4] == (uint8_t)(base >> 16));
-    assert(p[5] == (code ? 0x9a : 0x92));
+    assert(p[5] == access);
     assert(p[6] == 0 && p[7] == 0);
 }
 int main(void)
@@ -151,26 +151,40 @@ int main(void)
     reset_guest();
     assert(win_ne_guest_load(path, &img, &io, NULL) == WIN_NE_OK);
     assert(img.info.segment_count == 1 && img.thunk_count == 1);
-    assert(img.gdt_limit == 8 * (4 + WIN_NE_GUEST_GLOBALS) - 1 && img.cs == 0x10 && img.ss == 0x10);
+    /* null, thunks, the segment, the PSP, the globals, then the ring 3
+     * alias of the thunks, three call gates, the TSS, the ring 0 area */
+    assert(img.gdt_limit == 8 * (4 + WIN_NE_GUEST_GLOBALS + 6) - 1 && img.cs == 0x13 && img.ss == 0x13);
     assert(img.ip == 0 && img.sp == 0x40 && img.thunk_selector == 0x08);
     assert(nactive == 4 && img.gdt_linear && img.thunk_linear && img.psp.linear);
-    assert(img.psp.selector == 0x18);
+    assert(img.psp.selector == 0x1b);
+    const unsigned x = 8 * (4 + WIN_NE_GUEST_GLOBALS);
+    assert(img.thunk3_selector == (x | 3) && img.api_gate == ((x + 8) | 3));
+    assert(img.exit_gate == ((x + 16) | 3) && img.cbret_gate == ((x + 24) | 3));
+    assert(img.tss_selector == x + 32 && img.ring0_selector == x + 40);
     assert(img.segments[1].linear && img.segments[1].size == 0x80);
     const uint8_t *gdt = guest + img.gdt_linear;
     assert(!r32(gdt) && !r32(gdt + 4));
-    check_desc(gdt + 8, img.thunk_linear,
-               WIN_NE_THUNK_BYTES * WIN_NE_GUEST_MAX_THUNKS, 1);
-    check_desc(gdt + 16, img.segments[1].linear, 0x80u, 1);
-    check_desc(gdt + 24, img.psp.linear, WIN_NE_GUEST_PSP_BYTES, 0);
+    check_desc(gdt + 8, img.thunk_linear, WIN_NE_THUNK_SEGMENT_BYTES, 0x9a);
+    check_desc(gdt + 16, img.segments[1].linear, 0x80u, 0xfa);
+    check_desc(gdt + 24, img.psp.linear, WIN_NE_GUEST_PSP_BYTES, 0xf2);
+    check_desc(gdt + x, img.thunk_linear, WIN_NE_THUNK_SEGMENT_BYTES, 0xfa);
+    check_desc(gdt + x + 32, img.thunk_linear + WIN_NE_RING0_OFFSET, WIN_NE_TSS_BYTES, 0x81);
+    check_desc(gdt + x + 40, img.thunk_linear + WIN_NE_RING0_OFFSET, WIN_NE_RING0_BYTES, 0x92);
+    /* call gates: 16-bit, DPL 3, no words copied, to the ring 0 thunks */
+    const uint16_t targets[3] = { WIN_NE_BOOT_GATEWAY_OFFSET, WIN_NE_BOOT_EXIT_OFFSET,
+                                  WIN_NE_CBRET_OFFSET };
+    for (unsigned i = 0; i < 3; i++) {
+        const uint8_t *cg = gdt + x + 8 + 8 * i;
+        assert(r16(cg) == targets[i] && r16(cg + 2) == 0x08);
+        assert(cg[4] == 0 && cg[5] == 0xe4 && r16(cg + 6) == 0);
+    }
     const uint8_t *code = guest + img.segments[1].linear;
     assert(code[0] == 0x90 && code[0x7f] == 0);
-    assert(r16(code + 0x10) == 0 && r16(code + 0x12) == 0x08);
-    assert(r16(code + 0x20) == 0 && r16(code + 0x22) == 0x08);
+    assert(r16(code + 0x10) == 0 && r16(code + 0x12) == img.thunk3_selector);
+    assert(r16(code + 0x20) == 0 && r16(code + 0x22) == img.thunk3_selector);
     const uint8_t stub[9] = {
-        0xb8, 0x03, 0x00, 0x9a,
-        (uint8_t)WIN_NE_BOOT_GATEWAY_OFFSET,
-        (uint8_t)(WIN_NE_BOOT_GATEWAY_OFFSET >> 8),
-        0x08, 0x00, 0xcb
+        0xb8, 0x03, 0x00, 0x9a, 0x00, 0x00,
+        (uint8_t)img.api_gate, (uint8_t)(img.api_gate >> 8), 0xcb
     };
     assert(!memcmp(guest + img.thunk_linear, stub, sizeof(stub)));
     assert(guest[img.thunk_linear + WIN_NE_THUNK_BYTES] == 0xcc);
@@ -187,7 +201,8 @@ int main(void)
     uint16_t h = win_ne_guest_global_alloc(&img, 32);
     assert(h && win_ne_guest_global(&img, h));
     win_ne_guest_segment *block = win_ne_guest_global(&img, h);
-    check_desc(guest + img.gdt_linear + h, block->linear, 32, 0);
+    assert((h & 3) == 3);
+    check_desc(guest + img.gdt_linear + (h & ~7), block->linear, 32, 0xf2);
     for (unsigned i = 0; i < 32; i++) assert(!guest[block->linear + i]);
     guest[block->linear] = 0xa5;
     uint32_t original = block->linear;
@@ -213,7 +228,7 @@ int main(void)
     fail_write = 0;
     assert(win_ne_guest_global_free(&img, h));
     assert(!win_ne_guest_global(&img, h));
-    assert(!r32(guest + img.gdt_linear + h));
+    assert(!r32(guest + img.gdt_linear + (h & ~7)));
     assert(nactive == baseline - 1u);
 
     win_ne_guest_release(&img);

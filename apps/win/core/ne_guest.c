@@ -28,9 +28,15 @@ _Static_assert(WIN_NE_DOS_STUB_OFFSET + WIN_NE_DOS_STUB_BYTES <= WIN_NE_FAULT_ID
                "NE DOS stubs overlap the private IDT");
 _Static_assert(WIN_NE_FAULT_IDT_OFFSET + WIN_NE_FAULT_IDT_BYTES <=
                WIN_NE_FAULT_CODE_OFFSET, "NE private IDT overlaps fault code");
-_Static_assert(WIN_NE_FAULT_CODE_OFFSET + WIN_NE_FAULT_CODE_BYTES <=
-               WIN_NE_GUEST_MAX_THUNKS * THUNK_BYTES,
-               "NE fault recovery exceeds thunk segment");
+_Static_assert(WIN_NE_FAULT_CODE_OFFSET + WIN_NE_FAULT_CODE_BYTES <= WIN_NE_RING0_OFFSET,
+               "NE fault recovery overlaps the ring 0 area");
+_Static_assert(WIN_NE_RING0_OFFSET + WIN_NE_RING0_BYTES <= WIN_NE_THUNK_SEGMENT_BYTES,
+               "NE ring 0 area exceeds the thunk segment");
+
+/* the GDT after the globals: the ring 3 alias of the thunks, three call
+ * gates, the TSS, the ring 0 area */
+#define GDT_EXTRA(g) ((uint32_t)(g)->info.segment_count + 3u + WIN_NE_GUEST_GLOBALS)
+#define GDT_EXTRAS 6u
 
 static void put16(uint8_t *p, uint16_t v)
 {
@@ -38,17 +44,33 @@ static void put16(uint8_t *p, uint16_t v)
     p[1] = (uint8_t)(v >> 8);
 }
 
-/* Access byte: present, DPL=0, executable/readable or data/read-write.
- * Flags: G=0 (byte granularity), D=0 (16-bit code/stack). */
-static void descriptor(uint8_t *p, uint32_t base, uint32_t size, int code)
+/* Access byte: present, the DPL, executable/readable or data/read-write
+ * (or a system type). Flags: G=0 (byte granularity), D=0 (16-bit). */
+static void seg_descriptor(uint8_t *p, uint32_t base, uint32_t size, uint8_t access)
 {
     uint32_t limit = size - 1u;
     put16(p, (uint16_t)limit);
     put16(p + 2, (uint16_t)base);
     p[4] = (uint8_t)(base >> 16);
-    p[5] = code ? 0x9au : 0x92u;
+    p[5] = access;
     p[6] = (uint8_t)(limit >> 16) & 0x0fu;
     p[7] = (uint8_t)(base >> 24);
+}
+
+/* the program's own: DPL 3 */
+static void descriptor(uint8_t *p, uint32_t base, uint32_t size, int code)
+{
+    seg_descriptor(p, base, size, code ? 0xfau : 0xf2u);
+}
+
+/* a 16-bit call gate, DPL 3, without parameters, to ring 0 code */
+static void call_gate(uint8_t *p, uint16_t selector, uint16_t offset)
+{
+    put16(p, offset);
+    put16(p + 2, selector);
+    p[4] = 0;
+    p[5] = 0xe4;
+    put16(p + 6, 0);
 }
 
 static int name_eq(const char *a, const char *b)
@@ -111,9 +133,9 @@ static int assign_selector(void *opaque, uint16_t index, uint16_t flags,
         return 0;
     s->size = bytes;
     s->flags = flags;
-    s->selector = (uint16_t)(GDT_SEGMENT_INDEX(index) * GDT_ENTRY_BYTES);
+    s->selector = (uint16_t)(GDT_SEGMENT_INDEX(index) * GDT_ENTRY_BYTES | 3u);
     *selector = s->selector;
-    descriptor(g->gdt + s->selector, s->linear, s->size, !(flags & 1u));
+    descriptor(g->gdt + (s->selector & ~7u), s->linear, s->size, !(flags & 1u));
     return 1;
 }
 
@@ -355,7 +377,7 @@ static int resolve_import(void *opaque, const win_ne_import *imp,
         return 0;
     for (uint16_t i = 0; i < g->thunk_count; i++) {
         if (g->thunk_services[i] == id) {
-            *selector = g->thunk_selector;
+            *selector = g->thunk3_selector;
             *offset = (uint16_t)(i * THUNK_BYTES);
             return 1;
         }
@@ -364,7 +386,7 @@ static int resolve_import(void *opaque, const win_ne_import *imp,
         return 0;
     uint16_t slot = g->thunk_count++;
     g->thunk_services[slot] = id;
-    *selector = g->thunk_selector;
+    *selector = g->thunk3_selector;
     *offset = (uint16_t)(slot * THUNK_BYTES);
     return 1;
 }
@@ -388,25 +410,41 @@ int win_ne_guest_load(const char *path, win_ne_guest_image *out,
     out->info = info;
     out->segments = (win_ne_guest_segment *)calloc((size_t)info.segment_count + 1u,
                                                     sizeof(*out->segments));
-    /* null, thunks, the segments, the PSP, the global blocks */
-    uint32_t gdtsize = ((uint32_t)info.segment_count + 3u + WIN_NE_GUEST_GLOBALS) * GDT_ENTRY_BYTES;
+    /* null, thunks, the segments, the PSP, the global blocks, the extras */
+    uint32_t gdtsize = ((uint32_t)info.segment_count + 3u + WIN_NE_GUEST_GLOBALS + GDT_EXTRAS) *
+                       GDT_ENTRY_BYTES;
     out->gdt = (uint8_t *)calloc(gdtsize, 1);
     rc = WIN_NE_NO_MEMORY;
     if (!out->segments || !out->gdt)
         goto fail;
     out->gdt_limit = (uint16_t)(gdtsize - 1u);
     out->thunk_selector = GDT_THUNK_INDEX * GDT_ENTRY_BYTES;
-    out->psp.selector = (uint16_t)(GDT_SEGMENT_INDEX(info.segment_count + 1u) * GDT_ENTRY_BYTES);
+    out->psp.selector = (uint16_t)(GDT_SEGMENT_INDEX(info.segment_count + 1u) * GDT_ENTRY_BYTES | 3u);
+    uint32_t x = GDT_EXTRA(out);
+    out->thunk3_selector = (uint16_t)(x * GDT_ENTRY_BYTES | 3u);
+    out->api_gate = (uint16_t)((x + 1u) * GDT_ENTRY_BYTES | 3u);
+    out->exit_gate = (uint16_t)((x + 2u) * GDT_ENTRY_BYTES | 3u);
+    out->cbret_gate = (uint16_t)((x + 3u) * GDT_ENTRY_BYTES | 3u);
+    out->tss_selector = (uint16_t)((x + 4u) * GDT_ENTRY_BYTES);
+    out->ring0_selector = (uint16_t)((x + 5u) * GDT_ENTRY_BYTES);
     if (!guest_alloc(out, gdtsize, &out->gdt_linear) ||
-        !guest_alloc(out, WIN_NE_GUEST_MAX_THUNKS * THUNK_BYTES,
-                     &out->thunk_linear) ||
+        !guest_alloc(out, WIN_NE_THUNK_SEGMENT_BYTES, &out->thunk_linear) ||
         !guest_alloc(out, WIN_NE_GUEST_PSP_BYTES, &out->psp.linear))
         goto fail;
-    descriptor(out->gdt + out->thunk_selector, out->thunk_linear,
-               WIN_NE_GUEST_MAX_THUNKS * THUNK_BYTES, 1);
+    seg_descriptor(out->gdt + out->thunk_selector, out->thunk_linear,
+                   WIN_NE_THUNK_SEGMENT_BYTES, 0x9a);
+    seg_descriptor(out->gdt + (out->thunk3_selector & ~7u), out->thunk_linear,
+                   WIN_NE_THUNK_SEGMENT_BYTES, 0xfa);
+    call_gate(out->gdt + (out->api_gate & ~7u), out->thunk_selector, WIN_NE_BOOT_GATEWAY_OFFSET);
+    call_gate(out->gdt + (out->exit_gate & ~7u), out->thunk_selector, WIN_NE_BOOT_EXIT_OFFSET);
+    call_gate(out->gdt + (out->cbret_gate & ~7u), out->thunk_selector, WIN_NE_CBRET_OFFSET);
+    seg_descriptor(out->gdt + out->tss_selector, out->thunk_linear + WIN_NE_RING0_OFFSET,
+                   WIN_NE_TSS_BYTES, 0x81);         /* 16-bit TSS, available */
+    seg_descriptor(out->gdt + out->ring0_selector, out->thunk_linear + WIN_NE_RING0_OFFSET,
+                   WIN_NE_RING0_BYTES, 0x92);
     out->psp.size = WIN_NE_GUEST_PSP_BYTES;
     out->psp.flags = 1;                 /* data */
-    descriptor(out->gdt + out->psp.selector, out->psp.linear, WIN_NE_GUEST_PSP_BYTES, 0);
+    descriptor(out->gdt + (out->psp.selector & ~7u), out->psp.linear, WIN_NE_GUEST_PSP_BYTES, 0);
 
     win_ne_image image;
     rc = win_ne_load_image(path, &image, assign_selector,
@@ -422,29 +460,30 @@ int win_ne_guest_load(const char *path, win_ne_guest_image *out,
         if (!io->write(opaque, s->linear, image.segments[i].data, s->size))
             goto loaded_fail;
     }
-    {
-        /* Initialise every unused thunk byte to INT3, so an unallocated
-         * offset never executes stale DOS heap contents. */
-        uint8_t thunks[WIN_NE_GUEST_MAX_THUNKS * THUNK_BYTES];
-        memset(thunks, 0xcc, sizeof(thunks));
-        for (uint16_t i = 0; i < out->thunk_count; i++) {
+    /* Every unused byte of the thunk segment INT3, so an unallocated
+     * offset never executes stale DOS heap contents (ne_exec writes the
+     * trampoline, the stubs, the IDT and the TSS over it). */
+    for (uint32_t i = 0; i < WIN_NE_THUNK_SEGMENT_BYTES / THUNK_BYTES; i++) {
+        uint8_t p[THUNK_BYTES];
+        memset(p, 0xcc, sizeof(p));
+        if (i < out->thunk_count) {
             uint16_t id = out->thunk_services[i];
-            uint8_t *p = thunks + i * THUNK_BYTES;
-            /* CALL FAR the shared PM->RM->PM bridge. The OUT is executed
-             * in real mode, allowing its native handler to use DOS/BIOS.
-             * RETF imm16 restores the Win16 PASCAL caller's SP. */
+            /* CALL FAR the shared PM->RM->PM bridge through the API call
+             * gate (to ring 0). The OUT is executed in real mode, allowing
+             * its native handler to use DOS/BIOS. RETF imm16 restores the
+             * Win16 PASCAL caller's SP. */
             uint16_t args = service_args(id);
             p[0] = 0xb8; put16(p + 1, id); /* mov ax,service */
-            p[3] = 0x9a;                   /* call far PM gateway */
-            put16(p + 4, WIN_NE_BOOT_GATEWAY_OFFSET);
-            put16(p + 6, out->thunk_selector);
+            p[3] = 0x9a;                   /* call far api gate */
+            put16(p + 4, 0);
+            put16(p + 6, out->api_gate);
             if (args) {
                 p[8] = 0xca; put16(p + 9, args);
             } else {
                 p[8] = 0xcb;
             }
         }
-        if (!io->write(opaque, out->thunk_linear, thunks, sizeof(thunks)))
+        if (!io->write(opaque, out->thunk_linear + i * THUNK_BYTES, p, sizeof(p)))
             goto loaded_fail;
     }
     if (!io->write(opaque, out->gdt_linear, out->gdt, gdtsize))
@@ -475,6 +514,7 @@ static int set_descriptor(win_ne_guest_image *g, uint16_t sel, uint32_t linear, 
 {
     uint8_t desc[GDT_ENTRY_BYTES];
     descriptor(desc, linear, size, 0);
+    sel &= ~7u;
     if (!g->io.write(g->opaque, g->gdt_linear + sel, desc, sizeof(desc)))
         return 0;
     memcpy(g->gdt + sel, desc, sizeof(desc));
@@ -483,13 +523,13 @@ static int set_descriptor(win_ne_guest_image *g, uint16_t sel, uint32_t linear, 
 
 static uint16_t global_selector(const win_ne_guest_image *g, unsigned i)
 {
-    return (uint16_t)(GDT_SEGMENT_INDEX(g->info.segment_count + 2u + i) * GDT_ENTRY_BYTES);
+    return (uint16_t)(GDT_SEGMENT_INDEX(g->info.segment_count + 2u + i) * GDT_ENTRY_BYTES | 3u);
 }
 
 win_ne_guest_segment *win_ne_guest_global(win_ne_guest_image *g, uint16_t sel)
 {
     for (unsigned i = 0; i < WIN_NE_GUEST_GLOBALS; i++)
-        if (g->globals[i].linear && g->globals[i].selector == (sel & ~7u))
+        if (g->globals[i].linear && (g->globals[i].selector & ~7u) == (sel & ~7u))
             return &g->globals[i];
     return NULL;
 }
@@ -561,10 +601,10 @@ int win_ne_guest_global_free(win_ne_guest_image *g, uint16_t sel)
         return 0;
     uint8_t absent[GDT_ENTRY_BYTES] = {0};
     /* A failed descriptor write must not release still-addressable memory. */
-    if (!g->io.write(g->opaque, g->gdt_linear + s->selector,
+    if (!g->io.write(g->opaque, g->gdt_linear + (s->selector & ~7u),
                      absent, sizeof(absent)))
         return 0;
-    memcpy(g->gdt + s->selector, absent, sizeof(absent));
+    memcpy(g->gdt + (s->selector & ~7u), absent, sizeof(absent));
     g->io.free(g->opaque, s->linear);
     memset(s, 0, sizeof(*s));
     return 1;

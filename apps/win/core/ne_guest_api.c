@@ -25,12 +25,12 @@ static const win_ne_guest_segment *lookup_segment(
         return NULL;
     const win_ne_guest_image *g = ctx->image;
     for (uint16_t i = 1; i <= g->info.segment_count; i++)
-        if (g->segments[i].selector == selector)
+        if ((g->segments[i].selector & ~3u) == (selector & ~3u))
             return &g->segments[i];
-    if (g->psp.selector && g->psp.selector == selector)
+    if (g->psp.selector && (g->psp.selector & ~3u) == (selector & ~3u))
         return &g->psp;
     for (unsigned i = 0; i < WIN_NE_GUEST_GLOBALS; i++)     /* GlobalAlloc's */
-        if (g->globals[i].linear && g->globals[i].selector == selector)
+        if (g->globals[i].linear && (g->globals[i].selector & ~3u) == (selector & ~3u))
             return &g->globals[i];
     return NULL;
 }
@@ -51,7 +51,7 @@ static int read_stack_word(win_ne_guest_api_context *ctx, win_ne_regs *cpu,
     uint32_t sp = cpu->gprx[regsp].r16;
     uint8_t bytes[2];
     if (!ctx || !ctx->image ||
-        !read_segment(ctx, ctx->image->ss, sp + stack_offset, bytes, 2))
+        !read_segment(ctx, cpu->ss, sp + stack_offset, bytes, 2))
         return 0;
     *value = (uint16_t)(bytes[0] | (uint16_t)bytes[1] << 8);
     return 1;
@@ -101,7 +101,7 @@ static int write_segment(win_ne_guest_api_context *ctx, uint16_t selector,
 /* Copy a NUL-terminated source using a bounded temporary buffer.  Check the
  * complete source and destination ranges before writing.  Overlap is
  * rejected rather than relying on undefined strcpy/strcat semantics. */
-static int guest_string_edit(win_ne_guest_api_context *ctx,
+static __attribute__((noinline)) int guest_string_edit(win_ne_guest_api_context *ctx,
                              uint16_t dst_sel, uint16_t dst_off,
                              uint16_t src_sel, uint16_t src_off, int append)
 {
@@ -150,15 +150,17 @@ static int guest_copy_string(win_ne_guest_api_context *ctx,
 }
 
 /* The guest's other registers, as the gateway saved them below its return
- * address (4 bytes below SP here): PUSHA, then DS, ES, FLAGS. A service
- * that returns more than AX and DX writes them there. */
+ * address (4 bytes below the frame): PUSHA, then DS, ES, FLAGS. A service
+ * that returns more than AX and DX writes them there. An interrupt's frame
+ * is above: the guest's AX, IP, CS, FLAGS. The ring 0 stack, where the
+ * CPU and the gateway put all of it, is no segment of the program's. */
 enum { FR_CX = -8, FR_DX = -10, FR_BX = -12, FR_BP = -16, FR_SI = -18,
-       FR_DI = -20, FR_DS = -22, FR_ES = -24 };
+       FR_DI = -20, FR_DS = -22, FR_ES = -24, FR_AX = 0, FR_FLAGS = 6 };
 
 static int frame_get(win_ne_guest_api_context *ctx, win_ne_regs *cpu, int at, uint16_t *v)
 {
     uint8_t b[2];
-    if (!read_segment(ctx, ctx->image->ss, (uint16_t)(cpu->gprx[regsp].r16 + at), b, 2))
+    if (!ctx->read || !cpu->frame || !ctx->read(ctx->opaque, (uint32_t)(cpu->frame + at), b, 2))
         return 0;
     *v = (uint16_t)(b[0] | b[1] << 8);
     return 1;
@@ -167,7 +169,8 @@ static int frame_get(win_ne_guest_api_context *ctx, win_ne_regs *cpu, int at, ui
 static int frame_set(win_ne_guest_api_context *ctx, win_ne_regs *cpu, int at, uint16_t v)
 {
     uint8_t b[2] = { (uint8_t)v, (uint8_t)(v >> 8) };
-    return write_segment(ctx, ctx->image->ss, (uint16_t)(cpu->gprx[regsp].r16 + at), b, 2);
+    return cpu->frame && ctx->image->io.write &&
+           ctx->image->io.write(ctx->image->opaque, (uint32_t)(cpu->frame + at), b, 2);
 }
 
 static uint16_t dgroup(const win_ne_guest_image *g)
@@ -199,14 +202,14 @@ static int init_task(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint32_t *
     return 1;
 }
 
-/* INT 21h: the guest's AX is the word at SP, then the interrupt's IP, CS,
+/* INT 21h: the guest's AX is the frame's first word, then the interrupt's IP, CS,
  * FLAGS (its carry: the error); DX stays the guest's unless the function
  * sets it. */
 static int int21(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint32_t *value)
 {
     uint16_t ax, dx, flags;
-    if (!read_stack_word(ctx, cpu, 0, &ax) || !frame_get(ctx, cpu, FR_DX, &dx) ||
-        !read_stack_word(ctx, cpu, 6, &flags))
+    if (!frame_get(ctx, cpu, FR_AX, &ax) || !frame_get(ctx, cpu, FR_DX, &dx) ||
+        !frame_get(ctx, cpu, FR_FLAGS, &flags))
         return 0;
     switch (ax >> 8) {
     case 0x30:                  /* DOS version: 7.0, as GetVersion says */
@@ -223,8 +226,7 @@ static int int21(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint32_t *valu
         return 0;
     }
     flags &= (uint16_t)~1u;     /* CF: no error */
-    uint8_t b[2] = { (uint8_t)flags, (uint8_t)(flags >> 8) };
-    if (!write_segment(ctx, ctx->image->ss, (uint16_t)(cpu->gprx[regsp].r16 + 6), b, 2))
+    if (!frame_set(ctx, cpu, FR_FLAGS, flags))
         return 0;
     *value = ((uint32_t)dx << 16) | ax;
     return 1;
@@ -260,6 +262,27 @@ int win_ne_string(win_ne_guest_api_context *ctx, uint16_t sel, uint16_t off, cha
                   uint32_t cap)
 {
     return guest_copy_string(ctx, sel, off, dst, cap);
+}
+
+/* MessageBox's strings: in a frame of its own, not in the dispatcher's
+ * (which a program's nested window procedures stack up on its task) */
+static __attribute__((noinline)) uint32_t message_box(win_ne_guest_api_context *ctx,
+                                                      win_ne_regs *cpu)
+{
+    uint16_t type, title_off, title_sel, text_off, text_sel, owner;
+    char title[128], message[512];
+    if (!read_stack_word(ctx, cpu, 4, &type) ||
+        !read_stack_word(ctx, cpu, 6, &title_off) ||
+        !read_stack_word(ctx, cpu, 8, &title_sel) ||
+        !read_stack_word(ctx, cpu, 10, &text_off) ||
+        !read_stack_word(ctx, cpu, 12, &text_sel) ||
+        !read_stack_word(ctx, cpu, 14, &owner) ||
+        !guest_copy_string(ctx, title_sel, title_off, title, sizeof(title)) ||
+        !guest_copy_string(ctx, text_sel, text_off, message, sizeof(message))) {
+        if (ctx) ctx->invalid_args = 1;
+        return 0;
+    }
+    return (uint16_t)MessageBox(owner, message, title, type);
 }
 
 int win_ne_guest_api(void *opaque, win_ne_regs *cpu, uint16_t service)
@@ -306,12 +329,11 @@ int win_ne_guest_api(void *opaque, win_ne_regs *cpu, uint16_t service)
         /* the yield vector: AX, DX and the flags as they were, but IF (set
          * to take it) */
         uint16_t ax, dx, flags;
-        if (!read_stack_word(ctx, cpu, 0, &ax) || !frame_get(ctx, cpu, FR_DX, &dx) ||
-            !read_stack_word(ctx, cpu, 6, &flags))
+        if (!frame_get(ctx, cpu, FR_AX, &ax) || !frame_get(ctx, cpu, FR_DX, &dx) ||
+            !frame_get(ctx, cpu, FR_FLAGS, &flags))
             return 0;
         flags &= (uint16_t)~0x200u;
-        uint8_t b[2] = { (uint8_t)flags, (uint8_t)(flags >> 8) };
-        if (!write_segment(ctx, ctx->image->ss, (uint16_t)(cpu->gprx[regsp].r16 + 6), b, 2))
+        if (!frame_set(ctx, cpu, FR_FLAGS, flags))
             return 0;
         if (ctx->yield && ctx->yield()) {
             ctx->stopped = 1;
@@ -361,23 +383,7 @@ int win_ne_guest_api(void *opaque, win_ne_regs *cpu, uint16_t service)
         }
         break;
     case 0x1001: /* USER.1 MessageBox(HWND, FAR text, FAR caption, UINT) */
-        {
-            uint16_t type, title_off, title_sel, text_off, text_sel, owner;
-            char title[128], message[512];
-            if (!read_stack_word(ctx, cpu, 4, &type) ||
-                !read_stack_word(ctx, cpu, 6, &title_off) ||
-                !read_stack_word(ctx, cpu, 8, &title_sel) ||
-                !read_stack_word(ctx, cpu, 10, &text_off) ||
-                !read_stack_word(ctx, cpu, 12, &text_sel) ||
-                !read_stack_word(ctx, cpu, 14, &owner) ||
-                !guest_copy_string(ctx, title_sel, title_off, title, sizeof(title)) ||
-                !guest_copy_string(ctx, text_sel, text_off, message, sizeof(message))) {
-                if (ctx) ctx->invalid_args = 1;
-                value = 0;
-            } else {
-                value = (uint16_t)MessageBox(owner, message, title, type);
-            }
-        }
+        value = message_box(ctx, cpu);
         break;
     case 0x10b3:  /* USER.179 GetSystemMetrics(int): Win16 WORD argument */
         if (!read_stack_word(ctx, cpu, 4, &arg)) {

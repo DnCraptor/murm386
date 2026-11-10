@@ -1,4 +1,5 @@
-/* Test that a native Win16 service runs under the DOS CPU context, then
+/* Test that a native Win16 service runs under the DOS CPU context, with
+ * its arguments on the ring 3 stack the call gate's frame names, then
  * resumes the same Real Mode gateway context with its AX:DX result. */
 #include <assert.h>
 #include <stdint.h>
@@ -117,10 +118,19 @@ int main(void)
     store16(0x300cau, 0x20);
     store16(0x300ccu, 0x18);              /* text DS:0x20 */
     store16(0x300ceu, 0);                 /* hwnd */
-    store16(scratch+WIN_NE_BOOT_CALL_SP_OFFSET, 0xbcu);
+    /* the ring 0 stack at the gateway's entry, through the API call gate:
+     * its return address, then the ring 3 caller's SP and SS (0x1b: the
+     * segment, RPL 3) */
+    const uint32_t ring0 = 0x40800u;
+    store16(scratch+WIN_NE_BOOT_CALL_SP_OFFSET, 0x2f8u);
+    store16(ring0 + 0x2f8u, 0x000a);      /* the thunk's IP after the CALL */
+    store16(ring0 + 0x2fau, 0x0053);      /* its CS, ring 3 */
+    store16(ring0 + 0x2fcu, 0x00c0);      /* SP3 */
+    store16(ring0 + 0x2feu, 0x001b);      /* SS3 */
 
     win_ne_guest_api_context api = { .image = &img, .read = read_guest, .path = "TEST.EXE", .show = 1 };
-    win_ne_native_gate gate = { &original, &api, scratch, rm_cs };
+    win_ne_native_gate gate = { .dos_context = &original, .api = &api, .scratch_linear = scratch,
+                                .ring0_linear = ring0, .rm_segment = rm_cs, .ring0_selector = 0x68 };
     assert(invoke_native(&gate, &cpu, 0x1001));
     assert(modal_calls == 1 && !api.invalid_args);
     assert(cpu.gprx[regax].r16 == 1 && cpu.gprx[regdx].r16 == 0);
@@ -129,6 +139,12 @@ int main(void)
     assert(selectors[WIN_CS] == rm_cs);
     assert(cpu.ip == 0xba && cpu.next_ip == 0xbb);
     assert(get_flags(&cpu, 0xffffffffu) == 2u);
+    /* a call through the gate with no ring 3 caller's frame (the ring 0
+     * stack's top), or a CALL_SP outside the ring 0 stack: refused */
+    store16(scratch+WIN_NE_BOOT_CALL_SP_OFFSET, 0x2fcu);
+    assert(!invoke_native(&gate, &cpu, 0x1001));
+    store16(scratch+WIN_NE_BOOT_CALL_SP_OFFSET, 0x10u);
+    assert(!invoke_native(&gate, &cpu, 0x1001) && modal_calls == 1);
     puts("ne RM native gate context: PASS");
     return 0;
 }

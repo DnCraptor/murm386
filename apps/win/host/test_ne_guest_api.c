@@ -72,6 +72,7 @@ int main(void)
     img.io.write = write_guest;
     win_ne_guest_api_context ctx = { .image = &img, .read = read_guest, .path = "TEST.EXE", .show = 1 };
     cpu.gprx[regsp].r16 = 0x80; /* SS:SP points at caller's far return IP */
+    cpu.ss = 0x18;
     put16(0x80, 0x2222);
     put16(0x82, 0x0010);
 

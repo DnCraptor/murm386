@@ -6,10 +6,16 @@
 #include "ne_guest.h"
 #include "ne_exec.h"
 
-/* The guest's general registers at a call, as the gateway left them (the
- * caller's SP: the gateway's return address just below) */
+/* The guest's general registers at a call, as the gateway left them; SP
+ * and ss: the caller's stack (ring 3), at SS:SP the caller's far return
+ * address, then the arguments. frame: the linear address in the ring 0
+ * stack just above the gateway's return address, with the registers the
+ * gateway saved below it and, for an interrupt (INT 21h, the yield
+ * vector), the guest's AX, then the interrupt's IP, CS, FLAGS from it. */
 typedef struct {
     gprx_t gprx[8];
+    uint16_t ss;
+    uint32_t frame;
 } win_ne_regs;
 
 typedef struct {

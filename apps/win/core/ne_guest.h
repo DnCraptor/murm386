@@ -14,10 +14,9 @@
 #include "ne.h"
 
 #define WIN_NE_GUEST_MAX_SEGMENTS 128u
-#define WIN_NE_GUEST_MAX_THUNKS 128u
 #define WIN_NE_THUNK_BYTES 16u /* includes FAR return + Pascal stack adjustment */
-/* Upper half of thunk segment is reserved for the PM trampoline. */
-#define WIN_NE_GUEST_ACTIVE_THUNKS 64u
+/* the first half of the thunk segment (ne_boot.h): the API thunks */
+#define WIN_NE_GUEST_ACTIVE_THUNKS 128u
 /* The program's PSP (its own selector, ES after InitTask): the command line
  * at 81h, as DOS has it, but ending with a NUL (Windows). */
 #define WIN_NE_GUEST_PSP_BYTES 256u
@@ -46,7 +45,13 @@ typedef struct {
     void *opaque;
     win_ne_guest_segment *segments; /* 1-based; 0 unused */
     uint32_t gdt_linear, thunk_linear;
-    uint16_t gdt_limit, thunk_selector;
+    uint16_t gdt_limit;
+    /* the thunk segment as ring 0 code (WINN's) and as ring 3 code (the
+     * thunks and stubs the program calls), the call gates to ring 0 (its
+     * API calls, its entry's and its procedures' return), the TSS, the
+     * ring 0 area's data */
+    uint16_t thunk_selector, thunk3_selector;
+    uint16_t api_gate, exit_gate, cbret_gate, tss_selector, ring0_selector;
     win_ne_guest_segment psp;       /* a data segment of its own */
     /* its global memory blocks, a selector each (0: a free entry) */
     win_ne_guest_segment globals[WIN_NE_GUEST_GLOBALS];

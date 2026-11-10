@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """Generate NEFAULT.EXE: KERNEL.GetVersion followed by terminal UD2,
-or with --hang NEHANG.EXE: KERNEL.GetVersion followed by JMP $.
+or with --hang NEHANG.EXE: KERNEL.GetVersion followed by JMP $; or what a
+program in ring 3 may not do, each a fault WINN recovers from:
+  --stack  NESTACK.EXE: SP 0, then the UD2: the CPU's ring 0 stack takes
+           the exception frame (pushed on the program's own, it would land
+           below offset 0: the emulated CPU checks no segment limits)
+  --cli    NECLI.EXE: CLI, #GP (IOPL 0)
+  --out    NEOUT.EXE: the bridge's EXIT by an OUT of its own, #GP
+  --cr0    NECR0.EXE: MOV EAX,CR0 (to leave protected mode), #GP
+  --hlt    NEHLT.EXE: HLT (the CPU for ever, IF clear), #GP
 
 The DOS MZ stub exits normally with a "requires WINN" message.
 NEFAULT raises #UD after one native API call; WINN's private IDT returns to
@@ -12,10 +20,19 @@ import os
 import struct
 import sys
 
-hang = sys.argv[1:2] == ['--hang']
-args = sys.argv[2:] if hang else sys.argv[1:]
+KINDS = {
+    '--hang': 'eb fe',                              # JMP $
+    '--stack': '31 e4',                             # XOR SP,SP
+    '--cli': 'fa',                                  # CLI
+    '--out': 'ba e7 e7 b8 ff ff ef',                # MOV DX,E7E7; MOV AX,FFFF; OUT
+    '--cr0': '0f 20 c0',                            # MOV EAX,CR0
+    '--hlt': 'f4',                                  # HLT
+}
+kind = sys.argv[1] if sys.argv[1:2] and sys.argv[1] in KINDS else None
+hang = kind == '--hang'
+args = sys.argv[2:] if kind else sys.argv[1:]
 if len(args) != 1:
-    raise SystemExit('usage: mkne_fault.py [--hang] OUTPUT.EXE')
+    raise SystemExit('usage: mkne_fault.py [%s] OUTPUT.EXE' % '|'.join(KINDS))
 name = os.path.basename(args[0]).upper().encode()
 b = bytearray(0x400)
 def w16(p, v): struct.pack_into('<H', b, p, v)
@@ -48,7 +65,7 @@ def emit(hexstr): code.extend(bytes.fromhex(hexstr))
 reloc = len(code) + 1
 emit('9a ff ff ff ff')
 fixups.append((reloc, 1, 3))
-emit('eb fe' if hang else '0f 0b')   # JMP $ or UD2, never reaches RETF
+emit(KINDS[kind] + ('' if hang else ' 0f 0b') if kind else '0f 0b')  # never RETF
 assert len(code) < 0x40
 b[0x200:0x200+len(code)] = code
 w16(h+0x40, 0x20); w16(h+0x42, len(code)); w16(h+0x44, 0x100)
@@ -70,4 +87,5 @@ b[0x380:0x380+len(title)+1] = title+b'\0'
 with open(args[0], 'wb') as f:
     f.write(b)
 print(name.decode() + ':', len(b), 'bytes;',
-      'turns for the other tasks' if hang else '#UD, the DOS context back', 'expected')
+      'turns for the other tasks' if hang else
+      'a fault (%s), the DOS context back' % (kind or '#UD'), 'expected')

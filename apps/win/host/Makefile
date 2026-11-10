@@ -50,9 +50,20 @@ NEFAULT.EXE: mkne_fault.py
 	python3 mkne_fault.py $@
 NEHANG.EXE: mkne_fault.py
 	python3 mkne_fault.py --hang $@
+NESTACK.EXE: mkne_fault.py
+	python3 mkne_fault.py --stack $@
+NECLI.EXE: mkne_fault.py
+	python3 mkne_fault.py --cli $@
+NEOUT.EXE: mkne_fault.py
+	python3 mkne_fault.py --out $@
+NECR0.EXE: mkne_fault.py
+	python3 mkne_fault.py --cr0 $@
+NEHLT.EXE: mkne_fault.py
+	python3 mkne_fault.py --hlt $@
 OWHELLO.EXE OWBUSY.EXE OWWIN.EXE OWMENU.EXE OWSEGS.EXE OWDEMO.EXE: mkne_watcom.py
 	python3 mkne_watcom.py $(basename $@) $@
-NEFIXTURES: NEAPP-fixture.exe NEDIALOG.EXE NELOOP-fixture.exe NEFAULT.EXE NEHANG.EXE OWHELLO.EXE OWBUSY.EXE \
+NEFIXTURES: NEAPP-fixture.exe NEDIALOG.EXE NELOOP-fixture.exe NEFAULT.EXE NEHANG.EXE \
+	NESTACK.EXE NECLI.EXE NEOUT.EXE NECR0.EXE NEHLT.EXE OWHELLO.EXE OWBUSY.EXE \
 	OWWIN.EXE OWMENU.EXE OWSEGS.EXE OWDEMO.EXE
 
 test_ne_multi: ../core/ne.c ../core/ne_guest.c test_ne_multi.c NEAPP-fixture.exe
@@ -89,7 +100,7 @@ check: test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test
 	./test_x86bridge && ./test_ne && ./test_ne_image && ./test_ne_guest && ./test_ne_guest_api && \
 	./test_ne_boot && ./test_ne_multi NEAPP-fixture.exe && ./test_ne_launch NELOOP-fixture.exe && \
 	./test_ne_rm_gate && ./test_ne_run NEDIALOG.EXE NELOOP-fixture.exe NEFAULT.EXE NEHANG.EXE \
-		OWHELLO.EXE OWBUSY.EXE OWSEGS.EXE
+		NESTACK.EXE NECLI.EXE NEOUT.EXE NECR0.EXE NEHLT.EXE OWHELLO.EXE OWBUSY.EXE OWSEGS.EXE
 
 demo.o: ../../winapps/demo/demo.c
 	$(CC) $(CFLAGS) $(INC) -DWinMain=demo_WinMain -c -o $@ $<
@@ -146,6 +157,6 @@ HOSTWIN: NEFIXTURES
 	cp HOSTWIN/README.TXT HOSTWIN/DOCS/README.TXT
 
 clean:
-	rm -rf test_gdi test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_launch test_ne_rm_gate test_ne_run i386-host.o *-fixture.exe NEDIALOG.EXE NEFAULT.EXE NEHANG.EXE OWHELLO.EXE OWBUSY.EXE OWWIN.EXE OWMENU.EXE OWSEGS.EXE OWDEMO.EXE OWDEMO.TMP winhost winhost800 *.o *.ppm *.png appinfo.c HOSTWIN
+	rm -rf test_gdi test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_launch test_ne_rm_gate test_ne_run i386-host.o *-fixture.exe NEDIALOG.EXE NEFAULT.EXE NEHANG.EXE NESTACK.EXE NECLI.EXE NEOUT.EXE NECR0.EXE NEHLT.EXE OWHELLO.EXE OWBUSY.EXE OWWIN.EXE OWMENU.EXE OWSEGS.EXE OWDEMO.EXE OWDEMO.TMP winhost winhost800 *.o *.ppm *.png appinfo.c HOSTWIN
 
 .PHONY: all check clean HOSTWIN NEFIXTURES

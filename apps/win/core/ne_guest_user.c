@@ -384,7 +384,7 @@ static HMENU load_menu_named(args *a, const char *name)
 }
 
 /* Win16 accelerators: 5 bytes each, flags (80h: the last), key, command */
-static HACCEL load_accelerators(args *a, ne_user *u, uint32_t far)
+static __attribute__((noinline)) HACCEL load_accelerators(args *a, ne_user *u, uint32_t far)
 {
     uint32_t n;
     uint8_t *d = resource(a, RT_ACCELERATOR_, far, &n);
@@ -411,7 +411,7 @@ static HACCEL load_accelerators(args *a, ne_user *u, uint32_t far)
 
 /* USER.176 LoadString(HINSTANCE, UINT, LPSTR, int): string id is the
  * (id % 16)th of block id / 16 + 1, each a length byte and the text */
-static uint16_t load_string(args *a)
+static __attribute__((noinline)) uint16_t load_string(args *a)
 {
     int max = (int16_t)w(a, 4);
     uint32_t buf = dw(a, 6);
@@ -531,6 +531,33 @@ done:
 
 /* ---------------------------------------------------------------- services */
 
+/* the dialog item texts, each in a frame of its own (not in the
+ * dispatcher's, which nested window procedures stack up) */
+static __attribute__((noinline)) void set_dlg_text(args *a, win_ne_guest_api_context *ctx)
+{
+    uint32_t p = dw(a, 4);
+    char text[256];
+    if (!a->bad && win_ne_string(ctx, (uint16_t)(p >> 16), (uint16_t)p, text, sizeof(text)))
+        SetDlgItemText(w(a, 10), (int16_t)w(a, 8), text);
+    else
+        a->bad = 1;
+}
+
+static __attribute__((noinline)) uint16_t get_dlg_text(args *a, win_ne_guest_api_context *ctx)
+{
+    int max = (int16_t)w(a, 4);
+    uint32_t p = dw(a, 6);
+    char text[256];
+    if (a->bad || max <= 0)
+        return 0;
+    if (max > (int)sizeof(text))
+        max = (int)sizeof(text);
+    uint16_t v = (uint16_t)GetDlgItemText(w(a, 12), (int16_t)w(a, 10), text, max);
+    if (!win_ne_write(ctx, (uint16_t)(p >> 16), (uint16_t)p, text, v + 1u))
+        a->bad = 1;
+    return v;
+}
+
 int win_ne_guest_user(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint16_t service,
                       uint32_t *value, int *dword)
 {
@@ -642,28 +669,12 @@ int win_ne_guest_user(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint16_t 
     case 0x105b:                        /* GetDlgItem(HWND, int) */
         v = GetDlgItem(w(&a, 6), (int16_t)w(&a, 4));
         break;
-    case 0x105c: {                      /* SetDlgItemText(HWND, int, LPCSTR) */
-        uint32_t p = dw(&a, 4);
-        char text[256];
-        if (!a.bad && win_ne_string(ctx, (uint16_t)(p >> 16), (uint16_t)p, text, sizeof(text)))
-            SetDlgItemText(w(&a, 10), (int16_t)w(&a, 8), text);
-        else
-            a.bad = 1;
+    case 0x105c:                        /* SetDlgItemText(HWND, int, LPCSTR) */
+        set_dlg_text(&a, ctx);
         break;
-    }
-    case 0x105d: {                      /* GetDlgItemText(HWND, int, LPSTR, int) */
-        int max = (int16_t)w(&a, 4);
-        uint32_t p = dw(&a, 6);
-        char text[256];
-        if (a.bad || max <= 0)
-            break;
-        if (max > (int)sizeof(text))
-            max = (int)sizeof(text);
-        v = (uint16_t)GetDlgItemText(w(&a, 12), (int16_t)w(&a, 10), text, max);
-        if (!win_ne_write(ctx, (uint16_t)(p >> 16), (uint16_t)p, text, v + 1u))
-            a.bad = 1;
+    case 0x105d:                        /* GetDlgItemText(HWND, int, LPSTR, int) */
+        v = get_dlg_text(&a, ctx);
         break;
-    }
     case 0x105e:                        /* SetDlgItemInt(HWND, int, UINT, BOOL) */
         SetDlgItemInt(w(&a, 10), (int16_t)w(&a, 8),
                       w(&a, 4) ? (UINT)(int16_t)w(&a, 6) : w(&a, 6), w(&a, 4));

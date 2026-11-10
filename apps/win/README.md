@@ -18,10 +18,19 @@ context, so WINN can service keyboard/mouse BIOS calls and cooperative
 modal dialogs. After the native call, the same Win16 registers and stack
 are resumed; each `RETF imm16` cleans the Win16 PASCAL arguments.
 
-The code is not checked beforehand. Protected mode keeps it in its segments;
-an exception goes through a private IDT back to Real Mode and DOS and ends
-the program with the Windows 3.1 "Application Error" message and the place,
-`segment:offset`. WINN runs the guest's instructions itself, in bursts of
+The code is not checked beforehand. It runs in ring 3 (IOPL 0): its
+segments are DPL 3, its import thunks call the gateway through a call gate,
+INT 21h and the yield vector below reach it through interrupt gates, and
+the entry's and a window procedure's return come back through call gates
+too; all of them, and every exception, switch to a ring 0 stack its own
+16-bit TSS names, out of the program's reach. So a program cannot leave
+protected mode, load descriptor tables, CLI, HLT or forge the gateway's
+OUT, and a fault with its own stack gone (SP 0) still has a stack for its
+frame. An exception goes through a private IDT back to Real Mode and DOS
+and ends the program with the Windows 3.1 "Application Error" message and
+the place, `segment:offset`. (The emulated CPU checks no segment limits or
+write permissions, nor the DPL of a data segment loaded: within the
+first megabyte a program's stores are not confined to its segments.) WINN runs the guest's instructions itself, in bursts of
 CPU steps: a program that has run some 260 thousand instructions without
 calling the API takes a vector of the same IDT (WINN answers the CPU's
 interrupt controller callback with it for one step), whose stub calls the
@@ -33,7 +42,7 @@ with Windows. Neither x86 CPU implementation is modified.
 A program can have windows of its own classes: `RegisterClass` registers
 them with a native window procedure that calls the program's (USER's
 calls go through a callback entry of the trampoline, into protected mode
-and back, nesting as the procedure calls the API in turn), and its
+and ring 3 and back, nesting as the procedure calls the API in turn), and its
 messages, painting and drawing are converted between the Win16 structures
 in the guest and the native ones; a message's `lParam` reaches the window
 procedure as it is (a native pointer, for the program to hand on to

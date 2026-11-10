@@ -27,7 +27,9 @@ int main(void)
 {
     uint8_t boot[WIN_NE_BOOT_CAPACITY], idt[WIN_NE_FAULT_IDT_BYTES];
     uint8_t code[WIN_NE_FAULT_CODE_BYTES], dos[WIN_NE_DOS_STUB_BYTES];
-    win_ne_boot_args a = { 0x1234,8,0x10,0x42,0x18,0x100,31,0x6a30 };
+    win_ne_boot_args a = { .rm_segment = 0x1234, .pm_segment = 8, .ne_cs = 0x13, .ne_ip = 0x42,
+                           .ne_ss = 0x1b, .ne_sp = 0x100, .gdt_limit = 31, .gdt_linear = 0x6a30,
+                           .tss = 0x60, .ring0 = 0x68, .exit_gate = 0x53, .cbret_gate = 0x5b };
     assert(win_ne_boot_make(boot,sizeof(boot),&a) == sizeof(boot));
     assert(boot[0] == 0xfa && boot[1] == 0x8c && boot[2] == 0xc8);
     /* SGDT and SIDT are each executed once at entry; each table is restored
@@ -44,6 +46,21 @@ int main(void)
     assert(r32(boot+WIN_NE_BOOT_NEW_IDTR_OFFSET+2)==
            ((unsigned)a.rm_segment<<4)-WIN_NE_BOOT_OFFSET+WIN_NE_FAULT_IDT_OFFSET);
     assert(boot[WIN_NE_BOOT_GATEWAY_OFFSET-WIN_NE_BOOT_OFFSET]==0x2e);
+    /* ring 0: TR loaded at the entry and at every return from Real Mode; the
+     * ring 0 stack, then a far return into ring 3 (SS:SP, CS:IP pushed) */
+    const uint8_t ltr[]={0xb8,0x60,0x00,0x0f,0x00,0xd8};
+    unsigned ltrs=0;
+    for (size_t i=0;i+sizeof(ltr)<=sizeof(boot);i++)
+        ltrs+=!memcmp(boot+i,ltr,sizeof(ltr));
+    assert(ltrs==2);
+    const uint8_t enter3[]={0xb8,0x68,0x00,0x8e,0xd0,0xbc,WIN_NE_RING0_BYTES&255,WIN_NE_RING0_BYTES>>8,
+                            0x68,0x1b,0x00,0x68,0x00,0x01,0x68,0x13,0x00,0x68,0x42,0x00};
+    assert(contains(boot,sizeof(boot),enter3,sizeof(enter3)));
+    /* the exit gate's target: the result to CX:BX, Real Mode, EXIT */
+    const uint8_t exit0[]={0x89,0xc3,0x89,0xd1,0xfa};
+    assert(!memcmp(boot+WIN_NE_BOOT_EXIT_OFFSET-WIN_NE_BOOT_OFFSET,exit0,sizeof(exit0)));
+    const uint8_t exit_out[]={0xba,0xe7,0xe7,0xb8,0xff,0xff,0xef};
+    assert(contains(boot,sizeof(boot),exit_out,sizeof(exit_out)));
     assert(boot[WIN_NE_BOOT_SCRATCH_OFFSET-1]==0xcc);
     assert(boot[WIN_NE_BOOT_SVC_OFFSET]==0);
     assert(win_ne_fault_make(idt,code,&a));
@@ -52,7 +69,7 @@ int main(void)
         assert(r16(idt+v*8)==(v==WIN_NE_YIELD_VECTOR ? WIN_NE_YIELD_OFFSET :
                               WIN_NE_FAULT_CODE_OFFSET+pos));
         assert(r16(idt+v*8+2)==a.pm_segment);
-        assert(idt[v*8+4]==0 && idt[v*8+5]==0x86);
+        assert(idt[v*8+4]==0 && idt[v*8+5]==0x86);  /* DPL 0: no INT n from ring 3 */
         assert(r16(idt+v*8+6)==0);
         assert(code[pos]==0xbb && r16(code+pos+1)==v);
         assert(code[pos+3]==0xe9 && r16(code+pos+4)==
@@ -60,7 +77,8 @@ int main(void)
     }
     /* INT 20h and INT 21h: the DOS stubs, INT 21h a gateway service */
     assert(r16(idt+0x20*8)==WIN_NE_INT20_OFFSET && r16(idt+0x21*8)==WIN_NE_INT21_OFFSET);
-    assert(r16(idt+0x21*8+2)==a.pm_segment && idt[0x21*8+5]==0x86);
+    assert(r16(idt+0x21*8+2)==a.pm_segment && idt[0x21*8+5]==0xe6);  /* DPL 3 */
+    assert(idt[0x20*8+5]==0xe6);
     assert(win_ne_dos_make(dos,&a));
     const uint8_t int21[]={0x50,0xb8,WIN_NE_SERVICE_INT21&255,WIN_NE_SERVICE_INT21>>8,0x9a,
                            WIN_NE_BOOT_GATEWAY_OFFSET&255,WIN_NE_BOOT_GATEWAY_OFFSET>>8,
@@ -71,6 +89,20 @@ int main(void)
     memcpy(yield,int21,sizeof(int21));
     yield[2]=WIN_NE_SERVICE_YIELD&255; yield[3]=WIN_NE_SERVICE_YIELD>>8;
     assert(!memcmp(dos+WIN_NE_YIELD_OFFSET-WIN_NE_INT20_OFFSET,yield,sizeof(yield)));
+    /* the ring 3 stubs call the gates; the callback goes to ring 3 through
+     * the ring 0 stack at CB_R0SP; its return reports RETURN */
+    const uint8_t exit_stub[]={0x9a,0,0,0x53,0}, cbret_stub[]={0x9a,0,0,0x5b,0};
+    assert(!memcmp(dos+WIN_NE_EXIT_STUB_OFFSET-WIN_NE_INT20_OFFSET,exit_stub,sizeof(exit_stub)));
+    assert(!memcmp(dos+WIN_NE_CBRET_STUB_OFFSET-WIN_NE_INT20_OFFSET,cbret_stub,sizeof(cbret_stub)));
+    const uint8_t cb_r0[]={0xb8,0x68,0x00,0x8e,0xd0,0x2e,0x8b,0x26,
+                           WIN_NE_CB_R0SP_OFFSET&255,WIN_NE_CB_R0SP_OFFSET>>8};
+    assert(contains(dos,sizeof(dos),cb_r0,sizeof(cb_r0)));
+    const uint8_t cbret0[]={0x89,0xc3,0x89,0xd1,0xfa};
+    assert(!memcmp(dos+WIN_NE_CBRET_OFFSET-WIN_NE_INT20_OFFSET,cbret0,sizeof(cbret0)));
+    const uint8_t ret_out[]={0xba,0xe7,0xe7,0xb8,0xfd,0xff,0xef};
+    assert(contains(dos,sizeof(dos),ret_out,sizeof(ret_out)));
+    a.tss=0; assert(!win_ne_dos_make(dos,&a)); assert(!win_ne_boot_make(boot,sizeof(boot),&a));
+    a.tss=0x60;
     const uint8_t save_frame[]={0x8c,0xd6,0x89,0xe7};    /* si=ss, di=sp */
     assert(!memcmp(code+WIN_NE_FAULT_VECTORS*6,save_frame,sizeof(save_frame)));
     const unsigned common=WIN_NE_FAULT_VECTORS*6+sizeof(save_frame);
