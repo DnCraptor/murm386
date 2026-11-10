@@ -31,6 +31,17 @@
 #include <ucontext.h>
 #endif
 
+/* a task's stack, unless its module names one. AddressSanitizer's frames
+ * (redzones, its "fake" stack) are several times what they are compiled
+ * without: a program's callbacks nested three deep (a dialog's procedure
+ * from its class's window procedure, a control's notification from that)
+ * take more than 32 KB under it, on the host */
+#if defined(TASK_HOST) && defined(__SANITIZE_ADDRESS__)
+#define TASK_STACK 131072u
+#else
+#define TASK_STACK 32768u
+#endif
+
 struct wtask_ctx {
 #ifdef TASK_HOST
     ucontext_t uc;
@@ -568,7 +579,7 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
         runner = run_ne_app;
     }
 #endif
-    wtask *t = task_create(name, runner, img.stack_size ? img.stack_size : 32768);
+    wtask *t = task_create(name, runner, img.stack_size ? img.stack_size : TASK_STACK);
     if (!t) {
         win_free(ne_path);
         win_free(img.raw);

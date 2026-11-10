@@ -197,7 +197,8 @@ static int direct_result(UINT msg)
     return msg == WM_CTLCOLOR || msg == WM_INITDIALOG || msg == WM_GETDLGCODE;
 }
 
-LRESULT WINAPI DefDlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+/* what a dialog does with a message its procedure left */
+static LRESULT dlg_default(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
     wdlg *d = dlg_state(h);
     switch (msg) {
@@ -261,7 +262,10 @@ LRESULT WINAPI DefDlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     return DefWindowProc(h, msg, wp, lp);
 }
 
-LRESULT CALLBACK user_dialog_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+/* A dialog's window procedure, its class's (#32770) or that of a class of
+ * the program's own (DLGWINDOWEXTRA) calling it: the dialog procedure
+ * first (CreateDialog's, DialogBox's), then what a dialog does */
+LRESULT WINAPI DefDlgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
     wdlg *d = dlg_state(h);
     if (d && d->proc && msg != WM_NCDESTROY) {
@@ -273,6 +277,11 @@ LRESULT CALLBACK user_dialog_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     } else if (d && d->proc && msg == WM_NCDESTROY) {
         d->proc(h, msg, wp, lp);
     }
+    return dlg_default(h, msg, wp, lp);
+}
+
+LRESULT CALLBACK user_dialog_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
     return DefDlgProc(h, msg, wp, lp);
 }
 
