@@ -22,7 +22,7 @@ static wwnd *find_paint_in(wwnd *w, HTASK task)
 
 wwnd *user_find_paint(HTASK task)
 {
-    if (!U.desktop)
+    if (U.shutting_down || !U.desktop)
         return NULL;
     if (U.desktop->update.n || U.desktop->ncpaint)
         return U.desktop;
@@ -251,7 +251,7 @@ int WINAPI GetUpdateRgn(HWND hwnd, HRGN hr, BOOL erase)
 BOOL WINAPI UpdateWindow(HWND hwnd)
 {
     wwnd *w = user_wnd(hwnd);
-    if (!w || !user_is_visible(w))
+    if (U.shutting_down || !w || !user_is_visible(w))
         return FALSE;
     if (w->update.n || w->ncpaint)
         SendMessage(hwnd, WM_PAINT, 0, 0);

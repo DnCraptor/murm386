@@ -698,11 +698,47 @@ static void open_selected(void)
         run(gr->it[gr->sel].cmd, 0);
 }
 
+/* Commit the shutdown while the confirmation is still on screen.
+ * Closing a MessageBox first exposes the MDI frame during slow INI writes. */
+static BOOL CALLBACK ExitProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    (void)lp;
+    if (msg == WM_INITDIALOG)
+        return TRUE;
+    if (msg == WM_COMMAND) {
+        if (wp == IDOK) {
+            if (ExitWindows(0, 0))
+                EndDialog(dlg, IDOK);
+            return TRUE;
+        }
+        if (wp == IDCANCEL) {
+            EndDialog(dlg, IDCANCEL);
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 static void exit_windows(void)
 {
-    if (MessageBox(hframe, "This will end your Windows session.", "Exit Windows",
-                   MB_OKCANCEL | MB_ICONINFORMATION) == IDOK)
-        ExitWindows(0, 0);
+    DWORD units = GetDialogBaseUnits();
+    int sw = GetSystemMetrics(SM_CXSCREEN) * 4 / LOWORD(units);
+    int sh = GetSystemMetrics(SM_CYSCREEN) * 8 / HIWORD(units);
+    const DLGTEMPLATE_N tpl = {
+        WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_ABSALIGN,
+        4, (sw - 216) / 2, (sh - 62) / 2, 216, 62,
+        NULL, NULL, "Exit Windows", 0, NULL
+    };
+    static const DLGITEM_N items[] = {
+        { 8, 8, 16, 16, -1, SS_ICON | WS_VISIBLE, "STATIC", "#32516" },
+        { 30, 10, 174, 16, -1, SS_LEFT | WS_VISIBLE, "STATIC",
+          "This will end your Windows session." },
+        { 62, 38, 40, 14, IDOK, BS_DEFPUSHBUTTON | WS_TABSTOP | WS_VISIBLE,
+          "BUTTON", "OK" },
+        { 114, 38, 40, 14, IDCANCEL, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE,
+          "BUTTON", "Cancel" },
+    };
+    DialogBoxIndirectN(hinst, &tpl, items, hframe, ExitProc);
 }
 
 static void key(pm_group *gr, int vk)

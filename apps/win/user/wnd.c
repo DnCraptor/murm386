@@ -552,7 +552,7 @@ static void inval_walk(wwnd *w, const wrgn *r, wrgn *tmp, wrgn *part)
 /* Screen area exposed: everything visible there repaints. */
 void user_invalidate_screen(const wrgn *r)
 {
-    if (!r->n || !U.desktop)
+    if (U.shutting_down || !r->n || !U.desktop)
         return;
     wrgn tmp, part;
     wrgn_init(&tmp);
@@ -568,6 +568,8 @@ void user_invalidate_screen(const wrgn *r)
 /* r in screen coordinates, already limited to what the caller wants. */
 void user_invalidate(wwnd *w, const wrgn *r, int erase, int children)
 {
+    if (U.shutting_down)
+        return;
     wrgn vis, part;
     wrgn_init(&vis);
     wrgn_init(&part);
@@ -1353,6 +1355,13 @@ BOOL WINAPI DestroyWindow(HWND h)
     if (!w || w == U.desktop || w->destroying)
         return FALSE;
 
+    /* Preserve the hourglass during the potentially slow WM_DESTROY and
+     * resource release of a top-level application window. Normal dialogs
+     * and transient child controls must not flash the wait cursor. */
+    int wait_close = !(w->style & WS_CHILD) && !w->owner && !w->dialog && w->task;
+    if (wait_close)
+        cursor_wait_begin();
+
     /* owned popups go first */
     if (!(w->style & WS_CHILD))
         for (wwnd *t = U.desktop->child, *n; t; t = n) {
@@ -1378,6 +1387,8 @@ BOOL WINAPI DestroyWindow(HWND h)
     free_tree(w);
     if (was_active)
         activate_other(NULL);
+    if (wait_close)
+        cursor_wait_end();
     return TRUE;
 }
 

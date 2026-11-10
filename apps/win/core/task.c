@@ -216,9 +216,12 @@ static void task_start(void)
     wtask *t = cur;
     t->state = WTASK_RUNNING;
     t->exit_code = t->run(t);
+    /* Final window/file teardown may block on SD or driver operations. */
+    cursor_wait_begin();
     user_task_ended(t->h);
     win_files_task_ended(t->h);
     t->state = WTASK_DEAD;
+    cursor_wait_end();
     switch_to(&kernel_task);
     for (;;)
         ;                       /* never resumed */

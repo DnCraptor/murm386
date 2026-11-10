@@ -64,6 +64,7 @@ typedef struct wuser {
     unsigned buttons;
     MSG      cur_msg;            /* last retrieved */
     int      in_modal_move;
+    int      shutting_down;     /* accepted WM_QUERYENDSESSION: no more repaint */
     int      layout;             /* 0 = US, 1 = Russian */
     uint32_t last_click_time;
     int      last_click_x, last_click_y, last_click_msg;

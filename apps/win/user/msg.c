@@ -521,10 +521,23 @@ static void parent_notify(const MSG *m)
     }
 }
 
+static int quit_message(MSG *out, wtask *t, int remove)
+{
+    memset(out, 0, sizeof(*out));
+    out->message = WM_QUIT;
+    out->wParam = (WPARAM)t->quit_code;
+    if (remove)
+        t->quit = 0;
+    return -1;
+}
+
 static int get_one(MSG *out, HWND h, UINT first, UINT last, int remove)
 {
     pump_input();
     wtask *me = task_current();
+    /* A committed exit must not drain queued GUI input or begin a paint. */
+    if (U.shutting_down && me->quit)
+        return quit_message(out, me, remove);
     for (int i = 0; i < q_count; i++) {
         MSG *m = q_at(i);
         if (m->hwnd && !IsWindow(m->hwnd)) {
@@ -547,14 +560,8 @@ static int get_one(MSG *out, HWND h, UINT first, UINT last, int remove)
         }
         return 1;
     }
-    if (me->quit) {
-        memset(out, 0, sizeof(*out));
-        out->message = WM_QUIT;
-        out->wParam = (WPARAM)me->quit_code;
-        if (remove)
-            me->quit = 0;
-        return -1;
-    }
+    if (me->quit)
+        return quit_message(out, me, remove);
     if (!first || (WM_PAINT >= first && WM_PAINT <= last)) {
         wwnd *w = user_find_paint(me->h);
         if (w && (!h || w->h == h || IsChild(h, w->h))) {
@@ -645,9 +652,18 @@ int user_task_has_work(HTASK task)
 BOOL WINAPI ExitWindows(DWORD reserved, UINT code)
 {
     (void)reserved; (void)code;
+    if (U.shutting_down)
+        return TRUE;
+    /* Show progress through potentially slow task queries and SD writes. */
+    cursor_wait_begin();
     for (wwnd *w = U.desktop->child; w; w = w->next)
-        if (!SendMessage(w->h, WM_QUERYENDSESSION, 0, 0))
+        if (!SendMessage(w->h, WM_QUERYENDSESSION, 0, 0)) {
+            cursor_wait_end();
             return FALSE;
+        }
+    /* Keep the last complete frame (including a confirmation dialog) until
+     * the display is shut down; no half-painted desktop underneath it. */
+    U.shutting_down = 1;
     for (wwnd *w = U.desktop->child, *n; w; w = n) {
         n = w->next;
         SendMessage(w->h, WM_ENDSESSION, TRUE, 0);
