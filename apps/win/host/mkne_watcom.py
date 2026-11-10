@@ -108,6 +108,14 @@ OWSYS: Windows' own DLLs, WINN's: MMSYSTEM (no devices, MCI none,
     1" (VerFindFile: in its own directory), "lz \"ABCABCABCABC\" \"ABC\"
     12, C:\\HOSTWIN\\OWSYS.TXT, copy 12, install 0 12", "ticks 1" (0.3 s
     of timeSetEvent's 50 ms, at least 4 calls, however late the messages)
+
+OWFONT: a raster font file's faces (WINNTEST.FON beside it, mkfon.py:
+    "Winn Test" 12 and 24 bold; AddFontResource): each size, the nearest
+    for 20, twice 24, bold and italic made, underlined and struck out; the
+    VGA glyphs twice as large (System 32) and italic; with GetTextFace and
+    GetTextMetrics' height, ascent, internal leading and GetTextExtent:
+    "added 2, faces 6, sizes 2", "Small ...: Winn Test 12/10/2 61", ...
+    "x2: Winn Test 48/40/8 ...", "VGA x2: System 32/26/4 90"
 """
 import sys
 
@@ -5215,6 +5223,183 @@ PROGRAMS = {
             '46696c654465736372697074696f6e0057494e4e2073797374656d20444c4c73207465737400000018000800'
             '46696c6556657273696f6e00312e322e332e34002400000056617246696c65496e666f00140004005472616e'
             '736c6174696f6e000904e404'
+        )),
+    'OWFONT': (
+        # wcl -bt=windows -l=windows -ms owfont.c (WINNTEST.FON beside it: mkfon.py)
+        # ---- owfont.c
+        #     #include <windows.h>
+        #     #include <string.h>
+        #
+        #     /* Fonts of a raster font file (WINNTEST.FON beside it: the face "Winn
+        #      * Test", 12 pixels and 24 bold, AddFontResource): each size, the
+        #      * nearest when another is asked for, twice the size, italic and bold
+        #      * made, underlined and struck out; the VGA glyphs (System, Fixedsys)
+        #      * twice and three times as large; GetTextMetrics, GetTextFace,
+        #      * EnumFonts, GetTextExtent with them; as text */
+        #     static int added, faces, sizes;
+        #     static char path[128];
+        #
+        #     int FAR PASCAL EnumProc(LOGFONT FAR *lf, TEXTMETRIC FAR *tm, int type, LPARAM lp)
+        #     {
+        #         if (lp)
+        #             sizes++;
+        #         else
+        #             faces++;
+        #         return 1;
+        #     }
+        #
+        #     static void line(HDC dc, int *y, int height, int weight, BYTE italic, BYTE under, BYTE strike,
+        #                      LPCSTR face, LPCSTR text)
+        #     {
+        #         HFONT f = CreateFont(height, 0, 0, 0, weight, italic, under, strike, 0, 0, 0, 0, 0, face);
+        #         HFONT old = SelectObject(dc, f);
+        #         TEXTMETRIC tm;
+        #         char name[40], s[120];
+        #         DWORD ext;
+        #         GetTextMetrics(dc, &tm);
+        #         GetTextFace(dc, sizeof(name), name);
+        #         ext = GetTextExtent(dc, text, lstrlen(text));
+        #         wsprintf(s, "%s: %s %d/%d/%d %d", text, (LPSTR)name, tm.tmHeight, tm.tmAscent,
+        #                  tm.tmInternalLeading, LOWORD(ext));
+        #         TextOut(dc, 8, *y, s, lstrlen(s));
+        #         *y += tm.tmHeight + tm.tmExternalLeading + 2;
+        #         SelectObject(dc, old);
+        #         DeleteObject(f);
+        #     }
+        #
+        #     long FAR PASCAL WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+        #     {
+        #         PAINTSTRUCT ps;
+        #         HDC dc;
+        #         int y = 4;
+        #         char s[80];
+        #         switch (msg) {
+        #         case WM_PAINT:
+        #             dc = BeginPaint(h, &ps);
+        #             SetBkMode(dc, TRANSPARENT);
+        #             wsprintf(s, "added %d, faces %d, sizes %d", added, faces, sizes);
+        #             TextOut(dc, 8, y, s, lstrlen(s));
+        #             y += 18;
+        #             line(dc, &y, -10, FW_NORMAL, 0, 0, 0, "Winn Test", "Small \xc0\xe1\xe2");
+        #             line(dc, &y, 12, FW_BOLD, 0, 0, 0, "Winn Test", "Bold made");
+        #             line(dc, &y, 12, FW_NORMAL, 1, 0, 0, "Winn Test", "Italic made");
+        #             line(dc, &y, 20, FW_BOLD, 0, 1, 1, "Winn Test", "Ask 20");
+        #             line(dc, &y, 24, FW_BOLD, 0, 0, 0, "Winn Test", "Large");
+        #             line(dc, &y, 48, FW_BOLD, 0, 0, 0, "Winn Test", "x2");
+        #             line(dc, &y, 32, FW_NORMAL, 0, 0, 0, "System", "VGA x2");
+        #             line(dc, &y, 16, FW_NORMAL, 1, 0, 0, "Fixedsys", "Fixed italic");
+        #             EndPaint(h, &ps);
+        #             return 0;
+        #         case WM_DESTROY:
+        #             RemoveFontResource(path);
+        #             PostQuitMessage(0);
+        #             return 0;
+        #         }
+        #         return DefWindowProc(h, msg, wp, lp);
+        #     }
+        #
+        #     int PASCAL WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR cmd, int show)
+        #     {
+        #         WNDCLASS wc;
+        #         HWND h;
+        #         MSG m;
+        #         HDC dc;
+        #         char *p;
+        #         GetModuleFileName(hInstance, path, sizeof(path));
+        #         for (p = path + lstrlen(path); p > path && p[-1] != '\\'; p--)
+        #             ;
+        #         lstrcpy(p, "WINNTEST.FON");
+        #         added = AddFontResource(path);
+        #         dc = GetDC(NULL);
+        #         EnumFonts(dc, NULL, (FONTENUMPROC)EnumProc, NULL);
+        #         EnumFonts(dc, "Winn Test", (FONTENUMPROC)EnumProc, (LPSTR)"sizes");
+        #         ReleaseDC(NULL, dc);
+        #         _fmemset(&wc, 0, sizeof(wc));
+        #         wc.lpfnWndProc = WndProc;
+        #         wc.hInstance = hInstance;
+        #         wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        #         wc.hbrBackground = GetStockObject(WHITE_BRUSH);
+        #         wc.lpszClassName = "OwFont";
+        #         RegisterClass(&wc);
+        #         h = CreateWindow("OwFont", "Fonts", WS_OVERLAPPEDWINDOW, 0, 0, 640, 470, NULL, NULL,
+        #                          hInstance, NULL);
+        #         ShowWindow(h, show);
+        #         UpdateWindow(h);
+        #         while (GetMessage(&m, NULL, 0, 0)) {
+        #             TranslateMessage(&m);
+        #             DispatchMessage(&m);
+        #         }
+        #         return m.wParam;
+        #     }
+        bytes.fromhex(
+            '4d5a80000100000004000000ffff0000b8000000000000004000000000000000000000000000000000000000'
+            '00000000000000000000000000000000800000000e1fba0e00b409cd21b8014ccd2154686973206973206120'
+            '57696e646f77732031362d6269742065786563757461626c650d0a240000000000000000000000004e450501'
+            '710002000000000002030200000400206804010000000200020003000e004000500050005a006000f3000000'
+            '0000010000000200000000000000000381006207400d6207fb04b201410c4002064f57464f4e540000000100'
+            '05000c000003474449064b45524e454c045553455200000a6f77666f6e742e65786500000000ccebfd909090'
+            '90001e5890455589e51e8ed8b80800e807048b46080b46067406ff063402eb04ff063602b801001f5d4dca0e'
+            '005589e550b8ea00e8e20358565781ecc40089c689d75331c0505050518a460430e4508a4606508a46085030'
+            'c05050505050ff760cff760a9affff00008946f856509affff00008946fa568d5ed81e539affff000056b828'
+            '00508d5eb01e539affff000056ff7610ff760eff7610ff760e9affff0000509affff000050ff76deff76daff'
+            '76d88d5eb01e53ff7610ff760e1eb81000508d9e38ff1e539affff000083c41856b8080050ff358d9e38ff1e'
+            '531e539affff0000509affff00008b46d80346e0050200010556ff76fa9affff0000ff76f89affff00008d66'
+            'fc5f5e5dc20e001e5890455589e51e8ed8b88c00e8fa02565783ec728b460c8b7e0ec746f804003d0f00740b'
+            '3d02007403e96c01e95501578d56d81e529affff000089c650b80100509affff0000ff363402ff363602ff36'
+            '32021eb82300508d56881e529affff000083c40e56b8080050ff76f88d56881e521e529affff0000509affff'
+            '00001eb84000501eb84a005031c05050508346f812b99001bbf6ff8d56f889f0e87efe1eb85400501eb84a00'
+            '5031c0505050b9bc02bb0c008d56f889f0e861fe1eb85e00501eb84a005031c05050b8010050b99001bb0c00'
+            '8d56f889f0e841fe1eb86a00501eb84a0050b80100505031c050b9bc02bb14008d56f889f0e821fe1eb87100'
+            '501eb84a005031c0505050b9bc02bb18008d56f889f0e804fe1eb87700501eb84a005031c0505050b9bc02bb'
+            '30008d56f889f0e8e7fd1eb87a00501eb881005031c0505050b99001bb20008d56f889f0e8cafd1eb8880050'
+            '1eb895005031c05050b8010050b99001bb10008d56f889f0e8aafd578d56d81e529affff000031c031f6eb26'
+            '1eb8b201509affff000031c0509affff0000ebe65750ff760aff7608ff76069affff000089d689f28d66fa5f'
+            '5e1f5d4dca0a005589e5b85200e84901565783ec2c8b7e0c571eb8b20150b88000509affff00001eb8b20150'
+            '9affff0000bbb20101c381fbb2017609807fff5c74034bebf11e531eb89e00509affff00001eb8b201509aff'
+            'ff0000a3320231c0509affff000089c65031c05050b8ffff50b8ffff5031c050509affff0000561eb84a0050'
+            'b8ffff50b8ffff501eb8ab00509affff000031c050569affff0000b91a0031db8cda8d46d0e8df00c746d2ff'
+            'ffc746d4ffff897eda31c05050b8007f509affff00008946de31c0509affff00008946e0c746e6b1008c5ee8'
+            '8d56d01e529affff00001eb8b100501eb8b80050b8cf005031c0505050b8800250b8d6015031c05050575050'
+            '9affff000089c650ff76049affff0000569affff00008d46ea1e5031c05050509affff000085c074168d46ea'
+            '1e509affff00008d46ea1e509affff0000ebd78b46ee8d66fc5f5e5dc20a00008c16ca00c33bc473132bc4f7'
+            'd83b060a0077068cd03b06ca007401c30e5ab84104bb0100e9c801537461636b204f766572666c6f77210057'
+            '89c788d88ec2578ae0d1e9f3ab13c9f3aa5f89f85fc3eb0203009affff00000bc0750e5033c0ba0f00e86a02'
+            '58b44ccd218c06d000575606535253be38028936eb008c1eed00268a078804464384c075f589360a005b2bc0'
+            '509affff000057579affff0000fc1e07b93802bfb2012bcf32c0f3aab8b205a3e700b8ffffa3e900b430cd21'
+            'a2d2008826d3009affff0000a2d4008826d50086e0a3d60054583bc475120f01e0a90100740ab001a2d800b0'
+            '03a2d9001ebff30057b89000509affff0000b8f300893eef008c1ef100b8ff00e86b01e8a5fde9f9004f7065'
+            '6e20576174636f6d20432f432b2b31362052756e2d54696d652073797374656d2e20436f7079726967687420'
+            '286329204f70656e20576174636f6d20436f6e7472696275746f727320323030322d323032362e20506f7274'
+            '696f6e7320436f7079726967687420284329205379626173652c20496e632e20313938382d323030322e00c3'
+            'cb005589e551565781ec800089c689df8d9e7aff8cd98ec2268a0484c074173c0d74138d46f939c3730c268a'
+            '048ec14626880743ebe031c08ec15026c607001e8d9e7aff531eb8be005031c0509affff000089f8e9440051'
+            '5689c189d6e8330185c0750689c889f2eb9889d8e92c0000c3c3535289c3833eaa01007404ff16aa01ff1684'
+            '01baff00b81000e8a800ff168401ff16860189d8e928fe5289c2ff168401ff16860189d0e918fe5589e55352'
+            '89c3833f0075078d66fc5a5b5dc31eff171febf35589e5535289c38b47028b1785c0750485d274df1eff1f1f'
+            'ebd95589e5535152565789c11ee813ffbfb20189fabbac0189fe88c839fb7316803f02750583c306ebf23a47'
+            '0172f689de8a4701ebef39fe74158d4402803c007508e88affc60402ebcbe89bffebf61f8d66f65f5e5a595b'
+            '5dc35589e55351565789c11ee8bcfe88d5bfb20189fabbb20189fe88c839fb7316803f02750583c306ebf23a'
+            '470177f689de8a4701ebef39fe741c3a6c017305c60402ebd18d4402803c007505e827ffebeee83bffebe91f'
+            '8d66f85f5eeb9f803e880100750331c0c35250cceb0657564944454fb8010083c404c300320003016b000100'
+            '38000301750001002d000301830001005d000301920001005c000301a40002005a000301aa0001005b000301'
+            'cf000300a4010301e60002005a000301ec00010021000301000101002d00030108010100450003014c010300'
+            '27000301580101000200030173010300a40103018a0102005a00030190010100210003019002030028000301'
+            'a002010088000301a802030006000301ba0203006b000301e902020031000301f30202005a00030113030200'
+            '580003011d030100770003012803030042000200340301000800050038030100080003014003010046000200'
+            '4b030100080005004f030100080003015803010046000301610303004400050075030100150102007a030100'
+            '1501030188030300ad0003019303010057000301a803030039000301cf03030029000301da0303002a000301'
+            'e00303007c000301ef0303006c000301fd0303007100030107040300720003016d0402005b000301ac040200'
+            '1e000301b304030005000200cd04010068040301de0402000300030110050200310003010006030001000000'
+            '000005000000000000000000000025733a2025732025642f25642f25642025640061646465642025642c2066'
+            '616365732025642c2073697a657320256400536d616c6c20c0e1e20057696e6e205465737400426f6c64206d'
+            '616465004974616c6963206d6164650041736b203230004c6172676500783200564741207832005379737465'
+            '6d004669786564206974616c69630046697865647379730057494e4e544553542e464f4e0073697a6573004f'
+            '77466f6e7400466f6e7473004f70656e20576174636f6d000000ffff00000000000000000000000c00000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000023062306000000000000'
+            '00000000000000000000000000000000000000000000000000000000000000201a040000'
         )),
 }
 

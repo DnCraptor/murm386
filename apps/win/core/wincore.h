@@ -116,6 +116,10 @@ void dib_stretch(wsurf *d, const wclip *c, int dx, int dy, int dw, int dh,
  * in color; bold adds a second pass one pixel to the right. */
 void dib_glyph8(wsurf *s, const wclip *c, int x, int y, const uint8_t *rows,
                 int h, int w, int skip_left, uint8_t color, int bold);
+/* ... any glyph: w x h, rows of pitch bytes (bit 7 the leftmost), each
+ * pixel scale x scale; base > y: italic, slanted about that line */
+void dib_glyph(wsurf *s, const wclip *c, int x, int y, const uint8_t *rows, int pitch,
+               int w, int h, int scale, int base, uint8_t color);
 
 /* ---------------------------------------------------------------- GDI */
 
@@ -135,11 +139,22 @@ typedef struct wbrush {
     int      pat_is_mono;
 } wbrush;
 
+/* a font realized at one height on the device (gdi_text.c): a face of
+ * the font files' (fontfile.h) or the VGA glyphs (face NULL), made larger
+ * by a whole number, bold and italic made if the face is not */
+typedef struct wreal {
+    struct wface *face;
+    int      key;           /* the height asked for, in pixels (lfHeight's sign) */
+    int      scale, bold, italic, fixed;
+    int      height, ascent, ileading, eleading, avgw, maxw;
+} wreal;
+
 typedef struct wfont {
     LOGFONT  lf;
-    int      fixed;         /* fixed pitch */
+    int      fixed;         /* fixed pitch (the VGA glyphs) */
     int      bold;
-    int      height;        /* realized cell height */
+    int      height;        /* realized cell height (the VGA glyphs) */
+    wreal    real;          /* the last realization */
 } wfont;
 
 typedef struct wbitmap {

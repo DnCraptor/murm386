@@ -444,6 +444,33 @@ void dib_stretch(wsurf *d, const wclip *c, int dx, int dy, int dw, int dh,
 
 /* ---------------------------------------------------------------- glyphs */
 
+/* A glyph of w x h pixels, rows of pitch bytes (the leftmost pixel bit
+ * 7), each pixel scale x scale on the surface, at (x, y); slanted (base >
+ * y: italic) the rows above the base line moved right a pixel for every
+ * three up, those below it left. */
+void dib_glyph(wsurf *s, const wclip *c, int x, int y, const uint8_t *rows, int pitch,
+               int w, int h, int scale, int base, uint8_t color)
+{
+    int W = w * scale, H = h * scale, lean = base > y ? H / 3 + 1 : 0;
+    RECT rc = { x - lean, y, x + W + lean, y + H }, r;
+    int i = 0;
+    uint8_t v = s->bpp == 1 ? (color & 1) : color;
+    while (clip_next(s, c, &i, &rc, &r)) {
+        for (int yy = r.top; yy < r.bottom; yy++) {
+            const uint8_t *row = rows + (yy - y) / scale * pitch;
+            int shift = lean ? (base - yy) / 3 : 0;
+            for (int xx = r.left; xx < r.right; xx++) {
+                int sx = xx - x - shift;
+                if (sx < 0 || sx >= W)
+                    continue;
+                sx /= scale;
+                if (row[sx >> 3] & (0x80u >> (sx & 7)))
+                    px_put(s, xx, yy, v);
+            }
+        }
+    }
+}
+
 void dib_glyph8(wsurf *s, const wclip *c, int x, int y, const uint8_t *rows,
                 int h, int w, int skip_left, uint8_t color, int bold)
 {

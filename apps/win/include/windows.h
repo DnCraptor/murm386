@@ -575,6 +575,9 @@ BOOL    WINAPI GetCharWidth(HDC hdc, UINT first, UINT last, int *widths);
 #define RASTER_FONTTYPE 0x0001
 typedef int (CALLBACK *FONTENUMPROC)(const LOGFONT *lf, const TEXTMETRIC *tm, int type,
                                      LPARAM lp);
+/* a raster font file's faces (.FON, .FNT) for all to use: how many */
+int     WINAPI AddFontResource(LPCSTR file);
+BOOL    WINAPI RemoveFontResource(LPCSTR file);
 int     WINAPI EnumFonts(HDC hdc, LPCSTR face, FONTENUMPROC proc, LPARAM lp);
 int     WINAPI EnumFontFamilies(HDC hdc, LPCSTR family, FONTENUMPROC proc, LPARAM lp);
 DWORD   WINAPI GetTabbedTextExtent(HDC hdc, LPCSTR s, int n, int ntabs, const int *tabs);

@@ -1,16 +1,20 @@
 /*
  * gdi_text.c - fonts and text output.
  *
- * One bitmap face, the 8x16 VGA glyphs (CP866). ANSI text is Windows-1251
- * and is mapped to those glyphs; OEM_CHARSET fonts take bytes as CP866.
- * The proportional "System" face is made by trimming each glyph's empty
- * columns; the fixed faces use the full 8-pixel cell. Bold is synthesized
- * by a second pass one pixel to the right.
+ * The faces of Windows' raster font files WIN.INI's [fonts] names or
+ * AddFontResource adds (fontfile.c), at their sizes, made larger by whole
+ * numbers; else the 8x16 VGA glyphs (CP866), larger the same way. ANSI
+ * text is Windows-1251 and is mapped to those glyphs; OEM_CHARSET fonts
+ * take bytes as CP866. The proportional "System" face is made by trimming
+ * each glyph's empty columns; the fixed faces use the full 8-pixel cell.
+ * Bold is synthesized by a second pass one pixel to the right, italic by
+ * slanting the rows.
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
 #include <string.h>
 #include "wincore.h"
+#include "fontfile.h"
 
 extern const uint8_t win_font8x16[4096];
 
@@ -106,6 +110,7 @@ HFONT WINAPI CreateFontIndirect(const LOGFONT *lf)
                !lstrcmpi(n, "Fixedsys") || !lstrcmpi(n, "Terminal");
     f->bold = lf->lfWeight >= 600;
     f->height = CELL_H;
+    memset(&f->real, 0, sizeof(f->real));
     return h;
 }
 
@@ -138,38 +143,175 @@ static inline unsigned glyph_of(const wfont *f, unsigned char ch)
     return ansi_to_oem[ch - 0x80];
 }
 
-int gdi_char_width(const wfont *f, unsigned char ch)
+/* ---------------------------------------------------------------- realizing */
+
+/* face names that stand for each other: the first the second */
+static const char *const alias[][2] = {
+    { "Helv", "MS Sans Serif" }, { "Helvetica", "MS Sans Serif" },
+    { "Arial", "MS Sans Serif" }, { "Tms Rmn", "MS Serif" }, { "Times", "MS Serif" },
+    { "Times New Roman", "MS Serif" }, { "Courier New", "Courier" },
+};
+
+static const char *canonical(const char *name)
 {
-    int w = f->fixed ? 8 : glyph_width[glyph_of(f, ch)] + 1;
-    return w + (f->bold ? 1 : 0);
+    for (unsigned i = 0; i < sizeof(alias) / sizeof(alias[0]); i++)
+        if (!lstrcmpi(name, alias[i][0]))
+            return alias[i][1];
+    return name;
 }
 
-static int text_width(const wfont *f, LPCSTR s, int n)
+static int same_face(const char *a, const char *b)
+{
+    return !lstrcmpi(a, b) || !lstrcmpi(canonical(a), canonical(b));
+}
+
+/* the VGA glyphs' own names: theirs unless a font file has the face */
+static int vga_name(const char *n)
+{
+    return !*n || !lstrcmpi(n, "System") || !lstrcmpi(n, "Fixedsys") || !lstrcmpi(n, "Terminal");
+}
+
+/* the font files' face nearest the font asked for at height key (pixels;
+ * < 0 the characters' height, > 0 the cell's, 0 the default, 8 points),
+ * and the whole number it is made larger by; NULL: the VGA glyphs' */
+static wface *pick(const LOGFONT *lf, int key, int *scale)
+{
+    wface *const *list;
+    int n = font_faces(&list);
+    int target = key < 0 ? -key : key, cell = key >= 0;
+    if (!target)
+        target = 13;
+    int fam = lf->lfPitchAndFamily & 0xf0, fixed = (lf->lfPitchAndFamily & 3) == FIXED_PITCH;
+    int oem = lf->lfCharSet == OEM_CHARSET;
+    wface *best = NULL;
+    long best_score = 0;
+    for (int pass = 0; pass < 2 && !best; pass++) {
+        if (pass && (vga_name(lf->lfFaceName) || (!fam && !fixed)))
+            break;                      /* no face by its name: the family's */
+        for (int i = 0; i < n; i++) {
+            wface *f = list[i];
+            if (!pass && !same_face(lf->lfFaceName, f->name))
+                continue;
+            if (pass && ((fam && (f->pitch_family & 0xf0) != fam) ||
+                         (fixed && (f->pitch_family & 1)) || oem != (f->charset == OEM_CHARSET)))
+                continue;
+            int h = cell ? f->height : f->height - f->ileading;
+            if (h <= 0)
+                continue;
+            int s = target >= 2 * h ? target / h : 1;
+            if (s > 8)
+                s = 8;
+            int got = h * s;
+            long score = got <= target ? (long)(target - got) * 4 : (long)(got - target) * 6 + 2;
+            score += (lf->lfWeight >= 600) != (f->weight >= 600) ? 3 : 0;
+            score += !lf->lfItalic && f->italic ? 100 : lf->lfItalic && !f->italic ? 3 : 0;
+            if (!best || score < best_score) {
+                best = f;
+                best_score = score;
+                *scale = s;
+            }
+        }
+    }
+    return best;
+}
+
+/* the font as the DC has it: its height in the DC's units on the device */
+static const wreal *realize(const wdc *dc, const wfont *cf)
+{
+    wfont *f = (wfont *)cf;
+    int key = f->lf.lfHeight;
+    if (dc && dc->mapmode != MM_TEXT && key) {
+        int d = gdi_ly_to_dy((wdc *)dc, key < 0 ? -key : key);
+        d = d < 0 ? -d : d;
+        key = key < 0 ? -(d ? d : 1) : (d ? d : 1);
+    }
+    if (f->real.height && f->real.key == key)
+        return &f->real;
+    wreal r;
+    memset(&r, 0, sizeof(r));
+    r.key = key;
+    int scale = 1;
+    wface *face = pick(&f->lf, key, &scale);
+    if (face && font_data(face)) {
+        face->used = 1;
+        r.face = face;
+        r.scale = scale;
+        r.bold = f->lf.lfWeight >= 600 && face->weight < 600;
+        r.italic = f->lf.lfItalic && !face->italic;
+        r.fixed = !(face->pitch_family & 1);
+        r.height = face->height * scale;
+        r.ascent = face->ascent * scale;
+        r.ileading = face->ileading * scale;
+        r.eleading = face->eleading * scale;
+        r.avgw = face->avgw * scale + r.bold;
+        r.maxw = face->maxw * scale + r.bold;
+    } else {
+        int c = key > 0 ? key : key < 0 ? -key + 2 : CELL_H;
+        scale = c >= 2 * CELL_H ? c / CELL_H : 1;
+        if (scale > 8)
+            scale = 8;
+        r.scale = scale;
+        r.bold = f->bold;
+        r.italic = f->lf.lfItalic != 0;
+        r.fixed = f->fixed;
+        r.height = CELL_H * scale;
+        r.ascent = ASCENT * scale;
+        r.ileading = 2 * scale;
+        r.avgw = (f->fixed ? 8 : glyph_width[glyph_of(f, 'x')] + 1) * scale + r.bold;
+        r.maxw = (8 + (f->fixed ? 0 : 1)) * scale + r.bold;
+    }
+    f->real = r;
+    return &f->real;
+}
+
+static int char_width(const wreal *r, const wfont *f, unsigned char ch)
+{
+    int w;
+    if (!r->face) {
+        w = r->fixed ? 8 : glyph_width[glyph_of(f, ch)] + 1;
+    } else {
+        const uint8_t *cols;
+        if (!font_glyph(r->face, ch, &cols, &w))
+            w = r->face->avgw;
+    }
+    return w * r->scale + r->bold;
+}
+
+int gdi_char_width(const wfont *f, unsigned char ch)
+{
+    return char_width(realize(NULL, f), f, ch);
+}
+
+static int text_width(const wreal *r, const wfont *f, LPCSTR s, int n)
 {
     int w = 0;
     for (int i = 0; i < n; i++)
-        w += gdi_char_width(f, (unsigned char)s[i]);
+        w += char_width(r, f, (unsigned char)s[i]);
     return w;
 }
 
-static wdc *text_dc(HDC h, const wfont **f)
+/* the DC, its font, and that realized for it */
+static wdc *text_dc(HDC h, const wfont **f, const wreal **r)
 {
     wdc *dc = gdi_dc(h);
-    if (dc)
+    if (dc) {
         *f = gdi_font(dc->font);
+        *r = realize(dc, *f);
+    }
     return dc;
 }
 
 BOOL WINAPI GetTextExtentPoint(HDC h, LPCSTR s, int n, LPSIZE sz)
 {
     const wfont *f;
-    wdc *dc = text_dc(h, &f);
+    const wreal *r;
+    wdc *dc = text_dc(h, &f, &r);
     if (!dc || !sz)
         return FALSE;
     if (n < 0)
         n = lstrlen(s);
-    sz->cx = text_width(f, s, n) + dc->char_extra * n;
-    sz->cy = f->height;
+    sz->cx = text_width(r, f, s, n) + dc->char_extra * n;
+    sz->cy = r->height;
     if (dc->mapmode != MM_TEXT) {       /* in logical units */
         sz->cx = gdi_dx_to_lx(dc, sz->cx);
         sz->cy = gdi_dy_to_ly(dc, sz->cy);
@@ -187,38 +329,40 @@ DWORD WINAPI GetTextExtent(HDC h, LPCSTR s, int n)
 }
 
 /* a font's metrics, in pixels */
-static void font_metrics(const wfont *f, LPTEXTMETRIC tm)
+static void font_metrics(const wreal *r, const wfont *f, LPTEXTMETRIC tm)
 {
+    const wface *face = r->face;
     memset(tm, 0, sizeof(*tm));
-    tm->tmHeight = f->height;
-    tm->tmAscent = ASCENT;
-    tm->tmDescent = DESCENT;
-    tm->tmInternalLeading = 2;
-    tm->tmExternalLeading = 0;
-    tm->tmAveCharWidth = f->fixed ? 8 + f->bold : gdi_char_width(f, 'x');
-    tm->tmMaxCharWidth = 8 + f->bold + (f->fixed ? 0 : 1);
-    tm->tmWeight = f->bold ? FW_BOLD : FW_NORMAL;
-    tm->tmItalic = f->lf.lfItalic;
+    tm->tmHeight = r->height;
+    tm->tmAscent = r->ascent;
+    tm->tmDescent = r->height - r->ascent;
+    tm->tmInternalLeading = r->ileading;
+    tm->tmExternalLeading = r->eleading;
+    tm->tmAveCharWidth = r->avgw;
+    tm->tmMaxCharWidth = r->maxw;
+    tm->tmWeight = r->bold || (!face && f->bold) ? FW_BOLD : face ? face->weight : FW_NORMAL;
+    tm->tmItalic = (BYTE)(face ? face->italic || r->italic : f->lf.lfItalic);
     tm->tmUnderlined = f->lf.lfUnderline;
     tm->tmStruckOut = f->lf.lfStrikeOut;
-    tm->tmFirstChar = 0x20;
-    tm->tmLastChar = 0xFF;
-    tm->tmDefaultChar = '?';
-    tm->tmBreakChar = ' ';
+    tm->tmFirstChar = (BYTE)(face ? face->first : 0x20);
+    tm->tmLastChar = (BYTE)(face ? face->last : 0xFF);
+    tm->tmDefaultChar = (BYTE)(face ? face->defchar : '?');
+    tm->tmBreakChar = (BYTE)(face ? face->breakchar : ' ');
     /* bit 0 set means VARIABLE pitch (sic, Windows) */
-    tm->tmPitchAndFamily = f->fixed ? 0 : 1;
-    tm->tmCharSet = f->lf.lfCharSet;
-    tm->tmOverhang = f->bold;
+    tm->tmPitchAndFamily = (BYTE)(face ? face->pitch_family : r->fixed ? 0 : 1);
+    tm->tmCharSet = (BYTE)(face ? face->charset : f->lf.lfCharSet);
+    tm->tmOverhang = r->bold;
     tm->tmDigitizedAspectX = tm->tmDigitizedAspectY = 96;
 }
 
 BOOL WINAPI GetTextMetrics(HDC h, LPTEXTMETRIC tm)
 {
     const wfont *f;
-    wdc *dc = text_dc(h, &f);
+    const wreal *r;
+    wdc *dc = text_dc(h, &f, &r);
     if (!dc || !tm)
         return FALSE;
-    font_metrics(f, tm);
+    font_metrics(r, f, tm);
     if (dc->mapmode != MM_TEXT) {       /* in logical units */
         int *v[] = { &tm->tmHeight, &tm->tmAscent, &tm->tmDescent, &tm->tmInternalLeading,
                      &tm->tmExternalLeading, &tm->tmAveCharWidth, &tm->tmMaxCharWidth,
@@ -235,11 +379,12 @@ BOOL WINAPI GetTextMetrics(HDC h, LPTEXTMETRIC tm)
 BOOL WINAPI GetCharWidth(HDC h, UINT first, UINT last, int *widths)
 {
     const wfont *f;
-    wdc *dc = text_dc(h, &f);
+    const wreal *r;
+    wdc *dc = text_dc(h, &f, &r);
     if (!dc || !widths || first > last || last > 255)
         return FALSE;
     for (UINT c = first; c <= last; c++) {
-        int w = gdi_char_width(f, (unsigned char)c);
+        int w = char_width(r, f, (unsigned char)c);
         if (dc->mapmode != MM_TEXT) {
             w = gdi_dx_to_lx(dc, w);
             w = w < 0 ? -w : w;
@@ -249,20 +394,78 @@ BOOL WINAPI GetCharWidth(HDC h, UINT first, UINT last, int *widths)
     return TRUE;
 }
 
-/* EnumFonts, EnumFontFamilies: the stock fonts' faces (all of one size), one
- * each, or the one named; what proc returned last (0 stops) */
+/* EnumFonts, EnumFontFamilies: the stock fonts' faces (all of one size) and
+ * the font files' (each of their sizes when one is named, the first of
+ * each face else), the stock ones a font file has left out; what proc
+ * returned last (0 stops) */
 static int enum_fonts(LPCSTR face, FONTENUMPROC proc, LPARAM lp)
 {
     static const int stock[] = { SYSTEM_FONT, ANSI_VAR_FONT, SYSTEM_FIXED_FONT,
                                  ANSI_FIXED_FONT, OEM_FIXED_FONT };
-    int r = 1;
+    wface *const *list;
+    int n = font_faces(&list), r = 1;
     for (unsigned i = 0; r && i < sizeof(stock) / sizeof(stock[0]); i++) {
         const wfont *f = gdi_font(win_sys.stock[stock[i]]);
         if (face && *face && lstrcmpi(face, f->lf.lfFaceName))
             continue;
+        int filed = 0;
+        for (int k = 0; k < n && !filed; k++)
+            filed = !lstrcmpi(list[k]->name, f->lf.lfFaceName);
+        if (filed)
+            continue;
         TEXTMETRIC tm;
-        font_metrics(f, &tm);
+        wreal vga;                      /* the VGA glyphs at their size */
+        memset(&vga, 0, sizeof(vga));
+        vga.scale = 1;
+        vga.bold = f->bold;
+        vga.fixed = f->fixed;
+        vga.height = CELL_H;
+        vga.ascent = ASCENT;
+        vga.ileading = 2;
+        vga.avgw = (f->fixed ? 8 : glyph_width[glyph_of(f, 'x')] + 1) + f->bold;
+        vga.maxw = 8 + (f->fixed ? 0 : 1) + f->bold;
+        font_metrics(&vga, f, &tm);
         r = proc(&f->lf, &tm, RASTER_FONTTYPE, lp);
+    }
+    for (int i = 0; r && i < n; i++) {
+        wface *w = list[i];
+        int seen = 0;
+        if (face && *face) {
+            if (lstrcmpi(face, w->name))
+                continue;
+        } else {
+            for (int k = 0; k < i && !seen; k++)
+                seen = !lstrcmpi(list[k]->name, w->name);
+            if (seen)
+                continue;
+        }
+        LOGFONT lf;
+        memset(&lf, 0, sizeof(lf));
+        lf.lfHeight = w->height;
+        lf.lfWidth = w->avgw;
+        lf.lfWeight = w->weight;
+        lf.lfItalic = (BYTE)w->italic;
+        lf.lfCharSet = (BYTE)w->charset;
+        lf.lfPitchAndFamily = (BYTE)((w->pitch_family & 0xf0) |
+                                     ((w->pitch_family & 1) ? VARIABLE_PITCH : FIXED_PITCH));
+        lstrcpyn(lf.lfFaceName, w->name, LF_FACESIZE);
+        wfont tmp;
+        memset(&tmp, 0, sizeof(tmp));
+        tmp.lf = lf;
+        wreal real;
+        memset(&real, 0, sizeof(real));
+        real.face = w;
+        real.scale = 1;
+        real.fixed = !(w->pitch_family & 1);
+        real.height = w->height;
+        real.ascent = w->ascent;
+        real.ileading = w->ileading;
+        real.eleading = w->eleading;
+        real.avgw = w->avgw;
+        real.maxw = w->maxw;
+        TEXTMETRIC tm;
+        font_metrics(&real, &tmp, &tm);
+        r = proc(&lf, &tm, RASTER_FONTTYPE, lp);
     }
     return r;
 }
@@ -279,33 +482,76 @@ int WINAPI EnumFontFamilies(HDC h, LPCSTR family, FONTENUMPROC proc, LPARAM lp)
     return proc ? enum_fonts(family, proc, lp) : 0;
 }
 
+/* the face's name: the font file's the font was realized with */
 int WINAPI GetTextFace(HDC h, int n, LPSTR face)
 {
     const wfont *f;
-    wdc *dc = text_dc(h, &f);
+    const wreal *r;
+    wdc *dc = text_dc(h, &f, &r);
     if (!dc)
         return 0;
+    const char *name = r->face ? r->face->name : f->lf.lfFaceName;
     if (face && n > 0)
-        lstrcpyn(face, f->lf.lfFaceName, n);
-    return lstrlen(f->lf.lfFaceName);
+        lstrcpyn(face, name, n);
+    return lstrlen(name);
+}
+
+/* one character's glyph at surface position (x, y = top of the cell) */
+static void draw_char(wdc *dc, const wclip *c, const wreal *r, const wfont *f, int x, int y,
+                      unsigned char ch, uint8_t color)
+{
+    int base = r->italic ? y + r->ascent : 0;
+    if (!r->face) {
+        unsigned g = glyph_of(f, ch);
+        const uint8_t *src = &win_font8x16[g * CELL_H];
+        int w = r->fixed ? 8 : glyph_width[g], left = r->fixed ? 0 : glyph_left[g];
+        if (r->scale == 1 && !r->italic) {
+            dib_glyph8(dc->surf, c, x, y, src, CELL_H, w, left, color, r->bold);
+            return;
+        }
+        uint8_t rows[CELL_H];
+        for (int yy = 0; yy < CELL_H; yy++) {
+            unsigned b = (unsigned)src[yy] >> left, o = 0;
+            for (int i = 0; i < w; i++)
+                if (b >> i & 1)
+                    o |= 0x80u >> i;
+            rows[yy] = (uint8_t)o;
+        }
+        dib_glyph(dc->surf, c, x, y, rows, 1, w, CELL_H, r->scale, base, color);
+        if (r->bold)
+            dib_glyph(dc->surf, c, x + 1, y, rows, 1, w, CELL_H, r->scale, base, color);
+        return;
+    }
+    const uint8_t *cols;
+    int w;
+    if (!font_glyph(r->face, ch, &cols, &w) || !w)
+        return;
+    int h = r->face->height, pitch = (w + 7) / 8;
+    uint8_t small[256], *rows = pitch * h <= (int)sizeof(small) ? small
+                                                               : (uint8_t *)win_alloc((size_t)(pitch * h));
+    if (!rows)
+        return;
+    for (int k = 0; k < pitch; k++)     /* the font's columns: rows */
+        for (int yy = 0; yy < h; yy++)
+            rows[yy * pitch + k] = cols[k * h + yy];
+    dib_glyph(dc->surf, c, x, y, rows, pitch, w, h, r->scale, base, color);
+    if (r->bold)
+        dib_glyph(dc->surf, c, x + 1, y, rows, pitch, w, h, r->scale, base, color);
+    if (rows != small)
+        win_free(rows);
 }
 
 /*
  * Draw glyphs at surface position (x, y = top of the cell). dx: optional
  * advance per character. Returns the total advance.
  */
-static int draw_glyphs(wdc *dc, const wclip *c, const wfont *f, int x, int y,
+static int draw_glyphs(wdc *dc, const wclip *c, const wreal *r, const wfont *f, int x, int y,
                        LPCSTR s, int n, const int *dx, uint8_t color)
 {
     int x0 = x;
     for (int i = 0; i < n; i++) {
-        unsigned g = glyph_of(f, (unsigned char)s[i]);
-        int adv = dx ? dx[i] : gdi_char_width(f, (unsigned char)s[i]) + dc->char_extra;
-        if (f->fixed)
-            dib_glyph8(dc->surf, c, x, y, &win_font8x16[g * CELL_H], CELL_H, 8, 0, color, f->bold);
-        else
-            dib_glyph8(dc->surf, c, x, y, &win_font8x16[g * CELL_H], CELL_H,
-                       glyph_width[g], glyph_left[g], color, f->bold);
+        int adv = dx ? dx[i] : char_width(r, f, (unsigned char)s[i]) + dc->char_extra;
+        draw_char(dc, c, r, f, x, y, (unsigned char)s[i], color);
         x += adv;
     }
     int w = x - x0;
@@ -315,12 +561,13 @@ static int draw_glyphs(wdc *dc, const wclip *c, const wfont *f, int x, int y,
         fl.kind = WFILL_SOLID;
         fl.solid = color;
         if (f->lf.lfUnderline) {
-            RECT r = { x0, y + ASCENT + 1, x0 + w, y + ASCENT + 2 };
-            dib_fill_rect(dc->surf, c, &r, &fl, 0xF0);
+            RECT u = { x0, y + r->ascent + r->scale, x0 + w, y + r->ascent + 2 * r->scale };
+            dib_fill_rect(dc->surf, c, &u, &fl, 0xF0);
         }
         if (f->lf.lfStrikeOut) {
-            RECT r = { x0, y + ASCENT - 5, x0 + w, y + ASCENT - 4 };
-            dib_fill_rect(dc->surf, c, &r, &fl, 0xF0);
+            int t = y + r->ascent - (r->ascent - r->ileading) / 2;
+            RECT so = { x0, t, x0 + w, t + r->scale };
+            dib_fill_rect(dc->surf, c, &so, &fl, 0xF0);
         }
     }
     return w;
@@ -330,7 +577,8 @@ BOOL WINAPI ExtTextOut(HDC h, int x, int y, UINT opts, const RECT *rc,
                        LPCSTR s, UINT n, const int *dx)
 {
     const wfont *f;
-    wdc *dc = text_dc(h, &f);
+    const wreal *r;
+    wdc *dc = text_dc(h, &f, &r);
     if (!dc)
         return FALSE;
     if (!s)
@@ -346,10 +594,10 @@ BOOL WINAPI ExtTextOut(HDC h, int x, int y, UINT opts, const RECT *rc,
         for (UINT i = 0; i < n; i++)
             w += dx[i];
     else
-        w = text_width(f, s, (int)n) + dc->char_extra * (int)n;
+        w = text_width(r, f, s, (int)n) + dc->char_extra * (int)n;
 
     /* the reference point on the device, the text placed from it in pixels
-     * (the glyphs are the font's own size whatever the mapping mode) */
+     * (the glyphs are the realized font's size) */
     int sx = x, sy = y;
     gdi_lp_to_dp(dc, &sx, &sy);
     switch (dc->align & TA_CENTER) {
@@ -358,8 +606,8 @@ BOOL WINAPI ExtTextOut(HDC h, int x, int y, UINT opts, const RECT *rc,
     default: break;
     }
     switch (dc->align & TA_BASELINE) {
-    case TA_BOTTOM:   sy -= f->height; break;
-    case TA_BASELINE: sy -= ASCENT; break;
+    case TA_BOTTOM:   sy -= r->height; break;
+    case TA_BASELINE: sy -= r->ascent; break;
     default: break;
     }
     if (dc->align & TA_UPDATECP) {
@@ -370,7 +618,8 @@ BOOL WINAPI ExtTextOut(HDC h, int x, int y, UINT opts, const RECT *rc,
             dc->cur.x = x + lw;
     }
 
-    RECT tb = { sx, sy, sx + w + f->bold, sy + f->height };
+    int lean = r->italic ? r->height / 3 + 1 : 0;
+    RECT tb = { sx, sy, sx + w + r->bold, sy + r->height };
     RECT orc = { 0, 0, 0, 0 };
     if (rc && (opts & (ETO_OPAQUE | ETO_CLIPPED))) {
         orc = *rc;
@@ -378,11 +627,12 @@ BOOL WINAPI ExtTextOut(HDC h, int x, int y, UINT opts, const RECT *rc,
         gdi_lp_to_dp(dc, &orc.right, &orc.bottom);
     }
     RECT bounds = tb;
+    bounds.left -= lean;
+    bounds.right += lean;
     if (rc && (opts & ETO_OPAQUE))
         UnionRect(&bounds, &bounds, &orc);
     if (rc && (opts & ETO_CLIPPED))
         IntersectRect(&bounds, &bounds, &orc);
-
     /* clip list, optionally narrowed to rc */
     wclip cl;
     const wclip *c = gdi_dc_clip(dc, &cl);
@@ -407,7 +657,7 @@ BOOL WINAPI ExtTextOut(HDC h, int x, int y, UINT opts, const RECT *rc,
     if (dc->bkmode == OPAQUE && n)
         dib_fill_rect(dc->surf, c, &tb, &bkf, 0xF0);
     if (n)
-        draw_glyphs(dc, c, f, sx, sy, s, (int)n, dx, gdi_color_index(dc, dc->text));
+        draw_glyphs(dc, c, r, f, sx, sy, s, (int)n, dx, gdi_color_index(dc, dc->text));
     gdi_end_draw(dc, &bounds);
     return TRUE;
 }
@@ -445,12 +695,13 @@ static LONG tabbed(HDC h, int x, int y, LPCSTR s, int n, int ntabs,
                    const int *tabs, int origin, int draw)
 {
     const wfont *f;
-    wdc *dc = text_dc(h, &f);
+    const wreal *r;
+    wdc *dc = text_dc(h, &f, &r);
     if (!dc)
         return 0;
     if (n < 0)
         n = lstrlen(s);
-    int avg = f->fixed ? 8 : gdi_char_width(f, 'x');
+    int avg = r->fixed ? 8 * r->scale : char_width(r, f, 'x');
     int pos = x, start = 0;
     UINT align = dc->align;
     if (draw)
@@ -461,14 +712,14 @@ static LONG tabbed(HDC h, int x, int y, LPCSTR s, int n, int ntabs,
             if (len > 0) {
                 if (draw)
                     ExtTextOut(h, pos, y, 0, NULL, s + start, (UINT)len, NULL);
-                pos += text_width(f, s + start, len) + dc->char_extra * len;
+                pos += text_width(r, f, s + start, len) + dc->char_extra * len;
             }
             if (i < n) {
                 int nt = next_tab(pos, origin, ntabs, tabs, avg);
                 if (draw && dc->bkmode == OPAQUE) {
-                    RECT r = { pos, y, nt, y + f->height };
+                    RECT bk = { pos, y, nt, y + r->height };
                     HBRUSH br = CreateSolidBrush(dc->bk);
-                    FillRect(h, &r, br);
+                    FillRect(h, &bk, br);
                     DeleteObject(br);
                 }
                 pos = nt;
@@ -477,7 +728,7 @@ static LONG tabbed(HDC h, int x, int y, LPCSTR s, int n, int ntabs,
         }
     }
     dc->align = align;
-    return (LONG)((DWORD)(WORD)(pos - x) | ((DWORD)(WORD)f->height << 16));
+    return (LONG)((DWORD)(WORD)(pos - x) | ((DWORD)(WORD)r->height << 16));
 }
 
 LONG WINAPI TabbedTextOut(HDC h, int x, int y, LPCSTR s, int n,

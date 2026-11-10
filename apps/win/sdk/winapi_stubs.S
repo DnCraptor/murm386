@@ -2387,6 +2387,23 @@ SetBitmapBits:
     .ltorg
     .size SetBitmapBits, .-SetBitmapBits
 
+    .section .text.winapi.AddFontResource,"ax",%progbits
+    .global AddFontResource
+    .type AddFontResource, %function
+    .thumb_func
+AddFontResource:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =476
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size AddFontResource, .-AddFontResource
+
     .section .text.winapi.PlayMetaFile,"ax",%progbits
     .global PlayMetaFile
     .type PlayMetaFile, %function
@@ -2505,6 +2522,23 @@ GetRgnBox:
     bx   r12
     .ltorg
     .size GetRgnBox, .-GetRgnBox
+
+    .section .text.winapi.RemoveFontResource,"ax",%progbits
+    .global RemoveFontResource
+    .type RemoveFontResource, %function
+    .thumb_func
+RemoveFontResource:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =544
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size RemoveFontResource, .-RemoveFontResource
 
     .section .text.winapi.SetBrushOrg,"ax",%progbits
     .global SetBrushOrg

@@ -2,6 +2,7 @@
 #include "winmod.h"
 
 extern void AddAtom(void);
+extern void AddFontResource(void);
 extern void AdjustWindowRect(void);
 extern void AdjustWindowRectEx(void);
 extern void AnsiLower(void);
@@ -363,6 +364,7 @@ extern void RegisterWindowMessage(void);
 extern void ReleaseCapture(void);
 extern void ReleaseDC(void);
 extern void RemoveDirectoryN(void);
+extern void RemoveFontResource(void);
 extern void RemoveMenu(void);
 extern void RemoveProp(void);
 extern void ReplaceText(void);
@@ -638,6 +640,7 @@ static const void *const exports_gdi[486] = {
     [101] = (const void *)OffsetRgn,
     [103] = (const void *)PtVisible,
     [106] = (const void *)SetBitmapBits,
+    [119] = (const void *)AddFontResource,
     [123] = (const void *)PlayMetaFile,
     [124] = (const void *)GetMetaFile,
     [125] = (const void *)CreateMetaFile,
@@ -645,6 +648,7 @@ static const void *const exports_gdi[486] = {
     [127] = (const void *)DeleteMetaFile,
     [128] = (const void *)MulDiv,
     [134] = (const void *)GetRgnBox,
+    [136] = (const void *)RemoveFontResource,
     [148] = (const void *)SetBrushOrg,
     [149] = (const void *)GetBrushOrg,
     [150] = (const void *)UnrealizeObject,

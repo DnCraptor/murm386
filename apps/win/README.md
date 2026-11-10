@@ -142,8 +142,8 @@ FatalAppExit and the constants __AHINCR, __AHSHIFT, __WINFLAGS, __0040H
 (the BIOS data, read only); palettes, CreateDC and CreateIC, SetSysColors;
 the mapping modes (all of them: the metric and English ones and MM_TWIPS
 at 96 pixels an inch, MM_ISOTROPIC keeping the axes alike; pens, rounded
-corners and blits scale, the one font stays its size, its metrics and
-extents in logical units), the Ex functions of the origins and extents,
+corners and blits scale, fonts are realized at the height the mapping
+mode makes, their metrics and extents in logical units), the Ex functions of the origins and extents,
 DPtoLP and LPtoDP; Arc, Pie, Chord, PolyPolygon, FloodFill and
 ExtFloodFill; elliptic, rounded and polygonal regions, FrameRgn,
 InvertRgn, OffsetClipRgn; DIBs: SetDIBitsToDevice, StretchDIBits,
@@ -157,8 +157,16 @@ PlayMetaFileRecord (the table of objects in the program's memory),
 GetMetaFile (a placeable one's header skipped), CopyMetaFile,
 Get/SetMetaFileBits (a global block of the program's), IsValidMetaFile;
 regions painted (FillRgn and the rest) in logical coordinates, as the
-mapping mode has them; EnumFonts and EnumFontFamilies (the
-stock fonts), GetCharWidth, LineDDA, SetTextCharacterExtra; no printers
+mapping mode has them; fonts: Windows' raster font files (.FON, .FNT,
+versions 2 and 3) WIN.INI's [fonts] names in the Windows directory, as
+Windows has them ("MS Sans Serif 8,10,12,14,18,24 (VGA res)=SSERIFE.FON"),
+and those AddFontResource adds (RemoveFontResource), their faces found by
+name (Helv, Arial and Helvetica for MS Sans Serif, Tms Rmn, Times and
+Times New Roman for MS Serif, Courier New for Courier) or by family and
+pitch, the nearest size, made larger by whole numbers (up to 8 times);
+else the VGA glyphs, made larger the same way; bold and italic made when
+the face is not; GetTextFace the realized face's; EnumFonts and
+EnumFontFamilies (the stock fonts and the files' faces), GetCharWidth, LineDDA, SetTextCharacterExtra; no printers
 (StartDoc and the rest fail, Escape does nothing); no serial or parallel
 ports (OpenComm fails with IE_HARDWARE, the other comm functions with
 their errors); COMMDLG's Open and
@@ -222,7 +230,9 @@ enumerated), `OWAPI2` (the clipboard, DlgDirList, window placement,
 properties, menus from memory, cursors and icons of bits; OpenComm; a call
 WINN has not), `OWMETA` (a metafile recorded, played, scaled, enumerated
 record by record, its bits and a file), `OWSYS` (MMSYSTEM, TOOLHELP, VER,
-LZEXPAND) (`make NEFIXTURES` in
+LZEXPAND), `OWFONT` (a raster font file's faces, `WINNTEST.FON` beside
+it, made by `host/mkfon.py`: its sizes, larger, bold, italic; the VGA
+glyphs larger) (`make NEFIXTURES` in
 `host/`). All have DOS MZ stubs that explain how to launch them under WINN
 when invoked directly from DOS. `host/test_ne_run` runs them on the
 emulator's own i386 core (`src/i386.c` as it is, built for the host with
@@ -230,7 +240,7 @@ the stand-ins in `host/x86run/`), and so does the host `winhost`: they are
 in its `HOSTWIN/` (`scripts/owwin.txt`, `scripts/owmenu.txt`,
 `scripts/owdemo.txt`, `scripts/owfile.txt`, `scripts/owres.txt`,
 `scripts/owkern.txt`, `scripts/owdll.txt`, `scripts/owfpu.txt`, `scripts/owapi.txt`, `scripts/owgdi.txt`,
-`scripts/owapi2.txt`, `scripts/owmeta.txt`, `scripts/owsys.txt`).
+`scripts/owapi2.txt`, `scripts/owmeta.txt`, `scripts/owsys.txt`, `scripts/owfont.txt`).
 
     WINN [:] [program [arguments]]
 
@@ -424,7 +434,9 @@ through `CascadeChildWindows`, `TileChildWindows` and
 `ArrangeIconicWindows`.
 
 Ctrl+Shift switches between the US and Russian (Windows-1251) layouts.
-Text is ANSI Windows-1251 and is drawn with the CP866 VGA font.
+Text is ANSI Windows-1251 and is drawn with the CP866 VGA font, or with
+the fonts of the font files: their bytes as they are, so the files must
+be the Windows-1251 ones (as a Russian Windows has them) for Cyrillic.
 
 ## Not yet
 
