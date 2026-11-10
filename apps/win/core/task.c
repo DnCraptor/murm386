@@ -413,7 +413,10 @@ static int run_ne_app(wtask *t)
     if (!rc && r.stopped)           /* Windows ends */
         return 0;
     win_ne_unresolved u;
-    if (rc == WIN_NE_EXEC_UNSUPPORTED && r.unsupported >= WIN_NE_SERVICE_INT21)
+    if (rc == WIN_NE_EXEC_UNSUPPORTED && r.unsupported >= WIN_NE_SERVICE_UNDEFINED)
+        wsprintf(msg, "%s called %s, which WINN does not have yet.", file, r.undefined);
+    else if (rc == WIN_NE_EXEC_UNSUPPORTED && r.unsupported >= WIN_NE_SERVICE_INT21 &&
+             r.unsupported < WIN_NE_SERVICE_INT21 + 0x100u)
         wsprintf(msg, "%s uses INT 21h function %02Xh, which WINN does not have yet.",
                  file, r.unsupported - WIN_NE_SERVICE_INT21);
     else if (rc == WIN_NE_UNRESOLVED && win_ne_guest_unresolved(path, &u)) {

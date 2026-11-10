@@ -303,6 +303,14 @@ __attribute__((weak)) int win_ne_guest_user(win_ne_guest_api_context *ctx, win_n
     return 0;
 }
 __attribute__((weak)) void win_ne_user_start(win_ne_guest_api_context *ctx) { (void)ctx; }
+/* no names where ne_guest.c is not linked in */
+__attribute__((weak)) void win_ne_guest_undefined_text(const win_ne_guest_image *g,
+                                                       uint16_t service, char *out, size_t cap)
+{
+    (void)g; (void)service;
+    if (cap)
+        out[0] = 0;
+}
 __attribute__((weak)) void win_ne_dll_init(win_ne_guest_api_context *ctx) { (void)ctx; }
 __attribute__((weak)) int win_ne_dos(win_ne_guest_api_context *ctx, win_ne_dos_regs *r)
 {
@@ -492,6 +500,9 @@ int win_ne_guest_api(void *opaque, win_ne_regs *cpu, uint16_t service)
     default:
         if (!win_ne_guest_user(ctx, cpu, service, &value, &dword)) {
             ctx->unsupported = service;
+            if (service >= WIN_NE_SERVICE_UNDEFINED)
+                win_ne_guest_undefined_text(ctx->image, service, ctx->undefined,
+                                            sizeof(ctx->undefined));
             return 0;
         }
         break;

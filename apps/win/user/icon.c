@@ -137,6 +137,80 @@ HICON user_icon_create(const winapp_icon *ic)
     return h;
 }
 
+/* a copy of an icon or cursor (the built-in ones are their own) */
+HICON WINAPI CopyIcon(HINSTANCE inst, HICON icon)
+{
+    (void)inst;
+    void *p = win_handle_get(icon, WOBJ_CURSOR);
+    ucursor *c = cursor_of(icon);
+    uicon *u = c ? NULL : icon_of(icon);
+    if (c)
+        return user_cursor_create(c->and_m, c->xor_m, c->hx, c->hy);
+    if (!u)
+        return p ? icon : 0;
+    uicon *n = (uicon *)win_alloc(sizeof(uicon));
+    if (!n)
+        return 0;
+    *n = *u;
+    HDC sdc = GetDC(0), a = CreateCompatibleDC(sdc), b = CreateCompatibleDC(sdc);
+    n->color = CreateCompatibleBitmap(sdc, 32, 32);
+    n->mask = CreateBitmap(32, 32, 1, 1, NULL);
+    ReleaseDC(0, sdc);
+    HBITMAP pair[2][2] = { { u->color, n->color }, { u->mask, n->mask } };
+    for (int k = 0; k < 2; k++)
+        if (pair[k][1]) {
+            HGDIOBJ oa = SelectObject(a, pair[k][0]), ob = SelectObject(b, pair[k][1]);
+            BitBlt(b, 0, 0, 32, 32, a, 0, 0, SRCCOPY);
+            SelectObject(a, oa);
+            SelectObject(b, ob);
+        }
+    DeleteDC(a);
+    DeleteDC(b);
+    HICON h = n->color && n->mask ? win_handle_alloc(WOBJ_CURSOR, n) : 0;
+    if (!h) {
+        DeleteObject(n->color);
+        DeleteObject(n->mask);
+        win_free(n);
+    }
+    return h;
+}
+
+HCURSOR WINAPI CopyCursor(HINSTANCE inst, HCURSOR cursor) { return CopyIcon(inst, cursor); }
+
+/* a cursor of bits: 32x32 masks (rows of 4 bytes) */
+HCURSOR WINAPI CreateCursor(HINSTANCE inst, int hx, int hy, int w, int h, const void *and_bits,
+                            const void *xor_bits)
+{
+    (void)inst;
+    if (w != 32 || h != 32 || !and_bits || !xor_bits)
+        return 0;
+    return user_cursor_create((const uint8_t *)and_bits, (const uint8_t *)xor_bits,
+                              hx < 32 ? hx : 31, hy < 32 ? hy : 31);
+}
+
+/* an icon of bits: 32x32, the AND mask 1 bit a pixel; the XOR image
+ * monochrome (1 plane, 1 bit) or 16 colours (1 plane, 4 bits) */
+HICON WINAPI CreateIcon(HINSTANCE inst, int w, int h, BYTE planes, BYTE bpp,
+                        const void *and_bits, const void *xor_bits)
+{
+    (void)inst;
+    if (w != 32 || h != 32 || planes != 1 || (bpp != 1 && bpp != 4) || !and_bits || !xor_bits)
+        return 0;
+    winapp_icon ic;
+    const uint8_t *x = (const uint8_t *)xor_bits;
+    memcpy(ic.and_bits, and_bits, sizeof(ic.and_bits));
+    if (bpp == 4) {
+        memcpy(ic.xor_bits, x, sizeof(ic.xor_bits));
+    } else {
+        for (int y = 0; y < 32; y++)
+            for (int k = 0; k < 16; k++) {
+                int b = x[y * 4 + k / 4] >> (6 - 2 * (k & 3));
+                ic.xor_bits[y * 16 + k] = (uint8_t)((b & 2 ? 0xF0 : 0) | (b & 1 ? 0x0F : 0));
+            }
+    }
+    return user_icon_create(&ic);
+}
+
 BOOL WINAPI DestroyIcon(HICON icon)
 {
     uicon *u = icon_of(icon);

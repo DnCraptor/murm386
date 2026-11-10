@@ -3577,6 +3577,23 @@ SetProp:
     .ltorg
     .size SetProp, .-SetProp
 
+    .section .text.winapi.EnumProps,"ax",%progbits
+    .global EnumProps
+    .type EnumProps, %function
+    .thumb_func
+EnumProps:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =108
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size EnumProps, .-EnumProps
+
     .section .text.winapi.ClientToScreen,"ax",%progbits
     .global ClientToScreen
     .type ClientToScreen, %function
@@ -4716,6 +4733,40 @@ IsDlgButtonChecked:
     .ltorg
     .size IsDlgButtonChecked, .-IsDlgButtonChecked
 
+    .section .text.winapi.DlgDirSelect,"ax",%progbits
+    .global DlgDirSelect
+    .type DlgDirSelect, %function
+    .thumb_func
+DlgDirSelect:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =396
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size DlgDirSelect, .-DlgDirSelect
+
+    .section .text.winapi.DlgDirList,"ax",%progbits
+    .global DlgDirList
+    .type DlgDirList, %function
+    .thumb_func
+DlgDirList:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =400
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size DlgDirList, .-DlgDirList
+
     .section .text.winapi.SendDlgItemMessage,"ax",%progbits
     .global SendDlgItemMessage
     .type SendDlgItemMessage, %function
@@ -5481,6 +5532,23 @@ DestroyMenu:
     .ltorg
     .size DestroyMenu, .-DestroyMenu
 
+    .section .text.winapi.ChangeMenu,"ax",%progbits
+    .global ChangeMenu
+    .type ChangeMenu, %function
+    .thumb_func
+ChangeMenu:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =612
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size ChangeMenu, .-ChangeMenu
+
     .section .text.winapi.CheckMenuItem,"ax",%progbits
     .global CheckMenuItem
     .type CheckMenuItem, %function
@@ -5787,6 +5855,23 @@ WinHelp:
     .ltorg
     .size WinHelp, .-WinHelp
 
+    .section .text.winapi.SwitchToThisWindow,"ax",%progbits
+    .global SwitchToThisWindow
+    .type SwitchToThisWindow, %function
+    .thumb_func
+SwitchToThisWindow:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =688
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SwitchToThisWindow, .-SwitchToThisWindow
+
     .section .text.winapi.LoadCursor,"ax",%progbits
     .global LoadCursor
     .type LoadCursor, %function
@@ -6025,6 +6110,40 @@ IsClipboardFormatAvailable:
     .ltorg
     .size IsClipboardFormatAvailable, .-IsClipboardFormatAvailable
 
+    .section .text.winapi.DlgDirSelectComboBox,"ax",%progbits
+    .global DlgDirSelectComboBox
+    .type DlgDirSelectComboBox, %function
+    .thumb_func
+DlgDirSelectComboBox:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =776
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size DlgDirSelectComboBox, .-DlgDirSelectComboBox
+
+    .section .text.winapi.DlgDirListComboBox,"ax",%progbits
+    .global DlgDirListComboBox
+    .type DlgDirListComboBox, %function
+    .thumb_func
+DlgDirListComboBox:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =780
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size DlgDirListComboBox, .-DlgDirListComboBox
+
     .section .text.winapi.TabbedTextOut,"ax",%progbits
     .global TabbedTextOut
     .type TabbedTextOut, %function
@@ -6092,6 +6211,23 @@ TileChildWindows:
     bx   r12
     .ltorg
     .size TileChildWindows, .-TileChildWindows
+
+    .section .text.winapi.ScrollDC,"ax",%progbits
+    .global ScrollDC
+    .type ScrollDC, %function
+    .thumb_func
+ScrollDC:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =884
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size ScrollDC, .-ScrollDC
 
     .section .text.winapi.GetKeyboardState,"ax",%progbits
     .global GetKeyboardState
@@ -6722,6 +6858,23 @@ GetLastActivePopup:
     .ltorg
     .size GetLastActivePopup, .-GetLastActivePopup
 
+    .section .text.winapi.GetMessageExtraInfo,"ax",%progbits
+    .global GetMessageExtraInfo
+    .type GetMessageExtraInfo, %function
+    .thumb_func
+GetMessageExtraInfo:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1152
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetMessageExtraInfo, .-GetMessageExtraInfo
+
     .section .text.winapi.RedrawWindow,"ax",%progbits
     .global RedrawWindow
     .type RedrawWindow, %function
@@ -6772,6 +6925,23 @@ DefDlgProc:
     bx   r12
     .ltorg
     .size DefDlgProc, .-DefDlgProc
+
+    .section .text.winapi.ScrollWindowEx,"ax",%progbits
+    .global ScrollWindowEx
+    .type ScrollWindowEx, %function
+    .thumb_func
+ScrollWindowEx:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1276
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size ScrollWindowEx, .-ScrollWindowEx
 
     .section .text.winapi.GetQueueStatus,"ax",%progbits
     .global GetQueueStatus
@@ -6824,6 +6994,74 @@ IsMenu:
     .ltorg
     .size IsMenu, .-IsMenu
 
+    .section .text.winapi.CopyIcon,"ax",%progbits
+    .global CopyIcon
+    .type CopyIcon, %function
+    .thumb_func
+CopyIcon:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1472
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size CopyIcon, .-CopyIcon
+
+    .section .text.winapi.CopyCursor,"ax",%progbits
+    .global CopyCursor
+    .type CopyCursor, %function
+    .thumb_func
+CopyCursor:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1476
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size CopyCursor, .-CopyCursor
+
+    .section .text.winapi.GetWindowPlacement,"ax",%progbits
+    .global GetWindowPlacement
+    .type GetWindowPlacement, %function
+    .thumb_func
+GetWindowPlacement:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1480
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetWindowPlacement, .-GetWindowPlacement
+
+    .section .text.winapi.SetWindowPlacement,"ax",%progbits
+    .global SetWindowPlacement
+    .type SetWindowPlacement, %function
+    .thumb_func
+SetWindowPlacement:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1484
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SetWindowPlacement, .-SetWindowPlacement
+
     .section .text.winapi.SubtractRect,"ax",%progbits
     .global SubtractRect
     .type SubtractRect, %function
@@ -6874,6 +7112,40 @@ GetClassInfo:
     bx   r12
     .ltorg
     .size GetClassInfo, .-GetClassInfo
+
+    .section .text.winapi.CreateCursor,"ax",%progbits
+    .global CreateCursor
+    .type CreateCursor, %function
+    .thumb_func
+CreateCursor:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1624
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size CreateCursor, .-CreateCursor
+
+    .section .text.winapi.CreateIcon,"ax",%progbits
+    .global CreateIcon
+    .type CreateIcon, %function
+    .thumb_func
+CreateIcon:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1628
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size CreateIcon, .-CreateIcon
 
     .section .text.winapi.InsertMenu,"ax",%progbits
     .global InsertMenu
@@ -6994,6 +7266,40 @@ TrackPopupMenu:
     .ltorg
     .size TrackPopupMenu, .-TrackPopupMenu
 
+    .section .text.winapi.GetMenuCheckMarkDimensions,"ax",%progbits
+    .global GetMenuCheckMarkDimensions
+    .type GetMenuCheckMarkDimensions, %function
+    .thumb_func
+GetMenuCheckMarkDimensions:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1668
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetMenuCheckMarkDimensions, .-GetMenuCheckMarkDimensions
+
+    .section .text.winapi.SetMenuItemBitmaps,"ax",%progbits
+    .global SetMenuItemBitmaps
+    .type SetMenuItemBitmaps, %function
+    .thumb_func
+SetMenuItemBitmaps:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1672
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SetMenuItemBitmaps, .-SetMenuItemBitmaps
+
     .section .text.winapi.wsprintf,"ax",%progbits
     .global wsprintf
     .type wsprintf, %function
@@ -7027,6 +7333,40 @@ wvsprintf:
     bx   r12
     .ltorg
     .size wvsprintf, .-wvsprintf
+
+    .section .text.winapi.DlgDirSelectEx,"ax",%progbits
+    .global DlgDirSelectEx
+    .type DlgDirSelectEx, %function
+    .thumb_func
+DlgDirSelectEx:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1688
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size DlgDirSelectEx, .-DlgDirSelectEx
+
+    .section .text.winapi.DlgDirSelectComboBoxEx,"ax",%progbits
+    .global DlgDirSelectComboBoxEx
+    .type DlgDirSelectComboBoxEx, %function
+    .thumb_func
+DlgDirSelectComboBoxEx:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1692
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size DlgDirSelectComboBoxEx, .-DlgDirSelectComboBoxEx
 
     .section .text.winapi.lstrcmp,"ax",%progbits
     .global lstrcmp
@@ -7350,6 +7690,23 @@ AnsiPrev:
     bx   r12
     .ltorg
     .size AnsiPrev, .-AnsiPrev
+
+    .section .text.winapi.EnableScrollBar,"ax",%progbits
+    .global EnableScrollBar
+    .type EnableScrollBar, %function
+    .thumb_func
+EnableScrollBar:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1928
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size EnableScrollBar, .-EnableScrollBar
 
     .section .text.winapi.SystemParametersInfo,"ax",%progbits
     .global SystemParametersInfo

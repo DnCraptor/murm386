@@ -31,6 +31,7 @@ typedef struct {
     uint8_t exit_code;
     uint16_t unsupported;   /* the call it made that WINN does not have:
                              * WIN_NE_SERVICE_INT21 + AH for INT 21h */
+    char undefined[48];     /* a WIN_NE_SERVICE_UNDEFINED one: MODULE.function */
     int (*yield)(void);     /* its time slice is over: other tasks run;
                              * nonzero: it is to end (stopped) */
     int stopped;

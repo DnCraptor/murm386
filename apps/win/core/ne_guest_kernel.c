@@ -642,6 +642,43 @@ static __attribute__((noinline)) int dib_service(args *a, uint16_t service, uint
     return 1;
 }
 
+/* GDI's calls with buffers of their own: apart, off gdi_more's frame */
+static __attribute__((noinline)) int gdi_buffers(args *a, uint16_t service, uint32_t *v)
+{
+    switch (service) {
+    case 0x315e: {                      /* GetCharWidth(HDC, first, last, int FAR *) */
+        UINT first = w(a, 10), last = w(a, 8);
+        int wd[256];
+        uint8_t g[512];
+        if (last > 255 || first > last || !GetCharWidth(w(a, 12), first, last, wd))
+            return 1;
+        for (UINT i = 0; i <= last - first; i++)
+            wr16(g + 2 * i, (uint16_t)wd[i]);
+        *v = wr_(a, dw(a, 4), g, 2u * (last - first + 1u));
+        return 1;
+    }
+    case 0x316b: case 0x316c: case 0x3177: {  /* Get/SetPaletteEntries, GetSystemPaletteEntries */
+        uint32_t pe = dw(a, 4);
+        UINT n = w(a, 8), first = w(a, 10);
+        HANDLE h = w(a, 12);
+        PALETTEENTRY e[256];
+        if (a->bad || n > 256)
+            return 1;
+        if (service == 0x316c) {
+            if (rd_(a, pe, e, 4u * n))
+                *v = SetPaletteEntries(h, first, n, e);
+        } else {
+            UINT got = service == 0x316b ? GetPaletteEntries(h, first, n, pe ? e : NULL)
+                                         : GetSystemPaletteEntries(h, first, n, pe ? e : NULL);
+            if (!pe || wr_(a, pe, e, 4u * (got < n ? got : n)))
+                *v = got;
+        }
+        return 1;
+    }
+    }
+    return 0;
+}
+
 static __attribute__((noinline)) int gdi_more(args *a, uint16_t service, uint32_t *v, int *dword)
 {
     if (dib_service(a, service, v))
@@ -669,17 +706,9 @@ static __attribute__((noinline)) int gdi_more(args *a, uint16_t service, uint32_
     }
     case 0x31c2: case 0x31c3:           /* PolyPolygon, CreatePolyPolygonRgn */
         return poly_polygon(a, service == 0x31c3, v);
-    case 0x315e: {                      /* GetCharWidth(HDC, first, last, int FAR *) */
-        UINT first = w(a, 10), last = w(a, 8);
-        int wd[256];
-        uint8_t g[512];
-        if (last > 255 || first > last || !GetCharWidth(w(a, 12), first, last, wd))
-            return 1;
-        for (UINT i = 0; i <= last - first; i++)
-            wr16(g + 2 * i, (uint16_t)wd[i]);
-        *v = wr_(a, dw(a, 4), g, 2u * (last - first + 1u));
-        return 1;
-    }
+    case 0x315e:                        /* GetCharWidth */
+    case 0x316b: case 0x316c: case 0x3177:  /* the palettes' entries */
+        return gdi_buffers(a, service, v);
     case 0x3064: {                      /* LineDDA(x0, y0, x1, y1, proc, LPARAM) */
         dda_ctx d = { a->ctx, dw(a, 8), dw(a, 4) };
         if (!a->bad && d.proc)
@@ -726,24 +755,6 @@ static __attribute__((noinline)) int gdi_more(args *a, uint16_t service, uint32_
         if (lp && rd_(a, far, lp, size))
             *v = CreatePalette((const LOGPALETTE *)lp);
         win_free(lp);
-        return 1;
-    }
-    case 0x316b: case 0x316c: case 0x3177: {  /* Get/SetPaletteEntries, GetSystemPaletteEntries */
-        uint32_t pe = dw(a, 4);
-        UINT n = w(a, 8), first = w(a, 10);
-        HANDLE h = w(a, 12);
-        PALETTEENTRY e[256];
-        if (a->bad || n > 256)
-            return 1;
-        if (service == 0x316c) {
-            if (rd_(a, pe, e, 4u * n))
-                *v = SetPaletteEntries(h, first, n, e);
-        } else {
-            UINT got = service == 0x316b ? GetPaletteEntries(h, first, n, pe ? e : NULL)
-                                         : GetSystemPaletteEntries(h, first, n, pe ? e : NULL);
-            if (!pe || wr_(a, pe, e, 4u * (got < n ? got : n)))
-                *v = got;
-        }
         return 1;
     }
     }
@@ -902,6 +913,106 @@ static __attribute__((noinline)) int kernel_misc(args *a, uint16_t service, uint
                  win_ne_guest_selector_set(g, sel, service == 187 ? x : base,
                                            service == 189 ? x : limit, code);
         *v = service == 187 ? (ok ? sel : 0) : 0;
+        return 1;
+    }
+    case 206:                           /* AllocSelectorArray(UINT): n of them, in a row */
+        *v = win_ne_guest_selector_array(g, w(a, 4));
+        return 1;
+    case 196: {                         /* SelectorAccessRights(sel, op, rights): 0 get, 1 set */
+        uint16_t sel = w(a, 8);
+        *v = 0;
+        if (!win_ne_guest_selector_get(g, sel, &base, &limit, &code))
+            return 1;
+        if (!w(a, 6)) {                 /* the access byte; the limit's high bits' flags */
+            *v = (uint16_t)(0xf2u | (code ? 0x08u : 0u));
+        } else {
+            win_ne_guest_selector_set(g, sel, base, limit, (w(a, 4) & 0x08u) != 0);
+            *v = 0;
+        }
+        return 1;
+    }
+    case 159: {                         /* GlobalHandleNoRIP(UINT): its handle and selector */
+        uint16_t sel = w(a, 4);
+        *v = win_ne_guest_global(g, sel) ? (uint32_t)sel << 16 | sel : 0;
+        *dword = 1;
+        return 1;
+    }
+    case 352: {                         /* lstrcatn(LPSTR, LPCSTR, int): to fit its n */
+        int n = (int16_t)w(a, 4);
+        uint32_t src = dw(a, 6), dst = dw(a, 10);
+        char d[256], s[256];
+        *dword = 1;
+        if (n <= 0 || n > (int)sizeof(d) || !str_(a, dst, d, sizeof(d)) ||
+            !str_(a, src, s, sizeof(s)))
+            return 1;
+        int len = (int)strlen(d), add = (int)strlen(s);
+        if (len + add > n - 1)
+            add = n - 1 - len > 0 ? n - 1 - len : 0;
+        memcpy(d + len, s, (size_t)add);
+        d[len + add] = 0;
+        if (wr_(a, dst, d, (uint32_t)(len + add) + 1u))
+            *v = dst;
+        return 1;
+    }
+    case 93:                            /* GetCodeHandle(FARPROC): its segment's handle */
+        *v = (uint16_t)(dw(a, 4) >> 16);
+        return 1;
+    case 98:                            /* GetLastDiskChange */
+    case 154:                           /* GlobalNotify(proc): nothing is discarded */
+        *v = 0;
+        return 1;
+    case 14:                            /* LocalNotify(proc): the one before */
+        *v = 0;
+        *dword = 1;
+        return 1;
+    case 138:                           /* GetHeapSpaces(HMODULE): free, size */
+        *v = 0xfff0e000u;
+        *dword = 1;
+        return 1;
+    case 316:                           /* GetFreeMemInfo: no paging */
+        *v = 0xffffffffu;
+        *dword = 1;
+        return 1;
+    case 150:                           /* DirectedYield(HTASK) */
+        Yield();
+        return 1;
+    case 46:                            /* FreeModule */
+        *v = 0;
+        return 1;
+    case 45: {                          /* LoadModule(LPCSTR, LPVOID): a program (or -1: a
+                                         * library, as LoadLibrary) */
+        uint32_t pb = dw(a, 4);
+        char cmd[260], tail[130];
+        uint8_t blk[10], show[4];
+        *v = 2;
+        if (!str_(a, dw(a, 8), cmd, 128))
+            return 1;
+        if (pb == 0xffffffffu) {
+            int d = win_ne_guest_load_library(g, cmd);
+            if (d >= 0) {
+                win_ne_dll_init(c);
+                *v = win_ne_guest_dll_instance(g, d);
+            }
+            return 1;
+        }
+        UINT sw = SW_SHOWNORMAL;
+        tail[0] = 0;
+        if (pb && rd_(a, pb, blk, sizeof(blk))) {   /* its environment, command, show */
+            uint32_t line = rd16(blk + 2) | (uint32_t)rd16(blk + 4) << 16;
+            uint32_t sh = rd16(blk + 6) | (uint32_t)rd16(blk + 8) << 16;
+            uint8_t len;
+            if (line && rd_(a, line, &len, 1) && len < sizeof(tail) &&
+                rd_(a, line + 1, tail, len))
+                tail[len] = 0;
+            if (sh && rd_(a, sh, show, 4))
+                sw = rd16(show + 2);
+        }
+        if (tail[0]) {
+            size_t n = strlen(cmd);
+            cmd[n++] = ' ';
+            lstrcpyn(cmd + n, tail[0] == ' ' ? tail + 1 : tail, (int)(sizeof(cmd) - n));
+        }
+        *v = WinExec(cmd, sw);
         return 1;
     }
     case 184: {                         /* GlobalDOSAlloc(DWORD): segment and selector */

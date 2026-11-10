@@ -309,11 +309,13 @@ BOOL WINAPI RedrawWindow(HWND hwnd, const RECT *rc, HRGN hr, UINT flags)
 
 /* ---------------------------------------------------------------- scrolling */
 
-void WINAPI ScrollWindow(HWND hwnd, int dx, int dy, const RECT *rc, const RECT *clip)
+/* The scroll of ScrollWindow and ScrollWindowEx: the client area (or rc
+ * of it) moved, what is left uncovered in exposed (client coordinates),
+ * invalidated if asked (erased if asked), the children moved if asked */
+static void scroll(wwnd *w, int dx, int dy, const RECT *rc, const RECT *clip, int children,
+                   int invalidate, int erase, wrgn *exposed)
 {
-    wwnd *w = user_wnd(hwnd);
-    if (!w || (!dx && !dy))
-        return;
+    HWND hwnd = w->h;
     RECT area = w->client;
     if (rc) {
         area = *rc;
@@ -363,10 +365,15 @@ void WINAPI ScrollWindow(HWND hwnd, int dx, int dy, const RECT *rc, const RECT *
     wrgn_init(&need);
     wrgn_set_rect(&need, &lim);
     wrgn_diff(&need, &need, &dst);
-    user_invalidate(w, &need, TRUE, 0);
+    if (invalidate)
+        user_invalidate(w, &need, erase, 0);
+    if (exposed) {
+        wrgn_copy(exposed, &need);
+        wrgn_offset(exposed, -w->client.left, -w->client.top);
+    }
     wrgn_free(&need);
 
-    if (!rc) {
+    if (children) {
         for (wwnd *c = w->child; c; c = c->next) {
             RECT r = c->rc;
             OffsetRect(&r, dx - w->client.left, dy - w->client.top);
@@ -378,4 +385,64 @@ void WINAPI ScrollWindow(HWND hwnd, int dx, int dy, const RECT *rc, const RECT *
     wrgn_free(&shifted);
     wrgn_free(&dst);
     user_caret_restore(w);
+}
+
+void WINAPI ScrollWindow(HWND hwnd, int dx, int dy, const RECT *rc, const RECT *clip)
+{
+    wwnd *w = user_wnd(hwnd);
+    if (w && (dx || dy))
+        scroll(w, dx, dy, rc, clip, !rc, 1, 1, NULL);
+}
+
+int WINAPI ScrollWindowEx(HWND hwnd, int dx, int dy, const RECT *rc, const RECT *clip,
+                          HRGN update, LPRECT update_rc, UINT flags)
+{
+    wwnd *w = user_wnd(hwnd);
+    if (!w)
+        return ERROR;
+    wrgn exposed;
+    wrgn_init(&exposed);
+    if (dx || dy)
+        scroll(w, dx, dy, rc, clip, (flags & SW_SCROLLCHILDREN) != 0,
+               (flags & SW_INVALIDATE) != 0, (flags & SW_ERASE) != 0, &exposed);
+    wrgn *g = update ? gdi_region(update) : NULL;
+    if (g)
+        wrgn_copy(g, &exposed);
+    if (update_rc)
+        *update_rc = exposed.box;
+    int type = wrgn_type(&exposed);
+    wrgn_free(&exposed);
+    return type;
+}
+
+/* a DC's bits moved within rc (its logical coordinates) clipped to clip;
+ * what is left uncovered in update and update_rc */
+BOOL WINAPI ScrollDC(HDC hdc, int dx, int dy, const RECT *rc, const RECT *clip, HRGN update,
+                     LPRECT update_rc)
+{
+    RECT area, lim;
+    if (rc)
+        area = *rc;
+    else
+        GetClipBox(hdc, &area);
+    lim = area;
+    if (clip)
+        IntersectRect(&lim, &lim, clip);
+    RECT dst = area;
+    OffsetRect(&dst, dx, dy);
+    IntersectRect(&dst, &dst, &lim);
+    if (!IsRectEmpty(&dst))
+        BitBlt(hdc, dst.left, dst.top, dst.right - dst.left, dst.bottom - dst.top, hdc,
+               dst.left - dx, dst.top - dy, SRCCOPY);
+    wrgn need;
+    wrgn_init(&need);
+    wrgn_set_rect(&need, &lim);
+    wrgn_diff_rect(&need, &dst);
+    wrgn *g = update ? gdi_region(update) : NULL;
+    if (g)
+        wrgn_copy(g, &need);
+    if (update_rc)
+        *update_rc = need.box;
+    wrgn_free(&need);
+    return TRUE;
 }

@@ -804,6 +804,18 @@ int win_ne_guest_user(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint16_t 
         a.inst = w(&a, 8);
         v = load_menu(&a, dw(&a, 4));
         break;
+    case 0x10dc: {                      /* LoadMenuIndirect(const void FAR *): a template */
+        uint32_t n;
+        uint8_t *d = template_at(&a, dw(&a, 4), 0, &n);
+        HMENU m = d ? CreateMenu() : 0;
+        if (m && (n < 4 || !menu_items(m, d + 4, d + n))) {
+            DestroyMenu(m);
+            m = 0;
+        }
+        free(d);
+        v = m;
+        break;
+    }
     case 0x10b0:                        /* LoadString(HINSTANCE, UINT, LPSTR, int) */
         v = load_string(&a);
         break;

@@ -249,12 +249,21 @@ int main(void)
         assert(!nactive && alloc_calls == free_calls);
     }
     reset_guest();
-    file[SEG1 + 0x40 + 2 + 6] = 2; /* unsupported KERNEL ordinal (ExitKernel) */
+    /* a KERNEL function WINN has not (ExitKernel): it loads, the call a
+     * trap of its own (Windows' undefined dynalink), named */
+    file[SEG1 + 0x40 + 2 + 6] = 2;
     save_fixture(path, file);
-    assert(win_ne_guest_load(path, &img, &io, NULL) == WIN_NE_UNRESOLVED);
+    assert(win_ne_guest_load(path, &img, &io, NULL) == WIN_NE_OK);
+    int trap = 0;
+    for (unsigned i = 0; i < img.thunk_count; i++)
+        trap |= img.thunk_services[i] == (WIN_NE_SERVICE_UNDEFINED | 2u);
+    char text[48];
+    win_ne_guest_undefined_text(&img, WIN_NE_SERVICE_UNDEFINED | 2u, text, sizeof(text));
+    assert(trap && !strcmp(text, "KERNEL.2"));
+    win_ne_guest_release(&img);
     assert(!nactive && alloc_calls == free_calls);
     win_ne_unresolved u;
-    assert(win_ne_guest_unresolved(path, &u) && !strcmp(u.module, "KERNEL") && u.ordinal == 2);
+    assert(!win_ne_guest_unresolved(path, &u));
     file[SEG1 + 0x40 + 2 + 6] = 3;
     save_fixture(path, file);
     assert(!win_ne_guest_unresolved(path, &u));

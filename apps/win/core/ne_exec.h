@@ -26,7 +26,9 @@ typedef struct {
     int exited;             /* INT 21h 4Ch (or INT 20h) */
     int stopped;            /* at its turn's end, its task told to quit */
     uint16_t unsupported;   /* WIN_NE_EXEC_UNSUPPORTED: the call it made,
-                             * KERNEL n, USER 1000h + n, INT 21h 2100h + AH */
+                             * KERNEL n, USER 1000h + n, INT 21h 2100h + AH,
+                             * WIN_NE_SERVICE_UNDEFINED + ... (undefined) */
+    char undefined[48];     /* that one's MODULE.function */
     win_ne_fault fault;     /* WIN_NE_EXEC_FAULT */
     uint16_t invalid_call;  /* WIN_NE_EXEC_BAD_ARGS: the first call WINN refused,
                              * its arguments pointing outside the program's

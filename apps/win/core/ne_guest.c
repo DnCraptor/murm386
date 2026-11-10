@@ -316,9 +316,26 @@ static const struct {
     { M_KERNEL, 347, "IsBadHugeWritePtr", 8 },
     { M_KERNEL, 348, "hmemcpy", 12 },
     { M_KERNEL, 353, "lstrcpyn", 10 },
+    { M_KERNEL, 14, "LocalNotify", 4 },
+    { M_KERNEL, 45, "LoadModule", 8 },
+    { M_KERNEL, 46, "FreeModule", 2 },
+    { M_KERNEL, 93, "GetCodeHandle", 4 },
+    { M_KERNEL, 98, "GetLastDiskChange", 0 },
+    { M_KERNEL, 138, "GetHeapSpaces", 2 },
+    { M_KERNEL, 150, "DirectedYield", 2 },
+    { M_KERNEL, 154, "GlobalNotify", 4 },
+    { M_KERNEL, 159, "GlobalHandleNoRIP", 2 },
+    { M_KERNEL, 196, "SelectorAccessRights", 6 },
+    { M_KERNEL, 206, "AllocSelectorArray", 2 },
+    { M_KERNEL, 316, "GetFreeMemInfo", 0 },
+    { M_KERNEL, 352, "lstrcatn", 10 },
     /* USER: dialogs, classes, the keyboard, hooks and the rest (ne_guest_user.c,
      * ne_guest_call.c) */
     { M_USER, 123, "CallMsgFilter", 6 },
+    { M_USER, 138, "CloseClipboard", 0 },
+    { M_USER, 139, "EmptyClipboard", 0 },
+    { M_USER, 141, "SetClipboardData", 4 },
+    { M_USER, 142, "GetClipboardData", 2 },
     { M_USER, 121, "SetWindowsHook", 6 },
     { M_USER, 130, "SetClassWord", 6 },
     { M_USER, 132, "SetClassLong", 8 },
@@ -341,6 +358,16 @@ static const struct {
     { M_USER, 437, "AnsiUpperBuff", 6 },
     { M_USER, 438, "AnsiLowerBuff", 6 },
     { M_USER, 452, "CreateWindowEx", 34 },
+    { M_USER, 27, "EnumProps", 6 },
+    { M_USER, 99, "DlgDirSelect", 8 },
+    { M_USER, 100, "DlgDirList", 12 },
+    { M_USER, 194, "DlgDirSelectComboBox", 8 },
+    { M_USER, 195, "DlgDirListComboBox", 12 },
+    { M_USER, 220, "LoadMenuIndirect", 4 },
+    { M_USER, 370, "GetWindowPlacement", 6 },
+    { M_USER, 371, "SetWindowPlacement", 6 },
+    { M_USER, 406, "CreateCursor", 18 },
+    { M_USER, 407, "CreateIcon", 18 },
     { M_USER, 16, "ClipCursor", 4 },
     { M_USER, 181, "SetSysColors", 10 },
     { M_USER, 284, "GetFreeSystemResources", 2 },
@@ -527,6 +554,74 @@ static int module_of(const win_ne_import *imp)
     return -1;
 }
 
+static void module_stem(const char *module, char *out, size_t cap);
+
+/* Windows' own modules WINN has nothing of: a program importing them loads
+ * (WIN_NE_SERVICE_UNDEFINED); their indices after WINN's (M_COUNT on) */
+static const char *const system_modules[] = { "MMSYSTEM", "TOOLHELP", "VER", "LZEXPAND",
+                                              "DDEML", "OLECLI", "OLESVR", "SOUND",
+                                              "PENWIN" };
+_Static_assert(M_COUNT + sizeof(system_modules) / sizeof(system_modules[0]) <= 16,
+               "an undefined call's module takes 4 bits");
+
+/* the module of an import as an undefined call's: WINN's, or Windows' own */
+static int trap_module(const win_ne_import *imp)
+{
+    int m = module_of(imp);
+    if (m >= 0)
+        return m;
+    char stem[16];
+    module_stem(imp->module, stem, sizeof(stem));
+    for (unsigned i = 0; i < sizeof(system_modules) / sizeof(system_modules[0]); i++)
+        if (name_eq(stem, system_modules[i]))
+            return M_COUNT + (int)i;
+    return -1;
+}
+
+/* the service of a function WINN has not, of a module it knows; 0 if none */
+static uint16_t undefined_id(win_ne_guest_image *g, const win_ne_import *imp)
+{
+    int m = trap_module(imp);
+    if (m < 0)
+        return 0;
+    unsigned ord = imp->ordinal;
+    if (imp->procedure[0] || !ord || ord >= 1016) {
+        unsigned k = 0;                 /* by name: one of eight remembered */
+        while (k < 7 && g && g->undefined[k][0] && !name_eq(g->undefined[k], imp->procedure))
+            k++;
+        if (g && !g->undefined[k][0])
+            lstrcpy_n(g->undefined[k], imp->procedure[0] ? imp->procedure : "?",
+                      sizeof(g->undefined[k]));
+        ord = 1016 + k;
+    }
+    return (uint16_t)(WIN_NE_SERVICE_UNDEFINED | (unsigned)m << 10 | ord);
+}
+
+void win_ne_guest_undefined_text(const win_ne_guest_image *g, uint16_t service, char *out,
+                                 size_t cap)
+{
+    unsigned m = (service >> 10) & 15u, ord = service & 1023u;
+    const char *mod = m < M_COUNT ? module_names[m] :
+                      m - M_COUNT < sizeof(system_modules) / sizeof(system_modules[0]) ?
+                      system_modules[m - M_COUNT] : "?";
+    char buf[64], num[8];
+    size_t n = strlen(mod);
+    memcpy(buf, mod, n);
+    buf[n++] = '.';
+    const char *fn = g ? g->undefined[ord - 1016 < 8 ? ord - 1016 : 0] : "?";
+    if (ord < 1016) {                   /* the ordinal in decimal */
+        int k = (int)sizeof(num) - 1;
+        num[k] = 0;
+        do {
+            num[--k] = (char)('0' + ord % 10u);
+            ord /= 10u;
+        } while (ord);
+        fn = num + k;
+    }
+    lstrcpy_n(buf + n, fn, sizeof(buf) - n);
+    lstrcpy_n(out, buf, cap);
+}
+
 /* a function WINN has its own code for: its index in services[], -1 */
 static int service_index(const win_ne_import *imp)
 {
@@ -622,6 +717,8 @@ static int note_unresolved(void *opaque, const win_ne_import *imp)
         scan_ctx inner = { sc->u, dll, sc->depth + 1, "" };
         return win_ne_scan(dll, &info, note_unresolved, &inner) == WIN_NE_CANCELLED;
     }
+    if (trap_module(imp) >= 0)
+        return 0;                       /* its call of it ends it */
     win_ne_unresolved *u = sc->u;
     size_t n = strlen(imp->module);
     if (n >= sizeof(u->module))
@@ -659,12 +756,15 @@ static int resolve_import(void *opaque, const win_ne_import *imp,
         *selector = *offset = id;
         return 1;
     }
-    if (module_of(imp) < 0) {           /* a DLL's */
+    if (module_of(imp) < 0) {           /* a DLL's (one of Windows' own, there may be none) */
         int d = load_dll(g, imp->module, lc->depth);
-        return d >= 0 && dll_export(g, d, imp->ordinal,
-                                    imp->procedure[0] ? imp->procedure : NULL, selector, offset);
+        if (d >= 0)
+            return dll_export(g, d, imp->ordinal, imp->procedure[0] ? imp->procedure : NULL,
+                              selector, offset);
+        if (trap_module(imp) < 0)
+            return 0;
     }
-    if (!service_id(imp, &id))
+    if (!service_id(imp, &id) && !(id = undefined_id(g, imp)))
         return 0;
     for (uint16_t i = 0; i < g->thunk_count; i++) {
         if (g->thunk_services[i] == id) {
@@ -1061,6 +1161,29 @@ uint16_t win_ne_guest_selector_alloc(win_ne_guest_image *g, uint16_t like, int c
             return 0;
         }
         return s->selector;
+    }
+    return 0;
+}
+
+uint16_t win_ne_guest_selector_array(win_ne_guest_image *g, unsigned n)
+{
+    for (unsigned i = 0; n && i + n <= WIN_NE_GUEST_GLOBALS; i++) {
+        unsigned k = 0;
+        while (k < n && !g->globals[i + k].selector)
+            k++;
+        if (k < n)
+            continue;
+        for (k = 0; k < n; k++) {
+            win_ne_guest_segment *s = &g->globals[i + k];
+            s->selector = global_selector(g, i + k);
+            if (!alias_write(g, s, 0, 1, 0)) {
+                while (k--)
+                    win_ne_guest_global_free(g, g->globals[i + k].selector);
+                memset(s, 0, sizeof(*s));
+                return 0;
+            }
+        }
+        return g->globals[i].selector;
     }
     return 0;
 }

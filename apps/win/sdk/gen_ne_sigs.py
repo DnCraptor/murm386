@@ -70,6 +70,10 @@ SKIP = {
     'AnsiUpperBuff', 'AnsiLowerBuff', 'GetKeyboardState', 'SetKeyboardState',
     # points and widths by the count, a global block's DIB: ne_guest_kernel.c
     'LPtoDP', 'DPtoLP', 'GetCharWidth', 'CreateDIBPatternBrush',
+    # the clipboard's data: global blocks of the program's and native ones
+    'SetClipboardData', 'GetClipboardData', 'CloseClipboard', 'EmptyClipboard',
+    # a spec changed in place, a selection's text (no size): ne_guest_call.c
+    'DlgDirList', 'DlgDirListComboBox', 'DlgDirSelect', 'DlgDirSelectComboBox',
 }
 
 COUNTS = re.compile(r'^(n|c|cb|cch|count|len|nCount|cbString|size)$')

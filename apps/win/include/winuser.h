@@ -659,6 +659,36 @@ int     WINAPI GetDlgCtrlID(HWND hwnd);
 BOOL    WINAPI SetProp(HWND hwnd, LPCSTR name, HANDLE data);
 HANDLE  WINAPI GetProp(HWND hwnd, LPCSTR name);
 HANDLE  WINAPI RemoveProp(HWND hwnd, LPCSTR name);
+typedef BOOL (CALLBACK *PROPENUMPROC)(HWND hwnd, LPCSTR name, HANDLE data);
+int     WINAPI EnumProps(HWND hwnd, PROPENUMPROC proc);
+
+typedef struct tagWINDOWPLACEMENT {
+    UINT  length, flags, showCmd;
+    POINT ptMinPosition, ptMaxPosition;
+    RECT  rcNormalPosition;
+} WINDOWPLACEMENT, *LPWINDOWPLACEMENT;
+BOOL    WINAPI GetWindowPlacement(HWND hwnd, WINDOWPLACEMENT *wp);
+BOOL    WINAPI SetWindowPlacement(HWND hwnd, const WINDOWPLACEMENT *wp);
+void    WINAPI SwitchToThisWindow(HWND hwnd, BOOL restore);
+LONG    WINAPI GetMessageExtraInfo(void);
+/* ScrollWindowEx */
+#define SW_SCROLLCHILDREN   0x0001
+#define SW_INVALIDATE       0x0002
+#define SW_ERASE            0x0004
+int     WINAPI ScrollWindowEx(HWND hwnd, int dx, int dy, const RECT *rc, const RECT *clip,
+                              HRGN update, LPRECT update_rc, UINT flags);
+BOOL    WINAPI ScrollDC(HDC hdc, int dx, int dy, const RECT *rc, const RECT *clip, HRGN update,
+                        LPRECT update_rc);
+/* EnableScrollBar */
+#define ESB_ENABLE_BOTH     0x0000
+#define ESB_DISABLE_BOTH    0x0003
+BOOL    WINAPI EnableScrollBar(HWND hwnd, int bar, UINT arrows);
+HICON   WINAPI CopyIcon(HINSTANCE inst, HICON icon);
+HCURSOR WINAPI CopyCursor(HINSTANCE inst, HCURSOR cursor);
+HCURSOR WINAPI CreateCursor(HINSTANCE inst, int hx, int hy, int w, int h, const void *and_bits,
+                            const void *xor_bits);
+HICON   WINAPI CreateIcon(HINSTANCE inst, int w, int h, BYTE planes, BYTE bpp,
+                          const void *and_bits, const void *xor_bits);
 
 LRESULT WINAPI DefWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 LRESULT WINAPI CallWindowProc(WNDPROC proc, HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
@@ -759,6 +789,22 @@ HWND    WINAPI GetNextDlgTabItem(HWND dlg, HWND ctl, BOOL prev);
 HWND    WINAPI GetNextDlgGroupItem(HWND dlg, HWND ctl, BOOL prev);
 DWORD   WINAPI GetDialogBaseUnits(void);
 BOOL    WINAPI MapDialogRect(HWND hwnd, LPRECT rc);
+/* DlgDirList */
+#define DDL_READWRITE       0x0000
+#define DDL_READONLY        0x0001
+#define DDL_HIDDEN          0x0002
+#define DDL_SYSTEM          0x0004
+#define DDL_DIRECTORY       0x0010
+#define DDL_ARCHIVE         0x0020
+#define DDL_POSTMSGS        0x2000
+#define DDL_DRIVES          0x4000
+#define DDL_EXCLUSIVE       0x8000
+int     WINAPI DlgDirList(HWND dlg, LPSTR spec, int id, int id_static, UINT attr);
+int     WINAPI DlgDirListComboBox(HWND dlg, LPSTR spec, int id, int id_static, UINT attr);
+BOOL    WINAPI DlgDirSelect(HWND dlg, LPSTR out, int id);
+BOOL    WINAPI DlgDirSelectEx(HWND dlg, LPSTR out, int size, int id);
+BOOL    WINAPI DlgDirSelectComboBox(HWND dlg, LPSTR out, int id);
+BOOL    WINAPI DlgDirSelectComboBoxEx(HWND dlg, LPSTR out, int size, int id);
 
 /* ---------------------------------------------------------------- more constants */
 
@@ -777,7 +823,24 @@ BOOL    WINAPI MapDialogRect(HWND hwnd, LPRECT rc);
 #define WM_DESTROYCLIPBOARD 0x0307
 #define CF_TEXT             1
 #define CF_BITMAP           2
+#define CF_METAFILEPICT     3
+#define CF_SYLK             4
+#define CF_DIF              5
+#define CF_TIFF             6
 #define CF_OEMTEXT          7
+#define CF_DIB              8
+#define CF_PALETTE          9
+#define CF_PENDATA          10
+#define CF_RIFF             11
+#define CF_WAVE             12
+#define CF_OWNERDISPLAY     0x0080
+#define CF_DSPTEXT          0x0081
+#define CF_DSPBITMAP        0x0082
+#define CF_DSPMETAFILEPICT  0x0083
+#define CF_PRIVATEFIRST     0x0200
+#define CF_PRIVATELAST      0x02FF
+#define CF_GDIOBJFIRST      0x0300
+#define CF_GDIOBJLAST       0x03FF
 
 BOOL    WINAPI OpenClipboard(HWND h);
 BOOL    WINAPI CloseClipboard(void);
@@ -994,6 +1057,10 @@ void    WINAPI DrawMenuBar(HWND hwnd);
 HMENU   WINAPI GetSubMenu(HMENU menu, int pos);
 int     WINAPI GetMenuItemCount(HMENU menu);
 BOOL    WINAPI IsMenu(HMENU menu);
+BOOL    WINAPI ChangeMenu(HMENU menu, UINT pos, LPCSTR text, UINT id, UINT flags);
+DWORD   WINAPI GetMenuCheckMarkDimensions(void);
+BOOL    WINAPI SetMenuItemBitmaps(HMENU menu, UINT pos, UINT flags, HBITMAP unchecked,
+                                  HBITMAP checked);
 UINT    WINAPI GetMenuItemID(HMENU menu, int pos);
 UINT    WINAPI GetMenuState(HMENU menu, UINT id, UINT flags);
 int     WINAPI GetMenuString(HMENU menu, UINT id, LPSTR buf, int max, UINT flags);

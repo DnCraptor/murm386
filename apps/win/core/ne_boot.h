@@ -20,8 +20,8 @@
  * vector) and exceptions; the CPU then switches to the TSS's SS0:SP0, a
  * stack it cannot reach, so even a guest with a broken SS:SP faults in
  * good order. */
-#define WIN_NE_THUNK_SEGMENT_BYTES 4096u
-#define WIN_NE_BOOT_OFFSET 2048u
+#define WIN_NE_THUNK_SEGMENT_BYTES 8192u
+#define WIN_NE_BOOT_OFFSET 6144u
 #define WIN_NE_BOOT_CAPACITY 384u
 /* Offsets in the thunk segment, from WIN_NE_BOOT_OFFSET on: the boot entry
  * (Real Mode, at RM_SEG:0000), the exit (ring 0, the target of the exit
@@ -88,7 +88,7 @@
 #define WIN_NE_FPMATH_BYTES        96u
 /* The ring 0 area: a 16-bit TSS (SP0 at 2, SS0 at 4), then the stack, up
  * to the end of the segment; its own data selector, DPL 0 */
-#define WIN_NE_RING0_OFFSET        3328u
+#define WIN_NE_RING0_OFFSET        (WIN_NE_BOOT_OFFSET + 1280u)
 #define WIN_NE_RING0_BYTES         (WIN_NE_THUNK_SEGMENT_BYTES - WIN_NE_RING0_OFFSET)
 #define WIN_NE_TSS_BYTES           44u
 /* The service an INT 21h becomes: AX of the guest is the first word above

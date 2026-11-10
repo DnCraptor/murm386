@@ -400,6 +400,65 @@ HWND WINAPI FindWindow(LPCSTR klass, LPCSTR title)
 
 HWND WINAPI GetNextWindow(HWND h, UINT cmd) { return GetWindow(h, cmd); }
 
+static void rect_to_parent(const wwnd *w, RECT *r);
+
+/* how it is shown, and where it is when neither minimized nor maximized
+ * (its parent's client coordinates); minimized and maximized positions are
+ * WINN's own (-1) */
+BOOL WINAPI GetWindowPlacement(HWND h, WINDOWPLACEMENT *wp)
+{
+    wwnd *w = user_wnd(h);
+    if (!w || !wp)
+        return FALSE;
+    wp->length = sizeof(*wp);
+    wp->flags = 0;
+    wp->showCmd = !(w->style & WS_VISIBLE) ? SW_HIDE : (w->style & WS_MINIMIZE) ?
+                  SW_SHOWMINIMIZED : (w->style & WS_MAXIMIZE) ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL;
+    wp->ptMinPosition.x = wp->ptMinPosition.y = -1;
+    wp->ptMaxPosition.x = wp->ptMaxPosition.y = -1;
+    if (w->style & (WS_MINIMIZE | WS_MAXIMIZE)) {
+        wp->rcNormalPosition = w->normal;
+    } else {
+        wp->rcNormalPosition = w->rc;
+        rect_to_parent(w, &wp->rcNormalPosition);
+    }
+    return TRUE;
+}
+
+BOOL WINAPI SetWindowPlacement(HWND h, const WINDOWPLACEMENT *wp)
+{
+    wwnd *w = user_wnd(h);
+    if (!w || !wp)
+        return FALSE;
+    const RECT *r = &wp->rcNormalPosition;
+    if (w->style & (WS_MINIMIZE | WS_MAXIMIZE))
+        w->normal = *r;                 /* where it comes back to */
+    else
+        MoveWindow(h, r->left, r->top, r->right - r->left, r->bottom - r->top, TRUE);
+    ShowWindow(h, (int)wp->showCmd);
+    return TRUE;
+}
+
+/* to the front, as the Task List does (restore: from an icon) */
+void WINAPI SwitchToThisWindow(HWND h, BOOL restore)
+{
+    if (!IsWindow(h))
+        return;
+    if (restore && IsIconic(h))
+        ShowWindow(h, SW_RESTORE);
+    SetActiveWindow(h);
+}
+
+/* no input device leaves extra information */
+LONG WINAPI GetMessageExtraInfo(void) { return 0; }
+
+/* its arrows disabled or enabled: taken, drawn as they are */
+BOOL WINAPI EnableScrollBar(HWND h, int bar, UINT arrows)
+{
+    (void)bar; (void)arrows;
+    return IsWindow(h);
+}
+
 /* a visible top-level window that has an owner or is a pop-up */
 BOOL WINAPI AnyPopup(void)
 {
@@ -1652,6 +1711,24 @@ void WINAPI SetWindowText(HWND h, LPCSTR text)
 }
 
 /* ---------------------------------------------------------------- properties */
+
+/* each property to proc: its name (a string's, or an atom's number), its
+ * data; what proc returned last (it stops at 0), -1 if none */
+int WINAPI EnumProps(HWND h, PROPENUMPROC proc)
+{
+    wwnd *w = user_wnd(h);
+    int r = -1;
+    for (wprop *p = w ? w->props : NULL, *n; p && proc; p = n) {
+        n = p->next;                    /* the procedure may remove it */
+        char name[64];
+        LPCSTR s = p->atom >= 0xC000 && GetAtomName(p->atom, name, sizeof(name)) ? name
+                   : MAKEINTATOM(p->atom);
+        r = proc(h, s, p->data);
+        if (!r)
+            break;
+    }
+    return r;
+}
 
 BOOL WINAPI SetProp(HWND h, LPCSTR name, HANDLE data)
 {

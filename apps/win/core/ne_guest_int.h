@@ -73,6 +73,9 @@ typedef struct ne_user {
         char what[80], with[80];
         uint16_t what_len, with_len;
     } find_dlg[NE_FINDS];
+    /* ne_guest_call.c: the clipboard's data it got, copies in its memory
+     * (freed as it closes or empties the clipboard) */
+    struct { UINT fmt; uint16_t sel; } clip[8];
 } ne_user;
 
 

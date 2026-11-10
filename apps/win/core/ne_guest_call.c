@@ -124,6 +124,7 @@ static uint32_t guest_size(const char *f)
 #define F_MINMAX     "iiiiiiiiii"
 #define F_WINDOWPOS  "hhiiiiu"
 #define F_RECT       "iiii"
+#define F_PLACEMENT  "uuuiiiiiiii"
 
 _Static_assert(sizeof(TEXTMETRIC) == 56 && sizeof(LOGFONT) == 60 && sizeof(LOGPEN) == 16 &&
                sizeof(LOGBRUSH) == 12 && sizeof(BITMAP) == 24 && sizeof(WINDOWPOS) == 24 &&
@@ -914,6 +915,203 @@ static WNDPROC token_proc(uint32_t t)
     return (t >> 16) == 0xffffu && (t & 0xffffu) < 32 ? tokens[t & 0xffffu] : NULL;
 }
 
+/* ---------------------------------------------------------------- the clipboard */
+
+/* a format whose data is a GDI object (the same handle for all): not memory */
+static int clip_gdi(UINT fmt)
+{
+    return fmt == CF_BITMAP || fmt == CF_PALETTE || fmt == CF_DSPBITMAP ||
+           (fmt >= CF_GDIOBJFIRST && fmt <= CF_GDIOBJLAST) || fmt == CF_OWNERDISPLAY;
+}
+
+/* its copies of the clipboard's data freed: of a format, or all (0) */
+static void clip_free(args *a, ne_user *u, UINT fmt)
+{
+    win_ne_guest_image *g = (win_ne_guest_image *)a->ctx->image;
+    for (int i = 0; i < 8; i++)
+        if (u->clip[i].sel && (!fmt || u->clip[i].fmt == fmt)) {
+            win_ne_guest_global_free(g, u->clip[i].sel);
+            win_ne_forget_selector(a->ctx, a->cpu, u->clip[i].sel);
+            u->clip[i].sel = 0;
+        }
+}
+
+/* SetClipboardData(format, HANDLE): its global block's bytes the
+ * clipboard's (native memory, for every program), the block freed (the
+ * clipboard's now); a GDI object's handle as it is */
+static uint16_t clip_set(args *a, ne_user *u, UINT fmt, uint16_t h)
+{
+    (void)u;
+    win_ne_guest_image *g = (win_ne_guest_image *)a->ctx->image;
+    if (!h || clip_gdi(fmt))
+        return SetClipboardData(fmt, h) ? (h ? h : 1) : 0;
+    win_ne_guest_segment *s = win_ne_guest_global(g, h);
+    if (!s)
+        return 0;
+    HGLOBAL n = GlobalAlloc(GMEM_MOVEABLE | GMEM_DDESHARE, s->size);
+    uint8_t *p = n ? (uint8_t *)GlobalLock(n) : NULL;
+    if (!p || !rd(a, (uint32_t)h << 16, p, s->size)) {
+        if (n) {
+            GlobalUnlock(n);
+            GlobalFree(n);
+        }
+        return 0;
+    }
+    GlobalUnlock(n);
+    if (!SetClipboardData(fmt, n)) {
+        GlobalFree(n);
+        return 0;
+    }
+    win_ne_guest_global_free(g, h);
+    win_ne_forget_selector(a->ctx, a->cpu, h);
+    return h;
+}
+
+/* GetClipboardData(format): a copy of the clipboard's bytes in a block of
+ * its own (the clipboard's: it is not to free it), a GDI object as it is */
+static uint16_t clip_get(args *a, ne_user *u, UINT fmt)
+{
+    win_ne_guest_image *g = (win_ne_guest_image *)a->ctx->image;
+    HANDLE n = GetClipboardData(fmt);
+    if (!n || clip_gdi(fmt))
+        return n;
+    DWORD size = GlobalSize(n);
+    const uint8_t *p = (const uint8_t *)GlobalLock(n);
+    if (!p || !size || size > 0x10000u) {
+        if (p)
+            GlobalUnlock(n);
+        return 0;
+    }
+    clip_free(a, u, fmt);
+    int i = 0;
+    while (i < 7 && u->clip[i].sel)
+        i++;
+    if (u->clip[i].sel)
+        clip_free(a, u, u->clip[i].fmt);
+    uint16_t sel = win_ne_guest_global_alloc(g, size);
+    if (sel && !wr(a, (uint32_t)sel << 16, p, size)) {
+        win_ne_guest_global_free(g, sel);
+        sel = 0;
+    }
+    GlobalUnlock(n);
+    if (sel) {
+        u->clip[i].fmt = fmt;
+        u->clip[i].sel = sel;
+    }
+    return sel;
+}
+
+/* EnumProps' procedure of the program's: the window, the property's name
+ * (a string on its stack, or an atom's number), its data. The native
+ * callback has no context of its own: the one enumeration going on. */
+typedef struct {
+    win_ne_guest_api_context *c;
+    uint32_t proc;
+} props_ctx;
+
+static const props_ctx *props_now;
+
+static BOOL CALLBACK ne_propproc(HWND h, LPCSTR name, HANDLE data)
+{
+    const props_ctx *e = props_now;
+    char blob[64];
+    uint16_t len = 0;
+    uint32_t far = (uint32_t)(uintptr_t)name & 0xffffu;
+    if (!IS_INTRESOURCE(name)) {
+        lstrcpyn(blob, name, sizeof(blob));
+        len = (uint16_t)((strlen(blob) + 2u) & ~1u);
+        far = win_ne_blob_far(e->c, len);
+    }
+    const uint16_t words[4] = { (uint16_t)h, (uint16_t)(far >> 16), (uint16_t)far,
+                                (uint16_t)data };
+    return (uint16_t)win_ne_call(e->c, e->proc, words, 4, len ? blob : NULL, len) != 0;
+}
+
+static PROPENUMPROC ne_propproc_with(const props_ctx *e)
+{
+    props_now = e;
+    return ne_propproc;
+}
+
+/* USER's calls with buffers of their own: apart, as ne_call's frame is on
+ * the stack of every call (and of the callbacks under it) */
+static __attribute__((noinline)) int user_buffers(args *a, ne_user *u, uint16_t service,
+                                                  uint32_t *v)
+{
+    win_ne_guest_api_context *c = a->ctx;
+    (void)u;
+    switch (service) {
+    case 0x1064: case 0x10c3: {         /* DlgDirList, DlgDirListComboBox(HWND, LPSTR, int, int,
+                                         * UINT): spec left the pattern */
+        uint32_t sp = dw(a, 10);
+        char spec[128];
+        spec[0] = 0;
+        if (sp && !str(a, sp, spec, sizeof(spec)))
+            return 1;
+        *v = (uint16_t)(service == 0x1064 ? DlgDirList : DlgDirListComboBox)(
+            w(a, 14), sp ? spec : NULL, (int16_t)w(a, 8), (int16_t)w(a, 6), w(a, 4));
+        if (sp)
+            wr(a, sp, spec, (uint32_t)strlen(spec) + 1u);
+        return 1;
+    }
+    case 0x1063: case 0x10c2: {         /* DlgDirSelect, DlgDirSelectComboBox(HWND, LPSTR, int) */
+        char out[128];
+        out[0] = 0;
+        *v = (uint16_t)(service == 0x1063 ? DlgDirSelect : DlgDirSelectComboBox)(
+            w(a, 10), out, (int16_t)w(a, 4));
+        wr(a, dw(a, 6), out, (uint32_t)strlen(out) + 1u);
+        return 1;
+    }
+    case 0x1196: case 0x1197: {         /* CreateCursor(HINSTANCE, hx, hy, w, h, and, xor),
+                                         * CreateIcon(HINSTANCE, w, h, planes, bpp, and, xor) */
+        uint8_t and_m[128], xor_m[512];
+        int cursor = service == 0x1196;
+        int wd = (int16_t)w(a, cursor ? 14 : 18), ht = (int16_t)w(a, cursor ? 12 : 16);
+        uint32_t xn = cursor || (w(a, 12) & 0xff) == 1 ? 128u : 512u;
+        if (wd != 32 || ht != 32 || !rd(a, dw(a, 8), and_m, 128) || !rd(a, dw(a, 4), xor_m, xn))
+            return 1;
+        *v = cursor ? CreateCursor(0, (int16_t)w(a, 18), (int16_t)w(a, 16), 32, 32, and_m, xor_m)
+                    : CreateIcon(0, 32, 32, (BYTE)w(a, 14), (BYTE)w(a, 12), and_m, xor_m);
+        return 1;
+    }
+    case 0x10de: case 0x10df: {         /* GetKeyboardState, SetKeyboardState(LPBYTE) */
+        BYTE keys[256];
+        if (service == 0x10de) {
+            GetKeyboardState(keys);
+            wr(a, dw(a, 4), keys, sizeof(keys));
+        } else if (rd(a, dw(a, 4), keys, sizeof(keys))) {
+            SetKeyboardState(keys);
+        }
+        return 1;
+    }
+    case 0x10b9: {                      /* GrayString(HDC, HBRUSH, proc, LPARAM, n, x, y, cx, cy) */
+        HDC dc = w(a, 24);
+        uint32_t proc = dw(a, 18), lp = dw(a, 14);
+        int n = (int16_t)w(a, 12), x = (int16_t)w(a, 10), y = (int16_t)w(a, 8);
+        if (a->bad)
+            return 1;
+        if (proc) {                     /* its own drawing, as it is (not grayed) */
+            const uint16_t words[4] = { (uint16_t)dc, (uint16_t)(lp >> 16), (uint16_t)lp,
+                                        (uint16_t)n };
+            *v = (uint16_t)win_ne_call(c, proc, words, 4, NULL, 0) != 0;
+            return 1;
+        }
+        char text[256];
+        if (!str(a, lp, text, sizeof(text)))
+            return 1;
+        if (n <= 0 || n > (int)strlen(text))
+            n = (int)strlen(text);
+        COLORREF old = SetTextColor(dc, GetSysColor(COLOR_GRAYTEXT));
+        int mode = SetBkMode(dc, TRANSPARENT);
+        *v = (uint16_t)TextOut(dc, x, y, text, n);
+        SetBkMode(dc, mode);
+        SetTextColor(dc, old);
+        return 1;
+    }
+    }
+    return 0;
+}
+
 /* the program's class (its index) a window is of, -1 if none */
 static int class_of(ne_user *u, HWND h)
 {
@@ -1359,14 +1557,36 @@ int ne_call(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword)
         }
         return 1;
     }
-    case 0x10de: case 0x10df: {         /* GetKeyboardState, SetKeyboardState(LPBYTE) */
-        BYTE keys[256];
-        if (service == 0x10de) {
-            GetKeyboardState(keys);
-            wr(a, dw(a, 4), keys, sizeof(keys));
-        } else if (rd(a, dw(a, 4), keys, sizeof(keys))) {
-            SetKeyboardState(keys);
+    case 0x108d: case 0x108e: {         /* SetClipboardData, GetClipboardData */
+        UINT fmt = service == 0x108d ? w(a, 6) : w(a, 4);
+        *v = service == 0x108d ? clip_set(a, u, fmt, w(a, 4)) : clip_get(a, u, fmt);
+        return 1;
+    }
+    case 0x108a: case 0x108b:           /* CloseClipboard, EmptyClipboard: its copies freed */
+        clip_free(a, u, 0);
+        *v = (uint16_t)(service == 0x108a ? CloseClipboard() : EmptyClipboard());
+        return 1;
+    case 0x1196: case 0x1197:           /* CreateCursor, CreateIcon */
+    case 0x10de: case 0x10df:           /* GetKeyboardState, SetKeyboardState */
+    case 0x10b9:                        /* GrayString */
+    case 0x1064: case 0x10c3:           /* DlgDirList, DlgDirListComboBox */
+    case 0x1063: case 0x10c2:           /* DlgDirSelect, DlgDirSelectComboBox */
+        return user_buffers(a, u, service, v);
+    case 0x1172: case 0x1173: {         /* GetWindowPlacement, SetWindowPlacement(HWND, ptr) */
+        WINDOWPLACEMENT wp;
+        memset(&wp, 0, sizeof(wp));
+        if (service == 0x1172) {
+            if (GetWindowPlacement(w(a, 8), &wp))
+                *v = struct_out(a, F_PLACEMENT, dw(a, 4), &wp);
+        } else if (struct_in(a, F_PLACEMENT, dw(a, 4), &wp)) {
+            *v = (uint16_t)SetWindowPlacement(w(a, 8), &wp);
         }
+        return 1;
+    }
+    case 0x101b: {                      /* EnumProps(HWND, proc) */
+        props_ctx e = { c, dw(a, 4) };
+        if (!a->bad && e.proc)
+            *v = (uint16_t)EnumProps(w(a, 8), ne_propproc_with(&e));
         return 1;
     }
     case 0x1102: {                      /* MapWindowPoints(HWND, HWND, LPPOINT, UINT) */
@@ -1409,30 +1629,6 @@ int ne_call(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword)
     case 0x107b:                        /* CallMsgFilter(LPMSG, int): not handled */
         *v = 0;
         return 1;
-    case 0x10b9: {                      /* GrayString(HDC, HBRUSH, proc, LPARAM, n, x, y, cx, cy) */
-        HDC dc = w(a, 24);
-        uint32_t proc = dw(a, 18), lp = dw(a, 14);
-        int n = (int16_t)w(a, 12), x = (int16_t)w(a, 10), y = (int16_t)w(a, 8);
-        if (a->bad)
-            return 1;
-        if (proc) {                     /* its own drawing, as it is (not grayed) */
-            const uint16_t words[4] = { (uint16_t)dc, (uint16_t)(lp >> 16), (uint16_t)lp,
-                                        (uint16_t)n };
-            *v = (uint16_t)win_ne_call(c, proc, words, 4, NULL, 0) != 0;
-            return 1;
-        }
-        char text[256];
-        if (!str(a, lp, text, sizeof(text)))
-            return 1;
-        if (n <= 0 || n > (int)strlen(text))
-            n = (int)strlen(text);
-        COLORREF old = SetTextColor(dc, GetSysColor(COLOR_GRAYTEXT));
-        int mode = SetBkMode(dc, TRANSPARENT);
-        *v = (uint16_t)TextOut(dc, x, y, text, n);
-        SetBkMode(dc, mode);
-        SetTextColor(dc, old);
-        return 1;
-    }
     case 0x11b5: case 0x11b6: {         /* AnsiUpperBuff, AnsiLowerBuff(LPSTR, UINT) */
         uint32_t n = w(a, 4) ? w(a, 4) : 0x10000u, p = dw(a, 6), base, limit;
         int code;

@@ -10,13 +10,14 @@
 #ifndef WINN_NE_GUEST_H
 #define WINN_NE_GUEST_H
 
+#include <stddef.h>
 #include <stdint.h>
 #include "ne.h"
 
 #define WIN_NE_GUEST_MAX_SEGMENTS 128u
 #define WIN_NE_THUNK_BYTES 16u /* includes FAR return + Pascal stack adjustment */
-/* the first half of the thunk segment (ne_boot.h): the API thunks */
-#define WIN_NE_GUEST_ACTIVE_THUNKS 128u
+/* the thunk segment (ne_boot.h) up to its boot code: the API thunks */
+#define WIN_NE_GUEST_ACTIVE_THUNKS 384u
 /* The program's PSP (its own selector, ES after InitTask): the command line
  * at 81h, as DOS has it, but ending with a NUL (Windows). */
 #define WIN_NE_GUEST_PSP_BYTES 256u
@@ -33,6 +34,11 @@
  * emulator's own); the rest native */
 #define WIN_NE_SERVICE_WIN87EM  0x7000u
 #define WIN_NE_SERVICE_FPMATH   (WIN_NE_SERVICE_WIN87EM + 1u)
+/* A function of Windows' WINN has not (of its modules, or of Windows' own
+ * ones it has nothing of): the program loads, its call of it ends it, as
+ * Windows' "undefined dynalink" would. C000h + the module (its index, 4
+ * bits) << 10 + the ordinal (1016 + n: the nth imported by name) */
+#define WIN_NE_SERVICE_UNDEFINED 0xC000u
 /* GetWinFlags: protected mode, a 386, standard mode, a coprocessor */
 #define WIN_NE_WINFLAGS         0x0415u
 
@@ -97,6 +103,9 @@ typedef struct {
     uint16_t dll_count, dll_segment_count;
     uint8_t dll_order;
     win_ne_guest_segment dll_segments[WIN_NE_GUEST_DLL_SEGMENTS];
+    /* the functions it imports by name that WINN has not (its calls of
+     * them end it: WIN_NE_SERVICE_UNDEFINED) */
+    char undefined[8][32];
 } win_ne_guest_image;
 
 /* Complete staging is atomic with respect to allocations (all allocated
@@ -115,6 +124,9 @@ typedef struct {
     uint16_t ordinal;               /* 0: by name */
 } win_ne_unresolved;
 int win_ne_guest_unresolved(const char *path, win_ne_unresolved *u);
+/* a WIN_NE_SERVICE_UNDEFINED call's text: "MODULE.ordinal", "MODULE.Name" */
+void win_ne_guest_undefined_text(const win_ne_guest_image *g, uint16_t service, char *out,
+                                 size_t cap);
 
 /* A global memory block of the program (DOS memory, a data selector of its
  * own, zeroed): its selector, 0 if there is no memory or no entry left.
@@ -134,6 +146,8 @@ int win_ne_guest_selector_get(const win_ne_guest_image *g, uint16_t sel, uint32_
                               uint32_t *limit, int *code);
 int win_ne_guest_selector_set(win_ne_guest_image *g, uint16_t sel, uint32_t base,
                               uint32_t limit, int code);
+/* n empty selectors one after the other (AllocSelectorArray): the first */
+uint16_t win_ne_guest_selector_array(win_ne_guest_image *g, unsigned n);
 /* GetProcAddress of a module WINN has (0 KERNEL, 1 USER, 2 GDI, 3
  * KEYBOARD, 4 COMMDLG, 5 SHELL; win_ne_guest_module gives the number of a
  * name, -1 for none): a thunk's far address, made now if the program had

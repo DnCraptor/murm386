@@ -20,6 +20,7 @@ extern void BitBlt(void);
 extern void BringWindowToTop(void);
 extern void CallWindowProc(void);
 extern void CascadeChildWindows(void);
+extern void ChangeMenu(void);
 extern void CheckDlgButton(void);
 extern void CheckMenuItem(void);
 extern void CheckRadioButton(void);
@@ -30,6 +31,8 @@ extern void CloseClipboard(void);
 extern void CloseWindow(void);
 extern void CombineRgn(void);
 extern void CommDlgExtendedError(void);
+extern void CopyCursor(void);
+extern void CopyIcon(void);
 extern void CopyRect(void);
 extern void CountClipboardFormats(void);
 extern void CreateAcceleratorTableN(void);
@@ -38,6 +41,7 @@ extern void CreateBrushIndirect(void);
 extern void CreateCaret(void);
 extern void CreateCompatibleBitmap(void);
 extern void CreateCompatibleDC(void);
+extern void CreateCursor(void);
 extern void CreateDC(void);
 extern void CreateDIBPatternBrush(void);
 extern void CreateDIBitmap(void);
@@ -50,6 +54,7 @@ extern void CreateFont(void);
 extern void CreateFontIndirect(void);
 extern void CreateHatchBrush(void);
 extern void CreateIC(void);
+extern void CreateIcon(void);
 extern void CreateMenu(void);
 extern void CreatePalette(void);
 extern void CreatePatternBrush(void);
@@ -82,6 +87,12 @@ extern void DestroyMenu(void);
 extern void DestroyWindow(void);
 extern void DialogBoxIndirectN(void);
 extern void DispatchMessage(void);
+extern void DlgDirList(void);
+extern void DlgDirListComboBox(void);
+extern void DlgDirSelect(void);
+extern void DlgDirSelectComboBox(void);
+extern void DlgDirSelectComboBoxEx(void);
+extern void DlgDirSelectEx(void);
 extern void DrawFocusRect(void);
 extern void DrawIcon(void);
 extern void DrawMenuBar(void);
@@ -89,6 +100,7 @@ extern void DrawText(void);
 extern void Ellipse(void);
 extern void EmptyClipboard(void);
 extern void EnableMenuItem(void);
+extern void EnableScrollBar(void);
 extern void EnableWindow(void);
 extern void EndDeferWindowPos(void);
 extern void EndDialog(void);
@@ -97,6 +109,7 @@ extern void EnumChildWindows(void);
 extern void EnumClipboardFormats(void);
 extern void EnumFontFamilies(void);
 extern void EnumFonts(void);
+extern void EnumProps(void);
 extern void EnumWindows(void);
 extern void EqualRect(void);
 extern void EqualRgn(void);
@@ -171,11 +184,13 @@ extern void GetLastActivePopup(void);
 extern void GetLocalTimeN(void);
 extern void GetMapMode(void);
 extern void GetMenu(void);
+extern void GetMenuCheckMarkDimensions(void);
 extern void GetMenuItemCount(void);
 extern void GetMenuItemID(void);
 extern void GetMenuState(void);
 extern void GetMenuString(void);
 extern void GetMessage(void);
+extern void GetMessageExtraInfo(void);
 extern void GetMessagePos(void);
 extern void GetMessageTime(void);
 extern void GetModuleHandle(void);
@@ -236,6 +251,7 @@ extern void GetWindowExtEx(void);
 extern void GetWindowLong(void);
 extern void GetWindowOrg(void);
 extern void GetWindowOrgEx(void);
+extern void GetWindowPlacement(void);
 extern void GetWindowRect(void);
 extern void GetWindowTask(void);
 extern void GetWindowText(void);
@@ -349,7 +365,9 @@ extern void ScaleViewportExtEx(void);
 extern void ScaleWindowExt(void);
 extern void ScaleWindowExtEx(void);
 extern void ScreenToClient(void);
+extern void ScrollDC(void);
 extern void ScrollWindow(void);
+extern void ScrollWindowEx(void);
 extern void SelectClipRgn(void);
 extern void SelectObject(void);
 extern void SelectPalette(void);
@@ -380,6 +398,7 @@ extern void SetKeyboardState(void);
 extern void SetLocalTimeN(void);
 extern void SetMapMode(void);
 extern void SetMenu(void);
+extern void SetMenuItemBitmaps(void);
 extern void SetPaletteEntries(void);
 extern void SetParent(void);
 extern void SetPixel(void);
@@ -408,6 +427,7 @@ extern void SetWindowExtEx(void);
 extern void SetWindowLong(void);
 extern void SetWindowOrg(void);
 extern void SetWindowOrgEx(void);
+extern void SetWindowPlacement(void);
 extern void SetWindowPos(void);
 extern void SetWindowText(void);
 extern void SetWindowWord(void);
@@ -420,6 +440,7 @@ extern void StretchBlt(void);
 extern void StretchDIBits(void);
 extern void SubtractRect(void);
 extern void SwapMouseButton(void);
+extern void SwitchToThisWindow(void);
 extern void SystemParametersInfo(void);
 extern void TabbedTextOut(void);
 extern void TextOut(void);
@@ -678,6 +699,7 @@ static const void *const exports_user[484] = {
     [24] = (const void *)RemoveProp,
     [25] = (const void *)GetProp,
     [26] = (const void *)SetProp,
+    [27] = (const void *)EnumProps,
     [28] = (const void *)ClientToScreen,
     [29] = (const void *)ScreenToClient,
     [30] = (const void *)WindowFromPoint,
@@ -745,6 +767,8 @@ static const void *const exports_user[484] = {
     [96] = (const void *)CheckRadioButton,
     [97] = (const void *)CheckDlgButton,
     [98] = (const void *)IsDlgButtonChecked,
+    [99] = (const void *)DlgDirSelect,
+    [100] = (const void *)DlgDirList,
     [101] = (const void *)SendDlgItemMessage,
     [102] = (const void *)AdjustWindowRect,
     [103] = (const void *)MapDialogRect,
@@ -790,6 +814,7 @@ static const void *const exports_user[484] = {
     [146] = (const void *)GetClipboardFormatName,
     [151] = (const void *)CreateMenu,
     [152] = (const void *)DestroyMenu,
+    [153] = (const void *)ChangeMenu,
     [154] = (const void *)CheckMenuItem,
     [155] = (const void *)EnableMenuItem,
     [156] = (const void *)GetSystemMenu,
@@ -808,6 +833,7 @@ static const void *const exports_user[484] = {
     [169] = (const void *)GetCaretBlinkTime,
     [170] = (const void *)ArrangeIconicWindows,
     [171] = (const void *)WinHelp,
+    [172] = (const void *)SwitchToThisWindow,
     [173] = (const void *)LoadCursor,
     [174] = (const void *)LoadIcon,
     [178] = (const void *)TranslateAccelerator,
@@ -822,10 +848,13 @@ static const void *const exports_user[484] = {
     [191] = (const void *)ChildWindowFromPoint,
     [192] = (const void *)InSendMessage,
     [193] = (const void *)IsClipboardFormatAvailable,
+    [194] = (const void *)DlgDirSelectComboBox,
+    [195] = (const void *)DlgDirListComboBox,
     [196] = (const void *)TabbedTextOut,
     [197] = (const void *)GetTabbedTextExtent,
     [198] = (const void *)CascadeChildWindows,
     [199] = (const void *)TileChildWindows,
+    [221] = (const void *)ScrollDC,
     [222] = (const void *)GetKeyboardState,
     [223] = (const void *)SetKeyboardState,
     [224] = (const void *)GetWindowTask,
@@ -863,15 +892,23 @@ static const void *const exports_user[484] = {
     [283] = (const void *)RealizePalette,
     [286] = (const void *)GetDesktopWindow,
     [287] = (const void *)GetLastActivePopup,
+    [288] = (const void *)GetMessageExtraInfo,
     [290] = (const void *)RedrawWindow,
     [294] = (const void *)LockWindowUpdate,
     [308] = (const void *)DefDlgProc,
+    [319] = (const void *)ScrollWindowEx,
     [334] = (const void *)GetQueueStatus,
     [335] = (const void *)GetInputState,
     [358] = (const void *)IsMenu,
+    [368] = (const void *)CopyIcon,
+    [369] = (const void *)CopyCursor,
+    [370] = (const void *)GetWindowPlacement,
+    [371] = (const void *)SetWindowPlacement,
     [373] = (const void *)SubtractRect,
     [403] = (const void *)UnregisterClass,
     [404] = (const void *)GetClassInfo,
+    [406] = (const void *)CreateCursor,
+    [407] = (const void *)CreateIcon,
     [410] = (const void *)InsertMenu,
     [411] = (const void *)AppendMenu,
     [412] = (const void *)RemoveMenu,
@@ -879,8 +916,12 @@ static const void *const exports_user[484] = {
     [414] = (const void *)ModifyMenu,
     [415] = (const void *)CreatePopupMenu,
     [416] = (const void *)TrackPopupMenu,
+    [417] = (const void *)GetMenuCheckMarkDimensions,
+    [418] = (const void *)SetMenuItemBitmaps,
     [420] = (const void *)wsprintf,
     [421] = (const void *)wvsprintf,
+    [422] = (const void *)DlgDirSelectEx,
+    [423] = (const void *)DlgDirSelectComboBoxEx,
     [430] = (const void *)lstrcmp,
     [431] = (const void *)AnsiUpper,
     [432] = (const void *)AnsiLower,
@@ -900,6 +941,7 @@ static const void *const exports_user[484] = {
     [471] = (const void *)lstrcmpi,
     [472] = (const void *)AnsiNext,
     [473] = (const void *)AnsiPrev,
+    [482] = (const void *)EnableScrollBar,
     [483] = (const void *)SystemParametersInfo,
 };
 

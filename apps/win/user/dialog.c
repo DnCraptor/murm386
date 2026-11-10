@@ -686,3 +686,135 @@ int user_init(void)
     user_register_builtin("MDICLIENT", user_mdiclient_proc, 0, (int)sizeof(void *), arrow, 0);
     return 0;
 }
+
+/* ---------------------------------------------------------------- DlgDirList */
+
+/*
+ * DlgDirList, DlgDirListComboBox: the list box (combo box) id filled with
+ * the files of spec ("C:\\DIR\\*.TXT", "*.*"), as attr asks: DDL_DIRECTORY
+ * the subdirectories as "[name]", DDL_DRIVES the drives as "[-c-]",
+ * DDL_EXCLUSIVE no files; the current directory first made spec's path's
+ * (spec left the pattern), the static control idStatic showing it.
+ */
+static int dir_list(HWND dlg, LPSTR spec, int id, int id_static, UINT attr, int combo)
+{
+    char pat[80] = "*.*";
+    if (spec && *spec) {
+        int n = lstrlen(spec), cut = n;
+        while (cut > 0 && spec[cut - 1] != '\\' && spec[cut - 1] != ':')
+            cut--;
+        if (cut < n)
+            lstrcpyn(pat, spec + cut, sizeof(pat));
+        else
+            lstrcpyn(pat, "*.*", sizeof(pat));
+        if (cut) {                          /* its path: the current directory */
+            char path[128];
+            lstrcpyn(path, spec, cut + 1 < (int)sizeof(path) ? cut + 1 : (int)sizeof(path));
+            if (cut >= 2 && path[1] == ':')
+                win_file_drive((path[0] | 0x20) - 'a');
+            int l = lstrlen(path);
+            if (l > 1 && path[l - 1] == '\\' && path[l - 2] != ':')
+                path[l - 1] = 0;
+            if (!(l == 2 && path[1] == ':') && !win_file_chdir(path))
+                return FALSE;
+        }
+        lstrcpy(spec, pat);
+    }
+    UINT reset = combo ? CB_RESETCONTENT : LB_RESETCONTENT, add = combo ? CB_ADDSTRING : LB_ADDSTRING;
+    if (id) {
+        HWND box = GetDlgItem(dlg, id);
+        if (!box)
+            return FALSE;
+        SendMessage(box, reset, 0, 0);
+        static char names[2048];            /* big, off the task stack */
+        if (!(attr & DDL_EXCLUSIVE) || (attr & ~(DDL_EXCLUSIVE | DDL_DIRECTORY | DDL_DRIVES))) {
+            int n = WinDirListAttrN(pat, 0, names, sizeof(names));
+            for (const char *p = names; n-- > 0 && *p; p += lstrlen(p) + 1) {
+                char low[64];
+                lstrcpyn(low, p, sizeof(low));
+                AnsiLower(low);
+                SendMessage(box, add, 0, (LPARAM)(LPSTR)low);
+            }
+        }
+        if (attr & DDL_DIRECTORY) {
+            int n = WinDirListAttrN("*.*", 0x10, names, sizeof(names));
+            char cwd[128];
+            if (GetCurrentDirectoryN(cwd, sizeof(cwd)) > 3)
+                SendMessage(box, add, 0, (LPARAM)(LPSTR)"[..]");
+            for (const char *p = names; n-- > 0 && *p; p += lstrlen(p) + 1) {
+                char e[66];
+                e[0] = '[';
+                lstrcpyn(e + 1, p, 63);
+                lstrcat(e, "]");
+                AnsiLower(e);
+                SendMessage(box, add, 0, (LPARAM)(LPSTR)e);
+            }
+        }
+        if (attr & DDL_DRIVES)
+            for (int d = 0; d < 26; d++)
+                if (GetDriveType(d)) {
+                    char e[8];
+                    wsprintf(e, "[-%c-]", 'a' + d);
+                    SendMessage(box, add, 0, (LPARAM)(LPSTR)e);
+                }
+    }
+    if (id_static) {
+        char cwd[128];
+        GetCurrentDirectoryN(cwd, sizeof(cwd));
+        AnsiLower(cwd);
+        SetDlgItemText(dlg, id_static, cwd);
+    }
+    return TRUE;
+}
+
+int WINAPI DlgDirList(HWND dlg, LPSTR spec, int id, int id_static, UINT attr)
+{
+    return dir_list(dlg, spec, id, id_static, attr, 0);
+}
+
+int WINAPI DlgDirListComboBox(HWND dlg, LPSTR spec, int id, int id_static, UINT attr)
+{
+    return dir_list(dlg, spec, id, id_static, attr, 1);
+}
+
+/* DlgDirSelect(Ex), DlgDirSelectComboBox(Ex): the selection; a directory's
+ * ("[name]": "name\\") or a drive's ("[-c-]": "c:") TRUE, a file's FALSE */
+static BOOL dir_select(HWND dlg, LPSTR out, int size, int id, int combo)
+{
+    HWND box = GetDlgItem(dlg, id);
+    char t[80];
+    int i = box ? (int)SendMessage(box, combo ? CB_GETCURSEL : LB_GETCURSEL, 0, 0) : -1;
+    if (i < 0 || !out || size < 1)
+        return FALSE;
+    t[0] = 0;
+    SendMessage(box, combo ? CB_GETLBTEXT : LB_GETTEXT, (WPARAM)i, (LPARAM)(LPSTR)t);
+    int n = lstrlen(t);
+    BOOL dir = FALSE;
+    if (n >= 5 && t[0] == '[' && t[1] == '-' && t[n - 2] == '-' && t[n - 1] == ']') {
+        t[0] = t[2];
+        t[1] = ':';
+        t[2] = 0;
+        dir = TRUE;
+    } else if (n >= 2 && t[0] == '[' && t[n - 1] == ']') {
+        memmove(t, t + 1, (size_t)n - 2);
+        t[n - 2] = '\\';
+        t[n - 1] = 0;
+        dir = TRUE;
+    }
+    lstrcpyn(out, t, size);
+    return dir;
+}
+
+BOOL WINAPI DlgDirSelect(HWND dlg, LPSTR out, int id) { return dir_select(dlg, out, 128, id, 0); }
+BOOL WINAPI DlgDirSelectEx(HWND dlg, LPSTR out, int size, int id)
+{
+    return dir_select(dlg, out, size, id, 0);
+}
+BOOL WINAPI DlgDirSelectComboBox(HWND dlg, LPSTR out, int id)
+{
+    return dir_select(dlg, out, 128, id, 1);
+}
+BOOL WINAPI DlgDirSelectComboBoxEx(HWND dlg, LPSTR out, int size, int id)
+{
+    return dir_select(dlg, out, size, id, 1);
+}

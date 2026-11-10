@@ -466,23 +466,25 @@ int WINAPI SetDIBitsToDevice(HDC h, int x, int y, int w, int hh, int sx, int sy,
                              UINT usage)
 {
     DC_OR_RET(h, 0);
-    RGBQUAD tmp[256];
+    RGBQUAD *tmp = (RGBQUAD *)win_alloc(256 * sizeof(RGBQUAD));
     gdi_dib b;
-    if (!lines || !dib_of(dc, bi, bits, usage, (int)lines, &b, tmp))
-        return 0;
-    return dib_draw(h, dc, &b, x, y, w, hh, sx, dib_top(&b, (int)start, sy, hh), w, hh,
-                    SRCCOPY, 0) ? (int)lines : 0;
+    int r = tmp && lines && dib_of(dc, bi, bits, usage, (int)lines, &b, tmp) &&
+            dib_draw(h, dc, &b, x, y, w, hh, sx, dib_top(&b, (int)start, sy, hh), w, hh,
+                     SRCCOPY, 0) ? (int)lines : 0;
+    win_free(tmp);
+    return r;
 }
 
 int WINAPI StretchDIBits(HDC h, int x, int y, int w, int hh, int sx, int sy, int sw, int sh,
                          const void *bits, const BITMAPINFO *bi, UINT usage, DWORD rop)
 {
     DC_OR_RET(h, 0);
-    RGBQUAD tmp[256];
+    RGBQUAD *tmp = (RGBQUAD *)win_alloc(256 * sizeof(RGBQUAD));
     gdi_dib b;
-    if (!dib_of(dc, bi, bits, usage, 0, &b, tmp))
-        return 0;
-    return dib_draw(h, dc, &b, x, y, w, hh, sx, dib_top(&b, 0, sy, sh), sw, sh, rop, 1) ? sh : 0;
+    int r = tmp && dib_of(dc, bi, bits, usage, 0, &b, tmp) &&
+            dib_draw(h, dc, &b, x, y, w, hh, sx, dib_top(&b, 0, sy, sh), sw, sh, rop, 1) ? sh : 0;
+    win_free(tmp);
+    return r;
 }
 
 /* rows of a DIB into a bitmap: the band's from row start (from the
@@ -491,10 +493,12 @@ int WINAPI SetDIBits(HDC h, HBITMAP hb, UINT start, UINT lines, const void *bits
                      const BITMAPINFO *bi, UINT usage)
 {
     wbitmap *bm = (wbitmap *)win_handle_get(hb, WOBJ_BITMAP);
-    RGBQUAD tmp[256];
+    RGBQUAD *tmp = (RGBQUAD *)win_alloc(256 * sizeof(RGBQUAD));
     gdi_dib b;
-    if (!bm || !lines || !dib_of(gdi_dc(h), bi, bits, usage, (int)lines, &b, tmp))
+    if (!tmp || !bm || !lines || !dib_of(gdi_dc(h), bi, bits, usage, (int)lines, &b, tmp)) {
+        win_free(tmp);
         return 0;
+    }
     int n = 0;
     for (int r = 0; r < b.h; r++) {
         int y = b.top_down ? (int)start + r : bm->s.height - 1 - ((int)start + (b.h - 1 - r));
@@ -503,6 +507,7 @@ int WINAPI SetDIBits(HDC h, HBITMAP hb, UINT start, UINT lines, const void *bits
         dib_row_to(&b, r, &bm->s, y);
         n++;
     }
+    win_free(tmp);
     return n;
 }
 
@@ -641,11 +646,11 @@ int WINAPI GetDIBits(HDC h, HBITMAP hb, UINT start, UINT lines, void *bits, BITM
 HBRUSH WINAPI CreateDIBPatternBrush(HGLOBAL hg, UINT usage)
 {
     const BITMAPINFO *bi = (const BITMAPINFO *)GlobalLock(hg);
-    RGBQUAD tmp[256];
+    RGBQUAD *tmp = (RGBQUAD *)win_alloc(256 * sizeof(RGBQUAD));
     gdi_dib b;
     HBRUSH br = 0;
     /* the bits after the colours: RGBQUADs, or (DIB_PAL_COLORS) indices */
-    if (bi && gdi_dib_parse((const uint8_t *)bi, GlobalSize(hg), 1, &b) &&
+    if (tmp && bi && gdi_dib_parse((const uint8_t *)bi, GlobalSize(hg), 1, &b) &&
         dib_of(NULL, bi, usage == DIB_PAL_COLORS ? (const uint8_t *)bi + bi->bmiHeader.biSize +
                                                    2u * (uint32_t)b.colors : b.bits,
                usage, 0, &b, tmp)) {
@@ -660,6 +665,7 @@ HBRUSH WINAPI CreateDIBPatternBrush(HGLOBAL hg, UINT usage)
     }
     if (bi)
         GlobalUnlock(hg);
+    win_free(tmp);
     return br;
 }
 

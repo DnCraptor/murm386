@@ -34,6 +34,7 @@
 
 #if defined(__arm__) || defined(__thumb__) || defined(WINN_NE_HOST)
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 #include "dos-api.h"
 #include "dos_guest_ptr.h"
@@ -483,8 +484,9 @@ static int write_psp(const win_ne_guest_image *g, const char *cmdline)
     return g->io.write(g->opaque, g->psp.linear, psp, sizeof(psp));
 }
 
-int win_ne_execute(const char *path, const char *cmdline, int show, int (*yield)(void),
-                   win_ne_result *r)
+/* the program run, its image (large: not on the task's stack) given */
+static int execute(win_ne_guest_image *gp, const char *path, const char *cmdline, int show,
+                   int (*yield)(void), win_ne_result *r)
 {
     win_ne_result none;
     if (!r)
@@ -503,29 +505,28 @@ int win_ne_execute(const char *path, const char *cmdline, int show, int (*yield)
     if (!cpu->fpu && cpu->ext_accessors->enable_fpu)
         cpu->ext_accessors->enable_fpu(cpu);
 
-    win_ne_guest_image g;
-    int rc = win_ne_guest_load(path, &g, win_ne_guest_dos_io(), NULL);
+    int rc = win_ne_guest_load(path, gp, win_ne_guest_dos_io(), NULL);
     if (rc)
         return rc;
-    if (!valid_entry(&g)) {
+    if (!valid_entry(gp)) {
         rc = WIN_NE_EXEC_BAD_ENTRY;
         goto done;
     }
 
     uint8_t boot[WIN_NE_BOOT_CAPACITY];
-    const uint32_t linear = g.thunk_linear + WIN_NE_BOOT_OFFSET;
-    const uint32_t ring0 = g.thunk_linear + WIN_NE_RING0_OFFSET;
+    const uint32_t linear = gp->thunk_linear + WIN_NE_BOOT_OFFSET;
+    const uint32_t ring0 = gp->thunk_linear + WIN_NE_RING0_OFFSET;
     /* the entry's return address on its stack: the exit stub (ring 3) */
-    const uint16_t sp = (uint16_t)(g.sp - 4u);
-    const win_ne_guest_segment *stack = &g.segments[g.info.ss_index];
+    const uint16_t sp = (uint16_t)(gp->sp - 4u);
+    const win_ne_guest_segment *stack = &gp->segments[gp->info.ss_index];
     win_ne_boot_args args = {
         .rm_segment = (uint16_t)(linear >> 4),
-        .pm_segment = g.thunk_selector,
-        .ne_cs = g.cs, .ne_ip = g.ip,
-        .ne_ss = g.ss, .ne_sp = sp,
-        .gdt_limit = g.gdt_limit, .gdt_linear = g.gdt_linear,
-        .tss = g.tss_selector, .ring0 = g.ring0_selector,
-        .exit_gate = g.exit_gate, .cbret_gate = g.cbret_gate
+        .pm_segment = gp->thunk_selector,
+        .ne_cs = gp->cs, .ne_ip = gp->ip,
+        .ne_ss = gp->ss, .ne_sp = sp,
+        .gdt_limit = gp->gdt_limit, .gdt_linear = gp->gdt_linear,
+        .tss = gp->tss_selector, .ring0 = gp->ring0_selector,
+        .exit_gate = gp->exit_gate, .cbret_gate = gp->cbret_gate
     };
     /* the TSS: ring 0's stack (SS0:SP0) the CPU switches to, the whole
      * ring 0 area; nothing else of it is used (no task switch) */
@@ -533,11 +534,11 @@ int win_ne_execute(const char *path, const char *cmdline, int show, int (*yield)
     memset(tss, 0, sizeof(tss));
     tss[2] = (uint8_t)WIN_NE_RING0_BYTES;
     tss[3] = (uint8_t)(WIN_NE_RING0_BYTES >> 8);
-    tss[4] = (uint8_t)g.ring0_selector;
-    tss[5] = (uint8_t)(g.ring0_selector >> 8);
+    tss[4] = (uint8_t)gp->ring0_selector;
+    tss[5] = (uint8_t)(gp->ring0_selector >> 8);
     const uint8_t exit_ret[4] = {
         (uint8_t)WIN_NE_EXIT_STUB_OFFSET, (uint8_t)(WIN_NE_EXIT_STUB_OFFSET >> 8),
-        (uint8_t)g.thunk3_selector, (uint8_t)(g.thunk3_selector >> 8)
+        (uint8_t)gp->thunk3_selector, (uint8_t)(gp->thunk3_selector >> 8)
     };
     uint8_t fault_idt[WIN_NE_FAULT_IDT_BYTES];
     uint8_t fault_code[WIN_NE_FAULT_CODE_BYTES];
@@ -545,14 +546,14 @@ int win_ne_execute(const char *path, const char *cmdline, int show, int (*yield)
     if (!win_ne_boot_make(boot, sizeof(boot), &args) ||
         !win_ne_fault_make(fault_idt, fault_code, &args) ||
         !win_ne_dos_make(dos, &args) ||
-        !write_psp(&g, cmdline) ||
-        !g.io.write(g.opaque, ring0, tss, sizeof(tss)) ||
-        !g.io.write(g.opaque, stack->linear + sp, exit_ret, sizeof(exit_ret)) ||
-        !g.io.write(g.opaque, linear, boot, sizeof(boot)) ||
-        !g.io.write(g.opaque, g.thunk_linear + WIN_NE_DOS_STUB_OFFSET, dos, sizeof(dos)) ||
-        !g.io.write(g.opaque, g.thunk_linear + WIN_NE_FAULT_IDT_OFFSET,
+        !write_psp(gp, cmdline) ||
+        !gp->io.write(gp->opaque, ring0, tss, sizeof(tss)) ||
+        !gp->io.write(gp->opaque, stack->linear + sp, exit_ret, sizeof(exit_ret)) ||
+        !gp->io.write(gp->opaque, linear, boot, sizeof(boot)) ||
+        !gp->io.write(gp->opaque, gp->thunk_linear + WIN_NE_DOS_STUB_OFFSET, dos, sizeof(dos)) ||
+        !gp->io.write(gp->opaque, gp->thunk_linear + WIN_NE_FAULT_IDT_OFFSET,
                     fault_idt, sizeof(fault_idt)) ||
-        !g.io.write(g.opaque, g.thunk_linear + WIN_NE_FAULT_CODE_OFFSET,
+        !gp->io.write(gp->opaque, gp->thunk_linear + WIN_NE_FAULT_CODE_OFFSET,
                     fault_code, sizeof(fault_code))) {
         rc = WIN_NE_EXEC_BAD_BOOT;
         goto done;
@@ -568,7 +569,7 @@ int win_ne_execute(const char *path, const char *cmdline, int show, int (*yield)
     cpu->prefetch_base = (uint32_t)-1;
     win_ne_guest_api_context api;
     memset(&api, 0, sizeof(api));
-    api.image = &g;
+    api.image = gp;
     api.read = read_guest;
     api.path = path;
     api.show = show;
@@ -576,8 +577,8 @@ int win_ne_execute(const char *path, const char *cmdline, int show, int (*yield)
     ne_run run = {
         .gate = { .dos_context = &old, .api = &api, .scratch_linear = linear,
                   .ring0_linear = ring0, .rm_segment = args.rm_segment,
-                  .ring0_selector = g.ring0_selector },
-        .g = &g
+                  .ring0_selector = gp->ring0_selector },
+        .g = gp
     };
     api.exec = &run;
     win_ne_user_start(&api);
@@ -587,7 +588,7 @@ int win_ne_execute(const char *path, const char *cmdline, int show, int (*yield)
                              cpu->gprx[regbx].r16;
     int guest_fault = rc == WINX86_FAULT || api.dead;
     if (rc == WINX86_FAULT)
-        fault_where(&g, &run.gate, cpu, &r->fault);
+        fault_where(gp, &run.gate, cpu, &r->fault);
     else if (api.dead)
         r->fault = api.fault;           /* in a callback */
     restore_cpu(cpu, &old);
@@ -596,12 +597,24 @@ int win_ne_execute(const char *path, const char *cmdline, int show, int (*yield)
     r->stopped = api.stopped;
     r->value = api.exited ? api.exit_code : guest_fault ? 0 : result;
     r->unsupported = api.unsupported;
+    memcpy(r->undefined, api.undefined, sizeof(r->undefined));
     r->invalid_call = api.invalid_call;
     rc = guest_fault ? WIN_NE_EXEC_FAULT :
          rc == WINX86_BAD_SERVICE && api.unsupported ? WIN_NE_EXEC_UNSUPPORTED :
          rc == WINX86_BAD_SERVICE || api.invalid_args ? WIN_NE_EXEC_BAD_ARGS : WIN_NE_OK;
 done:
-    win_ne_guest_release(&g);
+    win_ne_guest_release(gp);
+    return rc;
+}
+
+int win_ne_execute(const char *path, const char *cmdline, int show, int (*yield)(void),
+                   win_ne_result *r)
+{
+    win_ne_guest_image *g = (win_ne_guest_image *)malloc(sizeof(*g));
+    if (!g)
+        return WIN_NE_NO_MEMORY;
+    int rc = execute(g, path, cmdline, show, yield, r);
+    free(g);
     return rc;
 }
 #endif

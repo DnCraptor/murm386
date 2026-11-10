@@ -60,6 +60,31 @@ HMENU WINAPI CreatePopupMenu(void) { return menu_new(1); }
 
 BOOL WINAPI IsMenu(HMENU h) { return menu_get(h) != NULL; }
 
+/* Windows 2's one function for all: by MF_APPEND, MF_DELETE, MF_REMOVE,
+ * MF_CHANGE, else an insertion */
+BOOL WINAPI ChangeMenu(HMENU h, UINT pos, LPCSTR text, UINT id, UINT flags)
+{
+    UINT f = flags & ~(UINT)(MF_APPEND | MF_DELETE | MF_REMOVE | MF_CHANGE);
+    if (flags & MF_APPEND)
+        return AppendMenu(h, f, id, text);
+    if (flags & MF_DELETE)
+        return DeleteMenu(h, pos, f);
+    if (flags & MF_REMOVE)
+        return RemoveMenu(h, pos, f);
+    if (flags & MF_CHANGE)
+        return ModifyMenu(h, pos, f, id, text);
+    return InsertMenu(h, pos, f, id, text);
+}
+
+DWORD WINAPI GetMenuCheckMarkDimensions(void) { return MAKELONG(CHECK_W, CHECK_W); }
+
+/* bitmaps of its own for an item's check: taken, the check drawn as WINN's */
+BOOL WINAPI SetMenuItemBitmaps(HMENU h, UINT pos, UINT flags, HBITMAP unchecked, HBITMAP checked)
+{
+    (void)pos; (void)flags; (void)unchecked; (void)checked;
+    return IsMenu(h);
+}
+
 BOOL WINAPI DestroyMenu(HMENU h)
 {
     wmenu *m = menu_get(h);

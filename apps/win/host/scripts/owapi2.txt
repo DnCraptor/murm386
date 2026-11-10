@@ -1,0 +1,27 @@
+# KERNEL and USER, more, for a Win16 program on the i386 core: the
+# clipboard (text, a format of its own), DlgDirList and DlgDirSelect,
+# window placement, EnumProps, LoadMenuIndirect, ChangeMenu,
+# ScrollWindowEx, CreateCursor, CreateIcon, CopyIcon, lstrcatn,
+# AllocSelectorArray, SelectorAccessRights, GetCodeHandle; then (SPACE) a
+# call of OpenComm, which WINN has not: the program ends, the call named:
+#     ./winhost scripts/owapi2.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OWAPI2
+key RETURN
+wait 200
+snap ok_dir.ppm
+key RETURN
+wait 100
+snap ok_lines.ppm
+key SPACE
+wait 100
+snap ok_undefined.ppm
+key RETURN
+wait 50
+snap ok_end.ppm
+exit
