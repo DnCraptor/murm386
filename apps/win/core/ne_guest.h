@@ -29,6 +29,10 @@
 #define WIN_NE_SERVICE_DOS3CALL 102u
 #define WIN_NE_SERVICE_COMMDLG  0x5000u
 #define WIN_NE_SERVICE_SHELL    0x6000u
+/* WIN87EM's: __FPMATH (1) is x86 code of WINN's (the coprocessor is the
+ * emulator's own); the rest native */
+#define WIN_NE_SERVICE_WIN87EM  0x7000u
+#define WIN_NE_SERVICE_FPMATH   (WIN_NE_SERVICE_WIN87EM + 1u)
 /* GetWinFlags: protected mode, a 386, standard mode, a coprocessor */
 #define WIN_NE_WINFLAGS         0x0415u
 

@@ -526,6 +526,13 @@ int ne_kernel_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *d
     win_ne_guest_image *g = (win_ne_guest_image *)c->image;
     if (service >= WIN_NE_SERVICE_SHELL && service < WIN_NE_SERVICE_SHELL + 0x1000u)
         return shell_service(a, service, v);
+    switch (service) {
+    case WIN_NE_SERVICE_WIN87EM + 3:    /* __WinEm87Info, __WinEm87Restore, */
+    case WIN_NE_SERVICE_WIN87EM + 4:    /* __WinEm87Save(LPVOID, int): the */
+    case WIN_NE_SERVICE_WIN87EM + 5:    /* coprocessor is no emulator's */
+        *v = 0;
+        return 1;
+    }
     if (gdi_more(a, service, v, dword))
         return 1;
     switch (service) {

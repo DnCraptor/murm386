@@ -497,6 +497,11 @@ int win_ne_execute(const char *path, const char *cmdline, int show, int (*yield)
         !cpu->ext_accessors->set_seg16 || !cpu->ext_accessors->get_flags ||
         !cpu->ext_accessors->set_flags)
         return WIN_NE_EXEC_BAD_CPU;
+    /* The coprocessor (GetWinFlags says there is one; WIN87EM's programs
+     * use its instructions): the emulator's own, on from now on if the
+     * configuration had it off */
+    if (!cpu->fpu && cpu->ext_accessors->enable_fpu)
+        cpu->ext_accessors->enable_fpu(cpu);
 
     win_ne_guest_image g;
     int rc = win_ne_guest_load(path, &g, win_ne_guest_dos_io(), NULL);

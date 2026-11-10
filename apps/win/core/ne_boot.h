@@ -82,6 +82,10 @@
 #define WIN_NE_FAULT_CODE_OFFSET   (WIN_NE_FAULT_IDT_OFFSET + WIN_NE_FAULT_IDT_BYTES)
 #define WIN_NE_FAULT_CODE_BYTES    272u
 #define WIN_NE_FAULT_VECTORS         32u
+/* WIN87EM's __FPMATH (its functions by BX), after the fault code: ring 3
+ * code a thunk jumps to (ne_guest.c) */
+#define WIN_NE_FPMATH_OFFSET       (WIN_NE_FAULT_CODE_OFFSET + WIN_NE_FAULT_CODE_BYTES)
+#define WIN_NE_FPMATH_BYTES        96u
 /* The ring 0 area: a 16-bit TSS (SP0 at 2, SS0 at 4), then the stack, up
  * to the end of the segment; its own data selector, DPL 0 */
 #define WIN_NE_RING0_OFFSET        3328u

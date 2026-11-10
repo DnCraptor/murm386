@@ -9,7 +9,7 @@
  *
  *     ./test_ne_run NEDIALOG.EXE NELOOP-fixture.exe NEFAULT.EXE NEHANG.EXE \
  *                   NESTACK.EXE NECLI.EXE NEOUT.EXE NECR0.EXE NEHLT.EXE \
- *                   OWHELLO.EXE OWBUSY.EXE OWSEGS.EXE
+ *                   NEFPU.EXE OWHELLO.EXE OWBUSY.EXE OWSEGS.EXE
  */
 #include <assert.h>
 #include <stdint.h>
@@ -95,6 +95,8 @@ int main(int argc, char **argv)
                    r.fault.ip == (ends_with(f, "NEOUT.EXE") ? 11 : 5));
         else if (ends_with(f, "NEHANG.EXE"))     /* other tasks run; it ends when told */
             assert(rc == 0 && r.stopped && yields == 3);
+        else if (ends_with(f, "NEFPU.EXE"))       /* the coprocessor, WIN87EM */
+            assert(rc == 0 && r.exited && r.value == 117);
         else if (ends_with(f, "NELOOP-fixture.exe"))
             assert(rc == 0 && boxes >= 1);
         else if (ends_with(f, "OWHELLO.EXE"))     /* Open Watcom's start-up code */

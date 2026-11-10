@@ -29,8 +29,10 @@ _Static_assert(WIN_NE_DOS_STUB_OFFSET + WIN_NE_DOS_STUB_BYTES <= WIN_NE_FAULT_ID
                "NE DOS stubs overlap the private IDT");
 _Static_assert(WIN_NE_FAULT_IDT_OFFSET + WIN_NE_FAULT_IDT_BYTES <=
                WIN_NE_FAULT_CODE_OFFSET, "NE private IDT overlaps fault code");
-_Static_assert(WIN_NE_FAULT_CODE_OFFSET + WIN_NE_FAULT_CODE_BYTES <= WIN_NE_RING0_OFFSET,
-               "NE fault recovery overlaps the ring 0 area");
+_Static_assert(WIN_NE_FAULT_CODE_OFFSET + WIN_NE_FAULT_CODE_BYTES <= WIN_NE_FPMATH_OFFSET,
+               "NE fault recovery overlaps __FPMATH");
+_Static_assert(WIN_NE_FPMATH_OFFSET + WIN_NE_FPMATH_BYTES <= WIN_NE_RING0_OFFSET,
+               "NE __FPMATH overlaps the ring 0 area");
 _Static_assert(WIN_NE_RING0_OFFSET + WIN_NE_RING0_BYTES <= WIN_NE_THUNK_SEGMENT_BYTES,
                "NE ring 0 area exceeds the thunk segment");
 
@@ -182,11 +184,12 @@ static int assign_selector(void *opaque, uint16_t index, uint16_t flags,
  * does). The service number, KERNEL ordinal n, USER 0x1000 + n, GDI
  * 0x3000 + n, lives entirely inside WINN; it is not a guest pointer or an
  * emulated IRQ. */
-enum { M_KERNEL, M_USER, M_GDI, M_KEYBOARD, M_COMMDLG, M_SHELL, M_COUNT };
+enum { M_KERNEL, M_USER, M_GDI, M_KEYBOARD, M_COMMDLG, M_SHELL, M_WIN87EM, M_COUNT };
 static const uint16_t module_base[] = { 0, 0x1000u, 0x3000u, WIN_NE_SERVICE_KEYBOARD,
-                                        WIN_NE_SERVICE_COMMDLG, WIN_NE_SERVICE_SHELL };
+                                        WIN_NE_SERVICE_COMMDLG, WIN_NE_SERVICE_SHELL,
+                                        WIN_NE_SERVICE_WIN87EM };
 static const char *const module_names[M_COUNT] = { "KERNEL", "USER", "GDI", "KEYBOARD",
-                                                   "COMMDLG", "SHELL" };
+                                                   "COMMDLG", "SHELL", "WIN87EM" };
 static const struct {
     uint8_t module;                 /* M_* */
     uint16_t ordinal;
@@ -309,6 +312,10 @@ static const struct {
     { M_SHELL, 21, "FindExecutable", 12 },
     { M_SHELL, 22, "ShellAbout", 12 },
     { M_SHELL, 34, "ExtractIcon", 8 },
+    { M_WIN87EM, 1, "__FPMATH", 0 },
+    { M_WIN87EM, 3, "__WinEm87Info", 6 },
+    { M_WIN87EM, 4, "__WinEm87Restore", 6 },
+    { M_WIN87EM, 5, "__WinEm87Save", 6 },
     { M_USER, 420, "wsprintf", 0 },
     { M_USER, 87, "DialogBox", 12 },
     { M_USER, 88, "EndDialog", 4 },
@@ -436,6 +443,8 @@ static int module_of(const win_ne_import *imp)
         return M_COMMDLG;
     if (name_eq(imp->module, "SHELL") || name_eq(imp->module, "SHELL.DLL"))
         return M_SHELL;
+    if (name_eq(imp->module, "WIN87EM") || name_eq(imp->module, "WIN87EM.DLL"))
+        return M_WIN87EM;
     return -1;
 }
 
@@ -594,15 +603,53 @@ static int resolve_import(void *opaque, const win_ne_import *imp,
     return 1;
 }
 
-/* A thunk: the service's number, CALL FAR the API gate (ring 0), RETF
- * releasing its PASCAL arguments; DOS3Call's an INT 21h of its own */
-static void thunk_bytes(const win_ne_guest_image *g, uint16_t id, uint8_t p[THUNK_BYTES])
+/* WIN87EM's __FPMATH: its function in BX, its operands in DX:AX and the
+ * coprocessor's stack; the emulator's coprocessor does the work. 0, 1:
+ * install and initialize; 4: the control word from AX; 5: the control
+ * word into AX; 7: pop as a long into DX:AX; 8: the status word into AX,
+ * then cleared; 9: cleared; 11: a coprocessor there (DX:AX 1); the rest
+ * (2 to remove it, 3 its error handler, 6, 10, 12): AX 0. */
+static const uint8_t fpmath_code[] = {
+    0x55, 0x89, 0xe5, 0x50, 0x50,       /* push bp; mov bp,sp; push ax x2 */
+    0x83, 0xfb, 0x01, 0x77, 0x04,       /* cmp bx,1; ja n1 */
+    0xdb, 0xe3, 0xeb, 0x4b,             /* fninit; jmp zero */
+    0x83, 0xfb, 0x04, 0x75, 0x05,       /* n1: cmp bx,4; jne n4 */
+    0xd9, 0x6e, 0xfe, 0xeb, 0x43,       /* fldcw [bp-2]; jmp out */
+    0x83, 0xfb, 0x05, 0x75, 0x05,       /* n4: cmp bx,5; jne n5 */
+    0xd9, 0x7e, 0xfe, 0xeb, 0x32,       /* fnstcw [bp-2]; jmp ax2 */
+    0x83, 0xfb, 0x07, 0x75, 0x08,       /* n5: cmp bx,7; jne n7 */
+    0xdb, 0x5e, 0xfc,                   /* fistp dword [bp-4] */
+    0x8b, 0x56, 0xfe, 0xeb, 0x20,       /* mov dx,[bp-2]; jmp ax4 */
+    0x83, 0xfb, 0x08, 0x75, 0x06,       /* n7: cmp bx,8; jne n8 */
+    0xdf, 0xe0, 0xdb, 0xe2, 0xeb, 0x21, /* fnstsw ax; fnclex; jmp out */
+    0x83, 0xfb, 0x09, 0x75, 0x04,       /* n8: cmp bx,9; jne n9 */
+    0xdb, 0xe2, 0xeb, 0x16,             /* fnclex; jmp zero */
+    0x83, 0xfb, 0x0b, 0x75, 0x11,       /* n9: cmp bx,11; jne zero */
+    0x31, 0xd2, 0xb8, 0x01, 0x00,       /* xor dx,dx; mov ax,1 */
+    0xeb, 0x0c,                         /* jmp out */
+    0x8b, 0x46, 0xfc, 0xeb, 0x07,       /* ax4: mov ax,[bp-4]; jmp out */
+    0x8b, 0x46, 0xfe, 0xeb, 0x02,       /* ax2: mov ax,[bp-2]; jmp out */
+    0x31, 0xc0,                         /* zero: xor ax,ax */
+    0x89, 0xec, 0x5d, 0xcb,             /* out: mov sp,bp; pop bp; retf */
+};
+_Static_assert(sizeof(fpmath_code) <= WIN_NE_FPMATH_BYTES, "__FPMATH too big");
+
+/* A thunk at its offset: the service's number, CALL FAR the API gate
+ * (ring 0), RETF releasing its PASCAL arguments; DOS3Call's an INT 21h of
+ * its own, __FPMATH's a jump to its code */
+static void thunk_bytes(const win_ne_guest_image *g, uint16_t id, uint16_t at,
+                        uint8_t p[THUNK_BYTES])
 {
     uint16_t args = service_args(id);
     memset(p, 0xcc, THUNK_BYTES);
     if (id == WIN_NE_SERVICE_DOS3CALL) {
         p[0] = 0xcd; p[1] = 0x21;          /* int 21h, with its registers */
         p[2] = 0xcb;                       /* retf */
+        return;
+    }
+    if (id == WIN_NE_SERVICE_FPMATH) {
+        p[0] = 0xe9;                       /* jmp near */
+        put16(p + 1, (uint16_t)(WIN_NE_FPMATH_OFFSET - (at + 3u)));
         return;
     }
     p[0] = 0xb8; put16(p + 1, id);         /* mov ax,service */
@@ -637,7 +684,7 @@ uint32_t win_ne_guest_proc(win_ne_guest_image *g, unsigned module, uint16_t ordi
         return 0;
     if (g->thunk_count != before) {         /* a new one: written now */
         uint8_t p[THUNK_BYTES];
-        thunk_bytes(g, id, p);
+        thunk_bytes(g, id, off, p);
         if (!g->io.write(g->opaque, g->thunk_linear + off, p, sizeof(p))) {
             g->thunk_count = before;
             return 0;
@@ -743,11 +790,14 @@ int win_ne_guest_load(const char *path, win_ne_guest_image *out,
              * gate (to ring 0). The OUT is executed in real mode, allowing
              * its native handler to use DOS/BIOS. RETF imm16 restores the
              * Win16 PASCAL caller's SP. */
-            thunk_bytes(out, id, p);
+            thunk_bytes(out, id, (uint16_t)(i * THUNK_BYTES), p);
         }
         if (!io->write(opaque, out->thunk_linear + i * THUNK_BYTES, p, sizeof(p)))
             goto loaded_fail;
     }
+    if (!io->write(opaque, out->thunk_linear + WIN_NE_FPMATH_OFFSET, fpmath_code,
+                   sizeof(fpmath_code)))
+        goto loaded_fail;
     if (!io->write(opaque, out->gdt_linear, out->gdt, gdtsize))
         goto loaded_fail;
 
@@ -1062,7 +1112,7 @@ int win_ne_guest_load_library(win_ne_guest_image *g, const char *name)
             return -1;
         for (uint16_t t = 0; t < g->thunk_count; t++) {
             uint8_t p[THUNK_BYTES];
-            thunk_bytes(g, g->thunk_services[t], p);
+            thunk_bytes(g, g->thunk_services[t], (uint16_t)(t * THUNK_BYTES), p);
             if (!g->io.write(g->opaque, g->thunk_linear + t * THUNK_BYTES, p, sizeof(p)))
                 return -1;
         }

@@ -1,0 +1,18 @@
+# The coprocessor for a Win16 program on the i386 core (WIN87EM's, the
+# emulator's own): arithmetic, sqrt, sin, floor, exp, conversions,
+# _control87, printf's formatting; the results in a message box:
+#     ./winhost scripts/owfpu.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OWFPU
+key RETURN
+wait 200
+snap ok_fpu.ppm
+key RETURN
+wait 50
+snap ok_fpu_end.ppm
+exit

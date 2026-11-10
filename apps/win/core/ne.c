@@ -312,6 +312,39 @@ static int ne_entry_target(FILE *f, uint64_t size, uint64_t base,
     return WIN_NE_UNRESOLVED;
 }
 
+/* An OS fixup: a coprocessor instruction (its type: 1 to 4 with DS, SS,
+ * CS or ES, 5 any other, 6 a WAIT). The image has the coprocessor's own
+ * (WAIT, ESC ...), Windows turns them into the emulator's interrupts (INT
+ * 34h to 3Dh) only without a coprocessor, and the emulator has one: nothing
+ * to do. Should a linker have left the interrupts in: the instructions
+ * again. A second record for an override's ESC byte finds no INT there. */
+static int ne_os_fixup(win_ne_segment_image *seg, const uint8_t rec[NE_FIXUP_SIZE])
+{
+    static const uint8_t override[4] = { 0x3e, 0x36, 0x2e, 0x26 };   /* DS SS CS ES */
+    uint16_t where = rd16(rec + 2), type = rd16(rec + 4);
+    if (!type || type > 6)
+        return WIN_NE_UNSUPPORTED;
+    if ((uint32_t)where + 2u > seg->size)
+        return WIN_NE_BAD_IMAGE;
+    uint8_t *p = seg->data + where;
+    if (p[0] != 0xcd)
+        return WIN_NE_OK;
+    if (p[1] >= 0x34 && p[1] <= 0x3b) {          /* WAIT, ESC 0 to 7 */
+        p[1] = (uint8_t)(p[1] - 0x34 + 0xd8);
+        p[0] = 0x9b;
+    } else if (p[1] == 0x3d) {                   /* WAIT */
+        p[0] = 0x90;
+        p[1] = 0x9b;
+    } else if (p[1] == 0x3c) {                   /* WAIT, segment, ESC */
+        if ((uint32_t)where + 3u > seg->size)
+            return WIN_NE_BAD_IMAGE;
+        p[0] = 0x9b;
+        p[1] = override[p[2] >> 6];
+        p[2] |= 0xc0;
+    }
+    return WIN_NE_OK;
+}
+
 /* Resolve one fixup, then apply its target through all chain links. Read the
  * next link BEFORE overwriting its source. Chained records have a 16-bit
  * next-link even when their relocation source type is a single byte. */
@@ -333,7 +366,7 @@ static int ne_apply_record(FILE *f, uint64_t file_size, uint64_t base,
     if ((rec[0] & 0xf0u) || (rec[1] & ~7u) || !width)
         return WIN_NE_UNSUPPORTED;
     if (kind == 3)
-        return WIN_NE_UNSUPPORTED; /* OS/FPU fixup */
+        return ne_os_fixup(srcseg, rec);
     if (kind == 0) {
         uint16_t target_idx = rec[4];
         if (target_idx == 0xffu) {
