@@ -81,6 +81,21 @@ UINT WINAPI GetNumTasks(void)
     return n;
 }
 
+/* the task after h in the list (0: the first), the kernel's left out */
+HTASK task_next(HTASK h)
+{
+    wtask *t = tasks;
+    if (h) {
+        while (t && t->h != h)
+            t = t->next;
+        t = t ? t->next : NULL;
+    }
+    for (; t; t = t->next)
+        if (t != &kernel_task && t->state != WTASK_DEAD)
+            return t->h;
+    return 0;
+}
+
 /* ---------------------------------------------------------------- switching */
 
 #ifdef TASK_HOST

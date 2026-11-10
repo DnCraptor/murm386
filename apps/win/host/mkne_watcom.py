@@ -94,6 +94,20 @@ OWMETA: metafiles: one recorded (pens, a hatch and a pattern brush, a
     record by record (EnumMetaFile, PlayMetaFileRecord); its bits and back,
     a file and back: "bits 1, header 1, valid 1 1, file 1, records 47,
     pens+brushes 5", "played 47"
+
+OWSYS: Windows' own DLLs, WINN's: MMSYSTEM (no devices, MCI none,
+    timeGetTime, timeSetEvent's procedure, a RIFF file written and read
+    back through mmio), TOOLHELP (TimerCount, MemManInfo, SystemHeapInfo,
+    the tasks, the modules, MemoryRead), VER (its own VERSIONINFO,
+    VerQueryValue, VerLanguageName, VerFindFile, VerInstallFile expanding)
+    and LZEXPAND (a file as COMPRESS.EXE makes them: LZOpenFile by its
+    name, LZRead, LZSeek, LZCopy, GetExpandedName): "devs 0 0 0 0, snd 0,
+    riff 0 136 100 1, ...", "time 1, event 1", "timer 1, page 4096, heap
+    80%, tasks 1 mine 1, modules 11 KERNEL, user 1, read 1234", "ver 1,
+    file 10002, \"WINN system DLLs test\", English (United States), find 1
+    1" (VerFindFile: in its own directory), "lz \"ABCABCABCABC\" \"ABC\"
+    12, C:\\HOSTWIN\\OWSYS.TXT, copy 12, install 0 12", "ticks 1" (0.3 s
+    of timeSetEvent's 50 ms, at least 4 calls, however late the messages)
 """
 import sys
 
@@ -4804,6 +4818,403 @@ PROGRAMS = {
             '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
             '0000000000000000000000000000f309f3090000000000000000000000000000000000000000000000000000'
             '000000000000000000000020ea070000'
+        )),
+    'OWSYS': (
+        # wcc -bt=windows -ms owsys.c; wlink @owsys.lnk; wrc -bt=windows owsys.rc owsys.exe
+        # ---- owsys.c
+        #     #include <windows.h>
+        #     #include <mmsystem.h>
+        #     #include <toolhelp.h>
+        #     #include <ver.h>
+        #     #include <lzexpand.h>
+        #     #include <string.h>
+        #
+        #     /* Windows' own DLLs, as WINN has them: MMSYSTEM (no devices, MCI none,
+        #      * timeGetTime, timeSetEvent's procedure, mmio: a RIFF file written and
+        #      * read back), TOOLHELP (the timer, the memory, tasks, modules,
+        #      * MemoryRead), VER (its own VERSIONINFO, VerQueryValue, VerLanguageName,
+        #      * VerFindFile, VerInstallFile expanding) and LZEXPAND (a file compressed
+        #      * as COMPRESS.EXE does: LZOpenFile finds it by its name ending in _,
+        #      * LZRead, LZSeek, LZCopy, GetExpandedName); what it found as text */
+        #     static char lines[6][100];
+        #     static volatile int ticks;
+        #     static UINT timer;
+        #
+        #     void FAR PASCAL TimeProc(UINT id, UINT msg, DWORD user, DWORD dw1, DWORD dw2)
+        #     {
+        #         if (user == 1234)
+        #             ticks++;
+        #     }
+        #
+        #     /* "ABCABCABCABC": three bytes as they are, then nine from the window */
+        #     static const BYTE packed[] = { 'S', 'Z', 'D', 'D', 0x88, 0xf0, 0x27, 0x33, 'A', 'T',
+        #                                    12, 0, 0, 0, 0x07, 'A', 'B', 'C', 0xf0, 0xf6 };
+        #
+        #     static void mm(void)
+        #     {
+        #         char err[64], ret[16];
+        #         MMCKINFO riff, ck;
+        #         HMMIO h;
+        #         long n;
+        #         DWORD t0 = timeGetTime();
+        #         static char data[100], back[100];
+        #         int i;
+        #         PCMWAVEFORMAT fmt;
+        #         for (i = 0; i < 100; i++)
+        #             data[i] = (char)i;
+        #         _fmemset(&fmt, 0, sizeof(fmt));
+        #         fmt.wf.wFormatTag = WAVE_FORMAT_PCM;
+        #         fmt.wf.nChannels = 1;
+        #         fmt.wf.nSamplesPerSec = 11025;
+        #         fmt.wf.nAvgBytesPerSec = 11025;
+        #         fmt.wf.nBlockAlign = 1;
+        #         fmt.wBitsPerSample = 8;
+        #         h = mmioOpen("C:\\HOSTWIN\\OWSYS.WAV", NULL, MMIO_CREATE | MMIO_WRITE);
+        #         riff.fccType = mmioFOURCC('W', 'A', 'V', 'E');
+        #         mmioCreateChunk(h, &riff, MMIO_CREATERIFF);
+        #         ck.ckid = mmioFOURCC('f', 'm', 't', ' ');
+        #         ck.cksize = 0;
+        #         mmioCreateChunk(h, &ck, 0);
+        #         mmioWrite(h, (HPSTR)&fmt, sizeof(fmt));
+        #         mmioAscend(h, &ck, 0);
+        #         ck.ckid = mmioFOURCC('d', 'a', 't', 'a');
+        #         mmioCreateChunk(h, &ck, 0);
+        #         mmioWrite(h, data, 100);
+        #         mmioAscend(h, &ck, 0);
+        #         mmioAscend(h, &riff, 0);
+        #         mmioClose(h, 0);
+        #         h = mmioOpen("C:\\HOSTWIN\\OWSYS.WAV", NULL, MMIO_READ);
+        #         riff.fccType = mmioStringToFOURCC("wave", MMIO_TOUPPER) == mmioFOURCC('W', 'A', 'V', 'E') ?
+        #                        mmioFOURCC('W', 'A', 'V', 'E') : 0;
+        #         i = mmioDescend(h, &riff, NULL, MMIO_FINDRIFF);
+        #         ck.ckid = mmioFOURCC('d', 'a', 't', 'a');
+        #         i += mmioDescend(h, &ck, &riff, MMIO_FINDCHUNK);
+        #         n = mmioRead(h, back, sizeof(back));
+        #         mmioClose(h, 0);
+        #         mmioOpen("C:\\HOSTWIN\\OWSYS.WAV", NULL, MMIO_DELETE);
+        #         mciGetErrorString(mciSendString("open cdaudio", ret, sizeof(ret), NULL), err, sizeof(err));
+        #         wsprintf(lines[0], "devs %d %d %d %d, snd %d, riff %d %ld %ld %d, %s",
+        #                  waveOutGetNumDevs(), midiOutGetNumDevs(), joyGetNumDevs(), auxGetNumDevs(),
+        #                  sndPlaySound("X.WAV", SND_ASYNC), i, riff.cksize, ck.cksize,
+        #                  n == 100 && !_fmemcmp(back, data, 100), (LPSTR)err);
+        #         timer = timeSetEvent(50, 10, (LPTIMECALLBACK)TimeProc, 1234, TIME_PERIODIC);
+        #         wsprintf(lines[1], "time %d, event %d", timeGetTime() >= t0, timer != 0);
+        #     }
+        #
+        #     static void th(void)
+        #     {
+        #         TIMERINFO ti;
+        #         MEMMANINFO mi;
+        #         TASKENTRY te;
+        #         MODULEENTRY me;
+        #         SYSHEAPINFO hi;
+        #         int tasks = 0, mods = 0, mine = 0;
+        #         char first[10];
+        #         WORD w = 0x1234, got = 0;
+        #         ti.dwSize = sizeof(ti);
+        #         mi.dwSize = sizeof(mi);
+        #         te.dwSize = sizeof(te);
+        #         me.dwSize = sizeof(me);
+        #         hi.dwSize = sizeof(hi);
+        #         TimerCount(&ti);
+        #         MemManInfo(&mi);
+        #         SystemHeapInfo(&hi);
+        #         if (TaskFirst(&te))
+        #             do {
+        #                 tasks++;
+        #                 mine |= te.hTask == GetCurrentTask() && !lstrcmp(te.szModule, "OWSYS");
+        #             } while (TaskNext(&te));
+        #         first[0] = 0;
+        #         if (ModuleFirst(&me)) {
+        #             lstrcpy(first, me.szModule);
+        #             do
+        #                 mods++;
+        #             while (ModuleNext(&me));
+        #         }
+        #         MemoryRead(SELECTOROF((LPVOID)&w), OFFSETOF((LPVOID)&w), &got, 2);
+        #         wsprintf(lines[2], "timer %d, page %u, heap %u%%, tasks %d mine %d, modules %d %s, user %d, read %x",
+        #                  ti.dwmsSinceStart > 0, mi.wPageSize, hi.wUserFreePercent, tasks > 0, mine, mods,
+        #                  (LPSTR)first, ModuleFindName(&me, "USER") && !lstrcmp(me.szModule, "USER"), got);
+        #     }
+        #
+        #     static void ver(void)
+        #     {
+        #         char path[128], name[48], cur[64], dest[64], dir[128], file[16], *p;
+        #         DWORD handle, size;
+        #         static char block[1024];
+        #         VS_FIXEDFILEINFO FAR *fi = NULL;
+        #         LPSTR desc = NULL;
+        #         DWORD FAR *tr = NULL;
+        #         UINT len = 0, curlen = sizeof(cur), destlen = sizeof(dest);
+        #         GetModuleFileName(GetModuleHandle("OWSYS"), path, sizeof(path));
+        #         size = GetFileVersionInfoSize(path, &handle);
+        #         GetFileVersionInfo(path, handle, sizeof(block), block);
+        #         VerQueryValue(block, "\\", (VOID FAR * FAR *)&fi, &len);
+        #         VerQueryValue(block, "\\StringFileInfo\\040904E4\\FileDescription", (VOID FAR * FAR *)&desc,
+        #                       &len);
+        #         VerQueryValue(block, "\\VarFileInfo\\Translation", (VOID FAR * FAR *)&tr, &len);
+        #         VerLanguageName(tr ? LOWORD(*tr) : 0, name, sizeof(name));
+        #         for (p = path + lstrlen(path); p > path && p[-1] != '\\'; p--)
+        #             ;                               /* its own directory: where it is found */
+        #         lstrcpy(file, p);
+        #         lstrcpy(dir, path);
+        #         dir[p - path > 3 ? p - path - 1 : p - path] = 0;
+        #         VerFindFile(0, file, "C:\\WINDOWS", dir, cur, &curlen, dest, &destlen);
+        #         wsprintf(lines[3], "ver %d, file %lx, \"%s\", %s, find %d %d", size > 100,
+        #                  fi ? fi->dwFileVersionMS : 0L, desc ? desc : (LPSTR)"", (LPSTR)name,
+        #                  !lstrcmpi(cur, dir), !lstrcmpi(dest, dir));
+        #     }
+        #
+        #     static void lz(void)
+        #     {
+        #         OFSTRUCT of;
+        #         HFILE f;
+        #         int h, n, m;
+        #         long copied, inst;
+        #         char buf[16], again[4], expanded[128], tmp[16];
+        #         UINT tmplen = sizeof(tmp);
+        #         f = _lcreat("C:\\HOSTWIN\\OWSYS.TX_", 0);
+        #         _lwrite(f, packed, sizeof(packed));
+        #         _lclose(f);
+        #         h = LZOpenFile("C:\\HOSTWIN\\OWSYS.TXT", &of, OF_READ);
+        #         n = LZRead(h, buf, sizeof(buf));
+        #         buf[n > 0 ? n : 0] = 0;
+        #         LZSeek(h, 3, 0);
+        #         m = LZRead(h, again, 3);
+        #         again[3] = 0;
+        #         LZClose(h);
+        #         GetExpandedName("C:\\HOSTWIN\\OWSYS.TX_", expanded);
+        #         h = LZOpenFile("C:\\HOSTWIN\\OWSYS.TX_", &of, OF_READ);
+        #         f = _lcreat("C:\\HOSTWIN\\OWSYS.OUT", 0);
+        #         copied = LZCopy(h, f);
+        #         LZClose(h);
+        #         _lclose(f);
+        #         inst = VerInstallFile(0, "OWSYS.TX_", "OWSYS2.TXT", "C:\\HOSTWIN", "C:\\HOSTWIN", "",
+        #                               tmp, &tmplen);
+        #         f = _lopen("C:\\HOSTWIN\\OWSYS2.TXT", OF_READ);
+        #         m = m == 3 ? (int)_llseek(f, 0, 2) : -1;
+        #         _lclose(f);
+        #         wsprintf(lines[4], "lz \"%s\" \"%s\" %d, %s, copy %ld, install %ld %d", (LPSTR)buf,
+        #                  (LPSTR)again, n, (LPSTR)expanded, copied, inst, m);
+        #         OpenFile("C:\\HOSTWIN\\OWSYS.TX_", &of, OF_DELETE);
+        #         OpenFile("C:\\HOSTWIN\\OWSYS.OUT", &of, OF_DELETE);
+        #         OpenFile("C:\\HOSTWIN\\OWSYS2.TXT", &of, OF_DELETE);
+        #     }
+        #
+        #     long FAR PASCAL WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+        #     {
+        #         PAINTSTRUCT ps;
+        #         HDC dc;
+        #         int i;
+        #         switch (msg) {
+        #         case WM_TIMER:
+        #             KillTimer(h, 1);
+        #             timeKillEvent(timer);
+        #             wsprintf(lines[5], "ticks %d", ticks >= 4);    /* 0.3 s of 50 ms: 6 */
+        #             InvalidateRect(h, NULL, TRUE);
+        #             return 0;
+        #         case WM_PAINT:
+        #             dc = BeginPaint(h, &ps);
+        #             for (i = 0; i < 6; i++)
+        #                 TextOut(dc, 8, 8 + 20 * i, lines[i], lstrlen(lines[i]));
+        #             EndPaint(h, &ps);
+        #             return 0;
+        #         case WM_DESTROY:
+        #             PostQuitMessage(0);
+        #             return 0;
+        #         }
+        #         return DefWindowProc(h, msg, wp, lp);
+        #     }
+        #
+        #     int PASCAL WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR cmd, int show)
+        #     {
+        #         WNDCLASS wc;
+        #         HWND h;
+        #         MSG m;
+        #         mm();
+        #         th();
+        #         ver();
+        #         lz();
+        #         _fmemset(&wc, 0, sizeof(wc));
+        #         wc.lpfnWndProc = WndProc;
+        #         wc.hInstance = hInstance;
+        #         wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        #         wc.hbrBackground = GetStockObject(WHITE_BRUSH);
+        #         wc.lpszClassName = "OwSys";
+        #         RegisterClass(&wc);
+        #         h = CreateWindow("OwSys", "System DLLs", WS_OVERLAPPEDWINDOW, 0, 10, 640, 180, NULL, NULL,
+        #                          hInstance, NULL);
+        #         ShowWindow(h, show);
+        #         UpdateWindow(h);
+        #         SetTimer(h, 1, 300, NULL);          /* 0.3 s of timeSetEvent's procedure */
+        #         while (GetMessage(&m, NULL, 0, 0)) {
+        #             TranslateMessage(&m);
+        #             DispatchMessage(&m);
+        #         }
+        #         return m.wParam;
+        #     }
+        # ---- owsys.rc
+        #     #include <windows.h>
+        #     #include <ver.h>
+        #
+        #     VS_VERSION_INFO VERSIONINFO
+        #     FILEVERSION 1,2,3,4
+        #     PRODUCTVERSION 1,2,0,0
+        #     FILEFLAGSMASK 0x3f
+        #     FILEOS VOS__WINDOWS16
+        #     FILETYPE VFT_APP
+        #     BEGIN
+        #         BLOCK "StringFileInfo"
+        #         BEGIN
+        #             BLOCK "040904E4"
+        #             BEGIN
+        #                 VALUE "CompanyName", "murm386"
+        #                 VALUE "FileDescription", "WINN system DLLs test"
+        #                 VALUE "FileVersion", "1.2.3.4"
+        #             END
+        #         END
+        #         BLOCK "VarFileInfo"
+        #         BEGIN
+        #             VALUE "Translation", 0x409, 1252
+        #         END
+        #     END
+        # ---- owsys.lnk
+        #     system windows
+        #     name owsys.exe
+        #     file owsys.o
+        #     library mmsystem.lib, toolhelp.lib, ver.lib, lzexpand.lib
+        bytes.fromhex(
+            '4d5a80000100000004000000ffff0000b8000000000000004000000000000000000000000000000000000000'
+            '00000000000000000000000000000000800000000e1fba0e00b409cd21b8014ccd2154686973206973206120'
+            '57696e646f77732031362d6269742065786563757461626c650d0a240000000000000000000000004e450501'
+            'af0002000000000002030200000400208e0a010000000200020007000d0040005000680071007f0031010000'
+            '00000100010002089f00930a00000a039f00880d400d880d28091803410c400a01001080010000000000bc0a'
+            '760030000180000000000000054f5753595300000001000a000f0018001f0023002c0000084d4d5359535445'
+            '4d045553455208544f4f4c48454c50064b45524e454c03564552084c5a455850414e44034744490000096f77'
+            '7379732e657865000000ccebfd90909090001e5890455589e51e8ed8b80800e8050a837e1000750e817e0ed2'
+            '047507a17005ff0670051f5d4dca10005589e5b8c000e8e209535152565781ec90009affff00008946f08956'
+            'f2c746f400008b76f48a46f488847405ff46f4837ef4647cedb9100031db8cda8d46dee8db09b801008946de'
+            '8946e0c746e2112bc746e40000c746e6112bc746e800008946eac746ec08001eb810005031c0505050b80110'
+            '509affff000089c6c746ae5741c746b05645508d56a61e52b82000509affff0000c746ba666dc746bc742031'
+            'c08946be8946c0568d56ba1e52509affff0000568d56de1e5231c050b81000509affff0000568d56ba1e5231'
+            'c0509affff0000c746ba6461c746bc7461568d56ba1e5231c0509affff0000561eb874055031c050b8640050'
+            '9affff0000568d56ba1e5231c0509affff0000568d56a61e5231c0509affff00005631c0509affff00001eb8'
+            '10005031c0505050509affff000089c61eb8250050b81000509affff000081fa5645750d3d57417508ba5741'
+            'b85645eb0431d231c08956ae8946b0568d56a61e5231c05050b82000509affff000089c78946f4c746ba6461'
+            'c746bc7461568d56ba1e528d56a61e52b81000509affff000001c7897ef4561eb8d8055031c050b86400509a'
+            'ffff00008946ee89d75631c0509affff00001eb810005031c0505050b80002509affff00001eb82a00508d56'
+            'ce1e52b810005031c0509affff000052508d9666ff1e52b84000509affff00008d9666ff1e5285ff7520837e'
+            'ee64751ab8640050bb74058cd9b8d8058cdae81f0885c07505b80100eb0231c050ff76c0ff76beff76acff76'
+            'aaff76f41eb8370050b80100509affff0000509affff0000509affff0000509affff0000509affff0000501e'
+            'b83d00501eb81803509affff000083c422b8320050b80a0050b8ffff50b8ffff5031c050b8d20450b8010050'
+            '9affff0000a3720585c07403b80100509affff00003b56f27707750a3b46f07205b80100eb0231c0501eb86e'
+            '00501eb87c03509affff000083c40c8d66f65f5e5a595b5dc35589e5b8b801e81907535152565781ec8e0131'
+            'ff897ef231f6c746f43412897ef0c746da0c00897edcc7867cff2a0089be7effc746a62800897ea8c78668fe'
+            '140189be6afec746ce0c00897ed08d56da1e529affff00008d967cff1e529affff00008d56ce1e529affff00'
+            '008d56a61e529affff000085c07435479affff00003b46aa75188d56c01e521eb88000509affff000085c075'
+            '05b80100eb0231c009c68d56a61e529affff000085c075cbc646e6008d9668fe1e529affff000085c074228d'
+            '56e61e528d966cfe1e529affff00008d9668fe1e52ff46f29affff000085c075ee8d56f41e31c050528d56f0'
+            '1e5250b80200509affff0000ff76f08d9668fe1e521eb88600509affff000085c074198d966cfe1e521eb886'
+            '00509affff000085c07505b80100eb0231c0508d56e61e52ff76f25685ff7e05b80100eb0231c050ff76d2ff'
+            '76a48b46e00b46de85c07605b80100eb0231c0501eb88b00501eb8e003509affff000083c41ce986fe5589e5'
+            'b80402e8a905535152565781ecd80131c08946e28946e48946e68946e88946ea8946ec8946f0b840008946f2'
+            '8946ee1eb88000509affff0000508d961efe1e52b88000509affff00008d961efe1e528d56de1e529affff00'
+            '0089c78956f48d961efe1e52ff76e0ff76de31c050b80004501eb83c06509affff00001eb83c06501eb8db00'
+            '508d56e21e528d56f01e529affff00001eb83c06501eb8dd00508d56e61e528d56f01e529affff00001eb83c'
+            '06501eb80601508d56ea1e528d56f01e529affff0000837eec007506837eea007408c476ea268b04eb0231c0'
+            '508d569e1e52b83000509affff00008d961efe1e529affff00008db61efe01c68d861efe39c67609807cff5c'
+            '74034eebf38d56ce1e521e569affff00008d969efe1e528d961efe1e529affff00008d861efe29c683fe037e'
+            '014e30c088829efe30e4508d56ce1e521eb81f01508d969efe1e528d965eff1e528d56f21e528d961eff1e52'
+            '8d56ee1e529affff00008d961eff1e528d969efe1e529affff000085c07505b80100eb0231c0508d965eff1e'
+            '528d969efe1e529affff000085c07505b80100eb0231c0508d569e1e52837ee8007506837ee60074088b76e6'
+            '8b46e8eb05be2a018cd85056837ee4007506837ee200740dc476e2268b4408268b740aeb0431c031f6565083'
+            '7ef400750583ff647605be0100eb0231f6561eb82b01501eb84404509affff000083c41ae978fc5589e5b868'
+            '01e89b03535152565781ec3a01c746e810001eb852015031c0509affff000089c6501eb81c0250b81400509a'
+            'ffff0000569affff00001eb86701508d96bcfe1e5231c0509affff000089c6508d56d41e52b81000509affff'
+            '00008946ee85c07e0489c7eb0231ff30c08843d45630e450b803005031c0509affff0000568d56e41e52b803'
+            '00509affff00008946eac646e700569affff00001eb85201508d9644ff1e529affff00001eb85201508d96bc'
+            'fe1e5231c0509affff000089c71eb87c015031c0509affff000089c657509affff00008946f28956f4579aff'
+            'ff0000569affff000031c0501eb8a701501eb89c01501eb89101501e501eb82a01508d56c41e528d56e81e52'
+            '9affff000089c78956ec1eb8b1015031c0509affff00008946f0837eea0375125031c05050b80200509affff'
+            '000089c6eb03beffffff76f09affff000056ff76ec57ff76f4ff76f28d9644ff1e52ff76ee8d56e41e528d56'
+            'd41e521eb8c701501eb8a804509affff000083c4201eb85201508d96bcfe1e52b80002509affff00001eb87c'
+            '01508d96bcfe1e52b80002509affff00001eb8b101508d96bcfe1e52b80002509affff0000e9bffa1e589045'
+            '5589e51e8ed8b83800e8db01565783ec208b460c3d1301740d3d0f0074573d02007450e9ba00ff760eb80100'
+            '509affff0000ff3672059affff0000833e7005047c05b80100eb0231c0501eb8f501501eb80c05509affff00'
+            '0083c40aff760e31c05050b80100509affff000031c031d2e97f00eb61ff760e8d56da1e529affff000089c7'
+            '31f657b808005089f0d1e0d1e001f0d1e0d1e00508005089f0d1e0d1e029f0b103d3e001f0d1e0d1e0ba1803'
+            '01c21e521e529affff0000509affff00004683fe067cbfff760e8d56da1e529affff0000eb9631c0509affff'
+            '0000eb8cff760e50ff760aff7608ff76069affff00008d66fa5f5e1f5d4dca0a005589e5b85000e8e1005683'
+            'ec2c8b760ce8ecf6e8b2f9e81ffbe82afdb91a0031db8cda8d46d2e8f300c746d4ffffc746d6ffff8976dc31'
+            'c05050b8007f509affff00008946e031c0509affff00008946e2c746e8fe018c5eea8d56d21e529affff0000'
+            '1eb8fe01501eb8040250b8cf005031c05050b80a0050b8800250b8b4005031c050505650509affff000089c6'
+            '50ff76049affff0000569affff000056b8010050b82c015031c050509affff00008d56ec1e5231c05050509a'
+            'ffff000085c074168d56ec1e529affff00008d56ec1e529affff0000ebd78b46f08d66fe5e5dc20a00008c16'
+            '3002c33bc473132bc4f7d83b060a0077068cd03b0630027401c30e5ab83f0abb0100e9f001537461636b204f'
+            '766572666c6f7721005789c788d88ec2578ae0d1e9f3ab13c9f3aa5f89f85fc35589e5565789c68b460489df'
+            '8ec189d11e918ed80bc9f3a6740519c983d9ff1f89c85f5e5dc20200eb0203009affff00000bc0750e5033c0'
+            'ba0f00e86a0258b44ccd218c063602575606535253be3c0a893651028c1e5302268a078804464384c075f589'
+            '360a005b2bc0509affff000057579affff0000fc1e07b93c0abf18032bcf32c0f3aab8d80ba34d02b8ffffa3'
+            '4f02b430cd21a23802882639029affff0000a23a0288263b0286e0a33c0254583bc475120f01e0a90100740a'
+            'b001a23e02b003a23f021ebf590257b89000509affff0000b85902893e55028c1e5702b8ff00e86b01e8e5fd'
+            'e9f9004f70656e20576174636f6d20432f432b2b31362052756e2d54696d652073797374656d2e20436f7079'
+            '726967687420286329204f70656e20576174636f6d20436f6e7472696275746f727320323030322d32303236'
+            '2e20506f7274696f6e7320436f7079726967687420284329205379626173652c20496e632e20313938382d32'
+            '3030322e00c3cb005589e551565781ec800089c689df8d9e7aff8cd98ec2268a0484c074173c0d74138d46f9'
+            '39c3730c268a048ec14626880743ebe031c08ec15026c607001e8d9e7aff531eb810025031c0509affff0000'
+            '89f8e94400515689c189d6e8330185c0750689c889f2eb9889d8e92c0000c3c3535289c3833e1003007404ff'
+            '161003ff16ea02baff00b81000e8a800ff16ea02ff16ec0289d8e928fe5289c2ff16ea02ff16ec0289d0e918'
+            'fe5589e5535289c3833f0075078d66fc5a5b5dc31eff171febf35589e5535289c38b47028b1785c0750485d2'
+            '74df1eff1f1febd95589e5535152565789c11ee813ffbf180389fabb120389fe88c839fb7316803f02750583'
+            'c306ebf23a470172f689de8a4701ebef39fe74158d4402803c007508e88affc60402ebcbe89bffebf61f8d66'
+            'f65f5e5a595b5dc35589e55351565789c11ee8bcfe88d5bf180389fabb180389fe88c839fb7316803f027505'
+            '83c306ebf23a470177f689de8a4701ebef39fe741c3a6c017305c60402ebd18d4402803c007505e827ffebee'
+            'e83bffebe91f8d66f85f5eeb9f803eee0200750331c0c35250cceb0657564944454fb8010083c404c3006f00'
+            '0301d406060005000301f60606000400030105070600050003011207060006000301220706000a0003013507'
+            '06000200030144070400530003014d0706000100030159070600060003015f07040051000301870705000900'
+            '03019907040055000301b007040054000301bf07040051000301ec070200a4010301030804004a0003011708'
+            '04004a0003012b0804004a000301640802000c0003016d0801005b0203018b080200a40103019e0802007d00'
+            '0301b408020027000301ed0804005a000301f308070021000301060902002800030110090200060003012409'
+            '02006b0005005f09010032080200640901003208030172090200ad0003017d09070057000301920902003900'
+            '0301bc09020029000301c70902002a000301cd0902007c000301df0902000a000301ee0902006c000301fc09'
+            '020071000301060a020072000301930a04005b000301d20a04001e000301d90a020005000200f30a01008e0a'
+            '0301040b040003000301360b040031000301260c020001000301450001005f020301a8000100ba040301c300'
+            '0100c9040301e1000100c9040301f3000100bd04030101010100c804030119010100c90403012b010100bd04'
+            '030139010100c804030147010100c804030150010100bb04030160010100ba04030170010100c4040301a001'
+            '0100c7040301c3010100c7040301da010100bc040301e8010100bb040301fb010100ba04030111020100be02'
+            '030122020100c20203016c02010002000301720201005e01030178020100650003017e020100c90003018402'
+            '01009101030194020200a4010200a402010008000500a802010008000301b70201005a020301c70201005f02'
+            '0301ea020200a40103014e03030050000301590303004800030163030300470003016d0303003f0003017703'
+            '0400240003018b030200ae010301a203030040000301b50303003b000301c903040058000301d70303003c00'
+            '0301f20303004e000301050403003d00030119040200ae01030161040200a4010301a30404002f000301b304'
+            '040031000301c304050006000301e504050007000301fe0405000b000301170505000b000301300505000b00'
+            '0301550505000a000301600504005a00030183050400580003019405040058000301d405050008000301e505'
+            '0200d701030102060200d70103016f060200a40103019906040053000301aa06040056000301b00604005100'
+            '0301c306060002000000000000000000000000000000000000000000050000000000000000000000433a5c48'
+            '4f535457494e5c4f575359532e5741560077617665006f70656e206364617564696f00582e57415600646576'
+            '732025642025642025642025642c20736e642025642c207269666620256420256c6420256c642025642c2025'
+            '730074696d652025642c206576656e74202564004f5753595300555345520074696d65722025642c20706167'
+            '652025752c206865617020257525252c207461736b73202564206d696e652025642c206d6f64756c65732025'
+            '642025732c20757365722025642c2072656164202578005c005c537472696e6746696c65496e666f5c303430'
+            '39303445345c46696c654465736372697074696f6e005c56617246696c65496e666f5c5472616e736c617469'
+            '6f6e00433a5c57494e444f575300007665722025642c2066696c6520256c782c20222573222c2025732c2066'
+            '696e6420256420256400433a5c484f535457494e5c4f575359532e54585f00433a5c484f535457494e5c4f57'
+            '5359532e54585400433a5c484f535457494e5c4f575359532e4f555400433a5c484f535457494e004f575359'
+            '53322e545854004f575359532e54585f00433a5c484f535457494e5c4f57535953322e545854006c7a202225'
+            '732220222573222025642c2025732c20636f707920256c642c20696e7374616c6c20256c6420256400746963'
+            '6b73202564004f775379730053797374656d20444c4c73004f70656e20576174636f6d00535a444488f02733'
+            '41540c00000007414243f0f60000ffff00000000000000000000000c00000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '00000000000000000000000000000000000000000000490c490c000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000020180a000000000000000000000000000000000000ec003400'
+            '56535f56455253494f4e5f494e464f00bd04effe00000100020001000400030002000100000000003f000000'
+            '0000000001000000010000000000000000000000496cf36a80000000537472696e6746696c65496e666f0000'
+            '6c00000030343039303445340000000018000800436f6d70616e794e616d65006d75726d333836002c001600'
+            '46696c654465736372697074696f6e0057494e4e2073797374656d20444c4c73207465737400000018000800'
+            '46696c6556657273696f6e00312e322e332e34002400000056617246696c65496e666f00140004005472616e'
+            '736c6174696f6e000904e404'
         )),
 }
 

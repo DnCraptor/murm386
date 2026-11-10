@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Generate NEUNDEF.EXE: imports WINN has not, as Windows' "undefined
-dynalinks": USER.600 (not called) and MMSYSTEM.2 (sndPlaySound, a module
-WINN has nothing of). The program loads; its call of MMSYSTEM.2 ends it,
-the call named ("MMSYSTEM.2").
+dynalinks": USER.600 (not called) and DDEML.2 (DdeInitialize, a module
+WINN has nothing of). The program loads; its call of DDEML.2 ends it, the
+call named ("DDEML.2").
 
     mkne_undef.py NEUNDEF.EXE
 """
@@ -43,15 +43,15 @@ def far_call(module, ordinal):
     code.extend(b'\xff\xff\x00\x00')
 code.extend(bytes.fromhex('eb 05'))     # jmp over the call never made
 far_call(1, 600)                        # USER.600
-code.extend(bytes.fromhex('6a 00 6a 00 6a 00'))  # sndPlaySound(NULL, 0)
-far_call(2, 2)                          # MMSYSTEM.2
+code.extend(bytes.fromhex('6a 00' * 6))  # DdeInitialize(NULL, NULL, 0, 0)
+far_call(2, 2)                          # DDEML.2
 code.extend(bytes.fromhex('b8 01 4c cd 21'))     # not reached: exit 1
 b[0x200:0x200+len(code)] = code
 w16(h+0x40, 0x20); w16(h+0x42, len(code)); w16(h+0x44, 0x100)
 w16(h+0x46, 0x100)
 w16(h+0x48, 0x30); w16(h+0x4a, 0x100); w16(h+0x4c, 1)
 w16(h+0x4e, 0x100)
-imp = b'\x00\x04USER\x08MMSYSTEM'
+imp = b'\x00\x04USER\x05DDEML'
 w16(h+0x50, 1); w16(h+0x52, 6)          # the modules' names
 b[h+0x54:h+0x54+len(imp)] = imp
 w16(0x200+len(code), len(fixups))
@@ -59,4 +59,4 @@ for i, rec in enumerate(fixups):
     struct.pack_into('<BBHHH', b, 0x200+len(code)+2+8*i, *rec)
 with open(sys.argv[1], 'wb') as f:
     f.write(b)
-print(name.decode() + ':', len(b), 'bytes; ends calling MMSYSTEM.2')
+print(name.decode() + ':', len(b), 'bytes; ends calling DDEML.2')

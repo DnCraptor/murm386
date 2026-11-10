@@ -1400,13 +1400,64 @@ static __attribute__((noinline)) uint16_t class_info(args *a, ne_user *u)
     return (uint16_t)wr(a, out, g, sizeof(g));
 }
 
+/* the strings changed in place: apart, their buffers not in ne_call's frame
+ * (a program's procedure, called back, calls again) */
+static __attribute__((noinline)) int call_strings(args *a, uint16_t service, uint32_t *v,
+                                                 int *dword)
+{
+    win_ne_guest_api_context *c = a->ctx;
+    switch (service) {
+    case 0x11b5: case 0x11b6: {         /* AnsiUpperBuff, AnsiLowerBuff(LPSTR, UINT) */
+        uint32_t n = w(a, 4) ? w(a, 4) : 0x10000u, p = dw(a, 6), base, limit;
+        int code;
+        char buf[128];
+        /* 0: 64K, as far as its segment goes */
+        if (win_ne_guest_selector_get(c->image, (uint16_t)(p >> 16), &base, &limit, &code) &&
+            (uint16_t)p <= limit && n > limit - (uint16_t)p + 1u)
+            n = limit - (uint16_t)p + 1u;
+        for (uint32_t k = 0; !a->bad && k < n; k += sizeof(buf)) {
+            uint32_t m = n - k < sizeof(buf) ? n - k : (uint32_t)sizeof(buf);
+            if (!rd(a, p + k, buf, m))
+                break;
+            if (service == 0x11b5)
+                AnsiUpperBuff(buf, m);
+            else
+                AnsiLowerBuff(buf, m);
+            wr(a, p + k, buf, m);
+        }
+        *v = (uint16_t)n;
+        return 1;
+    }
+    case 0x11af: case 0x11b0: {         /* AnsiUpper, AnsiLower(LPSTR or a char) */
+        uint32_t p = dw(a, 4);
+        int up = service == 0x11af;
+        if (!(p >> 16)) {
+            char s[2] = { (char)p, 0 };
+            up ? AnsiUpper(s) : AnsiLower(s);
+            *v = (uint8_t)s[0];
+        } else {
+            char s[512];
+            if (str(a, p, s, sizeof(s))) {
+                up ? AnsiUpper(s) : AnsiLower(s);
+                wr(a, p, s, (uint32_t)strlen(s));
+            }
+            *v = p;
+        }
+        *dword = 1;
+        return 1;
+    }
+    }
+    return 0;
+}
+
 int ne_call(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword)
 {
     win_ne_guest_api_context *c = a->ctx;
     if (service < 0x1000u && (local_service(a, u, service, v) || global_service(a, service, v, dword)))
         return 1;
     if (ne_dos_service(a, u, service, v, dword) || text_service(a, service, v, dword) ||
-        bitmap_service(a, service, v, dword) || ne_kernel_service(a, u, service, v, dword))
+        bitmap_service(a, service, v, dword) || ne_kernel_service(a, u, service, v, dword) ||
+        ne_sys_service(a, u, service, v, dword))
         return 1;
     if (service == 0x1194) {            /* GetClassInfo */
         *v = class_info(a, u);
@@ -1417,6 +1468,8 @@ int ne_call(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword)
         return 1;
     }
     switch (service) {
+    case 0x11b5: case 0x11b6: case 0x11af: case 0x11b0:
+        return call_strings(a, service, v, dword);
     case 0x100a: {                      /* SetTimer(HWND, UINT, UINT, TIMERPROC) */
         uint32_t proc = dw(a, 4);
         UINT ms = w(a, 8), id = w(a, 10);
@@ -1629,27 +1682,6 @@ int ne_call(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword)
     case 0x107b:                        /* CallMsgFilter(LPMSG, int): not handled */
         *v = 0;
         return 1;
-    case 0x11b5: case 0x11b6: {         /* AnsiUpperBuff, AnsiLowerBuff(LPSTR, UINT) */
-        uint32_t n = w(a, 4) ? w(a, 4) : 0x10000u, p = dw(a, 6), base, limit;
-        int code;
-        char buf[128];
-        /* 0: 64K, as far as its segment goes */
-        if (win_ne_guest_selector_get(c->image, (uint16_t)(p >> 16), &base, &limit, &code) &&
-            (uint16_t)p <= limit && n > limit - (uint16_t)p + 1u)
-            n = limit - (uint16_t)p + 1u;
-        for (uint32_t k = 0; !a->bad && k < n; k += sizeof(buf)) {
-            uint32_t m = n - k < sizeof(buf) ? n - k : (uint32_t)sizeof(buf);
-            if (!rd(a, p + k, buf, m))
-                break;
-            if (service == 0x11b5)
-                AnsiUpperBuff(buf, m);
-            else
-                AnsiLowerBuff(buf, m);
-            wr(a, p + k, buf, m);
-        }
-        *v = (uint16_t)n;
-        return 1;
-    }
     case 0x1085: case 0x1087: {         /* GetWindowWord, GetWindowLong(HWND, int) */
         int idx = (int16_t)w(a, 4);
         HWND h = w(a, 6);
@@ -1682,24 +1714,6 @@ int ne_call(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword)
     case 0x11a5:                        /* wvsprintf(LPSTR, LPCSTR, LPSTR args) */
         *v = (uint16_t)ne_format(a, dw(a, 12), dw(a, 8), dw(a, 4));
         return 1;
-    case 0x11af: case 0x11b0: {         /* AnsiUpper, AnsiLower(LPSTR or a char) */
-        uint32_t p = dw(a, 4);
-        int up = service == 0x11af;
-        if (!(p >> 16)) {
-            char s[2] = { (char)p, 0 };
-            up ? AnsiUpper(s) : AnsiLower(s);
-            *v = (uint8_t)s[0];
-        } else {
-            char s[512];
-            if (str(a, p, s, sizeof(s))) {
-                up ? AnsiUpper(s) : AnsiLower(s);
-                wr(a, p, s, (uint32_t)strlen(s));
-            }
-            *v = p;
-        }
-        *dword = 1;
-        return 1;
-    }
     case 0x11d8: {                      /* AnsiNext(LPCSTR) */
         uint32_t p = dw(a, 4);
         char ch = 0;

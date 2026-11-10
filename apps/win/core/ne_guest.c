@@ -184,12 +184,16 @@ static int assign_selector(void *opaque, uint16_t index, uint16_t flags,
  * does). The service number, KERNEL ordinal n, USER 0x1000 + n, GDI
  * 0x3000 + n, lives entirely inside WINN; it is not a guest pointer or an
  * emulated IRQ. */
-enum { M_KERNEL, M_USER, M_GDI, M_KEYBOARD, M_COMMDLG, M_SHELL, M_WIN87EM, M_COUNT };
+enum { M_KERNEL, M_USER, M_GDI, M_KEYBOARD, M_COMMDLG, M_SHELL, M_WIN87EM, M_MMSYSTEM,
+       M_TOOLHELP, M_VER, M_LZEXPAND, M_COUNT };
 static const uint16_t module_base[] = { 0, 0x1000u, 0x3000u, WIN_NE_SERVICE_KEYBOARD,
                                         WIN_NE_SERVICE_COMMDLG, WIN_NE_SERVICE_SHELL,
-                                        WIN_NE_SERVICE_WIN87EM };
+                                        WIN_NE_SERVICE_WIN87EM, WIN_NE_SERVICE_MMSYSTEM,
+                                        WIN_NE_SERVICE_TOOLHELP, WIN_NE_SERVICE_VER,
+                                        WIN_NE_SERVICE_LZEXPAND };
 static const char *const module_names[M_COUNT] = { "KERNEL", "USER", "GDI", "KEYBOARD",
-                                                   "COMMDLG", "SHELL", "WIN87EM" };
+                                                   "COMMDLG", "SHELL", "WIN87EM", "MMSYSTEM",
+                                                   "TOOLHELP", "VER", "LZEXPAND" };
 static const struct {
     uint8_t module;                 /* M_* */
     uint16_t ordinal;
@@ -364,6 +368,194 @@ static const struct {
     { M_GDI, 196, "SetMetaFileBitsBetter", 2 },
     { M_GDI, 175, "EnumMetaFile", 12 },
     { M_GDI, 176, "PlayMetaFileRecord", 12 },
+    /* Windows' own DLLs, WINN's (ne_guest_sys.c) */
+    { M_MMSYSTEM, 2, "sndPlaySound", 6 },
+    { M_MMSYSTEM, 3, "PlaySound", 10 },
+    { M_MMSYSTEM, 5, "mmsystemGetVersion", 0 },
+    { M_MMSYSTEM, 30, "OutputDebugStr", 4 },
+    { M_MMSYSTEM, 101, "joyGetNumDevs", 0 },
+    { M_MMSYSTEM, 102, "joyGetDevCaps", 8 },
+    { M_MMSYSTEM, 103, "joyGetPos", 6 },
+    { M_MMSYSTEM, 104, "joyGetThreshold", 6 },
+    { M_MMSYSTEM, 105, "joyReleaseCapture", 2 },
+    { M_MMSYSTEM, 106, "joySetCapture", 8 },
+    { M_MMSYSTEM, 107, "joySetThreshold", 4 },
+    { M_MMSYSTEM, 109, "joySetCalibration", 2 },
+    { M_MMSYSTEM, 110, "joyGetPosEx", 6 },
+    { M_MMSYSTEM, 201, "midiOutGetNumDevs", 0 },
+    { M_MMSYSTEM, 202, "midiOutGetDevCaps", 8 },
+    { M_MMSYSTEM, 203, "midiOutGetErrorText", 8 },
+    { M_MMSYSTEM, 204, "midiOutOpen", 18 },
+    { M_MMSYSTEM, 205, "midiOutClose", 2 },
+    { M_MMSYSTEM, 206, "midiOutPrepareHeader", 8 },
+    { M_MMSYSTEM, 207, "midiOutUnprepareHeader", 8 },
+    { M_MMSYSTEM, 208, "midiOutShortMsg", 6 },
+    { M_MMSYSTEM, 209, "midiOutLongMsg", 8 },
+    { M_MMSYSTEM, 210, "midiOutReset", 2 },
+    { M_MMSYSTEM, 211, "midiOutGetVolume", 6 },
+    { M_MMSYSTEM, 212, "midiOutSetVolume", 6 },
+    { M_MMSYSTEM, 213, "midiOutCachePatches", 10 },
+    { M_MMSYSTEM, 214, "midiOutCacheDrumPatches", 10 },
+    { M_MMSYSTEM, 215, "midiOutGetID", 6 },
+    { M_MMSYSTEM, 216, "midiOutMessage", 12 },
+    { M_MMSYSTEM, 301, "midiInGetNumDevs", 0 },
+    { M_MMSYSTEM, 302, "midiInGetDevCaps", 8 },
+    { M_MMSYSTEM, 303, "midiInGetErrorText", 8 },
+    { M_MMSYSTEM, 304, "midiInOpen", 18 },
+    { M_MMSYSTEM, 305, "midiInClose", 2 },
+    { M_MMSYSTEM, 306, "midiInPrepareHeader", 8 },
+    { M_MMSYSTEM, 307, "midiInUnprepareHeader", 8 },
+    { M_MMSYSTEM, 308, "midiInAddBuffer", 8 },
+    { M_MMSYSTEM, 309, "midiInStart", 2 },
+    { M_MMSYSTEM, 310, "midiInStop", 2 },
+    { M_MMSYSTEM, 311, "midiInReset", 2 },
+    { M_MMSYSTEM, 312, "midiInGetID", 6 },
+    { M_MMSYSTEM, 313, "midiInMessage", 12 },
+    { M_MMSYSTEM, 350, "auxGetNumDevs", 0 },
+    { M_MMSYSTEM, 351, "auxGetDevCaps", 8 },
+    { M_MMSYSTEM, 352, "auxGetVolume", 6 },
+    { M_MMSYSTEM, 353, "auxSetVolume", 6 },
+    { M_MMSYSTEM, 354, "auxOutMessage", 12 },
+    { M_MMSYSTEM, 401, "waveOutGetNumDevs", 0 },
+    { M_MMSYSTEM, 402, "waveOutGetDevCaps", 8 },
+    { M_MMSYSTEM, 403, "waveOutGetErrorText", 8 },
+    { M_MMSYSTEM, 404, "waveOutOpen", 20 },
+    { M_MMSYSTEM, 405, "waveOutClose", 2 },
+    { M_MMSYSTEM, 406, "waveOutPrepareHeader", 8 },
+    { M_MMSYSTEM, 407, "waveOutUnprepareHeader", 8 },
+    { M_MMSYSTEM, 408, "waveOutWrite", 8 },
+    { M_MMSYSTEM, 409, "waveOutPause", 2 },
+    { M_MMSYSTEM, 410, "waveOutRestart", 2 },
+    { M_MMSYSTEM, 411, "waveOutReset", 2 },
+    { M_MMSYSTEM, 412, "waveOutGetPosition", 8 },
+    { M_MMSYSTEM, 413, "waveOutGetPitch", 6 },
+    { M_MMSYSTEM, 414, "waveOutSetPitch", 6 },
+    { M_MMSYSTEM, 415, "waveOutGetVolume", 6 },
+    { M_MMSYSTEM, 416, "waveOutSetVolume", 6 },
+    { M_MMSYSTEM, 417, "waveOutGetPlaybackRate", 6 },
+    { M_MMSYSTEM, 418, "waveOutSetPlaybackRate", 6 },
+    { M_MMSYSTEM, 419, "waveOutBreakLoop", 2 },
+    { M_MMSYSTEM, 420, "waveOutGetID", 6 },
+    { M_MMSYSTEM, 421, "waveOutMessage", 12 },
+    { M_MMSYSTEM, 501, "waveInGetNumDevs", 0 },
+    { M_MMSYSTEM, 502, "waveInGetDevCaps", 8 },
+    { M_MMSYSTEM, 503, "waveInGetErrorText", 8 },
+    { M_MMSYSTEM, 504, "waveInOpen", 20 },
+    { M_MMSYSTEM, 505, "waveInClose", 2 },
+    { M_MMSYSTEM, 506, "waveInPrepareHeader", 8 },
+    { M_MMSYSTEM, 507, "waveInUnprepareHeader", 8 },
+    { M_MMSYSTEM, 508, "waveInAddBuffer", 8 },
+    { M_MMSYSTEM, 509, "waveInStart", 2 },
+    { M_MMSYSTEM, 510, "waveInStop", 2 },
+    { M_MMSYSTEM, 511, "waveInReset", 2 },
+    { M_MMSYSTEM, 512, "waveInGetPosition", 8 },
+    { M_MMSYSTEM, 513, "waveInGetID", 6 },
+    { M_MMSYSTEM, 514, "waveInMessage", 12 },
+    { M_MMSYSTEM, 601, "timeGetSystemTime", 6 },
+    { M_MMSYSTEM, 602, "timeSetEvent", 14 },
+    { M_MMSYSTEM, 603, "timeKillEvent", 2 },
+    { M_MMSYSTEM, 604, "timeGetDevCaps", 6 },
+    { M_MMSYSTEM, 605, "timeBeginPeriod", 2 },
+    { M_MMSYSTEM, 606, "timeEndPeriod", 2 },
+    { M_MMSYSTEM, 607, "timeGetTime", 0 },
+    { M_MMSYSTEM, 701, "mciSendCommand", 12 },
+    { M_MMSYSTEM, 702, "mciSendString", 12 },
+    { M_MMSYSTEM, 703, "mciGetDeviceID", 4 },
+    { M_MMSYSTEM, 706, "mciGetErrorString", 10 },
+    { M_MMSYSTEM, 707, "mciSetDriverData", 6 },
+    { M_MMSYSTEM, 708, "mciGetDriverData", 2 },
+    { M_MMSYSTEM, 710, "mciDriverYield", 2 },
+    { M_MMSYSTEM, 711, "mciDriverNotify", 6 },
+    { M_MMSYSTEM, 712, "mciExecute", 4 },
+    { M_MMSYSTEM, 713, "mciFreeCommandResource", 2 },
+    { M_MMSYSTEM, 714, "mciSetYieldProc", 10 },
+    { M_MMSYSTEM, 715, "mciGetDeviceIDFromElementID", 8 },
+    { M_MMSYSTEM, 716, "mciGetYieldProc", 6 },
+    { M_MMSYSTEM, 717, "mciGetCreatorTask", 2 },
+    { M_MMSYSTEM, 800, "mixerGetNumDevs", 0 },
+    { M_MMSYSTEM, 801, "mixerGetDevCaps", 8 },
+    { M_MMSYSTEM, 802, "mixerOpen", 18 },
+    { M_MMSYSTEM, 803, "mixerClose", 2 },
+    { M_MMSYSTEM, 804, "mixerMessage", 12 },
+    { M_MMSYSTEM, 805, "mixerGetLineInfo", 10 },
+    { M_MMSYSTEM, 806, "mixerGetID", 10 },
+    { M_MMSYSTEM, 807, "mixerGetLineControls", 10 },
+    { M_MMSYSTEM, 808, "mixerGetControlDetails", 10 },
+    { M_MMSYSTEM, 809, "mixerSetControlDetails", 10 },
+    { M_MMSYSTEM, 1100, "DrvOpen", 12 },
+    { M_MMSYSTEM, 1101, "DrvClose", 10 },
+    { M_MMSYSTEM, 1102, "DrvSendMessage", 12 },
+    { M_MMSYSTEM, 1103, "DrvGetModuleHandle", 2 },
+    { M_MMSYSTEM, 1104, "DrvDefDriverProc", 16 },
+    { M_MMSYSTEM, 1210, "mmioOpen", 12 },
+    { M_MMSYSTEM, 1211, "mmioClose", 4 },
+    { M_MMSYSTEM, 1212, "mmioRead", 10 },
+    { M_MMSYSTEM, 1213, "mmioWrite", 10 },
+    { M_MMSYSTEM, 1214, "mmioSeek", 8 },
+    { M_MMSYSTEM, 1215, "mmioGetInfo", 8 },
+    { M_MMSYSTEM, 1216, "mmioSetInfo", 8 },
+    { M_MMSYSTEM, 1217, "mmioSetBuffer", 12 },
+    { M_MMSYSTEM, 1218, "mmioFlush", 4 },
+    { M_MMSYSTEM, 1219, "mmioAdvance", 8 },
+    { M_MMSYSTEM, 1220, "mmioStringToFOURCC", 6 },
+    { M_MMSYSTEM, 1221, "mmioInstallIOProc", 12 },
+    { M_MMSYSTEM, 1222, "mmioSendMessage", 12 },
+    { M_MMSYSTEM, 1223, "mmioDescend", 12 },
+    { M_MMSYSTEM, 1224, "mmioAscend", 8 },
+    { M_MMSYSTEM, 1225, "mmioCreateChunk", 8 },
+    { M_MMSYSTEM, 1226, "mmioRename", 16 },
+    { M_TOOLHELP, 50, "GlobalHandleToSel", 2 },
+    { M_TOOLHELP, 51, "GlobalFirst", 6 },
+    { M_TOOLHELP, 52, "GlobalNext", 6 },
+    { M_TOOLHELP, 53, "GlobalInfo", 4 },
+    { M_TOOLHELP, 54, "GlobalEntryHandle", 6 },
+    { M_TOOLHELP, 55, "GlobalEntryModule", 8 },
+    { M_TOOLHELP, 56, "LocalInfo", 6 },
+    { M_TOOLHELP, 57, "LocalFirst", 6 },
+    { M_TOOLHELP, 58, "LocalNext", 4 },
+    { M_TOOLHELP, 59, "ModuleFirst", 4 },
+    { M_TOOLHELP, 60, "ModuleNext", 4 },
+    { M_TOOLHELP, 61, "ModuleFindName", 8 },
+    { M_TOOLHELP, 62, "ModuleFindHandle", 6 },
+    { M_TOOLHELP, 63, "TaskFirst", 4 },
+    { M_TOOLHELP, 64, "TaskNext", 4 },
+    { M_TOOLHELP, 65, "TaskFindHandle", 6 },
+    { M_TOOLHELP, 66, "StackTraceFirst", 6 },
+    { M_TOOLHELP, 67, "StackTraceCSIPFirst", 12 },
+    { M_TOOLHELP, 68, "StackTraceNext", 4 },
+    { M_TOOLHELP, 69, "ClassFirst", 4 },
+    { M_TOOLHELP, 70, "ClassNext", 4 },
+    { M_TOOLHELP, 71, "SystemHeapInfo", 4 },
+    { M_TOOLHELP, 72, "MemManInfo", 4 },
+    { M_TOOLHELP, 73, "NotifyRegister", 8 },
+    { M_TOOLHELP, 74, "NotifyUnregister", 2 },
+    { M_TOOLHELP, 75, "InterruptRegister", 6 },
+    { M_TOOLHELP, 76, "InterruptUnRegister", 2 },
+    { M_TOOLHELP, 77, "TerminateApp", 4 },
+    { M_TOOLHELP, 78, "MemoryRead", 14 },
+    { M_TOOLHELP, 79, "MemoryWrite", 14 },
+    { M_TOOLHELP, 80, "TimerCount", 4 },
+    { M_TOOLHELP, 84, "Local32Info", 6 },
+    { M_TOOLHELP, 85, "Local32First", 6 },
+    { M_TOOLHELP, 86, "Local32Next", 4 },
+    { M_VER, 2, "GetFileResourceSize", 16 },
+    { M_VER, 3, "GetFileResource", 24 },
+    { M_VER, 6, "GetFileVersionInfoSize", 8 },
+    { M_VER, 7, "GetFileVersionInfo", 16 },
+    { M_VER, 8, "VerFindFile", 30 },
+    { M_VER, 9, "VerInstallFile", 30 },
+    { M_VER, 10, "VerLanguageName", 8 },
+    { M_VER, 11, "VerQueryValue", 16 },
+    { M_LZEXPAND, 1, "LZCopy", 4 },
+    { M_LZEXPAND, 2, "LZOpenFile", 10 },
+    { M_LZEXPAND, 3, "LZInit", 2 },
+    { M_LZEXPAND, 4, "LZSeek", 8 },
+    { M_LZEXPAND, 5, "LZRead", 8 },
+    { M_LZEXPAND, 6, "LZClose", 2 },
+    { M_LZEXPAND, 7, "LZStart", 0 },
+    { M_LZEXPAND, 8, "CopyLZFile", 4 },
+    { M_LZEXPAND, 9, "LZDone", 0 },
+    { M_LZEXPAND, 10, "GetExpandedName", 8 },
     { M_USER, 218, "DialogBoxIndirect", 10 },
     { M_USER, 219, "CreateDialogIndirect", 12 },
     { M_USER, 222, "GetKeyboardState", 4 },
@@ -559,6 +751,8 @@ const char *win_ne_generic_sig(uint16_t service)
     return NULL;
 }
 
+static void module_stem(const char *module, char *out, size_t cap);
+
 static int module_of(const win_ne_import *imp)
 {
     if (name_eq(imp->module, "KERNEL") || name_eq(imp->module, "KERNEL.EXE"))
@@ -575,16 +769,19 @@ static int module_of(const win_ne_import *imp)
         return M_SHELL;
     if (name_eq(imp->module, "WIN87EM") || name_eq(imp->module, "WIN87EM.DLL"))
         return M_WIN87EM;
+    for (int m = M_MMSYSTEM; m < M_COUNT; m++) {    /* Windows' own DLLs, WINN's now */
+        char stem[16];
+        module_stem(imp->module, stem, sizeof(stem));
+        if (name_eq(stem, module_names[m]))
+            return m;
+    }
     return -1;
 }
 
-static void module_stem(const char *module, char *out, size_t cap);
 
 /* Windows' own modules WINN has nothing of: a program importing them loads
  * (WIN_NE_SERVICE_UNDEFINED); their indices after WINN's (M_COUNT on) */
-static const char *const system_modules[] = { "MMSYSTEM", "TOOLHELP", "VER", "LZEXPAND",
-                                              "DDEML", "OLECLI", "OLESVR", "SOUND",
-                                              "PENWIN" };
+static const char *const system_modules[] = { "DDEML", "OLECLI", "OLESVR", "SOUND", "PENWIN" };
 _Static_assert(M_COUNT + sizeof(system_modules) / sizeof(system_modules[0]) <= 16,
                "an undefined call's module takes 4 bits");
 
@@ -610,12 +807,22 @@ static uint16_t undefined_id(win_ne_guest_image *g, const win_ne_import *imp)
         return 0;
     unsigned ord = imp->ordinal;
     if (imp->procedure[0] || !ord || ord >= 1016) {
+        char num[8];                    /* a large ordinal: its number as the name */
+        const char *name = imp->procedure;
+        if (!name[0]) {
+            int d = (int)sizeof(num) - 1;
+            num[d] = 0;
+            do {
+                num[--d] = (char)('0' + ord % 10u);
+                ord /= 10u;
+            } while (ord && d > 0);
+            name = num + d;
+        }
         unsigned k = 0;                 /* by name: one of eight remembered */
-        while (k < 7 && g && g->undefined[k][0] && !name_eq(g->undefined[k], imp->procedure))
+        while (k < 7 && g && g->undefined[k][0] && !name_eq(g->undefined[k], name))
             k++;
         if (g && !g->undefined[k][0])
-            lstrcpy_n(g->undefined[k], imp->procedure[0] ? imp->procedure : "?",
-                      sizeof(g->undefined[k]));
+            lstrcpy_n(g->undefined[k], name[0] ? name : "?", sizeof(g->undefined[k]));
         ord = 1016 + k;
     }
     return (uint16_t)(WIN_NE_SERVICE_UNDEFINED | (unsigned)m << 10 | ord);
@@ -894,6 +1101,11 @@ uint32_t win_ne_guest_proc(win_ne_guest_image *g, unsigned module, uint16_t ordi
         }
     }
     return (uint32_t)sel << 16 | off;
+}
+
+const char *win_ne_guest_module_name(int m)
+{
+    return m >= 0 && m < M_COUNT ? module_names[m] : NULL;
 }
 
 int win_ne_guest_module(const char *name)

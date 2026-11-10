@@ -34,6 +34,12 @@
  * emulator's own); the rest native */
 #define WIN_NE_SERVICE_WIN87EM  0x7000u
 #define WIN_NE_SERVICE_FPMATH   (WIN_NE_SERVICE_WIN87EM + 1u)
+/* Windows' own DLLs WINN has (ne_guest_sys.c): MMSYSTEM (its ordinals go
+ * to 1226), TOOLHELP, VER, LZEXPAND */
+#define WIN_NE_SERVICE_MMSYSTEM 0x8000u
+#define WIN_NE_SERVICE_TOOLHELP 0x8800u
+#define WIN_NE_SERVICE_VER      0x8900u
+#define WIN_NE_SERVICE_LZEXPAND 0x8a00u
 /* A function of Windows' WINN has not (of its modules, or of Windows' own
  * ones it has nothing of): the program loads, its call of it ends it, as
  * Windows' "undefined dynalink" would. C000h + the module (its index, 4
@@ -149,12 +155,15 @@ int win_ne_guest_selector_set(win_ne_guest_image *g, uint16_t sel, uint32_t base
 /* n empty selectors one after the other (AllocSelectorArray): the first */
 uint16_t win_ne_guest_selector_array(win_ne_guest_image *g, unsigned n);
 /* GetProcAddress of a module WINN has (0 KERNEL, 1 USER, 2 GDI, 3
- * KEYBOARD, 4 COMMDLG, 5 SHELL; win_ne_guest_module gives the number of a
+ * KEYBOARD, 4 COMMDLG, 5 SHELL, 6 WIN87EM, 7 MMSYSTEM, 8 TOOLHELP, 9 VER,
+ * 10 LZEXPAND; win_ne_guest_module gives the number of a
  * name, -1 for none): a thunk's far address, made now if the program had
  * none for it, 0 if WINN has not the function. */
 uint32_t win_ne_guest_proc(win_ne_guest_image *g, unsigned module, uint16_t ordinal,
                            const char *name);
 int win_ne_guest_module(const char *name);
+/* ... and the name of number m (NULL past them) */
+const char *win_ne_guest_module_name(int m);
 /* DLLs. LoadLibrary: the DLL's index (loaded now if it was not: its
  * segments, its descriptors in the guest's GDT, the DLLs it needs), -1 if
  * it cannot be; its entry is the caller's to call. The far address of one

@@ -50,6 +50,7 @@ void win_ne_user_end(win_ne_guest_api_context *ctx)
                 if (u->image[i].h)
                     DestroyIcon(u->image[i].h);
             ne_call_end(u);
+            ne_sys_end(u);
             win_free(u);
             break;
         }

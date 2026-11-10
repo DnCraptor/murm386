@@ -1190,6 +1190,87 @@ static __attribute__((noinline)) int shell_service(args *a, uint16_t service, ui
     return 0;
 }
 
+/* the services with names and buffers of their own: apart, so that their
+ * frame is not every call's (a program's procedure, called back, calls
+ * again) */
+static __attribute__((noinline)) int kernel_strings(args *a, ne_user *u, uint16_t service,
+                                                   uint32_t *v, int *dword)
+{
+    win_ne_guest_api_context *c = a->ctx;
+    win_ne_guest_image *g = (win_ne_guest_image *)c->image;
+    (void)u;
+    switch (service) {
+    case 50: {                          /* GetProcAddress(HMODULE, LPCSTR) */
+        uint32_t far = dw(a, 4);
+        uint16_t h = w(a, 8), m = (uint16_t)(h - 0xf000u);
+        char name[64];
+        *dword = 1;
+        if (a->bad || ((far >> 16) && !str_(a, far, name, sizeof(name))))
+            return 1;
+        int d = win_ne_guest_dll_of(g, h);
+        if (d >= 0)
+            *v = win_ne_guest_dll_proc(g, d, (uint16_t)far, (far >> 16) ? name : NULL);
+        else if (win_ne_guest_module_name(m))
+            *v = win_ne_guest_proc(g, m, (uint16_t)far, (far >> 16) ? name : NULL);
+        return 1;
+    }
+    case 95: {                          /* LoadLibrary: the modules WINN has, DLLs */
+        uint16_t h = module_handle(a, dw(a, 4));
+        char name[64];
+        if (!h && str_(a, dw(a, 4), name, sizeof(name)) && name[0]) {
+            int d = win_ne_guest_load_library(g, name);
+            if (d >= 0) {
+                win_ne_dll_init(c);     /* its entry, and theirs it needs */
+                h = win_ne_guest_dll_instance(g, d);
+            }
+        }
+        *v = h ? h : 2;                 /* file not found */
+        return 1;
+    }
+    case 137: {                         /* FatalAppExit(UINT, LPCSTR): a message, the end */
+        char msg[128];
+        if (str_(a, dw(a, 4), msg, sizeof(msg)))
+            MessageBox(0, msg, "Application Error", MB_OK | MB_ICONSTOP);
+        c->exited = 1;
+        c->exit_code = 0xff;
+        return 1;
+    }
+    case 166: {                         /* WinExec(LPCSTR, UINT) */
+        char cmd[260];
+        *v = 2;
+        if (str_(a, dw(a, 6), cmd, sizeof(cmd)))
+            *v = WinExec(cmd, w(a, 4));
+        return 1;
+    }
+    case 0x10b5: {                      /* SetSysColors(int, const int FAR *, const COLORREF FAR *) */
+        int n = (int16_t)w(a, 12), idx[32];
+        COLORREF col[32];
+        uint8_t gi[64], gc[128];
+        if (a->bad || n <= 0 || n > 32 || !rd_(a, dw(a, 8), gi, 2u * (uint32_t)n) ||
+            !rd_(a, dw(a, 4), gc, 4u * (uint32_t)n))
+            return 1;
+        for (int i = 0; i < n; i++) {
+            idx[i] = (int16_t)rd16(gi + 2 * i);
+            col[i] = rd32(gc + 4 * i);
+        }
+        SetSysColors(n, idx, col);
+        return 1;
+    }
+    case WIN_NE_SERVICE_COMMDLG + 27: {   /* GetFileTitle(LPCSTR, LPSTR, UINT) */
+        char file[260], title[64];
+        UINT size = w(a, 4);
+        if (str_(a, dw(a, 10), file, sizeof(file))) {
+            short r = GetFileTitle(file, title, sizeof(title));
+            *v = (uint16_t)r;
+            if (!r && !str_out(a, dw(a, 6), title, size))
+                *v = (uint16_t)(strlen(title) + 1);
+        }
+        return 1;
+    }
+    }
+    return 0;
+}
+
 int ne_kernel_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword)
 {
     win_ne_guest_api_context *c = a->ctx;
@@ -1199,6 +1280,8 @@ int ne_kernel_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *d
     if (kernel_misc(a, service, v, dword))
         return 1;
     switch (service) {
+    case 50: case 95: case 137: case 166: case 0x10b5: case WIN_NE_SERVICE_COMMDLG + 27:
+        return kernel_strings(a, u, service, v, dword);
     case WIN_NE_SERVICE_WIN87EM + 3:    /* __WinEm87Info, __WinEm87Restore, */
     case WIN_NE_SERVICE_WIN87EM + 4:    /* __WinEm87Save(LPVOID, int): the */
     case WIN_NE_SERVICE_WIN87EM + 5:    /* coprocessor is no emulator's */
@@ -1241,20 +1324,6 @@ int ne_kernel_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *d
     case 48:                            /* GetModuleUsage */
         *v = 1;
         return 1;
-    case 50: {                          /* GetProcAddress(HMODULE, LPCSTR) */
-        uint32_t far = dw(a, 4);
-        uint16_t h = w(a, 8), m = (uint16_t)(h - 0xf000u);
-        char name[64];
-        *dword = 1;
-        if (a->bad || ((far >> 16) && !str_(a, far, name, sizeof(name))))
-            return 1;
-        int d = win_ne_guest_dll_of(g, h);
-        if (d >= 0)
-            *v = win_ne_guest_dll_proc(g, d, (uint16_t)far, (far >> 16) ? name : NULL);
-        else if (m < 6)
-            *v = win_ne_guest_proc(g, m, (uint16_t)far, (far >> 16) ? name : NULL);
-        return 1;
-    }
     case 54:                            /* GetInstanceData: no other instance */
         *v = 0;
         return 1;
@@ -1284,19 +1353,6 @@ int ne_kernel_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *d
     case 92:                            /* GetTempDrive: C: */
         *v = 0x3a43;
         return 1;
-    case 95: {                          /* LoadLibrary: the modules WINN has, DLLs */
-        uint16_t h = module_handle(a, dw(a, 4));
-        char name[64];
-        if (!h && str_(a, dw(a, 4), name, sizeof(name)) && name[0]) {
-            int d = win_ne_guest_load_library(g, name);
-            if (d >= 0) {
-                win_ne_dll_init(c);     /* its entry, and theirs it needs */
-                h = win_ne_guest_dll_instance(g, d);
-            }
-        }
-        *v = h ? h : 2;                 /* file not found */
-        return 1;
-    }
     case 96:                            /* FreeLibrary */
         *v = 0;
         return 1;
@@ -1314,40 +1370,11 @@ int ne_kernel_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *d
     case 133:                           /* GetExePtr: the module is the instance */
         *v = w(a, 4);
         return 1;
-    case 137: {                         /* FatalAppExit(UINT, LPCSTR): a message, the end */
-        char msg[128];
-        if (str_(a, dw(a, 4), msg, sizeof(msg)))
-            MessageBox(0, msg, "Application Error", MB_OK | MB_ICONSTOP);
-        c->exited = 1;
-        c->exit_code = 0xff;
-        return 1;
-    }
     case 155:                           /* GetTaskDS */
         *v = dgroup(c);
         return 1;
-    case 166: {                         /* WinExec(LPCSTR, UINT) */
-        char cmd[260];
-        *v = 2;
-        if (str_(a, dw(a, 6), cmd, sizeof(cmd)))
-            *v = WinExec(cmd, w(a, 4));
-        return 1;
-    }
     case 0x1010:                        /* ClipCursor: not confined */
         return 1;
-    case 0x10b5: {                      /* SetSysColors(int, const int FAR *, const COLORREF FAR *) */
-        int n = (int16_t)w(a, 12), idx[32];
-        COLORREF col[32];
-        uint8_t gi[64], gc[128];
-        if (a->bad || n <= 0 || n > 32 || !rd_(a, dw(a, 8), gi, 2u * (uint32_t)n) ||
-            !rd_(a, dw(a, 4), gc, 4u * (uint32_t)n))
-            return 1;
-        for (int i = 0; i < n; i++) {
-            idx[i] = (int16_t)rd16(gi + 2 * i);
-            col[i] = rd32(gc + 4 * i);
-        }
-        SetSysColors(n, idx, col);
-        return 1;
-    }
     case 0x111c:                        /* GetFreeSystemResources: plenty */
         *v = 90;
         return 1;
@@ -1369,17 +1396,6 @@ int ne_kernel_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *d
         *v = CommDlgExtendedError();
         *dword = 1;
         return 1;
-    case WIN_NE_SERVICE_COMMDLG + 27: {   /* GetFileTitle(LPCSTR, LPSTR, UINT) */
-        char file[260], title[64];
-        UINT size = w(a, 4);
-        if (str_(a, dw(a, 10), file, sizeof(file))) {
-            short r = GetFileTitle(file, title, sizeof(title));
-            *v = (uint16_t)r;
-            if (!r && !str_out(a, dw(a, 6), title, size))
-                *v = (uint16_t)(strlen(title) + 1);
-        }
-        return 1;
-    }
     }
     return 0;
 }

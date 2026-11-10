@@ -1,0 +1,22 @@
+# Windows' own DLLs for a Win16 program on the i386 core: MMSYSTEM (no
+# devices, timeGetTime, timeSetEvent's procedure, a RIFF file through
+# mmio), TOOLHELP (timer, memory, tasks, modules, MemoryRead), VER (its
+# VERSIONINFO, VerQueryValue, VerLanguageName, VerFindFile,
+# VerInstallFile) and LZEXPAND (a COMPRESS.EXE file, read expanded):
+#     ./winhost scripts/owsys.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OWSYS
+key RETURN
+wait 1000
+snap ok_sys.ppm
+keydown ALT
+key F4
+keyup ALT
+wait 50
+snap ok_sys_end.ppm
+exit

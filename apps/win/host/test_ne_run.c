@@ -98,7 +98,7 @@ int main(int argc, char **argv)
         else if (ends_with(f, "NEFPU.EXE"))       /* the coprocessor, WIN87EM */
             assert(rc == 0 && r.exited && r.value == 117);
         else if (ends_with(f, "NEUNDEF.EXE"))     /* loads; its undefined call ends it */
-            assert(rc == WIN_NE_EXEC_UNSUPPORTED && !strcmp(r.undefined, "MMSYSTEM.2"));
+            assert(rc == WIN_NE_EXEC_UNSUPPORTED && !strcmp(r.undefined, "DDEML.2"));
         else if (ends_with(f, "NELOOP-fixture.exe"))
             assert(rc == 0 && boxes >= 1);
         else if (ends_with(f, "OWHELLO.EXE"))     /* Open Watcom's start-up code */

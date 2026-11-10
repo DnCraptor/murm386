@@ -362,7 +362,7 @@ static void full_path(const char *name, char *out, int cap)
 enum { OF_PARSE_ = 0x100, OF_DELETE_ = 0x200, OF_CREATE_ = 0x1000, OF_EXIST_ = 0x4000,
        OF_REOPEN_ = 0x8000 };
 
-static __attribute__((noinline)) uint16_t open_file(args *a)
+__attribute__((noinline)) uint16_t ne_open_file(args *a, const char *given)
 {
     UINT mode = w(a, 4);
     uint32_t ofs = dw(a, 6), name_far = dw(a, 10);
@@ -371,7 +371,9 @@ static __attribute__((noinline)) uint16_t open_file(args *a)
     memset(of, 0, sizeof(of));
     if (a->bad)
         return (uint16_t)HFILE_ERROR;
-    if (mode & OF_REOPEN_) {
+    if (given) {
+        lstrcpyn(name, given, sizeof(name));
+    } else if (mode & OF_REOPEN_) {
         if (!win_ne_read(a->ctx, (uint16_t)(ofs >> 16), (uint16_t)ofs, of, sizeof(of)))
             return a->bad = 1, (uint16_t)HFILE_ERROR;
         lstrcpyn(name, (const char *)of + 8, sizeof(name));
@@ -481,7 +483,7 @@ int ne_dos_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dwor
 {
     switch (service) {
     case 74:                            /* OpenFile */
-        *v = open_file(a);
+        *v = ne_open_file(a, NULL);
         return 1;
     case 131:                           /* GetDOSEnvironment */
         *v = dos_environment(a, u);

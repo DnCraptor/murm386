@@ -75,11 +75,29 @@ has not, is named in the message.
 
 A function of Windows' WINN does not have (of KERNEL, USER, GDI and the
 rest of WINN's modules, or of Windows' own DLLs WINN has nothing of:
-MMSYSTEM, TOOLHELP, VER, LZEXPAND, DDEML, OLECLI, OLESVR, SOUND, PENWIN,
-when no such DLL is found) keeps no program from loading: as Windows'
-"undefined dynalink" its call ends the program, the function named
-("PROG.EXE called USER.200, which WINN does not have yet."). A program
-may import up to 384 of WINN's functions.
+DDEML, OLECLI, OLESVR, SOUND, PENWIN, when no such DLL is found) keeps no
+program from loading: as Windows' "undefined dynalink" its call ends the
+program, the function named ("PROG.EXE called USER.231, which WINN does
+not have yet."). A program may import up to 384 of WINN's functions.
+
+Windows' own DLLs WINN has (`core/ne_guest_sys.c`): MMSYSTEM with no
+devices (none of each kind: wave, MIDI, aux, joysticks, mixers; their
+opens fail, MCI has none, sndPlaySound and PlaySound play nothing), the
+multimedia timer (timeGetTime, timeGetSystemTime, timeGetDevCaps,
+timeSetEvent: its procedure is called as the program takes its messages,
+as a timer's, as often as its period went by since, ten times at most),
+mmio's files (mmioOpen, Read, Write, Seek, Close,
+Descend, Ascend, CreateChunk: RIFF files; unbuffered, no I/O procedures
+or memory files); TOOLHELP's TimerCount, MemManInfo and SystemHeapInfo
+(the memory as GetFreeSpace has it), TaskFirst, TaskNext,
+TaskFindHandle, ModuleFirst, ModuleNext, ModuleFindName and
+ModuleFindHandle (WINN's modules), MemoryRead and MemoryWrite,
+NotifyRegister and InterruptRegister (taken, never called); the heaps'
+walks find nothing; VER's GetFileVersionInfo(Size), VerQueryValue,
+GetFileResource(Size), VerLanguageName, VerFindFile and VerInstallFile (a
+copy, expanded); LZEXPAND: files compressed by COMPRESS.EXE ("SZDD"),
+read expanded (LZOpenFile finds FILE.TX_ for FILE.TXT, LZInit, LZRead,
+LZSeek, LZCopy, CopyLZFile, GetExpandedName), others as they are.
 
 The clipboard's data goes between a program's global blocks and WINN's
 (SetClipboardData copies the block, which is the clipboard's then and
@@ -203,7 +221,8 @@ the basics: arcs, flood fill, regions, the mapping modes, DIBs, fonts
 enumerated), `OWAPI2` (the clipboard, DlgDirList, window placement,
 properties, menus from memory, cursors and icons of bits; OpenComm; a call
 WINN has not), `OWMETA` (a metafile recorded, played, scaled, enumerated
-record by record, its bits and a file) (`make NEFIXTURES` in
+record by record, its bits and a file), `OWSYS` (MMSYSTEM, TOOLHELP, VER,
+LZEXPAND) (`make NEFIXTURES` in
 `host/`). All have DOS MZ stubs that explain how to launch them under WINN
 when invoked directly from DOS. `host/test_ne_run` runs them on the
 emulator's own i386 core (`src/i386.c` as it is, built for the host with
@@ -211,7 +230,7 @@ the stand-ins in `host/x86run/`), and so does the host `winhost`: they are
 in its `HOSTWIN/` (`scripts/owwin.txt`, `scripts/owmenu.txt`,
 `scripts/owdemo.txt`, `scripts/owfile.txt`, `scripts/owres.txt`,
 `scripts/owkern.txt`, `scripts/owdll.txt`, `scripts/owfpu.txt`, `scripts/owapi.txt`, `scripts/owgdi.txt`,
-`scripts/owapi2.txt`, `scripts/owmeta.txt`).
+`scripts/owapi2.txt`, `scripts/owmeta.txt`, `scripts/owsys.txt`).
 
     WINN [:] [program [arguments]]
 
