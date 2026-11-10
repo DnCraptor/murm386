@@ -1337,8 +1337,13 @@ int ne_kernel_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *d
         *v = (uint32_t)w(a, 4) << 16;
         *dword = 1;
         return 1;
-    case 63:                            /* FreeResource */
-        *v = win_ne_guest_global_free(g, w(a, 4)) ? 0 : w(a, 4);
+    case 63:                            /* FreeResource: DS or ES the block's no more */
+        if (win_ne_guest_global_free(g, w(a, 4))) {
+            win_ne_forget_selector(a->ctx, a->cpu, w(a, 4));
+            *v = 0;
+        } else {
+            *v = w(a, 4);
+        }
         return 1;
     case 65: {                          /* SizeofResource(HINSTANCE, HRSRC) */
         int i = resource_index(u, w(a, 4));
