@@ -21,8 +21,16 @@
  * On the first start the Main group gets every Windows application found
  * next to WINN.EXE. Items use the standard application icon (no resources
  * yet).
+ *
+ * As Windows' Program Manager it is a DDE server (DDEML.DLL): service and
+ * topic PROGMAN, the commands setup programs send it ([CreateGroup],
+ * [ShowGroup], [AddItem], [DeleteItem], [ReplaceItem], [DeleteGroup],
+ * [Reload], [ExitProgman]: nothing, it is the shell) and the item Groups
+ * (their names, a line each).
  */
+#include <string.h>
 #include "windows.h"
+#include "ddeml.h"
 
 #define INI         "PROGMAN.INI"
 #define MAXGROUPS   8
@@ -920,6 +928,264 @@ static LRESULT CALLBACK FrameProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     return DefFrameProc(h, hclient, msg, wp, lp);
 }
 
+/* ---------------------------------------------------------------- DDE */
+
+static struct {
+    HINSTANCE lib;
+    DWORD inst;
+    HSZ name, groups;                   /* PROGMAN (service and topic), Groups */
+    DDEGETDATA get_data;
+    DDECREATEDATAHANDLE create_data;
+    int current;                        /* the group AddItem goes to */
+} dde = { 0, 0, 0, 0, NULL, NULL, -1 };
+
+static int atoi_(const char *s)
+{
+    int v = 0, neg = *s == '-';
+    for (s += neg; *s >= '0' && *s <= '9'; s++)
+        v = v * 10 + (*s - '0');
+    return neg ? -v : v;
+}
+
+static int group_named(const char *name)
+{
+    for (int g = 0; g < ngroups; g++)
+        if (!lstrcmpi(groups[g].name, name))
+            return g;
+    return -1;
+}
+
+/* a group of the name (made when there is none): its index, -1 if none
+ * can be made */
+static int dde_group(const char *name)
+{
+    int g = group_named(name);
+    if (g >= 0 || ngroups >= MAXGROUPS || !name[0])
+        return g;
+    pm_group *gr = &groups[ngroups];
+    memset(gr, 0, sizeof(*gr));
+    lstrcpyn(gr->name, name, sizeof(gr->name));
+    gr->sel = -1;
+    ngroups++;
+    open_group_window(ngroups - 1, 1);
+    save_groups();
+    return ngroups - 1;
+}
+
+static void show_group(int g, int cmd)
+{
+    pm_group *gr = &groups[g];
+    if (!gr->hwnd)
+        return;
+    if (cmd == SW_MINIMIZE || cmd == SW_SHOWMINIMIZED || cmd == SW_SHOWMINNOACTIVE)
+        ShowWindow(gr->hwnd, SW_MINIMIZE);
+    else if (cmd == SW_SHOWMAXIMIZED)
+        SendMessage(hclient, WM_MDIMAXIMIZE, gr->hwnd, 0);
+    else if (IsIconic(gr->hwnd))
+        SendMessage(hclient, WM_MDIRESTORE, gr->hwnd, 0);
+    if (cmd != SW_SHOWNOACTIVATE && cmd != SW_SHOWMINNOACTIVE)
+        SendMessage(hclient, WM_MDIACTIVATE, gr->hwnd, 0);
+}
+
+static int item_named(pm_group *gr, const char *name)
+{
+    for (int i = 0; i < gr->n; i++)
+        if (!lstrcmpi(gr->it[i].desc, name))
+            return i;
+    return -1;
+}
+
+static void remove_item(pm_group *gr, int i)
+{
+    forget_icon(&gr->it[i]);
+    for (; i < gr->n - 1; i++)
+        gr->it[i] = gr->it[i + 1];
+    gr->n--;
+    if (gr->sel >= gr->n)
+        gr->sel = gr->n - 1;
+    items_changed(gr);
+}
+
+/* "[Cmd(a,"b, c",d)][Cmd2]...": each command and its arguments (quotes
+ * kept out); 1 when all were done */
+static int dde_execute(const char *s)
+{
+    int ok = 1;
+    while (*s) {
+        while (*s && *s != '[')
+            s++;
+        if (!*s)
+            break;
+        s++;
+        char name[24], arg[8][96];
+        int n = 0, k = 0;
+        while (*s == ' ')
+            s++;
+        while (*s && *s != '(' && *s != ']' && *s != ' ' && k < (int)sizeof(name) - 1)
+            name[k++] = *s++;
+        name[k] = 0;
+        while (*s == ' ')
+            s++;
+        if (*s == '(') {
+            s++;
+            for (;;) {
+                int q = 0;
+                k = 0;
+                while (*s == ' ')
+                    s++;
+                while (*s && (q || (*s != ',' && *s != ')'))) {
+                    if (*s == '"')
+                        q = !q;
+                    else if (n < 8 && k < (int)sizeof(arg[0]) - 1)
+                        arg[n][k++] = *s;
+                    s++;
+                }
+                while (k && arg[n < 8 ? n : 7][k - 1] == ' ')
+                    k--;
+                if (n < 8)
+                    arg[n++][k] = 0;
+                if (*s != ',')
+                    break;
+                s++;
+            }
+            if (*s == ')')
+                s++;
+        }
+        while (*s && *s != ']')
+            s++;
+        if (*s == ']')
+            s++;
+        for (int i = n; i < 8; i++)
+            arg[i][0] = 0;
+        if (!lstrcmpi(name, "CreateGroup") || !lstrcmpi(name, "ShowGroup")) {
+            int g = dde_group(arg[0]);
+            if (g < 0) {
+                ok = 0;
+                continue;
+            }
+            dde.current = g;
+            if (!lstrcmpi(name, "ShowGroup"))
+                show_group(g, n > 1 ? atoi_(arg[1]) : SW_SHOWNORMAL);
+            else
+                show_group(g, SW_SHOWNORMAL);
+        } else if (!lstrcmpi(name, "AddItem")) {
+            pm_group *gr = dde.current >= 0 && dde.current < ngroups ? &groups[dde.current] : NULL;
+            if (!gr || !arg[0][0] || gr->n >= MAXITEMS) {
+                ok = 0;
+                continue;
+            }
+            pm_item *it = &gr->it[gr->n];
+            memset(it, 0, sizeof(*it));
+            lstrcpyn(it->cmd, arg[0], sizeof(it->cmd));
+            if (arg[1][0])
+                lstrcpyn(it->desc, arg[1], sizeof(it->desc));
+            else
+                title_of(arg[0], it->desc, sizeof(it->desc));
+            gr->n++;
+            items_changed(gr);
+        } else if (!lstrcmpi(name, "DeleteItem") || !lstrcmpi(name, "ReplaceItem")) {
+            pm_group *gr = dde.current >= 0 && dde.current < ngroups ? &groups[dde.current] : NULL;
+            int i = gr ? item_named(gr, arg[0]) : -1;
+            if (i < 0)
+                ok = 0;
+            else
+                remove_item(gr, i);
+        } else if (!lstrcmpi(name, "DeleteGroup")) {
+            int g = group_named(arg[0]);
+            if (g < 0) {
+                ok = 0;
+                continue;
+            }
+            pm_group *gr = &groups[g];
+            HWND h = gr->hwnd;
+            for (int i = 0; i < gr->n; i++)
+                forget_icon(&gr->it[i]);
+            for (int k2 = g; k2 < ngroups - 1; k2++)
+                groups[k2] = groups[k2 + 1];
+            ngroups--;
+            if (dde.current == g)
+                dde.current = -1;
+            else if (dde.current > g)
+                dde.current--;
+            if (h)
+                SendMessage(hclient, WM_MDIDESTROY, h, 0);
+            save_groups();
+        } else if (!lstrcmpi(name, "Reload") || !lstrcmpi(name, "ExitProgman")) {
+            /* the groups are what PROGMAN.INI has; the shell stays */
+        } else {
+            ok = 0;
+        }
+    }
+    return ok;
+}
+
+static HDDEDATA CALLBACK dde_callback(UINT type, UINT fmt, HCONV conv, HSZ hsz1, HSZ hsz2,
+                                      HDDEDATA data, DWORD d1, DWORD d2)
+{
+    (void)conv; (void)d1; (void)d2;
+    switch (type) {
+    case XTYP_CONNECT:
+        return hsz1 == dde.name && hsz2 == dde.name;
+    case XTYP_EXECUTE: {
+        static char text[1024];
+        DWORD n = dde.get_data(data, (LPBYTE)text, sizeof(text) - 1, 0);
+        text[n] = 0;
+        return dde_execute(text) ? DDE_FACK : DDE_FNOTPROCESSED;
+    }
+    case XTYP_REQUEST: {
+        if (hsz2 != dde.groups || fmt != CF_TEXT)
+            return 0;
+        static char list[MAXGROUPS * 34 + 1];
+        int k = 0;
+        for (int g = 0; g < ngroups; g++)
+            k += wsprintf(list + k, "%s\r\n", groups[g].name);
+        list[k] = 0;
+        return dde.create_data(dde.inst, (LPBYTE)list, (DWORD)k + 1, 0, dde.groups, CF_TEXT, 0);
+    }
+    }
+    return 0;
+}
+
+/* DDEML's function of the name (void (*)(void): any function's type) */
+static void (*dde_proc(const char *name))(void)
+{
+    return (void (*)(void))GetProcAddress(dde.lib, name);
+}
+
+static void dde_start(void)
+{
+    dde.lib = LoadLibrary("DDEML");
+    if (dde.lib < 32)
+        return;
+    DDEINITIALIZE init = (DDEINITIALIZE)dde_proc("DdeInitialize");
+    DDECREATESTRINGHANDLE str = (DDECREATESTRINGHANDLE)dde_proc("DdeCreateStringHandle");
+    DDENAMESERVICE name = (DDENAMESERVICE)dde_proc("DdeNameService");
+    dde.get_data = (DDEGETDATA)dde_proc("DdeGetData");
+    dde.create_data = (DDECREATEDATAHANDLE)dde_proc("DdeCreateDataHandle");
+    if (!init || !str || !name || !dde.get_data || !dde.create_data ||
+        init(&dde.inst, dde_callback, CBF_FAIL_POKES | CBF_FAIL_ADVISES |
+             CBF_SKIP_REGISTRATIONS | CBF_SKIP_UNREGISTRATIONS, 0)) {
+        FreeLibrary(dde.lib);
+        dde.lib = 0;
+        dde.inst = 0;
+        return;
+    }
+    dde.name = str(dde.inst, "PROGMAN", CP_WINANSI);
+    dde.groups = str(dde.inst, "Groups", CP_WINANSI);
+    name(dde.inst, dde.name, 0, DNS_REGISTER);
+}
+
+static void dde_stop(void)
+{
+    if (!dde.lib)
+        return;
+    DDEUNINITIALIZE uninit = (DDEUNINITIALIZE)dde_proc("DdeUninitialize");
+    if (uninit)
+        uninit(dde.inst);
+    FreeLibrary(dde.lib);
+    dde.lib = 0;
+}
+
 int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
 {
     (void)cmd;
@@ -1001,6 +1267,7 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
         if (groups[g].state != 2)
             open_group_window(g, 0);
     UpdateWindow(h);
+    dde_start();
 
     MSG m;
     while (GetMessage(&m, 0, 0, 0)) {
@@ -1010,5 +1277,6 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
         DispatchMessage(&m);
     }
     DestroyAcceleratorTableN(acc);
+    dde_stop();
     return (int)m.wParam;
 }

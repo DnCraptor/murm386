@@ -1478,9 +1478,14 @@ int win_ne_guest_selector_set(win_ne_guest_image *g, uint16_t sel, uint32_t base
 
 /* ---------------------------------------------------------------- DLLs */
 
-/* where a DLL's file is found: the program's directory, then the one
- * WINN names (the Windows directory) */
+/* where a DLL's file is found: the program's directory, then those WINN
+ * names (the Windows directory, the system one) */
 __attribute__((weak)) const char *win_ne_dll_dir(void)
+{
+    return NULL;
+}
+
+__attribute__((weak)) const char *win_ne_dll_system_dir(void)
 {
     return NULL;
 }
@@ -1522,8 +1527,8 @@ static int locate_dll(const char *program, const char *module, char *out, size_t
         return 0;
     strcpy(name, base);
     strcat(name, ext);
-    const char *dirs[2] = { program, win_ne_dll_dir() };
-    for (int i = 0; i < 2; i++) {
+    const char *dirs[3] = { program, win_ne_dll_dir(), win_ne_dll_system_dir() };
+    for (int i = 0; i < 3; i++) {
         if (!dirs[i])
             continue;
         size_t n = strlen(dirs[i]);
@@ -1533,7 +1538,7 @@ static int locate_dll(const char *program, const char *module, char *out, size_t
         if (n + strlen(name) + 2 > cap)
             continue;
         memcpy(out, dirs[i], n);
-        if (i == 1 && n && out[n - 1] != '\\' && out[n - 1] != '/')
+        if (i && n && out[n - 1] != '\\' && out[n - 1] != '/')
             out[n++] = dirs[i][0] && strchr(dirs[i], '\\') ? '\\' : '/';
         strcpy(out + n, name);
         if (file_exists(out))

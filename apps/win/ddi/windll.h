@@ -45,6 +45,10 @@ typedef struct win_dll_ne {
     int (*write)(win_dll_call *c, uint32_t far, const void *src, uint32_t n);
     /* a zero-ended string of the program's, cut to cap; 0:0 fails */
     int (*string)(win_dll_call *c, uint32_t far, char *dst, uint32_t cap);
+    /* a FAR PASCAL procedure (selector:offset) of the Win16 program of the
+     * task, called with n words (in the order a PASCAL caller pushes them):
+     * its DX:AX; 0 if the task is no Win16 program's (or it has ended) */
+    uint32_t (*call)(uint16_t task, uint32_t proc, const uint16_t *words, int n);
 } win_dll_ne;
 
 typedef struct win_dll_export {

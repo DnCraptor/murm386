@@ -58,7 +58,8 @@ application's. A class it registers with a native class's procedure
 (`GetClassInfo`: a superclass) works as that class.
 
 A Win16 program's own DLLs (NE libraries) are loaded with it, from its
-directory or the Windows one: those it imports from (by name or ordinal,
+directory, the Windows one or its `SYSTEM` (Windows' own NE DLLs, as
+CARDS.DLL, are there): those it imports from (by name or ordinal,
 and those they import from in turn) as it is loaded, others when it calls
 `LoadLibrary`, `GetProcAddress` finding their exports. Their segments get
 selectors of the program's own (each program its own copy of a DLL: no
@@ -75,7 +76,8 @@ has not, is named in the message.
 
 A function of Windows' WINN does not have (of KERNEL, USER, GDI and the
 rest of WINN's modules, or of Windows' own DLLs WINN has nothing of:
-DDEML, OLECLI, OLESVR, SOUND, PENWIN, when no such DLL is found) keeps no
+OLECLI, OLESVR, SOUND, PENWIN, and LZEXPAND, VER, DDEML when their DLL is
+not there or has not the function) keeps no
 program from loading: as Windows' "undefined dynalink" its call ends the
 program, the function named ("PROG.EXE called USER.231, which WINN does
 not have yet."). A program may import up to 384 of WINN's functions.
@@ -279,7 +281,7 @@ enumerated), `OWAPI2` (the clipboard, DlgDirList, window placement,
 properties, menus from memory, cursors and icons of bits; OpenComm; a call
 WINN has not), `OWMETA` (a metafile recorded, played, scaled, enumerated
 record by record, its bits and a file), `OWSYS` (MMSYSTEM, TOOLHELP, VER,
-LZEXPAND, INT 2Fh, DPMI), `OWFONT` (a raster font file's faces, `WINNTEST.FON` beside
+LZEXPAND, INT 2Fh, DPMI, DDEML, the Program Manager's DDE), `OWFONT` (a raster font file's faces, `WINNTEST.FON` beside
 it, made by `host/mkfon.py`: its sizes, larger, bold, italic; the VGA
 glyphs larger; a dialog in the font) (`make NEFIXTURES` in
 `host/`). All have DOS MZ stubs that explain how to launch them under WINN
@@ -313,7 +315,7 @@ nothing leaves the program from the command line in that part (`WINN DEMO`).
 | `../winapps/<name>/` | applications: `progman` (the Program Manager, the default shell), `winfile` (File Manager), `taskman` (Task List), `winmine` (Minesweeper), `notepad`, `clock`, `calc`, `control` (Control Panel), `demo` (a tour of the API) |
 | `../windrv/<name>/` | driver modules; `vga800` is VBE 102h 800x600 in 16 colours |
 | `ddi/windll.h`, `core/windll.c` | native DLLs: the interface, and their loading, uses and unloading |
-| `../windll/<name>/` | native DLLs: `lzexpand` (LZEXPAND.DLL), `ver` (VER.DLL) |
+| `../windll/<name>/` | native DLLs: `lzexpand` (LZEXPAND.DLL), `ver` (VER.DLL), `ddeml` (DDEML.DLL) |
 | `host/` | the same sources on Linux with a snapshot display and scripted input |
 
 ## Drivers
@@ -351,9 +353,9 @@ used.
 
 Windows' own libraries are native DLLs of WINN's, loaded when a program
 needs one and unloaded when none does any more, as Windows 3.x does with
-its DLLs, instead of being built into `WINN.EXE`: `LZEXPAND.DLL` and
-`VER.DLL` so far (VER reads a file's resources with the core's
-`GetFileResourceN`). A program importing one that is not there, or a
+its DLLs, instead of being built into `WINN.EXE`: `LZEXPAND.DLL`,
+`VER.DLL` (it reads a file's resources with the core's
+`GetFileResourceN`) and `DDEML.DLL` so far. A program importing one that is not there, or a
 function the DLL has not, still loads; the call ends it.
 A native DLL is an EZ image built with `sdk/windll.cmake` (no crt0; its
 `__ez_start`, from `sdk/windll_entry.c`, begins with a branch over the
@@ -362,7 +364,24 @@ ordinal and name programs import each by, the bytes of a Win16 caller's
 PASCAL arguments, the native function. It calls KERNEL, GDI and USER
 through the API stubs as an application does, and has Win16 programs'
 calls of its functions with their arguments and memory from the core
-(`win_dll_ne`).
+(`win_dll_ne`), which also calls a procedure of a task's Win16 program
+for it (a callback).
+
+DDEML (`include/ddeml.h` for native callers) is the DDE Management
+Library between the programs WINN runs, native and Win16 alike:
+instances with their callbacks and filters, services (DdeNameService,
+XTYP_REGISTER), conversations (DdeConnect asks the servers' callbacks with
+XTYP_CONNECT), the client's request, poke, execute and advise links
+(DdePostAdvise: XTYP_ADVREQ, XTYP_ADVDATA), asynchronous transactions
+(XTYP_XACT_COMPLETE as the client takes its messages), data handles and
+string handles (global atoms). An instance's callback is called in its
+task, through a hidden window of the instance. There is no NetDDE, no
+conversation with a program speaking DDE's messages itself, no
+DdeConnectList, and a Win16 program's DdeAccessData gives nothing. The
+Program Manager is a DDEML server as Windows' is for setup programs:
+service and topic PROGMAN, [CreateGroup], [ShowGroup], [AddItem],
+[DeleteItem], [ReplaceItem], [DeleteGroup] ([Reload], [ExitProgman] do
+nothing), the item Groups.
 
 The core looks for `<NAME>.DLL` in the Windows directory (`WINN.EXE`'s),
 then its `SYSTEM`; a file there that is not a native DLL (Windows' own NE

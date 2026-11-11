@@ -16,7 +16,7 @@ GDICORE  = $(filter-out ../core/exports.c ../core/task.c ../core/file.c ../core/
 # the applications, built in; each WinMain gets its own name
 APPS     = demo.o progman.o notepad.o clock.o calc.o control.o winfile.o taskman.o winmine.o appinfo.o
 # the native DLLs, built in (host_dlls.c names them); each WinDllInit its own
-DLLS     = lzexpand.o ver.o host_dlls.c
+DLLS     = lzexpand.o ver.o ddeml.o host_dlls.c
 
 all: test_gdi test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_launch test_ne_rm_gate test_ne_run NEFIXTURES winhost winhost800 winhostvga HOSTWIN
 
@@ -155,6 +155,8 @@ lzexpand.o: ../../windll/lzexpand/lzexpand.c
 	$(CC) $(CFLAGS) $(INC) -DWinDllInit=lzexpand_WinDllInit -c -o $@ $<
 ver.o: ../../windll/ver/ver.c
 	$(CC) $(CFLAGS) $(INC) -DWinDllInit=ver_WinDllInit -c -o $@ $<
+ddeml.o: ../../windll/ddeml/ddeml.c ../include/ddeml.h ../ddi/windll.h
+	$(CC) $(CFLAGS) $(INC) -DWinDllInit=ddeml_WinDllInit -c -o $@ $<
 
 # their names and icons, from their CMakeLists.txt and .icon files
 appinfo.c: mkappinfo.py $(wildcard ../../winapps/*/CMakeLists.txt) $(wildcard ../../winapps/*/*.icon)

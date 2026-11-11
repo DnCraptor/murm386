@@ -702,8 +702,14 @@ static int call_string(win_dll_call *c, uint32_t far, char *dst, uint32_t cap)
     return str_(c->a, far, dst, cap);
 }
 
+static uint32_t task_call(uint16_t task, uint32_t proc, const uint16_t *words, int n)
+{
+    ne_user *u = ne_user_of((HTASK)task);
+    return u && u->ctx && proc ? win_ne_call(u->ctx, proc, words, n, NULL, 0) : 0;
+}
+
 static const win_dll_ne dll_ne = {
-    sizeof(win_dll_ne), call_arg16, call_arg32, call_read, call_write, call_string,
+    sizeof(win_dll_ne), call_arg16, call_arg32, call_read, call_write, call_string, task_call,
 };
 
 const win_dll_ne *win_dll_ne_glue(void) { return &dll_ne; }

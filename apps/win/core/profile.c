@@ -475,3 +475,11 @@ const char *win_ne_dll_dir(void)
 {
     return win_dir;
 }
+
+/* ... and then the system directory, when there is one of its own */
+const char *win_ne_dll_system_dir(void)
+{
+    static char dir[128];
+    UINT n = GetSystemDirectory(dir, sizeof(dir));
+    return n && n < sizeof(dir) && lstrcmpi(dir, win_dir) ? dir : NULL;
+}
