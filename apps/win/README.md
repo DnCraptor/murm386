@@ -281,7 +281,7 @@ enumerated), `OWAPI2` (the clipboard, DlgDirList, window placement,
 properties, menus from memory, cursors and icons of bits; OpenComm; a call
 WINN has not), `OWMETA` (a metafile recorded, played, scaled, enumerated
 record by record, its bits and a file), `OWSYS` (MMSYSTEM, TOOLHELP, VER,
-LZEXPAND, INT 2Fh, DPMI, DDEML, the Program Manager's DDE), `OWFONT` (a raster font file's faces, `WINNTEST.FON` beside
+LZEXPAND, INT 2Fh, DPMI, DDEML, the Program Manager's DDE, DDE's messages), `OWFONT` (a raster font file's faces, `WINNTEST.FON` beside
 it, made by `host/mkfon.py`: its sizes, larger, bold, italic; the VGA
 glyphs larger; a dialog in the font) (`make NEFIXTURES` in
 `host/`). All have DOS MZ stubs that explain how to launch them under WINN
@@ -389,7 +389,12 @@ DdeConnectList, and a Win16 program's DdeAccessData gives nothing. The
 Program Manager is a DDEML server as Windows' is for setup programs:
 service and topic PROGMAN, [CreateGroup], [ShowGroup], [AddItem],
 [DeleteItem], [ReplaceItem], [DeleteGroup] ([Reload], [ExitProgman] do
-nothing), the item Groups.
+nothing), the item Groups; and to programs speaking DDE's messages
+themselves (WM_DDE_INITIATE, EXECUTE, REQUEST, TERMINATE), as setup
+programs do. DDE's global memory goes between programs as copies: a Win16
+program's block (its selector) becomes a native one for the other end and
+back (the ACK that returns an EXECUTE's commands gives the sender its own
+block; DATA and POKE with fRelease are the receiver's).
 
 The core looks for `<NAME>.DLL` in the Windows directory (`WINN.EXE`'s),
 then its `SYSTEM`; a file there that is not a native DLL (Windows' own NE

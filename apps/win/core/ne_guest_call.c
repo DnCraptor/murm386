@@ -699,6 +699,8 @@ static WNDPROC token_proc(uint32_t t);
 LRESULT ne_message(ne_user *u, uint32_t proc, HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
     win_ne_guest_api_context *c = u->ctx;
+    if (msg >= 0x3E0 && msg <= 0x3E8)
+        lp = (LPARAM)ne_dde_in(c, u, msg, (uint32_t)lp, 1);
     WNDPROC native = token_proc(proc);
     if (native)                         /* a native one it holds (a superclass) */
         return CallWindowProc(native, h, msg, wp, lp);
@@ -793,9 +795,13 @@ enum {
 /* SendMessage to a window of the program's own: lParam as it is (its
  * procedure gets its own pointer). To another (a control): a string in, a
  * buffer out, a rectangle, made native. */
+static uint32_t dde_out(win_ne_guest_api_context *c, ne_user *u, UINT msg, uint32_t lp);
+
 static __attribute__((noinline)) uint32_t send(args *a, ne_user *u, HWND h, UINT msg, WPARAM wp,
                                                uint32_t lp, int post)
 {
+    if (msg >= 0x3E0 && msg <= 0x3E8 && h && h != 0xFFFF && GetWindowTask(h) != u->task)
+        lp = dde_out(a->ctx, u, msg, lp);   /* DDE's memory: the other one's copy */
     if (!h || ne_own_window(u, h) || !(lp >> 16) || lend_find(u, lp) >= 0) {
         if (post)
             return (uint32_t)PostMessage(h, msg, wp, (LPARAM)lp);
@@ -939,6 +945,160 @@ static uint32_t token_of(WNDPROC p)
 static WNDPROC token_proc(uint32_t t)
 {
     return (t >> 16) == 0xffffu && (t & 0xffffu) < 32 ? tokens[t & 0xffffu] : NULL;
+}
+
+/* ---------------------------------------------------------------- DDE's memory */
+
+/* DDE's messages carry global memory between programs (Windows: shared,
+ * GMEM_DDESHARE): WM_DDE_DATA's, POKE's, ADVISE's in lParam's low word,
+ * EXECUTE's and its ACK's in the high one. A program's block is its own
+ * (one of its selectors, odd), the other end's a native block (WINN's
+ * handles are even): a copy goes, the one it came from remembered, so the
+ * ACK that gives an EXECUTE's commands back gives the sender its own (the
+ * copy freed). DATA and POKE with fRelease: the receiver's to free, the
+ * sender's freed as it is copied. */
+enum { DDE_ACK_ = 0x3E4, DDE_ADVISE_ = 0x3E2, DDE_DATA_ = 0x3E5, DDE_POKE_ = 0x3E7,
+       DDE_EXECUTE_ = 0x3E8 };
+#define DDE_COPIES 32
+
+static struct {
+    HGLOBAL native;
+    HTASK task;
+    uint16_t sel;
+    uint8_t copy;                       /* the program's block is WINN's copy */
+} dde[DDE_COPIES];
+static unsigned dde_next;
+
+/* where its handle is: 0 none, 1 the low word, 2 the high one */
+static int dde_where(UINT msg)
+{
+    return msg == DDE_DATA_ || msg == DDE_POKE_ || msg == DDE_ADVISE_ ? 1 :
+           msg == DDE_EXECUTE_ || msg == DDE_ACK_ ? 2 : 0;
+}
+
+static uint32_t dde_with(uint32_t lp, int where, uint16_t h)
+{
+    return where == 1 ? (lp & 0xffff0000u) | h : (lp & 0xffffu) | (uint32_t)h << 16;
+}
+
+static int dde_find(HGLOBAL n, HTASK t, uint16_t sel)
+{
+    for (int i = 0; i < DDE_COPIES; i++)
+        if (dde[i].task == t && (n ? dde[i].native == n : dde[i].sel == sel) &&
+            (dde[i].native || dde[i].sel))
+            return i;
+    return -1;
+}
+
+static void dde_note(HGLOBAL n, HTASK t, uint16_t sel, int copy)
+{
+    int i = (int)(dde_next++ % DDE_COPIES);
+    dde[i].native = n;
+    dde[i].task = t;
+    dde[i].sel = sel;
+    dde[i].copy = (uint8_t)copy;
+}
+
+/* DDEDATA's fRelease (DATA, POKE) */
+static int dde_release(UINT msg, const uint8_t *p, DWORD n)
+{
+    return (msg == DDE_DATA_ || msg == DDE_POKE_) && n >= 2 && (p[1] & 0x20);
+}
+
+/* the program sends or posts it to another task's window */
+static uint32_t dde_out(win_ne_guest_api_context *c, ne_user *u, UINT msg, uint32_t lp)
+{
+    int where = dde_where(msg);
+    uint16_t sel = (uint16_t)(where == 1 ? lp : lp >> 16);
+    win_ne_guest_image *g = (win_ne_guest_image *)c->image;
+    win_ne_guest_segment *s = where && (sel & 1) ? win_ne_guest_global(g, sel) : NULL;
+    if (!s)
+        return lp;
+    int i = dde_find(0, u->task, sel);
+    if (i >= 0) {                       /* one it had from another, or sent before */
+        HGLOBAL n = dde[i].native;
+        if (msg == DDE_ACK_ && dde[i].copy) {   /* the commands back: the copy goes */
+            win_ne_guest_global_free(g, sel);
+            dde[i].native = 0;
+            dde[i].sel = 0;
+        }
+        return dde_with(lp, where, n);
+    }
+    DWORD size = s->size;
+    HGLOBAL n = size ? GlobalAlloc(GMEM_MOVEABLE | GMEM_DDESHARE, size) : 0;
+    uint8_t *p = n ? (uint8_t *)GlobalLock(n) : NULL;
+    if (!p || !win_ne_read(c, sel, 0, p, size)) {
+        if (n) {
+            GlobalUnlock(n);
+            GlobalFree(n);
+        }
+        return lp;
+    }
+    int release = dde_release(msg, p, size);
+    GlobalUnlock(n);
+    if (release)
+        win_ne_guest_global_free(g, sel);
+    else
+        dde_note(n, u->task, sel, 0);
+    return dde_with(lp, where, n);
+}
+
+/* the program takes it (from its queue: remove; sent) */
+static uint32_t dde_in(win_ne_guest_api_context *c, ne_user *u, UINT msg, uint32_t lp, int remove)
+{
+    int where = dde_where(msg);
+    HGLOBAL n = (HGLOBAL)(where == 1 ? lp & 0xffffu : lp >> 16);
+    if (!where || !n || (n & 1) || !GlobalSize(n))
+        return lp;
+    int i = dde_find(n, u->task, 0);
+    if (i >= 0) {                       /* its own block back, or the copy made before */
+        uint16_t sel = dde[i].sel;
+        if (remove && msg == DDE_ACK_ && !dde[i].copy) {
+            GlobalFree(n);
+            dde[i].native = 0;
+            dde[i].sel = 0;
+        } else if (remove && dde[i].copy) {
+            uint8_t head[2] = { 0, 0 };
+            win_ne_read(c, sel, 0, head, 2);
+            if (dde_release(msg, head, 2)) {
+                GlobalFree(n);
+                dde[i].native = 0;
+                dde[i].sel = 0;
+            }
+        }
+        return dde_with(lp, where, sel);
+    }
+    DWORD size = GlobalSize(n);
+    win_ne_guest_image *g = (win_ne_guest_image *)c->image;
+    const uint8_t *p = size <= 0x10000u ? (const uint8_t *)GlobalLock(n) : NULL;
+    uint16_t sel = p ? win_ne_guest_global_alloc(g, size) : 0;
+    if (sel && !win_ne_write(c, sel, 0, p, size)) {
+        win_ne_guest_global_free(g, sel);
+        sel = 0;
+    }
+    int release = p && dde_release(msg, p, size);
+    if (p)
+        GlobalUnlock(n);
+    if (!sel)
+        return lp;
+    if (remove && release)
+        GlobalFree(n);
+    else
+        dde_note(n, u->task, sel, 1);
+    return dde_with(lp, where, sel);
+}
+
+/* a program's MSG retrieved: its DDE memory its own */
+uint32_t ne_dde_in(win_ne_guest_api_context *c, ne_user *u, UINT msg, uint32_t lp, int remove)
+{
+    return msg >= 0x3E0 && msg <= 0x3E8 ? dde_in(c, u, msg, lp, remove) : lp;
+}
+
+static void dde_task_end(ne_user *u)
+{
+    for (int i = 0; i < DDE_COPIES; i++)
+        if (dde[i].task == u->task)
+            memset(&dde[i], 0, sizeof(dde[i]));
 }
 
 /* ---------------------------------------------------------------- the clipboard */
@@ -1817,6 +1977,7 @@ int ne_call(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword)
         *v = (uint16_t)PeekMessage(&m, h, lo, hi, remove);
         if (*v) {
             uint8_t g[18];
+            m.lParam = (LPARAM)ne_dde_in(c, u, m.message, (uint32_t)m.lParam, (remove & PM_REMOVE) != 0);
             msg_to_guest(&m, g);
             wr(a, p, g, sizeof(g));
         }
@@ -2027,6 +2188,7 @@ int ne_call(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword)
 
 void ne_call_end(ne_user *u)
 {
+    dde_task_end(u);
     for (int i = 0; i < NE_HOOKS; i++)
         if (u->hook[i].id)
             hook_remove(u, i);

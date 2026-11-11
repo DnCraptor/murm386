@@ -865,6 +865,7 @@ int win_ne_guest_user(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint16_t 
             break;
         MSG m;
         v = (uint16_t)GetMessage(&m, h, lo, hi);
+        m.lParam = (LPARAM)ne_dde_in(ctx, u, m.message, (uint32_t)m.lParam, 1);
         uint8_t g[18];
         msg_to_guest(&m, g);
         if (!win_ne_write(ctx, (uint16_t)(p >> 16), (uint16_t)p, g, sizeof(g)))

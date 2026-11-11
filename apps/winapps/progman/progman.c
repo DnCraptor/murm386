@@ -26,7 +26,8 @@
  * topic PROGMAN, the commands setup programs send it ([CreateGroup],
  * [ShowGroup], [AddItem], [DeleteItem], [ReplaceItem], [DeleteGroup],
  * [Reload], [ExitProgman]: nothing, it is the shell) and the item Groups
- * (their names, a line each).
+ * (their names, a line each), for DDEML's clients and those speaking DDE's
+ * messages themselves (WM_DDE_INITIATE, EXECUTE, REQUEST, TERMINATE).
  */
 #include <string.h>
 #include "windows.h"
@@ -877,8 +878,12 @@ static LRESULT CALLBACK GroupProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     return DefMDIChildProc(h, msg, wp, lp);
 }
 
+static LRESULT dde_message(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+
 static LRESULT CALLBACK FrameProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
+    if (msg >= WM_DDE_FIRST && msg <= WM_DDE_LAST && msg != WM_DDE_ACK && msg != WM_DDE_DATA)
+        return dde_message(h, msg, wp, lp);
     switch (msg) {
     case WM_CREATE: {
         hframe = h;
@@ -1184,6 +1189,70 @@ static HDDEDATA CALLBACK dde_callback(UINT type, UINT fmt, HCONV conv, HSZ hsz1,
 static void (*dde_proc(const char *name))(void)
 {
     return (void (*)(void))GetProcAddress(dde.lib, name);
+}
+
+/* DDE's messages, to the frame: the same as DDEML's */
+static int is_progman(ATOM a)
+{
+    char s[16];
+    return !a || (GlobalGetAtomName(a, s, sizeof(s)) && !lstrcmpi(s, "PROGMAN"));
+}
+
+static LRESULT dde_message(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+    HWND client = (HWND)wp;
+    switch (msg) {
+    case WM_DDE_INITIATE:
+        if (is_progman(LOWORD(lp)) && is_progman(HIWORD(lp)) && client != h)
+            SendMessage(client, WM_DDE_ACK, (WPARAM)h,
+                        MAKELPARAM(GlobalAddAtom("PROGMAN"), GlobalAddAtom("PROGMAN")));
+        return 0;
+    case WM_DDE_EXECUTE: {
+        HGLOBAL cmds = (HGLOBAL)HIWORD(lp);
+        const char *s = cmds ? (const char *)GlobalLock(cmds) : NULL;
+        int ok = 0;
+        if (s) {
+            static char text[1024];
+            lstrcpyn(text, s, sizeof(text));
+            GlobalUnlock(cmds);
+            ok = dde_execute(text);
+        }
+        PostMessage(client, WM_DDE_ACK, (WPARAM)h, MAKELPARAM(ok ? 0x8000 : 0, cmds));
+        return 0;
+    }
+    case WM_DDE_REQUEST: {
+        char item[16];
+        ATOM a = HIWORD(lp);
+        if (LOWORD(lp) == CF_TEXT && GlobalGetAtomName(a, item, sizeof(item)) &&
+            !lstrcmpi(item, "Groups")) {
+            HGLOBAL d = GlobalAlloc(GMEM_MOVEABLE | GMEM_DDESHARE, 4 + MAXGROUPS * 34 + 1);
+            char *p = d ? (char *)GlobalLock(d) : NULL;
+            if (p) {
+                p[0] = 0;
+                p[1] = 0x30;            /* fResponse, fRelease: the client frees it */
+                p[2] = CF_TEXT;
+                p[3] = 0;
+                int k = 4;
+                for (int g = 0; g < ngroups; g++)
+                    k += wsprintf(p + k, "%s\r\n", groups[g].name);
+                p[k] = 0;
+                GlobalUnlock(d);
+                if (PostMessage(client, WM_DDE_DATA, (WPARAM)h, MAKELPARAM(d, a)))
+                    return 0;
+                GlobalFree(d);
+            }
+        }
+        PostMessage(client, WM_DDE_ACK, (WPARAM)h, MAKELPARAM(0, a));
+        return 0;
+    }
+    case WM_DDE_TERMINATE:
+        PostMessage(client, WM_DDE_TERMINATE, (WPARAM)h, 0);
+        return 0;
+    case WM_DDE_ADVISE: case WM_DDE_UNADVISE: case WM_DDE_POKE:
+        PostMessage(client, WM_DDE_ACK, (WPARAM)h, MAKELPARAM(0, HIWORD(lp)));
+        return 0;
+    }
+    return 0;
 }
 
 static void dde_start(void)

@@ -703,6 +703,21 @@ BOOL    WINAPI WinHelp(HWND hwnd, LPCSTR file, UINT cmd, DWORD data);
  * class), sent as the registered message of this name, lParam pointing
  * to it: the command, its number, the file, its string (a keyword, a
  * macro) */
+/* DDE's messages (dde.h): lParam two words, the atoms of the
+ * application and topic or item, a status, global memory (GMEM_DDESHARE);
+ * DATA's and POKE's memory a DDEDATA: flags (fResponse 0x1000, fRelease
+ * 0x2000, fAckReq 0x8000), the format, the data */
+#define WM_DDE_FIRST        0x03E0
+#define WM_DDE_INITIATE     0x03E0
+#define WM_DDE_TERMINATE    0x03E1
+#define WM_DDE_ADVISE       0x03E2
+#define WM_DDE_UNADVISE     0x03E3
+#define WM_DDE_ACK          0x03E4
+#define WM_DDE_DATA         0x03E5
+#define WM_DDE_REQUEST      0x03E6
+#define WM_DDE_POKE         0x03E7
+#define WM_DDE_EXECUTE      0x03E8
+#define WM_DDE_LAST         0x03E8
 #define WINHELP_CLASS_N     "MS_WINHELP"
 #define WINHELP_MESSAGE_N   "WinnHelpRequest"
 typedef struct {
