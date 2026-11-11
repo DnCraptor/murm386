@@ -869,6 +869,13 @@ HICON   WINAPI ExtractIconExN(LPCSTR path, UINT n);     /* n-th; (UINT)-1: the c
  * into buf (NULL: none); its size, 0 if there is none */
 DWORD   WINAPI GetFileResourceN(LPCSTR path, LPCSTR type, LPCSTR id, DWORD offset, void *buf,
                                 DWORD cap);
+/* the speaker (SOUND.DLL's voice): a note of hz (0: a rest) for ms queued,
+ * FALSE when the queue (128 notes) is full; silence, the queue emptied;
+ * the notes left; waiting for them */
+BOOL    WINAPI SoundQueueN(UINT hz, UINT ms);
+void    WINAPI SoundStopN(void);
+int     WINAPI SoundCountN(void);
+void    WINAPI SoundWaitN(void);    /* until they are played */
 
 /* ---------------------------------------------------------------- tasks */
 

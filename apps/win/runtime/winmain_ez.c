@@ -21,6 +21,7 @@
  * 640x400x256 when it cannot */
 extern const win_display_driver win_disp_vga, win_disp_vbe8;
 extern const win_input_driver win_input_dos;
+extern const win_sound_driver win_sound_dos;
 
 static const char *exec_error(UINT r)
 {
@@ -63,6 +64,7 @@ int main(int argc, char **argv)
     }
     task_init();
     static const win_display_driver *const displays[] = { &win_disp_vga, &win_disp_vbe8, NULL };
+    win_register_sound_driver(&win_sound_dos);
     int r = win_boot(argc > 0 ? argv[0] : NULL, displays, &win_input_dos);
     if (r) {
         printf("Windows: display start failed (%d)\n", r);

@@ -146,6 +146,12 @@ OWMISC: what WRITE.EXE needed: moveable local memory (its handle an entry
     VkKeyScan, MapVirtualKey, GetKeyNameText and ToAscii, OLECLI: "local:
     handle 1, flags 1, 'moveable' 1, size 3000, discarded 4000 0, delta 20
     A0", "keyboard: 141 41 1BF, 1E 41, A Esc, 1 !", "olecli: 0 12 0"
+
+OWSND: SOUND.DLL (a scale and a tone queued, played, waited for; a note
+    out of range) and OLESVR.DLL (a server and a document registered and
+    revoked, their Release methods called): "sound: open 1, size 0, accent
+    0, note 0, tone 0, bad -5, count 6, start 0, wait 0, count 0", "olesvr:
+    0 0 0 0 0, more 0, released 1 1, version 1"; the tones on stderr
 """
 import sys
 
@@ -6804,6 +6810,193 @@ PROGRAMS = {
             '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
             '000000000000000000000000000000000000000000000000000000000000a305a30500000000000000000000'
             '000000000000000000000000000000000000000000000000000000209a030000'
+        )),
+    'OWSND': (
+        # wcc -bt=windows -ms -zW owsnd.c; wlink @owsnd.lnk
+        # ---- owsnd.c
+        #     /*
+        #      * owsnd.c - SOUND (a scale queued, played, waited for; a tone; the voice
+        #      * another task's: none) and OLESVR (a server and a document registered and
+        #      * revoked, their Release methods called): what each returned.
+        #      */
+        #     #include <windows.h>
+        #     #include <ole.h>
+        #     #include <string.h>
+        #
+        #     static char line1[120] = "", line2[120] = "";
+        #     static int server_released, doc_released;
+        #
+        #     OLESTATUS FAR PASCAL SrvRelease(LPOLESERVER s) { server_released++; return OLE_OK; }
+        #     OLESTATUS FAR PASCAL DocRelease(LPOLESERVERDOC d) { doc_released++; return OLE_OK; }
+        #     OLESTATUS FAR PASCAL Nothing(void) { return OLE_OK; }
+        #
+        #     static OLESERVERVTBL svtbl;
+        #     static OLESERVERDOCVTBL dvtbl;
+        #     static OLESERVER server;
+        #     static OLESERVERDOC sdoc;
+        #
+        #     static void run(HINSTANCE inst)
+        #     {
+        #         int open, q, n1, a, t, s, n2, w, n3, e;
+        #         LHSERVER hs = 0;
+        #         LHSERVERDOC hd = 0;
+        #         OLESTATUS r1, r2, r3, r4, r5;
+        #         BOOL more = TRUE;
+        #         open = OpenSound();
+        #         q = SetVoiceQueueSize(1, 6 * 16);
+        #         a = SetVoiceAccent(1, 240, 128, S_NORMAL, 0);
+        #         n1 = SetVoiceNote(1, 37, 8, 0);         /* C D E F G, eighths */
+        #         SetVoiceNote(1, 39, 8, 0);
+        #         SetVoiceNote(1, 41, 8, 0);
+        #         SetVoiceNote(1, 42, 8, 0);
+        #         SetVoiceNote(1, 44, 8, 1);
+        #         t = SetVoiceSound(1, MAKELONG(0, 440), 4);
+        #         e = SetVoiceNote(1, 85, 8, 0);
+        #         n2 = CountVoiceNotes(1);
+        #         s = StartSound();
+        #         w = WaitSoundState(S_QUEUEEMPTY);
+        #         n3 = CountVoiceNotes(1);
+        #         CloseSound();
+        #         MessageBeep(0);
+        #         wsprintf(line1, "sound: open %d, size %d, accent %d, note %d, tone %d, bad %d, "
+        #                  "count %d, start %d, wait %d, count %d", open, q, a, n1, t, e, n2, s, w, n3);
+        #         svtbl.Release = SrvRelease;
+        #         dvtbl.Release = DocRelease;
+        #         server.lpvtbl = &svtbl;
+        #         sdoc.lpvtbl = &dvtbl;
+        #         r1 = OleRegisterServer("OwSnd", &server, &hs, inst, OLE_SERVER_MULTI);
+        #         r2 = OleRegisterServerDoc(hs, "SOME.DOC", &sdoc, &hd);
+        #         r3 = OleUnblockServer(hs, &more);
+        #         r4 = OleRevokeServerDoc(hd);
+        #         r5 = OleRevokeServer(hs);
+        #         wsprintf(line2, "olesvr: %d %d %d %d %d, more %d, released %d %d, version %lX",
+        #                  r1, r2, r3, r4, r5, more, server_released, doc_released, OleQueryServerVersion());
+        #     }
+        #
+        #     long FAR PASCAL WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+        #     {
+        #         PAINTSTRUCT ps;
+        #         HDC dc;
+        #         switch (msg) {
+        #         case WM_PAINT:
+        #             dc = BeginPaint(h, &ps);
+        #             TextOut(dc, 8, 8, line1, lstrlen(line1));
+        #             TextOut(dc, 8, 28, line2, lstrlen(line2));
+        #             EndPaint(h, &ps);
+        #             return 0;
+        #         case WM_DESTROY:
+        #             PostQuitMessage(0);
+        #             return 0;
+        #         }
+        #         return DefWindowProc(h, msg, wp, lp);
+        #     }
+        #
+        #     int PASCAL WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR cmd, int show)
+        #     {
+        #         WNDCLASS wc;
+        #         HWND h;
+        #         MSG m;
+        #         _fmemset(&wc, 0, sizeof(wc));
+        #         wc.lpfnWndProc = WndProc;
+        #         wc.hInstance = hInstance;
+        #         wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        #         wc.hbrBackground = GetStockObject(WHITE_BRUSH);
+        #         wc.lpszClassName = "OwSnd";
+        #         if (!hPrev && !RegisterClass(&wc))
+        #             return 1;
+        #         run(hInstance);
+        #         h = CreateWindow("OwSnd", "OWSND", WS_OVERLAPPEDWINDOW, 0, 0, 640, 80,
+        #                          NULL, NULL, hInstance, NULL);
+        #         ShowWindow(h, show);
+        #         UpdateWindow(h);
+        #         while (GetMessage(&m, NULL, 0, 0)) {
+        #             TranslateMessage(&m);
+        #             DispatchMessage(&m);
+        #         }
+        #         return m.wParam;
+        #     }
+        # ---- owsnd.lnk
+        #     system windows
+        #     name owsnd.exe
+        #     file owsnd.o
+        #     library olesvr.lib
+        #     export SrvRelease
+        #     export DocRelease
+        bytes.fromhex(
+            '4d5a80000100000004000000ffff0000b8000000000000004000000000000000000000000000000000000000'
+            '00000000000000000000000000000000800000000e1fba0e00b409cd21b8014ccd2154686973206973206120'
+            '57696e646f77732031362d6269742065786563757461626c650d0a240000000000000000000000004e450501'
+            '9b000a000000000002030200000400200a04010000000200020005000d0040005000500073007d0025010000'
+            '0000010000000200000000000000000399000407400d0407f404aa02410c0003054f57534e4400000a535256'
+            '52454c4541534501000a444f4352454c45415345020000010007000c0013001a000005534f554e4404555345'
+            '52064f4c45535652064b45524e454c034744490201010800011b000000096f77736e642e657865000000cceb'
+            'fd9090909000b80600e8b3035589e5ff06ee0231c05dca0400b80600e8a0035589e5ff06f002ebebb80400e8'
+            '910331c0cb5589e550b84c00e8840358535152565783ec205031c08946d68946d88946da8946dcc746e40100'
+            '9affff00008946eab8010050b86000509affff00008946ecb8010050b8f00050b880005031c050509affff00'
+            '008946eeb8010050b8250050b808005031c0509affff00008946f0b8010050b8270050b808005031c0509aff'
+            'ff0000b8010050b8290050b808005031c0509affff0000b8010050b82a0050b808005031c0509affff0000b8'
+            '010050b82c0050b8080050b80100509affff0000b8010050b8b8015031c050b80400509affff00008946f2b8'
+            '010050b8550050b808005031c0509affff00008946f4b80100509affff000089c69affff000089c731c0509a'
+            'ffff00008946e6b80100509affff00008946e89affff000031c0509affff0000ff76e8ff76e65756ff76f4ff'
+            '76f2ff76f0ff76eeff76ecff76ea1eb81000501eb8d200509affff000083c41cc706e202ffffc706e402ffff'
+            'c706be02ffffc706c002ffffc706ca02ce028c1ecc02c706ea02aa028c1eec021eb87400501eb8ca02508d56'
+            'd61e52ff76d431c0509affff00008946deff76d8ff76d61eb87a00501eb8ea02508d56da1e529affff000089'
+            '46e0ff76d8ff76d68d56e41e529affff00008946e2ff76dcff76da9affff000089c7ff76d8ff76d69affff00'
+            '0089c69affff00005250ff36f002ff36ee02ff76e45657ff76e2ff76e0ff76de1eb88300501eb84a01509aff'
+            'ff000083c41c8d66f65f5e5a595b5dc3455589e5b83600e86901565783ec208b460c8b7e0e3d0f0074073d02'
+            '007453eb5b578d56dc1e529affff000089c650b8080050501eb8d200501e509affff0000509affff000056b8'
+            '080050b81c00501eb84a01501e509affff0000509affff0000578d56dc1e529affff000031c031d2eb1a31c0'
+            '509affff0000ebf05750ff760aff7608ff76069affff00008d66fc5f5e5d4dca0a005589e5b85000e8d40056'
+            '83ec2c8b760cb91a0031db8cda8d46d2e8f200c746d4ffffc746d6ffff8976dc31c05050b8007f509affff00'
+            '008946e031c0509affff00008946e2c746e874008c5eea837e0a0075138d56d21e529affff000085c07505b8'
+            '0100eb6989f0e8e4fc1eb87400501eb8c00050b8cf005031c0505050b8800250b850005031c050505650509a'
+            'ffff000089c650ff76049affff0000569affff00008d56ec1e5231c05050509affff000085c074168d56ec1e'
+            '529affff00008d56ec1e529affff0000ebd78b46f08d66fe5e5dc20a00008c16c201c33bc473132bc4f7d83b'
+            '060a0077068cd03b06c2017401c30e5ab8e303bb0100e9c801537461636b204f766572666c6f7721005789c7'
+            '88d88ec2578ae0d1e9f3ab13c9f3aa5f89f85fc3eb0203009affff00000bc0750e5033c0ba0f00e86a0258b4'
+            '4ccd218c06c801575606535253bef2028936e3018c1ee501268a078804464384c075f589360a005b2bc0509a'
+            'ffff000057579affff0000fc1e07b9f202bfaa022bcf32c0f3aab85405a3df01b8ffffa3e101b430cd21a2ca'
+            '018826cb019affff0000a2cc018826cd0186e0a3ce0154583bc475120f01e0a90100740ab001a2d001b003a2'
+            'd1011ebfeb0157b89000509affff0000b8eb01893ee7018c1ee901b8ff00e86b01e81afee9f9004f70656e20'
+            '576174636f6d20432f432b2b31362052756e2d54696d652073797374656d2e20436f70797269676874202863'
+            '29204f70656e20576174636f6d20436f6e7472696275746f727320323030322d323032362e20506f7274696f'
+            '6e7320436f7079726967687420284329205379626173652c20496e632e20313938382d323030322e00c3cb00'
+            '5589e551565781ec800089c689df8d9e7aff8cd98ec2268a0484c074173c0d74138d46f939c3730c268a048e'
+            'c14626880743ebe031c08ec15026c607001e8d9e7aff531eb8c6005031c0509affff000089f8e94400515689'
+            'c189d6e8330185c0750689c889f2eb9889d8e92c0000c3c3535289c3833ea202007404ff16a202ff167c02ba'
+            'ff00b81000e8a800ff167c02ff167e0289d8e928fe5289c2ff167c02ff167e0289d0e918fe5589e5535289c3'
+            '833f0075078d66fc5a5b5dc31eff171febf35589e5535289c38b47028b1785c0750485d274df1eff1f1febd9'
+            '5589e5535152565789c11ee813ffbfaa0289fabba40289fe88c839fb7316803f02750583c306ebf23a470172'
+            'f689de8a4701ebef39fe74158d4402803c007508e88affc60402ebcbe89bffebf61f8d66f65f5e5a595b5dc3'
+            '5589e55351565789c11ee8bcfe88d5bfaa0289fabbaa0289fe88c839fb7316803f02750583c306ebf23a4701'
+            '77f689de8a4701ebef39fe741c3a6c017305c60402ebd18d4402803c007505e827ffebeee83bffebe91f8d66'
+            'f85f5eeb9f803e800200750331c0c35250cceb0657564944454fb8010083c404c300360003015b0001000100'
+            '03016b0001000300030183000100050003019a00010004000301b100010004000301c500010004000301d900'
+            '010004000301ee0001000400030102010100080003011901010004000301250101000d0003012c0101000900'
+            '0301360101000b000301420101000d0003014a0101000200030152010200680003017b010200a40105008601'
+            '0100080002008c01010008000500920101001b000200980101001b000301c401030002000301e10103000600'
+            '0301f40103000500030102020300070003010f02030003000301160203000c0003013d020200a40103017602'
+            '0200270003018a0204005a0003019002050021000301a50204005a000301ab02050021000301b60202002800'
+            '0301c402020006000301d60202006b000500040301004e020200090301004e02030117030200ad0003012203'
+            '0500570003013d0302003900030172030200290003017d0302002a000301830302007c000301920302006c00'
+            '0301a003020071000301aa030200720003010f0404005b0003014e0404001e00030155040200050002006f04'
+            '01000a0403018004040003000301b204040031000301a2050200010000000000050000000000000000000000'
+            '736f756e643a206f70656e2025642c2073697a652025642c20616363656e742025642c206e6f74652025642c'
+            '20746f6e652025642c206261642025642c20636f756e742025642c2073746172742025642c20776169742025'
+            '642c20636f756e74202564004f77536e6400534f4d452e444f43006f6c657376723a20256420256420256420'
+            '25642025642c206d6f72652025642c2072656c65617365642025642025642c2076657273696f6e20256c5800'
+            '4f57534e44004f70656e20576174636f6d000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '00000000000000000000000000000000000000000000000000000000000000000000000000000000ffff0000'
+            '0000000000000000000c00000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '00000000c505c505000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0020bc030000'
         )),
 }
 

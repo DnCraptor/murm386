@@ -282,6 +282,7 @@ int main(int argc, char **argv)
 #else
     static const win_display_driver *const displays[] = { &host_snap_display, NULL };
 #endif
+    win_register_sound_driver(&host_sound);
     if (win_boot("HOSTWIN/WINN.EXE", displays, &host_script_input))
         return 1;
     win_logo_show();                /* HOSTWIN/WINLOGO.BMP, if the test put one there */

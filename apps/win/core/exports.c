@@ -459,6 +459,10 @@ extern void ShowCursor(void);
 extern void ShowOwnedPopups(void);
 extern void ShowScrollBar(void);
 extern void ShowWindow(void);
+extern void SoundCountN(void);
+extern void SoundQueueN(void);
+extern void SoundStopN(void);
+extern void SoundWaitN(void);
 extern void StretchBlt(void);
 extern void StretchDIBits(void);
 extern void SubtractRect(void);
@@ -987,7 +991,7 @@ static const void *const exports_user[484] = {
     [483] = (const void *)SystemParametersInfo,
 };
 
-static const void *const exports_winn[22] = {
+static const void *const exports_winn[26] = {
     [1] = (const void *)DialogBoxIndirectN,
     [2] = (const void *)CreateDialogIndirectN,
     [3] = (const void *)CreateAcceleratorTableN,
@@ -1009,6 +1013,10 @@ static const void *const exports_winn[22] = {
     [19] = (const void *)ExtractIconN,
     [20] = (const void *)ExtractIconExN,
     [21] = (const void *)GetFileResourceN,
+    [22] = (const void *)SoundQueueN,
+    [23] = (const void *)SoundStopN,
+    [24] = (const void *)SoundCountN,
+    [25] = (const void *)SoundWaitN,
 };
 
 static const void *const exports_commdlg[28] = {

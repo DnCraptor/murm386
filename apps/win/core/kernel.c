@@ -301,8 +301,46 @@ LPSTR WINAPI lstrcat(LPSTR d, LPCSTR s) { return strcat(d, s ? s : ""); }
 
 int WINAPI lstrcmp(LPCSTR a, LPCSTR b) { return strcmp(a ? a : "", b ? b : ""); }
 
-static int to_upper(int c) { return (c >= 'a' && c <= 'z') ? c - 32 : c; }
-static int to_lower(int c) { return (c >= 'A' && c <= 'Z') ? c + 32 : c; }
+/* CP1251 letter pairs outside the contiguous 0xC0-0xFF Cyrillic range. */
+static const unsigned char cp1251_case_pairs[][2] = {
+    {0x80, 0x90}, /* U+0402/U+0452 */
+    {0x81, 0x83}, /* U+0403/U+0453 */
+    {0x8A, 0x9A}, /* U+0409/U+0459 */
+    {0x8C, 0x9C}, /* U+040A/U+045A */
+    {0x8D, 0x9D}, /* U+040C/U+045C */
+    {0x8E, 0x9E}, /* U+040B/U+045B */
+    {0x8F, 0x9F}, /* U+040F/U+045F */
+    {0xA1, 0xA2}, /* U+040E/U+045E */
+    {0xA3, 0xBC}, /* U+0408/U+0458 */
+    {0xA5, 0xB4}, /* U+0490/U+0491 */
+    {0xA8, 0xB8}, /* U+0401/U+0451 */
+    {0xAA, 0xBA}, /* U+0404/U+0454 */
+    {0xAF, 0xBF}, /* U+0407/U+0457 */
+    {0xB2, 0xB3}, /* U+0406/U+0456 */
+    {0xBD, 0xBE}, /* U+0405/U+0455 */
+};
+
+static int to_upper(int c)
+{
+    if ((c >= 'a' && c <= 'z') || (c >= 0xE0 && c <= 0xFF))
+        return c - 0x20;
+    for (unsigned i = 0; i < sizeof(cp1251_case_pairs) / sizeof(cp1251_case_pairs[0]); i++) {
+        if (c == cp1251_case_pairs[i][1])
+            return cp1251_case_pairs[i][0];
+    }
+    return c;
+}
+
+static int to_lower(int c)
+{
+    if ((c >= 'A' && c <= 'Z') || (c >= 0xC0 && c <= 0xDF))
+        return c + 0x20;
+    for (unsigned i = 0; i < sizeof(cp1251_case_pairs) / sizeof(cp1251_case_pairs[0]); i++) {
+        if (c == cp1251_case_pairs[i][0])
+            return cp1251_case_pairs[i][1];
+    }
+    return c;
+}
 
 int WINAPI lstrcmpi(LPCSTR a, LPCSTR b)
 {
@@ -351,9 +389,19 @@ UINT WINAPI AnsiLowerBuff(LPSTR s, UINT n)
     return len;
 }
 
-/* the character classes, as AnsiUpper and AnsiLower have them */
-BOOL WINAPI IsCharUpper(char c) { return c >= 'A' && c <= 'Z'; }
-BOOL WINAPI IsCharLower(char c) { return c >= 'a' && c <= 'z'; }
+/* Classify unsigned CP1251 bytes using the same case mappings. */
+BOOL WINAPI IsCharUpper(char c)
+{
+    int ch = (unsigned char)c;
+    return to_lower(ch) != ch;
+}
+
+BOOL WINAPI IsCharLower(char c)
+{
+    int ch = (unsigned char)c;
+    return to_upper(ch) != ch;
+}
+
 BOOL WINAPI IsCharAlpha(char c) { return IsCharUpper(c) || IsCharLower(c); }
 BOOL WINAPI IsCharAlphaNumeric(char c) { return IsCharAlpha(c) || (c >= '0' && c <= '9'); }
 

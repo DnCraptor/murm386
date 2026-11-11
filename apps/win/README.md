@@ -76,7 +76,7 @@ has not, is named in the message.
 
 A function of Windows' WINN does not have (of KERNEL, USER, GDI and the
 rest of WINN's modules, or of Windows' own DLLs WINN has nothing of:
-OLESVR, SOUND, PENWIN, and LZEXPAND, VER, DDEML, MMSYSTEM, COMMDLG, OLECLI when their DLL is
+PENWIN, and LZEXPAND, VER, DDEML, MMSYSTEM, COMMDLG, OLECLI, OLESVR, SOUND when their DLL is
 not there or has not the function) keeps no
 program from loading: as Windows' "undefined dynalink" its call ends the
 program, the function named ("PROG.EXE called USER.231, which WINN does
@@ -107,7 +107,17 @@ procedure WINN called (a window's, a dialog's) is named as one in the
 program's own code is, not a fault.
 
 Windows' own DLLs WINN has: TOOLHELP (`core/ne_guest_sys.c`), and as
-native DLLs (see Native DLLs) MMSYSTEM, VER, LZEXPAND, DDEML, COMMDLG, OLECLI.
+native DLLs (see Native DLLs) MMSYSTEM, VER, LZEXPAND, DDEML, COMMDLG, OLECLI,
+OLESVR, SOUND. OLESVR is OLE 1.0's server library with no clients: a
+server and its documents are registered, renamed, saved, reverted and
+revoked, revoking one calls its Release method (as the library does once
+no client holds it), OleUnblockServer has no requests waiting. SOUND is
+Windows' sound driver with one voice, the PC speaker's: a task opens it,
+queues notes (1 to 84, middle C 37, of a length and dots in the voice's
+tempo, mode and pitch) and tones (a frequency for clock ticks),
+StartSound plays them, StopSound silences them, WaitSoundState waits for
+them, CountVoiceNotes counts them; volume, envelopes, noise and
+thresholds do nothing (`include/sound.h` for native callers).
 OLECLI is OLE 1.0's client library with no servers (WINN has no
 registration database): a client's documents are registered, renamed,
 saved, reverted, revoked; nothing on the clipboard can become an object
@@ -307,7 +317,8 @@ LZEXPAND, INT 2Fh, DPMI, DDEML, the Program Manager's DDE, DDE's messages), `OWF
 it, made by `host/mkfon.py`: its sizes, larger, bold, italic; the VGA
 glyphs larger; a dialog in the font), `OWHELP` (WinHelp), `OWDLG` (COMMDLG's
 Color, Font and Print dialogs, GetFileTitle), `OWMISC` (moveable local
-memory, KEYBOARD, OLECLI: what WRITE.EXE needed) (`make NEFIXTURES` in
+memory, KEYBOARD, OLECLI: what WRITE.EXE needed), `OWSND` (SOUND, OLESVR)
+(`make NEFIXTURES` in
 `host/`). All have DOS MZ stubs that explain how to launch them under WINN
 when invoked directly from DOS. `host/test_ne_run` runs them on the
 emulator's own i386 core (`src/i386.c` as it is, built for the host with
@@ -341,13 +352,13 @@ nothing leaves the program from the command line in that part (`WINN DEMO`).
 | `ddi/winmod.h` | loadable driver modules: entry point and the tables exchanged with the core |
 | `core/` | handle table, KERNEL subset (memory, strings, atoms, INI files, files, tasks), regions, 1/8 bpp raster engine, GDI, fonts, software cursor, module loader, export tables |
 | `user/` | windows, messages, painting, non-client area, menus and accelerators, controls (BUTTON, STATIC, EDIT, LISTBOX, COMBOBOX, SCROLLBAR), dialogs, MessageBox, MDI (MDICLIENT, DefFrameProc, DefMDIChildProc), clipboard, the common dialogs' entries for native applications (COMMDLG.DLL's, loaded for them) |
-| `drivers/dos/` | display drivers `VGA` (mode 12h 640x480 in 16 colours, the default; `planar16.h`, shared with VGA800.DRV) and `VBE8` (VBE 100h 640x400x8, fallback 13h), the `DOS` input driver (keyboard through the BIOS buffer, INT 33h mouse) |
+| `drivers/dos/` | display drivers `VGA` (mode 12h 640x480 in 16 colours, the default; `planar16.h`, shared with VGA800.DRV) and `VBE8` (VBE 100h 640x400x8, fallback 13h), the `DOS` input driver (keyboard through the BIOS buffer, INT 33h mouse), the `SPEAKER` sound driver (the PC speaker through PIT channel 2: MessageBeep, SOUND.DLL; `core/sound.c` times the notes) |
 | `runtime/` | `WINN.EXE` `main()`: drivers, core, shell and command-line program as tasks |
 | `sdk/` | for applications: API stubs by Win16 ordinal, `__ez_start`, `winapp.cmake`; `gen_exports.py` makes the export tables |
 | `../winapps/<name>/` | applications: `progman` (the Program Manager, the default shell), `winfile` (File Manager), `taskman` (Task List), `winmine` (Minesweeper), `winhelp` (Windows Help), `notepad`, `clock`, `calc`, `control` (Control Panel), `demo` (a tour of the API) |
 | `../windrv/<name>/` | driver modules; `vga800` is VBE 102h 800x600 in 16 colours |
 | `ddi/windll.h`, `core/windll.c` | native DLLs: the interface, and their loading, uses and unloading |
-| `../windll/<name>/` | native DLLs: `lzexpand` (LZEXPAND.DLL), `ver` (VER.DLL), `ddeml` (DDEML.DLL), `mmsystem` (MMSYSTEM.DLL), `commdlg` (COMMDLG.DLL), `olecli` (OLECLI.DLL) |
+| `../windll/<name>/` | native DLLs: `lzexpand` (LZEXPAND.DLL), `ver` (VER.DLL), `ddeml` (DDEML.DLL), `mmsystem` (MMSYSTEM.DLL), `commdlg` (COMMDLG.DLL), `olecli` (OLECLI.DLL), `olesvr` (OLESVR.DLL), `sound` (SOUND.DLL) |
 | `host/` | the same sources on Linux with a snapshot display and scripted input |
 
 ## Drivers
@@ -387,7 +398,9 @@ Windows' own libraries are native DLLs of WINN's, loaded when a program
 needs one and unloaded when none does any more, as Windows 3.x does with
 its DLLs, instead of being built into `WINN.EXE`: `LZEXPAND.DLL`,
 `VER.DLL` (it reads a file's resources with the core's
-`GetFileResourceN`), `DDEML.DLL`, `MMSYSTEM.DLL`, `COMMDLG.DLL` and `OLECLI.DLL` so far. A program importing one that is not there, or a
+`GetFileResourceN`), `DDEML.DLL`, `MMSYSTEM.DLL`, `COMMDLG.DLL`, `OLECLI.DLL`,
+`OLESVR.DLL` and `SOUND.DLL` (WINN's speaker: `SoundQueueN` and the rest)
+so far. A program importing one that is not there, or a
 function the DLL has not, still loads; the call ends it.
 A native DLL is an EZ image built with `sdk/windll.cmake` (no crt0; its
 `__ez_start`, from `sdk/windll_entry.c`, begins with a branch over the
@@ -469,9 +482,9 @@ MAKEINTRESOURCE(n))` gives a running program its n-th icon: 1 for its class
 `DestroyIcon` frees one that `ExtractIcon*N` made.
 
 Tasks switch only in `GetMessage`, `PeekMessage`, `Yield` and `WinExec`.
-A `PeekMessage` that finds nothing while no other task has work lets the
-system idle (a program waiting in such a loop, as WRITE.EXE's blinking
-caret does, keeps nothing from going on). WinExec's hourglass stays until
+A `PeekMessage` that finds nothing yields to the other tasks, then gives
+the system its idle turn (a program waiting in such a loop, as WRITE.EXE's
+blinking caret does, keeps nothing from going on). WinExec's hourglass stays until
 the program started first waits for input (or ends). Every instance has its own copy of the program, so window classes belong to
 the instance that registered them. A window DC follows its window: one a
 program keeps (`CS_OWNDC`, or a `GetDC` it has not released) is made new
@@ -598,6 +611,7 @@ use `ucontext`):
     ./winhost scripts/owhelp.txt PROGMAN     # WinHelp from a Win16 program: context, keyword, quit
     ./winhost scripts/owdlg.txt PROGMAN      # COMMDLG: Color (full), Font, Print (no printer), GetFileTitle
     ./winhost scripts/owmisc.txt PROGMAN     # moveable local memory, KEYBOARD, OLECLI
+    ./winhost scripts/owsnd.txt PROGMAN      # SOUND (tones on stderr), OLESVR
     ./winhost scripts/logo.txt PROGMAN       # the logo (copy the BMPs into HOSTWIN first)
     ./winhost800 scripts/vga800.txt  # the VGA800 driver, built in
     ./winhostvga scripts/vga.txt     # the built-in VGA driver (640x480x16), Win16 programs too

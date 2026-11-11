@@ -545,6 +545,7 @@ static void pump_input(void)
     if (win_sys.input)
         win_sys.input->poll();
     user_caret_tick(now_ms());
+    sound_service(now_ms());
 }
 
 /* One pass; 1 = message, 0 = nothing, -1 = WM_QUIT. */
@@ -753,10 +754,11 @@ BOOL WINAPI GetMessage(LPMSG msg, HWND h, UINT first, UINT last)
     }
 }
 
-/* Win16: finding nothing yields to the other tasks (unless PM_NOYIELD);
- * when nobody else ran the system is idle meanwhile (a program waiting in
- * a PeekMessage loop: Write's blinking caret). USER's own loops (menus,
- * capture) idle themselves: user_peek, without. */
+/* Win16: finding nothing yields to the other tasks (unless PM_NOYIELD),
+ * then gives the system its idle turn (time goes on for a program waiting
+ * in a PeekMessage loop, Write's blinking caret, though it keeps having
+ * work). USER's own loops (menus, capture) idle themselves: user_peek,
+ * without. */
 static BOOL peek(LPMSG msg, HWND h, UINT first, UINT last, UINT flags, int idle)
 {
     int r = get_one(msg, h, first, last, flags & PM_REMOVE);
@@ -765,8 +767,11 @@ static BOOL peek(LPMSG msg, HWND h, UINT first, UINT last, UINT flags, int idle)
         U.cur_msg = *msg;
     } else {
         task_started(task_current());   /* a game's loop: nothing waiting for it */
-        if (!(flags & PM_NOYIELD) && !task_yield() && idle && win_sys.input)
-            win_sys.input->idle();
+        if (!(flags & PM_NOYIELD)) {
+            task_yield();
+            if (idle && win_sys.input)
+                win_sys.input->idle();
+        }
     }
     return r != 0;
 }

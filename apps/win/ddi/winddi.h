@@ -68,9 +68,20 @@ typedef struct win_input_driver {
     void     (*idle)(void);
 } win_input_driver;
 
+/* A sound device of one voice (the PC speaker): a tone of hz, 0 for
+ * silence; the core times the notes. */
+typedef struct win_sound_driver {
+    uint32_t    ddi_version;
+    const char *name;
+    int      (*enable)(void);           /* 0 if it is there */
+    void     (*disable)(void);          /* silent again */
+    void     (*tone)(unsigned hz);
+} win_sound_driver;
+
 /* Driver registry: drivers register themselves, the core picks them by
  * name (from configuration) or takes the first one. */
 void win_register_display_driver(const win_display_driver *drv);
 void win_register_input_driver(const win_input_driver *drv);
+void win_register_sound_driver(const win_sound_driver *drv);
 
 #endif /* MURM_WINDDI_H */

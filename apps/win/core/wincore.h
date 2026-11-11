@@ -230,6 +230,7 @@ typedef struct wsys {
     uint8_t   cur_save[32 * 32];
     RECT      cur_rect;
     uint32_t  vis_gen;          /* USER: one more as windows move, change, come, go */
+    const win_sound_driver *sound;  /* NULL: none */
 } wsys;
 
 extern wsys win_sys;
@@ -405,6 +406,10 @@ int    task_yield(void);                 /* 1 if another task ran */
 void   task_run_now(wtask *t);
 void   task_kernel_loop(void);
 void   task_quit_all(void);              /* WM_QUIT for every application */
+/* sound.c: the notes queued for the speaker, played as time goes on
+ * (sound_service, from USER's input pump); a beep (MessageBeep) */
+void   sound_service(uint32_t now);
+void   sound_beep(void);
 void   task_started(wtask *t);           /* it waits for input: its hourglass ends */
 
 /* user/msg.c */

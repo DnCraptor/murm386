@@ -21,3 +21,7 @@
 19 ExtractIconN
 20 ExtractIconExN
 21 GetFileResourceN
+22 SoundQueueN
+23 SoundStopN
+24 SoundCountN
+25 SoundWaitN

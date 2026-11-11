@@ -1,0 +1,16 @@
+# SOUND.DLL and OLESVR.DLL from a Win16 program on the i386 core (OWSND):
+# a scale and a tone played through the speaker (each tone on stderr:
+# "TONE hz at ms"), waited for; a server and a document registered and
+# revoked, their Release methods called:
+#     ./winhost scripts/owsnd.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OWSND
+key RETURN
+wait 1500
+snap os_result.ppm
+exit

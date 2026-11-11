@@ -12,6 +12,7 @@
 
 static const win_display_driver *disp_drv[MAX_DRV];
 static const win_input_driver   *input_drv[MAX_DRV];
+static const win_sound_driver   *sound_drv;
 static int n_disp, n_input;
 
 void win_register_display_driver(const win_display_driver *drv)
@@ -24,6 +25,13 @@ void win_register_input_driver(const win_input_driver *drv)
 {
     if (drv && drv->ddi_version >= 1 && drv->ddi_version <= WINDDI_VERSION && n_input < MAX_DRV)
         input_drv[n_input++] = drv;
+}
+
+/* the first one registered is the one */
+void win_register_sound_driver(const win_sound_driver *drv)
+{
+    if (drv && drv->ddi_version >= 1 && drv->ddi_version <= WINDDI_VERSION && !sound_drv)
+        sound_drv = drv;
 }
 
 static const win_display_driver *pick_disp(const char *name)
@@ -62,6 +70,7 @@ int win_init(const char *display, const char *input, int want_w, int want_h, int
         goto fail;
     if (win_sys.input && win_sys.input->enable(s->width, s->height))
         win_sys.input = NULL;
+    win_sys.sound = sound_drv && !sound_drv->enable() ? sound_drv : NULL;
     cursor_init();
     return 0;
 fail:
@@ -72,6 +81,9 @@ fail:
 
 void win_shutdown(void)
 {
+    if (win_sys.sound)
+        win_sys.sound->disable();
+    win_sys.sound = NULL;
     if (win_sys.input)
         win_sys.input->disable();
     if (win_sys.disp && win_sys.screen_ok)

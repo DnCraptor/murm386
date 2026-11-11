@@ -8405,6 +8405,74 @@ GetFileResourceN:
     .ltorg
     .size GetFileResourceN, .-GetFileResourceN
 
+    .section .text.winapi.SoundQueueN,"ax",%progbits
+    .global SoundQueueN
+    .type SoundQueueN, %function
+    .thumb_func
+SoundQueueN:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #12]
+    ldr  r1, =88
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SoundQueueN, .-SoundQueueN
+
+    .section .text.winapi.SoundStopN,"ax",%progbits
+    .global SoundStopN
+    .type SoundStopN, %function
+    .thumb_func
+SoundStopN:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #12]
+    ldr  r1, =92
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SoundStopN, .-SoundStopN
+
+    .section .text.winapi.SoundCountN,"ax",%progbits
+    .global SoundCountN
+    .type SoundCountN, %function
+    .thumb_func
+SoundCountN:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #12]
+    ldr  r1, =96
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SoundCountN, .-SoundCountN
+
+    .section .text.winapi.SoundWaitN,"ax",%progbits
+    .global SoundWaitN
+    .type SoundWaitN, %function
+    .thumb_func
+SoundWaitN:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #12]
+    ldr  r1, =100
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SoundWaitN, .-SoundWaitN
+
     .section .text.winapi.GetOpenFileName,"ax",%progbits
     .global GetOpenFileName
     .type GetOpenFileName, %function

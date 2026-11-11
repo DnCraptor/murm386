@@ -239,7 +239,12 @@ int WINAPI GetSystemMetrics(int i)
     }
 }
 
-void WINAPI MessageBeep(UINT type) { (void)type; }
+/* the speaker's beep, whatever the type (WINN has no sounds of its own) */
+void WINAPI MessageBeep(UINT type)
+{
+    (void)type;
+    sound_beep();
+}
 
 /* ---------------------------------------------------------------- DrawText */
 

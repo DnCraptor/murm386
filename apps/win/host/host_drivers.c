@@ -97,3 +97,18 @@ static void in_idle(void)
 const win_input_driver host_script_input = {
     WINDDI_VERSION, "SCRIPT", in_enable, in_disable, in_poll, in_ticks, in_idle,
 };
+
+unsigned host_tones;
+
+static int snd_enable(void) { return 0; }
+static void snd_disable(void) {}
+static void snd_tone(unsigned hz)
+{
+    if (hz)
+        host_tones++;
+    fprintf(stderr, "TONE %u at %u\n", hz, now_ms);
+}
+
+const win_sound_driver host_sound = {
+    WINDDI_VERSION, "HOSTSOUND", snd_enable, snd_disable, snd_tone,
+};
