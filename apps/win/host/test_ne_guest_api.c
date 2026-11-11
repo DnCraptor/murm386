@@ -135,11 +135,16 @@ int main(void)
     assert(!strcmp((char *)mem+0x90, "Copy Win16"));
     assert(cpu.gprx[regax].r16 == 0x90 && cpu.gprx[regdx].r16 == 0x18);
 
-    /* Source and destination overlap: reject, leaving memory unchanged. */
-    put16(0x84, 0x91);
-    assert(win_ne_guest_api(&ctx, &cpu, 88) && ctx.invalid_args);
+    /* A string copied onto itself (PIFEDIT does it): nothing changes. */
+    put16(0x84, 0x90);
+    assert(win_ne_guest_api(&ctx, &cpu, 88) && !ctx.invalid_args);
     assert(!strcmp((char *)mem+0x90, "Copy Win16"));
-    ctx.invalid_args = 0;
+    assert(cpu.gprx[regax].r16 == 0x90 && cpu.gprx[regdx].r16 == 0x18);
+    /* Overlapping: copied a byte at a time from the front, as KERNEL does. */
+    put16(0x84, 0x91);
+    assert(win_ne_guest_api(&ctx, &cpu, 88) && !ctx.invalid_args);
+    assert(!strcmp((char *)mem+0x90, "opy Win16"));
+    memcpy(mem + 0x90, "Copy Win16", 11);
     put16(0x84, 0xb0);
     /* Destination too small: reject before the first write. */
     put16(0x88, 0xfd);

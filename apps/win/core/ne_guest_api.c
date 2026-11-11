@@ -102,8 +102,7 @@ static int write_segment(win_ne_guest_api_context *ctx, uint16_t selector,
 }
 
 /* Copy a NUL-terminated source using a bounded temporary buffer.  Check the
- * complete source and destination ranges before writing.  Overlap is
- * rejected rather than relying on undefined strcpy/strcat semantics. */
+ * complete source and destination ranges before writing. */
 static __attribute__((noinline)) int guest_string_edit(win_ne_guest_api_context *ctx,
                              uint16_t dst_sel, uint16_t dst_off,
                              uint16_t src_sel, uint16_t src_off, int append)
@@ -120,10 +119,21 @@ static __attribute__((noinline)) int guest_string_edit(win_ne_guest_api_context 
     uint32_t count = (uint32_t)src_len + 1u;
     if (start > dst->size || count > dst->size - start)
         return 0;
+    /* overlapping: as KERNEL's own copy does it, a byte at a time from the
+     * front (programs copy a string onto itself: nothing changes) */
     if (dst_sel == src_sel &&
         start < (uint32_t)src_off + count &&
-        (uint32_t)src_off < start + count)
-        return 0;
+        (uint32_t)src_off < start + count) {
+        if (start == src_off)
+            return 1;
+        for (uint32_t i = 0; i < count; i++) {
+            uint8_t c;
+            if (!read_segment(ctx, src_sel, (uint32_t)src_off + i, &c, 1) ||
+                !write_segment(ctx, dst_sel, start + i, &c, 1))
+                return 0;
+        }
+        return 1;
+    }
     uint8_t buf[64];
     for (uint32_t copied = 0; copied < count;) {
         uint32_t n = count - copied;
