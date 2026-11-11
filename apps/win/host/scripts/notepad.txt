@@ -56,6 +56,20 @@ keyup ALT
 key O
 wait 50
 snap np_openlist.ppm
+# into DOCS and back up by name: the saved file opens again, and Save As
+# starts where it is (a full path, never "..")
+type docs
+key RETURN
+wait 30
+type ..\out.txt
+key RETURN
+wait 50
+keydown ALT
+key F
+keyup ALT
+key A
+wait 50
+snap np_reopen.ppm
 key ESC
 wait 30
 keydown ALT

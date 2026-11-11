@@ -21,9 +21,12 @@ void win_set_home(const char *exe_path)
     for (int i = 0; exe_path[i]; i++)
         if (exe_path[i] == '\\' || exe_path[i] == '/' || exe_path[i] == ':')
             cut = i;
+#if !defined(__arm__) && !defined(__thumb__)
     if (cut < 0)
-        return;
-    int n = exe_path[cut] == ':' ? cut + 1 : cut;   /* keep "C:" but drop "\" */
+        return;                                     /* host tests: "." */
+#endif
+    /* keep "C:" and a root's "\", drop the last "\" */
+    int n = cut < 0 ? 0 : exe_path[cut] == ':' || cut == 0 ? cut + 1 : cut;
     if (n >= (int)sizeof(win_dir))
         return;
     memcpy(win_dir, exe_path, (size_t)n);
@@ -32,6 +35,66 @@ void win_set_home(const char *exe_path)
         win_dir[2] = '\\';
         win_dir[3] = 0;
     }
+#if defined(__arm__) || defined(__thumb__)
+    /* as Windows has it: full, from the drive, with backslashes, upper case
+     * (a launcher may give "WINN.EXE", "WINDOWS/WINN.EXE", "\WINDOWS\..."),
+     * so that it does not move with the current directory */
+    char full[sizeof(win_dir) + 64], cwd[128];
+    const char *rest = win_dir;
+    for (char *p = win_dir; *p; p++)
+        if (*p == '/')
+            *p = '\\';
+    int cn = GetCurrentDirectoryN(cwd, sizeof(cwd));
+    if (win_dir[0] && win_dir[1] == ':') {
+        full[0] = win_dir[0];
+        full[1] = ':';
+        full[2] = 0;
+        rest = win_dir + 2;
+        /* relative to the current directory of its drive: the current one's only */
+        if (*rest != '\\' && cn >= 2 && (cwd[0] | 0x20) == (win_dir[0] | 0x20))
+            lstrcpyn(full, cwd, sizeof(full));
+    } else if (cn >= 2) {
+        lstrcpyn(full, cwd, sizeof(full));
+        if (win_dir[0] == '\\')
+            full[2] = 0;
+    } else {
+        return;
+    }
+    int k = lstrlen(full);
+    if (k && full[k - 1] == '\\')
+        full[--k] = 0;
+    while (*rest) {
+        while (*rest == '\\')
+            rest++;
+        const char *e = rest;
+        while (*e && *e != '\\')
+            e++;
+        int len = (int)(e - rest);
+        if (len == 2 && rest[0] == '.' && rest[1] == '.') {
+            while (k > 2 && full[k - 1] != '\\')
+                k--;
+            if (k > 2)
+                k--;
+            full[k] = 0;
+        } else if (len && !(len == 1 && rest[0] == '.') && k + len + 1 < (int)sizeof(full)) {
+            full[k++] = '\\';
+            memcpy(full + k, rest, (size_t)len);
+            k += len;
+            full[k] = 0;
+        }
+        rest = e;
+    }
+    if (k == 2) {
+        full[2] = '\\';
+        full[3] = 0;
+    }
+    if (lstrlen(full) < (int)sizeof(win_dir)) {
+        lstrcpy(win_dir, full);
+        for (char *p = win_dir; *p; p++)        /* ASCII only: DOS names are OEM */
+            if (*p >= 'a' && *p <= 'z')
+                *p = (char)(*p - 32);
+    }
+#endif
 }
 
 UINT WINAPI GetWindowsDirectory(LPSTR buf, UINT size)

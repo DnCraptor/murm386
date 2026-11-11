@@ -123,7 +123,8 @@ static void use_name(const char *path)
 static int save_as(void)
 {
     char name[128];
-    lstrcpy(name, file[0] ? title : "*.txt");
+    /* the file's own directory, where it is saved again */
+    lstrcpyn(name, file[0] ? file : "*.txt", sizeof(name));
     OPENFILENAME o = { 0 };
     o.lStructSize = sizeof(o);
     o.hwndOwner = hmain;

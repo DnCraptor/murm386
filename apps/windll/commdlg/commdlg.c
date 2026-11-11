@@ -104,6 +104,65 @@ static void join(char *out, int size, const char *dir, const char *name)
     lstrcpyn(out + n, name, size - n);
 }
 
+/* a path made full, as the dialog shows and gives it: the drive, the
+ * directories from the root ("." and ".." resolved, "/" as "\"), upper
+ * case; a directory alone keeps no trailing backslash, except "C:\" */
+static void full_path(char *path, int size)
+{
+    char in[160], out[200], cwd[128];
+    lstrcpyn(in, path, sizeof(in));
+    for (char *p = in; *p; p++)
+        if (*p == '/')
+            *p = '\\';
+    const char *rest = in;
+    int cn = GetCurrentDirectoryN(cwd, sizeof(cwd));
+    if (cn < 2 || cwd[1] != ':')
+        lstrcpy(cwd, "C:\\");
+    if (in[0] && in[1] == ':') {
+        out[0] = in[0];
+        out[1] = ':';
+        out[2] = 0;
+        rest = in + 2;
+        /* relative to its drive's current directory: the current drive's only */
+        if (*rest != '\\' && (cwd[0] | 0x20) == (in[0] | 0x20))
+            lstrcpyn(out, cwd, sizeof(out));
+    } else {
+        lstrcpyn(out, cwd, sizeof(out));
+        if (in[0] == '\\')
+            out[2] = 0;
+    }
+    int k = lstrlen(out);
+    if (k > 2 && out[k - 1] == '\\')
+        out[--k] = 0;
+    while (*rest) {
+        while (*rest == '\\')
+            rest++;
+        const char *e = rest;
+        while (*e && *e != '\\')
+            e++;
+        int len = (int)(e - rest);
+        if (len == 2 && rest[0] == '.' && rest[1] == '.') {
+            while (k > 2 && out[k - 1] != '\\')
+                k--;
+            if (k > 2)
+                k--;
+            out[k] = 0;
+        } else if (len && !(len == 1 && rest[0] == '.') && k + len + 1 < (int)sizeof(out)) {
+            out[k++] = '\\';
+            memcpy(out + k, rest, (size_t)len);
+            k += len;
+            out[k] = 0;
+        }
+        rest = e;
+    }
+    if (k <= 2) {
+        out[2] = '\\';
+        out[3] = 0;
+    }
+    AnsiUpper(out);
+    lstrcpyn(path, out, size);
+}
+
 static int exists(const char *path, UINT attr)
 {
     char one[64];
@@ -198,8 +257,15 @@ static void change_dir(HWND dlg, fdlg *F, const char *item)
         join(d, sizeof(d), F->dir, name);
         lstrcpyn(F->dir, d, sizeof(F->dir));
     }
-    AnsiUpper(F->dir);
+    full_path(F->dir, sizeof(F->dir));
     fill(dlg, F);
+}
+
+/* the name box: the pattern, all of it selected, for the next name typed */
+static void show_pattern(HWND dlg, fdlg *F)
+{
+    SetDlgItemText(dlg, IDC_FILE, F->pattern);
+    SendDlgItemMessage(dlg, IDC_FILE, EM_SETSEL, 0, MAKELPARAM(0, -1));
 }
 
 /* the dialog's answer: 1 done, 0 stay */
@@ -236,11 +302,11 @@ static int accept(HWND dlg, fdlg *F)
         lstrcpyn(full, t, sizeof(full));
     else
         join(full, sizeof(full), F->dir, t);
-    AnsiUpper(full);
+    full_path(full, sizeof(full));
     /* a directory: go there */
     if (!has_wild(full) && exists(full, 0x10)) {
         lstrcpyn(F->dir, full, sizeof(F->dir));
-        SetDlgItemText(dlg, IDC_FILE, F->pattern);
+        show_pattern(dlg, F);
         fill(dlg, F);
         return 0;
     }
@@ -254,7 +320,7 @@ static int accept(HWND dlg, fdlg *F)
                 lstrcat(full, "\\");
             lstrcpyn(F->dir, full, sizeof(F->dir));
         }
-        SetDlgItemText(dlg, IDC_FILE, F->pattern);
+        show_pattern(dlg, F);
         fill(dlg, F);
         return 0;
     }
@@ -382,7 +448,7 @@ static BOOL CALLBACK file_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                     f += lstrlen(f) + 1;
                 }
                 o->nFilterIndex = (DWORD)i + 1;
-                SetDlgItemText(dlg, IDC_FILE, F->pattern);
+                show_pattern(dlg, F);
                 fill(dlg, F);
             }
             return TRUE;
@@ -432,7 +498,7 @@ static BOOL file_dialog(OPENFILENAME *o, int save)
         lstrcpy(d->dir, last_dir);
     else
         GetWindowsDirectory(d->dir, sizeof(d->dir));
-    AnsiUpper(d->dir);
+    full_path(d->dir, sizeof(d->dir));
     static const DLGTEMPLATE_N tpl_open = {
         WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME, 10, 20, 20, 264, 134,
         NULL, NULL, "Open", 0, NULL
