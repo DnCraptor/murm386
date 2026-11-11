@@ -206,9 +206,227 @@ static __attribute__((noinline)) int paths(win_ne_guest_api_context *ctx, ne_use
 
 static uint8_t bcd(unsigned v) { return (uint8_t)((v / 10u % 10u) << 4 | v % 10u); }
 
+/* INT 2Fh, the multiplex, as Windows 3.1 in enhanced mode answers a
+ * program: Windows there (its version GetVersion's), the idle calls, no
+ * XMS, no CD-ROM extensions; the rest as without anyone to answer */
+static void multiplex(win_ne_dos_regs *r)
+{
+    uint16_t version = (uint16_t)GetVersion();          /* 0A03h: 3.10 */
+    switch (r->ax) {
+    case 0x1600:                        /* enhanced mode: AL major, AH minor */
+        r->ax = version;
+        break;
+    case 0x160a:                        /* the version (BX, major high) and mode (CX) */
+        r->ax = 0;
+        r->bx = (uint16_t)((version & 0xffu) << 8 | version >> 8);
+        r->cx = 3;
+        break;
+    case 0x1680:                        /* release the time slice: done */
+        r->ax &= 0xff00u;
+        break;
+    case 0x1683:                        /* the virtual machine: the system's */
+        r->bx = 1;
+        break;
+    case 0x1686:                        /* in protected mode */
+        r->ax = 0;
+        break;
+    case 0x1500:                        /* MSCDEX: no drives */
+        r->bx = 0;
+        break;
+    case 0x4300:                        /* XMS: none for a Windows program */
+    case 0x1a00:                        /* ANSI.SYS: none */
+        r->ax &= 0xff00u;
+        break;
+    default:
+        break;
+    }
+}
+
+/* DPMI's errors */
+enum { DPMI_UNSUPPORTED = 0x8001, DPMI_NO_DESCRIPTOR = 0x8011, DPMI_NO_MEMORY = 0x8013,
+       DPMI_BAD_SELECTOR = 0x8022, DPMI_DOS_MEMORY = 0x0008 };
+
+static void dpmi_fail(win_ne_dos_regs *r, uint16_t code)
+{
+    r->ax = code;
+    r->carry = 1;
+}
+
+/* a descriptor as the CPU has it: base, limit (in pages past 1 MB), a
+ * code or data segment of ring 3 */
+static void descriptor(uint8_t d[8], uint32_t base, uint32_t limit, int code)
+{
+    int pages = limit > 0xfffffu;
+    if (pages)
+        limit >>= 12;
+    d[0] = (uint8_t)limit;
+    d[1] = (uint8_t)(limit >> 8);
+    d[2] = (uint8_t)base;
+    d[3] = (uint8_t)(base >> 8);
+    d[4] = (uint8_t)(base >> 16);
+    d[5] = (uint8_t)(code ? 0xfau : 0xf2u);
+    d[6] = (uint8_t)((limit >> 16 & 0x0fu) | (pages ? 0x80u : 0u));
+    d[7] = (uint8_t)(base >> 24);
+}
+
+/* INT 31h, DPMI 0.9 as Windows gives a program of its: the descriptors
+ * (the program's own selectors, as AllocSelector's), DOS memory (as
+ * GlobalDOSAlloc's), the version and the free memory; the interrupt
+ * vectors and locking taken and kept by nobody (WINN has its own IDT and
+ * no paging); real mode calls and callbacks, linear memory: errors */
+static void dpmi(win_ne_guest_api_context *ctx, win_ne_dos_regs *r)
+{
+    win_ne_guest_image *g = (win_ne_guest_image *)ctx->image;
+    uint32_t base, limit;
+    int code;
+    r->carry = 0;
+    if (!g) {
+        dpmi_fail(r, DPMI_UNSUPPORTED);
+        return;
+    }
+    switch (r->ax) {
+    case 0x0000: {                      /* CX descriptors in a row: AX the first */
+        uint16_t sel = r->cx ? win_ne_guest_selector_array(g, r->cx) : 0;
+        if (!sel)
+            dpmi_fail(r, DPMI_NO_DESCRIPTOR);
+        else
+            r->ax = sel;
+        break;
+    }
+    case 0x0001:                        /* free BX */
+        if (!win_ne_guest_global_free(g, r->bx))
+            dpmi_fail(r, DPMI_BAD_SELECTOR);
+        break;
+    case 0x0002: {                      /* the real mode segment BX: AX its selector */
+        uint16_t sel = win_ne_guest_selector_alloc(g, 0, 0);
+        if (!sel || !win_ne_guest_selector_set(g, sel, (uint32_t)r->bx << 4, 0xffffu, 0))
+            dpmi_fail(r, DPMI_NO_DESCRIPTOR);
+        else
+            r->ax = sel;
+        break;
+    }
+    case 0x0003:                        /* the selectors' increment */
+        r->ax = 8;
+        break;
+    case 0x0006:                        /* BX's base: CX:DX */
+        if (!win_ne_guest_selector_get(g, r->bx, &base, &limit, &code)) {
+            dpmi_fail(r, DPMI_BAD_SELECTOR);
+            break;
+        }
+        r->cx = (uint16_t)(base >> 16);
+        r->dx = (uint16_t)base;
+        break;
+    case 0x0007: case 0x0008:           /* BX's base, its limit: CX:DX */
+        if (!win_ne_guest_selector_get(g, r->bx, &base, &limit, &code) ||
+            !win_ne_guest_selector_set(g, r->bx,
+                                       r->ax == 7 ? (uint32_t)r->cx << 16 | r->dx : base,
+                                       r->ax == 8 ? (uint32_t)r->cx << 16 | r->dx : limit, code))
+            dpmi_fail(r, DPMI_BAD_SELECTOR);
+        break;
+    case 0x0009:                        /* BX's access rights CL: code or data */
+        if (!win_ne_guest_selector_get(g, r->bx, &base, &limit, &code) ||
+            !(r->cx & 0x10u) || (r->cx & 0x60u) != 0x60u ||
+            !win_ne_guest_selector_set(g, r->bx, base, limit, (r->cx & 0x08u) != 0))
+            dpmi_fail(r, DPMI_BAD_SELECTOR);
+        break;
+    case 0x000a: {                      /* a data alias of BX: AX */
+        uint16_t sel = win_ne_guest_selector_get(g, r->bx, &base, &limit, &code) ?
+                       win_ne_guest_selector_alloc(g, r->bx, 0) : 0;
+        if (!sel)
+            dpmi_fail(r, DPMI_BAD_SELECTOR);
+        else
+            r->ax = sel;
+        break;
+    }
+    case 0x000b: case 0x000c: {         /* BX's descriptor to, from ES:DI */
+        uint8_t d[8];
+        if (!win_ne_guest_selector_get(g, r->bx, &base, &limit, &code)) {
+            dpmi_fail(r, DPMI_BAD_SELECTOR);
+            break;
+        }
+        if (r->ax == 0x0b) {
+            descriptor(d, base, limit, code);
+            if (!win_ne_write(ctx, r->es, r->di, d, 8))
+                dpmi_fail(r, DPMI_BAD_SELECTOR);
+            break;
+        }
+        if (!win_ne_read(ctx, r->es, r->di, d, 8) || !(d[5] & 0x10u) ||
+            (d[5] & 0x60u) != 0x60u) {
+            dpmi_fail(r, DPMI_BAD_SELECTOR);
+            break;
+        }
+        base = (uint32_t)d[2] | (uint32_t)d[3] << 8 | (uint32_t)d[4] << 16 |
+               (uint32_t)d[7] << 24;
+        limit = (uint32_t)d[0] | (uint32_t)d[1] << 8 | (uint32_t)(d[6] & 0x0fu) << 16;
+        if (d[6] & 0x80u)
+            limit = limit << 12 | 0xfffu;
+        if (!win_ne_guest_selector_set(g, r->bx, base, limit, (d[5] & 0x08u) != 0))
+            dpmi_fail(r, DPMI_BAD_SELECTOR);
+        break;
+    }
+    case 0x0100: {                      /* BX paragraphs of DOS memory: AX segment, DX selector */
+        uint16_t sel = r->bx ? win_ne_guest_global_alloc(g, (uint32_t)r->bx << 4) : 0;
+        win_ne_guest_segment *s = sel ? win_ne_guest_global(g, sel) : NULL;
+        if (s && !(s->linear & 15u) && s->linear < 0x100000u) {
+            r->ax = (uint16_t)(s->linear >> 4);
+            r->dx = sel;
+            break;
+        }
+        if (sel)
+            win_ne_guest_global_free(g, sel);
+        dpmi_fail(r, DPMI_DOS_MEMORY);
+        r->bx = 0;                      /* the largest there is: unknown */
+        break;
+    }
+    case 0x0101:                        /* free DOS memory DX */
+        if (!win_ne_guest_global_free(g, r->dx))
+            dpmi_fail(r, 0x0009);       /* the DOS error: a bad block */
+        break;
+    case 0x0200: case 0x0204:           /* an interrupt's vector BL: CX:DX, none */
+        r->cx = r->dx = 0;
+        break;
+    case 0x0201: case 0x0205:           /* ... set: taken, nobody calls it */
+    case 0x0600: case 0x0601: case 0x0602: case 0x0603:   /* locked, unlocked: no paging */
+    case 0x0702: case 0x0703:
+    case 0x0e01:                        /* the coprocessor's emulation: none needed */
+        break;
+    case 0x0400:                        /* 0.90; a 386 (32 bits), no real mode reflection by
+                                         * virtual 86; the PICs' bases */
+        r->ax = 0x005a;
+        r->bx = 0x0005;
+        r->cx = (uint16_t)((r->cx & 0xff00u) | 3u);
+        r->dx = 0x0870;
+        break;
+    case 0x0500: {                      /* free memory: ES:DI, 48 bytes */
+        uint8_t info[48];
+        memset(info, 0xff, sizeof(info));
+        uint32_t free = 0x00080000u, pages = free >> 12;
+        for (int i = 0; i < 4; i++) {
+            info[i] = (uint8_t)(free >> (8 * i));       /* the largest block */
+            info[4 + i] = (uint8_t)(pages >> (8 * i));  /* unlocked pages */
+            info[8 + i] = (uint8_t)(pages >> (8 * i));  /* lockable pages */
+        }
+        if (!win_ne_write(ctx, r->es, r->di, info, sizeof(info)))
+            dpmi_fail(r, DPMI_BAD_SELECTOR);
+        break;
+    }
+    case 0x0900: case 0x0901: case 0x0902:   /* the virtual interrupt flag: it was on */
+        r->ax = (uint16_t)((r->ax & 0xff00u) | 1u);
+        break;
+    case 0x0e00:                        /* the coprocessor: there, a 487's, no emulation */
+        r->ax = 0x0045;
+        break;
+    case 0x0501:                        /* linear memory */
+        dpmi_fail(r, DPMI_NO_MEMORY);
+        break;
+    default:                            /* real mode calls, callbacks, the rest */
+        dpmi_fail(r, DPMI_UNSUPPORTED);
+        break;
+    }
+}
+
 void win_ne_bios(win_ne_guest_api_context *ctx, unsigned vector, win_ne_dos_regs *r)
 {
-    (void)ctx;
     uint8_t ah = (uint8_t)(r->ax >> 8), al = (uint8_t)r->ax;
     switch (vector) {
     case 0x10:                          /* video: VGA's answers, nothing set */
@@ -262,7 +480,17 @@ void win_ne_bios(win_ne_guest_api_context *ctx, unsigned vector, win_ne_dos_regs
         }
         break;
     }
-    default:
+    case 0x2f:
+        multiplex(r);
+        break;
+    case 0x31:
+        dpmi(ctx, r);
+        break;
+    case 0x33:                          /* the mouse: no DOS driver, the program has its messages */
+        if (r->ax == 0x0000 || r->ax == 0x0021)
+            r->ax = 0;
+        break;
+    default:                            /* DOS's others (22h ... 2Eh): as nobody's there */
         break;
     }
     (void)al;

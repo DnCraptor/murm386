@@ -166,9 +166,16 @@ LRESULT CALLBACK user_mdiclient_proc(HWND, UINT, WPARAM, LPARAM);
 
 /* control helpers */
 void    user_dialog_menu(HMENU menu);   /* the next dialog's menu */
-/* the programs' hooks: the types there are (bits 1 << WH_...), what
- * calls them (WH_CBT's HCBT_CREATEWND: nonzero, the window is not made;
- * WH_CALLWNDPROC: a CWPSTRUCT of the message sent) */
+/* the programs' hooks: the types there are (bits USER_HOOK_BIT(WH_...)),
+ * what calls them: WH_CALLWNDPROC with a CWPSTRUCT of the message sent;
+ * WH_CBT's HCBT_CREATEWND, _DESTROYWND, _ACTIVATE, _SETFOCUS, _MINMAX,
+ * _SYSCOMMAND (nonzero: it does not happen); WH_KEYBOARD, WH_MOUSE with
+ * the input a task takes (nonzero: it is thrown away); WH_GETMESSAGE
+ * with the MSG retrieved; WH_MSGFILTER, WH_SYSMSGFILTER with a modal
+ * loop's (CallMsgFilter); WH_SHELL with a top-level window made, gone */
+#ifndef USER_HOOK_BIT
+#define USER_HOOK_BIT(type) (1u << ((type) + 1))
+#endif
 void    user_set_hooks(unsigned types, LRESULT (*call)(int type, int code, WPARAM wp, LPARAM lp));
 LRESULT user_hook(int type, int code, WPARAM wp, LPARAM lp);
 HFONT   user_ctl_font(HWND h);

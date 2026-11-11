@@ -60,10 +60,13 @@ typedef struct {
 /* The DOS functions (ne_guest_int21.c; without it, none): 1 when done,
  * 0 when WINN does not have it. 30h and 4Ch are the gateway's own. */
 int win_ne_dos(win_ne_guest_api_context *ctx, win_ne_dos_regs *r);
-/* The BIOS's software interrupts (10h, 11h, 12h, 16h, 1Ah) as Windows'
- * DOS extender answers them for a program: the video and equipment
- * questions, the keyboard's state, the clock; those it has not leave the
- * registers as they were (ne_guest_int21.c; without it, all of them). */
+/* The software interrupts but INT 21h (the BIOS's 10h, 11h, 12h, 16h,
+ * 1Ah; 22h to 33h: the multiplex 2Fh, DPMI's 31h, the mouse's 33h) as
+ * Windows' DOS extender answers them for a program: the video and
+ * equipment questions, the keyboard's state, the clock, Windows' version,
+ * the descriptors and DOS memory; those it has not leave the registers as
+ * they were (DPMI's: its error) (ne_guest_int21.c; without it, all of
+ * them). */
 void win_ne_bios(win_ne_guest_api_context *ctx, unsigned vector, win_ne_dos_regs *r);
 
 /* The window and GDI services (ne_guest_user.c; without it, as in the

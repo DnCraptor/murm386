@@ -23,6 +23,8 @@ typedef struct {
     int     bx, by;         /* its base units: the font's, or the system font's */
 } wdlg;
 
+static BOOL CALLBACK msgbox_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+
 static wdlg *dlg_state(HWND h)
 {
     wwnd *w = user_wnd(h);
@@ -432,6 +434,8 @@ int WINAPI DialogBoxIndirectN(HINSTANCE inst, const DLGTEMPLATE_N *t,
             PostQuitMessage((int)m.wParam);
             break;
         }
+        if (CallMsgFilter(&m, d->proc == msgbox_proc ? MSGF_MESSAGEBOX : MSGF_DIALOGBOX))
+            continue;
         if (!IsDialogMessage(h, &m)) {
             TranslateMessage(&m);
             DispatchMessage(&m);

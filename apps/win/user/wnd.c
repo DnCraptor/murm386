@@ -1145,6 +1145,12 @@ HWND WINAPI SetActiveWindow(HWND h)
             user_bring_to_top(w);
         return old;
     }
+    if (w) {                            /* the CBT hook may refuse it */
+        CBTACTIVATESTRUCT ca = { FALSE, old };
+        if (user_hook(WH_CBT, HCBT_ACTIVATE, (WPARAM)w->h, (LPARAM)(intptr_t)&ca) ||
+            !IsWindow(w->h) || w == U.active)
+            return w == U.active ? old : 0;
+    }
     wwnd *o = U.active;
     if (o) {
         SendMessage(o->h, WM_NCACTIVATE, FALSE, 0);
@@ -1193,6 +1199,9 @@ HWND WINAPI SetFocus(HWND h)
     HWND old = U.focus ? U.focus->h : 0;
     if (w == U.focus)
         return old;
+    if (user_hook(WH_CBT, HCBT_SETFOCUS, (WPARAM)h, (LPARAM)old) ||
+        (w && !IsWindow(h)))           /* the CBT hook refused it */
+        return 0;
     if (w) {
         wwnd *top = user_toplevel(w);
         if (top != U.active)
@@ -1415,8 +1424,14 @@ static BOOL show_window(HWND h, int cmd)
  * between: Solitaire its game) */
 BOOL WINAPI ShowWindow(HWND h, int cmd)
 {
-    BOOL was = show_window(h, cmd);
     wwnd *w = user_wnd(h);
+    /* minimized, maximized, restored: the CBT hook may refuse it */
+    if (w && (cmd == SW_MINIMIZE || cmd == SW_SHOWMINIMIZED || cmd == SW_SHOWMINNOACTIVE ||
+              cmd == SW_SHOWMAXIMIZED || cmd == SW_RESTORE) &&
+        user_hook(WH_CBT, HCBT_MINMAX, (WPARAM)h, (LPARAM)cmd))
+        return (w = user_wnd(h)) != NULL && (w->style & WS_VISIBLE) != 0;
+    BOOL was = show_window(h, cmd);
+    w = user_wnd(h);
     if (w && w->need_size && !w->destroying) {
         w->need_size = 0;
         RECT c = w->client;
@@ -1430,6 +1445,8 @@ BOOL WINAPI ShowWindow(HWND h, int cmd)
 }
 
 /* ---------------------------------------------------------------- create / destroy */
+
+static BOOL destroy_window(HWND h);
 
 static int cascade;
 
@@ -1523,17 +1540,17 @@ HWND WINAPI CreateWindowEx(DWORD ex, LPCSTR klass, LPCSTR title, DWORD style,
      * place and size as worked out already */
     CBT_CREATEWND cbt = { &cs, 0 };
     if (user_hook(WH_CBT, HCBT_CREATEWND, (WPARAM)h, (LPARAM)(intptr_t)&cbt)) {
-        DestroyWindow(h);
+        destroy_window(h);
         return 0;
     }
     if (!IsWindow(h))
         return 0;
     if (!SendMessage(h, WM_NCCREATE, 0, (LPARAM)(intptr_t)&cs)) {
-        DestroyWindow(h);
+        destroy_window(h);
         return 0;
     }
     if (SendMessage(h, WM_CREATE, 0, (LPARAM)(intptr_t)&cs) == -1) {
-        DestroyWindow(h);
+        destroy_window(h);
         return 0;
     }
     if (!IsWindow(h))
@@ -1554,6 +1571,9 @@ HWND WINAPI CreateWindowEx(DWORD ex, LPCSTR klass, LPCSTR title, DWORD style,
         w->style &= ~(WS_MAXIMIZE | WS_MINIMIZE);
         ShowWindow(h, cmd);
     }
+    /* the shell's hook: a top-level window of a program's there */
+    if (!(style & WS_CHILD) && !w->owner && IsWindow(h))
+        user_hook(WH_SHELL, HSHELL_WINDOWCREATED, (WPARAM)h, 0);
     return h;
 }
 
@@ -1603,7 +1623,23 @@ static void free_tree(wwnd *w)
     win_free(w);
 }
 
+/* the CBT hook may keep it; the shell's hears of a top-level one going */
 BOOL WINAPI DestroyWindow(HWND h)
+{
+    wwnd *w = (wwnd *)win_handle_get(h, WOBJ_WINDOW);
+    if (!w || w == U.desktop || w->destroying)
+        return FALSE;
+    if (user_hook(WH_CBT, HCBT_DESTROYWND, (WPARAM)h, 0))
+        return FALSE;
+    w = (wwnd *)win_handle_get(h, WOBJ_WINDOW);
+    if (!w || w->destroying)
+        return FALSE;
+    if (!(w->style & WS_CHILD) && !w->owner)
+        user_hook(WH_SHELL, HSHELL_WINDOWDESTROYED, (WPARAM)h, 0);
+    return destroy_window(h);
+}
+
+static BOOL destroy_window(HWND h)
 {
     wwnd *w = (wwnd *)win_handle_get(h, WOBJ_WINDOW);
     if (!w || w == U.desktop || w->destroying)

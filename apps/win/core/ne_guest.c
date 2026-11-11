@@ -185,14 +185,14 @@ static int assign_selector(void *opaque, uint16_t index, uint16_t flags,
  * 0x3000 + n, lives entirely inside WINN; it is not a guest pointer or an
  * emulated IRQ. */
 enum { M_KERNEL, M_USER, M_GDI, M_KEYBOARD, M_COMMDLG, M_SHELL, M_WIN87EM, M_MMSYSTEM,
-       M_TOOLHELP, M_VER, M_COUNT };
+       M_TOOLHELP, M_COUNT };
 static const uint16_t module_base[] = { 0, 0x1000u, 0x3000u, WIN_NE_SERVICE_KEYBOARD,
                                         WIN_NE_SERVICE_COMMDLG, WIN_NE_SERVICE_SHELL,
                                         WIN_NE_SERVICE_WIN87EM, WIN_NE_SERVICE_MMSYSTEM,
-                                        WIN_NE_SERVICE_TOOLHELP, WIN_NE_SERVICE_VER };
+                                        WIN_NE_SERVICE_TOOLHELP };
 static const char *const module_names[M_COUNT] = { "KERNEL", "USER", "GDI", "KEYBOARD",
                                                    "COMMDLG", "SHELL", "WIN87EM", "MMSYSTEM",
-                                                   "TOOLHELP", "VER" };
+                                                   "TOOLHELP" };
 static const struct {
     uint8_t module;                 /* M_* */
     uint16_t ordinal;
@@ -537,14 +537,6 @@ static const struct {
     { M_TOOLHELP, 84, "Local32Info", 6 },
     { M_TOOLHELP, 85, "Local32First", 6 },
     { M_TOOLHELP, 86, "Local32Next", 4 },
-    { M_VER, 2, "GetFileResourceSize", 16 },
-    { M_VER, 3, "GetFileResource", 24 },
-    { M_VER, 6, "GetFileVersionInfoSize", 8 },
-    { M_VER, 7, "GetFileVersionInfo", 16 },
-    { M_VER, 8, "VerFindFile", 30 },
-    { M_VER, 9, "VerInstallFile", 30 },
-    { M_VER, 10, "VerLanguageName", 8 },
-    { M_VER, 11, "VerQueryValue", 16 },
     { M_USER, 218, "DialogBoxIndirect", 10 },
     { M_USER, 219, "CreateDialogIndirect", 12 },
     { M_USER, 222, "GetKeyboardState", 4 },
@@ -768,9 +760,11 @@ static int module_of(const win_ne_import *imp)
 }
 
 
-/* Windows' own modules WINN has nothing of: a program importing them loads
+/* Windows' own modules WINN has nothing of, or as native DLLs (there may
+ * be none, or one without the function): a program importing them loads
  * (WIN_NE_SERVICE_UNDEFINED); their indices after WINN's (M_COUNT on) */
-static const char *const system_modules[] = { "DDEML", "OLECLI", "OLESVR", "SOUND", "PENWIN" };
+static const char *const system_modules[] = { "DDEML", "OLECLI", "OLESVR", "SOUND", "PENWIN",
+                                              "LZEXPAND", "VER" };
 _Static_assert(M_COUNT + sizeof(system_modules) / sizeof(system_modules[0]) <= 16,
                "an undefined call's module takes 4 bits");
 
@@ -1010,8 +1004,8 @@ static int resolve_import(void *opaque, const win_ne_import *imp,
                                          * may be none) */
         int native = win_ne_native_import(imp->module, imp->ordinal,
                                           imp->procedure[0] ? imp->procedure : NULL, &id);
-        if (native < 0)
-            return 0;
+        if (native < 0 && !(id = undefined_id(g, imp)))
+            return 0;                   /* a native DLL without it, of no module known */
         if (!native) {
             int d = load_dll(g, imp->module, lc->depth);
             if (d >= 0)

@@ -189,3 +189,38 @@ HBITMAP win_ne_bitmap(const char *path, uint16_t id, const char *name)
     free(d);
     return h;
 }
+
+/* A resource of a Win16 file (VER's GetFileResource): its type and id
+ * numbers (MAKEINTRESOURCE, or "#n"), the id a name too, or NULL for the
+ * first of the type; from offset on, up to cap bytes into buf (NULL: none).
+ * Its size, 0 when the file has none. */
+DWORD WINAPI GetFileResourceN(LPCSTR path, LPCSTR type, LPCSTR id, DWORD offset, void *buf,
+                              DWORD cap)
+{
+    uint16_t t = 0, i = 0;
+    const char *name = NULL;
+    if (!path || !type)
+        return 0;
+    if ((uintptr_t)type < 0x10000u) {
+        t = (uint16_t)(uintptr_t)type;
+    } else if (type[0] == '#') {
+        for (const char *p = type + 1; *p >= '0' && *p <= '9'; p++)
+            t = (uint16_t)(t * 10 + (*p - '0'));
+    } else {
+        return 0;                       /* named types: none of Windows' own */
+    }
+    if (id && (uintptr_t)id < 0x10000u)
+        i = (uint16_t)(uintptr_t)id;
+    else if (id)
+        name = id;
+    uint8_t *d = NULL;
+    uint32_t n = 0;
+    int rc = id ? win_ne_resource(path, t, i, name, &d, &n)
+                : win_ne_resource_nth(path, t, 0, &d, &n);
+    if (rc != WIN_NE_OK)
+        return 0;
+    if (buf && offset < n)
+        memcpy(buf, d + offset, n - offset < cap ? n - offset : cap);
+    free(d);
+    return n;
+}

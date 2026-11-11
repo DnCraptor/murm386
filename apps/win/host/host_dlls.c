@@ -8,8 +8,10 @@
 #include "windll.h"
 
 const win_dll_info *lzexpand_WinDllInit(void);
+const win_dll_info *ver_WinDllInit(void);
 
 const win_dll_builtin win_dll_builtins[] = {
     { "LZEXPAND", lzexpand_WinDllInit },
+    { "VER", ver_WinDllInit },
     { NULL, NULL },
 };

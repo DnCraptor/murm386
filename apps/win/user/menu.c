@@ -962,6 +962,8 @@ static void track_loop(void)
             PostQuitMessage((int)m.wParam);
             break;
         }
+        if (CallMsgFilter(&m, MSGF_MENU))
+            continue;
         int mouse = (m.message >= WM_MOUSEFIRST && m.message <= WM_MOUSELAST) ||
                     (m.message >= WM_NCMOUSEMOVE && m.message <= WM_NCMBUTTONDBLCLK);
         if (mouse) {

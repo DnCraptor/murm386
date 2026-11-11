@@ -1478,25 +1478,25 @@ static __attribute__((noinline)) int call_strings(args *a, uint16_t service, uin
 
 /* ---------------------------------------------------------------- hooks */
 
-/* The program's hooks are taken (SetWindowsHook, SetWindowsHookEx); USER
- * calls two kinds: WH_CALLWNDPROC's with each message sent to a window of
- * its task (before its procedure: the hook may subclass it), WH_CBT's
- * with HCBT_CREATEWND as its task makes a window (MFC's way to take one
- * for its object). The others (a message filter, a keyboard hook ...)
- * see nothing. HHOOK: "HK" and the hook's number; the next in the chain
- * the one made before it. */
-#define WH_CALLWNDPROC_ 4
-#define WH_CBT_ 5
+/* The program's hooks are taken (SetWindowsHook, SetWindowsHookEx) and
+ * USER calls them (user.h has when) with the task's input, messages and
+ * windows: those of the task that retrieves a message, makes or destroys
+ * a window, activates one ...; WH_CALLWNDPROC's, with each message sent
+ * to a window of its task. The journals' see nothing. HHOOK: "HK" and the
+ * hook's number; the next in the chain the one made before it. */
+#define HOOK_TYPES 12                   /* WH_MSGFILTER (-1) to WH_SHELL (10) */
 static uint16_t hook_ids;
-static int hook_counts[2];              /* WH_CALLWNDPROC's, WH_CBT's */
+static int hook_counts[HOOK_TYPES];
 static LRESULT ne_hook(int type, int code, WPARAM wp, LPARAM lp);
 
 static void hooks_count(int type, int add)
 {
-    if (type == WH_CALLWNDPROC_ || type == WH_CBT_)
-        hook_counts[type - WH_CALLWNDPROC_] += add;
-    unsigned types = (hook_counts[0] > 0 ? 1u << WH_CALLWNDPROC_ : 0) |
-                     (hook_counts[1] > 0 ? 1u << WH_CBT_ : 0);
+    if (type >= -1 && type < HOOK_TYPES - 1)
+        hook_counts[type + 1] += add;
+    unsigned types = 0;
+    for (int t = -1; t < HOOK_TYPES - 1; t++)
+        if (hook_counts[t + 1] > 0 && t != WH_JOURNALRECORD && t != WH_JOURNALPLAYBACK)
+            types |= USER_HOOK_BIT(t);
     user_set_hooks(types, types ? ne_hook : NULL);
 }
 
@@ -1544,17 +1544,35 @@ static void hook_remove(ne_user *u, int i)
     hooks_count(type, -1);
 }
 
+/* a MSG a hook may have changed, from its copy (msg_to_guest's) */
+static void msg_from_copy(MSG *m, const uint8_t *b)
+{
+    m->hwnd = rd16(b);
+    m->message = rd16(b + 2);
+    m->wParam = rd16(b + 4);
+    m->lParam = (LPARAM)(int32_t)rd32(b + 6);
+    m->time = rd32(b + 10);
+    m->pt.x = (int16_t)rd16(b + 14);
+    m->pt.y = (int16_t)rd16(b + 16);
+}
+
 /* USER's call: the program's hook with copies of what lParam points to (a
- * CWPSTRUCT, a CBT_CREATEWND; their CREATESTRUCT for WM_CREATE ...);
- * what it returns. The program: CBT, the task making the window; a
- * message, the window's. */
+ * CWPSTRUCT, a CBT_CREATEWND and its CREATESTRUCT, a CBTACTIVATESTRUCT, a
+ * MSG, a MOUSEHOOKSTRUCT); a MSG it changed back; what it returns. The
+ * program: a message sent, the window's; the others, the current task. */
 static __attribute__((noinline)) LRESULT ne_hook(int type, int code, WPARAM wp, LPARAM lp)
 {
-    if (!lp || (type == WH_CBT_ && code != HCBT_CREATEWND))
+    int msg = type == WH_GETMESSAGE || type == WH_MSGFILTER || type == WH_SYSMSGFILTER;
+    int points = type == WH_CALLWNDPROC || msg || type == WH_MOUSE ||
+                 (type == WH_CBT && (code == HCBT_CREATEWND || code == HCBT_ACTIVATE));
+    if (points && !lp)
+        return 0;
+    if (type == WH_CBT && code != HCBT_CREATEWND && code != HCBT_ACTIVATE &&
+        code != HCBT_DESTROYWND && code != HCBT_SETFOCUS && code != HCBT_MINMAX &&
+        code != HCBT_SYSCOMMAND)
         return 0;
     const CWPSTRUCT *cwp = (const CWPSTRUCT *)(uintptr_t)lp;
-    const CBT_CREATEWND *cw = (const CBT_CREATEWND *)(uintptr_t)lp;
-    ne_user *u = ne_user_of(type == WH_CBT_ ? GetCurrentTask() : GetWindowTask(cwp->hwnd));
+    ne_user *u = ne_user_of(type == WH_CALLWNDPROC ? GetWindowTask(cwp->hwnd) : GetCurrentTask());
     win_ne_guest_api_context *c = u ? u->ctx : NULL;
     if (!c || c->dead || c->exited || c->stopped)
         return 0;
@@ -1562,15 +1580,40 @@ static __attribute__((noinline)) LRESULT ne_hook(int type, int code, WPARAM wp, 
     if (i < 0)
         return 0;
     uint8_t blob[10 + 30 + 64 + 64];
-    const CREATESTRUCT *cs = type == WH_CBT_ ? cw->lpcs :
+    if (!points)                        /* lParam no pointer */
+        return (LRESULT)(int32_t)hook_call(u, i, code, (uint16_t)wp, (uint32_t)lp, NULL, 0);
+    if (msg || type == WH_MOUSE || (type == WH_CBT && code == HCBT_ACTIVATE)) {
+        uint16_t len = msg ? 18 : type == WH_MOUSE ? 12 : 4;
+        uint32_t far = win_ne_blob_far(c, len);
+        if (msg) {
+            msg_to_guest((const MSG *)(uintptr_t)lp, blob);
+        } else if (type == WH_MOUSE) {
+            const MOUSEHOOKSTRUCT *mh = (const MOUSEHOOKSTRUCT *)(uintptr_t)lp;
+            wr16(blob, (uint16_t)mh->pt.x);
+            wr16(blob + 2, (uint16_t)mh->pt.y);
+            wr16(blob + 4, (uint16_t)mh->hwnd);
+            wr16(blob + 6, (uint16_t)mh->wHitTestCode);
+            wr32(blob + 8, (uint32_t)mh->dwExtraInfo);
+        } else {
+            const CBTACTIVATESTRUCT *ca = (const CBTACTIVATESTRUCT *)(uintptr_t)lp;
+            wr16(blob, (uint16_t)ca->fMouse);
+            wr16(blob + 2, (uint16_t)ca->hWndActive);
+        }
+        LRESULT r = (LRESULT)(int32_t)hook_call(u, i, code, (uint16_t)wp, far, blob, len);
+        if (msg)
+            msg_from_copy((MSG *)(uintptr_t)lp, blob);
+        return r;
+    }
+    const CBT_CREATEWND *cw = (const CBT_CREATEWND *)(uintptr_t)lp;
+    const CREATESTRUCT *cs = type == WH_CBT ? cw->lpcs :
                              (cwp->message == WM_CREATE || cwp->message == WM_NCCREATE) &&
                              cwp->lParam ? (const CREATESTRUCT *)(uintptr_t)cwp->lParam : NULL;
-    uint16_t head = type == WH_CBT_ ? 6 : 10;
+    uint16_t head = type == WH_CBT ? 6 : 10;
     uint16_t len = (uint16_t)(head + (cs ? create_size(cs) : 0));
     uint32_t far = win_ne_blob_far(c, len);
     if (cs)
         create_to_guest(u, cs, far + head, blob + head);
-    if (type == WH_CBT_) {
+    if (type == WH_CBT) {
         wr32(blob, far + head);
         wr16(blob + 4, (uint16_t)cw->hwndInsertAfter);
     } else {                            /* lParam, wParam, message, hwnd */
@@ -1639,9 +1682,14 @@ static int hook_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int 
         *dword = 1;
         return 1;
     }
-    case 0x107b:                        /* CallMsgFilter(LPMSG, int): not handled */
+    case 0x107b: {                      /* CallMsgFilter(LPMSG, int): the filters' */
+        MSG m;
         *v = 0;
+        if (a->bad || !dw(a, 6) || !msg_from_guest(a, dw(a, 6), &m))
+            return 1;
+        *v = (uint16_t)CallMsgFilter(&m, (int16_t)w(a, 4));
         return 1;
+    }
     }
     return 0;
 }

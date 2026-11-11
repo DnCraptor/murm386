@@ -170,7 +170,10 @@ void ne_call_end(ne_user *u);
 int ne_dos_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword);
 /* user/dialog.c: the menu of the dialog made next (its window's then) */
 void user_dialog_menu(HMENU menu);
-/* user/msg.c: the hooks USER calls (WH_CBT's HCBT_CREATEWND, WH_CALLWNDPROC) */
+/* user/msg.c: the hooks USER calls (user.h has when), their types' bits */
+#ifndef USER_HOOK_BIT
+#define USER_HOOK_BIT(type) (1u << ((type) + 1))
+#endif
 void user_set_hooks(unsigned types, LRESULT (*call)(int type, int code, WPARAM wp, LPARAM lp));
 /* ne_guest_int21.c: the DOS environment block, its selector in the PSP */
 void ne_environment(win_ne_guest_api_context *ctx, ne_user *u);

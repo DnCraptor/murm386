@@ -20,7 +20,7 @@
  * vector) and exceptions; the CPU then switches to the TSS's SS0:SP0, a
  * stack it cannot reach, so even a guest with a broken SS:SP faults in
  * good order. */
-#define WIN_NE_THUNK_SEGMENT_BYTES 8192u
+#define WIN_NE_THUNK_SEGMENT_BYTES 8448u
 #define WIN_NE_BOOT_OFFSET 6144u
 #define WIN_NE_BOOT_CAPACITY 384u
 /* Offsets in the thunk segment, from WIN_NE_BOOT_OFFSET on: the boot entry
@@ -77,10 +77,10 @@
 #define WIN_NE_CB_DI_OFFSET        (WIN_NE_DOS_STUB_OFFSET + 204u)
 #define WIN_NE_CB_CX_OFFSET        (WIN_NE_DOS_STUB_OFFSET + 206u)
 #define WIN_NE_FAULT_IDT_OFFSET    (WIN_NE_DOS_STUB_OFFSET + WIN_NE_DOS_STUB_BYTES)
-#define WIN_NE_IDT_VECTORS         0x22u
+#define WIN_NE_IDT_VECTORS         0x34u
 #define WIN_NE_FAULT_IDT_BYTES     (WIN_NE_IDT_VECTORS * 8u)
 #define WIN_NE_FAULT_CODE_OFFSET   (WIN_NE_FAULT_IDT_OFFSET + WIN_NE_FAULT_IDT_BYTES)
-#define WIN_NE_FAULT_CODE_BYTES    272u
+#define WIN_NE_FAULT_CODE_BYTES    384u
 #define WIN_NE_FAULT_VECTORS         32u
 /* WIN87EM's __FPMATH (its functions by BX), after the fault code: ring 3
  * code a thunk jumps to (ne_guest.c) */
@@ -88,7 +88,7 @@
 #define WIN_NE_FPMATH_BYTES        96u
 /* The ring 0 area: a 16-bit TSS (SP0 at 2, SS0 at 4), then the stack, up
  * to the end of the segment; its own data selector, DPL 0 */
-#define WIN_NE_RING0_OFFSET        (WIN_NE_BOOT_OFFSET + 1280u)
+#define WIN_NE_RING0_OFFSET        (WIN_NE_BOOT_OFFSET + 1536u)
 #define WIN_NE_RING0_BYTES         (WIN_NE_THUNK_SEGMENT_BYTES - WIN_NE_RING0_OFFSET)
 #define WIN_NE_TSS_BYTES           44u
 /* The service an INT 21h becomes: AX of the guest is the first word above
@@ -100,13 +100,16 @@
  * then the guest goes on where it was. */
 #define WIN_NE_YIELD_VECTOR      (WIN_NE_FAULT_VECTORS - 1u)
 #define WIN_NE_SERVICE_YIELD     0x2200u
-/* The BIOS's software interrupts a program may call (10h, 11h, 12h, 16h,
- * 1Ah: vectors no CPU exception of WINN's guests uses): their gates DPL 3,
- * the vector pushed, then as INT 21h with this service; the frame: AX, the
+/* The software interrupts a program may call: the BIOS's (10h, 11h, 12h,
+ * 16h, 1Ah: vectors no CPU exception of WINN's guests uses) and, but for
+ * 20h and 21h, those from 22h to the IDT's end (DOS's others, the
+ * multiplex 2Fh, DPMI's 31h, the mouse's 33h): their gates DPL 3, the
+ * vector pushed, then as INT 21h with this service; the frame: AX, the
  * vector, IP, CS, FLAGS. */
 #define WIN_NE_SERVICE_BIOS      0x2300u
 #define WIN_NE_BIOS_VECTOR(v)    ((v) == 0x10u || (v) == 0x11u || (v) == 0x12u || \
-                                  (v) == 0x16u || (v) == 0x1au)
+                                  (v) == 0x16u || (v) == 0x1au || \
+                                  ((v) >= 0x22u && (v) < WIN_NE_IDT_VECTORS))
 
 
 typedef struct {

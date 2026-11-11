@@ -9,11 +9,9 @@
  *   TOOLHELP  the tasks, WINN's modules, the timer, the memory as
  *             GetFreeSpace has it, MemoryRead/Write; notifications and
  *             interrupt handlers taken, never called
- *   VER       a file's VERSIONINFO, VerQueryValue in its block,
- *             VerFindFile, VerInstallFile (a copy, expanded by LZEXPAND's)
  *
- * and the native DLLs' calls (core/windll.c, ddi/windll.h): the program's
- * arguments and memory for the DLL.
+ * and the native DLLs' calls (core/windll.c, ddi/windll.h: LZEXPAND, VER
+ * ...): the program's arguments and memory for the DLL.
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
@@ -28,7 +26,6 @@
 
 #define MM WIN_NE_SERVICE_MMSYSTEM
 #define TH WIN_NE_SERVICE_TOOLHELP
-#define VR WIN_NE_SERVICE_VER
 
 /* MMSYSTEM's errors */
 enum { MMSYSERR_BADDEVICEID = 2, MMSYSERR_INVALHANDLE = 5, MMSYSERR_NODRIVER = 6,
@@ -91,30 +88,11 @@ static void put16_(args *a, uint32_t far, uint16_t v)
         wr_(a, far, b, 2);
 }
 
-static void put32_(args *a, uint32_t far, uint32_t v)
-{
-    uint8_t b[4];
-    wr32(b, v);
-    if (far >> 16)
-        wr_(a, far, b, 4);
-}
-
 /* the most bytes from far on in its segment, of n */
 static uint32_t in_segment(uint32_t far, uint32_t n)
 {
     uint32_t room = 0x10000u - (uint16_t)far;
     return n < room ? n : room;
-}
-
-/* dir and name, a backslash between them */
-static void join(char *out, uint32_t cap, const char *dir, const char *name)
-{
-    uint32_t n = (uint32_t)strlen(dir);
-    lstrcpyn(out, dir, (int)cap);
-    if (n && n + 1 < cap && dir[n - 1] != '\\' && dir[n - 1] != ':')
-        out[n++] = '\\', out[n] = 0;
-    if (n < cap)
-        lstrcpyn(out + n, name, (int)(cap - n));
 }
 
 /* ================================================================ MMSYSTEM */
@@ -705,268 +683,6 @@ static __attribute__((noinline)) int th_service(args *a, ne_user *u, uint16_t se
     return 0;
 }
 
-/* ================================================================ VER */
-
-/* a VERSIONINFO node at off of the block b (n bytes): its length, its
- * value's, its key; where its value and its children are (4-aligned) */
-typedef struct {
-    uint32_t len, vlen, val, kids;
-    const char *key;
-} ver_node;
-
-static int node_at(const uint8_t *b, uint32_t n, uint32_t off, ver_node *v)
-{
-    if (off + 5 > n)
-        return 0;
-    v->len = rd16(b + off);
-    v->vlen = rd16(b + off + 2);
-    if (v->len < 5 || off + v->len > n)
-        return 0;
-    v->key = (const char *)b + off + 4;
-    uint32_t k = off + 4;
-    while (k < off + v->len && b[k])
-        k++;
-    if (k >= off + v->len)
-        return 0;
-    v->val = (k + 1 + 3) & ~3u;
-    v->kids = (v->val + v->vlen + 3) & ~3u;
-    return 1;
-}
-
-/* VerQueryValue's path ("\", "\StringFileInfo\040904E4\FileVersion",
- * "\VarFileInfo\Translation") in the block: its node's value */
-static int ver_query(const uint8_t *b, uint32_t n, const char *path, uint32_t *val,
-                     uint32_t *len)
-{
-    ver_node cur;
-    uint32_t at = 0;
-    if (!node_at(b, n, 0, &cur))
-        return 0;
-    while (*path) {
-        while (*path == '\\')
-            path++;
-        if (!*path)
-            break;
-        char part[64];
-        uint32_t k = 0;
-        while (*path && *path != '\\' && k + 1 < sizeof(part))
-            part[k++] = *path++;
-        part[k] = 0;
-        uint32_t c = cur.kids, end = at + cur.len;
-        ver_node child;
-        int found = 0;
-        while (c < end && node_at(b, n, c, &child)) {
-            if (!lstrcmpi(child.key, part)) {
-                found = 1;
-                break;
-            }
-            c = (c + child.len + 3) & ~3u;
-        }
-        if (!found)
-            return 0;
-        cur = child;
-        at = c;
-    }
-    *val = cur.val;
-    *len = cur.vlen;
-    return cur.vlen != 0;
-}
-
-/* a numbered resource type or id given as a number, or "#n" */
-static int res_number(args *a, uint32_t far, uint16_t *num, char *name, uint32_t cap)
-{
-    name[0] = 0;
-    if (!(far >> 16)) {
-        *num = (uint16_t)far;
-        return 1;
-    }
-    if (!str_(a, far, name, cap))
-        return 0;
-    *num = 0;
-    if (name[0] == '#') {
-        for (const char *p = name + 1; *p >= '0' && *p <= '9'; p++)
-            *num = (uint16_t)(*num * 10 + (*p - '0'));
-        name[0] = 0;
-    }
-    return 1;
-}
-
-/* a file's resource (VERSIONINFO: the first of type 16): its bytes,
- * malloc'd */
-static uint8_t *file_resource(args *a, uint32_t file, uint32_t type, uint32_t id, uint32_t *n)
-{
-    char path[128], tname[32], iname[32];
-    uint16_t t = 16, i = 0;
-    uint8_t *d = NULL;
-    if (!str_(a, file, path, sizeof(path)))
-        return NULL;
-    if (type == 0xffffffffu) {
-        if (win_ne_resource_nth(path, 16, 0, &d, n) != WIN_NE_OK)
-            return NULL;
-    } else if (!res_number(a, type, &t, tname, sizeof(tname)) || tname[0] ||
-               !res_number(a, id, &i, iname, sizeof(iname)) ||
-               win_ne_resource(path, t, i, iname[0] ? iname : NULL, &d, n) != WIN_NE_OK) {
-        return NULL;
-    }
-    return d;
-}
-
-/* src (srcdir) to dest (destdir), expanded by LZEXPAND's LZCopy (a copy
- * as it is without the DLL): 0 or VIF_... */
-static uint32_t install_file(const char *src, const char *dest)
-{
-    HFILE in = _lopen(src, OF_READ);
-    if (in == HFILE_ERROR)
-        return 0x10000u;                /* VIF_CANNOTREADSRC */
-    HFILE out = _lcreat(dest, 0);
-    if (out == HFILE_ERROR) {
-        _lclose(in);
-        return 0x800u;                  /* VIF_CANNOTCREATE */
-    }
-    uint32_t r = 0;
-    HINSTANCE lz = LoadLibrary("LZEXPAND");
-    LONG (WINAPI *copy)(HFILE, HFILE) =                        /* LZCopy */
-        (LONG (WINAPI *)(HFILE, HFILE))(void (*)(void))GetProcAddress(lz, (LPCSTR)(uintptr_t)1);
-    if (copy) {
-        LONG n = copy(in, out);
-        r = n >= 0 ? 0 : n == -4 ? 0x100u : n == -5 ? 0x8000u : 0x10000u;
-    } else {
-        uint8_t *buf = (uint8_t *)win_alloc(1024);
-        r = buf ? 0 : 0x8000u;          /* VIF_OUTOFMEMORY */
-        while (!r) {
-            uint32_t n = _lread(in, buf, 1024);
-            if (n == (UINT)HFILE_ERROR)
-                r = 0x10000u;
-            else if (!n)
-                break;
-            else if (_lwrite(out, buf, n) != n)
-                r = 0x100u;             /* VIF_OUTOFSPACE */
-        }
-        win_free(buf);
-    }
-    FreeLibrary(lz);
-    _lclose(in);
-    _lclose(out);
-    return r;
-}
-
-static int exists(const char *path)
-{
-    HFILE f = _lopen(path, OF_READ);
-    if (f == HFILE_ERROR)
-        return 0;
-    _lclose(f);
-    return 1;
-}
-
-static __attribute__((noinline)) int ver_service(args *a, uint16_t service, uint32_t *v,
-                                                int *dword)
-{
-    unsigned o = service - VR;
-    uint32_t n = 0;
-    uint8_t *d;
-    switch (o) {
-    case 2:                             /* GetFileResourceSize(file, type, id, DWORD FAR *) */
-    case 6:                             /* GetFileVersionInfoSize(file, DWORD FAR *) */
-        d = o == 6 ? file_resource(a, dw(a, 8), 0xffffffffu, 0, &n)
-                   : file_resource(a, dw(a, 16), dw(a, 12), dw(a, 8), &n);
-        if (d && o == 6 && rd16(d) <= n)
-            n = rd16(d);
-        *v = d ? n : 0;
-        put32_(a, dw(a, 4), 0);
-        free(d);
-        *dword = 1;
-        return 1;
-    case 3:                             /* GetFileResource(file, type, id, offset, len, buf) */
-    case 7: {                           /* GetFileVersionInfo(file, handle, len, buf) */
-        d = o == 7 ? file_resource(a, dw(a, 16), 0xffffffffu, 0, &n)
-                   : file_resource(a, dw(a, 24), dw(a, 20), dw(a, 16), &n);
-        uint32_t len = dw(a, 8), buf = dw(a, 4);
-        if (len > n)
-            len = n;
-        len = in_segment(buf, len);
-        *v = d && wr_(a, buf, d, len);
-        free(d);
-        *dword = o == 3;
-        return 1;
-    }
-    case 8: {                           /* VerFindFile(flags, file, windir, appdir, curdir,
-                                         * UINT FAR *, destdir, UINT FAR *) */
-        char file[64], windir[128], appdir[128], path[200];
-        uint8_t b[2];
-        str_(a, dw(a, 28), file, sizeof(file));
-        str_(a, dw(a, 24), windir, sizeof(windir));
-        str_(a, dw(a, 20), appdir, sizeof(appdir));
-        int shared = w(a, 32) & 1;      /* VFFF_ISSHAREDFILE */
-        const char *dest = shared ? windir : appdir, *cur = "";
-        join(path, sizeof(path), dest, file);
-        if (exists(path))
-            cur = dest;
-        else if (join(path, sizeof(path), shared ? appdir : windir, file), exists(path))
-            cur = shared ? appdir : windir;
-        uint32_t r = cur[0] && lstrcmpi(cur, dest) ? 1 : 0;    /* VFF_CURNEDEST */
-        UINT curcap = rd_(a, dw(a, 12), b, 2) ? rd16(b) : 0;
-        UINT destcap = rd_(a, dw(a, 4), b, 2) ? rd16(b) : 0;
-        if (strlen(cur) >= curcap || strlen(dest) >= destcap)
-            r |= 4;                     /* VFF_BUFFTOOSMALL */
-        put16_(a, dw(a, 12), (uint16_t)(str_out(a, dw(a, 16), cur, curcap) + 1));
-        put16_(a, dw(a, 4), (uint16_t)(str_out(a, dw(a, 8), dest, destcap) + 1));
-        *v = r;
-        return 1;
-    }
-    case 9: {                           /* VerInstallFile(flags, src, dest, srcdir, destdir,
-                                         * curdir, LPSTR tmp, UINT FAR *) */
-        char src[64], dst[64], sdir[128], ddir[128], from[200], to[200];
-        str_(a, dw(a, 28), src, sizeof(src));
-        str_(a, dw(a, 24), dst, sizeof(dst));
-        str_(a, dw(a, 20), sdir, sizeof(sdir));
-        str_(a, dw(a, 16), ddir, sizeof(ddir));
-        join(from, sizeof(from), sdir, src);
-        join(to, sizeof(to), ddir, dst);
-        *v = a->bad ? 0x10000u : install_file(from, to);
-        uint8_t b[2];
-        if (rd_(a, dw(a, 4), b, 2) && rd16(b))
-            str_out(a, dw(a, 8), "", rd16(b));
-        put16_(a, dw(a, 4), 0);
-        *dword = 1;
-        return 1;
-    }
-    case 10: {                          /* VerLanguageName(UINT, LPSTR, UINT) */
-        static const struct { uint16_t lang; const char *name; } l[] = {
-            { 0x0000, "Language Neutral" }, { 0x0405, "Czech" }, { 0x0407, "German" },
-            { 0x0409, "English (United States)" }, { 0x0809, "English (United Kingdom)" },
-            { 0x040a, "Spanish (Traditional Sort)" }, { 0x040c, "French" },
-            { 0x0410, "Italian" }, { 0x0411, "Japanese" }, { 0x0415, "Polish" },
-            { 0x0419, "Russian" }, { 0x0422, "Ukrainian" },
-        };
-        const char *name = "Unknown language";
-        for (unsigned i = 0; i < sizeof(l) / sizeof(l[0]); i++)
-            if (l[i].lang == w(a, 10))
-                name = l[i].name;
-        *v = str_out(a, dw(a, 6), name, w(a, 4));
-        return 1;
-    }
-    case 11: {                          /* VerQueryValue(block, LPCSTR, LPVOID FAR *, UINT FAR *) */
-        uint32_t block = dw(a, 16), val, len;
-        char path[128];
-        uint8_t b[2];
-        *v = 0;
-        if (!str_(a, dw(a, 12), path, sizeof(path)) || !rd_(a, block, b, 2))
-            return 1;
-        n = in_segment(block, rd16(b));
-        d = (uint8_t *)win_alloc(n ? n : 1);
-        if (d && rd_(a, block, d, n) && ver_query(d, n, path, &val, &len)) {
-            put32_(a, dw(a, 8), block + val);
-            put16_(a, dw(a, 4), (uint16_t)len);
-            *v = 1;
-        }
-        win_free(d);
-        return 1;
-    }
-    }
-    return 0;
-}
-
 /* ================================================================ native DLLs */
 
 /* a call of the program's for a DLL: its arguments and memory */
@@ -1068,8 +784,6 @@ int ne_sys_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dwor
         return mm_service(a, u, service, v, dword);
     if (service >= TH && service < TH + 0x100u)
         return th_service(a, u, service, v, dword);
-    if (service >= VR && service < VR + 0x100u)
-        return ver_service(a, service, v, dword);
     if (service >= WIN_NE_SERVICE_DLL && service < WIN_NE_SERVICE_UNDEFINED)
         return dll_service(a, service, v, dword);
     return 0;

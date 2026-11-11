@@ -237,9 +237,12 @@ int win_ne_fault_make(uint8_t idt[WIN_NE_FAULT_IDT_BYTES],
     memset(code, 0xcc, WIN_NE_FAULT_CODE_BYTES);
     gate(idt, 0x20, WIN_NE_INT20_OFFSET, a->pm_segment, 1);
     gate(idt, 0x21, WIN_NE_INT21_OFFSET, a->pm_segment, 1);
-    const unsigned common = 6u * WIN_NE_FAULT_VECTORS;
-    for (unsigned v = 0; v < WIN_NE_FAULT_VECTORS; v++) {
+    /* a stub of 6 bytes for each vector but INT 20h's and 21h's */
+    const unsigned common = 6u * WIN_NE_IDT_VECTORS;
+    for (unsigned v = 0; v < WIN_NE_IDT_VECTORS; v++) {
         unsigned pos = 6u * v;
+        if (v == 0x20u || v == 0x21u)
+            continue;
         uint16_t off = (uint16_t)(WIN_NE_FAULT_CODE_OFFSET + pos);
         gate(idt, v, v == WIN_NE_YIELD_VECTOR ? (uint16_t)WIN_NE_YIELD_OFFSET : off,
              a->pm_segment, WIN_NE_BIOS_VECTOR(v));
@@ -286,7 +289,7 @@ int win_ne_fault_make(uint8_t idt[WIN_NE_FAULT_IDT_BYTES],
     b8(&e, 0xcf);                              /* iret */
     if (e.overflow || common + e.n > WIN_NE_FAULT_CODE_BYTES)
         return 0;
-    for (unsigned v = 0; v < WIN_NE_FAULT_VECTORS; v++)
+    for (unsigned v = 0; v < WIN_NE_IDT_VECTORS; v++)
         if (WIN_NE_BIOS_VECTOR(v))
             put16(code + 6u * v + 3u, (uint16_t)(common + bios - (6u * v + 5u)));
     patch16(&e, rmref, (uint16_t)(WIN_NE_FAULT_CODE_OFFSET -

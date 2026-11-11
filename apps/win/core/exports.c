@@ -19,6 +19,7 @@ extern void BeginDeferWindowPos(void);
 extern void BeginPaint(void);
 extern void BitBlt(void);
 extern void BringWindowToTop(void);
+extern void CallMsgFilter(void);
 extern void CallWindowProc(void);
 extern void CascadeChildWindows(void);
 extern void ChangeMenu(void);
@@ -182,6 +183,7 @@ extern void GetDlgItemInt(void);
 extern void GetDlgItemText(void);
 extern void GetDoubleClickTime(void);
 extern void GetDriveType(void);
+extern void GetFileResourceN(void);
 extern void GetFileTitle(void);
 extern void GetFocus(void);
 extern void GetInputState(void);
@@ -825,6 +827,7 @@ static const void *const exports_user[484] = {
     [119] = (const void *)GetMessagePos,
     [120] = (const void *)GetMessageTime,
     [122] = (const void *)CallWindowProc,
+    [123] = (const void *)CallMsgFilter,
     [124] = (const void *)UpdateWindow,
     [125] = (const void *)InvalidateRect,
     [126] = (const void *)InvalidateRgn,
@@ -981,7 +984,7 @@ static const void *const exports_user[484] = {
     [483] = (const void *)SystemParametersInfo,
 };
 
-static const void *const exports_winn[21] = {
+static const void *const exports_winn[22] = {
     [1] = (const void *)DialogBoxIndirectN,
     [2] = (const void *)CreateDialogIndirectN,
     [3] = (const void *)CreateAcceleratorTableN,
@@ -1002,6 +1005,7 @@ static const void *const exports_winn[21] = {
     [18] = (const void *)GetAppInfoN,
     [19] = (const void *)ExtractIconN,
     [20] = (const void *)ExtractIconExN,
+    [21] = (const void *)GetFileResourceN,
 };
 
 static const void *const exports_commdlg[28] = {

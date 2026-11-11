@@ -34,12 +34,54 @@ typedef struct tagCREATESTRUCT {
     int cy, cx, y, x; LONG style; LPCSTR lpszName, lpszClass; DWORD dwExStyle;
 } CREATESTRUCT, *LPCREATESTRUCT;
 
-/* hooks: a message sent (WH_CALLWNDPROC), the computer-based-training
- * one's window being made (WH_CBT, HCBT_CREATEWND) */
-#define WH_CALLWNDPROC  4
-#define WH_CBT          5
-#define HC_ACTION       0
-#define HCBT_CREATEWND  3
+/* hooks: a modal loop's message (WH_MSGFILTER, WH_SYSMSGFILTER: MSGF_),
+ * a key (WH_KEYBOARD: its virtual key, its flags), a message retrieved
+ * (WH_GETMESSAGE), one sent (WH_CALLWNDPROC), the computer-based-training
+ * one (WH_CBT: HCBT_), the mouse's (WH_MOUSE: the message, a
+ * MOUSEHOOKSTRUCT), the shell's (WH_SHELL: HSHELL_, the window) */
+#define WH_MSGFILTER      (-1)
+#define WH_JOURNALRECORD  0
+#define WH_JOURNALPLAYBACK 1
+#define WH_KEYBOARD       2
+#define WH_GETMESSAGE     3
+#define WH_CALLWNDPROC    4
+#define WH_CBT            5
+#define WH_SYSMSGFILTER   6
+#define WH_MOUSE          7
+#define WH_HARDWARE       8
+#define WH_DEBUG          9
+#define WH_SHELL          10
+#define HC_ACTION         0
+#define HC_GETNEXT        1
+#define HC_SKIP           2
+#define HC_NOREMOVE       3
+#define HCBT_MOVESIZE     0
+#define HCBT_MINMAX       1
+#define HCBT_QS           2
+#define HCBT_CREATEWND    3
+#define HCBT_DESTROYWND   4
+#define HCBT_ACTIVATE     5
+#define HCBT_CLICKSKIPPED 6
+#define HCBT_KEYSKIPPED   7
+#define HCBT_SYSCOMMAND   8
+#define HCBT_SETFOCUS     9
+#define MSGF_DIALOGBOX    0
+#define MSGF_MESSAGEBOX   1
+#define MSGF_MENU         2
+#define MSGF_MOVE         3
+#define MSGF_SIZE         4
+#define MSGF_SCROLLBAR    5
+#define MSGF_NEXTWINDOW   6
+#define MSGF_MAINLOOP     8
+#define HSHELL_WINDOWCREATED       1
+#define HSHELL_WINDOWDESTROYED     2
+#define HSHELL_ACTIVATESHELLWINDOW 3
+typedef struct tagMOUSEHOOKSTRUCT {
+    POINT pt; HWND hwnd; UINT wHitTestCode; DWORD dwExtraInfo;
+} MOUSEHOOKSTRUCT, *LPMOUSEHOOKSTRUCT;
+typedef struct tagCBTACTIVATESTRUCT {
+    BOOL fMouse; HWND hWndActive;
+} CBTACTIVATESTRUCT, *LPCBTACTIVATESTRUCT;
 typedef struct tagCWPSTRUCT {
     LPARAM lParam; WPARAM wParam; UINT message; HWND hwnd;
 } CWPSTRUCT, *LPCWPSTRUCT;
@@ -717,6 +759,7 @@ BOOL    WINAPI PostAppMessage(HTASK task, UINT msg, WPARAM wp, LPARAM lp);
 void    WINAPI PostQuitMessage(int code);
 BOOL    WINAPI GetMessage(LPMSG msg, HWND hwnd, UINT first, UINT last);
 BOOL    WINAPI PeekMessage(LPMSG msg, HWND hwnd, UINT first, UINT last, UINT flags);
+BOOL    WINAPI CallMsgFilter(LPMSG msg, int code);
 BOOL    WINAPI TranslateMessage(const MSG *msg);
 LONG    WINAPI DispatchMessage(const MSG *msg);
 BOOL    WINAPI WaitMessage(void);

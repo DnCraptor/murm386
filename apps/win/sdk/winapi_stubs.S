@@ -5413,6 +5413,23 @@ CallWindowProc:
     .ltorg
     .size CallWindowProc, .-CallWindowProc
 
+    .section .text.winapi.CallMsgFilter,"ax",%progbits
+    .global CallMsgFilter
+    .type CallMsgFilter, %function
+    .thumb_func
+CallMsgFilter:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =492
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size CallMsgFilter, .-CallMsgFilter
+
     .section .text.winapi.UpdateWindow,"ax",%progbits
     .global UpdateWindow
     .type UpdateWindow, %function
@@ -8370,6 +8387,23 @@ ExtractIconExN:
     bx   r12
     .ltorg
     .size ExtractIconExN, .-ExtractIconExN
+
+    .section .text.winapi.GetFileResourceN,"ax",%progbits
+    .global GetFileResourceN
+    .type GetFileResourceN, %function
+    .thumb_func
+GetFileResourceN:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #12]
+    ldr  r1, =84
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetFileResourceN, .-GetFileResourceN
 
     .section .text.winapi.GetOpenFileName,"ax",%progbits
     .global GetOpenFileName

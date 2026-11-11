@@ -30,8 +30,10 @@ int user_buttons_swapped(void) { return swap_buttons; }
 #define QSIZE 256
 
 static MSG queue[QSIZE];
-static int16_t qchar[QSIZE];
-static HTASK qtask[QSIZE];      /* task the message is for (0: any) */     /* key-down: character at post time, -1 none */
+static int16_t qchar[QSIZE];     /* key-down: character at post time, -1 none */
+static HTASK qtask[QSIZE];      /* task the message is for (0: any) */
+static uint8_t qinput[QSIZE];   /* the keyboard's, the mouse's: not posted */
+static int putting_input;
 static int last_char = -1;       /* of the last key message retrieved */
 static MSG last_key;
 static int q_head, q_count;
@@ -54,6 +56,7 @@ static void q_put_t(const MSG *m, int ch, HTASK task)
     queue[i] = *m;
     qchar[i] = (int16_t)ch;
     qtask[i] = task;
+    qinput[i] = (uint8_t)putting_input;
     q_count++;
 }
 
@@ -68,6 +71,7 @@ static void q_remove(int i)
         *q_at(k) = *q_at(k - 1);
         qchar[(q_head + k) % QSIZE] = qchar[(q_head + k - 1) % QSIZE];
         qtask[(q_head + k) % QSIZE] = qtask[(q_head + k - 1) % QSIZE];
+        qinput[(q_head + k) % QSIZE] = qinput[(q_head + k - 1) % QSIZE];
     }
     q_head = (q_head + 1) % QSIZE;
     q_count--;
@@ -126,14 +130,25 @@ void user_set_hooks(unsigned types, LRESULT (*call)(int type, int code, WPARAM w
 
 LRESULT user_hook(int type, int code, WPARAM wp, LPARAM lp)
 {
-    return hook_types & (1u << type) ? hook_call(type, code, wp, lp) : 0;
+    return hook_types & USER_HOOK_BIT(type) ? hook_call(type, code, wp, lp) : 0;
+}
+
+/* A modal loop's message (a dialog's, a menu's ...) to the message
+ * filters: the system's, then the task's; nonzero, one of them took it */
+BOOL WINAPI CallMsgFilter(LPMSG msg, int code)
+{
+    if (!msg)
+        return FALSE;
+    if (user_hook(WH_SYSMSGFILTER, code, 0, (LPARAM)(intptr_t)msg))
+        return TRUE;
+    return user_hook(WH_MSGFILTER, code, 0, (LPARAM)(intptr_t)msg) != 0;
 }
 
 /* WH_CALLWNDPROC's hooks with the message (they may subclass the window,
  * destroy it): its procedure then, NULL if it is gone */
 static WNDPROC send_hook(HWND h, UINT m, WPARAM wp, LPARAM lp, int same)
 {
-    if (hook_types & (1u << WH_CALLWNDPROC)) {
+    if (hook_types & USER_HOOK_BIT(WH_CALLWNDPROC)) {
         CWPSTRUCT cwp = { lp, wp, m, h };
         hook_call(WH_CALLWNDPROC, HC_ACTION, (WPARAM)same, (LPARAM)(intptr_t)&cwp);
     }
@@ -235,7 +250,9 @@ void win_ddi_key_event(int vk, int sc, int down)
     unsigned char ch;
     int c = (down && user_vk_to_char(vk, sc, &ch)) ? ch : -1;
     MSG msg = { target->h, m, (WPARAM)vk, lp, now_ms(), { U.mouse_x, U.mouse_y } };
+    putting_input = 1;
     q_put_ch(&msg, c);
+    putting_input = 0;
 }
 
 int WINAPI GetKeyState(int vk)
@@ -313,7 +330,9 @@ static void post_mouse(wwnd *w, int hit, UINT client_msg, int x, int y)
             return;
         }
     }
+    putting_input = 1;
     user_post(w->h, m, wp, lp);
+    putting_input = 0;
 }
 
 static void mouse_button(int x, int y, int btn, int down)
@@ -560,6 +579,45 @@ static int quit_message(MSG *out, wtask *t, int remove)
     return -1;
 }
 
+/* The keyboard's and the mouse's hooks with input a task takes (removed:
+ * HC_ACTION, looked at: HC_NOREMOVE), the keyboard's and the mouse's own,
+ * not a message posted: nonzero, it is to be thrown away. Not again while
+ * one of them runs. */
+static int input_hooking;
+
+static int input_hooked_away(const MSG *m, int remove)
+{
+    int key = m->message >= WM_KEYDOWN && m->message <= WM_SYSKEYUP &&
+              m->message != WM_CHAR && m->message != WM_DEADCHAR &&
+              m->message != WM_SYSCHAR && m->message != WM_SYSDEADCHAR;
+    int nc = m->message >= WM_NCMOUSEMOVE && m->message <= WM_NCMBUTTONDBLCLK;
+    int mouse = nc || (m->message >= WM_MOUSEFIRST && m->message <= WM_MOUSELAST);
+    if (input_hooking || (!key && !mouse) ||
+        !(hook_types & USER_HOOK_BIT(key ? WH_KEYBOARD : WH_MOUSE)))
+        return 0;
+    int code = remove ? HC_ACTION : HC_NOREMOVE;
+    LRESULT r;
+    input_hooking = 1;
+    if (key) {
+        r = hook_call(WH_KEYBOARD, code, m->wParam, m->lParam);
+    } else {
+        MOUSEHOOKSTRUCT mh = { m->pt, m->hwnd, nc ? (UINT)m->wParam : (UINT)HTCLIENT, 0 };
+        r = hook_call(WH_MOUSE, code, m->message, (LPARAM)(intptr_t)&mh);
+    }
+    input_hooking = 0;
+    return r != 0;
+}
+
+/* the queued message just like m, if it is still there: gone */
+static void q_drop(const MSG *m)
+{
+    for (int i = 0; i < q_count; i++)
+        if (!memcmp(q_at(i), m, sizeof(*m))) {
+            q_remove(i);
+            return;
+        }
+}
+
 static int get_one(MSG *out, HWND h, UINT first, UINT last, int remove)
 {
     pump_input();
@@ -578,15 +636,23 @@ static int get_one(MSG *out, HWND h, UINT first, UINT last, int remove)
             continue;
         if (!matches(m, h, first, last))
             continue;
-        *out = *m;
-        if (m->message == WM_KEYDOWN || m->message == WM_SYSKEYDOWN) {
-            last_key = *m;
-            last_char = qchar[(q_head + i) % QSIZE];
-        }
-        if (remove) {
+        MSG got = *m;
+        int ch = qchar[(q_head + i) % QSIZE], input = qinput[(q_head + i) % QSIZE];
+        if (remove)
             q_remove(i);
-            parent_notify(out);
+        if (input && input_hooked_away(&got, remove)) {   /* the queue may have changed */
+            if (!remove)
+                q_drop(&got);
+            i = -1;
+            continue;
         }
+        *out = got;
+        if (got.message == WM_KEYDOWN || got.message == WM_SYSKEYDOWN) {
+            last_key = got;
+            last_char = ch;
+        }
+        if (remove)
+            parent_notify(out);
         return 1;
     }
     if (me->quit)
@@ -666,11 +732,19 @@ static void wait_turn(void)
     me->waiting = WTASK_WAIT_NONE;
 }
 
+/* WH_GETMESSAGE's hooks with a message retrieved (they may change it) */
+static void got_message(MSG *msg)
+{
+    if (hook_types & USER_HOOK_BIT(WH_GETMESSAGE))
+        hook_call(WH_GETMESSAGE, HC_ACTION, 0, (LPARAM)(intptr_t)msg);
+}
+
 BOOL WINAPI GetMessage(LPMSG msg, HWND h, UINT first, UINT last)
 {
     for (;;) {
         int r = get_one(msg, h, first, last, 1);
         if (r) {
+            got_message(msg);
             U.cur_msg = *msg;
             return r > 0;
         }
@@ -682,8 +756,10 @@ BOOL WINAPI GetMessage(LPMSG msg, HWND h, UINT first, UINT last)
 BOOL WINAPI PeekMessage(LPMSG msg, HWND h, UINT first, UINT last, UINT flags)
 {
     int r = get_one(msg, h, first, last, flags & PM_REMOVE);
-    if (r)
+    if (r) {
+        got_message(msg);
         U.cur_msg = *msg;
+    }
     else if (!(flags & PM_NOYIELD))
         task_yield();
     return r != 0;

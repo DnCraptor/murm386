@@ -64,8 +64,10 @@ int main(void)
     assert(boot[WIN_NE_BOOT_SCRATCH_OFFSET-1]==0xcc);
     assert(boot[WIN_NE_BOOT_SVC_OFFSET]==0);
     assert(win_ne_fault_make(idt,code,&a));
-    for (unsigned v=0;v<WIN_NE_FAULT_VECTORS;v++) {
+    for (unsigned v=0;v<WIN_NE_IDT_VECTORS;v++) {
         unsigned pos=6*v;
+        if (v==0x20 || v==0x21)
+            continue;
         assert(r16(idt+v*8)==(v==WIN_NE_YIELD_VECTOR ? WIN_NE_YIELD_OFFSET :
                               WIN_NE_FAULT_CODE_OFFSET+pos));
         assert(r16(idt+v*8+2)==a.pm_segment);
@@ -83,8 +85,10 @@ int main(void)
         assert(idt[v*8+4]==0 && idt[v*8+5]==0x86);  /* DPL 0: no INT n from ring 3 */
         assert(code[pos]==0xbb && r16(code+pos+1)==v);
         assert(code[pos+3]==0xe9 && r16(code+pos+4)==
-               WIN_NE_FAULT_VECTORS*6-(pos+6));
+               WIN_NE_IDT_VECTORS*6-(pos+6));
     }
+    /* the multiplex, DPMI: as the BIOS's */
+    assert(WIN_NE_BIOS_VECTOR(0x2f) && WIN_NE_BIOS_VECTOR(0x31) && WIN_NE_BIOS_VECTOR(0x33));
     /* INT 20h and INT 21h: the DOS stubs, INT 21h a gateway service */
     assert(r16(idt+0x20*8)==WIN_NE_INT20_OFFSET && r16(idt+0x21*8)==WIN_NE_INT21_OFFSET);
     assert(r16(idt+0x21*8+2)==a.pm_segment && idt[0x21*8+5]==0xe6);  /* DPL 3 */
@@ -114,8 +118,8 @@ int main(void)
     a.tss=0; assert(!win_ne_dos_make(dos,&a)); assert(!win_ne_boot_make(boot,sizeof(boot),&a));
     a.tss=0x60;
     const uint8_t save_frame[]={0x8c,0xd6,0x89,0xe7};    /* si=ss, di=sp */
-    assert(!memcmp(code+WIN_NE_FAULT_VECTORS*6,save_frame,sizeof(save_frame)));
-    const unsigned common=WIN_NE_FAULT_VECTORS*6+sizeof(save_frame);
+    assert(!memcmp(code+WIN_NE_IDT_VECTORS*6,save_frame,sizeof(save_frame)));
+    const unsigned common=WIN_NE_IDT_VECTORS*6+sizeof(save_frame);
     const uint8_t clear_pe[]={0x0f,0x20,0xc0,0x24,0xfe,0x0f,0x22,0xc0};
     assert(code[common]==0xfa &&
            !memcmp(code+common+1,clear_pe,sizeof(clear_pe)));

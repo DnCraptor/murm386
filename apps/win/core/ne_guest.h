@@ -35,10 +35,9 @@
 #define WIN_NE_SERVICE_WIN87EM  0x7000u
 #define WIN_NE_SERVICE_FPMATH   (WIN_NE_SERVICE_WIN87EM + 1u)
 /* Windows' own DLLs WINN has (ne_guest_sys.c): MMSYSTEM (its ordinals go
- * to 1226), TOOLHELP, VER */
+ * to 1226), TOOLHELP */
 #define WIN_NE_SERVICE_MMSYSTEM 0x8000u
 #define WIN_NE_SERVICE_TOOLHELP 0x8800u
-#define WIN_NE_SERVICE_VER      0x8900u
 /* the native DLLs' (core/windll.c): 9000h + the DLL's slot << 10 + the
  * ordinal (below 1024); 12 slots */
 #define WIN_NE_SERVICE_DLL      0x9000u
@@ -161,7 +160,7 @@ int win_ne_guest_selector_set(win_ne_guest_image *g, uint16_t sel, uint32_t base
 /* n empty selectors one after the other (AllocSelectorArray): the first */
 uint16_t win_ne_guest_selector_array(win_ne_guest_image *g, unsigned n);
 /* GetProcAddress of a module WINN has (0 KERNEL, 1 USER, 2 GDI, 3
- * KEYBOARD, 4 COMMDLG, 5 SHELL, 6 WIN87EM, 7 MMSYSTEM, 8 TOOLHELP, 9 VER;
+ * KEYBOARD, 4 COMMDLG, 5 SHELL, 6 WIN87EM, 7 MMSYSTEM, 8 TOOLHELP;
  * win_ne_guest_module gives the number of a name, -1 for none): a thunk's
  * far address, made now if the program had none for it, 0 if WINN has not
  * the function. */

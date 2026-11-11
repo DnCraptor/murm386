@@ -893,7 +893,8 @@ void user_alt_tab(wwnd *w) { alt_tab(w); }
 
 void user_syscommand(wwnd *w, UINT cmd, int x, int y)
 {
-    (void)x; (void)y;
+    if (user_hook(WH_CBT, HCBT_SYSCOMMAND, (WPARAM)cmd, MAKELPARAM(x, y)) || !IsWindow(w->h))
+        return;                         /* the CBT hook refused it */
     switch (cmd & 0xFFF0) {
     case SC_MOVE:
         move_size_loop(w, 0);

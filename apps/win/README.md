@@ -91,8 +91,16 @@ The BIOS's software interrupts a program calls itself (INT 10h, 11h, 12h,
 16h, 1Ah) are answered as Windows' DOS extender would: VGA, colour (the
 display combination, EGA's information, the mode), the equipment, 640K,
 the keyboard's shift state (no keys come this way), the clock (ticks, the
-RTC's time and date); nothing is set. INT 21h 66h gives or sets DOS's code
-page (DOS's own; 866 on the host). A call WINN has not, or refuses, in a
+RTC's time and date); nothing is set. So are DOS's others up to 33h
+(the program's IDT has them all): the multiplex INT 2Fh (Windows 3.10 in
+enhanced mode, 1600h and 160Ah; the idle calls; no XMS, no MSCDEX), DPMI
+0.9's INT 31h as Windows gives it to a program (descriptors: allocate,
+free, a real mode segment's, base, limit, access rights, an alias, get and
+set the descriptor; DOS memory; the version, the free memory, the virtual
+interrupt flag, locking; the vectors taken and kept by nobody; real mode
+calls and callbacks fail with DPMI's error), the mouse's INT 33h (no DOS
+driver: the program has its messages). INT 21h 66h gives or sets DOS's
+code page (DOS's own; 866 on the host). A call WINN has not, or refuses, in a
 procedure WINN called (a window's, a dialog's) is named as one in the
 program's own code is, not a fault.
 
@@ -109,10 +117,10 @@ or memory files); TOOLHELP's TimerCount, MemManInfo and SystemHeapInfo
 TaskFindHandle, ModuleFirst, ModuleNext, ModuleFindName and
 ModuleFindHandle (WINN's modules), MemoryRead and MemoryWrite,
 NotifyRegister and InterruptRegister (taken, never called); the heaps'
-walks find nothing; VER's GetFileVersionInfo(Size), VerQueryValue,
-GetFileResource(Size), VerLanguageName, VerFindFile and VerInstallFile (a
-copy, expanded by LZEXPAND's LZCopy). LZEXPAND is a native DLL (see
-Native DLLs): files compressed by COMPRESS.EXE ("SZDD"), read expanded
+walks find nothing. VER and LZEXPAND are native DLLs (see Native DLLs):
+VER's GetFileVersionInfo(Size), VerQueryValue, GetFileResource(Size),
+VerLanguageName, VerFindFile and VerInstallFile (a copy, expanded by
+LZEXPAND's LZCopy); LZEXPAND's files compressed by COMPRESS.EXE ("SZDD"), read expanded
 (LZOpenFile finds FILE.TX_ for FILE.TXT, LZInit, LZRead, LZSeek, LZCopy,
 CopyLZFile, GetExpandedName), others as they are.
 
@@ -223,8 +231,18 @@ memory: a far pointer, or a global block), with their WM_INITDIALOG
 lParam; SetClassWord, SetClassLong (the class's extra bytes, its procedure
 for its own classes), CreateWindowEx, MapWindowPoints, Get/SetKeyboardState,
 EnumTaskWindows, GrayString (a string grayed; a procedure of its own draws
-as it is), AnsiUpperBuff and AnsiLowerBuff; hooks are taken and never
-called (SetWindowsHook(Ex), CallNextHookEx ...). Freeing a selector
+as it is), AnsiUpperBuff and AnsiLowerBuff. Hooks (SetWindowsHook(Ex),
+CallNextHookEx, DefHookProc, CallMsgFilter) are called as Windows calls
+them: WH_CALLWNDPROC with a message sent to a window of the task;
+WH_CBT with a window made (HCBT_CREATEWND), destroyed, activated, given
+the focus, minimized or maximized, a system command (nonzero: it does not
+happen); WH_KEYBOARD and WH_MOUSE with the keyboard's and the mouse's
+input the task takes (not messages posted; nonzero: thrown away);
+WH_GETMESSAGE with a message GetMessage or PeekMessage retrieved (the hook
+may change it); WH_MSGFILTER and WH_SYSMSGFILTER with a dialog's, a
+message box's, a menu's loop's messages (CallMsgFilter: MSGF_DIALOGBOX,
+MSGF_MESSAGEBOX, MSGF_MENU); WH_SHELL with a top-level window made and
+gone. The journals' are taken and never called. Freeing a selector
 (GlobalFree, FreeSelector) clears the caller's DS and ES if they hold it, as
 Windows does. A
 window procedure gets WM_CREATE's CREATESTRUCT, WM_GETMINMAXINFO's,
@@ -261,7 +279,7 @@ enumerated), `OWAPI2` (the clipboard, DlgDirList, window placement,
 properties, menus from memory, cursors and icons of bits; OpenComm; a call
 WINN has not), `OWMETA` (a metafile recorded, played, scaled, enumerated
 record by record, its bits and a file), `OWSYS` (MMSYSTEM, TOOLHELP, VER,
-LZEXPAND), `OWFONT` (a raster font file's faces, `WINNTEST.FON` beside
+LZEXPAND, INT 2Fh, DPMI), `OWFONT` (a raster font file's faces, `WINNTEST.FON` beside
 it, made by `host/mkfon.py`: its sizes, larger, bold, italic; the VGA
 glyphs larger; a dialog in the font) (`make NEFIXTURES` in
 `host/`). All have DOS MZ stubs that explain how to launch them under WINN
@@ -295,7 +313,7 @@ nothing leaves the program from the command line in that part (`WINN DEMO`).
 | `../winapps/<name>/` | applications: `progman` (the Program Manager, the default shell), `winfile` (File Manager), `taskman` (Task List), `winmine` (Minesweeper), `notepad`, `clock`, `calc`, `control` (Control Panel), `demo` (a tour of the API) |
 | `../windrv/<name>/` | driver modules; `vga800` is VBE 102h 800x600 in 16 colours |
 | `ddi/windll.h`, `core/windll.c` | native DLLs: the interface, and their loading, uses and unloading |
-| `../windll/<name>/` | native DLLs: `lzexpand` (LZEXPAND.DLL) |
+| `../windll/<name>/` | native DLLs: `lzexpand` (LZEXPAND.DLL), `ver` (VER.DLL) |
 | `host/` | the same sources on Linux with a snapshot display and scripted input |
 
 ## Drivers
@@ -333,7 +351,10 @@ used.
 
 Windows' own libraries are native DLLs of WINN's, loaded when a program
 needs one and unloaded when none does any more, as Windows 3.x does with
-its DLLs, instead of being built into `WINN.EXE`: `LZEXPAND.DLL` so far.
+its DLLs, instead of being built into `WINN.EXE`: `LZEXPAND.DLL` and
+`VER.DLL` so far (VER reads a file's resources with the core's
+`GetFileResourceN`). A program importing one that is not there, or a
+function the DLL has not, still loads; the call ends it.
 A native DLL is an EZ image built with `sdk/windll.cmake` (no crt0; its
 `__ez_start`, from `sdk/windll_entry.c`, begins with a branch over the
 signature `NWDL`) whose `WinDllInit` gives its exports: the Win16

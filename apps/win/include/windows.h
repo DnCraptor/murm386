@@ -828,6 +828,11 @@ int     WINAPI GetCurrentDirectoryN(LPSTR buf, int size);
 int     WINAPI GetAppInfoN(LPCSTR path, LPSTR desc, int size);
 HICON   WINAPI ExtractIconN(LPCSTR path);
 HICON   WINAPI ExtractIconExN(LPCSTR path, UINT n);     /* n-th; (UINT)-1: the count */
+/* a resource of a Win16 file: its type and id (MAKEINTRESOURCE, "#n", a
+ * name; NULL: the first of the type), up to cap bytes of it from offset
+ * into buf (NULL: none); its size, 0 if there is none */
+DWORD   WINAPI GetFileResourceN(LPCSTR path, LPCSTR type, LPCSTR id, DWORD offset, void *buf,
+                                DWORD cap);
 
 /* ---------------------------------------------------------------- tasks */
 
