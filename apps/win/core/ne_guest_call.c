@@ -1712,6 +1712,30 @@ int ne_call(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword)
         return 1;
     }
     switch (service) {
+    case 0x10ab: {                      /* WinHelp(HWND, LPCSTR, UINT, DWORD): a string or a
+                                         * MULTIKEYHELP of the program's for some */
+        char file[144], text[256];
+        UINT cmd = w(a, 8);
+        uint32_t data = dw(a, 4);
+        file[0] = text[0] = 0;
+        if (dw(a, 10))
+            str(a, dw(a, 10), file, sizeof(file));
+        if ((cmd == HELP_KEY || cmd == HELP_PARTIALKEY || cmd == HELP_COMMAND ||
+             cmd == HELP_MULTIKEY) && data) {
+            if (cmd == HELP_MULTIKEY) {
+                uint8_t mk[3 + sizeof(text)];
+                memset(mk, 0, sizeof(mk));
+                str(a, data + 3, (char *)mk + 3, sizeof(text));
+                memcpy(text, mk, sizeof(text));
+                text[sizeof(text) - 1] = 0;
+            } else {
+                str(a, data, text, sizeof(text));
+            }
+            data = (uint32_t)(uintptr_t)text;
+        }
+        *v = !a->bad && WinHelp(w(a, 14), file, cmd, data);
+        return 1;
+    }
     case 0x11b5: case 0x11b6: case 0x11af: case 0x11b0:
         return call_strings(a, service, v, dword);
     case 0x100a: {                      /* SetTimer(HWND, UINT, UINT, TIMERPROC) */

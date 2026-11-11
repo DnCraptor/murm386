@@ -421,12 +421,13 @@ int WINAPI DialogBoxIndirectN(HINSTANCE inst, const DLGTEMPLATE_N *t,
     if (!h)
         return -1;
     wwnd *ow = owner ? user_toplevel(user_wnd(owner)) : NULL;
-    int owner_was_enabled = ow && IsWindowEnabled(ow->h);
+    HWND oh = ow ? ow->h : 0;          /* the owner may go while the dialog runs */
+    int owner_was_enabled = oh && IsWindowEnabled(oh);
     wdlg *d = dlg_state(h);
     if (!d->ended) {
         ShowWindow(h, SW_SHOWNORMAL);
-        if (ow)
-            EnableWindow(ow->h, FALSE);
+        if (oh)
+            EnableWindow(oh, FALSE);
     }
     while (IsWindow(h) && !d->ended) {
         MSG m;
@@ -442,12 +443,12 @@ int WINAPI DialogBoxIndirectN(HINSTANCE inst, const DLGTEMPLATE_N *t,
         }
     }
     int result = IsWindow(h) && d ? d->result : -1;
-    if (ow && owner_was_enabled)
-        EnableWindow(ow->h, TRUE);
+    if (oh && owner_was_enabled && IsWindow(oh))
+        EnableWindow(oh, TRUE);
     if (IsWindow(h))
         DestroyWindow(h);
-    if (ow && IsWindow(ow->h))
-        SetActiveWindow(ow->h);
+    if (oh && IsWindow(oh))
+        SetActiveWindow(oh);
     return result;
 }
 

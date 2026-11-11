@@ -1,0 +1,57 @@
+# Windows Help on its test file (WINNTEST.HLP, mkhlp.py), the Program
+# Manager's Run opening it by WIN.INI's [Extensions]: the contents
+# (a non-scrolling heading, a jump, a pop-up, a bitmap, a tab, a macro
+# hotspot, a table row), the pop-up, the jump, Back, the browse sequence,
+# Search (a keyword, its topics, Go To), the macro's Search:
+#     ./winhost scripts/winhelp.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type WINNTEST.HLP
+key RETURN
+wait 300
+snap wh_contents.ppm
+click 348 139
+wait 100
+snap wh_popup.ppm
+click 348 139
+wait 50
+click 190 139
+wait 100
+snap wh_second.ppm
+click 281 89
+wait 100
+click 405 89
+wait 100
+snap wh_browse.ppm
+click 213 89
+wait 200
+type sec
+wait 50
+key RETURN
+wait 100
+snap wh_search.ppm
+key TAB
+key TAB
+key TAB
+key TAB
+key TAB
+key RETURN
+wait 100
+snap wh_goto.ppm
+click 115 89
+wait 100
+click 115 190
+wait 200
+snap wh_macro.ppm
+key ESC
+wait 50
+keydown ALT
+key F4
+keyup ALT
+wait 50
+snap wh_end.ppm
+exit

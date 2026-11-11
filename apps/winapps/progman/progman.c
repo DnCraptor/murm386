@@ -282,7 +282,8 @@ static void make_main_group(void)
     ngroups = 1;
     WinDirListN(spec, names, sizeof(names));
     for (const char *p = names; *p && gr->n < MAXITEMS; p += lstrlen(p) + 1) {
-        if (!lstrcmpi(p, "PROGMAN.EXE") || !lstrcmpi(p, "WINN.EXE") || !lstrcmpi(p, "TASKMAN.EXE"))
+        if (!lstrcmpi(p, "PROGMAN.EXE") || !lstrcmpi(p, "WINN.EXE") || !lstrcmpi(p, "TASKMAN.EXE") ||
+            !lstrcmpi(p, "WINHELP.EXE"))
             continue;
         wsprintf(path, "%s%s", dir, p);
         if (!IsWinAppN(path))
@@ -456,15 +457,48 @@ static HWND open_group_window(int g, int activate_it)
 
 /* ---------------------------------------------------------------- commands */
 
-static void run(const char *cmd, int minimized)
+/* a document (its first word's extension not a program's): the program
+ * WIN.INI [Extensions] names for it ("hlp=winhelp.exe ^.hlp") before it */
+static void with_program(const char *cmd, char *out, int size)
 {
+    char ext[8], v[96];
+    const char *end = cmd, *dot = NULL;
+    while (*end && *end != ' ') {
+        if (*end == '.')
+            dot = end;
+        else if (*end == '\\' || *end == ':')
+            dot = NULL;
+        end++;
+    }
+    lstrcpyn(out, cmd, size);
+    if (!dot || end - dot - 1 > 3 || end - dot - 1 < 1)
+        return;
+    lstrcpyn(ext, dot + 1, (int)(end - dot));
+    if (!lstrcmpi(ext, "EXE") || !lstrcmpi(ext, "COM") || !lstrcmpi(ext, "BAT") ||
+        !lstrcmpi(ext, "PIF") ||
+        !GetProfileString("Extensions", ext, "", v, sizeof(v)) || !v[0])
+        return;
+    int n = 0;
+    while (v[n] && v[n] != '^')
+        n++;
+    while (n && v[n - 1] == ' ')
+        n--;
+    v[n] = 0;
+    if (n && n + 1 + lstrlen(cmd) < size)
+        wsprintf(out, "%s %s", v, cmd);
+}
+
+static void run(const char *given, int minimized)
+{
+    char cmd[200];
+    with_program(given, cmd, sizeof(cmd));
     UINT r = WinExec(cmd, minimized ? SW_SHOWMINNOACTIVE : SW_SHOWNORMAL);
     if (r >= 32) {
         if (min_on_run)
             ShowWindow(hframe, SW_MINIMIZE);
         return;
     }
-    char msg[160];
+    char msg[300];
     wsprintf(msg, "Cannot run '%s':\n%s.", cmd,
              r == 2 ? "the file was not found" :
              r == 8 ? "there is not enough memory" :

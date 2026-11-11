@@ -6175,6 +6175,130 @@ PROGRAMS = {
             '030021508500001c004a0028000e00010001000150804f4b000052004a0028000e000200000001508043616e'
             '63656c000000'
         )),
+    'OWHELP': (
+        # wcc -bt=windows -ms owhelp.c; wlink @owhelp.lnk
+        # ---- owhelp.c
+        #     /*
+        #      * owhelp.c - WinHelp from a Win16 program: the help file's [MAP]
+        #      * context 2 (WINHELP.EXE started), a keyword (the running one asked),
+        #      * then HELP_QUIT; what each returned.
+        #      */
+        #     #include <windows.h>
+        #     #include <string.h>
+        #
+        #     static int step, r1, r2, r3;
+        #     static char line[80] = "waiting";
+        #
+        #     long FAR PASCAL WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+        #     {
+        #         PAINTSTRUCT ps;
+        #         HDC dc;
+        #         switch (msg) {
+        #         case WM_TIMER:
+        #             step++;
+        #             if (step == 1) {
+        #                 r2 = WinHelp(h, "WINNTEST.HLP", HELP_KEY, (DWORD)(LPSTR)"pop-up");
+        #             } else if (step == 2) {
+        #                 r3 = WinHelp(h, "WINNTEST.HLP", HELP_QUIT, 0);
+        #                 KillTimer(h, 1);
+        #                 wsprintf(line, "winhelp context %d, key %d, quit %d", r1, r2, r3);
+        #                 InvalidateRect(h, NULL, TRUE);
+        #             }
+        #             return 0;
+        #         case WM_PAINT:
+        #             dc = BeginPaint(h, &ps);
+        #             TextOut(dc, 8, 8, line, lstrlen(line));
+        #             EndPaint(h, &ps);
+        #             return 0;
+        #         case WM_DESTROY:
+        #             PostQuitMessage(0);
+        #             return 0;
+        #         }
+        #         return DefWindowProc(h, msg, wp, lp);
+        #     }
+        #
+        #     int PASCAL WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR cmd, int show)
+        #     {
+        #         WNDCLASS wc;
+        #         HWND h;
+        #         MSG m;
+        #         _fmemset(&wc, 0, sizeof(wc));
+        #         wc.lpfnWndProc = WndProc;
+        #         wc.hInstance = hInstance;
+        #         wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        #         wc.hbrBackground = GetStockObject(WHITE_BRUSH);
+        #         wc.lpszClassName = "OwHelp";
+        #         RegisterClass(&wc);
+        #         h = CreateWindow("OwHelp", "WinHelp API", WS_OVERLAPPEDWINDOW, 0, 330, 640, 70, NULL, NULL,
+        #                          hInstance, NULL);
+        #         ShowWindow(h, show);
+        #         UpdateWindow(h);
+        #         r1 = WinHelp(h, "WINNTEST.HLP", HELP_CONTEXT, 2);
+        #         SetTimer(h, 1, 1000, NULL);
+        #         while (GetMessage(&m, NULL, 0, 0)) {
+        #             TranslateMessage(&m);
+        #             DispatchMessage(&m);
+        #         }
+        #         return m.wParam;
+        #     }
+        # ---- owhelp.lnk
+        #     system windows
+        #     name owhelp.exe
+        #     file owhelp.o
+        bytes.fromhex(
+            '4d5a80000100000004000000ffff0000b8000000000000004000000000000000000000000000000000000000'
+            '00000000000000000000000000000000800000000e1fba0e00b409cd21b8014ccd2154686973206973206120'
+            '57696e646f77732031362d6269742065786563757461626c650d0a240000000000000000000000004e450501'
+            '710002000000000002030200000400204802010000000200020003000e004000500050005a006000f3000000'
+            '0000010000000200000000000000000381004205400d42059f03a001410cb001064f5748454c500000000100'
+            '06000d00000455534552064b45524e454c0347444900000a6f7768656c702e65786500000000ccebfd909090'
+            '90001e5890455589e51e8ed8b83800e8e7015683ec208b460c8b760e3d1301740d3d0f00742d3d0200742ae9'
+            'bb00ff06a001a1a0013d0100751e561eb8170050b80101501eb81000509affff0000a3a401eb56eb5ae98700'
+            '3d0200754c561eb8170050b802005031c050509affff0000a3a60156b80100509affff0000ff36a601ff36a4'
+            '01ff36a2011eb82400501eb86800509affff000083c40e5631c05050b80100509affff000031c031d2eb4a56'
+            '8d56dc1e529affff000050b8080050501eb86800501e509affff0000509affff0000568d56dc1e529affff00'
+            '00ebca31c0509affff0000ebc05650ff760aff7608ff76069affff00008d66fc5e1f5d4dca0a005589e5b850'
+            '00e8ed005683ec2c8b760cb91a0031db8cda8d46d2e80b01c746d4ffffc746d6ffff8976dc31c05050b8007f'
+            '509affff00008946e031c0509affff00008946e2c746e848008c5eea8d56d21e529affff00001eb84800501e'
+            'b84f0050b8cf005031c05050b84a0150b8800250b846005031c050505650509affff000089c650ff76049aff'
+            'ff0000569affff0000561eb8170050b801005031c050b80200509affff0000a3a20156b8010050b8e8035031'
+            'c050509affff00008d56ec1e5231c05050509affff000085c074168d56ec1e529affff00008d56ec1e529aff'
+            'ff0000ebd78b46f08d66fe5e5dc20a008c16b800c33bc473132bc4f7d83b060a0077068cd03b06b8007401c3'
+            '0e5ab82102bb0100e9c801537461636b204f766572666c6f7721005789c788d88ec2578ae0d1e9f3ab13c9f3'
+            'aa5f89f85fc3eb0203009affff00000bc0750e5033c0ba0f00e86a0258b44ccd218c06be00575606535253be'
+            'a8018936d9008c1edb00268a078804464384c075f589360a005b2bc0509affff000057579affff0000fc1e07'
+            'b9a801bfa0012bcf32c0f3aab89203a3d500b8ffffa3d700b430cd21a2c0008826c1009affff0000a2c20088'
+            '26c30086e0a3c40054583bc475120f01e0a90100740ab001a2c600b003a2c7001ebfe10057b89000509affff'
+            '0000b8e100893edd008c1edf00b8ff00e86b01e801fee9f9004f70656e20576174636f6d20432f432b2b3136'
+            '2052756e2d54696d652073797374656d2e20436f7079726967687420286329204f70656e20576174636f6d20'
+            '436f6e7472696275746f727320323030322d323032362e20506f7274696f6e7320436f707972696768742028'
+            '4329205379626173652c20496e632e20313938382d323030322e00c3cb005589e551565781ec800089c689df'
+            '8d9e7aff8cd98ec2268a0484c074173c0d74138d46f939c3730c268a048ec14626880743ebe031c08ec15026'
+            'c607001e8d9e7aff531eb85c005031c0509affff000089f8e94400515689c189d6e8330185c0750689c889f2'
+            'eb9889d8e92c0000c3c3535289c3833e9801007404ff169801ff167201baff00b81000e8a800ff167201ff16'
+            '740189d8e928fe5289c2ff167201ff16740189d0e918fe5589e5535289c3833f0075078d66fc5a5b5dc31eff'
+            '171febf35589e5535289c38b47028b1785c0750485d274df1eff1f1febd95589e5535152565789c11ee813ff'
+            'bfa00189fabb9a0189fe88c839fb7316803f02750583c306ebf23a470172f689de8a4701ebef39fe74158d44'
+            '02803c007508e88affc60402ebcbe89bffebf61f8d66f65f5e5a595b5dc35589e55351565789c11ee8bcfe88'
+            'd5bfa00189fabba00189fe88c839fb7316803f02750583c306ebf23a470177f689de8a4701ebef39fe741c3a'
+            '6c017305c60402ebd18d4402803c007505e827ffebeee83bffebe91f8d66f85f5eeb9f803e760100750331c0'
+            'c35250cceb0657564944454fb8010083c404c3001f00030150000100ab00030172000100ab0003017f000100'
+            '0c0003019a000100a4010301ab0001007d000301bc00010027000301ce0002005a000301d400030021000301'
+            'df00010028000301e900010006000301fb0001006b00050029010100080002002e010100080003013c010100'
+            'ad00030147010300570003015c010100390003018601010029000301910101002a000301970101007c000301'
+            'ad010100ab000301c20101000a000301d10101006c000301df01010071000301e9010100720003014d020200'
+            '5b0003018c0202001e0003019302010005000200ad02010048020301be02020003000301f002020031000301'
+            'e0030100010000000000050000000000000000000000706f702d75700057494e4e544553542e484c50007769'
+            '6e68656c7020636f6e746578742025642c206b65792025642c2071756974202564004f7748656c700057696e'
+            '48656c702041504900004f70656e20576174636f6d0077616974696e67000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '00000000000000000000000000000000ffff00000000000000000000000c0000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000304030400000000000000000000000000000000'
+            '00000000000000000000000000000000000000000020fa010000'
+        )),
 }
 
 if len(sys.argv) != 3 or sys.argv[1] not in PROGRAMS:

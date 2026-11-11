@@ -1,0 +1,20 @@
+# WinHelp from a Win16 program on the i386 core (OWHELP): HELP_CONTEXT
+# starts WINHELP.EXE on WINNTEST.HLP's [MAP] number 2, HELP_KEY asks the
+# running one for a keyword's topic, HELP_QUIT closes it:
+#     ./winhost scripts/owhelp.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OWHELP
+key RETURN
+wait 400
+snap oh_context.ppm
+wait 1100
+snap oh_key.ppm
+wait 1100
+wait 300
+snap oh_quit.ppm
+exit

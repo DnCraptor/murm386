@@ -383,13 +383,12 @@ HWND WINAPI GetTopWindow(HWND h)
 
 static int text_match(const char *a, const char *b) { return !lstrcmp(a ? a : "", b ? b : ""); }
 
+/* a top-level window of the class (any task's, as the class's name is
+ * Windows' atom for all) and the title */
 HWND WINAPI FindWindow(LPCSTR klass, LPCSTR title)
 {
-    wclass *c = klass ? user_find_class(klass) : NULL;
-    if (klass && !c)
-        return 0;
     for (wwnd *w = U.desktop->child; w; w = w->next) {
-        if (c && w->cls != c)
+        if (klass && (!w->cls || !class_is(w->cls, klass)))
             continue;
         if (title && !text_match(w->text, title))
             continue;
@@ -543,11 +542,45 @@ HWND WINAPI SetSysModalWindow(HWND h)
 
 HWND WINAPI GetSysModalWindow(void) { return IsWindow(sys_modal) ? sys_modal : 0; }
 
-/* no Help program: HELP_QUIT (nothing to end) is all that succeeds */
+/* WINHELP.EXE: the running one is sent the request (WINHELP_N), else it
+ * is started with it on its command line. HELP_KEY's, HELP_PARTIALKEY's,
+ * HELP_COMMAND's data: a string; HELP_MULTIKEY's: a MULTIKEYHELP (its
+ * keyword taken); HELP_SETINDEX and HELP_SETWINPOS: nothing to do. */
 BOOL WINAPI WinHelp(HWND h, LPCSTR file, UINT cmd, DWORD data)
 {
-    (void)h; (void)file; (void)data;
-    return cmd == HELP_QUIT;
+    HWND help = FindWindow(WINHELP_CLASS_N, NULL);
+    if (cmd == HELP_QUIT) {
+        if (help)
+            PostMessage(help, WM_CLOSE, 0, 0);
+        return TRUE;
+    }
+    if (cmd == HELP_SETINDEX || cmd == HELP_SETWINPOS)
+        return TRUE;
+    WINHELP_N r;
+    memset(&r, 0, sizeof(r));
+    r.cmd = cmd;
+    r.data = data;
+    lstrcpyn(r.file, cmd == HELP_HELPONHELP ? "WINHELP.HLP" : file ? file : "", sizeof(r.file));
+    if ((cmd == HELP_KEY || cmd == HELP_PARTIALKEY || cmd == HELP_COMMAND) && data)
+        lstrcpyn(r.text, (LPCSTR)(uintptr_t)data, sizeof(r.text));
+    else if (cmd == HELP_MULTIKEY && data) {           /* size, the table's letter, the keyword */
+        lstrcpyn(r.text, (LPCSTR)(uintptr_t)data + 3, sizeof(r.text));
+        r.cmd = HELP_KEY;
+    }
+    if (help) {
+        SendMessage(help, RegisterWindowMessage(WINHELP_MESSAGE_N), (WPARAM)h,
+                    (LPARAM)(intptr_t)&r);
+        return TRUE;
+    }
+    char line[420];
+    switch (r.cmd) {
+    case HELP_CONTEXT: wsprintf(line, "WINHELP.EXE %s -n %lu", r.file, (unsigned long)data); break;
+    case HELP_CONTEXTPOPUP: wsprintf(line, "WINHELP.EXE %s -p -n %lu", r.file, (unsigned long)data); break;
+    case HELP_KEY: case HELP_PARTIALKEY: wsprintf(line, "WINHELP.EXE %s -k %s", r.file, r.text); break;
+    case HELP_COMMAND: wsprintf(line, "WINHELP.EXE %s -m %s", r.file, r.text); break;
+    default: wsprintf(line, "WINHELP.EXE %s", r.file); break;
+    }
+    return WinExec(line, SW_SHOWNORMAL) >= 32;
 }
 
 BOOL WINAPI EnumWindows(WNDENUMPROC proc, LPARAM lp)

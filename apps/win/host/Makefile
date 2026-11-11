@@ -14,7 +14,7 @@ GDICORE  = $(filter-out ../core/exports.c ../core/task.c ../core/file.c ../core/
             ../core/x86bridge.c ../core/windll.c,$(CORE))
 
 # the applications, built in; each WinMain gets its own name
-APPS     = demo.o progman.o notepad.o clock.o calc.o control.o winfile.o taskman.o winmine.o appinfo.o
+APPS     = demo.o progman.o notepad.o clock.o calc.o control.o winfile.o taskman.o winmine.o winhelp.o hlpfile.o appinfo.o
 # the native DLLs, built in (host_dlls.c names them); each WinDllInit its own
 DLLS     = lzexpand.o ver.o ddeml.o host_dlls.c
 
@@ -70,13 +70,15 @@ NEUNDEF.EXE: mkne_undef.py
 
 WINNTEST.FON: mkfon.py ../core/sysfont.c ../core/gdi_text.c
 	python3 mkfon.py $@
+WINNTEST.HLP: mkhlp.py
+	python3 mkhlp.py $@
 OWHELLO.EXE OWBUSY.EXE OWWIN.EXE OWMENU.EXE OWSEGS.EXE OWDEMO.EXE OWFILE.EXE OWFILEL.EXE OWRES.EXE OWKERN.EXE OWUSE.EXE \
-	OWDLL.DLL OWDLL2.DLL OWFPU.EXE OWAPI.EXE OWGDI.EXE OWAPI2.EXE OWMETA.EXE OWSYS.EXE OWFONT.EXE: mkne_watcom.py
+	OWDLL.DLL OWDLL2.DLL OWFPU.EXE OWAPI.EXE OWGDI.EXE OWAPI2.EXE OWMETA.EXE OWSYS.EXE OWFONT.EXE OWHELP.EXE: mkne_watcom.py
 	python3 mkne_watcom.py $(basename $@) $@
 NEFIXTURES: NEAPP-fixture.exe NEDIALOG.EXE NELOOP-fixture.exe NEFAULT.EXE NEHANG.EXE \
 	NESTACK.EXE NECLI.EXE NEOUT.EXE NECR0.EXE NEHLT.EXE NEFPU.EXE NEUNDEF.EXE OWHELLO.EXE OWBUSY.EXE \
 	OWWIN.EXE OWMENU.EXE OWSEGS.EXE OWDEMO.EXE OWFILE.EXE OWFILEL.EXE OWRES.EXE OWKERN.EXE \
-	OWUSE.EXE OWDLL.DLL OWDLL2.DLL OWFPU.EXE OWAPI.EXE OWGDI.EXE OWAPI2.EXE OWMETA.EXE OWSYS.EXE OWFONT.EXE WINNTEST.FON
+	OWUSE.EXE OWDLL.DLL OWDLL2.DLL OWFPU.EXE OWAPI.EXE OWGDI.EXE OWAPI2.EXE OWMETA.EXE OWSYS.EXE OWFONT.EXE OWHELP.EXE WINNTEST.FON WINNTEST.HLP
 
 test_ne_multi: ../core/ne.c ../core/ne_guest.c test_ne_multi.c NEAPP-fixture.exe
 	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne.c ../core/ne_guest.c test_ne_multi.c
@@ -150,6 +152,10 @@ taskman.o: ../../winapps/taskman/taskman.c
 
 winmine.o: ../../winapps/winmine/winmine.c
 	$(CC) $(CFLAGS) $(INC) -DWinMain=winmine_WinMain -c -o $@ $<
+winhelp.o: ../../winapps/winhelp/winhelp.c ../../winapps/winhelp/hlpfile.h
+	$(CC) $(CFLAGS) $(INC) -DWinMain=winhelp_WinMain -c -o $@ $<
+hlpfile.o: ../../winapps/winhelp/hlpfile.c ../../winapps/winhelp/hlpfile.h
+	$(CC) $(CFLAGS) $(INC) -c -o $@ $<
 
 lzexpand.o: ../../windll/lzexpand/lzexpand.c
 	$(CC) $(CFLAGS) $(INC) -DWinDllInit=lzexpand_WinDllInit -c -o $@ $<
@@ -184,7 +190,8 @@ HOSTWIN: NEFIXTURES
 	mkdir -p HOSTWIN
 	cp NEDIALOG.EXE NEFAULT.EXE NEHANG.EXE OWHELLO.EXE OWBUSY.EXE OWWIN.EXE OWMENU.EXE OWSEGS.EXE \
 		OWDEMO.EXE OWFILE.EXE OWFILEL.EXE OWRES.EXE OWKERN.EXE OWUSE.EXE OWDLL.DLL OWDLL2.DLL OWFPU.EXE \
-		OWAPI.EXE OWGDI.EXE OWAPI2.EXE OWMETA.EXE OWSYS.EXE OWFONT.EXE WINNTEST.FON HOSTWIN/
+		OWAPI.EXE OWGDI.EXE OWAPI2.EXE OWMETA.EXE OWSYS.EXE OWFONT.EXE OWHELP.EXE WINNTEST.FON WINNTEST.HLP HOSTWIN/
+	cp ../WIN.INI HOSTWIN/
 	touch HOSTWIN/DEMO.EXE HOSTWIN/PROGMAN.EXE HOSTWIN/NOTEPAD.EXE HOSTWIN/CLOCK.EXE HOSTWIN/CALC.EXE HOSTWIN/CONTROL.EXE HOSTWIN/WINFILE.EXE HOSTWIN/TASKMAN.EXE HOSTWIN/WINMINE.EXE HOSTWIN/WINN.EXE HOSTWIN/NC.EXE
 	mkdir -p HOSTWIN/DOCS
 	printf 'Notepad test file\n\tTabbed line\tand more\nThis is a rather long line that goes on and on past the right edge of the window so that horizontal scrolling is needed to see its end.\nLast line\n' > HOSTWIN/README.TXT
@@ -192,7 +199,7 @@ HOSTWIN: NEFIXTURES
 	cp HOSTWIN/README.TXT HOSTWIN/DOCS/README.TXT
 
 clean:
-	rm -rf test_gdi test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_launch test_ne_rm_gate test_ne_run i386-host.o *-fixture.exe NEDIALOG.EXE NEFAULT.EXE NEHANG.EXE NESTACK.EXE NECLI.EXE NEOUT.EXE NECR0.EXE NEHLT.EXE NEFPU.EXE NEUNDEF.EXE OWHELLO.EXE OWBUSY.EXE OWWIN.EXE OWMENU.EXE OWSEGS.EXE OWDEMO.EXE OWDEMO.TMP OWFILE.EXE OWFILEL.EXE OWRES.EXE OWKERN.EXE OWUSE.EXE OWDLL.DLL OWDLL2.DLL OWFPU.EXE OWAPI.EXE OWGDI.EXE OWAPI2.EXE OWMETA.EXE OWSYS.EXE OWFONT.EXE WINNTEST.FON winhost winhost800 winhostvga *.o *.ppm *.png appinfo.c HOSTWIN
+	rm -rf test_gdi test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_launch test_ne_rm_gate test_ne_run i386-host.o *-fixture.exe NEDIALOG.EXE NEFAULT.EXE NEHANG.EXE NESTACK.EXE NECLI.EXE NEOUT.EXE NECR0.EXE NEHLT.EXE NEFPU.EXE NEUNDEF.EXE OWHELLO.EXE OWBUSY.EXE OWWIN.EXE OWMENU.EXE OWSEGS.EXE OWDEMO.EXE OWDEMO.TMP OWFILE.EXE OWFILEL.EXE OWRES.EXE OWKERN.EXE OWUSE.EXE OWDLL.DLL OWDLL2.DLL OWFPU.EXE OWAPI.EXE OWGDI.EXE OWAPI2.EXE OWMETA.EXE OWSYS.EXE OWFONT.EXE OWHELP.EXE WINNTEST.FON WINNTEST.HLP winhost winhost800 winhostvga *.o *.ppm *.png appinfo.c HOSTWIN
 
 .PHONY: all check clean HOSTWIN NEFIXTURES
 

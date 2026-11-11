@@ -295,6 +295,14 @@ in its `HOSTWIN/` (`scripts/owwin.txt`, `scripts/owmenu.txt`,
 
     WINN [:] [program [arguments]]
 
+`WIN.INI` next to `WINN.EXE` (see the sample here) holds what programs
+keep with GetProfileString and WriteProfileString: [windows] (the mouse),
+[Desktop] (the pattern), [colors], [fonts] (font files) and
+[Extensions], the documents' programs ("hlp=winhelp.exe ^.hlp"): the File
+Manager, the Program Manager (its items, Run) and ShellExecute open a
+document with them. Without it each setting has its default (text files
+open in Notepad).
+
 `SYSTEM.INI` next to `WINN.EXE` (see the sample here) names the shell
 (`[boot] shell=`), started first; Windows ends when it ends. Without the key
 the shell is `PROGMAN.EXE`, if it is there, as in Windows 3.x; `shell=` with
@@ -312,7 +320,7 @@ nothing leaves the program from the command line in that part (`WINN DEMO`).
 | `drivers/dos/` | display drivers `VGA` (mode 12h 640x480 in 16 colours, the default; `planar16.h`, shared with VGA800.DRV) and `VBE8` (VBE 100h 640x400x8, fallback 13h), the `DOS` input driver (keyboard through the BIOS buffer, INT 33h mouse) |
 | `runtime/` | `WINN.EXE` `main()`: drivers, core, shell and command-line program as tasks |
 | `sdk/` | for applications: API stubs by Win16 ordinal, `__ez_start`, `winapp.cmake`; `gen_exports.py` makes the export tables |
-| `../winapps/<name>/` | applications: `progman` (the Program Manager, the default shell), `winfile` (File Manager), `taskman` (Task List), `winmine` (Minesweeper), `notepad`, `clock`, `calc`, `control` (Control Panel), `demo` (a tour of the API) |
+| `../winapps/<name>/` | applications: `progman` (the Program Manager, the default shell), `winfile` (File Manager), `taskman` (Task List), `winmine` (Minesweeper), `winhelp` (Windows Help), `notepad`, `clock`, `calc`, `control` (Control Panel), `demo` (a tour of the API) |
 | `../windrv/<name>/` | driver modules; `vga800` is VBE 102h 800x600 in 16 colours |
 | `ddi/windll.h`, `core/windll.c` | native DLLs: the interface, and their loading, uses and unloading |
 | `../windll/<name>/` | native DLLs: `lzexpand` (LZEXPAND.DLL), `ver` (VER.DLL), `ddeml` (DDEML.DLL) |
@@ -437,6 +445,26 @@ Files and disks beyond KERNEL's `_l*` functions are native WINN calls:
 DOS critical errors (a drive without a disk) fail the call instead of
 asking "Abort, Retry, Fail?".
 
+Windows Help (`WINHELP.EXE`, `hlpfile.c` reading the files) shows Windows
+3.1's help files (.HLP: |SYSTEM, the phrases, |TOPIC's LZ77 blocks, |FONT,
+|CONTEXT, |CTXOMAP, |TTLBTREE, the keywords, the bitmaps): a topic's
+paragraphs laid out in the window's width with their fonts, indents, tabs,
+alignment, table rows and bitmaps (DIBs and DDBs, RLE and LZ77), the
+non-scrolling region above the rest; jumps (to this file or another),
+pop-ups, macro hotspots; Contents, Search (the keywords, their topics, Go
+To), Back, the browse sequence's << >> (BrowseButtons), the file's own
+buttons (CreateButton), [CONFIG]'s and the hotspots' macros (Contents,
+Search, Back, Prev, Next, JumpId, PopupId, JumpContext, PopupContext,
+JumpKeyword, JumpContents, HelpOn, ExecProgram, Exit and the buttons'
+ones; the rest do nothing), Edit Copy. Windows 95's files (2K blocks,
+Hall compression), metafiles, bookmarks, annotations and printing it has
+not. `WinHelp` (native callers and Win16 programs alike) starts it, or
+asks the running one (`WINHELP_N`): HELP_CONTEXT, HELP_CONTEXTPOPUP,
+HELP_KEY, HELP_PARTIALKEY, HELP_MULTIKEY, HELP_COMMAND, HELP_CONTENTS,
+HELP_HELPONHELP, HELP_QUIT. Its command line: the file, then `-n` a
+[MAP] number, `-i` a context string, `-k` a keyword, `-m` a macro (`-p`
+before them: as a pop-up).
+
 After adding an API function, run `sdk/gen_exports.py` (it updates
 `core/exports.c` and `sdk/winapi_stubs.S`, both committed), then
 `sdk/gen_ne_sigs.py` (`core/ne_sigs.h`: how Win16 programs reach it).
@@ -525,6 +553,8 @@ use `ucontext`):
     ./winhost scripts/owgdi.txt PROGMAN      # arcs, FloodFill, regions, MM_ISOTROPIC, DIBs, EnumFonts
     ./winhost scripts/owapi2.txt PROGMAN     # clipboard, DlgDirList, placement, a call WINN has not
     ./winhost scripts/winmine.txt WINMINE    # marks, a lost game, Expert, Best Times
+    ./winhost scripts/winhelp.txt PROGMAN    # Windows Help on WINNTEST.HLP (mkhlp.py)
+    ./winhost scripts/owhelp.txt PROGMAN     # WinHelp from a Win16 program: context, keyword, quit
     ./winhost scripts/logo.txt PROGMAN       # the logo (copy the BMPs into HOSTWIN first)
     ./winhost800 scripts/vga800.txt  # the VGA800 driver, built in
     ./winhostvga scripts/vga.txt     # the built-in VGA driver (640x480x16), Win16 programs too

@@ -840,11 +840,11 @@ HFILE WINAPI OpenFile(LPCSTR given, OFSTRUCT *of, UINT mode)
         f = _lopen(path, mode & 3);
         for (int pass = 0; f == HFILE_ERROR && pass < 2 && !(name[0] && name[1] == ':') &&
                            name[0] != '\\'; pass++) {
-            char dir[128];              /* not here: in the Windows, the system directory */
+            char dir[128], in[160];     /* not here: in the Windows, the system directory */
             UINT n = pass ? GetSystemDirectory(dir, sizeof(dir)) : GetWindowsDirectory(dir, sizeof(dir));
             if (n && n < sizeof(dir) - 14) {
-                wsprintf(path, dir[n - 1] == '\\' ? "%s%s" : "%s\\%s", dir, name);
-                full_path(path, path, sizeof(path));
+                wsprintf(in, dir[n - 1] == '\\' ? "%s%s" : "%s\\%s", dir, name);
+                full_path(in, path, sizeof(path));
                 f = _lopen(path, mode & 3);
             }
         }

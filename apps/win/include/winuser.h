@@ -689,8 +689,28 @@ HWND    WINAPI GetSysModalWindow(void);
 #define HELP_INDEX          0x0003
 #define HELP_CONTENTS       0x0003
 #define HELP_HELPONHELP     0x0004
+#define HELP_SETCONTENTS    0x0005
+#define HELP_SETINDEX       0x0005
+#define HELP_CONTEXTPOPUP   0x0008
+#define HELP_FORCEFILE      0x0009
 #define HELP_KEY            0x0101
+#define HELP_COMMAND        0x0102
+#define HELP_PARTIALKEY     0x0105
+#define HELP_MULTIKEY       0x0201
+#define HELP_SETWINPOS      0x0203
 BOOL    WINAPI WinHelp(HWND hwnd, LPCSTR file, UINT cmd, DWORD data);
+/* WINN's: WinHelp's request to the running WINHELP.EXE (its window's
+ * class), sent as the registered message of this name, lParam pointing
+ * to it: the command, its number, the file, its string (a keyword, a
+ * macro) */
+#define WINHELP_CLASS_N     "MS_WINHELP"
+#define WINHELP_MESSAGE_N   "WinnHelpRequest"
+typedef struct {
+    UINT cmd;
+    DWORD data;
+    char file[144];
+    char text[256];
+} WINHELP_N;
 HWND    WINAPI GetDesktopWindow(void);
 HWND    WINAPI FindWindow(LPCSTR klass, LPCSTR title);
 BOOL    WINAPI EnumWindows(WNDENUMPROC proc, LPARAM lp);
