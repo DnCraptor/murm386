@@ -130,7 +130,13 @@ typedef const RECT *LPCRECT;
 
 #define LMEM_FIXED          0x0000
 #define LMEM_MOVEABLE       0x0002
+#define LMEM_NOCOMPACT      0x0010
+#define LMEM_NODISCARD      0x0020
 #define LMEM_ZEROINIT       0x0040
+#define LMEM_MODIFY         0x0080
+#define LMEM_DISCARDABLE    0x0F00
+#define LMEM_DISCARDED      0x4000
+#define LMEM_LOCKCOUNT      0x00FF
 #define LHND                (LMEM_MOVEABLE | LMEM_ZEROINIT)
 #define LPTR                (LMEM_FIXED | LMEM_ZEROINIT)
 
@@ -303,7 +309,13 @@ UINT    WINAPI GlobalGetAtomName(ATOM a, LPSTR buf, int size);
 #define ASPECTY         42
 #define ASPECTXY        44
 #define COLORRES        108
+#define DT_PLOTTER      0
 #define DT_RASDISPLAY   1
+#define DT_RASPRINTER   2
+#define DT_RASCAMERA    3
+#define DT_CHARSTREAM   4
+#define DT_METAFILE     5
+#define DT_DISPFILE     6
 #define CP_RECTANGLE    1
 #define CC_CIRCLES      0x0001
 #define CC_PIE          0x0002

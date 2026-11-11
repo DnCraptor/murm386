@@ -31,19 +31,9 @@ wwnd *user_find_paint(HTASK task)
 
 /* ---------------------------------------------------------------- DCs */
 
-HDC user_get_dc(wwnd *w, int whole, const wrgn *limit)
+/* a window DC's visible area and origin, as the window is now */
+static void dc_place(HDC h, wwnd *w, int whole, const wrgn *limit)
 {
-    HDC h;
-    int own = (w->cls->wc.style & CS_OWNDC) && !whole;
-    if (own && w->owndc) {
-        h = w->owndc;
-    } else {
-        h = gdi_create_screen_dc(w->h);
-        if (!h)
-            return 0;
-        if (own)
-            w->owndc = h;
-    }
     wrgn vis;
     wrgn_init(&vis);
     user_vis_region(w, !whole, &vis);
@@ -58,6 +48,33 @@ HDC user_get_dc(wwnd *w, int whole, const wrgn *limit)
         gdi_set_dc_origin(h, w->rc.left, w->rc.top);
     else
         gdi_set_dc_origin(h, w->client.left, w->client.top);
+    /* kept so as the windows change, unless kept to the area to paint */
+    gdi_set_dc_follow(h, !limit, whole);
+}
+
+/* GDI's hook: a window DC used after the windows changed */
+static void dc_follow(HDC h, HWND hwnd, int whole)
+{
+    wwnd *w = user_wnd(hwnd);
+    if (w)
+        dc_place(h, w, whole, NULL);
+}
+
+HDC user_get_dc(wwnd *w, int whole, const wrgn *limit)
+{
+    HDC h;
+    int own = (w->cls->wc.style & CS_OWNDC) && !whole;
+    gdi_dc_vis_hook = dc_follow;
+    if (own && w->owndc) {
+        h = w->owndc;
+    } else {
+        h = gdi_create_screen_dc(w->h);
+        if (!h)
+            return 0;
+        if (own)
+            w->owndc = h;
+    }
+    dc_place(h, w, whole, limit);
     if (!own)
         gdi_reset_dc(h);
     return h;
@@ -78,8 +95,13 @@ HDC WINAPI GetWindowDC(HWND hwnd)
 int WINAPI ReleaseDC(HWND hwnd, HDC hdc)
 {
     wwnd *w = user_wnd(hwnd);
-    if (w && w->owndc == hdc)
+    if (w && w->owndc == hdc) {
+        /* kept: the whole of its visible area again (not just what
+         * BeginPaint had to paint), as the window is when next used */
+        gdi_set_dc_follow(hdc, 1, 0);
+        win_sys.vis_gen++;
         return 1;
+    }
     return DeleteDC(hdc) ? 1 : 0;
 }
 

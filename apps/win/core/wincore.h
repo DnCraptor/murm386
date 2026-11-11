@@ -205,6 +205,11 @@ typedef struct wdc {
     int      save_level;
     struct wdc *saved;
     struct wmrec *meta;     /* CreateMetaFile's: what it records (metafile.c) */
+    /* a window's DC USER keeps up to date (GetDC's, a CS_OWNDC one): its
+     * visible area and origin as the windows were at vis_gen; whole: the
+     * window's, not its client area's */
+    int      follow, whole;
+    uint32_t vis_gen;
 } wdc;
 
 /* Screen and system state shared by GDI and USER. */
@@ -224,6 +229,7 @@ typedef struct wsys {
     const uint8_t *cur_and, *cur_xor;   /* 32x32 1bpp masks, MSB left */
     uint8_t   cur_save[32 * 32];
     RECT      cur_rect;
+    uint32_t  vis_gen;          /* USER: one more as windows move, change, come, go */
 } wsys;
 
 extern wsys win_sys;
@@ -263,6 +269,11 @@ void     gdi_realize_brush(wdc *dc, HBRUSH br, wfill *f);
 wrgn    *gdi_region(HRGN h);
 void     gdi_begin_draw(wdc *dc, const RECT *dev_bounds);   /* cursor exclusion */
 void     gdi_end_draw(wdc *dc, const RECT *dev_bounds);     /* flush, cursor */
+/* a window DC to follow the windows (follow 1) or not (BeginPaint's,
+ * kept to the area to paint): USER's hook makes it new before it is used
+ * once they changed */
+void     gdi_set_dc_follow(HDC h, int follow, int whole);
+extern void (*gdi_dc_vis_hook)(HDC h, HWND hwnd, int whole);
 /* USER installs the icon overlay; NULL in standalone GDI tests. */
 extern void (*gdi_overlay_hook)(HWND source, const RECT *damage);
 void     gdi_text_init(void);
@@ -327,6 +338,12 @@ HCURSOR  user_cursor_create(const uint8_t and_m[128], const uint8_t xor_m[128], 
 /* a built-in cursor set as SetCursor sets it: GetCursor, SetCursor's old
  * one are then its handle */
 void     user_cursor_builtin(int id);
+/* the keyboard (KEYBOARD's ToAscii, VkKeyScan, MapVirtualKey,
+ * GetKeyNameText) in the layout in use */
+int      user_key_char(const BYTE *keys, int vk, unsigned char *out);
+int      user_char_key(unsigned char c);
+UINT     user_map_key(UINT code, UINT type);
+int      user_key_name(LONG lp, char *out, int cap);
 
 /* gdi.c: device-independent bitmaps (Win16 resources) */
 typedef struct {

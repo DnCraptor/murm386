@@ -39,7 +39,7 @@ PC *get_PC(void)
 }
 
 /* DOS memory: first fit in 128K..640K, paragraph aligned, not zeroed */
-#define BLOCKS 64
+#define BLOCKS 512           /* WRITE.EXE alone has 84 segments */
 static struct { uint32_t at, size; } used[BLOCKS];
 
 static int host_alloc(void *o, uint32_t bytes, uint32_t *linear)

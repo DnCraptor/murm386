@@ -202,7 +202,7 @@ static void drop_down(HWND h, wcombo *c, int by_mouse)
     SetCapture(h);
     for (;;) {
         MSG m;
-        if (!PeekMessage(&m, 0, 0, 0, PM_REMOVE)) {
+        if (!user_peek(&m, 0, 0, 0, PM_REMOVE)) {
             if (win_sys.input)
                 win_sys.input->idle();
             continue;

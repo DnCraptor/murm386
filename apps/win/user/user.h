@@ -184,6 +184,8 @@ HBRUSH  user_ctl_color(HWND h, HDC dc, int type);
 
 /* keyboard.c */
 int     user_vk_to_char(int vk, int sc, unsigned char *out);
+/* PeekMessage for USER's own loops, which idle themselves */
+BOOL    user_peek(LPMSG msg, HWND h, UINT first, UINT last, UINT flags);
 
 /* clipboard.c */
 void    user_clipboard_task_ended(HTASK task);

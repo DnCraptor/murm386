@@ -17,12 +17,18 @@
 #define NE_ACCELS  4
 #define NE_TIMERS  16
 #define NE_SUBCLASSED 16
-#define NE_LOCALS  64
 #define NE_HEAPS   4
 #define NE_LENT    8
 #define NE_IMAGES  16
 #define NE_RESOURCES 16
 #define NE_HOOKS   8
+
+/* a block of a local heap (ne_guest_call.c) */
+typedef struct {
+    uint16_t at, size;              /* place, bytes (a discarded one: 0, 0) */
+    uint16_t handle;                /* a moveable one's: its entry's place */
+    uint8_t heap, kind;
+} ne_local;
 
 typedef struct ne_user {
     struct ne_user *next;
@@ -49,7 +55,8 @@ typedef struct ne_user {
      * segment's selector, the heap's place in it, where it grows from (the
      * segment's end as it was); blocks (offset, size) of each */
     struct { uint16_t sel, lo, hi, end; } heap[NE_HEAPS];
-    struct { uint16_t at, size; uint8_t heap; } local[NE_LOCALS];
+    ne_local *local;                /* nlocals of them, grown as needed */
+    int nlocals;
     /* native pointers handed to its procedures as guest copies (lParam of
      * WM_CREATE, WM_GETMINMAXINFO ...), for DefWindowProc to take back */
     struct { uint32_t far; void *native; UINT msg; } lent[NE_LENT];
@@ -66,6 +73,7 @@ typedef struct ne_user {
      * mode */
     struct { uint16_t type, id, inst; char name[32]; } res[NE_RESOURCES];
     uint16_t error_mode;
+    uint16_t handle_delta;          /* LocalHandleDelta's; 0: the default */
     /* ne_guest_call.c: the clipboard's data it got, copies in its memory
      * (freed as it closes or empties the clipboard) */
     struct { UINT fmt; uint16_t sel; } clip[8];

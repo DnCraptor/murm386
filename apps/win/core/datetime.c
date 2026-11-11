@@ -48,7 +48,9 @@ void WINAPI GetLocalTimeN(SYSTEMTIME_N *t)
             break;
     }
 #else
-    time_t now = time(NULL) + host_offset;
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    time_t now = ts.tv_sec + host_offset;
     struct tm tm;
     localtime_r(&now, &tm);
     t->wYear = (WORD)(tm.tm_year + 1900);
@@ -58,6 +60,7 @@ void WINAPI GetLocalTimeN(SYSTEMTIME_N *t)
     t->wHour = (WORD)tm.tm_hour;
     t->wMinute = (WORD)tm.tm_min;
     t->wSecond = (WORD)tm.tm_sec;
+    t->wMilliseconds = (WORD)(ts.tv_nsec / 1000000);
 #endif
 }
 

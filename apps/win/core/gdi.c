@@ -964,7 +964,29 @@ HGDIOBJ WINAPI GetStockObject(int index)
 
 /* ---------------------------------------------------------------- DCs */
 
-wdc *gdi_dc(HDC h) { return (wdc *)win_handle_get(h, WOBJ_DC); }
+void (*gdi_dc_vis_hook)(HDC h, HWND hwnd, int whole);
+
+/* a DC; a window's USER keeps up to date made so first, if the windows
+ * changed since (a CS_OWNDC window's moved since its GetDC) */
+wdc *gdi_dc(HDC h)
+{
+    wdc *dc = (wdc *)win_handle_get(h, WOBJ_DC);
+    if (dc && dc->follow && dc->vis_gen != win_sys.vis_gen && gdi_dc_vis_hook) {
+        dc->vis_gen = win_sys.vis_gen;
+        gdi_dc_vis_hook(h, dc->hwnd, dc->whole);
+    }
+    return dc;
+}
+
+void gdi_set_dc_follow(HDC h, int follow, int whole)
+{
+    wdc *dc = (wdc *)win_handle_get(h, WOBJ_DC);
+    if (!dc)
+        return;
+    dc->follow = follow;
+    dc->whole = whole;
+    dc->vis_gen = win_sys.vis_gen;
+}
 
 static void dc_defaults(wdc *dc)
 {
@@ -1189,7 +1211,7 @@ int WINAPI GetDeviceCaps(HDC h, int index)
     case VERTSIZE: return s->height * 254 / 960;
     case ASPECTX: case ASPECTY: return 10;          /* square pixels */
     case ASPECTXY: return 14;
-    case TECHNOLOGY: return DT_RASDISPLAY;
+    case TECHNOLOGY: return dc && dc->meta ? DT_METAFILE : DT_RASDISPLAY;
     case DRIVERVERSION: return 0x300;
     case CLIPCAPS: return CP_RECTANGLE;
     case CURVECAPS: return CC_CIRCLES | CC_PIE | CC_CHORD | CC_ELLIPSES | CC_WIDE |

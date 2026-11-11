@@ -953,7 +953,7 @@ static void track_loop(void)
     int first_up = (U.buttons & 1) != 0;
     while (!T.done) {
         MSG m;
-        if (!PeekMessage(&m, 0, 0, 0, PM_REMOVE)) {
+        if (!user_peek(&m, 0, 0, 0, PM_REMOVE)) {
             if (win_sys.input)
                 win_sys.input->idle();
             continue;

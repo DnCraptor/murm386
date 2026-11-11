@@ -259,6 +259,7 @@ wwnd *user_toplevel(wwnd *w)
 
 static void unlink_wnd(wwnd *w)
 {
+    win_sys.vis_gen++;
     if (!w->parent)
         return;
     for (wwnd **pp = &w->parent->child; *pp; pp = &(*pp)->next)
@@ -271,12 +272,14 @@ static void unlink_wnd(wwnd *w)
 
 static void link_top(wwnd *w)
 {
+    win_sys.vis_gen++;
     w->next = w->parent->child;
     w->parent->child = w;
 }
 
 static void link_bottom(wwnd *w)
 {
+    win_sys.vis_gen++;
     wwnd **pp = &w->parent->child;
     while (*pp)
         pp = &(*pp)->next;
@@ -286,6 +289,7 @@ static void link_bottom(wwnd *w)
 
 static void link_after(wwnd *w, wwnd *after)
 {
+    win_sys.vis_gen++;
     w->next = after->next;
     after->next = w;
 }
@@ -947,6 +951,7 @@ void user_set_window_rect(wwnd *w, const RECT *rc, UINT flags)
 {
     (void)flags;
     RECT oc = w->client;
+    win_sys.vis_gen++;
     w->rc = *rc;
     nc_calc(w->style, w->exstyle, user_menu_bar_height(w), own_icon(w), &w->rc, &w->client);
     int dx = w->client.left - oc.left, dy = w->client.top - oc.top;
@@ -1019,6 +1024,8 @@ BOOL WINAPI SetWindowPos(HWND h, HWND after, int x, int y, int cx, int cy, UINT 
         w->style |= WS_VISIBLE;
     if (flags & SWP_HIDEWINDOW)
         w->style &= ~WS_VISIBLE;
+    if (flags & (SWP_SHOWWINDOW | SWP_HIDEWINDOW))
+        win_sys.vis_gen++;
     int now_vis = user_is_visible(w);
 
     if (!(flags & SWP_NOREDRAW) && (geo || zchg || was_vis != now_vis)) {
@@ -1756,7 +1763,7 @@ LONG WINAPI SetWindowLong(HWND h, int index, LONG value)
     LONG old = GetWindowLong(h, index);
     switch (index) {
     case GWL_WNDPROC: w->proc = (WNDPROC)(intptr_t)value; break;
-    case GWL_STYLE: w->style = (DWORD)value; break;
+    case GWL_STYLE: w->style = (DWORD)value; win_sys.vis_gen++; break;
     case GWL_EXSTYLE: w->exstyle = (DWORD)value; break;
     default:
         if (index >= 0 && index + 4 <= w->cb_extra)

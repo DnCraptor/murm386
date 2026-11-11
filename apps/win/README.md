@@ -76,7 +76,7 @@ has not, is named in the message.
 
 A function of Windows' WINN does not have (of KERNEL, USER, GDI and the
 rest of WINN's modules, or of Windows' own DLLs WINN has nothing of:
-OLECLI, OLESVR, SOUND, PENWIN, and LZEXPAND, VER, DDEML, MMSYSTEM, COMMDLG when their DLL is
+OLESVR, SOUND, PENWIN, and LZEXPAND, VER, DDEML, MMSYSTEM, COMMDLG, OLECLI when their DLL is
 not there or has not the function) keeps no
 program from loading: as Windows' "undefined dynalink" its call ends the
 program, the function named ("PROG.EXE called USER.231, which WINN does
@@ -107,7 +107,13 @@ procedure WINN called (a window's, a dialog's) is named as one in the
 program's own code is, not a fault.
 
 Windows' own DLLs WINN has: TOOLHELP (`core/ne_guest_sys.c`), and as
-native DLLs (see Native DLLs) MMSYSTEM, VER, LZEXPAND, DDEML, COMMDLG. COMMDLG has
+native DLLs (see Native DLLs) MMSYSTEM, VER, LZEXPAND, DDEML, COMMDLG, OLECLI.
+OLECLI is OLE 1.0's client library with no servers (WINN has no
+registration database): a client's documents are registered, renamed,
+saved, reverted, revoked; nothing on the clipboard can become an object
+(OleQueryCreateFromClip: OLE_ERROR_FORMAT), no object is ever made
+(OleCreate and the rest: OLE_ERROR_CLASS), a call about one has none
+(OLE_ERROR_OBJECT); for native callers too (`include/ole.h`). COMMDLG has
 Windows 3.1's common dialogs: Open and Save As, Find and Replace (the
 program's FINDREPLACE in their messages, kept up to date), Color (the 48
 basic colours, 16 custom ones, a colour defined by hue, saturation and
@@ -175,8 +181,15 @@ SetTimer with a procedure of its own, EnumWindows, subclassing
 (SetWindowLong GWL_WNDPROC, CallWindowProc), memory (GlobalAlloc: a
 selector of its own per block; LocalAlloc: in DGROUP's local heap, which
 grows past the stack up to 64K as in Windows: DGROUP moves, its selector
-stays), OpenFile, GetDOSEnvironment, KEYBOARD's AnsiToOem, OemToAnsi (the
-...Buff ones), GetKBCodePage and GetKeyboardType,
+stays; a fixed block's handle its pointer, a moveable one's an entry
+holding its pointer, lock count and flags as Windows 3.1 has them, so a
+program may read the pointer itself (`*h`, as WRITE.EXE does); LocalLock
+counts, LocalReAlloc moves a block (its entry kept up to date) and
+discards a moveable one (size 0), LocalFlags, LocalHandle,
+LocalHandleDelta), OpenFile, GetDOSEnvironment, KEYBOARD's AnsiToOem,
+OemToAnsi (the ...Buff ones), GetKBCodePage, GetKeyboardType, VkKeyScan,
+OemKeyScan, MapVirtualKey, GetKeyNameText and ToAscii (the layout in use,
+US or Russian), Inquire and the driver's others (doing nothing),
 structures (TEXTMETRIC, LOGFONT, LOGPEN, LOGBRUSH, BITMAP), wsprintf,
 ExtTextOut, GetTextExtentPoint, TabbedTextOut, GetTabbedTextExtent,
 GetTextFace, CreateBitmap(Indirect), Get/SetBitmapBits, GetClassInfo,
@@ -293,7 +306,8 @@ record by record, its bits and a file), `OWSYS` (MMSYSTEM, TOOLHELP, VER,
 LZEXPAND, INT 2Fh, DPMI, DDEML, the Program Manager's DDE, DDE's messages), `OWFONT` (a raster font file's faces, `WINNTEST.FON` beside
 it, made by `host/mkfon.py`: its sizes, larger, bold, italic; the VGA
 glyphs larger; a dialog in the font), `OWHELP` (WinHelp), `OWDLG` (COMMDLG's
-Color, Font and Print dialogs, GetFileTitle) (`make NEFIXTURES` in
+Color, Font and Print dialogs, GetFileTitle), `OWMISC` (moveable local
+memory, KEYBOARD, OLECLI: what WRITE.EXE needed) (`make NEFIXTURES` in
 `host/`). All have DOS MZ stubs that explain how to launch them under WINN
 when invoked directly from DOS. `host/test_ne_run` runs them on the
 emulator's own i386 core (`src/i386.c` as it is, built for the host with
@@ -333,7 +347,7 @@ nothing leaves the program from the command line in that part (`WINN DEMO`).
 | `../winapps/<name>/` | applications: `progman` (the Program Manager, the default shell), `winfile` (File Manager), `taskman` (Task List), `winmine` (Minesweeper), `winhelp` (Windows Help), `notepad`, `clock`, `calc`, `control` (Control Panel), `demo` (a tour of the API) |
 | `../windrv/<name>/` | driver modules; `vga800` is VBE 102h 800x600 in 16 colours |
 | `ddi/windll.h`, `core/windll.c` | native DLLs: the interface, and their loading, uses and unloading |
-| `../windll/<name>/` | native DLLs: `lzexpand` (LZEXPAND.DLL), `ver` (VER.DLL), `ddeml` (DDEML.DLL), `mmsystem` (MMSYSTEM.DLL), `commdlg` (COMMDLG.DLL) |
+| `../windll/<name>/` | native DLLs: `lzexpand` (LZEXPAND.DLL), `ver` (VER.DLL), `ddeml` (DDEML.DLL), `mmsystem` (MMSYSTEM.DLL), `commdlg` (COMMDLG.DLL), `olecli` (OLECLI.DLL) |
 | `host/` | the same sources on Linux with a snapshot display and scripted input |
 
 ## Drivers
@@ -373,7 +387,7 @@ Windows' own libraries are native DLLs of WINN's, loaded when a program
 needs one and unloaded when none does any more, as Windows 3.x does with
 its DLLs, instead of being built into `WINN.EXE`: `LZEXPAND.DLL`,
 `VER.DLL` (it reads a file's resources with the core's
-`GetFileResourceN`), `DDEML.DLL`, `MMSYSTEM.DLL` and `COMMDLG.DLL` so far. A program importing one that is not there, or a
+`GetFileResourceN`), `DDEML.DLL`, `MMSYSTEM.DLL`, `COMMDLG.DLL` and `OLECLI.DLL` so far. A program importing one that is not there, or a
 function the DLL has not, still loads; the call ends it.
 A native DLL is an EZ image built with `sdk/windll.cmake` (no crt0; its
 `__ez_start`, from `sdk/windll_entry.c`, begins with a branch over the
@@ -455,8 +469,15 @@ MAKEINTRESOURCE(n))` gives a running program its n-th icon: 1 for its class
 `DestroyIcon` frees one that `ExtractIcon*N` made.
 
 Tasks switch only in `GetMessage`, `PeekMessage`, `Yield` and `WinExec`.
-Every instance has its own copy of the program, so window classes belong to
-the instance that registered them.
+A `PeekMessage` that finds nothing while no other task has work lets the
+system idle (a program waiting in such a loop, as WRITE.EXE's blinking
+caret does, keeps nothing from going on). WinExec's hourglass stays until
+the program started first waits for input (or ends). Every instance has its own copy of the program, so window classes belong to
+the instance that registered them. A window DC follows its window: one a
+program keeps (`CS_OWNDC`, or a `GetDC` it has not released) is made new
+for where the window is and what covers it when it is used after the
+windows changed; after `EndPaint` a `CS_OWNDC` one has its whole visible
+area again.
 
 Files and disks beyond KERNEL's `_l*` functions are native WINN calls:
 `WinFindFilesN` (entries with attributes, sizes and times),
@@ -576,6 +597,7 @@ use `ucontext`):
     ./winhost scripts/winhelp.txt PROGMAN    # Windows Help on WINNTEST.HLP (mkhlp.py)
     ./winhost scripts/owhelp.txt PROGMAN     # WinHelp from a Win16 program: context, keyword, quit
     ./winhost scripts/owdlg.txt PROGMAN      # COMMDLG: Color (full), Font, Print (no printer), GetFileTitle
+    ./winhost scripts/owmisc.txt PROGMAN     # moveable local memory, KEYBOARD, OLECLI
     ./winhost scripts/logo.txt PROGMAN       # the logo (copy the BMPs into HOSTWIN first)
     ./winhost800 scripts/vga800.txt  # the VGA800 driver, built in
     ./winhostvga scripts/vga.txt     # the built-in VGA driver (640x480x16), Win16 programs too

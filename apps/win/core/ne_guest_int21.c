@@ -769,6 +769,70 @@ int ne_dos_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dwor
     case WIN_NE_SERVICE_KEYBOARD + 132: /* GetKBCodePage: the OEM code page */
         *v = 866;
         return 1;
+    case WIN_NE_SERVICE_KEYBOARD + 1: {  /* Inquire(KBINFO FAR *): its size */
+        static const uint8_t kb[6] = { 0, 0, 0, 0, 0, 0 };   /* no double-byte ranges */
+        uint32_t far = dw(a, 4);
+        *v = far && win_ne_write(a->ctx, (uint16_t)(far >> 16), (uint16_t)far, kb, sizeof(kb)) ?
+             sizeof(kb) : 0;
+        return 1;
+    }
+    case WIN_NE_SERVICE_KEYBOARD + 2:   /* Enable(proc, state): the driver's, WINN's own */
+    case WIN_NE_SERVICE_KEYBOARD + 3:   /* Disable */
+    case WIN_NE_SERVICE_KEYBOARD + 100: /* ScreenSwitchEnable(WORD) */
+    case WIN_NE_SERVICE_KEYBOARD + 127: /* NewTable */
+        *v = 0;
+        return 1;
+    case WIN_NE_SERVICE_KEYBOARD + 7:   /* SetSpeed(int): the rate it has */
+        *v = 0;
+        return 1;
+    case WIN_NE_SERVICE_KEYBOARD + 126: /* GetTableSeg: none */
+    case WIN_NE_SERVICE_KEYBOARD + 136: /* EnableKBSysReq(WORD): was off */
+        *v = 0;
+        return 1;
+    case WIN_NE_SERVICE_KEYBOARD + 137: /* GetBIOSKeyProc: none */
+        *v = 0;
+        *dword = 1;
+        return 1;
+    case WIN_NE_SERVICE_KEYBOARD + 4: {  /* ToAscii(vk, scan, LPBYTE state, LPVOID buf, flags) */
+        uint8_t keys[256];
+        uint32_t st = dw(a, 10), buf = dw(a, 6);
+        uint16_t vk = w(a, 16), scan = w(a, 14);
+        unsigned char ch;
+        *v = 0;
+        if (!win_ne_read(a->ctx, (uint16_t)(st >> 16), (uint16_t)st, keys, sizeof(keys))) {
+            a->bad = 1;
+            return 1;
+        }
+        if (!(scan & 0x8000u) && vk < 256 && user_key_char(keys, vk, &ch)) {
+            uint8_t out[2] = { ch, 0 };
+            *v = win_ne_write(a->ctx, (uint16_t)(buf >> 16), (uint16_t)buf, out, 2) ? 1 : 0;
+        }
+        return 1;
+    }
+    case WIN_NE_SERVICE_KEYBOARD + 128: { /* OemKeyScan(WORD oem): scan code, shift state */
+        int k = user_char_key((unsigned char)win_oem_to_ansi((uint8_t)w(a, 4)));
+        UINT sc = k >= 0 ? user_map_key((UINT)k & 0xffu, 0) : 0;
+        *v = k < 0 || !sc ? 0xffffffffu : sc | (uint32_t)(((unsigned)k >> 8) & 1u) << 17;
+        *dword = 1;
+        return 1;
+    }
+    case WIN_NE_SERVICE_KEYBOARD + 129: /* VkKeyScan(char): key | shift state << 8, -1 */
+        *v = (uint16_t)user_char_key((unsigned char)w(a, 4));
+        return 1;
+    case WIN_NE_SERVICE_KEYBOARD + 131: /* MapVirtualKey(code, type) */
+        *v = user_map_key(w(a, 6), w(a, 4));
+        return 1;
+    case WIN_NE_SERVICE_KEYBOARD + 133: { /* GetKeyNameText(LONG, LPSTR, int) */
+        char name[32];
+        int cap = (int16_t)w(a, 4);
+        uint32_t far = dw(a, 6);
+        int n = user_key_name((LONG)dw(a, 10), name, cap < (int)sizeof(name) ? cap : (int)sizeof(name));
+        *v = 0;
+        if (cap > 0 && far &&
+            win_ne_write(a->ctx, (uint16_t)(far >> 16), (uint16_t)far, name, (uint32_t)n + 1))
+            *v = (uint16_t)n;
+        return 1;
+    }
     }
     return 0;
 }

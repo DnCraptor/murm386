@@ -1,0 +1,16 @@
+# What WRITE.EXE needed, from a Win16 program on the i386 core (OWMISC):
+# moveable local memory read through its handle, LocalHandleDelta,
+# KEYBOARD's VkKeyScan, MapVirtualKey, GetKeyNameText, ToAscii, OLECLI's
+# client document:
+#     ./winhost scripts/owmisc.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OWMISC
+key RETURN
+wait 200
+snap om_result.ppm
+exit

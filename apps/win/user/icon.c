@@ -446,10 +446,17 @@ static const struct { uint8_t vk; char s; } ru_shift_digits[] = {
 int user_vk_to_char(int vk, int sc, unsigned char *out)
 {
     (void)sc;
-    int shift = (U.keys[VK_SHIFT] & 0x80) != 0;
-    int ctrl = (U.keys[VK_CONTROL] & 0x80) != 0;
-    int caps = U.keys[VK_CAPITAL] & 1;
-    int alt = (U.keys[VK_MENU] & 0x80) != 0;
+    return user_key_char(U.keys, vk, out);
+}
+
+/* the character of a key with the keys' state given (bit 7 down, bit 0
+ * toggled), in the layout in use: 1 with it, 0 for none */
+int user_key_char(const BYTE *keys, int vk, unsigned char *out)
+{
+    int shift = (keys[VK_SHIFT] & 0x80) != 0;
+    int ctrl = (keys[VK_CONTROL] & 0x80) != 0;
+    int caps = keys[VK_CAPITAL] & 1;
+    int alt = (keys[VK_MENU] & 0x80) != 0;
 
     switch (vk) {
     case VK_BACK: *out = 8; return 1;
@@ -505,4 +512,123 @@ int user_vk_to_char(int vk, int sc, unsigned char *out)
             return 1;
         }
     return 0;
+}
+
+/* the key and shift state (1 Shift, 2 Ctrl) that type a character: vk |
+ * state << 8; -1 for none (VkKeyScan) */
+int user_char_key(unsigned char c)
+{
+    BYTE keys[256];
+    memset(keys, 0, sizeof(keys));
+    for (int state = 0; state < 3; state++) {
+        keys[VK_SHIFT] = state == 1 ? 0x80 : 0;
+        keys[VK_CONTROL] = state == 2 ? 0x80 : 0;
+        for (int vk = 1; vk < 256; vk++) {
+            unsigned char ch;
+            if (vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU)
+                continue;
+            if (vk >= VK_NUMPAD0 && vk <= VK_DIVIDE)
+                continue;               /* the main block's keys first */
+            if (user_key_char(keys, vk, &ch) && ch == c)
+                return vk | state << 8;
+        }
+    }
+    for (int vk = VK_NUMPAD0; vk <= VK_DIVIDE; vk++) {
+        unsigned char ch;
+        if (user_key_char(keys, vk, &ch) && ch == c)
+            return vk;
+    }
+    return -1;
+}
+
+/* Set 1 scan codes 0..58h: their virtual keys */
+static const uint8_t scan_vk[0x59] = {
+    0, VK_ESCAPE, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', 0xBD, 0xBB, VK_BACK, VK_TAB,
+    'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', 0xDB, 0xDD, VK_RETURN, VK_CONTROL, 'A', 'S',
+    'D', 'F', 'G', 'H', 'J', 'K', 'L', 0xBA, 0xDE, 0xC0, VK_SHIFT, 0xDC, 'Z', 'X', 'C', 'V',
+    'B', 'N', 'M', 0xBC, 0xBE, 0xBF, VK_SHIFT, VK_MULTIPLY, VK_MENU, VK_SPACE, VK_CAPITAL,
+    VK_F1, VK_F1 + 1, VK_F1 + 2, VK_F1 + 3, VK_F1 + 4,
+    VK_F1 + 5, VK_F1 + 6, VK_F1 + 7, VK_F1 + 8, VK_F10, VK_NUMLOCK, VK_SCROLL,
+    VK_NUMPAD0 + 7, VK_NUMPAD0 + 8, VK_NUMPAD0 + 9, VK_SUBTRACT,
+    VK_NUMPAD0 + 4, VK_NUMPAD0 + 5, VK_NUMPAD0 + 6, VK_ADD,
+    VK_NUMPAD0 + 1, VK_NUMPAD0 + 2, VK_NUMPAD0 + 3, VK_NUMPAD0, VK_DECIMAL,
+    0, 0, 0xE2, VK_F11, VK_F12,
+};
+
+/* the grey keys (E0 prefix): their scan codes */
+static const struct { uint8_t vk, sc; } grey_keys[] = {
+    { VK_HOME, 0x47 }, { VK_UP, 0x48 }, { VK_PRIOR, 0x49 }, { VK_LEFT, 0x4B },
+    { VK_RIGHT, 0x4D }, { VK_END, 0x4F }, { VK_DOWN, 0x50 }, { VK_NEXT, 0x51 },
+    { VK_INSERT, 0x52 }, { VK_DELETE, 0x53 }, { VK_DIVIDE, 0x35 }, { VK_CLEAR, 0x4C },
+};
+
+/* MapVirtualKey: 0 a key's scan code, 1 a scan code's key, 2 a key's
+ * character (unshifted; letters upper case); 0 for none */
+UINT user_map_key(UINT code, UINT type)
+{
+    if (type == 0) {
+        for (unsigned i = 0; i < sizeof(grey_keys) / sizeof(grey_keys[0]); i++)
+            if (grey_keys[i].vk == code)
+                return grey_keys[i].sc;
+        for (unsigned sc = 1; sc < sizeof(scan_vk); sc++)
+            if (scan_vk[sc] == code)
+                return sc;
+        return 0;
+    }
+    if (type == 1)
+        return code < sizeof(scan_vk) ? scan_vk[code] : 0;
+    if (type == 2) {
+        BYTE keys[256];
+        unsigned char ch;
+        memset(keys, 0, sizeof(keys));
+        if (code >= 'A' && code <= 'Z')
+            return code;
+        return code < 256 && user_key_char(keys, (int)code, &ch) ? ch : 0;
+    }
+    return 0;
+}
+
+/* GetKeyNameText: the name of a key by WM_KEYDOWN's lParam (bits 16-23
+ * its scan code, 24 extended, 25 "left or right alike") */
+int user_key_name(LONG lp, char *out, int cap)
+{
+    static const char *const names[0x59] = {
+        NULL, "Esc", NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+        "Backspace", "Tab", NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+        NULL, "Enter", "Ctrl", NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+        NULL, NULL, "Shift", NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+        NULL, "Right Shift", "Num *", "Alt", "Space", "Caps Lock", "F1", "F2", "F3", "F4",
+        "F5", "F6", "F7", "F8", "F9", "F10", "Num Lock", "Scroll Lock", "Num 7", "Num 8",
+        "Num 9", "Num -", "Num 4", "Num 5", "Num 6", "Num +", "Num 1", "Num 2", "Num 3",
+        "Num 0", "Num Del", NULL, NULL, NULL, "F11", "F12",
+    };
+    static const struct { uint8_t sc; const char *name; } grey[] = {
+        { 0x47, "Home" }, { 0x48, "Up" }, { 0x49, "Page Up" }, { 0x4B, "Left" },
+        { 0x4D, "Right" }, { 0x4F, "End" }, { 0x50, "Down" }, { 0x51, "Page Down" },
+        { 0x52, "Insert" }, { 0x53, "Delete" }, { 0x35, "Num /" }, { 0x1C, "Num Enter" },
+        { 0x1D, "Right Ctrl" }, { 0x38, "Right Alt" },
+    };
+    unsigned sc = (unsigned)(lp >> 16) & 0xFFu;
+    int ext = (lp >> 24) & 1, any = (lp >> 25) & 1;
+    char one[2] = { 0, 0 };
+    const char *n = NULL;
+    if (ext && !(any && (sc == 0x1D || sc == 0x38)))
+        for (unsigned i = 0; i < sizeof(grey) / sizeof(grey[0]) && !n; i++)
+            if (grey[i].sc == sc)
+                n = grey[i].name;
+    if (!n && any && sc == 0x36)
+        n = "Shift";
+    if (!n && sc < sizeof(names) / sizeof(names[0]))
+        n = names[sc];
+    if (!n && sc < sizeof(scan_vk)) {
+        UINT c = user_map_key(scan_vk[sc], 2);
+        if (c) {
+            one[0] = (char)c;
+            n = one;
+        }
+    }
+    if (!n || cap <= 0)
+        return 0;
+    lstrcpyn(out, n, cap);
+    return lstrlen(out);
 }

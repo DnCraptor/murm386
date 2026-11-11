@@ -753,20 +753,32 @@ BOOL WINAPI GetMessage(LPMSG msg, HWND h, UINT first, UINT last)
     }
 }
 
-/* Win16: finding nothing yields to the other tasks (unless PM_NOYIELD). */
-BOOL WINAPI PeekMessage(LPMSG msg, HWND h, UINT first, UINT last, UINT flags)
+/* Win16: finding nothing yields to the other tasks (unless PM_NOYIELD);
+ * when nobody else ran the system is idle meanwhile (a program waiting in
+ * a PeekMessage loop: Write's blinking caret). USER's own loops (menus,
+ * capture) idle themselves: user_peek, without. */
+static BOOL peek(LPMSG msg, HWND h, UINT first, UINT last, UINT flags, int idle)
 {
     int r = get_one(msg, h, first, last, flags & PM_REMOVE);
     if (r) {
         got_message(msg);
         U.cur_msg = *msg;
-    }
-    else {
+    } else {
         task_started(task_current());   /* a game's loop: nothing waiting for it */
-        if (!(flags & PM_NOYIELD))
-            task_yield();
+        if (!(flags & PM_NOYIELD) && !task_yield() && idle && win_sys.input)
+            win_sys.input->idle();
     }
     return r != 0;
+}
+
+BOOL WINAPI PeekMessage(LPMSG msg, HWND h, UINT first, UINT last, UINT flags)
+{
+    return peek(msg, h, first, last, flags, 1);
+}
+
+BOOL user_peek(LPMSG msg, HWND h, UINT first, UINT last, UINT flags)
+{
+    return peek(msg, h, first, last, flags, 0);
 }
 
 BOOL WINAPI WaitMessage(void)

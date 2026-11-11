@@ -396,27 +396,65 @@ static int heap_of(args *a, ne_user *u, uint16_t ds)
     return free_slot;
 }
 
-static int local_find(ne_user *u, int heap, uint16_t h)
+/* The local heaps' blocks, as Windows 3.1's: a fixed block's handle is its
+ * near pointer (a multiple of 4); a moveable one's is the place of its
+ * handle table entry (2 more than a multiple of 4): the block's near
+ * pointer (0 when discarded), its lock count, its flags (LMEM_DISCARDABLE
+ * and LMEM_DISCARDED >> 8), which a program may read itself (*(PSTR *)h).
+ * A block moves only as LocalReAlloc grows it, its entry kept up to date. */
+enum { L_FREE, L_FIXED, L_MOVEABLE, L_ENTRY };
+#define LHE_DISCARDED 0x40u
+
+/* a record of the program's; NULL if it has no room for more */
+static ne_local *local_new(ne_user *u)
 {
-    for (int i = 0; i < NE_LOCALS; i++)
-        if (u->local[i].size && u->local[i].heap == heap && u->local[i].at == h)
-            return i;
-    return -1;
+    for (int i = 0; i < u->nlocals; i++)
+        if (u->local[i].kind == L_FREE)
+            return &u->local[i];
+    int n = u->nlocals ? u->nlocals * 2 : 64;
+    if (n > 4096)
+        return NULL;
+    ne_local *l = (ne_local *)win_realloc(u->local, sizeof(ne_local) * (size_t)n);
+    if (!l)
+        return NULL;
+    memset(l + u->nlocals, 0, sizeof(ne_local) * (size_t)(n - u->nlocals));
+    u->local = l;
+    ne_local *r = &l[u->nlocals];
+    u->nlocals = n;
+    return r;
 }
 
-/* the first place for size bytes in [lo, hi) clear of the blocks, or 0 */
-static uint32_t local_fit(ne_user *u, int heap, uint32_t lo, uint32_t hi, uint32_t size)
+/* a block by its handle (a moveable one's entry, a fixed one's pointer) */
+static ne_local *local_of(ne_user *u, int heap, uint16_t h)
 {
-    uint32_t at = lo;
+    if (!h)
+        return NULL;
+    int moveable = (h & 3u) == 2u;
+    for (int i = 0; i < u->nlocals; i++) {
+        ne_local *l = &u->local[i];
+        if (l->heap == heap && (moveable ? l->kind == L_MOVEABLE && l->handle == h
+                                         : l->kind == L_FIXED && l->at == h))
+            return l;
+    }
+    return NULL;
+}
+
+/* the first place for size bytes in [lo, hi) clear of the blocks, at a
+ * multiple of 4 plus off, or 0 */
+static uint32_t local_fit(ne_user *u, int heap, uint32_t lo, uint32_t hi, uint32_t size,
+                          uint32_t off)
+{
+    uint32_t at = ((lo + 3u - off) & ~3u) + off;
     for (int again = 1; again;) {
         again = 0;
-        for (int i = 0; i < NE_LOCALS; i++)
-            if (u->local[i].size && u->local[i].heap == heap &&
-                at < (uint32_t)u->local[i].at + u->local[i].size &&
-                u->local[i].at < at + size) {
-                at = (uint32_t)u->local[i].at + u->local[i].size;
+        for (int i = 0; i < u->nlocals; i++) {
+            const ne_local *l = &u->local[i];
+            if (l->kind != L_FREE && l->size && l->heap == heap &&
+                at < (uint32_t)l->at + l->size && l->at < at + size) {
+                at = (((uint32_t)l->at + l->size + 3u - off) & ~3u) + off;
                 again = 1;
             }
+        }
     }
     return at && at + size <= hi ? at : 0;
 }
@@ -446,56 +484,210 @@ static void local_zero(args *a, uint16_t sel, uint32_t at, uint32_t size)
                      size - k < sizeof(zero) ? size - k : (uint32_t)sizeof(zero));
 }
 
-static uint16_t local_alloc(args *a, ne_user *u, int heap, uint32_t size)
+/* size bytes (zeroed) of the heap: their place, 0 if there is none; in
+ * the heap, then beyond its segment's end (the segment made big enough,
+ * in 1K steps, its offsets below 0xFFF0) */
+static uint16_t local_place(args *a, ne_user *u, int heap, uint32_t size, uint32_t off)
 {
-    if (!size || size > 0xfff0u || heap < 0)
-        return 0;
-    size = (size + 1) & ~1u;
-    /* in the heap, then beyond its segment's end: the segment made big
-     * enough (in 1K steps, its offsets below 0xFFF0) */
-    uint16_t sel = u->heap[heap].sel;
-    uint32_t at = local_fit(u, heap, u->heap[heap].lo, u->heap[heap].hi, size);
-    if (!at && (at = local_fit(u, heap, u->heap[heap].end, 0xfff0u, size)) != 0 &&
+    uint32_t at = local_fit(u, heap, u->heap[heap].lo, u->heap[heap].hi, size, off);
+    if (!at && (at = local_fit(u, heap, u->heap[heap].end, 0xfff0u, size, off)) != 0 &&
         !local_room(a, u, heap, at + size))
         at = 0;
+    if (at)
+        local_zero(a, u->heap[heap].sel, at, size);
+    return (uint16_t)at;
+}
+
+/* a block's record, its place taken; NULL if there is no room */
+static ne_local *local_block(args *a, ne_user *u, int heap, uint32_t size, int kind)
+{
+    ne_local *l = local_new(u);
+    if (!l)
+        return NULL;
+    uint16_t at = local_place(a, u, heap, size, kind == L_ENTRY ? 2u : 0u);
     if (!at)
+        return NULL;
+    l->kind = (uint8_t)kind;
+    l->heap = (uint8_t)heap;
+    l->at = at;
+    l->size = (uint16_t)size;
+    l->handle = 0;
+    return l;
+}
+
+/* a moveable block's entry: its pointer, lock count and flags */
+static void entry_write(args *a, ne_user *u, const ne_local *l, int lock, unsigned flags)
+{
+    uint8_t e[4] = { (uint8_t)l->at, (uint8_t)(l->at >> 8), (uint8_t)lock, (uint8_t)flags };
+    win_ne_write(a->ctx, u->heap[l->heap].sel, l->handle, e, sizeof(e));
+}
+
+static void entry_read(args *a, ne_user *u, const ne_local *l, uint8_t e[4])
+{
+    memset(e, 0, 4);
+    win_ne_read(a->ctx, u->heap[l->heap].sel, l->handle, e, 4);
+}
+
+/* the entry's own block */
+static ne_local *entry_of(ne_user *u, const ne_local *l)
+{
+    for (int i = 0; i < u->nlocals; i++)
+        if (u->local[i].kind == L_ENTRY && u->local[i].heap == l->heap &&
+            u->local[i].at == l->handle)
+            return &u->local[i];
+    return NULL;
+}
+
+/* LocalAlloc(flags, size): a fixed block's pointer, a moveable one's handle */
+static uint16_t local_alloc(args *a, ne_user *u, int heap, uint16_t flags, uint32_t size)
+{
+    if (size > 0xfff0u || heap < 0)
         return 0;
-    for (int i = 0; i < NE_LOCALS; i++)
-        if (!u->local[i].size) {
-            u->local[i].at = (uint16_t)at;
-            u->local[i].size = (uint16_t)size;
-            u->local[i].heap = (uint8_t)heap;
-            local_zero(a, sel, at, size);
-            return (uint16_t)at;
-        }
-    return 0;
+    size = (size + 1) & ~1u;
+    if (!(flags & LMEM_MOVEABLE)) {
+        ne_local *l = size ? local_block(a, u, heap, size, L_FIXED) : NULL;
+        return l ? l->at : 0;
+    }
+    ne_local *e = local_block(a, u, heap, 4, L_ENTRY);
+    if (!e)
+        return 0;
+    ne_local *l = local_new(u);
+    uint16_t at = l && size ? local_place(a, u, heap, size, 0) : 0;
+    if (!l || (size && !at)) {
+        e->kind = L_FREE;
+        return 0;
+    }
+    l->kind = L_MOVEABLE;
+    l->heap = (uint8_t)heap;
+    l->at = at;
+    l->size = (uint16_t)size;
+    l->handle = e->at;
+    entry_write(a, u, l, 0, ((flags & LMEM_DISCARDABLE) ? 0x0fu : 0u) |
+                            (size ? 0u : LHE_DISCARDED));
+    return l->handle;
 }
 
 /* the bytes of a heap's blocks */
 static uint32_t local_used(ne_user *u, int heap)
 {
     uint32_t n = 0;
-    for (int i = 0; i < NE_LOCALS; i++)
-        if (u->local[i].size && u->local[i].heap == heap)
+    for (int i = 0; i < u->nlocals; i++)
+        if (u->local[i].kind != L_FREE && u->local[i].heap == heap)
             n += u->local[i].size;
+    return n;
+}
+
+/* LocalReAlloc(h, size, flags): the handle (a moved fixed block's new
+ * pointer), 0 if it fails */
+static uint16_t local_realloc(args *a, ne_user *u, int heap, uint16_t h, uint32_t want,
+                              uint16_t flags)
+{
+    ne_local *l = local_of(u, heap, h);
+    if (!l)
+        return 0;
+    int moveable = l->kind == L_MOVEABLE;
+    uint8_t e[4] = { 0, 0, 0, 0 };
+    if (moveable)
+        entry_read(a, u, l, e);
+    if (flags & LMEM_MODIFY) {              /* its flags only */
+        if (moveable && (flags & LMEM_DISCARDABLE))
+            entry_write(a, u, l, e[2], (e[3] & LHE_DISCARDED) | 0x0fu);
+        else if (moveable)
+            entry_write(a, u, l, e[2], e[3] & LHE_DISCARDED);
+        return h;
+    }
+    if (!want && moveable) {                /* discarded (LocalDiscard): unlocked only */
+        if (e[2])
+            return 0;
+        l->at = 0;
+        l->size = 0;
+        entry_write(a, u, l, 0, e[3] | LHE_DISCARDED);
+        return h;
+    }
+    want = want ? (want + 1) & ~1u : 2;
+    if (want > 0xfff0u)
+        return 0;
+    uint16_t sel = u->heap[heap].sel;
+    if (moveable && !l->size) {             /* a discarded one: made again */
+        uint16_t at = local_place(a, u, heap, want, 0);
+        if (!at)
+            return 0;
+        l->at = at;
+        l->size = (uint16_t)want;
+        entry_write(a, u, l, e[2], e[3] & ~LHE_DISCARDED);
+        return h;
+    }
+    uint32_t old = l->size, tail = (uint32_t)l->at + old;
+    if (want <= old) {                      /* smaller: where it is, what it has kept */
+        l->size = (uint16_t)want;
+        return h;
+    }
+    /* larger: where it is if what follows is free, the new part zero */
+    uint32_t hi = tail <= u->heap[heap].hi ? u->heap[heap].hi : 0xfff0u;
+    uint16_t size_was = l->size;
+    l->size = 0;                            /* not in its own way */
+    uint32_t fit = local_fit(u, heap, tail, hi, want - old, tail & 3u);
+    l->size = size_was;
+    if (fit == tail && local_room(a, u, heap, (uint32_t)l->at + want)) {
+        local_zero(a, sel, tail, want - old);
+        l->size = (uint16_t)want;
+        return h;
+    }
+    if (!moveable && !(flags & LMEM_MOVEABLE) && e[2])
+        return 0;
+    uint16_t n = local_place(a, u, heap, want, 0);   /* elsewhere: moved */
+    if (!n)
+        return 0;
+    uint8_t buf[64];
+    for (uint32_t k = 0; k < old; k += sizeof(buf)) {
+        uint32_t m = old - k < sizeof(buf) ? old - k : (uint32_t)sizeof(buf);
+        win_ne_read(a->ctx, sel, (uint32_t)l->at + k, buf, m);
+        win_ne_write(a->ctx, sel, (uint32_t)n + k, buf, m);
+    }
+    l->at = n;
+    l->size = (uint16_t)want;
+    if (moveable) {
+        entry_write(a, u, l, e[2], e[3]);
+        return h;
+    }
     return n;
 }
 
 static int local_service(args *a, ne_user *u, uint16_t service, uint32_t *v)
 {
-    int i;
-    if ((service < 4 || service > 13) && service != 121 && service != 161 && service != 162)
+    ne_local *l;
+    if ((service < 4 || service > 13) && service != 121 && service != 161 && service != 162 &&
+        service != 310)
         return 0;
     int heap = heap_of(a, u, a->cpu ? a->cpu->ds : 0);
     /* the heap's size: its place in the segment, and as far as it may grow */
     uint32_t size = heap < 0 ? 0 : (uint32_t)(u->heap[heap].hi - u->heap[heap].lo) +
                                    (0xfff0u - u->heap[heap].end);
     switch (service) {
-    case 11:                            /* LocalHandle(near pointer): the handle is it */
-        *v = local_find(u, heap, w(a, 4)) >= 0 ? w(a, 4) : 0;
-        return 1;
-    case 12:                            /* LocalFlags: fixed, not locked */
+    case 11: {                          /* LocalHandle(near pointer): its handle */
+        uint16_t p = w(a, 4);
         *v = 0;
+        for (int i = 0; p && i < u->nlocals; i++) {
+            ne_local *k = &u->local[i];
+            if (k->heap == heap && k->at == p && (k->kind == L_FIXED || k->kind == L_MOVEABLE))
+                *v = k->kind == L_FIXED ? p : k->handle;
+        }
+        return 1;
+    }
+    case 12: {                          /* LocalFlags(h): lock count, flags << 8 */
+        uint8_t e[4];
+        *v = 0;
+        if ((l = local_of(u, heap, w(a, 4))) != NULL && l->kind == L_MOVEABLE) {
+            entry_read(a, u, l, e);
+            *v = (uint32_t)e[2] | (uint32_t)e[3] << 8;
+        }
+        return 1;
+    }
+    case 310:                           /* LocalHandleDelta(n): the handle table's
+                                         * growth (WINN's grows by one); 0 asks */
+        if (w(a, 4))
+            u->handle_delta = w(a, 4);
+        *v = u->handle_delta ? u->handle_delta : 0x20;
         return 1;
     case 13: case 121:                  /* LocalCompact(UINT), LocalShrink(HLOCAL, UINT) */
     case 161: case 162:                 /* LocalCountFree, LocalHeapSize */
@@ -522,58 +714,47 @@ static int local_service(args *a, ne_user *u, uint16_t service, uint32_t *v)
         return 1;
     }
     case 5:                             /* LocalAlloc(flags, size) */
-        *v = local_alloc(a, u, heap, w(a, 4));
+        *v = local_alloc(a, u, heap, w(a, 6), w(a, 4));
         return 1;
-    case 6: {                           /* LocalReAlloc(h, size, flags) */
-        uint16_t h = w(a, 8), flags = w(a, 4);
-        uint32_t want = w(a, 6);
-        *v = 0;
-        if ((i = local_find(u, heap, h)) < 0)
-            return 1;
-        *v = h;
-        if (flags & 0x80)               /* LMEM_MODIFY: its flags only */
-            return 1;
-        want = want ? (want + 1) & ~1u : 2;
-        uint32_t old = u->local[i].size, tail = (uint32_t)h + old;
-        uint16_t sel = u->heap[heap].sel;
-        if (want <= old) {              /* smaller: where it is, what it has kept */
-            u->local[i].size = (uint16_t)want;
-            return 1;
-        }
-        /* larger: where it is if what follows is free, the new part zero */
-        uint32_t hi = tail <= u->heap[heap].hi ? u->heap[heap].hi : 0xfff0u;
-        if (want <= 0xfff0u && local_fit(u, heap, tail, hi, want - old) == tail &&
-            local_room(a, u, heap, (uint32_t)h + want)) {
-            local_zero(a, sel, tail, want - old);
-            u->local[i].size = (uint16_t)want;
-            return 1;
-        }
-        uint16_t n = local_alloc(a, u, heap, want);     /* elsewhere: moved */
-        *v = n;
-        if (!n)
-            return 1;
-        uint8_t buf[64];
-        for (uint32_t k = 0; k < old; k += sizeof(buf)) {
-            uint32_t m = old - k < sizeof(buf) ? old - k : (uint32_t)sizeof(buf);
-            win_ne_read(a->ctx, sel, (uint32_t)h + k, buf, m);
-            win_ne_write(a->ctx, sel, (uint32_t)n + k, buf, m);
-        }
-        u->local[i].size = 0;
+    case 6:                             /* LocalReAlloc(h, size, flags) */
+        *v = local_realloc(a, u, heap, w(a, 8), w(a, 6), w(a, 4));
         return 1;
-    }
     case 7:                             /* LocalFree(h): 0 */
-        if ((i = local_find(u, heap, w(a, 4))) >= 0)
-            u->local[i].size = 0;
-        *v = i >= 0 ? 0 : w(a, 4);
+        *v = w(a, 4);
+        if ((l = local_of(u, heap, w(a, 4))) != NULL) {
+            if (l->kind == L_MOVEABLE) {
+                ne_local *e = entry_of(u, l);
+                if (e)
+                    e->kind = L_FREE;
+            }
+            l->kind = L_FREE;
+            *v = 0;
+        }
         return 1;
     case 8:                             /* LocalLock(h): the near pointer */
-        *v = local_find(u, heap, w(a, 4)) >= 0 ? w(a, 4) : 0;
-        return 1;
-    case 9:                             /* LocalUnlock */
         *v = 0;
+        if ((l = local_of(u, heap, w(a, 4))) != NULL) {
+            if (l->kind == L_MOVEABLE) {
+                uint8_t e[4];
+                entry_read(a, u, l, e);
+                if (l->size && e[2] < 0xffu)
+                    entry_write(a, u, l, e[2] + 1, e[3]);
+            }
+            *v = l->size ? l->at : 0;
+        }
+        return 1;
+    case 9:                             /* LocalUnlock(h): still locked */
+        *v = 0;
+        if ((l = local_of(u, heap, w(a, 4))) != NULL && l->kind == L_MOVEABLE) {
+            uint8_t e[4];
+            entry_read(a, u, l, e);
+            if (e[2] && e[2] < 0xffu)
+                entry_write(a, u, l, --e[2], e[3]);
+            *v = e[2] != 0;
+        }
         return 1;
     case 10:                            /* LocalSize */
-        *v = (i = local_find(u, heap, w(a, 4))) >= 0 ? u->local[i].size : 0;
+        *v = (l = local_of(u, heap, w(a, 4))) != NULL ? l->size : 0;
         return 1;
     }
     return 0;

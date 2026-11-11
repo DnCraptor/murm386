@@ -443,9 +443,9 @@ LRESULT user_nc_hittest(wwnd *w, int x, int y)
  * Returns 0 when nothing arrived within the wait. */
 static int track_msg(wwnd *w, MSG *m, POINT *pt)
 {
-    if (PeekMessage(m, 0, WM_KEYFIRST, WM_KEYLAST, PM_REMOVE) ||
-        PeekMessage(m, 0, WM_MOUSEFIRST, WM_MOUSELAST, PM_REMOVE) ||
-        PeekMessage(m, 0, WM_NCMOUSEMOVE, WM_NCRBUTTONDBLCLK, PM_REMOVE)) {
+    if (user_peek(m, 0, WM_KEYFIRST, WM_KEYLAST, PM_REMOVE) ||
+        user_peek(m, 0, WM_MOUSEFIRST, WM_MOUSELAST, PM_REMOVE) ||
+        user_peek(m, 0, WM_NCMOUSEMOVE, WM_NCRBUTTONDBLCLK, PM_REMOVE)) {
         /* a release queued before the capture was taken arrives as a
          * non-client message: treat it like the client one */
         if (m->message >= WM_NCMOUSEMOVE && m->message <= WM_NCRBUTTONDBLCLK)
