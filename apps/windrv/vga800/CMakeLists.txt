@@ -52,6 +52,7 @@ native_dos_runtime_attach(${PROJECT_NAME})
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${WIN_DIR}/ddi
+    ${WIN_DIR}/drivers/dos
     ${CMAKE_CURRENT_SOURCE_DIR}/../../api
 )
 

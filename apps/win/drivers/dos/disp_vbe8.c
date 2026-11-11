@@ -6,6 +6,8 @@
  * (pitch = width), so the core draws straight into what the renderer scans
  * out and flush() has nothing to do. The mode is chosen from a table by the
  * caller's hint; everything that fits the 256 KB video memory works.
+ * Built in after disp_vga.c (the default): when that cannot start or the
+ * [display] hints ask for 640x400.
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */

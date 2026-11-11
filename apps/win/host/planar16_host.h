@@ -1,6 +1,8 @@
 /*
- * vga800_host.h - fake BIOS and planar video memory for testing the VGA800
- * driver on the host (included by vga800.c when WINDRV_HOST is defined).
+ * planar16_host.h - fake BIOS and planar video memory for testing the
+ * planar drivers (drivers/dos/planar16.h: the built-in VGA, VGA800.DRV) on
+ * the host, at PLANAR_W x PLANAR_H (included instead of planar16_dos.h when
+ * WINDRV_HOST is defined).
  */
 #include <stdio.h>
 
@@ -18,15 +20,15 @@ static void hw_set_dac(int i, int r, int g, int b)
 }
 
 /* decode the bit planes the way the VGA does */
-int vga800_host_snapshot(const char *path)
+int planar_host_snapshot(const char *path)
 {
     FILE *f = fopen(path, "wb");
     if (!f)
         return -1;
-    fprintf(f, "P6\n800 600\n255\n");
-    for (int y = 0; y < 600; y++)
-        for (int x = 0; x < 800; x++) {
-            uint32_t w = fake_vram[y * 100 + x / 8];
+    fprintf(f, "P6\n%d %d\n255\n", PLANAR_W, PLANAR_H);
+    for (int y = 0; y < PLANAR_H; y++)
+        for (int x = 0; x < PLANAR_W; x++) {
+            uint32_t w = fake_vram[y * (PLANAR_W / 8) + x / 8];
             int bit = 7 - (x & 7), c = 0;
             for (int p = 0; p < 4; p++)
                 c |= ((w >> (8 * p + bit)) & 1) << p;

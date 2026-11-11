@@ -289,7 +289,7 @@ nothing leaves the program from the command line in that part (`WINN DEMO`).
 | `ddi/winmod.h` | loadable driver modules: entry point and the tables exchanged with the core |
 | `core/` | handle table, KERNEL subset (memory, strings, atoms, INI files, files, tasks), regions, 1/8 bpp raster engine, GDI, fonts, software cursor, module loader, export tables |
 | `user/` | windows, messages, painting, non-client area, menus and accelerators, controls (BUTTON, STATIC, EDIT, LISTBOX, COMBOBOX, SCROLLBAR), dialogs, MessageBox, MDI (MDICLIENT, DefFrameProc, DefMDIChildProc), clipboard, common dialogs (module COMMDLG: Open, Save As, Find, Replace) |
-| `drivers/dos/` | `VBE8` display driver (VBE 100h 640x400x8, fallback 13h) and `DOS` input driver (keyboard through the BIOS buffer, INT 33h mouse) |
+| `drivers/dos/` | display drivers `VGA` (mode 12h 640x480 in 16 colours, the default; `planar16.h`, shared with VGA800.DRV) and `VBE8` (VBE 100h 640x400x8, fallback 13h), the `DOS` input driver (keyboard through the BIOS buffer, INT 33h mouse) |
 | `runtime/` | `WINN.EXE` `main()`: drivers, core, shell and command-line program as tasks |
 | `sdk/` | for applications: API stubs by Win16 ordinal, `__ez_start`, `winapp.cmake`; `gen_exports.py` makes the export tables |
 | `../winapps/<name>/` | applications: `progman` (the Program Manager, the default shell), `winfile` (File Manager), `taskman` (Task List), `winmine` (Minesweeper), `notepad`, `clock`, `calc`, `control` (Control Panel), `demo` (a tour of the API) |
@@ -303,9 +303,20 @@ nothing leaves the program from the command line in that part (`WINN DEMO`).
 The core never touches video hardware. A display driver reports a
 framebuffer as a surface (pointer, size, pitch, bpp), accepts palette
 updates and is told which rectangles changed. Another mode or another
-device is another driver; the core works at any size. 101h (640x480x8) does
-not fit the 256 KB video memory, so the built-in default is 100h
-(640x400x8).
+device is another driver; the core works at any size.
+
+The built-in default is `VGA`: mode 12h, 640x480 in 16 colours, as
+Windows 3.x's own VGA.DRV, the size Windows programs are made for. Like
+`VGA800.DRV` (both are `drivers/dos/planar16.h`) it keeps an 8 bpp copy
+of the screen and converts changed rectangles to the four VGA planes,
+mapping colours to the standard 16. If it cannot start, or SYSTEM.INI's
+[display] asks for another size (`height=400`), the other built-in one is
+used: `VBE8`, VBE 100h, 640x400 in 256 colours, drawn straight into the
+video memory (101h, 640x480x8, does not fit its 256 KB). On an HDMI
+build the firmware shows VBE 100h with every second pixel of a line, and
+the colours 252..255 (white, cyan, magenta, blue in Windows' palette) as
+251: the HDMI signal's own symbols take those indices; 12h and VBE 102h
+it shows in full.
 
 Drivers can be separate files. A module is an EZ image built without crt0
 whose `__ez_start` takes the core's service table and returns its driver
@@ -316,8 +327,7 @@ support involved. `SYSTEM.INI` next to `WINN.EXE` names the modules:
     display.drv=VGA800.DRV
 
 Without the file, or if a module fails to load, the built-in drivers are
-used. `VGA800.DRV` keeps an 8 bpp copy of the screen and converts changed
-rectangles to the four VGA planes, mapping colours to the standard 16.
+used.
 
 ## Native DLLs
 
@@ -477,6 +487,7 @@ use `ucontext`):
     ./winhost scripts/winmine.txt WINMINE    # marks, a lost game, Expert, Best Times
     ./winhost scripts/logo.txt PROGMAN       # the logo (copy the BMPs into HOSTWIN first)
     ./winhost800 scripts/vga800.txt  # the VGA800 driver, built in
+    ./winhostvga scripts/vga.txt     # the built-in VGA driver (640x480x16), Win16 programs too
     ./test_gdi                       # GDI sample sheet, gdi.ppm
     make check                       # NE: loader, gateway, trampoline; the programs on the i386 core
 

@@ -98,11 +98,12 @@ win_app_entry win_host_app(const char *prog)
     return NULL;
 }
 
-#ifdef HOST_VGA800
-/* the VGA800 module's driver, built in for the test */
-extern const win_display_driver win_disp_vga800;
-int vga800_host_snapshot(const char *path);
-#define SNAPSHOT vga800_host_snapshot
+#if defined(HOST_VGA800) || defined(HOST_VGA)
+/* a planar driver (the VGA800 module's, the built-in VGA), built in for the
+ * test with fake planar video memory */
+extern const win_display_driver win_disp_vga800, win_disp_vga;
+int planar_host_snapshot(const char *path);
+#define SNAPSHOT planar_host_snapshot
 #else
 #define SNAPSHOT host_snapshot
 #endif
@@ -266,13 +267,15 @@ int main(int argc, char **argv)
     }
     fclose(f);
     task_init();
-#ifdef HOST_VGA800
-    if (win_boot("HOSTWIN/WINN.EXE", &win_disp_vga800, &host_script_input))
-        return 1;
+#if defined(HOST_VGA800)
+    static const win_display_driver *const displays[] = { &win_disp_vga800, NULL };
+#elif defined(HOST_VGA)
+    static const win_display_driver *const displays[] = { &win_disp_vga, NULL };
 #else
-    if (win_boot("HOSTWIN/WINN.EXE", &host_snap_display, &host_script_input))
-        return 1;
+    static const win_display_driver *const displays[] = { &host_snap_display, NULL };
 #endif
+    if (win_boot("HOSTWIN/WINN.EXE", displays, &host_script_input))
+        return 1;
     win_logo_show();                /* HOSTWIN/WINLOGO.BMP, if the test put one there */
     UINT r = WinExec(argc > 2 ? argv[2] : "DEMO.EXE", SW_SHOWNORMAL);
     if (r < 32) {

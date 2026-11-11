@@ -18,7 +18,7 @@ APPS     = demo.o progman.o notepad.o clock.o calc.o control.o winfile.o taskman
 # the native DLLs, built in (host_dlls.c names them); each WinDllInit its own
 DLLS     = lzexpand.o host_dlls.c
 
-all: test_gdi test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_launch test_ne_rm_gate test_ne_run NEFIXTURES winhost winhost800 HOSTWIN
+all: test_gdi test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_launch test_ne_rm_gate test_ne_run NEFIXTURES winhost winhost800 winhostvga HOSTWIN
 
 test_gdi: $(GDICORE) $(HOST) test_gdi.c
 	$(CC) $(CFLAGS) $(INC) -o $@ $^
@@ -167,7 +167,12 @@ winhost: $(CORE) $(USER) $(HOST) host_main.c $(APPS) $(DLLS) $(X86RUN)
 
 # the VGA800 driver module, built in, with fake planar video memory
 winhost800: $(CORE) $(USER) $(HOST) host_main.c $(APPS) ../../windrv/vga800/vga800.c
-	$(CC) $(CFLAGS) $(INC) -DHOST_VGA800 -DWINDRV_HOST -o $@ $^
+	$(CC) $(CFLAGS) $(INC) -I. -I../drivers/dos -DHOST_VGA800 -DWINDRV_HOST -o $@ $^
+
+# winhost with the built-in VGA driver (640x480 in 16 colours, the target's
+# default), fake planar video memory
+winhostvga: $(CORE) $(USER) $(HOST) host_main.c $(APPS) $(DLLS) $(X86RUN) ../drivers/dos/disp_vga.c
+	$(CC) $(CFLAGS) $(INC) -I. -I../drivers/dos -DHOST_VGA -DWINDRV_HOST -DWINN_NE_HOST -Ix86run -o $@ $^ -lm
 
 # the Windows directory of the tests: stand-ins for the application files
 # (the applications themselves are built in), a DOS program and a text file
@@ -183,7 +188,7 @@ HOSTWIN: NEFIXTURES
 	cp HOSTWIN/README.TXT HOSTWIN/DOCS/README.TXT
 
 clean:
-	rm -rf test_gdi test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_launch test_ne_rm_gate test_ne_run i386-host.o *-fixture.exe NEDIALOG.EXE NEFAULT.EXE NEHANG.EXE NESTACK.EXE NECLI.EXE NEOUT.EXE NECR0.EXE NEHLT.EXE NEFPU.EXE NEUNDEF.EXE OWHELLO.EXE OWBUSY.EXE OWWIN.EXE OWMENU.EXE OWSEGS.EXE OWDEMO.EXE OWDEMO.TMP OWFILE.EXE OWFILEL.EXE OWRES.EXE OWKERN.EXE OWUSE.EXE OWDLL.DLL OWDLL2.DLL OWFPU.EXE OWAPI.EXE OWGDI.EXE OWAPI2.EXE OWMETA.EXE OWSYS.EXE OWFONT.EXE WINNTEST.FON winhost winhost800 *.o *.ppm *.png appinfo.c HOSTWIN
+	rm -rf test_gdi test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_launch test_ne_rm_gate test_ne_run i386-host.o *-fixture.exe NEDIALOG.EXE NEFAULT.EXE NEHANG.EXE NESTACK.EXE NECLI.EXE NEOUT.EXE NECR0.EXE NEHLT.EXE NEFPU.EXE NEUNDEF.EXE OWHELLO.EXE OWBUSY.EXE OWWIN.EXE OWMENU.EXE OWSEGS.EXE OWDEMO.EXE OWDEMO.TMP OWFILE.EXE OWFILEL.EXE OWRES.EXE OWKERN.EXE OWUSE.EXE OWDLL.DLL OWDLL2.DLL OWFPU.EXE OWAPI.EXE OWGDI.EXE OWAPI2.EXE OWMETA.EXE OWSYS.EXE OWFONT.EXE WINNTEST.FON winhost winhost800 winhostvga *.o *.ppm *.png appinfo.c HOSTWIN
 
 .PHONY: all check clean HOSTWIN NEFIXTURES
 

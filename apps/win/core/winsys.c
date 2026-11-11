@@ -104,21 +104,25 @@ static const char *boot_module(const char *key, int want_display)
 
 /* Start-up used by the runtime: Windows directory from the program path,
  * drivers from SYSTEM.INI [boot] display.drv / input.drv (falling back to
- * the built-in ones), then GDI and USER. */
-int win_boot(const char *exe_path, const win_display_driver *disp, const win_input_driver *in)
+ * the built-in ones: the display ones in disp's order, NULL-ended, the
+ * first that starts with the [display] hints, else without them), then
+ * GDI and USER. */
+int win_boot(const char *exe_path, const win_display_driver *const *disp,
+             const win_input_driver *in)
 {
     win_set_home(exe_path);
     const char *dname = boot_module("display.drv", 1);
     const char *iname = boot_module("input.drv", 0);
-    if (disp)
-        win_register_display_driver(disp);
+    for (int i = 0; disp && disp[i]; i++)
+        win_register_display_driver(disp[i]);
     if (in)
         win_register_input_driver(in);
     int w = (int)GetPrivateProfileInt("display", "width", 0, "SYSTEM.INI");
     int h = (int)GetPrivateProfileInt("display", "height", 0, "SYSTEM.INI");
-    int rc = win_init(dname, iname, w, h, 8);
-    if (rc && dname)                 /* module refused: try the built-in */
-        rc = win_init(disp ? disp->name : NULL, iname, 0, 0, 8);
+    int rc = dname ? win_init(dname, iname, w, h, 8) : -1;
+    for (int pass = 0; rc && pass < 2; pass++)          /* the built-in ones */
+        for (int i = 0; rc && disp && disp[i]; i++)
+            rc = win_init(disp[i]->name, iname, pass ? 0 : w, pass ? 0 : h, 8);
     if (rc)
         return rc;
     return user_init();

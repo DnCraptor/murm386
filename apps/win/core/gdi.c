@@ -1170,15 +1170,18 @@ int WINAPI GetDeviceCaps(HDC h, int index)
 {
     wdc *dc = gdi_dc(h);
     const wsurf *s = dc ? dc->surf : &win_sys.screen;
+    /* the screen of a 16-colour display (VGA): as Windows' VGA.DRV has it,
+     * 4 planes of 1 bit, no palette (the 8 bpp copy is WINN's own) */
+    int planes4 = dc && dc->is_screen && s->bpp == 8 && GetDisplayDriverInfoN(NULL, 0) <= 16;
     switch (index) {
     case HORZRES: return s->width;
     case VERTRES: return s->height;
-    case BITSPIXEL: return s->bpp;
-    case PLANES: return 1;
+    case BITSPIXEL: return planes4 ? 1 : s->bpp;
+    case PLANES: return planes4 ? 4 : 1;
     case NUMCOLORS:
         if (s->bpp == 1)
             return 2;
-        if (dc && dc->is_screen && GetDisplayDriverInfoN(NULL, 0) <= 16)
+        if (planes4)
             return (int)GetDisplayDriverInfoN(NULL, 0);
         return 20;
     case LOGPIXELSX: case LOGPIXELSY: return 96;
@@ -1197,10 +1200,10 @@ int WINAPI GetDeviceCaps(HDC h, int index)
     case TEXTCAPS: return 0;
     case NUMBRUSHES: return -1;
     case NUMPENS: case NUMFONTS: return s->bpp == 1 ? 2 : 16;
-    case COLORRES: return s->bpp == 8 ? 18 : 0;
-    case SIZEPALETTE: return s->bpp == 8 ? 256 : 0;
-    case NUMRESERVED: return s->bpp == 8 ? 20 : 0;
-    case RASTERCAPS: return s->bpp == 8 ? RC_PALETTE : 0;
+    case COLORRES: return s->bpp == 8 && !planes4 ? 18 : 0;
+    case SIZEPALETTE: return s->bpp == 8 && !planes4 ? 256 : 0;
+    case NUMRESERVED: return s->bpp == 8 && !planes4 ? 20 : 0;
+    case RASTERCAPS: return s->bpp == 8 && !planes4 ? RC_PALETTE : 0;
     default: return 0;
     }
 }

@@ -17,7 +17,9 @@
 #include "wincore.h"
 #include "ne.h"
 
-extern const win_display_driver win_disp_vbe8;
+/* the built-in display drivers: VGA 640x480x16 as Windows' own, VBE
+ * 640x400x256 when it cannot */
+extern const win_display_driver win_disp_vga, win_disp_vbe8;
 extern const win_input_driver win_input_dos;
 
 static const char *exec_error(UINT r)
@@ -60,7 +62,8 @@ int main(int argc, char **argv)
         strcat(cmdline, argv[i]);
     }
     task_init();
-    int r = win_boot(argc > 0 ? argv[0] : NULL, &win_disp_vbe8, &win_input_dos);
+    static const win_display_driver *const displays[] = { &win_disp_vga, &win_disp_vbe8, NULL };
+    int r = win_boot(argc > 0 ? argv[0] : NULL, displays, &win_input_dos);
     if (r) {
         printf("Windows: display start failed (%d)\n", r);
         return 1;
