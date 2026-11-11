@@ -411,7 +411,7 @@ void win_ddi_mouse_event(int x, int y, unsigned buttons)
             if (w && hit != HTERROR)
                 SendMessage(w->h, WM_SETCURSOR, w->h, MAKELPARAM(hit, WM_MOUSEMOVE));
             else if (w)
-                cursor_select_builtin(WCUR_ARROW);
+                user_cursor_builtin(WCUR_ARROW);
         }
         if (w && hit != HTERROR)
             post_mouse(w, hit, WM_MOUSEMOVE, x, y);
@@ -726,6 +726,7 @@ void WINAPI SetKeyboardState(const BYTE *keys) { memcpy(U.keys, keys, sizeof(U.k
 static void wait_turn(void)
 {
     wtask *me = task_current();
+    task_started(me);
     me->waiting = WTASK_WAIT_MESSAGE;
     if (!task_yield() && win_sys.input)
         win_sys.input->idle();
@@ -760,8 +761,11 @@ BOOL WINAPI PeekMessage(LPMSG msg, HWND h, UINT first, UINT last, UINT flags)
         got_message(msg);
         U.cur_msg = *msg;
     }
-    else if (!(flags & PM_NOYIELD))
-        task_yield();
+    else {
+        task_started(task_current());   /* a game's loop: nothing waiting for it */
+        if (!(flags & PM_NOYIELD))
+            task_yield();
+    }
     return r != 0;
 }
 

@@ -324,6 +324,9 @@ void     cursor_select_builtin(int id);
  * bits, freed with DestroyIcon */
 HICON    user_icon_create(const winapp_icon *ic);
 HCURSOR  user_cursor_create(const uint8_t and_m[128], const uint8_t xor_m[128], int hx, int hy);
+/* a built-in cursor set as SetCursor sets it: GetCursor, SetCursor's old
+ * one are then its handle */
+void     user_cursor_builtin(int id);
 
 /* gdi.c: device-independent bitmaps (Win16 resources) */
 typedef struct {
@@ -371,6 +374,7 @@ typedef struct wtask {
     int     (*run)(struct wtask *);
     struct wtask_ctx *ctx;
     struct wtask *dispatch_owner;  /* logical owner during cross-task SendMessage */
+    int       starting;         /* WinExec's hourglass is its until it first waits */
 } wtask;
 
 void   task_init(void);
@@ -384,6 +388,7 @@ int    task_yield(void);                 /* 1 if another task ran */
 void   task_run_now(wtask *t);
 void   task_kernel_loop(void);
 void   task_quit_all(void);              /* WM_QUIT for every application */
+void   task_started(wtask *t);           /* it waits for input: its hourglass ends */
 
 /* user/msg.c */
 int    user_task_has_work(HTASK h);

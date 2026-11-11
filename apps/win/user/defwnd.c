@@ -64,7 +64,7 @@ LRESULT WINAPI DefWindowProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             return TRUE;
         }
         int sc = size_cursor(hit);
-        cursor_select_builtin(sc >= 0 ? sc : WCUR_ARROW);
+        user_cursor_builtin(sc >= 0 ? sc : WCUR_ARROW);
         return hit == HTCLIENT ? FALSE : TRUE;
     }
     case WM_MOUSEACTIVATE:

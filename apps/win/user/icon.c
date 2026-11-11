@@ -281,13 +281,24 @@ HICON WINAPI LoadIcon(HINSTANCE inst, LPCSTR name)
     return shape_handle(8 + id, 101 + id);
 }
 
+/* the cursor set, by SetCursor or as a window's (WM_SETCURSOR); the arrow
+ * until one is, none after SetCursor(NULL). A program's "old = SetCursor
+ * (hourglass) ... SetCursor(old)" gets the one it had back, never none. */
 static HCURSOR current_cursor;
+static int cursor_none;
 
-HCURSOR WINAPI GetCursor(void) { return current_cursor; }
+static HCURSOR cursor_now(void)
+{
+    if (!current_cursor && !cursor_none)
+        current_cursor = shape_handle(0, 1 + WCUR_ARROW);
+    return current_cursor;
+}
+
+HCURSOR WINAPI GetCursor(void) { return cursor_now(); }
 
 HCURSOR WINAPI SetCursor(HCURSOR c)
 {
-    HCURSOR old = current_cursor;
+    HCURSOR old = cursor_now();
     int id = (int)(intptr_t)win_handle_get(c, WOBJ_CURSOR);
     ucursor *own = cursor_of(c);
     if (id >= 1 && id <= WCUR_COUNT) {
@@ -300,7 +311,17 @@ HCURSOR WINAPI SetCursor(HCURSOR c)
         cursor_set_shape(NULL, NULL, 0, 0);
         current_cursor = 0;
     }
+    cursor_none = !current_cursor;
     return old;
+}
+
+void user_cursor_builtin(int id)
+{
+    if (id < 0 || id >= WCUR_COUNT)
+        id = WCUR_ARROW;
+    cursor_select_builtin(id);
+    current_cursor = shape_handle(id, 1 + id);
+    cursor_none = 0;
 }
 
 int WINAPI ShowCursor(BOOL show) { return cursor_show(show); }

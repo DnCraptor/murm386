@@ -1566,6 +1566,18 @@ HWND WINAPI CreateWindowEx(DWORD ex, LPCSTR klass, LPCSTR title, DWORD style,
         link_bottom(w);
     else
         link_top(w);
+    /* its normal place is the one asked for, minimized or not; one made
+     * minimized but hidden (WinMine's, then shown SW_SHOWNORMAL) is an icon
+     * already, as in Windows (a visible one becomes one in ShowWindow) */
+    SetRect(&w->normal, x, y, x + cx, y + cy);
+    if ((w->style & WS_MINIMIZE) && !want_vis) {
+        RECT r;
+        user_icon_slot(w, &r);
+        if (parent != U.desktop)
+            OffsetRect(&r, parent->client.left, parent->client.top);
+        w->rc = r;
+        nc_calc(w->style, w->exstyle, user_menu_bar_height(w), own_icon(w), &w->rc, &w->client);
+    }
 
     CREATESTRUCT cs = { param, inst, menu, hparent, cy, cx, y, x, (LONG)style, title, klass, ex };
     /* HCBT_CREATEWND: the window there, before its first message (MFC's

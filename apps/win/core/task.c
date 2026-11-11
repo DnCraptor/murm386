@@ -237,11 +237,20 @@ void task_init(void)
 
 /* ---------------------------------------------------------------- life cycle */
 
+void task_started(wtask *t)
+{
+    if (t && t->starting) {
+        t->starting = 0;
+        cursor_wait_end();
+    }
+}
+
 static void task_start(void)
 {
     wtask *t = cur;
     t->state = WTASK_RUNNING;
     t->exit_code = t->run(t);
+    task_started(t);                    /* it ended without waiting once */
     /* Final window/file teardown may block on SD or driver operations. */
     cursor_wait_begin();
     user_task_ended(t->h);
@@ -596,9 +605,10 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
     t->info = win_app_info(path);
     lstrcpyn(t->cmdline, args, sizeof(t->cmdline));
     t->show = (int)show;
-    /* Loading is complete. Do not hold the hourglass through the task's
-     * message loop or a modal dialog in its first time slice. */
-    cursor_wait_end();
+    /* The hourglass stays while it starts (a Win16 program loads in its
+     * own task), as in Windows: until it first waits for input, in its
+     * message loop or a dialog's, or ends (task_started) */
+    t->starting = 1;
     /* let it start right away, as Windows does */
     task_run_now(t);
     return t->h;
