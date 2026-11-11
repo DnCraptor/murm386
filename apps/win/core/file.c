@@ -42,6 +42,17 @@ static HFILE track(int fd)
 {
     if (fd < 0)
         return HFILE_ERROR;
+#ifdef FILE_HOST
+    /* host tests: numbered as DOS numbers them, after its five standard
+     * handles (3 and 4 are AUX and PRN to a program, never its files) */
+    if (fd < 5) {
+        int moved = fcntl(fd, F_DUPFD, 5);
+        close(fd);
+        if (moved < 0)
+            return HFILE_ERROR;
+        fd = moved;
+    }
+#endif
     for (int i = 0; i < NFILES; i++)
         if (!files[i].task) {
             files[i].fd = fd;

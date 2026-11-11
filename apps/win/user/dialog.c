@@ -379,8 +379,15 @@ HWND WINAPI CreateDialogIndirectN(HINSTANCE inst, const DLGTEMPLATE_N *t,
         LPCSTR k = ctl_class(it->klass);
         DWORD cs = it->style | WS_CHILD;
         DWORD cex = WS_EX_NOPARENTNOTIFY;
+        int cw = it->cx * bx / 4, ch = it->cy * by / 8;
+        /* SS_ICON ignores dialog-template dimensions: the icon occupies
+         * its actual pixel size, not cx/cy scaled from dialog units. */
+        if (!lstrcmpi(k, "STATIC") && (cs & 0x0f) == SS_ICON) {
+            cw = GetSystemMetrics(SM_CXICON);
+            ch = GetSystemMetrics(SM_CYICON);
+        }
         HWND c = CreateWindowEx(cex, k, it->text ? it->text : "", cs,
-                                it->x * bx / 4, it->y * by / 8, it->cx * bx / 4, it->cy * by / 8,
+                                it->x * bx / 4, it->y * by / 8, cw, ch,
                                 h, (HMENU)it->id, inst, NULL);
         if (!c)
             continue;

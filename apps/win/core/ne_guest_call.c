@@ -551,8 +551,11 @@ static uint16_t local_alloc(args *a, ne_user *u, int heap, uint16_t flags, uint3
     ne_local *e = local_block(a, u, heap, 4, L_ENTRY);
     if (!e)
         return 0;
+    /* the records may move as they grow: the entry's by its index */
+    int ei = (int)(e - u->local);
     ne_local *l = local_new(u);
     uint16_t at = l && size ? local_place(a, u, heap, size, 0) : 0;
+    e = &u->local[ei];
     if (!l || (size && !at)) {
         e->kind = L_FREE;
         return 0;

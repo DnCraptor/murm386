@@ -1,7 +1,7 @@
 # What WRITE.EXE needed, from a Win16 program on the i386 core (OWMISC):
-# moveable local memory read through its handle, LocalHandleDelta,
-# KEYBOARD's VkKeyScan, MapVirtualKey, GetKeyNameText, ToAscii, OLECLI's
-# client document:
+# moveable local memory read through its handle (300 blocks at once),
+# LocalHandleDelta, KEYBOARD's VkKeyScan, MapVirtualKey, GetKeyNameText,
+# ToAscii, OLECLI's client document:
 #     ./winhost scripts/owmisc.txt PROGMAN
 wait 100
 keydown ALT
