@@ -672,6 +672,57 @@ __attribute__((noinline)) uint16_t ne_open_file(args *a, const char *given)
  * block of the program's, then as DOS 3 has it the count 1 and the
  * program's path; its selector in the PSP. KERNEL.131 GetDOSEnvironment
  * gives the same block. */
+/* Give Win16 programs a Windows-local TEMP/TMP without modifying DOS's
+ * parent environment. The PSP and GetDOSEnvironment share this block. */
+static int ne_local_temp_env(char *env, int n, int cap)
+{
+    char dir[128];
+    UINT d = GetWindowsDirectory(dir, sizeof(dir));
+    if (!d || d > sizeof(dir) - 7)
+        return n;
+    if (dir[d - 1] != '\\' && dir[d - 1] != '/')
+        dir[d++] = '\\';
+    memcpy(dir + d, "TEMP", 5);
+    d += 4;
+    int attr = win_file_attr(dir, 0, 0);
+    if (attr < 0)
+        CreateDirectoryN(dir);
+
+    int in = 0, out = 0;
+    while (in < n && env[in]) {
+        const char *entry = env + in;
+        int len = (int)strlen(entry) + 1, k = 0;
+        char key[5];
+        while (k < 4 && entry[k] && entry[k] != '=') {
+            key[k] = entry[k];
+            k++;
+        }
+        key[k] = 0;
+        int skip = entry[k] == '=' &&
+                   (!lstrcmpi(key, "TEMP") || !lstrcmpi(key, "TMP"));
+        if (!skip) {
+            memmove(env + out, entry, (size_t)len);
+            out += len;
+        }
+        in += len;
+    }
+
+    if (out + 2 * (int)d + 12 <= cap) {
+        memcpy(env + out, "TEMP=", 5);
+        out += 5;
+        memcpy(env + out, dir, d + 1);
+        out += (int)d + 1;
+        memcpy(env + out, "TMP=", 4);
+        out += 4;
+        memcpy(env + out, dir, d + 1);
+        out += (int)d + 1;
+    }
+    env[out++] = 0;
+    if (out == 1)
+        env[out++] = 0;
+    return out;
+}
+
 void ne_environment(win_ne_guest_api_context *ctx, ne_user *u)
 {
     if (u->env)
@@ -686,6 +737,7 @@ void ne_environment(win_ne_guest_api_context *ctx, ne_user *u)
         env[0] = env[1] = 0;
         n = 2;
     }
+    n = ne_local_temp_env(env, n, room);
     env[n] = 1;
     env[n + 1] = 0;
     lstrcpy(env + n + 2, path);

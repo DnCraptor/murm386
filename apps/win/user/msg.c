@@ -41,6 +41,21 @@ static int ctrl_shift_pending;
 
 static uint32_t now_ms(void) { return GetTickCount(); }
 
+/* ClipCursor's rectangle (right, bottom outside it); none: the screen */
+static RECT clip_rc;
+static int clip_on;
+
+static void clip_point(int *x, int *y)
+{
+    if (!clip_on)
+        return;
+    if (*x < clip_rc.left) *x = clip_rc.left;
+    if (*y < clip_rc.top) *y = clip_rc.top;
+    if (*x >= clip_rc.right) *x = clip_rc.right - 1;
+    if (*y >= clip_rc.bottom) *y = clip_rc.bottom - 1;
+}
+
+
 /* the task a window belongs to; 0 for the desktop (any task may serve) */
 static HTASK wnd_task(HWND h)
 {
@@ -193,8 +208,20 @@ BOOL WINAPI InSendMessage(void) { return FALSE; }
 
 static int key_down(int vk) { return (U.keys[vk & 0xFF] & 0x80) != 0; }
 
+/* EnableHardwareInput's: the keys and the mouse's buttons ignored */
+static int input_off;
+
+BOOL WINAPI EnableHardwareInput(BOOL enable)
+{
+    BOOL was = !input_off;
+    input_off = !enable;
+    return was;
+}
+
 void win_ddi_key_event(int vk, int sc, int down)
 {
+    if (input_off)
+        return;
     vk &= 0xFF;
     /* keypad without NumLock: navigation keys */
     if (!(sc & 0x100) && !(U.keys[VK_NUMLOCK] & 1)) {
@@ -396,6 +423,9 @@ void win_ddi_mouse_event(int x, int y, unsigned buttons)
     if (y < 0) y = 0;
     if (x >= sw) x = sw - 1;
     if (y >= sh) y = sh - 1;
+    clip_point(&x, &y);
+    if (input_off)
+        buttons = U.buttons;
     int moved = x != U.mouse_x || y != U.mouse_y;
     U.mouse_x = x;
     U.mouse_y = y;
@@ -437,9 +467,28 @@ void WINAPI GetCursorPos(LPPOINT pt)
 
 void WINAPI SetCursorPos(int x, int y)
 {
+    clip_point(&x, &y);
     U.mouse_x = x;
     U.mouse_y = y;
     cursor_move(x, y);
+}
+
+void WINAPI ClipCursor(const RECT *rc)
+{
+    RECT scr = { 0, 0, win_sys.screen.width, win_sys.screen.height };
+    clip_on = rc && IntersectRect(&clip_rc, rc, &scr);
+    if (clip_on)
+        SetCursorPos(U.mouse_x, U.mouse_y);
+}
+
+void WINAPI GetClipCursor(RECT *rc)
+{
+    if (!rc)
+        return;
+    if (clip_on)
+        *rc = clip_rc;
+    else
+        SetRect(rc, 0, 0, win_sys.screen.width, win_sys.screen.height);
 }
 
 /* ---------------------------------------------------------------- timers */
@@ -452,20 +501,22 @@ typedef struct {
     TIMERPROC proc;
     int       used, pending;
     HTASK     task;
+    int       sys;              /* SetSystemTimer's: WM_SYSTIMER */
 } wtimer;
 
 #define NTIMERS 32
 static wtimer timers[NTIMERS];
 static UINT next_timer_id = 0x100;
 
-UINT WINAPI SetTimer(HWND h, UINT id, UINT elapse, TIMERPROC proc)
+static UINT set_timer(HWND h, UINT id, UINT elapse, TIMERPROC proc, int sys)
 {
     if (elapse < 10)
         elapse = 10;
     if (!h)
         id = next_timer_id++;
     for (int i = 0; i < NTIMERS; i++)
-        if (timers[i].used && timers[i].hwnd == h && timers[i].id == id) {
+        if (timers[i].used && timers[i].hwnd == h && timers[i].id == id &&
+            timers[i].sys == sys) {
             timers[i].elapse = elapse;
             timers[i].due = now_ms() + elapse;
             timers[i].proc = proc;
@@ -474,21 +525,39 @@ UINT WINAPI SetTimer(HWND h, UINT id, UINT elapse, TIMERPROC proc)
     for (int i = 0; i < NTIMERS; i++)
         if (!timers[i].used) {
             timers[i] = (wtimer){ h, id, elapse, now_ms() + elapse, proc, 1, 0,
-                                  h ? wnd_task(h) : task_current()->h };
+                                  h ? wnd_task(h) : task_current()->h, sys };
             return id ? id : 1;
         }
     return 0;
 }
 
-BOOL WINAPI KillTimer(HWND h, UINT id)
+static BOOL kill_timer(HWND h, UINT id, int sys)
 {
     for (int i = 0; i < NTIMERS; i++)
-        if (timers[i].used && timers[i].hwnd == h && timers[i].id == id) {
+        if (timers[i].used && timers[i].hwnd == h && timers[i].id == id &&
+            timers[i].sys == sys) {
             timers[i].used = 0;
             return TRUE;
         }
     return FALSE;
 }
+
+UINT WINAPI SetTimer(HWND h, UINT id, UINT elapse, TIMERPROC proc)
+{
+    return set_timer(h, id, elapse, proc, 0);
+}
+
+BOOL WINAPI KillTimer(HWND h, UINT id) { return kill_timer(h, id, 0); }
+
+UINT WINAPI SetSystemTimer(HWND h, UINT id, UINT elapse, TIMERPROC proc)
+{
+    return set_timer(h, id, elapse, proc, 1);
+}
+
+BOOL WINAPI KillSystemTimer(HWND h, UINT id) { return kill_timer(h, id, 1); }
+
+/* microseconds a timer tick: WINN's timers count milliseconds */
+DWORD WINAPI GetTimerResolution(void) { return 1000; }
 
 void user_kill_window_timers(HWND h)
 {
@@ -506,19 +575,22 @@ static int timer_due(HTASK task)
     return 0;
 }
 
-static int timer_message(MSG *m, HWND filter, HTASK task, int remove)
+static int timer_message(MSG *m, HWND filter, HTASK task, int remove, UINT first, UINT last)
 {
     uint32_t t = now_ms();
     for (int i = 0; i < NTIMERS; i++) {
         wtimer *tm = &timers[i];
+        UINT msg = tm->sys ? WM_SYSTIMER : WM_TIMER;
         if (!tm->used || tm->task != task || (int32_t)(t - tm->due) < 0)
+            continue;
+        if ((first || last) && (msg < first || msg > last))
             continue;
         if (filter && tm->hwnd != filter && !IsChild(filter, tm->hwnd))
             continue;
         if (remove)
             tm->due = t + tm->elapse;
         m->hwnd = tm->hwnd;
-        m->message = WM_TIMER;
+        m->message = tm->sys ? WM_SYSTIMER : WM_TIMER;
         m->wParam = tm->id;
         m->lParam = (LPARAM)(intptr_t)tm->proc;
         m->time = t;
@@ -670,12 +742,10 @@ static int get_one(MSG *out, HWND h, UINT first, UINT last, int remove)
             return 1;
         }
     }
-    if (!first || (WM_TIMER >= first && WM_TIMER <= last)) {
-        MSG t;
-        if (timer_message(&t, h, me->h, remove)) {
-            *out = t;
-            return 1;
-        }
+    MSG t;
+    if (timer_message(&t, h, me->h, remove, first, last)) {
+        *out = t;
+        return 1;
     }
     return 0;
 }
@@ -893,3 +963,32 @@ int user_pump_one(void)
     return 1;
 }
 
+
+/* ---------------------------------------------------------------- the rest of 3.1's */
+
+/* idle: no input waiting for anyone */
+BOOL WINAPI IsUserIdle(void)
+{
+    for (int i = 0; i < q_count; i++)
+        if (qinput[(q_head + i) % QSIZE])
+            return FALSE;
+    return TRUE;
+}
+
+void WINAPI UserYield(void)
+{
+    pump_input();
+    task_yield();
+}
+
+/* the input for one window only (a system-modal one): noted */
+BOOL WINAPI LockInput(HANDLE reserved, HWND h, BOOL lock)
+{
+    (void)reserved; (void)h; (void)lock;
+    return TRUE;
+}
+
+/* a queue of that many messages: WINN's grows as it must */
+BOOL WINAPI SetMessageQueue(int size) { return size > 0; }
+
+DWORD WINAPI GetSystemDebugState(void) { return 0; }

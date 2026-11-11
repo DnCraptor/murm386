@@ -210,6 +210,10 @@ typedef struct wdc {
      * window's, not its client area's */
     int      follow, whole;
     uint32_t vis_gen;
+    RECT     bounds;        /* SetBoundsRect's: what was drawn (surface), its flags */
+    UINT     bounds_flags;
+    int      relabs;        /* SetRelAbs's (noted) */
+    DWORD    mapper;        /* SetMapperFlags's (noted) */
 } wdc;
 
 /* Screen and system state shared by GDI and USER. */
@@ -393,6 +397,8 @@ typedef struct wtask {
     struct wtask_ctx *ctx;
     struct wtask *dispatch_owner;  /* logical owner during cross-task SendMessage */
     int       starting;         /* WinExec's hourglass is its until it first waits */
+    int       priority;         /* SetPriority's: noted */
+    HANDLE    queue;            /* SetTaskQueue's (0: the task) */
 } wtask;
 
 void   task_init(void);

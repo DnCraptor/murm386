@@ -40,7 +40,7 @@ ROOT = os.path.dirname(HERE)
 SKIP = {
     'FatalExit', 'Yield', 'GetVersion', 'GetCurrentTask', 'GetNumTasks',
     'lstrcpy', 'lstrcat', 'lstrlen', 'lstrcpyn', 'GetModuleHandle',
-    'WinExec',
+    'WinExec', 'LoadLibrary', 'FreeLibrary',
     'MessageBox', 'PostQuitMessage', 'BeginPaint', 'EndPaint', 'CreateWindow',
     'CreateWindowEx', 'RegisterClass', 'DefWindowProc', 'GetMessage',
     'PeekMessage', 'TranslateMessage', 'DispatchMessage', 'LoadCursor', 'LoadIcon',

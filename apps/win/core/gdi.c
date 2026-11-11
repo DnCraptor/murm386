@@ -1807,6 +1807,8 @@ BOOL WINAPI RectVisible(HDC h, const RECT *rc)
 
 void gdi_begin_draw(wdc *dc, const RECT *b)
 {
+    if (dc->bounds_flags & DCB_ENABLE)          /* SetBoundsRect's accumulation */
+        UnionRect(&dc->bounds, &dc->bounds, b);
     if (dc->is_screen)
         cursor_exclude(b);
 }
@@ -3131,4 +3133,241 @@ void WINAPI LineDDA(int x0, int y0, int x1, int y1, LINEDDAPROC proc, LPARAM lp)
         if (e2 > -dx) { err -= dy; x += sx; }
         if (e2 < dy) { err += dx; y += sy; }
     }
+}
+
+/* ---------------------------------------------------------------- the rest of 3.1's */
+
+UINT WINAPI SetBoundsRect(HDC hdc, const RECT *rc, UINT flags)
+{
+    wdc *dc = gdi_dc(hdc);
+    if (!dc)
+        return 0;
+    UINT was = (dc->bounds_flags & DCB_ENABLE ? DCB_ENABLE : DCB_DISABLE) |
+               (IsRectEmpty(&dc->bounds) ? DCB_RESET : DCB_SET);
+    if (flags & DCB_RESET)
+        SetRectEmpty(&dc->bounds);
+    if ((flags & DCB_ACCUMULATE) && rc) {   /* logical, in the surface's terms */
+        POINT p[2] = { { rc->left, rc->top }, { rc->right, rc->bottom } };
+        LPtoDP(hdc, p, 2);
+        RECT d = { p[0].x + dc->org_x, p[0].y + dc->org_y, p[1].x + dc->org_x, p[1].y + dc->org_y };
+        UnionRect(&dc->bounds, &dc->bounds, &d);
+    }
+    if (flags & DCB_ENABLE)
+        dc->bounds_flags |= DCB_ENABLE;
+    if (flags & DCB_DISABLE)
+        dc->bounds_flags &= ~(UINT)DCB_ENABLE;
+    return was;
+}
+
+UINT WINAPI GetBoundsRect(HDC hdc, RECT *rc, UINT flags)
+{
+    wdc *dc = gdi_dc(hdc);
+    if (!dc)
+        return 0;
+    UINT r = IsRectEmpty(&dc->bounds) ? DCB_RESET : DCB_SET;
+    if (rc) {
+        if (r == DCB_RESET) {
+            SetRectEmpty(rc);
+        } else {
+            POINT p[2] = { { dc->bounds.left - dc->org_x, dc->bounds.top - dc->org_y },
+                           { dc->bounds.right - dc->org_x, dc->bounds.bottom - dc->org_y } };
+            DPtoLP(hdc, p, 2);
+            SetRect(rc, p[0].x, p[0].y, p[1].x, p[1].y);
+        }
+    }
+    if (flags & DCB_RESET)
+        SetRectEmpty(&dc->bounds);
+    return r;
+}
+
+int WINAPI SetRelAbs(HDC hdc, int mode)
+{
+    wdc *dc = gdi_dc(hdc);
+    if (!dc || (mode != ABSOLUTE && mode != RELATIVE))
+        return 0;
+    int old = dc->relabs ? dc->relabs : ABSOLUTE;
+    dc->relabs = mode;
+    return old;
+}
+
+int WINAPI GetRelAbs(HDC hdc)
+{
+    wdc *dc = gdi_dc(hdc);
+    return dc ? (dc->relabs ? dc->relabs : ABSOLUTE) : 0;
+}
+
+DWORD WINAPI SetMapperFlags(HDC hdc, DWORD flags)
+{
+    wdc *dc = gdi_dc(hdc);
+    if (!dc)
+        return GDI_ERROR;
+    DWORD old = dc->mapper;
+    dc->mapper = flags;
+    return old;
+}
+
+/* the screen's pixels are square: 1:1 when the mapper filters by it */
+DWORD WINAPI GetAspectRatioFilter(HDC hdc)
+{
+    wdc *dc = gdi_dc(hdc);
+    return dc && (dc->mapper & ASPECT_FILTERING) ? MAKELONG(1, 1) : 0;
+}
+
+BOOL WINAPI GetAspectRatioFilterEx(HDC hdc, SIZE *aspect)
+{
+    wdc *dc = gdi_dc(hdc);
+    if (!dc || !aspect)
+        return FALSE;
+    aspect->cx = aspect->cy = (dc->mapper & ASPECT_FILTERING) ? 1 : 0;
+    return TRUE;
+}
+
+BOOL WINAPI ResizePalette(HPALETTE hp, UINT n)
+{
+    wpalette *p = (wpalette *)win_handle_get(hp, WOBJ_PALETTE);
+    if (!p || !n || n > 256 || win_handle_is_stock(hp))
+        return FALSE;
+    for (UINT i = (UINT)p->n; i < n; i++) {
+        memset(&p->e[i], 0, sizeof(p->e[i]));
+        p->map[i] = 0;
+    }
+    p->n = (int)n;
+    return TRUE;
+}
+
+/* the entries made PC_RESERVED change, on the screen too where they are
+ * realized in the system palette's own entries */
+void WINAPI AnimatePalette(HPALETTE hp, UINT first, UINT n, const PALETTEENTRY *pe)
+{
+    wpalette *p = (wpalette *)win_handle_get(hp, WOBJ_PALETTE);
+    if (!p || !pe || first >= (UINT)p->n)
+        return;
+    if (first + n > (UINT)p->n)
+        n = (UINT)p->n - first;
+    int lo = 256, hi = -1;
+    for (UINT i = 0; i < n; i++) {
+        PALETTEENTRY *e = &p->e[first + i];
+        if (!(e->peFlags & PC_RESERVED))
+            continue;
+        e->peRed = pe[i].peRed;
+        e->peGreen = pe[i].peGreen;
+        e->peBlue = pe[i].peBlue;
+        int k = p->map[first + i];
+        if (p->realized && k >= 10 && k < 246) {
+            win_sys.syspal[k] = *e;
+            win_sys.syspal[k].peFlags = 0;
+            lo = k < lo ? k : lo;
+            hi = k > hi ? k : hi;
+        }
+    }
+    if (hi >= lo) {
+        color_cache_flush();
+        syspal_upload(lo, hi - lo + 1);
+    }
+}
+
+/* the window's pixels to the system palette's colours: they are already */
+int WINAPI UpdateColors(HDC hdc) { return gdi_dc(hdc) ? 1 : 0; }
+
+static UINT syspal_use = SYSPAL_STATIC;
+
+UINT WINAPI SetSystemPaletteUse(HDC hdc, UINT use)
+{
+    if (!gdi_dc(hdc) || (use != SYSPAL_STATIC && use != SYSPAL_NOSTATIC))
+        return 0;
+    UINT old = syspal_use;
+    syspal_use = use;               /* noted: the 20 static colours stay */
+    return old;
+}
+
+UINT WINAPI GetSystemPaletteUse(HDC hdc) { return gdi_dc(hdc) ? syspal_use : 0; }
+
+HFONT WINAPI GetCurLogFont(HDC hdc)
+{
+    wdc *dc = gdi_dc(hdc);
+    return dc ? (dc->font ? dc->font : win_sys.stock[SYSTEM_FONT]) : 0;
+}
+
+BOOL WINAPI IsGDIObject(HGDIOBJ obj)
+{
+    switch (win_handle_type(obj)) {
+    case WOBJ_PEN: return OBJ_PEN;
+    case WOBJ_BRUSH: return OBJ_BRUSH;
+    case WOBJ_FONT: return OBJ_FONT;
+    case WOBJ_BITMAP: return OBJ_BITMAP;
+    case WOBJ_REGION: return OBJ_REGION;
+    case WOBJ_PALETTE: return OBJ_PAL;
+    case WOBJ_DC: return OBJ_DC;
+    case WOBJ_METAFILE: return OBJ_METAFILE;
+    }
+    return 0;
+}
+
+/* GDI's objects belong to nobody in WINN: noted as done */
+void WINAPI SetObjectOwner(HGDIOBJ obj, HANDLE owner) { (void)obj; (void)owner; }
+void WINAPI MakeObjectPrivate(HGDIOBJ obj, BOOL priv) { (void)obj; (void)priv; }
+
+int WINAPI Death(HDC hdc) { return gdi_dc(hdc) ? 1 : 0; }
+
+int WINAPI Resurrection(HDC hdc, WORD w1, WORD w2, WORD w3, WORD w4, WORD w5, WORD w6)
+{
+    (void)w1; (void)w2; (void)w3; (void)w4; (void)w5; (void)w6;
+    return gdi_dc(hdc) ? 1 : 0;
+}
+
+int WINAPI GetEnvironment(LPCSTR port, LPSTR env, UINT size)
+{
+    (void)port; (void)env; (void)size;
+    return 0;
+}
+
+int WINAPI SetEnvironment(LPCSTR port, LPCSTR env, UINT size)
+{
+    (void)port; (void)env; (void)size;
+    return -1;
+}
+
+BOOL WINAPI GetRasterizerCaps(void *status, int size)
+{
+    RASTERIZER_STATUS rs = { sizeof(RASTERIZER_STATUS), 0, 0 };   /* no TrueType */
+    if (!status || size <= 0)
+        return FALSE;
+    memcpy(status, &rs, (size_t)size < sizeof(rs) ? (size_t)size : sizeof(rs));
+    return TRUE;
+}
+
+BOOL WINAPI CreateScalableFontResource(UINT hidden, LPCSTR fot, LPCSTR ttf, LPCSTR path)
+{
+    (void)hidden; (void)fot; (void)ttf; (void)path;
+    return FALSE;
+}
+
+/* the device's pens (its 16 colours, solid; black in each style) or its
+ * brushes (the 16 colours solid; black in each hatch) */
+int WINAPI EnumObjects(HDC hdc, int type, GOBJENUMPROC proc, LPARAM lp)
+{
+    if (!gdi_dc(hdc) || !proc || (type != OBJ_PEN && type != OBJ_BRUSH))
+        return 0;
+    int r = 1;
+    for (int i = 0; i < 16 && r; i++) {
+        PALETTEENTRY e = win_sys.syspal[i < 8 ? i : 240 + i];   /* the VGA 16 */
+        COLORREF c = RGB(e.peRed, e.peGreen, e.peBlue);
+        if (type == OBJ_PEN) {
+            LOGPEN p = { PS_SOLID, { 1, 0 }, c };
+            r = proc(&p, lp);
+        } else {
+            LOGBRUSH b = { BS_SOLID, c, 0 };
+            r = proc(&b, lp);
+        }
+    }
+    for (int k = 1; k <= (type == OBJ_PEN ? PS_DASHDOTDOT : HS_DIAGCROSS + 1) && r; k++) {
+        if (type == OBJ_PEN) {
+            LOGPEN p = { (UINT)k, { 1, 0 }, RGB(0, 0, 0) };
+            r = proc(&p, lp);
+        } else {
+            LOGBRUSH b = { BS_HATCHED, RGB(0, 0, 0), k - 1 };
+            r = proc(&b, lp);
+        }
+    }
+    return r;
 }

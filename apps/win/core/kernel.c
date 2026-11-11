@@ -618,3 +618,24 @@ UINT WINAPI GetAtomName(ATOM a, LPSTR buf, int size)
     lstrcpyn(buf, e->name, size);
     return (UINT)lstrlen(buf);
 }
+
+/* ---------------------------------------------------------------- the rest of 3.1's */
+
+BOOL WINAPI DefineHandleTable(WORD offset) { (void)offset; return TRUE; }
+void WINAPI ValidateCodeSegments(void) {}
+
+/* the swap area: as large as asked, at most 64K paragraphs */
+LONG WINAPI SetSwapAreaSize(UINT size)
+{
+    return MAKELONG(size, 0xFFFF);
+}
+
+void WINAPI LimitEMSPages(DWORD kb) { (void)kb; }
+
+/* the atom table: WINN's grows as it must; an atom is its own handle */
+BOOL WINAPI InitAtomTable(int size) { return size > 0; }
+HANDLE WINAPI GetAtomHandle(ATOM atom) { return (HANDLE)atom; }
+
+/* WINN's global memory is never discarded: no order to tell */
+HGLOBAL WINAPI GlobalLRUOldest(HGLOBAL h) { return h; }
+HGLOBAL WINAPI GlobalLRUNewest(HGLOBAL h) { return h; }

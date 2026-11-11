@@ -918,6 +918,13 @@ BOOL    WINAPI DlgDirSelectComboBoxEx(HWND dlg, LPSTR out, int size, int id);
 #define WM_RENDERFORMAT     0x0305
 #define WM_RENDERALLFORMATS 0x0306
 #define WM_DESTROYCLIPBOARD 0x0307
+#define WM_DRAWCLIPBOARD    0x0308
+#define WM_PAINTCLIPBOARD   0x0309
+#define WM_VSCROLLCLIPBOARD 0x030A
+#define WM_SIZECLIPBOARD    0x030B
+#define WM_ASKCBFORMATNAME  0x030C
+#define WM_CHANGECBCHAIN    0x030D
+#define WM_HSCROLLCLIPBOARD 0x030E
 #define CF_TEXT             1
 #define CF_BITMAP           2
 #define CF_METAFILEPICT     3
@@ -1014,6 +1021,7 @@ BOOL    WINAPI TranslateMDISysAccel(HWND client, LPMSG msg);
 #define CTLCOLOR_DLG        4
 #define CTLCOLOR_SCROLLBAR  5
 #define CTLCOLOR_STATIC     6
+#define CTLCOLOR_MAX        8
 
 #define MA_ACTIVATE         1
 #define MA_ACTIVATEANDEAT   2
@@ -1238,5 +1246,61 @@ int     WINAPI TranslateAccelerator(HWND hwnd, HACCEL h, LPMSG msg);
 
 /* Application entry: native apps define WinMain; the runtime's main() calls it. */
 int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmdline, int show);
+
+/* ---------------------------------------------------------------- USER, the rest of 3.1's */
+
+#define WM_SYSTIMER         0x0118
+#define DCX_WINDOW          0x00000001L
+#define DCX_CACHE           0x00000002L
+#define DCX_CLIPCHILDREN    0x00000008L
+#define DCX_CLIPSIBLINGS    0x00000010L
+#define DCX_PARENTCLIP      0x00000020L
+#define DCX_EXCLUDERGN      0x00000040L
+#define DCX_INTERSECTRGN    0x00000080L
+#define DCX_LOCKWINDOWUPDATE 0x00000400L
+#define DCX_USESTYLE        0x00010000L
+#define SEB_OK              1           /* SysErrorBox's buttons */
+#define SEB_CANCEL          2
+#define SEB_YES             3
+#define SEB_NO              4
+#define SEB_RETRY           5
+#define SEB_ABORT           6
+#define SEB_IGNORE          7
+#define SEB_DEFBUTTON       0x8000
+
+/* the clipboard viewers' chain: the one first in it (WM_DRAWCLIPBOARD as
+ * the clipboard changes, WM_CHANGECBCHAIN as the chain does) */
+HWND    WINAPI SetClipboardViewer(HWND h);
+HWND    WINAPI GetClipboardViewer(void);
+BOOL    WINAPI ChangeClipboardChain(HWND remove, HWND next);
+HWND    WINAPI GetOpenClipboardWindow(void);
+int     WINAPI GetPriorityClipboardFormat(UINT *formats, int n);
+/* the cursor kept in a rectangle (NULL: the screen) */
+void    WINAPI ClipCursor(const RECT *rc);
+void    WINAPI GetClipCursor(RECT *rc);
+/* a timer of the system's: WM_SYSTIMER */
+UINT    WINAPI SetSystemTimer(HWND h, UINT id, UINT elapse, TIMERPROC proc);
+BOOL    WINAPI KillSystemTimer(HWND h, UINT id);
+DWORD   WINAPI GetTimerResolution(void);    /* microseconds a tick */
+BOOL    WINAPI IsUserIdle(void);
+void    WINAPI UserYield(void);
+BOOL    WINAPI EnableHardwareInput(BOOL enable);   /* the keyboard's and the mouse's */
+BOOL    WINAPI LockInput(HANDLE reserved, HWND h, BOOL lock);
+BOOL    WINAPI SetMessageQueue(int size);
+DWORD   WINAPI GetSystemDebugState(void);
+void    WINAPI EndMenu(void);
+BOOL    WINAPI SetSystemMenu(HWND h, HMENU menu);
+HWND    WINAPI WindowFromDC(HDC hdc);
+HDC     WINAPI GetDCEx(HWND h, HRGN clip, DWORD flags);
+HBRUSH  WINAPI GetControlBrush(HWND h, HDC hdc, UINT type);
+void    WINAPI FillWindow(HWND parent, HWND h, HDC hdc, HBRUSH brush);
+void    WINAPI PaintRect(HWND parent, HWND h, HDC hdc, HBRUSH brush, const RECT *rc);
+void    WINAPI RepaintScreen(void);
+HWND    WINAPI GetDesktopHwnd(void);
+BOOL    WINAPI ExitWindowsExec(LPCSTR exe, LPCSTR params);
+UINT    WINAPI SysErrorBox(LPCSTR text, LPCSTR caption, UINT b1, UINT b2, UINT b3);
+BOOL    WINAPI DragDetect(HWND h, POINT pt);
+void    WINAPI CalcChildScroll(HWND h, UINT bar);
+void    WINAPI ScrollChildren(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 
 #endif /* MURM_WINUSER_H */

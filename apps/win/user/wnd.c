@@ -9,6 +9,7 @@
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
+#include <stdlib.h>
 #include <string.h>
 #include "user.h"
 
@@ -324,6 +325,7 @@ BOOL WINAPI IsIconic(HWND h) { wwnd *w = user_wnd(h); return w && (w->style & WS
 BOOL WINAPI IsZoomed(HWND h) { wwnd *w = user_wnd(h); return w && (w->style & WS_MAXIMIZE); }
 
 HWND WINAPI GetDesktopWindow(void) { return U.desktop ? U.desktop->h : 0; }
+HWND WINAPI GetDesktopHwnd(void) { return GetDesktopWindow(); }
 
 HWND WINAPI GetParent(HWND h)
 {
@@ -1926,4 +1928,46 @@ void user_init_windows(void)
     wrgn_set_rect(&r, &d->rc);
     add_update(d, &r, 1);
     wrgn_free(&r);
+}
+
+/* Windows left to run a DOS program and come back: WINN cannot */
+BOOL WINAPI ExitWindowsExec(LPCSTR exe, LPCSTR params)
+{
+    (void)exe; (void)params;
+    return FALSE;
+}
+
+/* the mouse, its left button down at pt (screen), moved far enough to be
+ * dragging before it went up (or a key was pressed) */
+BOOL WINAPI DragDetect(HWND h, POINT pt)
+{
+    int dx = GetSystemMetrics(SM_CXDOUBLECLK) / 2, dy = GetSystemMetrics(SM_CYDOUBLECLK) / 2;
+    BOOL drag = FALSE;
+    if (!user_wnd(h))
+        return FALSE;
+    if (dx < 2) dx = 2;
+    if (dy < 2) dy = 2;
+    SetCapture(h);
+    for (;;) {
+        MSG m;
+        if (!user_peek(&m, 0, 0, 0, PM_REMOVE)) {
+            if (win_sys.input)
+                win_sys.input->idle();
+            continue;
+        }
+        if (m.message == WM_QUIT) {
+            PostQuitMessage((int)m.wParam);
+            break;
+        }
+        if (m.message == WM_LBUTTONUP || m.message == WM_KEYDOWN ||
+            m.message == WM_RBUTTONDOWN)
+            break;
+        if (m.message == WM_MOUSEMOVE &&
+            (abs(U.mouse_x - pt.x) > dx || abs(U.mouse_y - pt.y) > dy)) {
+            drag = TRUE;
+            break;
+        }
+    }
+    ReleaseCapture();
+    return drag;
 }

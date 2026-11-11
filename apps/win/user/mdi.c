@@ -722,3 +722,72 @@ UINT WINAPI ArrangeIconicWindows(HWND parent)
     icon_arrange(parent, m);
     return UM_ICONH + UM_ICONGAP;
 }
+
+/* ---------------------------------------------------------------- scrolling the children */
+
+/* the scroll bar's range (SB_HORZ, SB_VERT, SB_BOTH) for all the children
+ * to be seen: none when they are all in the client area */
+void WINAPI CalcChildScroll(HWND h, UINT bar)
+{
+    RECT cl, all, r;
+    if (!IsWindow(h))
+        return;
+    GetClientRect(h, &cl);
+    SetRectEmpty(&all);
+    for (HWND c = GetWindow(h, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT)) {
+        if (!IsWindowVisible(c))
+            continue;
+        GetWindowRect(c, &r);
+        ScreenToClient(h, (POINT *)&r.left);
+        ScreenToClient(h, (POINT *)&r.right);
+        UnionRect(&all, &all, &r);
+    }
+    if (bar == SB_HORZ || bar == SB_BOTH) {
+        int lo = all.left < 0 ? all.left : 0, hi = all.right > cl.right ? all.right - cl.right : 0;
+        SetScrollRange(h, SB_HORZ, lo, hi, FALSE);
+        SetScrollPos(h, SB_HORZ, 0, TRUE);
+    }
+    if (bar == SB_VERT || bar == SB_BOTH) {
+        int lo = all.top < 0 ? all.top : 0, hi = all.bottom > cl.bottom ? all.bottom - cl.bottom : 0;
+        SetScrollRange(h, SB_VERT, lo, hi, FALSE);
+        SetScrollPos(h, SB_VERT, 0, TRUE);
+    }
+}
+
+/* WM_HSCROLL or WM_VSCROLL's scrolling of the children */
+void WINAPI ScrollChildren(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+    int bar = msg == WM_HSCROLL ? SB_HORZ : msg == WM_VSCROLL ? SB_VERT : -1;
+    RECT cl;
+    int lo, hi;
+    if (bar < 0 || !IsWindow(h))
+        return;
+    GetClientRect(h, &cl);
+    GetScrollRange(h, bar, &lo, &hi);
+    int pos = GetScrollPos(h, bar), page = bar == SB_HORZ ? cl.right : cl.bottom;
+    int line = bar == SB_HORZ ? GetSystemMetrics(SM_CXVSCROLL) : GetSystemMetrics(SM_CYHSCROLL);
+    int to = pos;
+    switch (wp) {
+    case SB_LINEUP: to = pos - line; break;
+    case SB_LINEDOWN: to = pos + line; break;
+    case SB_PAGEUP: to = pos - page; break;
+    case SB_PAGEDOWN: to = pos + page; break;
+    case SB_THUMBPOSITION: to = (int16_t)LOWORD(lp); break;
+    case SB_TOP: to = lo; break;
+    case SB_BOTTOM: to = hi; break;
+    case SB_ENDSCROLL:
+        CalcChildScroll(h, (UINT)bar);
+        return;
+    default:
+        return;
+    }
+    if (to < lo) to = lo;
+    if (to > hi) to = hi;
+    if (to == pos)
+        return;
+    SetScrollPos(h, bar, to, TRUE);
+    if (bar == SB_HORZ)
+        ScrollWindow(h, pos - to, 0, NULL, NULL);
+    else
+        ScrollWindow(h, 0, pos - to, NULL, NULL);
+}

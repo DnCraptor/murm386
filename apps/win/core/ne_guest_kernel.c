@@ -191,7 +191,8 @@ static uint16_t load_resource(args *a, ne_user *u)
 }
 
 /* GetTempFileName(BYTE drive, LPCSTR prefix, UINT unique, LPSTR): in the
- * Windows directory, ~PRE1234.TMP; unique 0: a name no file has, made */
+ * Windows directory's TEMP subdirectory, ~PRE1234.TMP.
+ * unique 0: a name no file has, made */
 static uint16_t temp_file_name(args *a)
 {
     uint32_t out = dw(a, 4), prefix_far = dw(a, 10);
@@ -201,10 +202,15 @@ static uint16_t temp_file_name(args *a)
         return 0;
     prefix[3] = 0;
     UINT n = GetWindowsDirectory(dir, sizeof(dir));
-    if (!n || n > sizeof(dir) - 2)
+    if (!n || n > sizeof(dir) - 7)
         return 0;
     if (dir[n - 1] != '\\' && dir[n - 1] != '/')
         lstrcat(dir, "\\");
+    lstrcat(dir, "TEMP");
+    int attr = win_file_attr(dir, 0, 0);
+    if ((attr < 0 && !CreateDirectoryN(dir)) || (attr >= 0 && !(attr & 0x10)))
+        return 0;
+    lstrcat(dir, "\\");
     uint16_t num = unique ? unique : (uint16_t)GetTickCount();
     for (int tries = 0; tries < 256; tries++, num++) {
         if (!num)
@@ -347,6 +353,40 @@ static int CALLBACK ne_fontproc(const LOGFONT *lf, const TEXTMETRIC *tm, int typ
                                 (uint16_t)(far + lfn), (uint16_t)type, (uint16_t)(e->lp >> 16),
                                 (uint16_t)e->lp };
     return (int16_t)win_ne_call(e->c, e->proc, words, 7, blob, len);
+}
+
+/* EnumObjects' LOGPEN (style, width's POINT, colour: 10 bytes) or
+ * LOGBRUSH (style, colour, hatch: 8) on the program's stack for its
+ * procedure (LPVOID, LPARAM) */
+typedef struct {
+    win_ne_guest_api_context *c;
+    uint32_t proc, lp;
+    int type;
+} obj_enum;
+
+static int CALLBACK ne_objproc(void *obj, LPARAM lp)
+{
+    const obj_enum *e = (const obj_enum *)(uintptr_t)lp;
+    uint8_t g[10];
+    uint16_t len;
+    if (e->type == OBJ_PEN) {
+        const LOGPEN *p = (const LOGPEN *)obj;
+        wr16(g, (uint16_t)p->lopnStyle);
+        wr16(g + 2, (uint16_t)p->lopnWidth.x);
+        wr16(g + 4, (uint16_t)p->lopnWidth.y);
+        wr32(g + 6, p->lopnColor);
+        len = 10;
+    } else {
+        const LOGBRUSH *b = (const LOGBRUSH *)obj;
+        wr16(g, (uint16_t)b->lbStyle);
+        wr32(g + 2, b->lbColor);
+        wr16(g + 6, (uint16_t)b->lbHatch);
+        len = 8;
+    }
+    uint32_t far = win_ne_blob_far(e->c, len);
+    const uint16_t words[4] = { (uint16_t)(far >> 16), (uint16_t)far, (uint16_t)(e->lp >> 16),
+                                (uint16_t)e->lp };
+    return (int16_t)win_ne_call(e->c, e->proc, words, 4, g, len);
 }
 
 /* LineDDA's points to the program's procedure (x, y, LPARAM) */
@@ -699,6 +739,57 @@ static __attribute__((noinline)) int gdi_more(args *a, uint16_t service, uint32_
             return 1;
         if (e.proc)
             *v = (uint16_t)EnumFonts(w(a, 16), face, ne_fontproc, (LPARAM)(uintptr_t)&e);
+        return 1;
+    }
+    case 0x3047: {                      /* EnumObjects(HDC, int, proc, LPARAM) */
+        obj_enum e = { a->ctx, dw(a, 8), dw(a, 4), (int16_t)w(a, 12) };
+        if (e.proc)
+            *v = (uint16_t)EnumObjects(w(a, 14), e.type, ne_objproc, (LPARAM)(uintptr_t)&e);
+        return 1;
+    }
+    /* TrueType's: WINN's fonts are raster ones */
+    case 0x3133: case 0x3134: case 0x314c:  /* GetCharABCWidths, GetOutlineTextMetrics,
+                                             * GetKerningPairs: none */
+        *v = 0;
+        *dword = service == 0x3134;
+        return 1;
+    case 0x3135: case 0x3137:           /* GetGlyphOutline, GetFontData: GDI_ERROR */
+        *v = GDI_ERROR;
+        *dword = 1;
+        return 1;
+    case 0x3178:                        /* ResetDC(HDC, DEVMODE FAR *): no printer's to change */
+        *v = w(a, 8);
+        return 1;
+    case 0x316f: {                      /* AnimatePalette(HPALETTE, first, n, PALETTEENTRY FAR *) */
+        UINT n = w(a, 8);
+        PALETTEENTRY pe[256];
+        if (n > 256)
+            n = 256;
+        if (rd_(a, dw(a, 4), pe, n * sizeof(PALETTEENTRY)))
+            AnimatePalette(w(a, 12), w(a, 10), n, pe);
+        return 1;
+    }
+    case 0x100b:                        /* SetSystemTimer(HWND, id, ms, proc): WM_SYSTIMER */
+        *v = SetSystemTimer(w(a, 12), w(a, 10), w(a, 8), NULL);
+        return 1;
+    case 0x1192: {                      /* GetPriorityClipboardFormat(UINT FAR *, int) */
+        int n = (int16_t)w(a, 4);
+        UINT f[64];
+        uint8_t g[128];
+        if (n < 0)
+            n = 0;
+        if (n > 64)
+            n = 64;
+        if (!rd_(a, dw(a, 6), g, (uint32_t)n * 2))
+            return 1;
+        for (int i = 0; i < n; i++)
+            f[i] = rd16(g + 2 * i);
+        *v = (uint16_t)GetPriorityClipboardFormat(f, n);
+        return 1;
+    }
+    case 0x11d1: {                      /* DragDetect(HWND, POINT) */
+        POINT pt = { (int16_t)w(a, 4), (int16_t)w(a, 6) };
+        *v = (uint16_t)DragDetect(w(a, 8), pt);
         return 1;
     }
     /* printing: no printers */
@@ -1254,8 +1345,6 @@ int ne_kernel_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *d
         return 1;
     case 155:                           /* GetTaskDS */
         *v = dgroup(c);
-        return 1;
-    case 0x1010:                        /* ClipCursor: not confined */
         return 1;
     case 0x111c:                        /* GetFreeSystemResources: plenty */
         *v = 90;

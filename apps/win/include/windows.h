@@ -267,6 +267,13 @@ UINT    WINAPI GlobalGetAtomName(ATOM a, LPSTR buf, int size);
 
 #define OBJ_PEN         1
 #define OBJ_BRUSH       2
+#define OBJ_DC          3           /* IsGDIObject's others, Win32's values */
+#define OBJ_METADC      4
+#define OBJ_PAL         5
+#define OBJ_FONT        6
+#define OBJ_BITMAP      7
+#define OBJ_REGION      8
+#define OBJ_METAFILE    9
 
 #define ERROR           0
 #define NULLREGION      1
@@ -456,6 +463,10 @@ typedef struct tagBITMAPINFO {
 typedef struct tagPALETTEENTRY {
     BYTE peRed, peGreen, peBlue, peFlags;
 } PALETTEENTRY, *LPPALETTEENTRY;
+
+#define PC_RESERVED     0x01
+#define PC_EXPLICIT     0x02
+#define PC_NOCOLLAPSE   0x04
 
 typedef struct tagLOGPALETTE {
     WORD palVersion, palNumEntries;
@@ -877,7 +888,77 @@ void    WINAPI SoundStopN(void);
 int     WINAPI SoundCountN(void);
 void    WINAPI SoundWaitN(void);    /* until they are played */
 
+/* ---------------------------------------------------------------- GDI, the rest of 3.1's */
+
+#define DCB_RESET       0x0001
+#define DCB_ACCUMULATE  0x0002
+#define DCB_DIRTY       DCB_ACCUMULATE
+#define DCB_SET         (DCB_RESET | DCB_ACCUMULATE)
+#define DCB_ENABLE      0x0004
+#define DCB_DISABLE     0x0008
+#define SYSPAL_STATIC   1
+#define SYSPAL_NOSTATIC 2
+#define ASPECT_FILTERING 0x0001
+#define ABSOLUTE        1
+#define RELATIVE        2
+#define GDI_ERROR       0xFFFFFFFFul
+
+typedef struct { short nSize, wFlags, nLanguageID; } RASTERIZER_STATUS;
+#define TT_AVAILABLE    0x0001
+#define TT_ENABLED      0x0002
+
+/* the bounds of what is drawn in a DC, accumulated while DCB_ENABLE'd */
+UINT    WINAPI SetBoundsRect(HDC hdc, const RECT *rc, UINT flags);
+UINT    WINAPI GetBoundsRect(HDC hdc, RECT *rc, UINT flags);
+int     WINAPI SetRelAbs(HDC hdc, int mode);       /* noted: coordinates are absolute */
+int     WINAPI GetRelAbs(HDC hdc);
+DWORD   WINAPI SetMapperFlags(HDC hdc, DWORD flags);
+DWORD   WINAPI GetAspectRatioFilter(HDC hdc);
+BOOL    WINAPI GetAspectRatioFilterEx(HDC hdc, SIZE *aspect);
+BOOL    WINAPI ResizePalette(HPALETTE hp, UINT n);
+void    WINAPI AnimatePalette(HPALETTE hp, UINT first, UINT n, const PALETTEENTRY *pe);
+int     WINAPI UpdateColors(HDC hdc);
+UINT    WINAPI SetSystemPaletteUse(HDC hdc, UINT use);
+UINT    WINAPI GetSystemPaletteUse(HDC hdc);
+HFONT   WINAPI GetCurLogFont(HDC hdc);
+BOOL    WINAPI IsGDIObject(HGDIOBJ obj);            /* its OBJ_ type, 0 for none */
+void    WINAPI SetObjectOwner(HGDIOBJ obj, HANDLE owner);
+void    WINAPI MakeObjectPrivate(HGDIOBJ obj, BOOL priv);
+/* the display's switching away and back (a DOS box's full screen): nothing */
+int     WINAPI Death(HDC hdc);
+int     WINAPI Resurrection(HDC hdc, WORD w1, WORD w2, WORD w3, WORD w4, WORD w5, WORD w6);
+/* a printer port's environment: WINN has no printers */
+int     WINAPI GetEnvironment(LPCSTR port, LPSTR env, UINT size);
+int     WINAPI SetEnvironment(LPCSTR port, LPCSTR env, UINT size);
+/* the pens or brushes (OBJ_PEN, OBJ_BRUSH) the device has, a LOGPEN or a
+ * LOGBRUSH each, to proc until it returns 0 */
+typedef int (CALLBACK *GOBJENUMPROC)(void *obj, LPARAM lp);
+int     WINAPI EnumObjects(HDC hdc, int type, GOBJENUMPROC proc, LPARAM lp);
+/* TrueType: WINN's fonts are raster ones */
+BOOL    WINAPI GetRasterizerCaps(void *status, int size);
+BOOL    WINAPI CreateScalableFontResource(UINT hidden, LPCSTR fot, LPCSTR ttf, LPCSTR path);
+
 /* ---------------------------------------------------------------- tasks */
+/* the rest of KERNEL 3.1's: a task's priority (-32..15) changed by delta,
+ * the new one; a task locked to run alone (noted); its message queue (the
+ * task itself); an event (nothing waits for one); memory things WINN has
+ * no use for, done as asked */
+int     WINAPI SetPriority(HTASK task, int delta);
+HTASK   WINAPI LockCurrentTask(BOOL lock);
+HTASK   WINAPI IsTaskLocked(void);
+HANDLE  WINAPI GetTaskQueue(HTASK task);
+HANDLE  WINAPI SetTaskQueue(HTASK task, HANDLE queue);
+void    WINAPI PostEvent(HTASK task);
+BOOL    WINAPI IsWinOldApTask(HTASK task);
+BOOL    WINAPI DefineHandleTable(WORD offset);
+void    WINAPI ValidateCodeSegments(void);
+LONG    WINAPI SetSwapAreaSize(UINT size);
+void    WINAPI LimitEMSPages(DWORD kb);
+BOOL    WINAPI InitAtomTable(int size);
+HANDLE  WINAPI GetAtomHandle(ATOM atom);
+HGLOBAL WINAPI GlobalLRUOldest(HGLOBAL h);
+HGLOBAL WINAPI GlobalLRUNewest(HGLOBAL h);
+
 
 UINT    WINAPI WinExec(LPCSTR cmdline, UINT show);
 HTASK   WINAPI GetCurrentTask(void);

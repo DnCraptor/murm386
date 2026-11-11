@@ -613,3 +613,44 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
     task_run_now(t);
     return t->h;
 }
+
+/* ---------------------------------------------------------------- the rest of 3.1's */
+
+static HTASK locked;                /* LockCurrentTask's */
+
+int WINAPI SetPriority(HTASK task, int delta)
+{
+    wtask *t = task ? task_from_handle(task) : task_current();
+    if (!t)
+        return 0;
+    int p = t->priority + delta;
+    t->priority = p < -32 ? -32 : p > 15 ? 15 : p;
+    return t->priority;
+}
+
+HTASK WINAPI LockCurrentTask(BOOL lock)
+{
+    locked = lock ? task_current()->h : 0;
+    return locked;
+}
+
+HTASK WINAPI IsTaskLocked(void) { return locked && IsTask(locked) ? locked : 0; }
+
+HANDLE WINAPI GetTaskQueue(HTASK task)
+{
+    wtask *t = task ? task_from_handle(task) : task_current();
+    return t ? (t->queue ? t->queue : t->h) : 0;
+}
+
+HANDLE WINAPI SetTaskQueue(HTASK task, HANDLE queue)
+{
+    wtask *t = task ? task_from_handle(task) : task_current();
+    if (!t)
+        return 0;
+    HANDLE old = t->queue ? t->queue : t->h;
+    t->queue = queue;
+    return old;
+}
+
+void WINAPI PostEvent(HTASK task) { (void)task; }
+BOOL WINAPI IsWinOldApTask(HTASK task) { (void)task; return FALSE; }

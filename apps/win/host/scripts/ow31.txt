@@ -1,0 +1,16 @@
+# The rest of Windows 3.1's USER, GDI and KERNEL from a Win16 program on
+# the i386 core (OW31): the clipboard viewers' chain, ClipCursor, a system
+# timer, a DC's bounds, EnumObjects, GDI's objects and modes, a palette
+# resized, the rasterizer, a task's priority:
+#     ./winhost scripts/ow31.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OW31
+key RETURN
+wait 400
+snap o31_result.ppm
+exit

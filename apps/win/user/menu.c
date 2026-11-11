@@ -1200,3 +1200,22 @@ int WINAPI TranslateAccelerator(HWND h, HACCEL ha, LPMSG msg)
     }
     return 0;
 }
+
+/* the menu being tracked closes, nothing chosen */
+void WINAPI EndMenu(void)
+{
+    if (T.depth)
+        T.done = 1;
+}
+
+/* a window's system menu replaced by another */
+BOOL WINAPI SetSystemMenu(HWND h, HMENU menu)
+{
+    wwnd *w = user_wnd(h);
+    if (!w || !menu_get(menu))
+        return FALSE;
+    if (w->sysmenu && w->sysmenu != menu)
+        DestroyMenu(w->sysmenu);
+    w->sysmenu = menu;
+    return TRUE;
+}

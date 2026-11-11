@@ -654,31 +654,19 @@ static BOOL CALLBACK msgbox_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     (void)lp;
     if (msg == WM_INITDIALOG)
         return TRUE;
-    if (msg == WM_COMMAND && wp >= IDOK && wp <= IDNO) {
-        EndDialog(h, (int)wp);
+    if (msg == WM_COMMAND && ((wp >= IDOK && wp <= IDNO) || (wp >= 0x100 && wp < 0x103))) {
+        EndDialog(h, (int)wp);                  /* SysErrorBox's: 100h.. */
         return TRUE;
     }
     return FALSE;
 }
 
-int WINAPI MessageBox(HWND owner, LPCSTR text, LPCSTR caption, UINT type)
+/* a box of text, an icon (0 none, 1 hand, 2 question, 3 exclamation, 4
+ * asterisk) and nb buttons of these ids and names, def's the default: the
+ * id of the one pressed */
+static int text_box(HWND owner, LPCSTR text, LPCSTR caption, int icon, int nb, const int *ids,
+                    const char *const *names, int def)
 {
-    static const struct { int n; int ids[3]; const char *names[3]; } sets[6] = {
-        { 1, { IDOK }, { "OK" } },
-        { 2, { IDOK, IDCANCEL }, { "OK", "Cancel" } },
-        { 3, { IDABORT, IDRETRY, IDIGNORE }, { "&Abort", "&Retry", "&Ignore" } },
-        { 3, { IDYES, IDNO, IDCANCEL }, { "&Yes", "&No", "Cancel" } },
-        { 2, { IDYES, IDNO }, { "&Yes", "&No" } },
-        { 2, { IDRETRY, IDCANCEL }, { "&Retry", "Cancel" } },
-    };
-    int set = (int)(type & 0x0F);
-    if (set > 5)
-        set = 0;
-    int icon = (int)(type & 0xF0) >> 4;           /* 1 hand, 2 question, 3 excl, 4 asterisk */
-    int def = (int)(type & 0x0F00) >> 8;
-    if (def >= sets[set].n)
-        def = 0;
-
     /* measure the text in pixels, then convert to dialog units */
     HDC dc = GetDC(0);
     SelectObject(dc, GetStockObject(SYSTEM_FONT));
@@ -687,7 +675,7 @@ int WINAPI MessageBox(HWND owner, LPCSTR text, LPCSTR caption, UINT type)
     ReleaseDC(0, dc);
     int tw = (tr.right + 1) * 4 / DLG_BASE_X + 1, th = (tr.bottom + 1) * 8 / DLG_BASE_Y + 1;
     int ix = 0, iw = icon ? 24 : 0;
-    int bw = 40, gap = 8, nb = sets[set].n;
+    int bw = 40, gap = 8;
     int width = ix + iw + tw + 16;
     int bwidth = nb * bw + (nb - 1) * gap + 16;
     if (width < bwidth) width = bwidth;
@@ -707,10 +695,10 @@ int WINAPI MessageBox(HWND owner, LPCSTR text, LPCSTR caption, UINT type)
                               SS_LEFT | SS_NOPREFIX | WS_VISIBLE, "STATIC", text ? text : "" };
     int bx = (width - (nb * bw + (nb - 1) * gap)) / 2;
     for (int i = 0; i < nb; i++)
-        items[n++] = (DLGITEM_N){ bx + i * (bw + gap), 8 + textH + 8, bw, 14, sets[set].ids[i],
+        items[n++] = (DLGITEM_N){ bx + i * (bw + gap), 8 + textH + 8, bw, 14, ids[i],
                                   (DWORD)((i == def ? BS_DEFPUSHBUTTON : BS_PUSHBUTTON) |
                                           WS_TABSTOP | WS_VISIBLE | (i == 0 ? WS_GROUP : 0)),
-                                  "BUTTON", sets[set].names[i] };
+                                  "BUTTON", names[i] };
     int sw = win_sys.screen.width * 4 / DLG_BASE_X, sh = win_sys.screen.height * 8 / DLG_BASE_Y;
     DLGTEMPLATE_N t = { WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_ABSALIGN,
                         (BYTE)n, (sw - width) / 2, (sh - height) / 2, width, height,
@@ -721,10 +709,62 @@ int WINAPI MessageBox(HWND owner, LPCSTR text, LPCSTR caption, UINT type)
      * disabled). */
     wwnd *act = U.active;
     HWND own = owner ? owner : (act && act->task == task_current()->h ? act->h : 0);
-    int r = DialogBoxIndirectN(0, &t, items, own, msgbox_proc);
+    return DialogBoxIndirectN(0, &t, items, own, msgbox_proc);
+}
+
+int WINAPI MessageBox(HWND owner, LPCSTR text, LPCSTR caption, UINT type)
+{
+    static const struct { int n; int ids[3]; const char *names[3]; } sets[6] = {
+        { 1, { IDOK }, { "OK" } },
+        { 2, { IDOK, IDCANCEL }, { "OK", "Cancel" } },
+        { 3, { IDABORT, IDRETRY, IDIGNORE }, { "&Abort", "&Retry", "&Ignore" } },
+        { 3, { IDYES, IDNO, IDCANCEL }, { "&Yes", "&No", "Cancel" } },
+        { 2, { IDYES, IDNO }, { "&Yes", "&No" } },
+        { 2, { IDRETRY, IDCANCEL }, { "&Retry", "Cancel" } },
+    };
+    int set = (int)(type & 0x0F);
+    if (set > 5)
+        set = 0;
+    int icon = (int)(type & 0xF0) >> 4;           /* 1 hand, 2 question, 3 excl, 4 asterisk */
+    int def = (int)(type & 0x0F00) >> 8;
+    if (def >= sets[set].n)
+        def = 0;
+    int r = text_box(owner, text, caption, icon, sets[set].n, sets[set].ids, sets[set].names, def);
     if (r == IDCANCEL && !(set == 1 || set == 3 || set == 5))
         r = sets[set].ids[0];
     return r;
+}
+
+/* the system's error box: up to three buttons (SEB_OK .. SEB_IGNORE, 0
+ * none; SEB_DEFBUTTON the default): 1, 2 or 3, the one pressed */
+UINT WINAPI SysErrorBox(LPCSTR text, LPCSTR caption, UINT b1, UINT b2, UINT b3)
+{
+    static const char *const names[8] = { NULL, "OK", "Cancel", "&Yes", "&No", "&Retry",
+                                           "&Abort", "&Ignore" };
+    UINT b[3] = { b1, b2, b3 };
+    int ids[3], nb = 0, def = 0, which[3];
+    const char *bn[3];
+    for (int i = 0; i < 3; i++) {
+        UINT k = b[i] & 0x7FFF;
+        if (!k || k > SEB_IGNORE)
+            continue;
+        if (b[i] & SEB_DEFBUTTON)
+            def = nb;
+        which[nb] = i + 1;
+        ids[nb] = 0x100 + i;
+        bn[nb++] = names[k];
+    }
+    if (!nb) {
+        ids[0] = 0x100;
+        which[0] = 1;
+        bn[nb++] = names[SEB_OK];
+    }
+    MessageBeep(MB_ICONHAND);
+    int r = text_box(0, text, caption, 0, nb, ids, bn, def);
+    for (int i = 0; i < nb; i++)
+        if (r == ids[i])
+            return (UINT)which[i];
+    return (UINT)which[0];
 }
 
 /* ---------------------------------------------------------------- USER start-up */

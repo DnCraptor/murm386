@@ -468,3 +468,74 @@ BOOL WINAPI ScrollDC(HDC hdc, int dx, int dy, const RECT *rc, const RECT *clip, 
     wrgn_free(&need);
     return TRUE;
 }
+
+/* ---------------------------------------------------------------- the rest of 3.1's */
+
+HWND WINAPI WindowFromDC(HDC hdc)
+{
+    wdc *dc = gdi_dc(hdc);
+    return dc && dc->is_screen && dc->hwnd && user_wnd(dc->hwnd) ? dc->hwnd : 0;
+}
+
+/* GetDC's with a choice: the whole window, a region to keep to or keep
+ * out of (the client's coordinates; the window's with DCX_WINDOW) */
+HDC WINAPI GetDCEx(HWND h, HRGN clip, DWORD flags)
+{
+    wwnd *w = h ? user_wnd(h) : U.desktop;
+    if (!w)
+        return 0;
+    HDC dc = (flags & DCX_WINDOW) ? GetWindowDC(w->h) : GetDC(w->h);
+    if (dc && clip && (flags & (DCX_INTERSECTRGN | DCX_EXCLUDERGN))) {
+        if (flags & DCX_INTERSECTRGN) {
+            SelectClipRgn(dc, clip);
+        } else {
+            RECT r;
+            HRGN all;
+            GetClipBox(dc, &r);
+            all = CreateRectRgnIndirect(&r);
+            CombineRgn(all, all, clip, RGN_DIFF);
+            SelectClipRgn(dc, all);
+            DeleteObject(all);
+        }
+    }
+    return dc;
+}
+
+/* the brush a control's parent gives it (WM_CTLCOLOR), DefWindowProc's
+ * when it has none */
+HBRUSH WINAPI GetControlBrush(HWND h, HDC hdc, UINT type)
+{
+    HWND parent = GetParent(h);
+    HBRUSH b = parent ? (HBRUSH)SendMessage(parent, WM_CTLCOLOR, (WPARAM)hdc,
+                                            MAKELPARAM(h, type)) : 0;
+    if (!b)
+        b = (HBRUSH)DefWindowProc(h, WM_CTLCOLOR, (WPARAM)hdc, MAKELPARAM(h, type));
+    return b;
+}
+
+/* a brush, or a CTLCOLOR_ type for the control's (CTLCOLOR_MAX at most) */
+static HBRUSH paint_brush(HWND parent, HWND h, HDC hdc, HBRUSH brush)
+{
+    (void)parent;
+    return brush <= (HBRUSH)CTLCOLOR_MAX ? GetControlBrush(h, hdc, (UINT)brush) : brush;
+}
+
+void WINAPI PaintRect(HWND parent, HWND h, HDC hdc, HBRUSH brush, const RECT *rc)
+{
+    HBRUSH b = paint_brush(parent, h, hdc, brush);
+    if (b && rc)
+        FillRect(hdc, rc, b);
+}
+
+void WINAPI FillWindow(HWND parent, HWND h, HDC hdc, HBRUSH brush)
+{
+    RECT r;
+    GetClientRect(h, &r);
+    PaintRect(parent, h, hdc, brush, &r);
+}
+
+void WINAPI RepaintScreen(void)
+{
+    if (U.desktop)
+        RedrawWindow(U.desktop->h, NULL, 0, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+}

@@ -19,6 +19,8 @@ static int   nclip;
 static HWND  clip_owner, clip_open;
 static HTASK clip_task;
 static int   is_open;
+static HWND  viewer;                /* the clipboard viewers' chain's first */
+static int   changed;               /* since it was opened: WM_DRAWCLIPBOARD */
 
 BOOL WINAPI OpenClipboard(HWND h)
 {
@@ -37,6 +39,9 @@ BOOL WINAPI CloseClipboard(void)
     is_open = 0;
     clip_open = 0;
     clip_task = 0;
+    if (changed && viewer && IsWindow(viewer))
+        SendMessage(viewer, WM_DRAWCLIPBOARD, 0, 0);
+    changed = 0;
     return TRUE;
 }
 
@@ -51,6 +56,7 @@ BOOL WINAPI EmptyClipboard(void)
             GlobalFree(clip[i].data);
     nclip = 0;
     clip_owner = clip_open;
+    changed = 1;
     return TRUE;
 }
 
@@ -81,6 +87,7 @@ HANDLE WINAPI SetClipboardData(UINT fmt, HANDLE data)
         GlobalFree(clip[i].data);
     }
     clip[i].data = data;
+    changed = 1;
     return data;
 }
 
@@ -178,4 +185,46 @@ char *user_clipboard_get_text(HWND h)
     }
     CloseClipboard();
     return out;
+}
+
+/* ---------------------------------------------------------------- viewers */
+
+HWND WINAPI SetClipboardViewer(HWND h)
+{
+    HWND old = viewer && IsWindow(viewer) ? viewer : 0;
+    viewer = h;
+    if (h && IsWindow(h))
+        SendMessage(h, WM_DRAWCLIPBOARD, 0, 0);
+    return old;
+}
+
+HWND WINAPI GetClipboardViewer(void) { return viewer && IsWindow(viewer) ? viewer : 0; }
+
+/* remove leaves the chain, next after it: the first one learns of it and
+ * passes it on (WM_CHANGECBCHAIN), unless remove is the first */
+BOOL WINAPI ChangeClipboardChain(HWND remove, HWND next)
+{
+    if (!viewer || !IsWindow(viewer)) {
+        viewer = 0;
+        return FALSE;
+    }
+    if (viewer == remove) {
+        viewer = next;
+        return TRUE;
+    }
+    return SendMessage(viewer, WM_CHANGECBCHAIN, (WPARAM)remove, MAKELPARAM(next, 0)) != 0;
+}
+
+HWND WINAPI GetOpenClipboardWindow(void) { return is_open ? clip_open : 0; }
+
+/* the first of the formats the clipboard has; 0 if it is empty, -1 if it
+ * has none of them */
+int WINAPI GetPriorityClipboardFormat(UINT *formats, int n)
+{
+    if (!nclip)
+        return 0;
+    for (int i = 0; formats && i < n; i++)
+        if (IsClipboardFormatAvailable(formats[i]))
+            return (int)formats[i];
+    return -1;
 }

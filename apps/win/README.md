@@ -79,7 +79,7 @@ rest of WINN's modules, or of Windows' own DLLs WINN has nothing of:
 PENWIN, and LZEXPAND, VER, DDEML, MMSYSTEM, COMMDLG, OLECLI, OLESVR, SOUND when their DLL is
 not there or has not the function) keeps no
 program from loading: as Windows' "undefined dynalink" its call ends the
-program, the function named ("PROG.EXE called USER.231, which WINN does
+program, the function named ("PROG.EXE called USER.216, which WINN does
 not have yet."). A program may import up to 384 of WINN's functions.
 
 A program's PSP has its DOS environment (2Ch), made before it runs, as
@@ -317,8 +317,8 @@ LZEXPAND, INT 2Fh, DPMI, DDEML, the Program Manager's DDE, DDE's messages), `OWF
 it, made by `host/mkfon.py`: its sizes, larger, bold, italic; the VGA
 glyphs larger; a dialog in the font), `OWHELP` (WinHelp), `OWDLG` (COMMDLG's
 Color, Font and Print dialogs, GetFileTitle), `OWMISC` (moveable local
-memory, KEYBOARD, OLECLI: what WRITE.EXE needed), `OWSND` (SOUND, OLESVR)
-(`make NEFIXTURES` in
+memory, KEYBOARD, OLECLI: what WRITE.EXE needed), `OWSND` (SOUND, OLESVR),
+`OW31` (the rest of 3.1's USER, GDI, KERNEL) (`make NEFIXTURES` in
 `host/`). All have DOS MZ stubs that explain how to launch them under WINN
 when invoked directly from DOS. `host/test_ne_run` runs them on the
 emulator's own i386 core (`src/i386.c` as it is, built for the host with
@@ -486,7 +486,28 @@ A `PeekMessage` that finds nothing yields to the other tasks, then gives
 the system its idle turn (a program waiting in such a loop, as WRITE.EXE's
 blinking caret does, keeps nothing from going on). WinExec's hourglass stays until
 the program started first waits for input (or ends). Every instance has its own copy of the program, so window classes belong to
-the instance that registered them. A window DC follows its window: one a
+the instance that registered them.
+
+The rest of Windows 3.1's API for both kinds of programs: the clipboard
+viewers' chain (`SetClipboardViewer`: WM_DRAWCLIPBOARD as the clipboard
+changes, `ChangeClipboardChain`: WM_CHANGECBCHAIN), `GetPriorityClipboardFormat`,
+`GetOpenClipboardWindow`; `ClipCursor` keeps the cursor in a rectangle
+(`GetClipCursor`); system timers (`SetSystemTimer`: WM_SYSTIMER);
+`EnableHardwareInput`, `IsUserIdle`, `UserYield`, `EndMenu`,
+`SetSystemMenu`, `WindowFromDC`, `GetDCEx`, `GetControlBrush`,
+`FillWindow`, `PaintRect`, `RepaintScreen`, `SysErrorBox`, `DragDetect`,
+`CalcChildScroll` and `ScrollChildren` (MDI); a DC's bounds
+(`SetBoundsRect`, `GetBoundsRect`: what was drawn while enabled), the
+device's pens and brushes (`EnumObjects`), `IsGDIObject`, `GetCurLogFont`,
+`SetRelAbs`, `SetMapperFlags`, `GetAspectRatioFilter(Ex)`,
+`ResizePalette`, `AnimatePalette` (PC_RESERVED entries, on the screen as
+realized), `Set/GetSystemPaletteUse`, `GetRasterizerCaps` (no TrueType:
+`GetFontData`, `GetGlyphOutline` GDI_ERROR, `GetCharABCWidths`,
+`GetOutlineTextMetrics`, `GetKerningPairs` none); KERNEL's `SetPriority`,
+`LockCurrentTask`, `Get/SetTaskQueue`, `PostEvent`, `InitAtomTable`,
+`GetAtomHandle` and the like WINN has no use for, done as asked.
+
+A window DC follows its window: one a
 program keeps (`CS_OWNDC`, or a `GetDC` it has not released) is made new
 for where the window is and what covers it when it is used after the
 windows changed; after `EndPaint` a `CS_OWNDC` one has its whole visible
@@ -612,6 +633,7 @@ use `ucontext`):
     ./winhost scripts/owdlg.txt PROGMAN      # COMMDLG: Color (full), Font, Print (no printer), GetFileTitle
     ./winhost scripts/owmisc.txt PROGMAN     # moveable local memory, KEYBOARD, OLECLI
     ./winhost scripts/owsnd.txt PROGMAN      # SOUND (tones on stderr), OLESVR
+    ./winhost scripts/ow31.txt PROGMAN       # clipboard viewers, ClipCursor, bounds, EnumObjects...
     ./winhost scripts/logo.txt PROGMAN       # the logo (copy the BMPs into HOSTWIN first)
     ./winhost800 scripts/vga800.txt  # the VGA800 driver, built in
     ./winhostvga scripts/vga.txt     # the built-in VGA driver (640x480x16), Win16 programs too
