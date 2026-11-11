@@ -416,6 +416,8 @@ HANDLE win_dll_handle(int slot);
 const char *win_dll_path(int slot);
 const struct win_dll_info *win_dll_get(int slot);
 const struct win_dll_export *win_dll_export_of(int slot, uint16_t ordinal, const char *name);
+#define WIN_DLL_EXPORTS 1024            /* a DLL's exports: fewer */
+const struct win_dll_export *win_dll_export_at(int slot, unsigned n);
 void   win_dll_task_end(HTASK task);
 
 /* gdi.c: set by USER, for FillRect(dc, rc, (HBRUSH)(COLOR_xxx + 1)) */

@@ -98,7 +98,7 @@ static const win_dll_info *load_file(const char *m, dslot *s)
         if (sig == WINDLL_MAGIC)
             info = ((dll_entry)(uintptr_t)img.entry)(&with_ne);
         if (info && info->version == WINDLL_VERSION && info->size >= sizeof(win_dll_info) &&
-            info->name) {
+            info->name && info->export_count < WIN_DLL_EXPORTS) {
             char named[9];
             module_name(info->name, named);
             if (!strcmp(named, m)) {
@@ -120,7 +120,8 @@ static const win_dll_info *load_file(const char *m, dslot *s)
         if (!lstrcmpi(b->name, m)) {
             __win_dll_ne = ne;
             const win_dll_info *info = b->init();
-            if (!info || info->version != WINDLL_VERSION || info->size < sizeof(win_dll_info))
+            if (!info || info->version != WINDLL_VERSION || info->size < sizeof(win_dll_info) ||
+                info->export_count >= WIN_DLL_EXPORTS)
                 return NULL;
             char dir[128];
             UINT n = GetWindowsDirectory(dir, sizeof(dir));
@@ -239,6 +240,13 @@ int win_dll_of(HANDLE h)
 HANDLE win_dll_handle(int slot) { return win_dll_get(slot) ? slots[slot].h : 0; }
 
 const char *win_dll_path(int slot) { return win_dll_get(slot) ? slots[slot].path : NULL; }
+
+/* the n-th of its exports (the services of Win16 programs' calls) */
+const win_dll_export *win_dll_export_at(int slot, unsigned n)
+{
+    const win_dll_info *d = win_dll_get(slot);
+    return d && n < d->export_count ? &d->exports[n] : NULL;
+}
 
 /* by its ordinal, or by its name when name is given */
 const win_dll_export *win_dll_export_of(int slot, uint16_t ordinal, const char *name)

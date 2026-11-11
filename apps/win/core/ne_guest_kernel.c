@@ -1219,7 +1219,7 @@ static __attribute__((noinline)) int kernel_strings(args *a, ne_user *u, uint16_
         const win_dll_export *e = s >= 0 ? win_dll_export_of(s, (uint16_t)far,
                                                              (far >> 16) ? name : NULL) : NULL;
         if (e)
-            *v = win_ne_guest_thunk(g, WIN_NE_DLL_SERVICE(s, e->ordinal));
+            *v = win_ne_guest_thunk(g, win_ne_dll_service(s, e));
         else if (s >= 0)
             *v = 0;
         else if (d >= 0)

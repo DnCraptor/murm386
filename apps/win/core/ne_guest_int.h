@@ -78,9 +78,6 @@ typedef struct ne_user {
      * (freed as it closes or empties the clipboard) */
     struct { UINT fmt; uint16_t sel; } clip[8];
     /* ne_guest_sys.c: timeSetEvent's procedures, mmio's files (0: none) */
-    struct { UINT id; uint32_t proc, user, next; uint16_t delay, once; } mmtimer[8];
-    HFILE mmio[8];
-    uint8_t mmio_open[8];
     /* ne_guest_call.c: its hooks (SetWindowsHook(Ex)): the type, its
      * procedure, the task it is for (0 all its own), its number (HHOOK's
      * low word, made one after the other: the later the first called) */
@@ -183,10 +180,10 @@ void ne_environment(win_ne_guest_api_context *ctx, ne_user *u);
 /* ne_guest_int21.c: OpenFile's work, the name given (NULL: the
  * program's, its first argument) */
 uint16_t ne_open_file(args *a, const char *name);
-/* ne_guest_sys.c: MMSYSTEM, TOOLHELP, VER, LZEXPAND; 1 if it is one of
- * theirs; what they leave at the program's end */
+/* ne_guest_sys.c: TOOLHELP, the native DLLs; 1 if it is one of theirs */
 int ne_sys_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword);
-void ne_sys_end(ne_user *u);
+/* ... the service of a native DLL's export */
+uint16_t win_ne_dll_service(int slot, const struct win_dll_export *e);
 /* ne_guest_kernel.c: KERNEL's modules, resources and the rest, GDI's and
  * USER's few left, COMMDLG, SHELL; 1 if it is one of them. A Find/Replace
  * dialog's message (lParam its native FINDREPLACE): the program's own,

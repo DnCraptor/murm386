@@ -2,16 +2,12 @@
  * ne_guest_sys.c - Windows' own DLLs a Win16 program may import, as WINN
  * has them:
  *
- *   MMSYSTEM  no devices: none of each kind (sound, MIDI, joysticks,
- *             mixers), their opens fail, MCI has none; the timers
- *             (timeGetTime, timeSetEvent: its procedure called as the
- *             program takes its messages); mmio's files and RIFF chunks
  *   TOOLHELP  the tasks, WINN's modules, the timer, the memory as
  *             GetFreeSpace has it, MemoryRead/Write; notifications and
  *             interrupt handlers taken, never called
  *
- * and the native DLLs' calls (core/windll.c, ddi/windll.h: LZEXPAND, VER
- * ...): the program's arguments and memory for the DLL.
+ * and the native DLLs' calls (core/windll.c, ddi/windll.h: LZEXPAND, VER,
+ * DDEML, MMSYSTEM): the program's arguments and memory for the DLL.
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
@@ -24,17 +20,7 @@
 
 #if defined(__arm__) || defined(__thumb__) || defined(WINN_NE_HOST)
 
-#define MM WIN_NE_SERVICE_MMSYSTEM
 #define TH WIN_NE_SERVICE_TOOLHELP
-
-/* MMSYSTEM's errors */
-enum { MMSYSERR_BADDEVICEID = 2, MMSYSERR_INVALHANDLE = 5, MMSYSERR_NODRIVER = 6,
-       MMSYSERR_INVALPARAM = 11, JOYERR_UNPLUGGED = 167, MCIERR_DEVICE_NOT_INSTALLED = 306,
-       MMIOERR_FILENOTFOUND = 257, MMIOERR_CANNOTOPEN = 259, MMIOERR_CANNOTREAD = 261,
-       MMIOERR_CANNOTWRITE = 262, MMIOERR_CANNOTSEEK = 263, MMIOERR_CHUNKNOTFOUND = 265,
-       MMIOERR_UNBUFFERED = 266 };
-
-#define MMIO_HANDLE 0x6d00u
 
 static int rd_(args *a, uint32_t far, void *d, uint32_t n)
 {
@@ -65,437 +51,11 @@ static int str_(args *a, uint32_t far, char *d, uint32_t cap)
     return 1;
 }
 
-/* s into the program's buffer of cap bytes (none: nothing), cut to fit;
- * its length */
-static uint32_t str_out(args *a, uint32_t far, const char *s, uint32_t cap)
-{
-    if (!cap || !(far >> 16))
-        return 0;
-    uint32_t n = (uint32_t)strlen(s);
-    if (n >= cap)
-        n = cap - 1;
-    wr_(a, far, s, n);
-    wr_(a, far + n, "", 1);
-    return n;
-}
-
-/* a word or a dword into the program's memory, if it gave a place */
-static void put16_(args *a, uint32_t far, uint16_t v)
-{
-    uint8_t b[2];
-    wr16(b, v);
-    if (far >> 16)
-        wr_(a, far, b, 2);
-}
-
 /* the most bytes from far on in its segment, of n */
 static uint32_t in_segment(uint32_t far, uint32_t n)
 {
     uint32_t room = 0x10000u - (uint16_t)far;
     return n < room ? n : room;
-}
-
-/* ================================================================ MMSYSTEM */
-
-/* timeSetEvent's procedure: as often as its period went by since the last
- * time (the timer's message comes late when the program was busy; Windows
- * calls it from the timer's interrupt), ten times at most */
-static void CALLBACK mm_timerproc(HWND h, UINT msg, UINT id, DWORD time)
-{
-    (void)h; (void)msg; (void)time;
-    ne_user *u = ne_user_of(GetCurrentTask());
-    for (int i = 0; u && i < 8; i++)
-        if (u->mmtimer[i].proc && u->mmtimer[i].id == id) {
-            uint32_t proc = u->mmtimer[i].proc, user = u->mmtimer[i].user, now = GetTickCount();
-            unsigned times = 1;
-            if (u->mmtimer[i].once) {
-                KillTimer(0, id);
-                u->mmtimer[i].proc = 0;
-            } else {
-                uint32_t late = (int32_t)(now - u->mmtimer[i].next) > 0 ?
-                                now - u->mmtimer[i].next : 0;
-                times += late / u->mmtimer[i].delay;
-                if (times > 10)
-                    times = 10;
-                u->mmtimer[i].next += times * u->mmtimer[i].delay;
-                if ((int32_t)(now - u->mmtimer[i].next) > 0)
-                    u->mmtimer[i].next = now;       /* more than ten: from now on */
-            }
-            /* (UINT id, UINT msg, DWORD user, DWORD, DWORD) */
-            const uint16_t words[8] = { (uint16_t)id, 0, (uint16_t)(user >> 16), (uint16_t)user,
-                                        0, 0, 0, 0 };
-            for (unsigned k = 0; k < times; k++) {
-                if (k && (u->mmtimer[i].proc != proc || u->mmtimer[i].id != id))
-                    break;                          /* timeKillEvent in it */
-                win_ne_call(u->ctx, proc, words, 8, NULL, 0);
-            }
-            return;
-        }
-}
-
-static const char *mm_error(uint32_t e)
-{
-    switch (e) {
-    case 0: return "The specified command was carried out.";
-    case MMSYSERR_BADDEVICEID: return "The specified device ID is out of range for your system.";
-    case MMSYSERR_INVALHANDLE: return "The specified device handle is invalid.";
-    case MMSYSERR_NODRIVER: return "There is no driver installed on your system.";
-    case MCIERR_DEVICE_NOT_INSTALLED:
-        return "The specified device is not installed on the system.";
-    default: return "An unknown error has occurred.";
-    }
-}
-
-/* an mmio handle's file */
-static int mmio_of(ne_user *u, uint16_t h, HFILE *f)
-{
-    unsigned i = (unsigned)h - MMIO_HANDLE;
-    if (h < MMIO_HANDLE || i >= 8 || !u->mmio_open[i])
-        return 0;
-    *f = u->mmio[i];
-    return 1;
-}
-
-/* MMCKINFO: ckid, cksize, fccType, dwDataOffset, dwFlags */
-#define FCC(a, b, c, d) ((uint32_t)(a) | (uint32_t)(b) << 8 | (uint32_t)(c) << 16 | \
-                         (uint32_t)(d) << 24)
-#define MMIO_DIRTY 0x10000000u
-
-static uint16_t descend(args *a, HFILE f, uint32_t ck_far, uint32_t parent_far, UINT flags)
-{
-    uint8_t ck[20], parent[20];
-    if (!rd_(a, ck_far, ck, 20) || ((parent_far >> 16) && !rd_(a, parent_far, parent, 20)))
-        return MMIOERR_CANNOTREAD;
-    uint32_t end = (parent_far >> 16) ? rd32(parent + 12) + rd32(parent + 4) : 0xffffffffu;
-    uint32_t want_id = rd32(ck), want_type = rd32(ck + 8);
-    for (;;) {
-        int32_t at = _llseek(f, 0, 1);
-        uint8_t h[12];
-        if (at < 0 || (uint32_t)at + 8 > end || _lread(f, h, 8) != 8)
-            return MMIOERR_CHUNKNOTFOUND;
-        uint32_t id = rd32(h), size = rd32(h + 4), type = 0;
-        int list = id == FCC('R', 'I', 'F', 'F') || id == FCC('L', 'I', 'S', 'T');
-        if (list && _lread(f, h + 8, 4) == 4)
-            type = rd32(h + 8);
-        int match = (flags & 0x10) ? id == want_id
-                  : (flags & 0x20) ? id == FCC('R', 'I', 'F', 'F') && type == want_type
-                  : (flags & 0x40) ? id == FCC('L', 'I', 'S', 'T') && type == want_type : 1;
-        if (match) {
-            wr32(ck, id);
-            wr32(ck + 4, size);
-            wr32(ck + 8, type);
-            wr32(ck + 12, (uint32_t)at + 8);
-            wr32(ck + 16, 0);
-            wr_(a, ck_far, ck, 20);
-            return 0;
-        }
-        if (_llseek(f, at + 8 + (int32_t)((size + 1) & ~1u), 0) < 0)
-            return MMIOERR_CANNOTSEEK;
-    }
-}
-
-static uint16_t ascend(args *a, HFILE f, uint32_t ck_far)
-{
-    uint8_t ck[20];
-    if (!rd_(a, ck_far, ck, 20))
-        return MMIOERR_CANNOTREAD;
-    uint32_t data = rd32(ck + 12), size = rd32(ck + 4);
-    if (rd32(ck + 16) & MMIO_DIRTY) {               /* made here: its size now */
-        int32_t at = _llseek(f, 0, 1);
-        if (at < 0 || (uint32_t)at < data)
-            return MMIOERR_CANNOTSEEK;
-        size = (uint32_t)at - data;
-        uint8_t b[4];
-        wr32(b, size);
-        if (size & 1)
-            _lwrite(f, "", 1);
-        if (_llseek(f, (int32_t)data - 4, 0) < 0 || _lwrite(f, b, 4) != 4)
-            return MMIOERR_CANNOTWRITE;
-        wr32(ck + 4, size);
-        wr32(ck + 16, 0);
-        wr_(a, ck_far, ck, 20);
-    }
-    return _llseek(f, (int32_t)(data + ((size + 1) & ~1u)), 0) < 0 ? MMIOERR_CANNOTSEEK : 0;
-}
-
-static uint16_t create_chunk(args *a, HFILE f, uint32_t ck_far, UINT flags)
-{
-    uint8_t ck[20], h[12];
-    if (!rd_(a, ck_far, ck, 20))
-        return MMIOERR_CANNOTREAD;
-    int32_t at = _llseek(f, 0, 1);
-    uint32_t id = (flags & 0x20) ? FCC('R', 'I', 'F', 'F')
-                : (flags & 0x40) ? FCC('L', 'I', 'S', 'T') : rd32(ck);
-    UINT n = (flags & 0x60) ? 12 : 8;
-    wr32(h, id);
-    wr32(h + 4, rd32(ck + 4));
-    wr32(h + 8, rd32(ck + 8));
-    if (at < 0 || _lwrite(f, h, n) != n)
-        return MMIOERR_CANNOTWRITE;
-    wr32(ck, id);
-    wr32(ck + 12, (uint32_t)at + 8);
-    wr32(ck + 16, MMIO_DIRTY);
-    wr_(a, ck_far, ck, 20);
-    return 0;
-}
-
-static __attribute__((noinline)) uint16_t mmio_open(args *a, ne_user *u)
-{
-    uint32_t flags = dw(a, 4), info = dw(a, 8);
-    char name[128];
-    uint16_t err = MMIOERR_FILENOTFOUND, h = 0;
-    uint8_t mi[16];
-    if ((info >> 16) && rd_(a, info, mi, 16) && (rd32(mi + 4) || rd32(mi + 8))) {
-        err = MMIOERR_CANNOTOPEN;               /* an I/O procedure, memory: not WINN's */
-    } else if (!str_(a, dw(a, 12), name, sizeof(name))) {
-        err = MMIOERR_CANNOTOPEN;
-    } else if (flags & 0x100) {                 /* MMIO_PARSE */
-        h = 1;
-    } else if (flags & 0x200) {                 /* MMIO_DELETE */
-        h = (uint16_t)DeleteFileN(name);
-    } else if (flags & 0x4000) {                /* MMIO_EXIST */
-        HFILE f = _lopen(name, OF_READ);
-        if (f != HFILE_ERROR)
-            _lclose(f);
-        h = f != HFILE_ERROR;
-    } else {
-        int i = 0;
-        while (i < 8 && u->mmio_open[i])
-            i++;
-        HFILE f = HFILE_ERROR;
-        if (i < 8 && (flags & 0x1000)) {        /* MMIO_CREATE */
-            f = _lcreat(name, 0);
-            if (f != HFILE_ERROR && (flags & 3) != OF_WRITE) {
-                _lclose(f);
-                f = _lopen(name, (int)(flags & 3));
-            }
-            err = MMIOERR_CANNOTOPEN;
-        } else if (i < 8) {
-            f = _lopen(name, (int)(flags & 3));
-        }
-        if (f != HFILE_ERROR) {
-            u->mmio[i] = f;
-            u->mmio_open[i] = 1;
-            h = (uint16_t)(MMIO_HANDLE + (unsigned)i);
-        }
-    }
-    if (!h && (info >> 16))
-        put16_(a, info + 12, err);              /* wErrorRet */
-    return h;
-}
-
-static __attribute__((noinline)) int mm_service(args *a, ne_user *u, uint16_t service,
-                                               uint32_t *v, int *dword)
-{
-    unsigned o = service - MM;
-    HFILE f;
-    switch (o) {
-    case 2: case 3:                     /* sndPlaySound, PlaySound: no sound */
-        *v = 0;
-        return 1;
-    case 5:                             /* mmsystemGetVersion */
-        *v = 0x030a;
-        return 1;
-    case 30:                            /* OutputDebugStr */
-        return 1;
-    case 101: case 201: case 301: case 350: case 401: case 501: case 800:
-        *v = 0;                         /* ...GetNumDevs: none */
-        return 1;
-    case 103: case 110: case 106:       /* joyGetPos(Ex), joySetCapture */
-        *v = JOYERR_UNPLUGGED;
-        return 1;
-    case 102: case 104: case 105: case 107: case 109:
-        *v = MMSYSERR_NODRIVER;
-        return 1;
-    case 203: case 303: case 403: case 503:     /* ...GetErrorText(UINT, LPSTR, UINT) */
-        str_out(a, dw(a, 6), mm_error(w(a, 10)), w(a, 4));
-        *v = 0;
-        return 1;
-    case 202: case 302: case 351: case 402: case 502: case 801:  /* the capabilities */
-    case 204: case 304: case 404: case 504: case 802:            /* opens */
-    case 216: case 313: case 354: case 421: case 514: case 806:  /* by the device */
-        if (o == 204 || o == 304 || o == 404 || o == 504 || o == 802)
-            put16_(a, dw(a, o == 404 || o == 504 ? 22 : 18), 0);    /* no handle */
-        *v = MMSYSERR_BADDEVICEID;
-        *dword = o == 216 || o == 313 || o == 354 || o == 421 || o == 514;
-        return 1;
-    case 601: {                         /* timeGetSystemTime(MMTIME FAR *, UINT): TIME_MS */
-        uint8_t t[6];
-        wr16(t, 1);
-        wr32(t + 2, GetTickCount());
-        if (w(a, 4) >= 6)
-            wr_(a, dw(a, 6), t, 6);
-        *v = 0;
-        return 1;
-    }
-    case 602: {                         /* timeSetEvent(delay, resolution, proc, DWORD, flags) */
-        UINT flags = w(a, 4), delay = w(a, 16);
-        uint32_t user = dw(a, 6), proc = dw(a, 10);
-        int i = 0;
-        while (i < 8 && u->mmtimer[i].proc)
-            i++;
-        UINT id = i < 8 && proc && !a->bad ? SetTimer(0, 0, delay ? delay : 1, mm_timerproc)
-                                           : 0;
-        if (id) {
-            u->mmtimer[i].id = id;
-            u->mmtimer[i].proc = proc;
-            u->mmtimer[i].user = user;
-            u->mmtimer[i].delay = (uint16_t)(delay ? delay : 1);
-            u->mmtimer[i].next = GetTickCount() + u->mmtimer[i].delay;
-            u->mmtimer[i].once = !(flags & 1);  /* TIME_PERIODIC */
-        }
-        *v = (uint16_t)id;
-        return 1;
-    }
-    case 603: {                         /* timeKillEvent(UINT) */
-        UINT id = w(a, 4);
-        *v = MMSYSERR_INVALPARAM;
-        for (int i = 0; i < 8; i++)
-            if (u->mmtimer[i].proc && u->mmtimer[i].id == id) {
-                KillTimer(0, id);
-                u->mmtimer[i].proc = 0;
-                *v = 0;
-            }
-        return 1;
-    }
-    case 604: {                         /* timeGetDevCaps(TIMECAPS FAR *, UINT) */
-        uint8_t t[4];
-        wr16(t, 1);
-        wr16(t + 2, 0xffff);
-        if (w(a, 4) >= 4)
-            wr_(a, dw(a, 6), t, 4);
-        *v = 0;
-        return 1;
-    }
-    case 605: case 606:                 /* timeBeginPeriod, timeEndPeriod */
-        *v = 0;
-        return 1;
-    case 607:                           /* timeGetTime */
-        *v = GetTickCount();
-        *dword = 1;
-        return 1;
-    case 701:                           /* mciSendCommand: no devices */
-        *v = MCIERR_DEVICE_NOT_INSTALLED;
-        *dword = 1;
-        return 1;
-    case 702:                           /* mciSendString(cmd, LPSTR, UINT, HWND) */
-        str_out(a, dw(a, 8), "", w(a, 6));
-        *v = MCIERR_DEVICE_NOT_INSTALLED;
-        *dword = 1;
-        return 1;
-    case 706:                           /* mciGetErrorString(DWORD, LPSTR, UINT) */
-        str_out(a, dw(a, 6), mm_error(dw(a, 10)), w(a, 4));
-        *v = 1;
-        return 1;
-    case 703: case 707: case 708: case 710: case 711: case 712: case 713: case 714:
-    case 715: case 716: case 717:
-        *v = 0;
-        *dword = o == 708 || o == 716;
-        return 1;
-    case 1100: case 1101: case 1102: case 1103: case 1104:   /* installable drivers: none */
-        *v = 0;
-        *dword = o == 1102 || o == 1104;
-        return 1;
-    case 1210:                          /* mmioOpen(LPSTR, MMIOINFO FAR *, DWORD) */
-        *v = mmio_open(a, u);
-        return 1;
-    case 1211: {                        /* mmioClose(HMMIO, UINT) */
-        uint16_t h = w(a, 6);
-        *v = MMSYSERR_INVALHANDLE;
-        if (mmio_of(u, h, &f)) {
-            _lclose(f);
-            u->mmio_open[h - MMIO_HANDLE] = 0;
-            *v = 0;
-        }
-        return 1;
-    }
-    case 1212: case 1213: {             /* mmioRead, mmioWrite(HMMIO, HPSTR, LONG) */
-        uint32_t buf = dw(a, 8), n = dw(a, 4);
-        int32_t got = -1;
-        if (mmio_of(u, w(a, 12), &f) && (int32_t)n >= 0) {
-            n = in_segment(buf, n);
-            uint8_t *tmp = n ? (uint8_t *)win_alloc(n) : NULL;
-            if (!n)
-                got = 0;
-            else if (tmp && o == 1212) {
-                UINT r = _lread(f, tmp, n);
-                got = r == (UINT)HFILE_ERROR ? -1 : (int32_t)r;
-                if (got > 0 && !wr_(a, buf, tmp, (uint32_t)got))
-                    got = -1;
-            } else if (tmp && rd_(a, buf, tmp, n)) {
-                UINT r = _lwrite(f, tmp, n);
-                got = r == (UINT)HFILE_ERROR ? -1 : (int32_t)r;
-            }
-            win_free(tmp);
-        }
-        *v = (uint32_t)got;
-        *dword = 1;
-        return 1;
-    }
-    case 1214:                          /* mmioSeek(HMMIO, LONG, int) */
-        *v = mmio_of(u, w(a, 10), &f) ? (uint32_t)_llseek(f, (LONG)dw(a, 6), (int16_t)w(a, 4))
-                                      : 0xffffffffu;
-        *dword = 1;
-        return 1;
-    case 1215: {                        /* mmioGetInfo(HMMIO, MMIOINFO FAR *, UINT): unbuffered */
-        uint8_t mi[66];
-        memset(mi, 0, sizeof(mi));
-        wr16(mi + 64, w(a, 10));
-        *v = mmio_of(u, w(a, 10), &f) ? (wr_(a, dw(a, 6), mi, sizeof(mi)), 0)
-                                      : MMSYSERR_INVALHANDLE;
-        return 1;
-    }
-    case 1216: case 1218:               /* mmioSetInfo, mmioFlush */
-        *v = 0;
-        return 1;
-    case 1217:                          /* mmioSetBuffer: unbuffered it stays */
-        *v = dw(a, 10) || dw(a, 6) ? MMIOERR_UNBUFFERED : 0;
-        return 1;
-    case 1219:                          /* mmioAdvance */
-        *v = MMIOERR_UNBUFFERED;
-        return 1;
-    case 1220: {                        /* mmioStringToFOURCC(LPCSTR, UINT) */
-        char s[8];
-        uint8_t c[4] = { ' ', ' ', ' ', ' ' };
-        if (dw(a, 6) >> 16) {
-            win_ne_string(a->ctx, (uint16_t)(dw(a, 6) >> 16), (uint16_t)dw(a, 6), s, 5);
-            for (int i = 0; i < 4 && s[i]; i++)
-                c[i] = (uint8_t)((w(a, 4) & 0x10) && s[i] >= 'a' && s[i] <= 'z' ? s[i] - 32
-                                                                                  : s[i]);
-        }
-        *v = rd32(c);
-        *dword = 1;
-        return 1;
-    }
-    case 1221: case 1222:               /* mmioInstallIOProc, mmioSendMessage */
-        *v = 0;
-        *dword = 1;
-        return 1;
-    case 1223:                          /* mmioDescend(HMMIO, ck, parent, UINT) */
-        *v = mmio_of(u, w(a, 14), &f) ? descend(a, f, dw(a, 10), dw(a, 6), w(a, 4))
-                                      : MMSYSERR_INVALHANDLE;
-        return 1;
-    case 1224:                          /* mmioAscend(HMMIO, ck, UINT) */
-        *v = mmio_of(u, w(a, 10), &f) ? ascend(a, f, dw(a, 6)) : MMSYSERR_INVALHANDLE;
-        return 1;
-    case 1225:                          /* mmioCreateChunk(HMMIO, ck, UINT) */
-        *v = mmio_of(u, w(a, 10), &f) ? create_chunk(a, f, dw(a, 6), w(a, 4))
-                                      : MMSYSERR_INVALHANDLE;
-        return 1;
-    case 1226: {                        /* mmioRename(old, new, info, flags) */
-        char from[128], to[128];
-        *v = str_(a, dw(a, 16), from, sizeof(from)) && str_(a, dw(a, 12), to, sizeof(to)) &&
-             MoveFileN(from, to) ? 0 : MMIOERR_FILENOTFOUND;
-        return 1;
-    }
-    default:
-        if ((o >= 205 && o <= 215) || (o >= 305 && o <= 312) || (o >= 352 && o <= 353) ||
-            (o >= 405 && o <= 420) || (o >= 505 && o <= 513) || (o >= 803 && o <= 809)) {
-            *v = MMSYSERR_INVALHANDLE;  /* a device's handle: there are none */
-            return 1;
-        }
-        return 0;
-    }
 }
 
 /* ================================================================ TOOLHELP */
@@ -714,21 +274,30 @@ static const win_dll_ne dll_ne = {
 
 const win_dll_ne *win_dll_ne_glue(void) { return &dll_ne; }
 
-static int dll_slot_of(uint16_t id, uint16_t *ord)
+/* a native DLL's service: its slot, its export */
+static int dll_slot_of(uint16_t id, const win_dll_export **e)
 {
-    *ord = (uint16_t)((id - WIN_NE_SERVICE_DLL) & 0x3ffu);
-    return (int)((id - WIN_NE_SERVICE_DLL) >> 10);
+    int s = (int)((id - WIN_NE_SERVICE_DLL) >> 10);
+    *e = win_dll_export_at(s, (id - WIN_NE_SERVICE_DLL) & 0x3ffu);
+    return s;
 }
 
 static __attribute__((noinline)) int dll_service(args *a, uint16_t service, uint32_t *v,
                                                 int *dword)
 {
-    uint16_t ord;
-    const win_dll_info *d = win_dll_get(dll_slot_of(service, &ord));
+    const win_dll_export *e;
+    const win_dll_info *d = win_dll_get(dll_slot_of(service, &e));
     win_dll_call c = { a };
-    int r = d && d->ne_call ? d->ne_call(&c, ord, v) : WINDLL_NONE;
+    int r = d && e && d->ne_call ? d->ne_call(&c, e->ordinal, v) : WINDLL_NONE;
     *dword = r == WINDLL_DWORD;
     return r != WINDLL_NONE;
+}
+
+/* the service of a native DLL's export (its slot's) */
+uint16_t win_ne_dll_service(int slot, const win_dll_export *e)
+{
+    const win_dll_info *d = win_dll_get(slot);
+    return (uint16_t)(d && e ? WIN_NE_DLL_SERVICE(slot, (unsigned)(e - d->exports)) : 0);
 }
 
 int win_ne_native_import(const char *module, uint16_t ordinal, const char *name, uint16_t *id)
@@ -737,47 +306,41 @@ int win_ne_native_import(const char *module, uint16_t ordinal, const char *name,
     if (s < 0)
         return 0;
     const win_dll_export *e = win_dll_export_of(s, ordinal, name);
-    if (!e && name) {
+    if (!e) {                           /* not the DLL's: an undefined call's */
         win_dll_unref(s);
         return -1;
     }
-    if (!e && ordinal >= 0x400u) {
-        win_dll_unref(s);
-        return -1;
-    }
-    *id = WIN_NE_DLL_SERVICE(s, e ? e->ordinal : ordinal);  /* none: not supported, at its call */
+    *id = win_ne_dll_service(s, e);
     return 1;
 }
 
 int win_ne_native_has(const char *module, uint16_t ordinal, const char *name)
 {
     uint16_t id;
+    const win_dll_export *e;
     int r = win_ne_native_import(module, ordinal, name, &id);
     if (r > 0)
-        win_dll_unref(dll_slot_of(id, &ordinal));
+        win_dll_unref(dll_slot_of(id, &e));
     return r;
 }
 
 uint16_t win_ne_native_args(uint16_t id)
 {
-    uint16_t ord;
-    int s = dll_slot_of(id, &ord);
-    const win_dll_export *e = win_dll_export_of(s, ord, NULL);
+    const win_dll_export *e;
+    dll_slot_of(id, &e);
     return e ? e->argbytes : 0;
 }
 
 const char *win_ne_native_name(uint16_t id, char *buf, unsigned cap)
 {
-    uint16_t ord;
-    int s = dll_slot_of(id, &ord);
-    const win_dll_info *d = win_dll_get(s);
-    const win_dll_export *e = win_dll_export_of(s, ord, NULL);
-    if (!d)
+    const win_dll_export *e;
+    const win_dll_info *d = win_dll_get(dll_slot_of(id, &e));
+    if (!d || !e)
         return NULL;
-    if (e && e->name)
+    if (e->name)
         wsprintf(buf, "%s.%s", d->name, e->name);
     else
-        wsprintf(buf, "%s.%u", d->name, (unsigned)ord);
+        wsprintf(buf, "%s.%u", d->name, (unsigned)e->ordinal);
     (void)cap;
     return buf;
 }
@@ -786,22 +349,11 @@ const char *win_ne_native_name(uint16_t id, char *buf, unsigned cap)
 
 int ne_sys_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword)
 {
-    if (service >= MM && service < MM + 0x800u)
-        return mm_service(a, u, service, v, dword);
     if (service >= TH && service < TH + 0x100u)
         return th_service(a, u, service, v, dword);
     if (service >= WIN_NE_SERVICE_DLL && service < WIN_NE_SERVICE_UNDEFINED)
         return dll_service(a, service, v, dword);
     return 0;
-}
-
-void ne_sys_end(ne_user *u)
-{
-    for (int i = 0; i < 8; i++) {
-        if (u->mmtimer[i].proc)
-            KillTimer(0, u->mmtimer[i].id);
-        u->mmtimer[i].proc = 0;
-    }
 }
 
 #endif

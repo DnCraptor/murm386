@@ -76,7 +76,7 @@ has not, is named in the message.
 
 A function of Windows' WINN does not have (of KERNEL, USER, GDI and the
 rest of WINN's modules, or of Windows' own DLLs WINN has nothing of:
-OLECLI, OLESVR, SOUND, PENWIN, and LZEXPAND, VER, DDEML when their DLL is
+OLECLI, OLESVR, SOUND, PENWIN, and LZEXPAND, VER, DDEML, MMSYSTEM when their DLL is
 not there or has not the function) keeps no
 program from loading: as Windows' "undefined dynalink" its call ends the
 program, the function named ("PROG.EXE called USER.231, which WINN does
@@ -106,7 +106,8 @@ code page (DOS's own; 866 on the host). A call WINN has not, or refuses, in a
 procedure WINN called (a window's, a dialog's) is named as one in the
 program's own code is, not a fault.
 
-Windows' own DLLs WINN has (`core/ne_guest_sys.c`): MMSYSTEM with no
+Windows' own DLLs WINN has: TOOLHELP (`core/ne_guest_sys.c`), and as
+native DLLs (see Native DLLs) MMSYSTEM, VER, LZEXPAND, DDEML. MMSYSTEM has no
 devices (none of each kind: wave, MIDI, aux, joysticks, mixers; their
 opens fail, MCI has none, sndPlaySound and PlaySound play nothing), the
 multimedia timer (timeGetTime, timeGetSystemTime, timeGetDevCaps,
@@ -114,13 +115,13 @@ timeSetEvent: its procedure is called as the program takes its messages,
 as a timer's, as often as its period went by since, ten times at most),
 mmio's files (mmioOpen, Read, Write, Seek, Close,
 Descend, Ascend, CreateChunk: RIFF files; unbuffered, no I/O procedures
-or memory files); TOOLHELP's TimerCount, MemManInfo and SystemHeapInfo
+or memory files), for native callers too (`include/mmsystem.h`);
+TOOLHELP's TimerCount, MemManInfo and SystemHeapInfo
 (the memory as GetFreeSpace has it), TaskFirst, TaskNext,
 TaskFindHandle, ModuleFirst, ModuleNext, ModuleFindName and
 ModuleFindHandle (WINN's modules), MemoryRead and MemoryWrite,
 NotifyRegister and InterruptRegister (taken, never called); the heaps'
-walks find nothing. VER and LZEXPAND are native DLLs (see Native DLLs):
-VER's GetFileVersionInfo(Size), VerQueryValue, GetFileResource(Size),
+walks find nothing. VER's GetFileVersionInfo(Size), VerQueryValue, GetFileResource(Size),
 VerLanguageName, VerFindFile and VerInstallFile (a copy, expanded by
 LZEXPAND's LZCopy); LZEXPAND's files compressed by COMPRESS.EXE ("SZDD"), read expanded
 (LZOpenFile finds FILE.TX_ for FILE.TXT, LZInit, LZRead, LZSeek, LZCopy,
@@ -323,7 +324,7 @@ nothing leaves the program from the command line in that part (`WINN DEMO`).
 | `../winapps/<name>/` | applications: `progman` (the Program Manager, the default shell), `winfile` (File Manager), `taskman` (Task List), `winmine` (Minesweeper), `winhelp` (Windows Help), `notepad`, `clock`, `calc`, `control` (Control Panel), `demo` (a tour of the API) |
 | `../windrv/<name>/` | driver modules; `vga800` is VBE 102h 800x600 in 16 colours |
 | `ddi/windll.h`, `core/windll.c` | native DLLs: the interface, and their loading, uses and unloading |
-| `../windll/<name>/` | native DLLs: `lzexpand` (LZEXPAND.DLL), `ver` (VER.DLL), `ddeml` (DDEML.DLL) |
+| `../windll/<name>/` | native DLLs: `lzexpand` (LZEXPAND.DLL), `ver` (VER.DLL), `ddeml` (DDEML.DLL), `mmsystem` (MMSYSTEM.DLL) |
 | `host/` | the same sources on Linux with a snapshot display and scripted input |
 
 ## Drivers
@@ -363,13 +364,15 @@ Windows' own libraries are native DLLs of WINN's, loaded when a program
 needs one and unloaded when none does any more, as Windows 3.x does with
 its DLLs, instead of being built into `WINN.EXE`: `LZEXPAND.DLL`,
 `VER.DLL` (it reads a file's resources with the core's
-`GetFileResourceN`) and `DDEML.DLL` so far. A program importing one that is not there, or a
+`GetFileResourceN`), `DDEML.DLL` and `MMSYSTEM.DLL` so far. A program importing one that is not there, or a
 function the DLL has not, still loads; the call ends it.
 A native DLL is an EZ image built with `sdk/windll.cmake` (no crt0; its
 `__ez_start`, from `sdk/windll_entry.c`, begins with a branch over the
 signature `NWDL`) whose `WinDllInit` gives its exports: the Win16
 ordinal and name programs import each by, the bytes of a Win16 caller's
-PASCAL arguments, the native function. It calls KERNEL, GDI and USER
+PASCAL arguments, the native function (fewer than 1024 exports: a Win16
+program's call of one is the export's place in the table, whatever its
+ordinal). It calls KERNEL, GDI and USER
 through the API stubs as an application does, and has Win16 programs'
 calls of its functions with their arguments and memory from the core
 (`win_dll_ne`), which also calls a procedure of a task's Win16 program
