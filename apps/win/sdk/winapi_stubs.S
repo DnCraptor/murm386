@@ -8439,6 +8439,23 @@ GetSaveFileName:
     .ltorg
     .size GetSaveFileName, .-GetSaveFileName
 
+    .section .text.winapi.ChooseColor,"ax",%progbits
+    .global ChooseColor
+    .type ChooseColor, %function
+    .thumb_func
+ChooseColor:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #16]
+    ldr  r1, =20
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size ChooseColor, .-ChooseColor
+
     .section .text.winapi.FindText,"ax",%progbits
     .global FindText
     .type FindText, %function
@@ -8472,6 +8489,40 @@ ReplaceText:
     bx   r12
     .ltorg
     .size ReplaceText, .-ReplaceText
+
+    .section .text.winapi.ChooseFont,"ax",%progbits
+    .global ChooseFont
+    .type ChooseFont, %function
+    .thumb_func
+ChooseFont:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #16]
+    ldr  r1, =60
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size ChooseFont, .-ChooseFont
+
+    .section .text.winapi.PrintDlg,"ax",%progbits
+    .global PrintDlg
+    .type PrintDlg, %function
+    .thumb_func
+PrintDlg:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #16]
+    ldr  r1, =80
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size PrintDlg, .-PrintDlg
 
     .section .text.winapi.CommDlgExtendedError,"ax",%progbits
     .global CommDlgExtendedError

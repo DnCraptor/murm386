@@ -7,6 +7,7 @@
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
+#include <stddef.h>
 #include <string.h>
 #include "wincore.h"
 #include "winmod.h"
@@ -195,6 +196,28 @@ int win_dll_load(const char *name)
         return -1;
     }
     return i;
+}
+
+int win_dll_use(const char *name)
+{
+    int s = win_dll_find(name);
+    HTASK t = GetCurrentTask();
+    for (int i = 0; s >= 0 && i < DLL_REFS; i++)
+        if (refs[i].count && refs[i].task == t && refs[i].slot == s)
+            return s;
+    return win_dll_load(name);
+}
+
+uint32_t win_dll_ne_lparam(uint32_t msg, uint32_t lparam)
+{
+    for (int i = 0; i < DLL_SLOTS; i++) {
+        const win_dll_info *d = slots[i].info;
+        uint32_t far;
+        if (d && d->size >= offsetof(win_dll_info, ne_lparam) + sizeof(d->ne_lparam) &&
+            d->ne_lparam && (far = d->ne_lparam(msg, lparam)) != 0)
+            return far;
+    }
+    return 0;
 }
 
 void win_dll_unref(int slot)

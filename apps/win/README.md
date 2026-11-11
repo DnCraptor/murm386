@@ -76,7 +76,7 @@ has not, is named in the message.
 
 A function of Windows' WINN does not have (of KERNEL, USER, GDI and the
 rest of WINN's modules, or of Windows' own DLLs WINN has nothing of:
-OLECLI, OLESVR, SOUND, PENWIN, and LZEXPAND, VER, DDEML, MMSYSTEM when their DLL is
+OLECLI, OLESVR, SOUND, PENWIN, and LZEXPAND, VER, DDEML, MMSYSTEM, COMMDLG when their DLL is
 not there or has not the function) keeps no
 program from loading: as Windows' "undefined dynalink" its call ends the
 program, the function named ("PROG.EXE called USER.231, which WINN does
@@ -107,7 +107,17 @@ procedure WINN called (a window's, a dialog's) is named as one in the
 program's own code is, not a fault.
 
 Windows' own DLLs WINN has: TOOLHELP (`core/ne_guest_sys.c`), and as
-native DLLs (see Native DLLs) MMSYSTEM, VER, LZEXPAND, DDEML. MMSYSTEM has no
+native DLLs (see Native DLLs) MMSYSTEM, VER, LZEXPAND, DDEML, COMMDLG. COMMDLG has
+Windows 3.1's common dialogs: Open and Save As, Find and Replace (the
+program's FINDREPLACE in their messages, kept up to date), Color (the 48
+basic colours, 16 custom ones, a colour defined by hue, saturation and
+luminosity or red, green and blue), Font (the faces of the system's raster
+fonts, their styles, simulated or not, sizes, effects and colour, a
+sample), Print and Print Setup (WINN has no printers: "No default
+printer", PDERR_NODEFAULTPRN), GetFileTitle, CommDlgExtendedError; hooks
+and templates are left out. Native applications call them as they are
+(`include/commdlg.h`): WINN loads the DLL for the task at its first call
+of one. MMSYSTEM has no
 devices (none of each kind: wave, MIDI, aux, joysticks, mixers; their
 opens fail, MCI has none, sndPlaySound and PlaySound play nothing), the
 multimedia timer (timeGetTime, timeGetSystemTime, timeGetDevCaps,
@@ -172,7 +182,7 @@ ExtTextOut, GetTextExtentPoint, TabbedTextOut, GetTabbedTextExtent,
 GetTextFace, CreateBitmap(Indirect), Get/SetBitmapBits, GetClassInfo,
 _hread/_hwrite (within one block: a huge pointer's segments are not
 tiled); KERNEL's GetModuleHandle, LoadLibrary and GetProcAddress for the
-modules WINN has (KERNEL, USER, GDI, KEYBOARD, COMMDLG, SHELL, WIN87EM) and its own
+modules WINN has (KERNEL, USER, GDI, KEYBOARD, SHELL, WIN87EM) and its own
 DLLs (below), FindResource, LoadResource, LockResource, SizeofResource,
 Catch and Throw, GetTempFileName, GetWinFlags, WinExec, SetErrorMode,
 FatalAppExit and the constants __AHINCR, __AHSHIFT, __WINFLAGS, __0040H
@@ -211,9 +221,7 @@ WM_GETFONT), the others as before in the system font; EnumFonts and
 EnumFontFamilies (the stock fonts and the files' faces), GetCharWidth, LineDDA, SetTextCharacterExtra; no printers
 (StartDoc and the rest fail, Escape does nothing); no serial or parallel
 ports (OpenComm fails with IE_HARDWARE, the other comm functions with
-their errors); COMMDLG's Open and
-Save dialogs, Find and Replace (its FINDREPLACE in the messages, its own),
-GetFileTitle; SHELL's ShellExecute (a program, or a document by WIN.INI's
+their errors); SHELL's ShellExecute (a program, or a document by WIN.INI's
 [Extensions]), FindExecutable, ShellAbout, ExtractIcon, DragAcceptFiles,
 and no registration database; selectors of its own (AllocSelector,
 AllocCStoDSAlias, AllocDStoCSAlias, PrestoChangoSelector, Get/Set
@@ -284,7 +292,8 @@ WINN has not), `OWMETA` (a metafile recorded, played, scaled, enumerated
 record by record, its bits and a file), `OWSYS` (MMSYSTEM, TOOLHELP, VER,
 LZEXPAND, INT 2Fh, DPMI, DDEML, the Program Manager's DDE, DDE's messages), `OWFONT` (a raster font file's faces, `WINNTEST.FON` beside
 it, made by `host/mkfon.py`: its sizes, larger, bold, italic; the VGA
-glyphs larger; a dialog in the font) (`make NEFIXTURES` in
+glyphs larger; a dialog in the font), `OWHELP` (WinHelp), `OWDLG` (COMMDLG's
+Color, Font and Print dialogs, GetFileTitle) (`make NEFIXTURES` in
 `host/`). All have DOS MZ stubs that explain how to launch them under WINN
 when invoked directly from DOS. `host/test_ne_run` runs them on the
 emulator's own i386 core (`src/i386.c` as it is, built for the host with
@@ -317,14 +326,14 @@ nothing leaves the program from the command line in that part (`WINN DEMO`).
 | `ddi/winddi.h` | driver interface: display (DIB surface + palette) and input |
 | `ddi/winmod.h` | loadable driver modules: entry point and the tables exchanged with the core |
 | `core/` | handle table, KERNEL subset (memory, strings, atoms, INI files, files, tasks), regions, 1/8 bpp raster engine, GDI, fonts, software cursor, module loader, export tables |
-| `user/` | windows, messages, painting, non-client area, menus and accelerators, controls (BUTTON, STATIC, EDIT, LISTBOX, COMBOBOX, SCROLLBAR), dialogs, MessageBox, MDI (MDICLIENT, DefFrameProc, DefMDIChildProc), clipboard, common dialogs (module COMMDLG: Open, Save As, Find, Replace) |
+| `user/` | windows, messages, painting, non-client area, menus and accelerators, controls (BUTTON, STATIC, EDIT, LISTBOX, COMBOBOX, SCROLLBAR), dialogs, MessageBox, MDI (MDICLIENT, DefFrameProc, DefMDIChildProc), clipboard, the common dialogs' entries for native applications (COMMDLG.DLL's, loaded for them) |
 | `drivers/dos/` | display drivers `VGA` (mode 12h 640x480 in 16 colours, the default; `planar16.h`, shared with VGA800.DRV) and `VBE8` (VBE 100h 640x400x8, fallback 13h), the `DOS` input driver (keyboard through the BIOS buffer, INT 33h mouse) |
 | `runtime/` | `WINN.EXE` `main()`: drivers, core, shell and command-line program as tasks |
 | `sdk/` | for applications: API stubs by Win16 ordinal, `__ez_start`, `winapp.cmake`; `gen_exports.py` makes the export tables |
 | `../winapps/<name>/` | applications: `progman` (the Program Manager, the default shell), `winfile` (File Manager), `taskman` (Task List), `winmine` (Minesweeper), `winhelp` (Windows Help), `notepad`, `clock`, `calc`, `control` (Control Panel), `demo` (a tour of the API) |
 | `../windrv/<name>/` | driver modules; `vga800` is VBE 102h 800x600 in 16 colours |
 | `ddi/windll.h`, `core/windll.c` | native DLLs: the interface, and their loading, uses and unloading |
-| `../windll/<name>/` | native DLLs: `lzexpand` (LZEXPAND.DLL), `ver` (VER.DLL), `ddeml` (DDEML.DLL), `mmsystem` (MMSYSTEM.DLL) |
+| `../windll/<name>/` | native DLLs: `lzexpand` (LZEXPAND.DLL), `ver` (VER.DLL), `ddeml` (DDEML.DLL), `mmsystem` (MMSYSTEM.DLL), `commdlg` (COMMDLG.DLL) |
 | `host/` | the same sources on Linux with a snapshot display and scripted input |
 
 ## Drivers
@@ -364,7 +373,7 @@ Windows' own libraries are native DLLs of WINN's, loaded when a program
 needs one and unloaded when none does any more, as Windows 3.x does with
 its DLLs, instead of being built into `WINN.EXE`: `LZEXPAND.DLL`,
 `VER.DLL` (it reads a file's resources with the core's
-`GetFileResourceN`), `DDEML.DLL` and `MMSYSTEM.DLL` so far. A program importing one that is not there, or a
+`GetFileResourceN`), `DDEML.DLL`, `MMSYSTEM.DLL` and `COMMDLG.DLL` so far. A program importing one that is not there, or a
 function the DLL has not, still loads; the call ends it.
 A native DLL is an EZ image built with `sdk/windll.cmake` (no crt0; its
 `__ez_start`, from `sdk/windll_entry.c`, begins with a branch over the
@@ -376,7 +385,10 @@ ordinal). It calls KERNEL, GDI and USER
 through the API stubs as an application does, and has Win16 programs'
 calls of its functions with their arguments and memory from the core
 (`win_dll_ne`), which also calls a procedure of a task's Win16 program
-for it (a callback).
+for it (a callback), reads and writes a task's Win16 program's memory
+outside its calls, and asks the DLL for the lParam a Win16 window gets
+with a registered message one of the DLL's windows sends (COMMDLG's
+Find dialog: the program's own FINDREPLACE).
 
 DDEML (`include/ddeml.h` for native callers) is the DDE Management
 Library between the programs WINN runs, native and Win16 alike:
@@ -563,6 +575,7 @@ use `ucontext`):
     ./winhost scripts/winmine.txt WINMINE    # marks, a lost game, Expert, Best Times
     ./winhost scripts/winhelp.txt PROGMAN    # Windows Help on WINNTEST.HLP (mkhlp.py)
     ./winhost scripts/owhelp.txt PROGMAN     # WinHelp from a Win16 program: context, keyword, quit
+    ./winhost scripts/owdlg.txt PROGMAN      # COMMDLG: Color (full), Font, Print (no printer), GetFileTitle
     ./winhost scripts/logo.txt PROGMAN       # the logo (copy the BMPs into HOSTWIN first)
     ./winhost800 scripts/vga800.txt  # the VGA800 driver, built in
     ./winhostvga scripts/vga.txt     # the built-in VGA driver (640x480x16), Win16 programs too

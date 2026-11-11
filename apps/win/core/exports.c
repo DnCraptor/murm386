@@ -27,6 +27,8 @@ extern void CheckDlgButton(void);
 extern void CheckMenuItem(void);
 extern void CheckRadioButton(void);
 extern void ChildWindowFromPoint(void);
+extern void ChooseColor(void);
+extern void ChooseFont(void);
 extern void Chord(void);
 extern void ClientToScreen(void);
 extern void CloseClipboard(void);
@@ -356,6 +358,7 @@ extern void Polyline(void);
 extern void PostAppMessage(void);
 extern void PostMessage(void);
 extern void PostQuitMessage(void);
+extern void PrintDlg(void);
 extern void PtInRect(void);
 extern void PtInRegion(void);
 extern void PtVisible(void);
@@ -1011,8 +1014,11 @@ static const void *const exports_winn[22] = {
 static const void *const exports_commdlg[28] = {
     [1] = (const void *)GetOpenFileName,
     [2] = (const void *)GetSaveFileName,
+    [5] = (const void *)ChooseColor,
     [11] = (const void *)FindText,
     [12] = (const void *)ReplaceText,
+    [15] = (const void *)ChooseFont,
+    [20] = (const void *)PrintDlg,
     [26] = (const void *)CommDlgExtendedError,
     [27] = (const void *)GetFileTitle,
 };

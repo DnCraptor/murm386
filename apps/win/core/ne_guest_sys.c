@@ -268,8 +268,23 @@ static uint32_t task_call(uint16_t task, uint32_t proc, const uint16_t *words, i
     return u && u->ctx && proc ? win_ne_call(u->ctx, proc, words, n, NULL, 0) : 0;
 }
 
+static int task_read(uint16_t task, uint32_t far, void *dst, uint32_t n)
+{
+    ne_user *u = ne_user_of((HTASK)task);
+    args a = { u ? u->ctx : NULL, NULL, 0, 0 };
+    return u && u->ctx && rd_(&a, far, dst, n);
+}
+
+static int task_write(uint16_t task, uint32_t far, const void *src, uint32_t n)
+{
+    ne_user *u = ne_user_of((HTASK)task);
+    args a = { u ? u->ctx : NULL, NULL, 0, 0 };
+    return u && u->ctx && wr_(&a, far, src, n);
+}
+
 static const win_dll_ne dll_ne = {
     sizeof(win_dll_ne), call_arg16, call_arg32, call_read, call_write, call_string, task_call,
+    task_read, task_write,
 };
 
 const win_dll_ne *win_dll_ne_glue(void) { return &dll_ne; }

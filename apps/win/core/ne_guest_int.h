@@ -22,7 +22,6 @@
 #define NE_LENT    8
 #define NE_IMAGES  16
 #define NE_RESOURCES 16
-#define NE_FINDS   2
 #define NE_HOOKS   8
 
 typedef struct ne_user {
@@ -64,16 +63,9 @@ typedef struct ne_user {
     /* its icons (kind 2) and cursors (1), by number or name */
     struct { HANDLE h; uint8_t kind; uint16_t id, inst; char name[32]; } image[NE_IMAGES];
     /* ne_guest_kernel.c: the resources it found (FindResource), its error
-     * mode, its Find/Replace dialogs (the native FINDREPLACE, its strings,
-     * the program's FINDREPLACE; the native one is left to the dialog) */
+     * mode */
     struct { uint16_t type, id, inst; char name[32]; } res[NE_RESOURCES];
     uint16_t error_mode;
-    struct ne_find {
-        struct tagFINDREPLACE *fr;
-        uint32_t guest;
-        char what[80], with[80];
-        uint16_t what_len, with_len;
-    } find_dlg[NE_FINDS];
     /* ne_guest_call.c: the clipboard's data it got, copies in its memory
      * (freed as it closes or empties the clipboard) */
     struct { UINT fmt; uint16_t sel; } clip[8];
@@ -185,11 +177,8 @@ int ne_sys_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dwor
 /* ... the service of a native DLL's export */
 uint16_t win_ne_dll_service(int slot, const struct win_dll_export *e);
 /* ne_guest_kernel.c: KERNEL's modules, resources and the rest, GDI's and
- * USER's few left, COMMDLG, SHELL; 1 if it is one of them. A Find/Replace
- * dialog's message (lParam its native FINDREPLACE): the program's own,
- * updated, or 0 if lp is none of its dialogs' */
+ * USER's few left, SHELL; 1 if it is one of them */
 int ne_kernel_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword);
-uint32_t ne_find_message(ne_user *u, LPARAM lp);
 /* a procedure of the program with a message, lParam lent as a guest copy
  * when it points to a structure; a native one (DefWindowProc ...) with
  * lParam from the program, a lent copy given back */

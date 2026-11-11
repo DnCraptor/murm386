@@ -416,6 +416,9 @@ int    win_ez_is_app(const char *path);    /* the file, without loading it */
 int    win_dll_load(const char *name);   /* its slot, used once more; -1 none */
 void   win_dll_unref(int slot);
 int    win_dll_find(const char *name);   /* loaded: its slot; -1 */
+int    win_dll_use(const char *name);    /* ... used by this task (once, until its end) */
+/* a DLL's registered message to a Win16 window: the program's lParam, 0 */
+uint32_t win_dll_ne_lparam(uint32_t msg, uint32_t lparam);
 int    win_dll_of(HANDLE h);             /* a module handle's slot; -1 */
 HANDLE win_dll_handle(int slot);
 const char *win_dll_path(int slot);

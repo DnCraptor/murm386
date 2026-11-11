@@ -1126,7 +1126,7 @@ static const win_dll_export exports[] = {
 
 static const win_dll_info info = {
     WINDLL_VERSION, sizeof(win_dll_info), "DDEML",
-    exports, sizeof(exports) / sizeof(exports[0]), ne_call, task_end, term,
+    exports, sizeof(exports) / sizeof(exports[0]), ne_call, task_end, term, NULL,
 };
 
 const win_dll_info *WinDllInit(void) { return &info; }

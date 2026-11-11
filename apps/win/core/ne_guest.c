@@ -184,13 +184,12 @@ static int assign_selector(void *opaque, uint16_t index, uint16_t flags,
  * does). The service number, KERNEL ordinal n, USER 0x1000 + n, GDI
  * 0x3000 + n, lives entirely inside WINN; it is not a guest pointer or an
  * emulated IRQ. */
-enum { M_KERNEL, M_USER, M_GDI, M_KEYBOARD, M_COMMDLG, M_SHELL, M_WIN87EM, M_TOOLHELP,
-       M_COUNT };
+enum { M_KERNEL, M_USER, M_GDI, M_KEYBOARD, M_SHELL, M_WIN87EM, M_TOOLHELP, M_COUNT };
 static const uint16_t module_base[] = { 0, 0x1000u, 0x3000u, WIN_NE_SERVICE_KEYBOARD,
-                                        WIN_NE_SERVICE_COMMDLG, WIN_NE_SERVICE_SHELL,
-                                        WIN_NE_SERVICE_WIN87EM, WIN_NE_SERVICE_TOOLHELP };
+                                        WIN_NE_SERVICE_SHELL, WIN_NE_SERVICE_WIN87EM,
+                                        WIN_NE_SERVICE_TOOLHELP };
 static const char *const module_names[M_COUNT] = { "KERNEL", "USER", "GDI", "KEYBOARD",
-                                                   "COMMDLG", "SHELL", "WIN87EM", "TOOLHELP" };
+                                                   "SHELL", "WIN87EM", "TOOLHELP" };
 static const struct {
     uint8_t module;                 /* M_* */
     uint16_t ordinal;
@@ -462,12 +461,6 @@ static const struct {
     { M_GDI, 363, "GetPaletteEntries", 10 },
     { M_GDI, 364, "SetPaletteEntries", 10 },
     { M_GDI, 375, "GetSystemPaletteEntries", 10 },
-    { M_COMMDLG, 1, "GetOpenFileName", 4 },
-    { M_COMMDLG, 2, "GetSaveFileName", 4 },
-    { M_COMMDLG, 11, "FindText", 4 },
-    { M_COMMDLG, 12, "ReplaceText", 4 },
-    { M_COMMDLG, 26, "CommDlgExtendedError", 0 },
-    { M_COMMDLG, 27, "GetFileTitle", 10 },
     { M_SHELL, 1, "RegOpenKey", 10 },
     { M_SHELL, 2, "RegCreateKey", 10 },
     { M_SHELL, 3, "RegCloseKey", 4 },
@@ -607,8 +600,6 @@ static int module_of(const win_ne_import *imp)
         return M_GDI;
     if (name_eq(imp->module, "KEYBOARD") || name_eq(imp->module, "KEYBOARD.DRV"))
         return M_KEYBOARD;
-    if (name_eq(imp->module, "COMMDLG") || name_eq(imp->module, "COMMDLG.DLL"))
-        return M_COMMDLG;
     if (name_eq(imp->module, "SHELL") || name_eq(imp->module, "SHELL.DLL"))
         return M_SHELL;
     if (name_eq(imp->module, "WIN87EM") || name_eq(imp->module, "WIN87EM.DLL"))
@@ -627,7 +618,7 @@ static int module_of(const win_ne_import *imp)
  * be none, or one without the function): a program importing them loads
  * (WIN_NE_SERVICE_UNDEFINED); their indices after WINN's (M_COUNT on) */
 static const char *const system_modules[] = { "DDEML", "OLECLI", "OLESVR", "SOUND", "PENWIN",
-                                              "LZEXPAND", "VER", "MMSYSTEM" };
+                                              "LZEXPAND", "VER", "MMSYSTEM", "COMMDLG" };
 _Static_assert(M_COUNT + sizeof(system_modules) / sizeof(system_modules[0]) <= 16,
                "an undefined call's module takes 4 bits");
 

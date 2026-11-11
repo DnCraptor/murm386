@@ -11,11 +11,13 @@ const win_dll_info *lzexpand_WinDllInit(void);
 const win_dll_info *ver_WinDllInit(void);
 const win_dll_info *ddeml_WinDllInit(void);
 const win_dll_info *mmsystem_WinDllInit(void);
+const win_dll_info *commdlg_WinDllInit(void);
 
 const win_dll_builtin win_dll_builtins[] = {
     { "LZEXPAND", lzexpand_WinDllInit },
     { "VER", ver_WinDllInit },
     { "DDEML", ddeml_WinDllInit },
     { "MMSYSTEM", mmsystem_WinDllInit },
+    { "COMMDLG", commdlg_WinDllInit },
     { NULL, NULL },
 };

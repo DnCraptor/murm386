@@ -3,9 +3,9 @@
  * (GetModuleHandle, LoadLibrary and GetProcAddress for the modules WINN
  * has), resources (FindResource, LoadResource ...), temporary files, the
  * environment of the system (GetWinFlags, GetFreeSpace ...); USER's and
- * GDI's few left (the MM_TEXT mapping mode, palettes, CreateDC); COMMDLG's
- * file dialogs and Find/Replace; SHELL's ShellExecute, ShellAbout,
- * ExtractIcon and the rest of it a program asks for.
+ * GDI's few left (the MM_TEXT mapping mode, palettes, CreateDC); SHELL's
+ * ShellExecute, ShellAbout, ExtractIcon and the rest of it a program asks
+ * for.
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
@@ -13,7 +13,6 @@
 #include <string.h>
 #include "wincore.h"
 #include "windll.h"
-#include "commdlg.h"
 #include "ne_guest_api.h"
 #include "ne_guest_int.h"
 
@@ -256,134 +255,6 @@ static int command_for(const char *file, const char *params, char *cmd, int cap)
         return 0;
     wsprintf(cmd, "%s %s", assoc, file);
     return 1;
-}
-
-/* ---------------------------------------------------------------- COMMDLG */
-
-/* Win16 OPENFILENAME: lStructSize, hwndOwner, hInstance, lpstrFilter,
- * lpstrCustomFilter, nMaxCustFilter, nFilterIndex, lpstrFile, nMaxFile,
- * lpstrFileTitle, nMaxFileTitle, lpstrInitialDir, lpstrTitle, Flags,
- * nFileOffset, nFileExtension, lpstrDefExt, lCustData, lpfnHook,
- * lpTemplateName: 72 bytes */
-static __attribute__((noinline)) uint16_t file_dialog(args *a, int save)
-{
-    uint32_t far = dw(a, 4);
-    uint8_t g[72];
-    char filter[512], file[260], title_buf[64], dir[128], caption[64], defext[8];
-    if (!rd_(a, far, g, sizeof(g)))
-        return 0;
-    /* the filter: pairs of strings up to an empty one */
-    uint32_t f = rd32(g + 8), n = 0;
-    memset(filter, 0, sizeof(filter));
-    if (f) {
-        while (n + 2 < sizeof(filter)) {
-            if (!rd_(a, f + n, filter + n, 1))
-                return 0;
-            if (!filter[n] && n && !filter[n - 1])
-                break;
-            n++;
-        }
-    }
-    uint32_t file_far = rd32(g + 24), max_file = rd32(g + 28);
-    uint32_t title_far = rd32(g + 32), max_title = rd32(g + 36);
-    if (!file_far || !str_(a, file_far, file, sizeof(file)) ||
-        !str_(a, rd32(g + 40), dir, sizeof(dir)) || !str_(a, rd32(g + 44), caption, sizeof(caption)) ||
-        !str_(a, rd32(g + 56), defext, sizeof(defext)))
-        return 0;
-    OPENFILENAME ofn;
-    memset(&ofn, 0, sizeof(ofn));
-    ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner = rd16(g + 4);
-    ofn.lpstrFilter = f ? filter : NULL;
-    ofn.nFilterIndex = rd32(g + 20);
-    ofn.lpstrFile = file;
-    ofn.nMaxFile = max_file < sizeof(file) ? max_file : sizeof(file);
-    ofn.lpstrFileTitle = title_far ? title_buf : NULL;
-    ofn.nMaxFileTitle = max_title < sizeof(title_buf) ? max_title : sizeof(title_buf);
-    ofn.lpstrInitialDir = dir[0] ? dir : NULL;
-    ofn.lpstrTitle = caption[0] ? caption : NULL;
-    ofn.Flags = rd32(g + 48) & ~(DWORD)(OFN_ENABLEHOOK | OFN_ENABLETEMPLATE);
-    ofn.lpstrDefExt = defext[0] ? defext : NULL;
-    BOOL ok = save ? GetSaveFileName(&ofn) : GetOpenFileName(&ofn);
-    wr32(g + 20, ofn.nFilterIndex);
-    wr32(g + 48, ofn.Flags);
-    wr16(g + 52, (uint16_t)ofn.nFileOffset);
-    wr16(g + 54, (uint16_t)ofn.nFileExtension);
-    if (!wr_(a, far, g, sizeof(g)))
-        return 0;
-    if (ok) {
-        str_out(a, file_far, file, max_file);
-        if (title_far)
-            str_out(a, title_far, title_buf, max_title);
-    }
-    return (uint16_t)ok;
-}
-
-/* Find and Replace: the program's FINDREPLACE (lStructSize, hwndOwner,
- * hInstance, Flags, lpstrFindWhat, lpstrReplaceWith, wFindWhatLen,
- * wReplaceWithLen, lCustData, lpfnHook, lpTemplateName: 36 bytes) and the
- * native one the dialog keeps, its strings in buffers of its own; each
- * message the dialog sends brings the native one's fields back */
-static __attribute__((noinline)) uint16_t find_dialog(args *a, ne_user *u, int replace)
-{
-    uint32_t far = dw(a, 4);
-    uint8_t g[36];
-    int i = 0;
-    while (i < NE_FINDS && u->find_dlg[i].fr)
-        i++;
-    if (i == NE_FINDS || !rd_(a, far, g, sizeof(g)))
-        return 0;
-    struct ne_find *nf = &u->find_dlg[i];
-    FINDREPLACE *fr = (FINDREPLACE *)win_alloc(sizeof(FINDREPLACE));
-    if (!fr)
-        return 0;
-    nf->what_len = rd16(g + 20) < sizeof(nf->what) ? rd16(g + 20) : sizeof(nf->what);
-    nf->with_len = rd16(g + 22) < sizeof(nf->with) ? rd16(g + 22) : sizeof(nf->with);
-    nf->guest = far;
-    if (!str_(a, rd32(g + 12), nf->what, sizeof(nf->what)) ||
-        (replace && !str_(a, rd32(g + 16), nf->with, sizeof(nf->with)))) {
-        win_free(fr);
-        return 0;
-    }
-    fr->lStructSize = sizeof(*fr);
-    fr->hwndOwner = rd16(g + 4);
-    fr->Flags = rd32(g + 8) & ~(DWORD)0x180;       /* no hook, no template */
-    fr->lpstrFindWhat = nf->what;
-    fr->lpstrReplaceWith = replace ? nf->with : NULL;
-    fr->wFindWhatLen = nf->what_len;
-    fr->wReplaceWithLen = nf->with_len;
-    nf->fr = fr;
-    HWND h = replace ? ReplaceText(fr) : FindText(fr);
-    if (!h) {
-        win_free(fr);
-        nf->fr = NULL;
-    }
-    return h;
-}
-
-uint32_t ne_find_message(ne_user *u, LPARAM lp)
-{
-    for (int i = 0; i < NE_FINDS; i++) {
-        struct ne_find *nf = &u->find_dlg[i];
-        if (!nf->fr || (LPARAM)(uintptr_t)nf->fr != lp)
-            continue;
-        args a = { u->ctx, NULL, 0, 0 };
-        uint8_t g[36];
-        if (rd_(&a, nf->guest, g, sizeof(g))) {
-            wr32(g + 8, nf->fr->Flags);
-            wr_(&a, nf->guest, g, sizeof(g));
-            str_out(&a, rd32(g + 12), nf->what, nf->what_len ? nf->what_len : 1);
-            if (nf->fr->lpstrReplaceWith)
-                str_out(&a, rd32(g + 16), nf->with, nf->with_len ? nf->with_len : 1);
-        }
-        uint32_t far = nf->guest;
-        if (nf->fr->Flags & FR_DIALOGTERM) {    /* the dialog's last: its end */
-            win_free(nf->fr);
-            nf->fr = NULL;
-        }
-        return far;
-    }
-    return 0;
 }
 
 /* ---------------------------------------------------------------- the services */
@@ -1272,17 +1143,6 @@ static __attribute__((noinline)) int kernel_strings(args *a, ne_user *u, uint16_
         SetSysColors(n, idx, col);
         return 1;
     }
-    case WIN_NE_SERVICE_COMMDLG + 27: {   /* GetFileTitle(LPCSTR, LPSTR, UINT) */
-        char file[260], title[64];
-        UINT size = w(a, 4);
-        if (str_(a, dw(a, 10), file, sizeof(file))) {
-            short r = GetFileTitle(file, title, sizeof(title));
-            *v = (uint16_t)r;
-            if (!r && !str_out(a, dw(a, 6), title, size))
-                *v = (uint16_t)(strlen(title) + 1);
-        }
-        return 1;
-    }
     }
     return 0;
 }
@@ -1296,7 +1156,7 @@ int ne_kernel_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *d
     if (kernel_misc(a, service, v, dword))
         return 1;
     switch (service) {
-    case 50: case 95: case 137: case 166: case 0x10b5: case WIN_NE_SERVICE_COMMDLG + 27:
+    case 50: case 95: case 137: case 166: case 0x10b5:
         return kernel_strings(a, u, service, v, dword);
     case WIN_NE_SERVICE_WIN87EM + 3:    /* __WinEm87Info, __WinEm87Restore, */
     case WIN_NE_SERVICE_WIN87EM + 4:    /* __WinEm87Save(LPVOID, int): the */
@@ -1406,18 +1266,6 @@ int ne_kernel_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *d
             *v = (uint16_t)TranslateMDISysAccel(w(a, 8), &m);
         return 1;
     }
-    case WIN_NE_SERVICE_COMMDLG + 1:
-    case WIN_NE_SERVICE_COMMDLG + 2:
-        *v = file_dialog(a, service == WIN_NE_SERVICE_COMMDLG + 2);
-        return 1;
-    case WIN_NE_SERVICE_COMMDLG + 11:
-    case WIN_NE_SERVICE_COMMDLG + 12:
-        *v = find_dialog(a, u, service == WIN_NE_SERVICE_COMMDLG + 12);
-        return 1;
-    case WIN_NE_SERVICE_COMMDLG + 26:
-        *v = CommDlgExtendedError();
-        *dword = 1;
-        return 1;
     }
     return 0;
 }

@@ -1,0 +1,30 @@
+# COMMDLG.DLL's Color, Font and Print dialogs from a Win16 program on the
+# i386 core (OWDLG): Color opened full, red picked and added to the custom
+# colours, OK; Font with System asked, Bold Italic and Underline picked,
+# OK; Print with PD_RETURNDEFAULT (no printer); GetFileTitle:
+#     ./winhost scripts/owdlg.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OWDLG
+key RETURN
+wait 300
+click 37 97
+wait 20
+click 460 374
+wait 20
+snap od_color.ppm
+click 60 374
+wait 50
+click 296 222
+wait 10
+click 58 313
+wait 20
+snap od_font.ppm
+key RETURN
+wait 50
+snap od_result.ppm
+exit

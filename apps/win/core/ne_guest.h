@@ -28,7 +28,6 @@
  * an INT 21h of its own (the registers are its arguments) */
 #define WIN_NE_SERVICE_KEYBOARD 0x4000u
 #define WIN_NE_SERVICE_DOS3CALL 102u
-#define WIN_NE_SERVICE_COMMDLG  0x5000u
 #define WIN_NE_SERVICE_SHELL    0x6000u
 /* WIN87EM's: __FPMATH (1) is x86 code of WINN's (the coprocessor is the
  * emulator's own); the rest native */
@@ -159,7 +158,7 @@ int win_ne_guest_selector_set(win_ne_guest_image *g, uint16_t sel, uint32_t base
 /* n empty selectors one after the other (AllocSelectorArray): the first */
 uint16_t win_ne_guest_selector_array(win_ne_guest_image *g, unsigned n);
 /* GetProcAddress of a module WINN has (0 KERNEL, 1 USER, 2 GDI, 3
- * KEYBOARD, 4 COMMDLG, 5 SHELL, 6 WIN87EM, 7 TOOLHELP;
+ * KEYBOARD, 4 SHELL, 5 WIN87EM, 6 TOOLHELP;
  * win_ne_guest_module gives the number of a name, -1 for none): a thunk's
  * far address, made now if the program had none for it, 0 if WINN has not
  * the function. */

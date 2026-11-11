@@ -49,6 +49,10 @@ typedef struct win_dll_ne {
      * task, called with n words (in the order a PASCAL caller pushes them):
      * its DX:AX; 0 if the task is no Win16 program's (or it has ended) */
     uint32_t (*call)(uint16_t task, uint32_t proc, const uint16_t *words, int n);
+    /* the memory of the Win16 program of a task outside its calls (a
+     * modeless dialog's structure of its): 0 if it fails */
+    int (*task_read)(uint16_t task, uint32_t far, void *dst, uint32_t n);
+    int (*task_write)(uint16_t task, uint32_t far, const void *src, uint32_t n);
 } win_dll_ne;
 
 typedef struct win_dll_export {
@@ -74,6 +78,11 @@ typedef struct win_dll_info {
     void (*task_end)(uint16_t task);
     /* the last user is gone: before the DLL is unloaded (WEP) */
     void (*term)(void);
+    /* a registered message (C000h on) that one of its windows sends a
+     * Win16 program's window, lParam a native structure of the DLL's (the
+     * Find dialog's FINDREPLACE): the far pointer the program gets (its
+     * own, brought up to date), 0 for none of the DLL's; NULL: none */
+    uint32_t (*ne_lparam)(uint32_t msg, uint32_t lparam);
 } win_dll_info;
 
 typedef struct win_dll_host {

@@ -370,8 +370,22 @@ UINT    WINAPI GlobalGetAtomName(ATOM a, LPSTR buf, int size);
 #define FF_SCRIPT       0x40
 #define FF_DECORATIVE   0x50
 #define OUT_DEFAULT_PRECIS  0
+#define OUT_STRING_PRECIS   1
+#define OUT_CHARACTER_PRECIS 2
+#define OUT_STROKE_PRECIS   3
+#define OUT_TT_PRECIS       4
+#define OUT_DEVICE_PRECIS   5
+#define OUT_RASTER_PRECIS   6
+#define OUT_TT_ONLY_PRECIS  7
 #define CLIP_DEFAULT_PRECIS 0
+#define CLIP_CHARACTER_PRECIS 1
+#define CLIP_STROKE_PRECIS  2
+#define CLIP_LH_ANGLES      0x10
+#define CLIP_TT_ALWAYS      0x20
+#define CLIP_EMBEDDED       0x80
 #define DEFAULT_QUALITY     0
+#define DRAFT_QUALITY       1
+#define PROOF_QUALITY       2
 #define LF_FACESIZE     32
 
 typedef struct tagLOGPEN {

@@ -133,6 +133,13 @@ OWFONT: a raster font file's faces (WINNTEST.FON beside it, mkfon.py:
     "x2: Winn Test 48/40/8 ...", "VGA x2: System 32/26/4 90"; (SPACE) a
     dialog whose template has the font (FONT 9, "Winn Test"): its controls
     in it, its units the font's: "Units 9 x 12, font 1"
+
+OWDLG: COMMDLG.DLL's Color (opened full: a basic colour picked, Add to
+    Custom Colors), Font (System, Bold Italic, underlined, maroon), Print
+    (PD_RETURNDEFAULT: no printer) and GetFileTitle: "color 1 0000FF err
+    0, custom 0000FF FFFFFF", "font 1 err 0: System -15, w 700 i 1 u 1,
+    110/10 pt, Bold Italic, type A300, 000080", "print 0 err 1008, title 0
+    WIN.INI"
 """
 import sys
 
@@ -6410,6 +6417,200 @@ PROGRAMS = {
             '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
             '0000000000000000000000000000000000000000000000000304030400000000000000000000000000000000'
             '00000000000000000000000000000000000000000020fa010000'
+        )),
+    'OWDLG': (
+        # wcc -bt=windows -ms owdlg.c; wlink @owdlg.lnk
+        # ---- owdlg.c
+        #     /*
+        #      * owdlg.c - COMMDLG's Color, Font and Print dialogs and GetFileTitle from
+        #      * a Win16 program: Color opened full (a colour picked, Add to Custom
+        #      * Colors, OK), Font (the System font asked, Bold Italic picked, OK),
+        #      * Print (PD_RETURNDEFAULT: no printer), the title of a path; what each
+        #      * returned, and CommDlgExtendedError after each.
+        #      */
+        #     #include <windows.h>
+        #     #include <commdlg.h>
+        #     #include <string.h>
+        #
+        #     static char line1[100] = "waiting", line2[100] = "", line3[100] = "";
+        #
+        #     static void run(HWND h)
+        #     {
+        #         static COLORREF cust[16];
+        #         CHOOSECOLOR cc;
+        #         CHOOSEFONT cf;
+        #         LOGFONT lf;
+        #         PRINTDLG pd;
+        #         char style[LF_FACESIZE], title[16];
+        #         BOOL rc, rf, rp;
+        #         DWORD ec, ef, ep;
+        #         short rt;
+        #         int i;
+        #         for (i = 0; i < 16; i++)
+        #             cust[i] = RGB(255, 255, 255);
+        #         _fmemset(&cc, 0, sizeof(cc));
+        #         cc.lStructSize = sizeof(cc);
+        #         cc.hwndOwner = h;
+        #         cc.rgbResult = RGB(0, 0, 255);
+        #         cc.lpCustColors = cust;
+        #         cc.Flags = CC_RGBINIT | CC_FULLOPEN;
+        #         rc = ChooseColor(&cc);
+        #         ec = CommDlgExtendedError();
+        #         _fmemset(&lf, 0, sizeof(lf));
+        #         lstrcpy(lf.lfFaceName, "System");
+        #         lf.lfHeight = -13;
+        #         lstrcpy(style, "Regular");
+        #         _fmemset(&cf, 0, sizeof(cf));
+        #         cf.lStructSize = sizeof(cf);
+        #         cf.hwndOwner = h;
+        #         cf.lpLogFont = &lf;
+        #         cf.Flags = CF_SCREENFONTS | CF_EFFECTS | CF_INITTOLOGFONTSTRUCT | CF_USESTYLE;
+        #         cf.rgbColors = RGB(128, 0, 0);
+        #         cf.lpszStyle = style;
+        #         rf = ChooseFont(&cf);
+        #         ef = CommDlgExtendedError();
+        #         _fmemset(&pd, 0, sizeof(pd));
+        #         pd.lStructSize = sizeof(pd);
+        #         pd.hwndOwner = h;
+        #         pd.Flags = PD_RETURNDEFAULT;
+        #         rp = PrintDlg(&pd);
+        #         ep = CommDlgExtendedError();
+        #         rt = GetFileTitle("C:\\WINDOWS\\WIN.INI", title, sizeof(title));
+        #         wsprintf(line1, "color %d %06lX err %lX, custom %06lX %06lX", rc, cc.rgbResult, ec,
+        #                  cust[0], cust[1]);
+        #         wsprintf(line2, "font %d err %lX: %s %d, w %d i %d u %d, %d/10 pt, %s, type %X, %06lX",
+        #                  rf, ef, (LPSTR)lf.lfFaceName, lf.lfHeight, lf.lfWeight, lf.lfItalic,
+        #                  lf.lfUnderline, cf.iPointSize, (LPSTR)style, cf.nFontType, cf.rgbColors);
+        #         wsprintf(line3, "print %d err %lX, title %d %s", rp, ep, rt, (LPSTR)title);
+        #         InvalidateRect(h, NULL, TRUE);
+        #     }
+        #
+        #     long FAR PASCAL WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+        #     {
+        #         PAINTSTRUCT ps;
+        #         HDC dc;
+        #         switch (msg) {
+        #         case WM_TIMER:
+        #             KillTimer(h, 1);
+        #             run(h);
+        #             return 0;
+        #         case WM_PAINT:
+        #             dc = BeginPaint(h, &ps);
+        #             TextOut(dc, 8, 8, line1, lstrlen(line1));
+        #             TextOut(dc, 8, 28, line2, lstrlen(line2));
+        #             TextOut(dc, 8, 48, line3, lstrlen(line3));
+        #             EndPaint(h, &ps);
+        #             return 0;
+        #         case WM_DESTROY:
+        #             PostQuitMessage(0);
+        #             return 0;
+        #         }
+        #         return DefWindowProc(h, msg, wp, lp);
+        #     }
+        #
+        #     int PASCAL WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR cmd, int show)
+        #     {
+        #         WNDCLASS wc;
+        #         HWND h;
+        #         MSG m;
+        #         _fmemset(&wc, 0, sizeof(wc));
+        #         wc.lpfnWndProc = WndProc;
+        #         wc.hInstance = hInstance;
+        #         wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        #         wc.hbrBackground = GetStockObject(WHITE_BRUSH);
+        #         wc.lpszClassName = "OwDlg";
+        #         if (!hPrev && !RegisterClass(&wc))
+        #             return 1;
+        #         h = CreateWindow("OwDlg", "COMMDLG", WS_OVERLAPPEDWINDOW, 0, 0, 640, 100,
+        #                          NULL, NULL, hInstance, NULL);
+        #         ShowWindow(h, show);
+        #         UpdateWindow(h);
+        #         SetTimer(h, 1, 100, NULL);
+        #         while (GetMessage(&m, NULL, 0, 0)) {
+        #             TranslateMessage(&m);
+        #             DispatchMessage(&m);
+        #         }
+        #         return m.wParam;
+        #     }
+        # ---- owdlg.lnk
+        #     system windows
+        #     name owdlg.exe
+        #     file owdlg.o
+        #     library commdlg.lib
+        bytes.fromhex(
+            '4d5a80000100000004000000ffff0000b8000000000000004000000000000000000000000000000000000000'
+            '00000000000000000000000000000000800000000e1fba0e00b409cd21b8014ccd2154686973206973206120'
+            '57696e646f77732031362d6269742065786563757461626c650d0a240000000000000000000000004e450501'
+            '7a0002000000000002030200000400202804010000000200020004000d0040005000500059006100fc000000'
+            '0000010000000200000000000000000385002207400d2207c304ee02410c3003054f57444c47000000010009'
+            '00100015000007434f4d4d444c47064b45524e454c0455534552034744490000096f77646c672e6578650000'
+            '0000ccebfd90909090005589e550b82a01e8cd0358535152565781ecf60089c631c089c3d1e3d1e3c787ee02'
+            'ffffc787f002ff00403d10007ce8b9200031db8cda8d46b4e8cc03c746b4200031c08946b68976b88946bcc7'
+            '46beff00c746c0ee028c5ec2c746c403008946c68d56b41e529affff00008946e89affff00008946ee8956f4'
+            'b9320031db8cda8d8634ffe881038d9646ff1e521eb81000509affff0000c78634fff3ff8d56941e521eb817'
+            '00509affff0000b92e0031db8cda8d8666ffe84e03c78666ff2e00c78668ff000089b66aff8d9634ff89966e'
+            'ff8c9e70ffc78674ffc101c78676ff0000c78678ff8000c7867aff00008d569489568a8c5e8c8d9666ff1e52'
+            '9affff00008946ec9affff00008946f08956eab9340031db8cda8d8600ffe8ea02c78600ff3400c78602ff00'
+            '0089b604ffc7860cff0004c7860eff00008d9600ff1e529affff00008946f29affff00008946e689d71eb81f'
+            '00508d56d41e52b81000509affff00008946e4ff36f402ff36f202ff36f002ff36ee02ff76f4ff76eeff76be'
+            'ff76bcff76e81eb83200501eb8da00509affff000083c41affb67affffb678ffff768e8d56941e52ffb672ff'
+            '8a863fff30e4508a863eff50ffb63cffffb634ff8d9646ff1e52ff76eaff76f0ff76ec1eb85d00501eb83e01'
+            '509affff000083c4268d56d41e52ff76e457ff76e6ff76f21eb8a200501eb8a201509affff000083c4145631'
+            'c05050b80100509affff00008d66f65f5e5a595b5dc31e5890455589e51e8ed8b83800e8ab01565783ec208b'
+            '460c8b7e0e3d1301740d3d0f0074203d02007419e98a0057b80100509affff000089f8e8a8fd31c031d2e984'
+            '00eb68578d56da1e529affff000089c650b8080050501eb8da00501e509affff0000509affff000056b80800'
+            '50b81c00501eb83e01501e509affff0000509affff000056b8080050b83000501eb8a201501e509affff0000'
+            '509affff0000578d56da1e529affff0000eb8f31c0509affff0000eb855750ff760aff7608ff76069affff00'
+            '008d66fa5f5e1f5d4dca0a005589e5b85000e8e0005683ec2c8b760cb91a0031db8cda8d46d2e8fe00c746d4'
+            'ffffc746d6ffff8976dc31c05050b8007f509affff00008946e031c0509affff00008946e2c746e8c0008c5e'
+            'ea837e0a0075138d56d21e529affff000085c07505b80100eb761eb8c000501eb8c60050b8cf005031c05050'
+            '50b8800250b864005031c050505650509affff000089c650ff76049affff0000569affff000056b8010050b8'
+            '64005031c050509affff00008d56ec1e5231c05050509affff000085c074168d56ec1e529affff00008d56ec'
+            '1e529affff0000ebd78b46f08d66fe5e5dc20a008c160602c33bc473132bc4f7d83b060a0077068cd03b0606'
+            '027401c30e5ab80104bb0100e9c801537461636b204f766572666c6f7721005789c788d88ec2578ae0d1e9f3'
+            'ab13c9f3aa5f89f85fc3eb0203009affff00000bc0750e5033c0ba0f00e86a0258b44ccd218c060c02575606'
+            '535253be2e03893627028c1e2902268a078804464384c075f589360a005b2bc0509affff000057579affff00'
+            '00fc1e07b92e03bfee022bcf32c0f3aab87205a32302b8ffffa32502b430cd21a20e0288260f029affff0000'
+            'a210028826110286e0a3120254583bc475120f01e0a90100740ab001a21402b003a215021ebf2f0257b89000'
+            '509affff0000b82f02893e2b028c1e2d02b8ff00e86b01e80efee9f9004f70656e20576174636f6d20432f43'
+            '2b2b31362052756e2d54696d652073797374656d2e20436f7079726967687420286329204f70656e20576174'
+            '636f6d20436f6e7472696275746f727320323030322d323032362e20506f7274696f6e7320436f7079726967'
+            '687420284329205379626173652c20496e632e20313938382d323030322e00c3cb005589e551565781ec8000'
+            '89c689df8d9e7aff8cd98ec2268a0484c074173c0d74138d46f939c3730c268a048ec14626880743ebe031c0'
+            '8ec15026c607001e8d9e7aff531eb8ce005031c0509affff000089f8e94400515689c189d6e8330185c07506'
+            '89c889f2eb9889d8e92c0000c3c3535289c3833ee602007404ff16e602ff16c002baff00b81000e8a800ff16'
+            'c002ff16c20289d8e928fe5289c2ff16c002ff16c20289d0e918fe5589e5535289c3833f0075078d66fc5a5b'
+            '5dc31eff171febf35589e5535289c38b47028b1785c0750485d274df1eff1f1febd95589e5535152565789c1'
+            '1ee813ffbfee0289fabbe80289fe88c839fb7316803f02750583c306ebf23a470172f689de8a4701ebef39fe'
+            '74158d4402803c007508e88affc60402ebcbe89bffebf61f8d66f65f5e5a595b5dc35589e55351565789c11e'
+            'e8bcfe88d5bfee0289fabbee0289fe88c839fb7316803f02750583c306ebf23a470177f689de8a4701ebef39'
+            'fe741c3a6c017305c60402ebd18d4402803c007505e827ffebeee83bffebe91f8d66f85f5eeb9f803ec40200'
+            '750331c0c35250cceb0657564944454fb8010083c404c3002b0003017000010005000301780001001a000301'
+            '9c00020058000301b100020058000301070101000f0003010f0101001a0003014a0101001400030152010100'
+            '1a0003016a0101001b0003019b010300a4010301e4010300a401030105020300a4010301160203007d000301'
+            '570203000c0003017002030027000301840202005a0003018a020400210003019f0202005a000301a5020400'
+            '21000301ba0202005a000301c002040021000301cb02030028000301d502030006000301e70203006b000500'
+            '16030100240202001b0301002402030129030300ad00030134030400570003014f030300390003017f030300'
+            '290003018a0303002a000301900303007c000301a20303000a000301b10303006c000301bf03030071000301'
+            'c9030300720003012d0402005b0003016c0402001e00030173040300050002008d040100280403019e040200'
+            '03000301d004020031000301c005030001000000000005000000000000000000000053797374656d00526567'
+            '756c617200433a5c57494e444f57535c57494e2e494e4900636f6c6f72202564202530366c58206572722025'
+            '6c582c20637573746f6d202530366c58202530366c5800666f6e742025642065727220256c583a2025732025'
+            '642c2077202564206920256420752025642c2025642f31302070742c2025732c20747970652025582c202530'
+            '366c58007072696e742025642065727220256c582c207469746c65202564202573004f77446c6700434f4d4d'
+            '444c47004f70656e20576174636f6d0077616974696e67000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '00000000000000000000ffff00000000000000000000000c0000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '000000000000000000000000000000000000e305e30500000000000000000000000000000000000000000000'
+            '00000000000000000000000000000020da030000'
         )),
 }
 

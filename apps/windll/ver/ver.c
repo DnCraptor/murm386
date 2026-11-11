@@ -472,7 +472,7 @@ static const win_dll_export exports[] = {
 
 static const win_dll_info info = {
     WINDLL_VERSION, sizeof(win_dll_info), "VER",
-    exports, sizeof(exports) / sizeof(exports[0]), ne_call, NULL, NULL,
+    exports, sizeof(exports) / sizeof(exports[0]), ne_call, NULL, NULL, NULL,
 };
 
 const win_dll_info *WinDllInit(void) { return &info; }
