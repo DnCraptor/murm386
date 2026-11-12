@@ -241,11 +241,13 @@ TTEnable=0 none of them, TTOnly=1 no raster files of [fonts]; a family's
 regular, bold and italic files its faces, a face with the Windows-1251
 letters before one without for the family's name: "Arial Cyr" for
 "Arial" when Arial has none), drawn by WINN's own rasterizer (`core/truetype.c`: simple and
-composite glyphs, their curves made lines, black and white with dropout
-control as Windows 3.1 has them on a VGA; the fonts' hints not run, the
-glyphs fitted up and down instead: each horizontal edge on a pixel's
-boundary, a stroke at least a pixel, so the baseline, the capitals' and
-small letters' tops and the bars stay level) at any height (the
+composite glyphs, black and white as Windows 3.1 has them on a VGA, no
+smoothing; the fonts' hints run by `core/ttinterp.c`, the TrueType
+instructions' interpreter: fpgm and prep once a size, each glyph's own,
+the hdmx widths; the scan converter's rules, dropout control by the
+font's SCANCTRL and SCANTYPE, the rasterizer Windows' and FreeType's
+share, its pixels FreeType's v35 interpreter's; turned or slanted glyphs
+drawn from the outline unhinted) at any height (the
 em's when lfHeight is negative, the cell's when positive), Windows-1251
 through the font's Unicode map (Latin-1 for a font without Cyrillic) or
 its symbol one; their faces found by
@@ -702,7 +704,9 @@ first writes `WINNTRAC.LOG` in the Windows directory: the last 256
 calls Win16 programs made of WINN's (the task, the caller's CS:IP, the
 call, DX:AX; one repeated from the same place counted), where their
 last turns ended, and the programs' memory (extended and DOS's, DOS's
-largest free block), for a program that hangs.
+largest free block), for a program that hangs; and a line of the
+TrueType fonts': their files read (ms), sizes made and kept, glyphs drawn
+(ms), advances hinted, for text that draws slowly.
 
 Ctrl+Shift switches between the US and Russian (Windows-1251) layouts.
 Text is ANSI Windows-1251 and is drawn with the CP866 VGA font, or with

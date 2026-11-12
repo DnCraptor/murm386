@@ -1,11 +1,12 @@
 /*
  * truetype.c - TrueType fonts: the tables a font file has (head, hhea,
- * hmtx, maxp, loca, glyf, cmap, name, OS/2, post), its characters' glyphs
- * (simple and composite ones, their quadratic curves made lines) drawn
- * black and white: a pixel set when its centre is inside the outline (the
- * non-zero winding rule), and the parts thinner than a pixel, which no
- * centre is inside, still a pixel (dropout control, rows and columns), as
- * Windows draws its TrueType fonts on a VGA. No hinting.
+ * hmtx, maxp, loca, glyf, cmap, name, OS/2, post, hdmx, kern), its
+ * characters' glyphs (simple and composite ones, their quadratic curves
+ * made lines) drawn black and white: a pixel set when its centre is inside
+ * the outline (the non-zero winding rule), and, when the font's hints ask
+ * for it (SCANCTRL), the parts thinner than a pixel still one (dropout
+ * control: simple or smart, SCANTYPE), as Windows draws its TrueType fonts
+ * on a VGA. The hints themselves: ttinterp.c.
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
@@ -14,20 +15,12 @@
 #include "wincore.h"
 #include "truetype.h"
 
-struct ttfont {
-    uint8_t *d;
-    uint32_t n;
-    uint32_t head, hhea, hmtx, maxp, loca, glyf, name, os2, post, cmap;
-    uint32_t loca_len, glyf_len, hmtx_len;
-    uint32_t sub;                   /* the character map's subtable (its offset) */
-    int      kind;                  /* the map: 1 Unicode, 2 symbol, 3 Macintosh */
-    int      loca_long, nglyphs, nhmetrics;
-    ttinfo   info;
-};
+#include "truetype_int.h"
 
-static unsigned be16(const uint8_t *p) { return (unsigned)p[0] << 8 | p[1]; }
-static int bes16(const uint8_t *p) { return (int16_t)be16(p); }
-static uint32_t be32(const uint8_t *p) { return (uint32_t)be16(p) << 16 | be16(p + 2); }
+#define be16 tt_be16
+#define bes16 tt_bes16
+#define be32 tt_be32
+#define table tt_tab
 
 /* Windows-1251 80h..FFh in Unicode */
 static const uint16_t cp1251[128] = {
@@ -67,8 +60,7 @@ int tt_is_ttf(const uint8_t *d, uint32_t n)
     return n >= 12 && (be32(d) == 0x00010000u || be32(d) == 0x74727565u);   /* 1.0, "true" */
 }
 
-/* a table's place, 0 if there is none (or it is not all in the file) */
-static uint32_t table(const ttfont *f, const char *tag, uint32_t *len)
+uint32_t tt_tab(const ttfont *f, const char *tag, uint32_t *len)
 {
     unsigned count = be16(f->d + 4);
     for (unsigned i = 0; i < count && 12u + 16u * (i + 1) <= f->n; i++) {
@@ -452,160 +444,210 @@ int tt_kern(const ttfont *f, void (*pair)(void *ctx, unsigned left, unsigned rig
     return count;
 }
 
-/* ---------------------------------------------------------------- outlines */
+/* ---------------------------------------------------------------- glyphs */
 
-typedef struct {
-    float x0, y0, x1, y1;
-} edge;
-
-typedef struct {
-    edge *e;
-    int n, cap;
-} edges;
-
-static void add_edge(edges *es, float x0, float y0, float x1, float y1)
+int tt_glyph_at(const ttfont *f, unsigned glyph, const uint8_t **g, const uint8_t **end)
 {
-    if (x0 == x1 && y0 == y1)
-        return;
-    if (es->n == es->cap) {
-        int cap = es->cap ? es->cap * 2 : 128;
-        edge *n = (edge *)win_alloc(sizeof(edge) * (size_t)cap);
-        if (!n)
-            return;
-        if (es->e) {
-            memcpy(n, es->e, sizeof(edge) * (size_t)es->n);
-            win_free(es->e);
-        }
-        es->e = n;
-        es->cap = cap;
-    }
-    es->e[es->n++] = (edge){ x0, y0, x1, y1 };
-}
-
-/* a quadratic curve as lines, finer the larger it is */
-static void add_curve(edges *es, float x0, float y0, float cx, float cy, float x1, float y1)
-{
-    float dx = x0 - 2 * cx + x1, dy = y0 - 2 * cy + y1;
-    float dev = (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
-    int n = 1;
-    while (n < 16 && dev > 0.6f * (float)(n * n))
-        n++;
-    float px = x0, py = y0;
-    for (int i = 1; i <= n; i++) {
-        float t = (float)i / (float)n, u = 1 - t;
-        float x = u * u * x0 + 2 * u * t * cx + t * t * x1;
-        float y = u * u * y0 + 2 * u * t * cy + t * t * y1;
-        add_edge(es, px, py, x, y);
-        px = x;
-        py = y;
-    }
-}
-
-/* the glyph's outline to the sink, its points through m (x' = m0 x + m2 y +
- * m4, y' = m1 x + m3 y + m5, in pixels, y up) */
-#define FIT_EDGES 96
-
-static float fabs_(float v) { return v < 0 ? -v : v; }
-
-/* the glyph fitted to the pixels up and down, as Windows' hints do for a
- * VGA's sizes (without running them): its horizontal edges (on-curve
- * points a level line joins, a curve's flat top or bottom) each on a
- * pixel's boundary, a stroke or a gap between two of them a pixel at
- * least, the other points moved in proportion between the edges about
- * them (y in pixels, up) */
-static void fit_y(const float *px, float *py, const uint8_t *flag, int points,
-                  const uint8_t *ends, int contours)
-{
-    float e[FIT_EDGES], s[FIT_EDGES];
-    int ne = 0, first = 0;
-    for (int c = 0; c < contours; c++) {
-        int last = (int)be16(ends + 2 * c);
-        if (last < first || last >= points)
-            break;
-        for (int i = first; i <= last; i++) {
-            int pr = i == first ? last : i - 1, nx = i == last ? first : i + 1;
-            if (!(flag[i] & 1))
-                continue;
-            int level_pr = fabs_(py[pr] - py[i]) < 0.02f, level_nx = fabs_(py[nx] - py[i]) < 0.02f;
-            int edge = ((flag[nx] & 1) && level_nx && fabs_(px[nx] - px[i]) > 0.3f) ||
-                       ((flag[pr] & 1) && level_pr && fabs_(px[pr] - px[i]) > 0.3f) ||
-                       (!(flag[pr] & 1) && !(flag[nx] & 1) && level_pr && level_nx);
-            if (!edge)
-                continue;
-            int k = 0;
-            while (k < ne && fabs_(e[k] - py[i]) >= 0.02f)
-                k++;
-            if (k == ne && ne < FIT_EDGES)
-                e[ne++] = py[i];
-        }
-        first = last + 1;
-    }
-    if (!ne)
-        return;
-    for (int i = 1; i < ne; i++) {                  /* low to high */
-        float v = e[i];
-        int k = i;
-        for (; k > 0 && e[k - 1] > v; k--)
-            e[k] = e[k - 1];
-        e[k] = v;
-    }
-    for (int k = 0; k < ne; k++) {
-        int r = (int)(e[k] + 0.5f);
-        if ((float)r > e[k] + 0.5f)
-            r--;                                    /* the nearest boundary */
-        s[k] = (float)r;
-    }
-    /* two edges that met: a pixel apart, the one away from the glyph's
-     * bottom or top moved, so that the baseline and the tops (capitals',
-     * small letters') stay level; closer than 0.3 pixel (a round letter's
-     * overshoot) the same edge */
-    float mid = (e[0] + e[ne - 1]) / 2;
-    for (int k = 1; k < ne && e[k] <= mid; k++)         /* the lower half: up */
-        if (s[k] <= s[k - 1])
-            s[k] = e[k] - e[k - 1] >= 0.3f ? s[k - 1] + 1 : s[k - 1];
-    for (int k = ne - 1; k > 0 && e[k - 1] > mid; k--)  /* the upper half: down */
-        if (s[k - 1] >= s[k])
-            s[k - 1] = e[k] - e[k - 1] >= 0.3f ? s[k] - 1 : s[k];
-    for (int k = 1; k < ne; k++)                        /* where they meet */
-        if (s[k] < s[k - 1])
-            s[k] = s[k - 1];
-    for (int i = 0; i < points; i++) {
-        float y = py[i];
-        if (y <= e[0]) {
-            py[i] = y + s[0] - e[0];
-        } else if (y >= e[ne - 1]) {
-            py[i] = y + s[ne - 1] - e[ne - 1];
-        } else {
-            int k = 0;
-            while (y > e[k + 1])
-                k++;
-            py[i] = s[k] + (y - e[k]) * (s[k + 1] - s[k]) / (e[k + 1] - e[k]);
-        }
-    }
-}
-
-static void outline(const ttfont *f, unsigned glyph, const float m[6], tt_sink sink, void *ctx,
-                    int depth)
-{
-    if (glyph >= (unsigned)f->nglyphs || depth > 4)
-        return;
+    if (glyph >= (unsigned)f->nglyphs)
+        return 0;
     uint32_t at, next;
     if (f->loca_long) {
         if (4u * glyph + 8 > f->loca_len)
-            return;
+            return 0;
         at = be32(f->d + f->loca + 4 * glyph);
         next = be32(f->d + f->loca + 4 * glyph + 4);
     } else {
         if (2u * glyph + 4 > f->loca_len)
-            return;
+            return 0;
         at = 2u * be16(f->d + f->loca + 2 * glyph);
         next = 2u * be16(f->d + f->loca + 2 * glyph + 2);
     }
     if (next <= at || next > f->glyf_len || next - at < 10)
-        return;                     /* empty (a space) */
-    const uint8_t *g = f->d + f->glyf + at, *end = f->d + f->glyf + next;
+        return 0;                   /* empty (a space) */
+    *g = f->d + f->glyf + at;
+    *end = f->d + f->glyf + next;
+    return 1;
+}
+
+void tt_hmetrics(const ttfont *f, unsigned glyph, int *advance, int *lsb)
+{
+    *advance = tt_advance(f, glyph);
+    *lsb = 0;
+    if (!f->hmtx || !f->nhmetrics)
+        return;
+    uint32_t at = glyph < (unsigned)f->nhmetrics ? 4u * glyph + 2
+                  : 4u * (unsigned)f->nhmetrics + 2u * (glyph - (unsigned)f->nhmetrics);
+    if (at + 2 <= f->hmtx_len)
+        *lsb = bes16(f->d + f->hmtx + at);
+}
+
+int tt_simple(const uint8_t *g, const uint8_t *end, ttsimple *s)
+{
+    memset(s, 0, sizeof(*s));
     int contours = bes16(g);
-    if (contours < 0) {             /* composite: its components, each moved */
+    const uint8_t *p = g + 10;
+    if (contours <= 0 || p + 2 * contours + 2 > end)
+        return 0;
+    int points = (int)be16(p + 2 * (contours - 1)) + 1;
+    unsigned ilen = be16(p + 2 * contours);
+    if (points <= 0 || points > 0x7fff || p + 2 * contours + 2 + ilen > end)
+        return 0;
+    size_t sz = (sizeof(int32_t) * 2 + 1) * (size_t)points + sizeof(uint16_t) * (size_t)contours;
+    uint8_t *mem = (uint8_t *)win_alloc(sz);
+    if (!mem)
+        return 0;
+    s->mem = mem;
+    s->x = (int32_t *)mem;
+    s->y = s->x + points;
+    s->ends = (uint16_t *)(s->y + points);
+    s->on = (uint8_t *)(s->ends + contours);
+    s->npts = points;
+    s->ncont = contours;
+    for (int c = 0; c < contours; c++) {
+        s->ends[c] = (uint16_t)be16(p + 2 * c);
+        if (s->ends[c] >= points || (c && s->ends[c] < s->ends[c - 1]))
+            goto bad;
+    }
+    s->ins = p + 2 * contours + 2;
+    s->nins = ilen;
+    p = s->ins + ilen;
+    uint8_t *flag = s->on;
+    for (int i = 0; i < points;) {                  /* the flags, repeated */
+        if (p >= end)
+            goto bad;
+        uint8_t fl = *p++;
+        flag[i++] = fl;
+        if (fl & 8) {
+            if (p >= end)
+                goto bad;
+            for (unsigned r = *p++; r && i < points; r--)
+                flag[i++] = fl;
+        }
+    }
+    int32_t v = 0;
+    for (int i = 0; i < points; i++) {              /* the x's, from one to the next */
+        uint8_t fl = flag[i];
+        if (fl & 2) {
+            if (p >= end)
+                goto bad;
+            v += fl & 0x10 ? *p : -(int32_t)*p;
+            p++;
+        } else if (!(fl & 0x10)) {
+            if (p + 2 > end)
+                goto bad;
+            v += bes16(p);
+            p += 2;
+        }
+        s->x[i] = v;
+    }
+    v = 0;
+    for (int i = 0; i < points; i++) {              /* the y's */
+        uint8_t fl = flag[i];
+        if (fl & 4) {
+            if (p >= end)
+                goto bad;
+            v += fl & 0x20 ? *p : -(int32_t)*p;
+            p++;
+        } else if (!(fl & 0x20)) {
+            if (p + 2 > end)
+                goto bad;
+            v += bes16(p);
+            p += 2;
+        }
+        s->y[i] = v;
+    }
+    for (int i = 0; i < points; i++)
+        flag[i] &= 1;                               /* on the curve */
+    return 1;
+bad:
+    tt_simple_free(s);
+    return 0;
+}
+
+void tt_simple_free(ttsimple *s)
+{
+    win_free(s->mem);
+    memset(s, 0, sizeof(*s));
+}
+
+void tt_emit(const float *px, const float *py, const uint8_t *on, const uint16_t *ends,
+             int ncont, int npts, tt_sink sink, void *ctx)
+{
+    int first = 0;
+    for (int c = 0; c < ncont; c++) {
+        int last = ends[c];
+        if (last < first || last >= npts)
+            break;
+        int count = last - first + 1;
+        /* where it starts: an on-curve point, else the middle of the
+         * last and the first */
+        float sx, sy;
+        int start;
+        if (on[first] & 1) {
+            sx = px[first];
+            sy = py[first];
+            start = 1;
+        } else if (on[last] & 1) {
+            sx = px[last];
+            sy = py[last];
+            start = 0;
+            count--;
+        } else {
+            sx = (px[first] + px[last]) / 2;
+            sy = (py[first] + py[last]) / 2;
+            start = 0;
+        }
+        float cx = sx, cy = sy;                     /* the pen */
+        sink(ctx, TT_MOVE, sx, sy, 0, 0);
+        int ctrl = 0;
+        float kx = 0, ky = 0;                       /* the pending control point */
+        for (int k = start; k <= count; k++) {
+            int i = first + (k < count ? k : 0);
+            float x, y;
+            int is_on;
+            if (k == count) {                       /* back to the start */
+                x = sx;
+                y = sy;
+                is_on = 1;
+            } else {
+                x = px[i];
+                y = py[i];
+                is_on = on[i] & 1;
+            }
+            if (is_on) {
+                if (ctrl)
+                    sink(ctx, TT_QUAD, kx, ky, x, y);
+                else
+                    sink(ctx, TT_LINE, x, y, 0, 0);
+                cx = x;
+                cy = y;
+                ctrl = 0;
+            } else {
+                if (ctrl) {                         /* the point between two controls */
+                    float mx = (kx + x) / 2, my = (ky + y) / 2;
+                    sink(ctx, TT_QUAD, kx, ky, mx, my);
+                    cx = mx;
+                    cy = my;
+                }
+                kx = x;
+                ky = y;
+                ctrl = 1;
+            }
+        }
+        sink(ctx, TT_CLOSE, cx, cy, 0, 0);
+        first = last + 1;
+    }
+}
+
+/* the glyph's outline as it is (no hints) to the sink, its points through m
+ * (x' = m0 x + m2 y + m4, y' = m1 x + m3 y + m5, in pixels, y up) */
+static void outline(const ttfont *f, unsigned glyph, const float m[6], tt_sink sink, void *ctx,
+                    int depth)
+{
+    const uint8_t *g, *end;
+    if (depth > 4 || !tt_glyph_at(f, glyph, &g, &end))
+        return;
+    if (bes16(g) < 0) {             /* composite: its components, each moved */
         const uint8_t *p = g + 10;
         unsigned flags;
         do {
@@ -664,142 +706,21 @@ static void outline(const ttfont *f, unsigned glyph, const float m[6], tt_sink s
         } while (flags & 0x20);                     /* MORE_COMPONENTS */
         return;
     }
-    if (!contours)
+    ttsimple s;
+    if (!tt_simple(g, end, &s))
         return;
-    const uint8_t *p = g + 10;
-    if (p + 2 * contours + 2 > end)
-        return;
-    int points = (int)be16(p + 2 * (contours - 1)) + 1;
-    unsigned ilen = be16(p + 2 * contours);
-    p += 2 * contours + 2 + ilen;
-    if (points <= 0 || points > 0x7fff || p > end)
-        return;
-    uint8_t *flag = (uint8_t *)win_alloc((size_t)points);
-    float *px = (float *)win_alloc(sizeof(float) * 2 * (size_t)points);
-    if (!flag || !px) {
-        win_free(flag);
+    float *px = (float *)win_alloc(sizeof(float) * 2 * (size_t)s.npts);
+    if (px) {
+        float *py = px + s.npts;
+        for (int i = 0; i < s.npts; i++) {          /* through m */
+            float x = (float)s.x[i], y = (float)s.y[i];
+            px[i] = m[0] * x + m[2] * y + m[4];
+            py[i] = m[1] * x + m[3] * y + m[5];
+        }
+        tt_emit(px, py, s.on, s.ends, s.ncont, s.npts, sink, ctx);
         win_free(px);
-        return;
     }
-    float *py = px + points;
-    for (int i = 0; i < points;) {                  /* the flags, repeated */
-        if (p >= end)
-            goto done;
-        uint8_t fl = *p++;
-        flag[i++] = fl;
-        if (fl & 8) {
-            if (p >= end)
-                goto done;
-            for (unsigned r = *p++; r && i < points; r--)
-                flag[i++] = fl;
-        }
-    }
-    int v = 0;
-    for (int i = 0; i < points; i++) {              /* the x's, from one to the next */
-        uint8_t fl = flag[i];
-        if (fl & 2) {
-            if (p >= end)
-                goto done;
-            v += fl & 0x10 ? *p : -(int)*p;
-            p++;
-        } else if (!(fl & 0x10)) {
-            if (p + 2 > end)
-                goto done;
-            v += bes16(p);
-            p += 2;
-        }
-        px[i] = (float)v;
-    }
-    v = 0;
-    for (int i = 0; i < points; i++) {              /* the y's */
-        uint8_t fl = flag[i];
-        if (fl & 4) {
-            if (p >= end)
-                goto done;
-            v += fl & 0x20 ? *p : -(int)*p;
-            p++;
-        } else if (!(fl & 0x20)) {
-            if (p + 2 > end)
-                goto done;
-            v += bes16(p);
-            p += 2;
-        }
-        py[i] = (float)v;
-    }
-    for (int i = 0; i < points; i++) {              /* through m */
-        float x = px[i], y = py[i];
-        px[i] = m[0] * x + m[2] * y + m[4];
-        py[i] = m[1] * x + m[3] * y + m[5];
-    }
-    if (m[1] == 0 && m[2] == 0)                     /* upright: fitted to the rows */
-        fit_y(px, py, flag, points, g + 10, contours);
-    /* each contour: on-curve points joined by lines, an off-curve one
-     * the control point of a curve (two in a row: on-curve between them) */
-    int first = 0;
-    for (int c = 0; c < contours; c++) {
-        int last = (int)be16(g + 10 + 2 * c);
-        if (last < first || last >= points)
-            break;
-        int count = last - first + 1;
-        float sx, sy;                               /* where it starts: on the curve */
-        int start;
-        if (flag[first] & 1) {
-            sx = px[first];
-            sy = py[first];
-            start = 1;
-        } else if (flag[last] & 1) {
-            sx = px[last];
-            sy = py[last];
-            start = 0;
-            count--;
-        } else {
-            sx = (px[first] + px[last]) / 2;
-            sy = (py[first] + py[last]) / 2;
-            start = 0;
-        }
-        float cx = sx, cy = sy;                     /* the pen */
-        sink(ctx, TT_MOVE, sx, sy, 0, 0);
-        int ctrl = 0;
-        float kx = 0, ky = 0;                       /* the pending control point */
-        for (int k = start; k <= count; k++) {
-            int i = first + (k < count ? k : 0);
-            float x, y;
-            int on;
-            if (k == count) {                       /* back to the start */
-                x = sx;
-                y = sy;
-                on = 1;
-            } else {
-                x = px[i];
-                y = py[i];
-                on = flag[i] & 1;
-            }
-            if (on) {
-                if (ctrl)
-                    sink(ctx, TT_QUAD, kx, ky, x, y);
-                else
-                    sink(ctx, TT_LINE, x, y, 0, 0);
-                cx = x;
-                cy = y;
-                ctrl = 0;
-            } else {
-                if (ctrl) {                         /* the point between two controls */
-                    float mx = (kx + x) / 2, my = (ky + y) / 2;
-                    sink(ctx, TT_QUAD, kx, ky, mx, my);
-                    cx = mx;
-                    cy = my;
-                }
-                kx = x;
-                ky = y;
-                ctrl = 1;
-            }
-        }
-        sink(ctx, TT_CLOSE, cx, cy, 0, 0);
-        first = last + 1;
-    }
-done:
-    win_free(flag);
-    win_free(px);
+    tt_simple_free(&s);
 }
 
 void tt_outline(const ttfont *f, unsigned glyph, const float m[4], tt_sink sink, void *ctx)
@@ -808,64 +729,774 @@ void tt_outline(const ttfont *f, unsigned glyph, const float m[4], tt_sink sink,
     outline(f, glyph, m6, sink, ctx, 0);
 }
 
-/* the outline as edges, the curves as lines */
-typedef struct {
-    edges es;
-    float px, py;
-} edge_pen;
+/* ---------------------------------------------------------------- scan conversion */
 
-static void edge_sink(void *ctx, int op, float x0, float y0, float x1, float y1)
+/*
+ * The outline (26.6) made pixels as Windows' rasterizer makes them: the
+ * coordinates fixed point (a pixel 4096 below 24 pixels to the em, else
+ * 64), the pixels' centres at whole numbers; each contour cut into
+ * profiles, its runs up and its runs down, each holding where it crosses
+ * the scan lines it passes (the centres' rows: those on its ends too, a
+ * turning point in both the profiles it ends and starts, a point within
+ * a profile once); curves halved until a piece is flatter than a step,
+ * then taken straight. A row: its rising crossings and its falling ones,
+ * each in order, paired; the centres from one to the other set; a span
+ * with none, between two neighbouring centres, a dropout. Then the
+ * columns the same way, the outline turned: a centre on a horizontal edge
+ * set, and the columns' dropouts. A dropout's pixel: simple, the left (the
+ * lower) one; smart, the one nearer its middle; a stub (a stroke's end
+ * between two scan lines) not, without stubs, unless the stroke reaches
+ * half a pixel past the last line and is half a pixel wide.
+ */
+
+enum { ST_NONE, ST_UP, ST_DOWN };
+enum { DROP_SIMPLE = 0, DROP_SIMPLE_NOSTUBS = 1, DROP_OFF = 2, DROP_SMART = 4, DROP_SMART_NOSTUBS = 5 };
+
+typedef struct {
+    int64_t *xs;                    /* its crossings: up, from its lowest line; down, from its highest */
+    int      n, cap;
+    int64_t  start;                 /* that line */
+    uint8_t  up, ovr_top, ovr_bot;
+    int      next;                  /* the next profile in its contour */
+    int64_t  x;                     /* where it crosses the line swept */
+} sprof;
+
+typedef struct {
+    int64_t x, y;
+} spt;
+
+typedef struct {
+    sprof  *p;
+    int     np, cap, cur, first;    /* first: the contour's first profile (-1) */
+    int     state, fresh, joint;
+    int64_t lastx, lasty, miny, maxy;
+    int64_t P, half, step, jitter;
+    int     bits;
+    int     err;
+} scan;
+
+static int64_t sfloor(const scan *s, int64_t v) { return v & -s->P; }
+static int64_t sceil(const scan *s, int64_t v) { return (v + s->P - 1) & -s->P; }
+static int64_t strunc(const scan *s, int64_t v) { return v >> s->bits; }
+static int64_t sfrac(const scan *s, int64_t v) { return v & (s->P - 1); }
+
+static int64_t smuldiv(int64_t a, int64_t b, int64_t c, int round)
 {
-    edge_pen *p = (edge_pen *)ctx;
-    if (op == TT_LINE) {
-        add_edge(&p->es, p->px, p->py, x0, y0);
-    } else if (op == TT_QUAD) {
-        add_curve(&p->es, p->px, p->py, x0, y0, x1, y1);
-        x0 = x1;
-        y0 = y1;
-    } else if (op == TT_CLOSE) {
+    int neg = (a < 0) ^ (b < 0) ^ (c < 0);
+    uint64_t ua = (uint64_t)(a < 0 ? -a : a), ub = (uint64_t)(b < 0 ? -b : b);
+    uint64_t uc = (uint64_t)(c < 0 ? -c : c);
+    uint64_t q = uc ? (ua * ub + (round ? uc / 2 : 0)) / uc : 0x7fffffff;
+    return neg ? -(int64_t)q : (int64_t)q;
+}
+
+static int slot(scan *s)
+{
+    if (s->np == s->cap) {
+        int cap = s->cap ? s->cap * 2 : 32;
+        sprof *p = (sprof *)win_alloc(sizeof(sprof) * (size_t)cap);
+        if (!p) {
+            s->err = 1;
+            return -1;
+        }
+        if (s->p) {
+            memcpy(p, s->p, sizeof(sprof) * (size_t)s->np);
+            win_free(s->p);
+        }
+        s->p = p;
+        s->cap = cap;
+    }
+    memset(&s->p[s->np], 0, sizeof(sprof));
+    s->p[s->np].next = -1;
+    return s->np++;
+}
+
+static void push_x(scan *s, int64_t x)
+{
+    sprof *p = &s->p[s->cur];
+    if (p->n == p->cap) {
+        int cap = p->cap ? p->cap * 2 : 16;
+        int64_t *n = (int64_t *)win_alloc(sizeof(int64_t) * (size_t)cap);
+        if (!n) {
+            s->err = 1;
+            return;
+        }
+        if (p->xs) {
+            memcpy(n, p->xs, sizeof(int64_t) * (size_t)p->n);
+            win_free(p->xs);
+        }
+        p->xs = n;
+        p->cap = cap;
+    }
+    p->xs[p->n++] = x;
+}
+
+static void pop_x(scan *s)
+{
+    if (s->p[s->cur].n)
+        s->p[s->cur].n--;
+}
+
+static int top_ovr(const scan *s, int64_t y) { return y - sfloor(s, y) >= s->half; }
+static int bot_ovr(const scan *s, int64_t y) { return sceil(s, y) - y >= s->half; }
+
+static void new_profile(scan *s, int state, int overshoot)
+{
+    sprof *p = &s->p[s->cur];
+    p->n = 0;
+    p->start = 0;
+    p->up = state == ST_UP;
+    p->ovr_top = p->ovr_bot = 0;
+    if (overshoot) {
+        if (p->up)
+            p->ovr_bot = 1;
+        else
+            p->ovr_top = 1;
+    }
+    p->next = -1;
+    if (s->first < 0)
+        s->first = s->cur;
+    s->state = state;
+    s->fresh = 1;
+    s->joint = 0;
+}
+
+static void end_profile(scan *s, int overshoot)
+{
+    sprof *p = &s->p[s->cur];
+    if (p->n > 0) {
+        if (overshoot) {
+            if (p->up)
+                p->ovr_top = 1;
+            else
+                p->ovr_bot = 1;
+        }
+        int old = s->cur, n = slot(s);
+        if (n < 0)
+            return;
+        s->cur = n;
+        s->p[old].next = n;
+    }
+    s->joint = 0;
+}
+
+/* a rising line's crossings */
+static void line_up(scan *s, int64_t x1, int64_t y1, int64_t x2, int64_t y2, int64_t miny,
+                    int64_t maxy)
+{
+    int64_t dx = x2 - x1, dy = y2 - y1, e1, e2, f1, f2;
+    if (dy <= 0 || y2 < miny || y1 > maxy)
+        return;
+    if (y1 < miny) {
+        x1 += smuldiv(dx, miny - y1, dy, 1);
+        e1 = strunc(s, miny);
+        f1 = 0;
+    } else {
+        e1 = strunc(s, y1);
+        f1 = sfrac(s, y1);
+    }
+    if (y2 > maxy) {
+        e2 = strunc(s, maxy);
+        f2 = 0;
+    } else {
+        e2 = strunc(s, y2);
+        f2 = sfrac(s, y2);
+    }
+    if (f1 > 0) {
+        if (e1 == e2)
+            return;
+        x1 += smuldiv(dx, s->P - f1, dy, 1);
+        e1++;
+    } else if (s->joint) {
+        pop_x(s);
+        s->joint = 0;
+    }
+    s->joint = f2 == 0;
+    if (s->fresh) {
+        s->p[s->cur].start = e1;
+        s->fresh = 0;
+    }
+    int64_t ix, rx, ax = -dy;
+    if (dx > 0) {
+        ix = smuldiv(s->P, dx, dy, 0);
+        rx = (s->P * dx) % dy;
+        dx = 1;
+    } else {
+        ix = -smuldiv(s->P, -dx, dy, 0);
+        rx = (s->P * -dx) % dy;
+        dx = -1;
+    }
+    for (int64_t k = e2 - e1 + 1; k > 0 && !s->err; k--) {
+        push_x(s, x1);
+        x1 += ix;
+        ax += rx;
+        if (ax >= 0) {
+            ax -= dy;
+            x1 += dx;
+        }
+    }
+}
+
+static void line_down(scan *s, int64_t x1, int64_t y1, int64_t x2, int64_t y2, int64_t miny,
+                      int64_t maxy)
+{
+    int fresh = s->fresh;
+    line_up(s, x1, -y1, x2, -y2, -maxy, -miny);
+    if (fresh && !s->fresh)
+        s->p[s->cur].start = -s->p[s->cur].start;
+}
+
+static void split_conic(spt *b)
+{
+    int64_t a, c;
+    b[4].x = b[2].x;
+    a = b[0].x + b[1].x;
+    c = b[1].x + b[2].x;
+    b[3].x = c >> 1;
+    b[2].x = (a + c) >> 2;
+    b[1].x = a >> 1;
+    b[4].y = b[2].y;
+    a = b[0].y + b[1].y;
+    c = b[1].y + b[2].y;
+    b[3].y = c >> 1;
+    b[2].y = (a + c) >> 2;
+    b[1].y = a >> 1;
+}
+
+#define MAX_BEZIER 32
+
+/* a rising conic's crossings: halved until a piece crossing a line is
+ * flatter than a step, then that piece straight */
+static void bezier_up(scan *s, spt *arc, spt *stack_end, int64_t miny, int64_t maxy)
+{
+    int64_t y1 = arc[2].y, y2 = arc[0].y, e, e2;
+    if (y2 < miny || y1 > maxy)
+        return;
+    e2 = sfloor(s, y2);
+    if (e2 > maxy)
+        e2 = maxy;
+    int64_t e0 = miny;
+    if (y1 < miny) {
+        e = miny;
+    } else {
+        e = sceil(s, y1);
+        int64_t f1 = sfrac(s, y1);
+        e0 = e;
+        if (f1 == 0) {
+            if (s->joint) {
+                pop_x(s);
+                s->joint = 0;
+            }
+            push_x(s, arc[2].x);
+            e += s->P;
+        }
+    }
+    if (s->fresh) {
+        s->p[s->cur].start = strunc(s, e0);
+        s->fresh = 0;
+    }
+    if (e2 < e)
+        return;
+    spt *start = arc;
+    do {
+        s->joint = 0;
+        y2 = arc[0].y;
+        if (y2 > e) {
+            y1 = arc[2].y;
+            if (y2 - y1 >= s->step && arc + 4 < stack_end) {
+                split_conic(arc);
+                arc += 2;
+            } else {
+                push_x(s, arc[2].x + (arc[0].x - arc[2].x) * (e - y1) / (y2 - y1));
+                arc -= 2;
+                e += s->P;
+            }
+        } else {
+            if (y2 == e) {
+                s->joint = 1;
+                push_x(s, arc[0].x);
+                e += s->P;
+            }
+            arc -= 2;
+        }
+    } while (arc >= start && e <= e2 && !s->err);
+}
+
+static void bezier_down(scan *s, spt *arc, spt *stack_end, int64_t miny, int64_t maxy)
+{
+    arc[0].y = -arc[0].y;
+    arc[1].y = -arc[1].y;
+    arc[2].y = -arc[2].y;
+    int fresh = s->fresh;
+    bezier_up(s, arc, stack_end, -maxy, -miny);
+    if (fresh && !s->fresh)
+        s->p[s->cur].start = -s->p[s->cur].start;
+    arc[0].y = -arc[0].y;
+}
+
+static void line_to(scan *s, int64_t x, int64_t y)
+{
+    switch (s->state) {
+    case ST_NONE:
+        if (y > s->lasty)
+            new_profile(s, ST_UP, bot_ovr(s, s->lasty));
+        else if (y < s->lasty)
+            new_profile(s, ST_DOWN, top_ovr(s, s->lasty));
+        break;
+    case ST_UP:
+        if (y < s->lasty) {
+            end_profile(s, top_ovr(s, s->lasty));
+            new_profile(s, ST_DOWN, top_ovr(s, s->lasty));
+        }
+        break;
+    default:
+        if (y > s->lasty) {
+            end_profile(s, bot_ovr(s, s->lasty));
+            new_profile(s, ST_UP, bot_ovr(s, s->lasty));
+        }
+        break;
+    }
+    if (s->state == ST_UP)
+        line_up(s, s->lastx, s->lasty, x, y, s->miny, s->maxy);
+    else if (s->state == ST_DOWN)
+        line_down(s, s->lastx, s->lasty, x, y, s->miny, s->maxy);
+    s->lastx = x;
+    s->lasty = y;
+}
+
+static void conic_to(scan *s, int64_t cx, int64_t cy, int64_t x, int64_t y)
+{
+    spt arcs[2 * MAX_BEZIER + 1], *arc = arcs, *end = arcs + 2 * MAX_BEZIER + 1;
+    int64_t x3 = x, y3 = y;
+    arc[2].x = s->lastx;
+    arc[2].y = s->lasty;
+    arc[1].x = cx;
+    arc[1].y = cy;
+    arc[0].x = x;
+    arc[0].y = y;
+    do {
+        int64_t y1 = arc[2].y, y2 = arc[1].y, ya = arc[0].y, ymin, ymax;
+        x3 = arc[0].x;
+        y3 = ya;
+        if (y1 <= ya) {
+            ymin = y1;
+            ymax = ya;
+        } else {
+            ymin = ya;
+            ymax = y1;
+        }
+        if ((y2 < ymin || y2 > ymax) && arc + 4 < end) {    /* not one way: halved */
+            split_conic(arc);
+            arc += 2;
+        } else if (y1 == ya) {                              /* flat */
+            arc -= 2;
+        } else {
+            int st = y1 < ya ? ST_UP : ST_DOWN;
+            if (s->state != st) {
+                int o = st == ST_UP ? bot_ovr(s, y1) : top_ovr(s, y1);
+                if (s->state != ST_NONE)
+                    end_profile(s, o);
+                new_profile(s, st, o);
+            }
+            if (st == ST_UP)
+                bezier_up(s, arc, end, s->miny, s->maxy);
+            else
+                bezier_down(s, arc, end, s->miny, s->maxy);
+            arc -= 2;
+        }
+    } while (arc >= arcs && !s->err);
+    s->lastx = x3;
+    s->lasty = y3;
+}
+
+/* the path (26.6, from the bitmap's corner) made profiles; flipped: x and
+ * y swapped, for the columns */
+typedef ttpath spath;
+
+static void make_profiles(scan *s, const spath *pa, int flipped)
+{
+    int first = 0;
+    s->cur = slot(s);
+    for (int c = 0; c < pa->ncont && !s->err; c++) {
+        int last = pa->ends[c];
+        if (last < first || last >= pa->n)
+            break;
+        s->state = ST_NONE;
+        s->first = -1;
+#define SC(v) ((int64_t)(v) * (s->P >> 6) - s->half)
+#define PT(i, X, Y) do { X = SC(pa->x[i]); Y = SC(pa->y[i]); \
+                         if (flipped) { int64_t t_ = X; X = Y; Y = t_; } } while (0)
+        int64_t sx, sy, lx, ly;
+        PT(first, sx, sy);
+        PT(last, lx, ly);
+        int i = first, limit = last;
+        if (!(pa->on[first] & 1)) {         /* starts off the curve */
+            if (pa->on[last] & 1) {
+                sx = lx;
+                sy = ly;
+                limit--;
+            } else {
+                sx = (sx + lx) / 2;
+                sy = (sy + ly) / 2;
+            }
+            i--;
+        }
+        s->lastx = sx;
+        s->lasty = sy;
+        int closed = 0;
+        while (i < limit && !s->err) {
+            i++;
+            int64_t x, y;
+            PT(i, x, y);
+            if (pa->on[i] & 1) {
+                line_to(s, x, y);
+                continue;
+            }
+            int64_t kx = x, ky = y;                 /* a control point */
+            for (;;) {
+                if (i < limit) {
+                    i++;
+                    PT(i, x, y);
+                    if (pa->on[i] & 1) {
+                        conic_to(s, kx, ky, x, y);
+                        break;
+                    }
+                    conic_to(s, kx, ky, (kx + x) / 2, (ky + y) / 2);
+                    kx = x;
+                    ky = y;
+                } else {
+                    conic_to(s, kx, ky, sx, sy);
+                    closed = 1;
+                    break;
+                }
+            }
+            if (closed)
+                break;
+        }
+        if (!closed)
+            line_to(s, sx, sy);
+#undef PT
+#undef SC
+        /* the contour's last and first profiles joined on a line: its
+         * point once */
+        if (sfrac(s, s->lasty) == 0 && s->lasty >= s->miny && s->lasty <= s->maxy &&
+            s->first >= 0 && s->p[s->first].up == s->p[s->cur].up)
+            pop_x(s);
+        int lastp = s->cur;
+        int o = s->p[s->cur].n && s->p[s->cur].up ? top_ovr(s, s->lasty) : bot_ovr(s, s->lasty);
+        end_profile(s, o);
+        if (s->first >= 0)
+            s->p[lastp].next = s->first;
+        first = last + 1;
+    }
+}
+
+static void scan_free(scan *s)
+{
+    for (int i = 0; i < s->np; i++)
+        win_free(s->p[i].xs);
+    win_free(s->p);
+    memset(s, 0, sizeof(*s));
+}
+
+/* the bitmap: rows bottom up, (x, y) the pixel at column x, row y */
+typedef struct {
+    uint8_t *bits;
+    int      w, h, pitch;
+} sbmp;
+
+static int sget(const sbmp *b, int x, int y)
+{
+    return x >= 0 && x < b->w && y >= 0 && y < b->h &&
+           (b->bits[(b->h - 1 - y) * b->pitch + (x >> 3)] & (0x80u >> (x & 7)));
+}
+
+static void sset(sbmp *b, int x, int y)
+{
+    if (x >= 0 && x < b->w && y >= 0 && y < b->h)
+        b->bits[(b->h - 1 - y) * b->pitch + (x >> 3)] |= (uint8_t)(0x80u >> (x & 7));
+}
+
+/* a dropout's pixel on scan line y (flipped: column y), x1..x2 its span */
+static void drop(const scan *s, sbmp *b, int flipped, int mode, int64_t y, int64_t x1, int64_t x2,
+                 const sprof *left, int li, int ri, int last_of_left)
+{
+    int64_t e1 = sceil(s, x1), e2 = sfloor(s, x2), pxl = e1;
+    int size = flipped ? b->h : b->w;
+    if (e1 > e2) {
+        if (e1 != e2 + s->P)
+            return;
+        switch (mode) {
+        case DROP_SIMPLE:
+            pxl = e2;
+            break;
+        case DROP_SMART:
+            pxl = sfloor(s, (x1 + x2 + s->P * 63 / 64) >> 1);
+            break;
+        case DROP_SIMPLE_NOSTUBS:
+        case DROP_SMART_NOSTUBS:
+            /* a stub, at the stroke's top or bottom end */
+            if (left->next == ri && last_of_left && !(left->ovr_top && x2 - x1 >= s->half))
+                return;
+            if (s->p[ri].next == li && left->start == y && !(left->ovr_bot && x2 - x1 >= s->half))
+                return;
+            pxl = mode == DROP_SIMPLE_NOSTUBS ? e2 : sfloor(s, (x1 + x2 + s->P * 63 / 64) >> 1);
+            break;
+        default:
+            return;
+        }
+        if (pxl < 0)                        /* in the bitmap */
+            pxl = e1;
+        else if (strunc(s, pxl) >= size)
+            pxl = e2;
+        int64_t other = strunc(s, pxl == e1 ? e2 : e1);
+        if (other >= 0 && other < size &&
+            (flipped ? sget(b, (int)y, (int)other) : sget(b, (int)other, (int)y)))
+            return;
+    }
+    int64_t p = strunc(s, pxl);
+    if (flipped)
+        sset(b, (int)y, (int)p);
+    else
+        sset(b, (int)p, (int)y);
+}
+
+static void sweep(scan *s, sbmp *b, int flipped, int mode)
+{
+    int lines = flipped ? b->w : b->h, size = flipped ? b->h : b->w;
+    int *lst = (int *)win_alloc(sizeof(int) * (size_t)(2 * s->np + 2));
+    int *pend = (int *)win_alloc(sizeof(int) * (size_t)(2 * s->np + 2));
+    if (!lst || !pend) {
+        win_free(lst);
+        win_free(pend);
         return;
     }
-    p->px = x0;
-    p->py = y0;
+    for (int y = 0; y < lines; y++) {
+        int nl = 0, nr = 0;
+        int *L = lst, *R = lst + s->np + 1;
+        for (int i = 0; i < s->np; i++) {
+            sprof *p = &s->p[i];
+            if (!p->n)
+                continue;
+            int64_t lo = p->up ? p->start : p->start - p->n + 1, hi = lo + p->n - 1;
+            if (y < lo || y > hi)
+                continue;
+            p->x = p->up ? p->xs[y - lo] : p->xs[p->start - y];
+            int *lis = p->up ? L : R, *cnt = p->up ? &nl : &nr;
+            int k = (*cnt)++;                       /* in order of x (and of making) */
+            while (k > 0 && s->p[lis[k - 1]].x > p->x) {
+                lis[k] = lis[k - 1];
+                k--;
+            }
+            lis[k] = i;
+        }
+        int npend = 0;
+        for (int k = 0; k < nl && k < nr; k++) {
+            int64_t x1 = s->p[L[k]].x, x2 = s->p[R[k]].x;
+            if (x1 > x2) {
+                int64_t t = x1;
+                x1 = x2;
+                x2 = t;
+            }
+            int64_t f1 = sfloor(s, x1), c2 = sceil(s, x2);
+            if (x2 - x1 <= s->P && f1 != x1 && c2 != x2 && (f1 > c2 || c2 == f1 + s->P)) {
+                if (mode != DROP_OFF)               /* a dropout: after the spans */
+                    pend[npend++] = k;
+                continue;
+            }
+            if (!flipped) {                         /* the row's centres */
+                int64_t e1 = sceil(s, x1), e2 = sfloor(s, x2);
+                if (mode != DROP_OFF && x2 - x1 - s->P <= s->jitter && e1 != x1 && e2 != x2)
+                    e2 = e1;
+                int64_t a = strunc(s, e1), z = strunc(s, e2);
+                if (z >= 0 && a < size) {
+                    if (a < 0)
+                        a = 0;
+                    if (z >= size)
+                        z = size - 1;
+                    for (int64_t c = a; c <= z; c++)
+                        sset(b, (int)c, y);
+                }
+            } else {                                /* a column: centres on its edges */
+                int64_t e1 = sceil(s, x1), e2 = sfloor(s, x2);
+                if (x1 == e1)
+                    sset(b, y, (int)strunc(s, e1));
+                if (x2 == e2)
+                    sset(b, y, (int)strunc(s, e2));
+            }
+        }
+        for (int j = 0; j < npend; j++) {
+            int k = pend[j];
+            const sprof *lp = &s->p[L[k]];
+            int64_t lo = lp->up ? lp->start : lp->start - lp->n + 1, hi = lo + lp->n - 1;
+            int64_t x1 = lp->x, x2 = s->p[R[k]].x;
+            if (x1 > x2) {
+                int64_t t = x1;
+                x1 = x2;
+                x2 = t;
+            }
+            /* the left profile's first line: its start as FreeType's is */
+            sprof tmp = *lp;
+            tmp.start = lo;
+            drop(s, b, flipped, mode, y, x1, x2, &tmp, L[k], R[k], y == hi);
+        }
+    }
+    win_free(lst);
+    win_free(pend);
 }
 
-/* ---------------------------------------------------------------- drawing */
-
-static int ifloor(float v) { int i = (int)v; return (float)i > v ? i - 1 : i; }
-static int iceil(float v) { int i = (int)v; return (float)i < v ? i + 1 : i; }
-
-typedef struct {
-    float at;
-    int dir;
-} cross;
-
-static void sort_crossings(cross *c, int n)
+/* the path filled: its bitmap's box from the points' (control points too),
+ * rounded so that a centre on its edge is in */
+static uint8_t *fill_path(const spath *pa, int mode, int high, int *w, int *h, int *x0, int *top)
 {
-    for (int i = 1; i < n; i++) {                   /* few: insertion */
-        cross k = c[i];
-        int j = i - 1;
-        while (j >= 0 && c[j].at > k.at) {
-            c[j + 1] = c[j];
-            j--;
+    *w = *h = *x0 = *top = 0;
+    if (!pa->n)
+        return NULL;
+    int32_t xmin = pa->x[0], xmax = xmin, ymin = pa->y[0], ymax = ymin;
+    for (int i = 1; i < pa->n; i++) {
+        if (pa->x[i] < xmin) xmin = pa->x[i];
+        if (pa->x[i] > xmax) xmax = pa->x[i];
+        if (pa->y[i] < ymin) ymin = pa->y[i];
+        if (pa->y[i] > ymax) ymax = pa->y[i];
+    }
+    int bx0 = (xmin >> 6) + (((xmin & 63) + 31) >> 6), bx1 = (xmax >> 6) + (((xmax & 63) + 32) >> 6);
+    int by0 = (ymin >> 6) + (((ymin & 63) + 31) >> 6), by1 = (ymax >> 6) + (((ymax & 63) + 32) >> 6);
+    if (bx0 == bx1) {
+        if (((xmin & 63) + 31) % 64 - 31 + ((xmax & 63) + 32) % 64 - 32 < 0)
+            bx0--;
+        else
+            bx1++;
+    }
+    if (by0 == by1) {
+        if (((ymin & 63) + 31) % 64 - 31 + ((ymax & 63) + 32) % 64 - 32 < 0)
+            by0--;
+        else
+            by1++;
+    }
+    sbmp b;
+    b.w = bx1 - bx0;
+    b.h = by1 - by0;
+    if (b.w <= 0 || b.h <= 0 || b.w > 1024 || b.h > 1024)
+        return NULL;
+    b.pitch = (b.w + 7) / 8;
+    b.bits = (uint8_t *)win_alloc((size_t)(b.pitch * b.h));
+    spath q = *pa;
+    q.x = (int32_t *)win_alloc(sizeof(int32_t) * 2 * (size_t)pa->n);
+    if (!b.bits || !q.x) {
+        win_free(b.bits);
+        win_free(q.x);
+        return NULL;
+    }
+    memset(b.bits, 0, (size_t)(b.pitch * b.h));
+    q.y = q.x + pa->n;
+    for (int i = 0; i < pa->n; i++) {       /* from the bitmap's corner */
+        q.x[i] = pa->x[i] - bx0 * 64;
+        q.y[i] = pa->y[i] - by0 * 64;
+    }
+    for (int flipped = 0; flipped < 2; flipped++) {
+        scan s;
+        memset(&s, 0, sizeof(s));
+        s.bits = high ? 12 : 6;
+        s.P = (int64_t)1 << s.bits;
+        s.half = s.P >> 1;
+        s.step = high ? 256 : 32;
+        s.jitter = high ? 30 : 2;
+        s.miny = 0;
+        s.maxy = (int64_t)((flipped ? b.w : b.h) - 1) * s.P;
+        make_profiles(&s, &q, flipped);
+        if (!s.err)
+            sweep(&s, &b, flipped, mode);
+        scan_free(&s);
+    }
+    win_free(q.x);
+    *w = b.w;
+    *h = b.h;
+    *x0 = bx0;
+    *top = by1;
+    return b.bits;
+}
+
+/* the sink's path kept: its points (26.6) and contours, as TrueType has them */
+typedef struct {
+    spath p;
+    int   cap, ccap;
+    int   start;                    /* the contour's first point */
+} path_pen;
+
+static void pen_point(path_pen *pp, float x, float y, int on)
+{
+    spath *p = &pp->p;
+    if (p->n == pp->cap) {
+        int cap = pp->cap ? pp->cap * 2 : 128;
+        int32_t *nx = (int32_t *)win_alloc(sizeof(int32_t) * 2 * (size_t)cap);
+        uint8_t *no = (uint8_t *)win_alloc((size_t)cap);
+        if (!nx || !no) {
+            win_free(nx);
+            win_free(no);
+            return;
         }
-        c[j + 1] = k;
+        if (p->n) {
+            memcpy(nx, p->x, sizeof(int32_t) * (size_t)p->n);
+            memcpy(nx + cap, p->y, sizeof(int32_t) * (size_t)p->n);
+            memcpy(no, p->on, (size_t)p->n);
+        }
+        win_free(p->x);
+        win_free(p->on);
+        p->x = nx;
+        p->y = nx + cap;
+        p->on = no;
+        pp->cap = cap;
+    }
+    p->x[p->n] = (int32_t)(x * 64.0f + (x < 0 ? -0.5f : 0.5f));
+    p->y[p->n] = (int32_t)(y * 64.0f + (y < 0 ? -0.5f : 0.5f));
+    p->on[p->n] = (uint8_t)on;
+    p->n++;
+}
+
+static void path_sink(void *ctx, int op, float x0, float y0, float x1, float y1)
+{
+    path_pen *pp = (path_pen *)ctx;
+    spath *p = &pp->p;
+    switch (op) {
+    case TT_MOVE:
+        pp->start = p->n;
+        pen_point(pp, x0, y0, 1);
+        break;
+    case TT_LINE:
+        pen_point(pp, x0, y0, 1);
+        break;
+    case TT_QUAD:
+        pen_point(pp, x0, y0, 0);
+        pen_point(pp, x1, y1, 1);
+        break;
+    default:                                /* the contour: its last point its first's */
+        if (p->n - pp->start > 1 && p->x[p->n - 1] == p->x[pp->start] &&
+            p->y[p->n - 1] == p->y[pp->start] && (p->on[p->n - 1] & 1))
+            p->n--;
+        if (p->ncont == pp->ccap) {
+            int cap = pp->ccap ? pp->ccap * 2 : 16;
+            uint16_t *e = (uint16_t *)win_alloc(sizeof(uint16_t) * (size_t)cap);
+            if (!e)
+                return;
+            if (p->ncont)
+                memcpy(e, p->ends, sizeof(uint16_t) * (size_t)p->ncont);
+            win_free(p->ends);
+            p->ends = e;
+            pp->ccap = cap;
+        }
+        if (p->n > pp->start)
+            p->ends[p->ncont++] = (uint16_t)(p->n - 1);
+        else
+            p->n = pp->start;
+        break;
     }
 }
 
-/* the span ending at crossing i goes on: another shape's starts there */
-static int abuts(const cross *c, int n, int i)
+static void path_free(path_pen *pp)
 {
-    for (int k = i + 1; k < n && c[k].at - c[i].at < 1.0f / 1024; k++)
-        if (c[k].dir)
-            return 1;
-    return 0;
-}
-
-static void set_px(uint8_t *bits, int pitch, int w, int h, int x, int y)
-{
-    if (x >= 0 && x < w && y >= 0 && y < h)
-        bits[y * pitch + (x >> 3)] |= (uint8_t)(0x80u >> (x & 7));
+    win_free(pp->p.x);
+    win_free(pp->p.on);
+    win_free(pp->p.ends);
+    memset(pp, 0, sizeof(*pp));
 }
 
 uint8_t *tt_render(const ttfont *f, unsigned glyph, float scale, int *w, int *h, int *x0,
@@ -878,116 +1509,49 @@ uint8_t *tt_render(const ttfont *f, unsigned glyph, float scale, int *w, int *h,
 uint8_t *tt_render_m(const ttfont *f, unsigned glyph, const float m[4], int *w, int *h,
                      int *x0, int *top)
 {
-    edge_pen pen = { { NULL, 0, 0 }, 0, 0 };
-    *w = *h = *x0 = *top = 0;
-    tt_outline(f, glyph, m, edge_sink, &pen);
-    edges es = pen.es;
-    if (!es.n) {
-        win_free(es.e);
-        return NULL;
-    }
-    float xmin = es.e[0].x0, xmax = xmin, ymin = es.e[0].y0, ymax = ymin;
-    for (int i = 0; i < es.n; i++) {
-        const edge *e = &es.e[i];
-        float xs[2] = { e->x0, e->x1 }, ys[2] = { e->y0, e->y1 };
-        for (int k = 0; k < 2; k++) {
-            if (xs[k] < xmin) xmin = xs[k];
-            if (xs[k] > xmax) xmax = xs[k];
-            if (ys[k] < ymin) ymin = ys[k];
-            if (ys[k] > ymax) ymax = ys[k];
-        }
-    }
-    int left = ifloor(xmin), right = iceil(xmax), bottom = ifloor(ymin), up = iceil(ymax);
-    if (right <= left)
-        right = left + 1;
-    if (up <= bottom)
-        up = bottom + 1;
-    int bw = right - left, bh = up - bottom, pitch = (bw + 7) / 8;
-    if (bw > 1024 || bh > 1024) {
-        win_free(es.e);
-        return NULL;
-    }
-    uint8_t *bits = (uint8_t *)win_alloc((size_t)(pitch * bh));
-    cross *cr = (cross *)win_alloc(sizeof(cross) * (size_t)es.n);
-    if (!bits || !cr) {
-        win_free(bits);
-        win_free(cr);
-        win_free(es.e);
-        return NULL;
-    }
-    /* rows: the pixels whose centres are inside (an edge from y0 up to y1
-     * crosses the centres from y0 on, not y1: a span's bottom is in it, its
-     * top not), and one for a span between two centres */
-    for (int r = 0; r < bh; r++) {
-        float yc = (float)up - (float)r - 0.5f;
-        int n = 0;
-        for (int i = 0; i < es.n; i++) {
-            const edge *e = &es.e[i];
-            if ((e->y0 <= yc && yc < e->y1) || (e->y1 <= yc && yc < e->y0)) {
-                cr[n].at = e->x0 + (yc - e->y0) * (e->x1 - e->x0) / (e->y1 - e->y0) - (float)left;
-                cr[n].dir = e->y1 > e->y0 ? 1 : -1;
-                n++;
-            }
-        }
-        sort_crossings(cr, n);
-        int wind = 0, on = 0;               /* on: a span goes on past the next start */
-        float from = 0;
-        for (int i = 0; i < n; i++) {
-            int was = wind;
-            wind += cr[i].dir;
-            if (!was && wind) {
-                if (!on)
-                    from = cr[i].at;
-                on = 0;
-            } else if (was && !wind) {
-                if ((on = abuts(cr, n, i)) != 0)    /* two shapes side by side: one span */
-                    continue;
-                int c0 = iceil(from - 0.5f), c1 = iceil(cr[i].at - 0.5f) - 1;
-                if (c1 < c0)                        /* thinner than a pixel */
-                    set_px(bits, pitch, bw, bh, ifloor((from + cr[i].at) / 2), r);
-                for (int c = c0; c <= c1; c++)
-                    set_px(bits, pitch, bw, bh, c, r);
-            }
-        }
-    }
-    /* columns: the spans with no row's centre in them (horizontal strokes
-     * thinner than a pixel), a pixel each; downwards from the top, a span
-     * holds the centres after its top up to its bottom, as the rows have
-     * it */
-    for (int c = 0; c < bw; c++) {
-        float xc = (float)left + (float)c + 0.5f;
-        int n = 0;
-        for (int i = 0; i < es.n; i++) {
-            const edge *e = &es.e[i];
-            if ((e->x0 <= xc && xc < e->x1) || (e->x1 <= xc && xc < e->x0)) {
-                cr[n].at = (float)up - (e->y0 + (xc - e->x0) * (e->y1 - e->y0) / (e->x1 - e->x0));
-                cr[n].dir = e->x1 > e->x0 ? 1 : -1;
-                n++;
-            }
-        }
-        sort_crossings(cr, n);
-        int wind = 0, on = 0;               /* on: a span goes on past the next start */
-        float from = 0;
-        for (int i = 0; i < n; i++) {
-            int was = wind;
-            wind += cr[i].dir;
-            if (!was && wind) {
-                if (!on)
-                    from = cr[i].at;
-                on = 0;
-            } else if (was && !wind) {
-                if ((on = abuts(cr, n, i)) != 0)
-                    continue;
-                if (ifloor(cr[i].at - 0.5f) < ifloor(from - 0.5f) + 1)
-                    set_px(bits, pitch, bw, bh, c, ifloor((from + cr[i].at) / 2));
-            }
-        }
-    }
-    win_free(cr);
-    win_free(es.e);
-    *w = bw;
-    *h = bh;
-    *x0 = left;
-    *top = up;
+    path_pen pp;
+    memset(&pp, 0, sizeof(pp));
+    tt_outline(f, glyph, m, path_sink, &pp);
+    /* not hinted: what an unhinted outline gets, dropouts without stubs */
+    float sc = m[0] < 0 ? -m[0] : m[0];
+    uint8_t *bits = fill_path(&pp.p, DROP_SIMPLE_NOSTUBS, sc * (float)f->info.em < 24.0f, w, h,
+                              x0, top);
+    path_free(&pp);
     return bits;
+}
+
+uint8_t *tt_render_hinted(tthint *hint, unsigned glyph, int *w, int *h, int *x0, int *top,
+                          int *advance)
+{
+    static const int modes[] = {
+        [TT_DROPOUT_NONE] = DROP_OFF, [TT_DROPOUT_SIMPLE] = DROP_SIMPLE,
+        [TT_DROPOUT_SIMPLE_NOSTUBS] = DROP_SIMPLE_NOSTUBS, [TT_DROPOUT_SMART] = DROP_SMART,
+        [TT_DROPOUT_SMART_NOSTUBS] = DROP_SMART_NOSTUBS,
+    };
+    ttpath p;
+    int dropout = 0;
+    *w = *h = *x0 = *top = 0;
+    if (!tt_hint_path(hint, glyph, &p, advance, &dropout))
+        return NULL;
+    uint8_t *bits = fill_path(&p, modes[dropout], tt_hint_ppem(hint) < 24, w, h, x0, top);
+    tt_path_free(&p);
+    return bits;
+}
+
+int tt_hdmx(const ttfont *f, int ppem, unsigned glyph)
+{
+    uint32_t len = 0, at = table(f, "hdmx", &len);
+    if (!at || len < 8 || glyph >= (unsigned)f->nglyphs)
+        return -1;
+    const uint8_t *d = f->d + at;
+    unsigned records = be16(d + 2);
+    uint32_t size = be32(d + 4);
+    if (size < 2 + (uint32_t)f->nglyphs || 8 + (uint64_t)records * size > len)
+        return -1;
+    for (unsigned i = 0; i < records; i++) {
+        const uint8_t *r = d + 8 + i * size;
+        if (r[0] == ppem)
+            return r[2 + glyph];
+    }
+    return -1;
 }

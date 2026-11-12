@@ -285,6 +285,11 @@ static int is_fot(const uint8_t *d, uint32_t n)
     return 0;
 }
 
+/* what WINNTRAC.LOG says of the TrueType fonts */
+static struct {
+    unsigned long sizes, glyphs, advances, loads, ms_glyphs, ms_loads;
+} tts;
+
 struct ttfont *font_tt(wface *f)
 {
     if (!f->tt)
@@ -292,7 +297,10 @@ struct ttfont *font_tt(wface *f)
     if (f->ttf || f->bad)
         return f->ttf;
     uint32_t n = 0;
+    DWORD t0 = GetTickCount();
     uint8_t *d = win_file_load(f->file, &n, 0x1000000u);
+    tts.loads++;
+    tts.ms_loads += GetTickCount() - t0;
     f->ttf = d ? tt_open(d, n) : NULL;
     if (!f->ttf) {
         win_free(d);
@@ -425,15 +433,19 @@ int font_make_fot(const char *fot, const char *ttf, const char *path)
 }
 
 /* the sizes drawn, the latest used first */
-#define TT_SIZES 12
+#define TT_SIZES 32
 
+/* a size of a TrueType face: its metrics, its hints (made with its first
+ * glyph), its characters' advances and glyphs (each drawn the first time
+ * it is) */
 typedef struct ttsize {
     wface   *face;
-    int      key;
+    int      key, ppem, no_hint;
     float    scale;
+    tthint  *hint;
     wttsize  m;
     struct {
-        uint8_t  done;
+        uint8_t  done, adv_done;
         int16_t  adv, w, h, x0, top;
         uint8_t *bits;
     } g[256];
@@ -442,6 +454,14 @@ typedef struct ttsize {
 static ttsize *sizes[TT_SIZES];
 
 static int round_px(float v) { return (int)(v + 0.5f); }
+
+static void size_free(ttsize *s)
+{
+    for (int c = 0; c < 256; c++)
+        win_free(s->g[c].bits);
+    tt_hint_free(s->hint);
+    win_free(s);
+}
 
 static ttsize *tt_size(wface *f, int key)
 {
@@ -459,18 +479,20 @@ static ttsize *tt_size(wface *f, int key)
     ttsize *s = (ttsize *)win_alloc(sizeof(*s));
     if (!s)
         return NULL;
-    int cell = in->ascent + in->descent;
-    float px = key < 0 ? (float)-key : key > 0 ? (float)key : 16.0f;
-    if (px > 400)
-        px = 400;
-    s->scale = key < 0 ? px / (float)in->em : px / (float)cell;
+    memset(s, 0, sizeof(*s));
+    /* the pixels to the em, whole (the hints are for those): the height
+     * asked, the em's (negative) or the cell's */
+    int cell = in->ascent + in->descent > 0 ? in->ascent + in->descent : in->em;
+    int ppem = key < 0 ? -key : round_px((float)(key ? key : 16) * (float)in->em / (float)cell);
+    s->ppem = ppem < 1 ? 1 : ppem > 400 ? 400 : ppem;
+    s->scale = (float)s->ppem / (float)in->em;
     s->face = f;
     s->key = key;
     s->m.ascent = round_px((float)in->ascent * s->scale);
     s->m.height = s->m.ascent + round_px((float)in->descent * s->scale);
     if (s->m.height < 1)
         s->m.height = 1;
-    s->m.ileading = s->m.height - round_px((float)in->em * s->scale);
+    s->m.ileading = s->m.height - s->ppem;
     if (s->m.ileading < 0)
         s->m.ileading = 0;
     s->m.eleading = round_px((float)in->line_gap * s->scale);
@@ -480,18 +502,63 @@ static ttsize *tt_size(wface *f, int key)
         s->m.avgw = 1;
     if (s->m.maxw < s->m.avgw)
         s->m.maxw = s->m.avgw;
-    ttsize *old = sizes[TT_SIZES - 1];              /* the least used, gone */
-    if (old) {
-        for (int c = 0; c < 256; c++)
-            win_free(old->g[c].bits);
-        win_free(old);
-    }
+    tts.sizes++;
+    if (sizes[TT_SIZES - 1])                     /* the least used, gone */
+        size_free(sizes[TT_SIZES - 1]);
     memmove(&sizes[1], &sizes[0], sizeof(sizes[0]) * (TT_SIZES - 1));
     sizes[0] = s;
     return s;
 }
 
-/* the character's glyph at the size, drawn the first time */
+/* a face's sizes gone (its file closed) */
+static void sizes_drop(const wface *f)
+{
+    int k = 0;
+    for (int i = 0; i < TT_SIZES; i++) {
+        if (sizes[i] && sizes[i]->face == f)
+            size_free(sizes[i]);
+        else
+            sizes[k++] = sizes[i];
+    }
+    while (k < TT_SIZES)
+        sizes[k++] = NULL;
+}
+
+static tthint *size_hint(ttsize *s, struct ttfont *t)
+{
+    if (!s->hint && !s->no_hint) {
+        s->hint = tt_hint_new(t, s->ppem);
+        s->no_hint = !s->hint;
+    }
+    return s->hint;
+}
+
+/* the character's advance: hdmx's, else its hinted one (not drawn) */
+static int tt_adv(ttsize *s, unsigned char ch)
+{
+    if (s->g[ch].adv_done)
+        return 1;
+    struct ttfont *t = font_tt(s->face);
+    if (!t)
+        return 0;
+    unsigned gi = tt_glyph_index(t, ch);
+    int adv = tt_hdmx(t, s->ppem, gi);
+    if (adv < 0) {
+        tthint *h = size_hint(s, t);
+        ttpath p;
+        int drop;
+        if (h && tt_hint_path(h, gi, &p, &adv, &drop))
+            tt_path_free(&p);
+        else
+            adv = round_px((float)tt_advance(t, gi) * s->scale);
+        tts.advances++;
+    }
+    s->g[ch].adv = (int16_t)adv;
+    s->g[ch].adv_done = 1;
+    return 1;
+}
+
+/* the character's glyph at the size, drawn (hinted) the first time */
 static int tt_char(ttsize *s, unsigned char ch)
 {
     if (s->g[ch].done)
@@ -500,13 +567,26 @@ static int tt_char(ttsize *s, unsigned char ch)
     if (!t)
         return 0;
     unsigned gi = tt_glyph_index(t, ch);
-    int w, h, x0, top;
-    s->g[ch].bits = tt_render(t, gi, s->scale, &w, &h, &x0, &top);
+    int w, h, x0, top, adv;
+    DWORD t0 = GetTickCount();
+    tthint *hint = size_hint(s, t);
+    if (hint) {
+        s->g[ch].bits = tt_render_hinted(hint, gi, &w, &h, &x0, &top, &adv);
+    } else {
+        s->g[ch].bits = tt_render(t, gi, s->scale, &w, &h, &x0, &top);
+        adv = round_px((float)tt_advance(t, gi) * s->scale);
+    }
+    tts.glyphs++;
+    tts.ms_glyphs += GetTickCount() - t0;
     s->g[ch].w = (int16_t)w;
     s->g[ch].h = (int16_t)h;
     s->g[ch].x0 = (int16_t)x0;
     s->g[ch].top = (int16_t)top;
-    s->g[ch].adv = (int16_t)round_px((float)tt_advance(t, gi) * s->scale);
+    if (!s->g[ch].adv_done) {
+        int hd = tt_hdmx(t, s->ppem, gi);
+        s->g[ch].adv = (int16_t)(hd >= 0 ? hd : adv);
+        s->g[ch].adv_done = 1;
+    }
     s->g[ch].done = 1;
     return 1;
 }
@@ -523,10 +603,17 @@ float font_tt_scale(wface *f, int key)
     return s ? s->scale : 0.0f;
 }
 
+struct tthint *font_tt_hint(wface *f, int key)
+{
+    ttsize *s = tt_size(f, key);
+    struct ttfont *t = font_tt(f);
+    return s && t ? size_hint(s, t) : NULL;
+}
+
 int font_tt_width(wface *f, int key, unsigned char ch)
 {
     ttsize *s = tt_size(f, key);
-    return s && tt_char(s, ch) ? s->g[ch].adv : 0;
+    return s && tt_adv(s, ch) ? s->g[ch].adv : 0;
 }
 
 int font_tt_glyph(wface *f, int key, unsigned char ch, const uint8_t **rows, int *w, int *h,
@@ -541,6 +628,16 @@ int font_tt_glyph(wface *f, int key, unsigned char ch, const uint8_t **rows, int
     *x0 = s->g[ch].x0;
     *top = s->g[ch].top;
     return 1;
+}
+
+void font_tt_stats(char *line)
+{
+    int n = 0;
+    for (int i = 0; i < TT_SIZES; i++)
+        n += sizes[i] != NULL;
+    wsprintf(line, "TrueType: files read %lu (%lu ms), sizes made %lu (%d kept), glyphs drawn "
+             "%lu (%lu ms), advances hinted %lu\r\n", tts.loads, tts.ms_loads, tts.sizes, n,
+             tts.glyphs, tts.ms_glyphs, tts.advances);
 }
 
 /* the font file's faces into the list: their number */
@@ -668,6 +765,7 @@ BOOL WINAPI RemoveFontResource(LPCSTR file)
     for (int i = 0; i < nfaces; i++) {
         wface *f = faces[i];
         if (!lstrcmpi(f->file, path) && !f->used) {
+            sizes_drop(f);
             win_free(f->data);
             tt_close(f->ttf);
             win_free(f);

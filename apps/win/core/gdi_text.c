@@ -1025,15 +1025,26 @@ DWORD WINAPI GetGlyphOutline(HDC h, UINT ch, UINT format, LPGLYPHMETRICS gm, DWO
         m[3] = sc * fixed_f(mat->eM22);
     }
     unsigned gi = tt_glyph_index(t, (unsigned char)ch);
-    int adv = tt_advance(t, gi), w, hh, x0, top;
-    uint8_t *bits = tt_render_m(t, gi, m, &w, &hh, &x0, &top);
+    int adv = tt_advance(t, gi), w, hh, x0, top, inc_x, inc_y;
+    /* upright: hinted, as it is drawn */
+    tthint *hint = m[1] == 0 && m[2] == 0 && m[0] == sc && m[3] == sc ?
+                   font_tt_hint(r->face, r->key) : NULL;
+    uint8_t *bits;
+    if (hint) {
+        bits = tt_render_hinted(hint, gi, &w, &hh, &x0, &top, &inc_x);
+        inc_y = 0;
+    } else {
+        bits = tt_render_m(t, gi, m, &w, &hh, &x0, &top);
+        inc_x = round_i((float)adv * m[0]);
+        inc_y = round_i((float)adv * m[1]);
+    }
     if (gm) {
         gm->gmBlackBoxX = bits ? (UINT)w : 1;
         gm->gmBlackBoxY = bits ? (UINT)hh : 1;
         gm->gmptGlyphOrigin.x = bits ? x0 : 0;
         gm->gmptGlyphOrigin.y = bits ? top : 0;
-        gm->gmCellIncX = (short)(round_i((float)adv * m[0]) + r->bold);
-        gm->gmCellIncY = (short)round_i((float)adv * m[1]);
+        gm->gmCellIncX = (short)(inc_x + r->bold);
+        gm->gmCellIncY = (short)inc_y;
     }
     DWORD need = 1;
     if (format == GGO_BITMAP) {
@@ -1052,7 +1063,12 @@ DWORD WINAPI GetGlyphOutline(HDC h, UINT ch, UINT format, LPGLYPHMETRICS gm, DWO
     } else if (format == GGO_NATIVE) {
         native_out o;
         memset(&o, 0, sizeof(o));
-        tt_outline(t, gi, m, native_sink, &o);
+        if (hint) {
+            int a2, drop;
+            tt_hint_glyph(hint, gi, native_sink, &o, &a2, &drop);
+        } else {
+            tt_outline(t, gi, m, native_sink, &o);
+        }
         native_close(&o);
         need = o.n;
         if (buffer && size) {

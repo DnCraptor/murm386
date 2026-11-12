@@ -1,7 +1,7 @@
 /*
  * truetype.h - TrueType fonts (.TTF; .FOT files naming them): a font file
  * read and its glyphs drawn at any size, black and white as Windows 3.1
- * draws them on a VGA (no smoothing, no hinting, dropouts kept), its
+ * draws them on a VGA (no smoothing, hinted, dropout control), its
  * characters Windows-1251 (the ANSI WINN has) through the font's Unicode
  * character map (or its symbol one, F000h + the character).
  *
@@ -74,6 +74,45 @@ uint8_t *tt_render(const ttfont *f, unsigned glyph, float scale, int *w, int *h,
 /* the same through a matrix (as tt_outline's) */
 uint8_t *tt_render_m(const ttfont *f, unsigned glyph, const float m[4], int *w, int *h,
                      int *x0, int *top);
+
+/* dropout control (SCANTYPE): none, simple (the left or lower pixel),
+ * smart (the one nearest the span's middle); each with the stubs (a
+ * stroke's end between two scan lines) or without */
+enum {
+    TT_DROPOUT_NONE, TT_DROPOUT_SIMPLE, TT_DROPOUT_SIMPLE_NOSTUBS, TT_DROPOUT_SMART,
+    TT_DROPOUT_SMART_NOSTUBS
+};
+
+/* the font's hints (ttinterp.c) at a size: its instructions (fpgm, prep)
+ * run for ppem pixels to the em; NULL if there is no memory */
+typedef struct tthint tthint;
+tthint *tt_hint_new(const ttfont *f, int ppem);
+void tt_hint_free(tthint *h);
+/* a glyph hinted: its outline (pixels, y up, its origin at 0) to the sink,
+ * its advance (whole pixels), the dropout control its hints ask for;
+ * 0 if it has none to draw (sink unused) */
+int tt_hint_glyph(tthint *h, unsigned glyph, tt_sink sink, void *ctx, int *advance,
+                  int *dropout);
+/* a glyph's path: its points (26.6, y up), on the curve (bit 0), its
+ * contours' last points; one win_alloc block (tt_path_free) */
+typedef struct {
+    int       n, ncont;
+    int32_t  *x, *y;
+    uint8_t  *on;
+    uint16_t *ends;
+} ttpath;
+
+/* the glyph hinted (ttinterp.c): its path from its origin, its advance
+ * (pixels), the dropout control its hints ask for; 0 if it cannot be */
+int tt_hint_path(tthint *h, unsigned glyph, ttpath *out, int *advance, int *dropout);
+int tt_hint_ppem(const tthint *h);
+void tt_path_free(ttpath *p);
+
+/* the glyph drawn hinted (as tt_render), its advance */
+uint8_t *tt_render_hinted(tthint *h, unsigned glyph, int *w, int *hh, int *x0, int *top,
+                          int *advance);
+/* the hdmx table's advance (pixels) of the glyph at ppem; -1 if none */
+int tt_hdmx(const ttfont *f, int ppem, unsigned glyph);
 
 /* the kerning table's pairs (format 0's, horizontal): each its glyphs and
  * value (font units) to pair(); their number */

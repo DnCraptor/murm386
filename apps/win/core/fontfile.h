@@ -58,5 +58,9 @@ int font_tt_any(void);
 int font_make_fot(const char *fot, const char *ttf, const char *path);
 /* the size's scale (pixels per font unit; 0: none) */
 float font_tt_scale(wface *f, int key);
+/* the size's hints (NULL: none) */
+struct tthint *font_tt_hint(wface *f, int key);
+/* WINNTRAC.LOG's line on them: files read, sizes, glyphs drawn, times */
+void font_tt_stats(char *line);
 
 #endif

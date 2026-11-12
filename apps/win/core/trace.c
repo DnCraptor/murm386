@@ -13,6 +13,7 @@
 #include "wincore.h"
 #include "ne_exec.h"
 #include "ne_guest.h"
+#include "fontfile.h"
 
 #define CALLS 256
 #define TURNS 32
@@ -104,6 +105,8 @@ void win_trace_dump(void)
              (unsigned long)m.dos_used, (unsigned long)m.dos_free, (unsigned long)m.dos_free_umb);
     put(f, line);
 #endif
+    font_tt_stats(line);
+    put(f, line);
     unsigned first = ncalls > CALLS ? ncalls - CALLS : 0;
     for (unsigned i = first; i < ncalls; i++) {
         const tcall *t = &calls[i % CALLS];
