@@ -2451,6 +2451,14 @@ int ne_call(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword)
             *v = (uint16_t)size;
         return 1;
     }
+    case 0x3068: {                      /* GDI.104 RectVisibleOld(HDC, const RECT FAR *) */
+        RECT rc;
+        uint32_t rect = dw(a, 4);
+        HDC hdc = w(a, 8);
+        if (!a->bad && rect && struct_in(a, F_RECT, rect, &rc))
+            *v = (uint16_t)RectVisible(hdc, &rc);
+        return 1;
+    }
     case 0x305d: {                      /* GetTextMetrics(HDC, LPTEXTMETRIC) */
         TEXTMETRIC tm;
         uint32_t p = dw(a, 4);

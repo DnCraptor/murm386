@@ -276,6 +276,7 @@ static const struct {
     { M_GDI, 49, "CreateBitmapIndirect", 4 },
     { M_GDI, 74, "GetBitmapBits", 10 },
     { M_GDI, 92, "GetTextFace", 8 },
+    { M_GDI, 104, "RectVisibleOld", 6 },
     { M_GDI, 106, "SetBitmapBits", 10 },
     { M_GDI, 351, "ExtTextOut", 22 },
     { M_GDI, 471, "GetTextExtentPoint", 12 },
