@@ -18,7 +18,7 @@
 #define NE (__win_dll_ne)
 #define WAVE_HANDLE    0x6e01u
 #define WAVE_QUEUE     16
-#define WAVE_SAMPLES   2048u
+#define WAVE_BUFSIZE   8192u
 
 #define MMSYSERR_NOMEM         7u
 #define MMSYSERR_NOTSUPPORTED 8u
@@ -64,8 +64,7 @@ typedef struct {
 } wave_state;
 
 static wave_state output;
-static uint8_t raw[WAVE_SAMPLES * 4u];
-static uint8_t pcm[WAVE_SAMPLES];
+static uint8_t raw[WAVE_BUFSIZE];
 
 static uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | (unsigned)p[1] << 8); }
 static uint32_t rd32(const uint8_t *p) { return (uint32_t)rd16(p) | (uint32_t)rd16(p + 2) << 16; }
@@ -197,38 +196,26 @@ static void wave_pump(void)
             wave_return_head(1);
             continue;
         }
-        unsigned frames = (q->bytes - q->position) / output.format.block;
+        /* Preserve the original PCM (including stereo and 16-bit samples).
+         * The driver decides between 8237 DMA1 and high DMA5. */
+        unsigned bytes = q->bytes - q->position;
         unsigned max = output.driver->max_bytes;
-        if (max > WAVE_SAMPLES)
-            max = WAVE_SAMPLES;
-        if (frames > max)
-            frames = max;
-        if (!frames)
+        if (max > sizeof(raw))
+            max = sizeof(raw);
+        max -= max % output.format.block;
+        if (bytes > max)
+            bytes = max;
+        if (!bytes)
             break;
-        unsigned bytes = frames * output.format.block;
         uint32_t addr = q->data + q->position;
-        /* A Win16 buffer must remain within the same selector. */
         if ((uint16_t)addr < (uint16_t)q->data ||
             !NE->task_read((uint16_t)output.task, addr, raw, bytes)) {
             output.driver->stop();
             wave_return_head(1);
             continue;
         }
-        for (unsigned i = 0; i < frames; i++) {
-            unsigned at = i * output.format.block;
-            if (output.format.bits == 8) {
-                unsigned v = raw[at];
-                if (output.format.channels == 2)
-                    v = (v + raw[at + 1u]) / 2u;
-                pcm[i] = (uint8_t)v;
-            } else {
-                int32_t v = (int16_t)rd16(raw + at);
-                if (output.format.channels == 2)
-                    v = (v + (int16_t)rd16(raw + at + 2u)) / 2;
-                pcm[i] = (uint8_t)((v + 32768) >> 8);
-            }
-        }
-        if (!output.driver->submit(pcm, frames, output.format.rate)) {
+        if (!output.driver->submit(raw, bytes, output.format.rate,
+                                   output.format.bits, output.format.channels)) {
             output.driver->stop();
             wave_return_head(1);
             continue;
@@ -387,7 +374,7 @@ static MMRESULT wave_caps(win_dll_call *c)
     wr16(b + 4, 0x030a);
     memcpy(b + 6, "SB16 (murm386)", sizeof("SB16 (murm386)"));
     wr32(b + 38, 0x0fffu);            /* 11/22/44 kHz PCM, mono/stereo, 8/16-bit */
-    wr16(b + 42, 2);                  /* input stereo is converted to mono */
+    wr16(b + 42, 2);                  /* native stereo channels */
     /* dwSupport at +44: no per-channel volume/pitch/loop control */
     if (size > sizeof(b))
         size = sizeof(b);

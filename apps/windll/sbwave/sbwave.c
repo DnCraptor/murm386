@@ -24,6 +24,7 @@ static void *low_block;
 static uint8_t *buffer;
 static uint32_t physical;
 static int opened, running;
+static unsigned running_bits;
 
 static int sb_present(void)
 {
@@ -85,6 +86,7 @@ static int sb_open(void)
     }
     opened = 1;
     running = 0;
+    running_bits = 0;
     return 1;
 }
 
@@ -92,14 +94,16 @@ static void sb_stop(void)
 {
     if (!opened)
         return;
-    dsp_byte(0xd0u);                 /* halt 8-bit DMA */
-    outp(0x0au, 0x04u | SB_DMA);    /* mask channel 1 */
-    outp(SB_BASE + 4u, 0x82u);     /* mixer IRQ status */
-    if (inp(SB_BASE + 5u) & 1u) {
-        (void)inp(SB_BASE + 0x0eu); /* acknowledge SB8 IRQ */
-        outp(0x20u, 0x20u);         /* PIC EOI: SB16 has IRQ 5 */
-    }
+    dsp_byte(running_bits == 16u ? 0xd5u : 0xd0u); /* halt correct channel */
+    outp(0x0au, 0x04u | SB_DMA);
+    outp(0xd4u, 0x05u);            /* mask high-DMA channel 5 */
+    outp(SB_BASE + 4u, 0x82u);
+    uint8_t irq = inp(SB_BASE + 5u);
+    if (irq & 1u) (void)inp(SB_BASE + 0x0eu);
+    if (irq & 2u) (void)inp(SB_BASE + 0x0fu);
+    if (irq & 3u) outp(0x20u, 0x20u);
     running = 0;
+    running_bits = 0;
 }
 
 static void sb_close(void)
@@ -114,42 +118,66 @@ static void sb_close(void)
     opened = 0;
 }
 
-/* Program the 8237 DMA1 address, page, count and memory-to-device mode. */
-static void program_dma(unsigned n)
+/* The SB16 uses DMA1 (byte channel) for 8-bit samples and DMA5
+ * (word channel, second 8237) for 16-bit samples. 8 KiB physical
+ * alignment prevents crossing either controller's DMA page boundary. */
+static void program_dma(unsigned n, unsigned bits)
 {
-    outp(0x0au, 0x04u | SB_DMA);
-    outp(0x0cu, 0);                       /* reset byte flip-flop */
-    outp(0x02u, (uint8_t)physical);
-    outp(0x02u, (uint8_t)(physical >> 8));
-    outp(0x83u, (uint8_t)(physical >> 16));
-    outp(0x0cu, 0);
-    outp(0x03u, (uint8_t)(n - 1u));
-    outp(0x03u, (uint8_t)((n - 1u) >> 8));
-    outp(0x0bu, 0x48u | SB_DMA);          /* single cycle, memory read */
-    outp(0x0au, SB_DMA);                  /* unmask channel 1 */
+    if (bits == 16u) {
+        unsigned words = n / 2u;
+        outp(0xd4u, 0x05u);           /* mask DMA5 (controller channel 1) */
+        outp(0xd8u, 0);               /* high controller flip-flop */
+        outp(0xc4u, (uint8_t)(physical >> 1));
+        outp(0xc4u, (uint8_t)(physical >> 9));
+        outp(0x8bu, (uint8_t)(physical >> 16));
+        outp(0xd8u, 0);
+        outp(0xc6u, (uint8_t)(words - 1u));
+        outp(0xc6u, (uint8_t)((words - 1u) >> 8));
+        outp(0xd6u, 0x49u);           /* single, memory-to-device, channel 1 */
+        outp(0xd4u, 0x01u);           /* unmask DMA5 */
+    } else {
+        outp(0x0au, 0x04u | SB_DMA);
+        outp(0x0cu, 0);
+        outp(0x02u, (uint8_t)physical);
+        outp(0x02u, (uint8_t)(physical >> 8));
+        outp(0x83u, (uint8_t)(physical >> 16));
+        outp(0x0cu, 0);
+        outp(0x03u, (uint8_t)(n - 1u));
+        outp(0x03u, (uint8_t)((n - 1u) >> 8));
+        outp(0x0bu, 0x48u | SB_DMA);
+        outp(0x0au, SB_DMA);
+    }
 }
 
-static int sb_submit(const uint8_t *data, unsigned n, unsigned rate)
+static int sb_submit(const uint8_t *data, unsigned n, unsigned rate,
+                     unsigned bits, unsigned channels)
 {
+    unsigned frame_bytes = (bits / 8u) * channels;
     if (!opened || running || !data || !n || n > SB_BUFSIZE ||
-        rate < 4000u || rate > 48000u)
+        (bits != 8u && bits != 16u) || (channels != 1u && channels != 2u) ||
+        n % frame_bytes || rate < 4000u || rate > 48000u)
         return 0;
     memcpy(buffer, data, n);
-    /* Clear any old 8-bit IRQ before beginning the next transfer. */
+    /* Clear the previous block's IRQ before arming DMA. */
     outp(SB_BASE + 4u, 0x82u);
-    if (inp(SB_BASE + 5u) & 1u) {
-        (void)inp(SB_BASE + 0x0eu);
-        outp(0x20u, 0x20u);
-    }
-    program_dma(n);
-    /* SB16 generalized single-cycle 8-bit unsigned mono DAC. */
+    uint8_t irq = inp(SB_BASE + 5u);
+    if (irq & 1u) (void)inp(SB_BASE + 0x0eu);
+    if (irq & 2u) (void)inp(SB_BASE + 0x0fu);
+    if (irq & 3u) outp(0x20u, 0x20u);
+    program_dma(n, bits);
+    /* DSP B0h: signed 16-bit; C0h: unsigned 8-bit. Bit 5 of mode
+     * enables stereo. The length register counts frames (not bytes). */
+    unsigned count = n / frame_bytes - 1u;
+    uint8_t cmd = bits == 16u ? 0xb0u : 0xc0u;
+    uint8_t mode = (bits == 16u ? 0x10u : 0u) | (channels == 2u ? 0x20u : 0u);
     if (!dsp_byte(0x41u) || !dsp_byte((uint8_t)(rate >> 8)) ||
-        !dsp_byte((uint8_t)rate) || !dsp_byte(0xc0u) ||
-        !dsp_byte(0x00u) || !dsp_byte((uint8_t)(n - 1u)) ||
-        !dsp_byte((uint8_t)((n - 1u) >> 8))) {
+        !dsp_byte((uint8_t)rate) || !dsp_byte(cmd) || !dsp_byte(mode) ||
+        !dsp_byte((uint8_t)count) || !dsp_byte((uint8_t)(count >> 8))) {
+        running_bits = bits;
         sb_stop();
         return 0;
     }
+    running_bits = bits;
     running = 1;
     return 1;
 }
@@ -159,18 +187,21 @@ static int sb_finished(void)
     if (!opened || !running)
         return 0;
     outp(SB_BASE + 4u, 0x82u);
-    if (!(inp(SB_BASE + 5u) & 1u))
+    uint8_t mask = running_bits == 16u ? 2u : 1u;
+    if (!(inp(SB_BASE + 5u) & mask))
         return 0;
-    (void)inp(SB_BASE + 0x0eu);  /* clear SB16's latched 8-bit IRQ */
+    (void)inp(SB_BASE + (running_bits == 16u ? 0x0fu : 0x0eu));
     outp(0x20u, 0x20u);          /* PIC IRQ5 EOI */
     running = 0;
+    running_bits = 0;
     return 1;
 }
 
 static void sb_pause(int paused)
 {
     if (opened && running)
-        dsp_byte(paused ? 0xd0u : 0xd4u);
+        dsp_byte(paused ? (running_bits == 16u ? 0xd5u : 0xd0u)
+                        : (running_bits == 16u ? 0xd6u : 0xd4u));
 }
 
 static const win_wave_driver device = {

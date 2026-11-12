@@ -1,7 +1,7 @@
 /*
  * mmsystem.c - MMSYSTEM.DLL, WINN's multimedia system. Win16 waveOut
- * uses an installed native driver (wave.c); other multimedia devices
- * and sndPlaySound/PlaySound remain unsupported. The
+ * and midiOut use installed native drivers (wave.c / midi.c). Wave input,
+ * MCI and sndPlaySound/PlaySound remain unsupported. The
  * multimedia timer (timeGetTime, timeSetEvent: its procedure called as its
  * task takes its messages, as a timer's, as often as its period went by
  * since, ten times at most) and mmio's files (unbuffered: RIFF chunks
@@ -24,6 +24,11 @@ int winn_wave_ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *value);
 void winn_wave_task_end(uint16_t task);
 void winn_wave_term(void);
 UINT WINAPI winn_wave_num(void);
+/* Win16 midiOut lives in midi.c, behind installed native MIDI drivers. */
+int winn_midi_ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *value);
+void winn_midi_task_end(uint16_t task);
+void winn_midi_term(void);
+UINT WINAPI winn_midi_num(void);
 
 #define TIMERS      32
 #define MMIOS       16
@@ -493,6 +498,9 @@ static int ne_call(win_dll_call *c, uint16_t o, uint32_t *v)
     int wr = winn_wave_ne_call(c, o, v);
     if (wr != WINDLL_NONE)
         return wr;
+    wr = winn_midi_ne_call(c, o, v);
+    if (wr != WINDLL_NONE)
+        return wr;
     switch (o) {
     case 2: case 3:                     /* sndPlaySound, PlaySound: no sound */
         *v = 0;
@@ -693,6 +701,7 @@ static int ne_call(win_dll_call *c, uint16_t o, uint32_t *v)
 static void task_end(uint16_t task)
 {
     winn_wave_task_end(task);
+    winn_midi_task_end(task);
     for (int i = 0; i < TIMERS; i++)
         if (timers[i].used && (uint16_t)timers[i].task == task) {
             KillTimer(0, timers[i].id);
@@ -706,6 +715,7 @@ static void task_end(uint16_t task)
 static void term(void)
 {
     winn_wave_term();
+    winn_midi_term();
     for (int i = 0; i < TIMERS; i++)
         if (timers[i].used)
             KillTimer(0, timers[i].id);
@@ -730,7 +740,7 @@ static const win_dll_export exports[] = {
     { 107, 4, "joySetThreshold", NULL },
     { 109, 2, "joySetCalibration", NULL },
     { 110, 6, "joyGetPosEx", NULL },
-    { 201, 0, "midiOutGetNumDevs", (const void *)no_devices },
+    { 201, 0, "midiOutGetNumDevs", (const void *)winn_midi_num },
     { 202, 8, "midiOutGetDevCaps", NULL },
     { 203, 8, "midiOutGetErrorText", (const void *)error_text },
     { 204, 18, "midiOutOpen", NULL },
