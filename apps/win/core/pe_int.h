@@ -26,7 +26,10 @@
 #include "ne_guest.h"
 #include "ne_exec.h"
 
-enum { PE_KERNEL32, PE_USER32, PE_GDI32, PE_MODULES };
+/* WINN's modules: KERNEL32, USER32, GDI32 its own; WINMM the native
+ * MMSYSTEM.DLL's (core/pe_api.c's table); WING32 pe_user.c's */
+enum { PE_KERNEL32, PE_USER32, PE_GDI32, PE_WINMM, PE_WING32, PE_MODULES };
+extern const char *const win_pe_module_names[PE_MODULES];
 
 /* a function of WINN's: sig NULL for those with code of their own */
 typedef struct {
@@ -257,6 +260,11 @@ void win_pe_end(win_pe_ctx *ctx);
 int pe_user_api(pe_args *a, uint16_t service, uint32_t *eax);
 #define WIN_PE_SERVICE_NATIVE 0x4800u
 #define WIN_PE_NATIVE_PROCS 64u
+/* WINMM's functions: MMSYSTEM.DLL's (4900h + their place in its table) */
+#define WIN_PE_SERVICE_MM 0x4900u
+uint32_t win_pe_mm_proc(win_pe_image *img, const char *name);
+#define WIN_PE_SERVICE_WING 0x4a00u
+uint32_t win_pe_wing_proc(win_pe_image *img, const char *name);
 void pe_user_start(win_pe_ctx *ctx);
 void pe_user_end(win_pe_ctx *ctx);
 /* the instance of the program's task for native functions */

@@ -24,7 +24,9 @@
 const char *win_ne_dll_dir(void);
 const char *win_ne_dll_system_dir(void);
 
-static const char *const native_names[PE_MODULES] = { "KERNEL32", "USER32", "GDI32" };
+const char *const win_pe_module_names[PE_MODULES] = { "KERNEL32", "USER32", "GDI32", "WINMM",
+                                                      "WING32" };
+#define native_names win_pe_module_names
 
 /* ---------------------------------------------------------------- the file */
 
@@ -272,6 +274,10 @@ uint32_t win_pe_native_proc(win_pe_image *img, int module, const char *name, uin
     if (!name || module < 0)
         return 0;                           /* WINN's have no ordinals */
     (void)ordinal;
+    if (module == PE_WINMM)
+        return win_pe_mm_proc(img, name);
+    if (module == PE_WING32)
+        return win_pe_wing_proc(img, name);
     for (unsigned i = 0; i < win_pe_nfns; i++)
         if (win_pe_fns[i].module == module && !strcmp(win_pe_fns[i].name, name))
             return win_pe_thunk(img, (uint16_t)i, win_pe_fns[i].args);

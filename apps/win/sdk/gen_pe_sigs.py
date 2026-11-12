@@ -91,7 +91,8 @@ USER32: MessageBoxA RegisterClassA RegisterClassExA UnregisterClassA CreateWindo
   SetWindowPlacement
   SystemParametersInfoA
   GetMessagePos MsgWaitForMultipleObjects WaitMessage
-GDI32: GetObjectA GetTextMetricsA CreateFontIndirectA TextOutA ExtTextOutA
+GDI32: GetObjectA GetTextMetricsA CreateFontIndirectA TextOutA ExtTextOutA SelectObject BitBlt
+  StretchBlt DeleteObject SetDIBColorTable GetDIBColorTable
   GetTextExtentPoint32A GetTextExtentPointA GetStockObject CreateDIBSection
 '''
 

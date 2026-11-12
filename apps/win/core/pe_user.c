@@ -32,6 +32,7 @@ void user_dialog_menu(HMENU menu);
 #define WM_MENUCHAR   0x0120
 
 #define PE_LENT 8
+#define PE_DIBS 16
 #define PE_USERDATA 64
 #define PE_ACCELS 8
 #define PE_IMAGES 32
@@ -57,6 +58,9 @@ typedef struct pe_user {
     struct { uint32_t addr; void *native; UINT msg; } lent[PE_LENT];
     int lents;
     HACCEL accel[PE_ACCELS];
+    /* its DIB sections (CreateDIBSection, WinGCreateBitmap): the bitmap,
+     * its bits in its memory, their format; the DC it is selected into */
+    struct pe_dib { HBITMAP h; uint32_t bits; HDC dc; uint8_t info[40 + 1024]; } dib[PE_DIBS];
     struct { HANDLE h; uint8_t kind; int module; uint32_t id; char name[24]; } image[PE_IMAGES];
 } pe_user;
 
@@ -94,6 +98,9 @@ void pe_user_end(win_pe_ctx *ctx)
             for (int i = 0; i < PE_IMAGES; i++)
                 if (u->image[i].h && u->image[i].kind != 3)
                     DestroyIcon(u->image[i].h);
+            for (int i = 0; i < PE_DIBS; i++)
+                if (u->dib[i].h)
+                    DeleteObject(u->dib[i].h);
             free(u);
             break;
         }
@@ -1094,6 +1101,185 @@ static void textmetric(const TEXTMETRIC *t, uint8_t *g)
     g[52] = t->tmCharSet;
 }
 
+/* ---------------------------------------------------------------- DIB sections */
+
+/* A DIB section is a bitmap of WINN's and the bits in the program's
+ * memory it writes: they are given to the bitmap (SetDIBits) before it is
+ * the source of a BitBlt. What GDI draws into it does not come back. */
+static struct pe_dib *dib_of_dc(pe_user *u, HDC dc)
+{
+    for (int i = 0; dc && i < PE_DIBS; i++)
+        if (u->dib[i].h && u->dib[i].dc == dc)
+            return &u->dib[i];
+    return NULL;
+}
+
+static int dib_height(const struct pe_dib *d)
+{
+    int32_t h = (int32_t)pe_rd32(d->info + 8);
+    return h < 0 ? -h : h;
+}
+
+static void dib_sync(pe_user *u, HDC dc)
+{
+    struct pe_dib *d = dib_of_dc(u, dc);
+    if (!d)
+        return;
+    const BITMAPINFOHEADER *bih = (const BITMAPINFOHEADER *)d->info;
+    uint32_t stride = (((uint32_t)bih->biWidth * bih->biBitCount + 31u) / 32u) * 4u;
+    const void *bits = win_pe_ptr(u->ctx->img, d->bits, stride * (uint32_t)dib_height(d));
+    if (bits)
+        SetDIBits(dc, d->h, 0, (UINT)dib_height(d), bits, (const BITMAPINFO *)d->info,
+                  DIB_RGB_COLORS);
+}
+
+/* the bitmap: its bits zeroed in the program's heap, their address at
+ * *bits (the program's) */
+static __attribute__((noinline)) uint32_t dib_create(pe_args *a, pe_user *u, HDC dc,
+                                                     uint32_t info, int pal, uint8_t *bits)
+{
+    const uint8_t *bi = (const uint8_t *)pe_buf(a, info, 40);
+    int i = 0;
+    while (i < PE_DIBS && u->dib[i].h)
+        i++;
+    if (!bi || i == PE_DIBS || pe_rd32(bi) < 40)
+        return 0;
+    int32_t w = (int32_t)pe_rd32(bi + 4), h = (int32_t)pe_rd32(bi + 8);
+    unsigned bpp = pe_rd16(bi + 14), used = pe_rd32(bi + 32);
+    if (w <= 0 || !h || w > 4096 || h > 4096 || h < -4096 ||
+        (bpp != 1 && bpp != 4 && bpp != 8 && bpp != 16 && bpp != 24 && bpp != 32) ||
+        pe_rd32(bi + 16) != 0)              /* BI_RGB only */
+        return 0;
+    unsigned colors = bpp <= 8 ? (used && used < (1u << bpp) ? used : 1u << bpp) : 0;
+    const uint8_t *table = colors ? (const uint8_t *)pe_buf(a, info + pe_rd32(bi), 4u * colors) : NULL;
+    if (colors && !table)
+        return 0;
+    struct pe_dib *d = &u->dib[i];
+    memset(d->info, 0, sizeof(d->info));
+    memcpy(d->info, bi, 40);
+    pe_wr32(d->info, 40);
+    pe_wr32(d->info + 32, colors);
+    if (table) {
+        if (pal)                            /* DIB_PAL_COLORS: indexes, as gray */
+            for (unsigned k = 0; k < colors; k++)
+                d->info[40 + 4 * k] = d->info[41 + 4 * k] = d->info[42 + 4 * k] =
+                    (uint8_t)(k * 255u / (colors > 1 ? colors - 1 : 1));
+        else
+            memcpy(d->info + 40, table, 4u * colors);
+    }
+    uint32_t stride = (((uint32_t)w * bpp + 31u) / 32u) * 4u;
+    uint32_t size = stride * (uint32_t)(h < 0 ? -h : h);
+    d->bits = pe_heap_alloc(u->ctx, u->ctx->heap, size, 1);
+    if (!d->bits)
+        return 0;
+    BITMAPINFOHEADER bih;
+    memcpy(&bih, d->info, sizeof(bih));
+    d->h = CreateDIBitmap(dc ? dc : 0, &bih, 0, NULL, NULL, DIB_RGB_COLORS);
+    if (!d->h) {
+        pe_heap_free(u->ctx, u->ctx->heap, d->bits);
+        return 0;
+    }
+    d->dc = 0;
+    if (bits)
+        pe_wr32(bits, d->bits);
+    return d->h;
+}
+
+/* SetDIBColorTable, GetDIBColorTable of the DIB section in a DC */
+static uint32_t dib_colors(pe_args *a, pe_user *u, HDC dc, uint32_t start, uint32_t n,
+                           uint32_t colors, int set)
+{
+    struct pe_dib *d = dib_of_dc(u, dc);
+    uint32_t have = d ? pe_rd32(d->info + 32) : 0;
+    if (!d || start >= have)
+        return 0;
+    if (n > have - start)
+        n = have - start;
+    uint8_t *p = (uint8_t *)pe_buf(a, colors, 4u * n);
+    if (!p)
+        return 0;
+    if (set)
+        memcpy(d->info + 40 + 4 * start, p, 4u * n);
+    else
+        memcpy(p, d->info + 40 + 4 * start, 4u * n);
+    return n;
+}
+
+/* ---------------------------------------------------------------- WinG */
+
+/* WING32.DLL (Win32s' games): its DCs are memory DCs, its bitmaps DIB
+ * sections (top-down, 8 bits, as it recommends) */
+static const struct { const char *name; int args; } wing_fns[] = {
+    { "WinGCreateDC", 0 }, { "WinGRecommendDIBFormat", 4 }, { "WinGCreateBitmap", 12 },
+    { "WinGGetDIBPointer", 8 }, { "WinGGetDIBColorTable", 16 }, { "WinGSetDIBColorTable", 16 },
+    { "WinGBitBlt", 32 }, { "WinGStretchBlt", 40 }, { "WinGCreateHalftonePalette", 0 },
+    { "WinGCreateHalftoneBrush", 12 },
+};
+#define WING_FNS (sizeof(wing_fns) / sizeof(wing_fns[0]))
+
+uint32_t win_pe_wing_proc(win_pe_image *img, const char *name)
+{
+    for (unsigned i = 0; i < WING_FNS; i++)
+        if (!strcmp(wing_fns[i].name, name))
+            return win_pe_thunk(img, (uint16_t)(WIN_PE_SERVICE_WING + i), wing_fns[i].args);
+    return 0;
+}
+
+static __attribute__((noinline)) int wing(pe_args *a, pe_user *u, unsigned i, uint32_t *eax)
+{
+    uint32_t v = 0;
+    switch (i) {
+    case 0: v = CreateCompatibleDC(0); break;
+    case 1: {                               /* 8 bits, top-down */
+        uint8_t *bi = (uint8_t *)pe_buf(a, pe_arg(a, 0), 40);
+        if (bi) {
+            memset(bi, 0, 40);
+            pe_wr32(bi, 40);
+            pe_wr32(bi + 4, 1);
+            pe_wr32(bi + 8, 0xffffffffu);
+            pe_wr16(bi + 12, 1);
+            pe_wr16(bi + 14, 8);
+            v = 1;
+        }
+        break;
+    }
+    case 2: {
+        uint8_t *bp = pe_arg(a, 2) ? (uint8_t *)pe_buf(a, pe_arg(a, 2), 4) : NULL;
+        v = dib_create(a, u, (HDC)pe_arg(a, 0), pe_arg(a, 1), 0, bp);
+        break;
+    }
+    case 3:                                 /* WinGGetDIBPointer */
+        for (int k = 0; k < PE_DIBS; k++)
+            if (u->dib[k].h && u->dib[k].h == (HBITMAP)pe_arg(a, 0)) {
+                uint8_t *bi = pe_arg(a, 1) ? (uint8_t *)pe_buf(a, pe_arg(a, 1), 40) : NULL;
+                if (bi)
+                    memcpy(bi, u->dib[k].info, 40);
+                v = u->dib[k].bits;
+            }
+        break;
+    case 4: case 5:
+        v = dib_colors(a, u, (HDC)pe_arg(a, 0), pe_arg(a, 1), pe_arg(a, 2), pe_arg(a, 3), i == 5);
+        break;
+    case 6:
+        dib_sync(u, (HDC)pe_arg(a, 5));
+        v = BitBlt((HDC)pe_arg(a, 0), (int)pe_arg(a, 1), (int)pe_arg(a, 2), (int)pe_arg(a, 3),
+                   (int)pe_arg(a, 4), (HDC)pe_arg(a, 5), (int)pe_arg(a, 6), (int)pe_arg(a, 7),
+                   SRCCOPY);
+        break;
+    case 7:
+        dib_sync(u, (HDC)pe_arg(a, 5));
+        v = StretchBlt((HDC)pe_arg(a, 0), (int)pe_arg(a, 1), (int)pe_arg(a, 2), (int)pe_arg(a, 3),
+                       (int)pe_arg(a, 4), (HDC)pe_arg(a, 5), (int)pe_arg(a, 6), (int)pe_arg(a, 7),
+                       (int)pe_arg(a, 8), (int)pe_arg(a, 9), SRCCOPY);
+        break;
+    case 8: v = GetStockObject(DEFAULT_PALETTE); break;
+    case 9: v = CreateSolidBrush(pe_arg(a, 1)); break;
+    default: return 0;
+    }
+    *eax = v;
+    return 1;
+}
+
 /* ---------------------------------------------------------------- the services */
 
 /* a message from the program's MSG (28 bytes) */
@@ -1450,6 +1636,8 @@ int pe_user_api(pe_args *a, uint16_t service, uint32_t *eax)
     if (!u)
         return 0;
     uint32_t v = 0;
+    if (service >= WIN_PE_SERVICE_WING && service < WIN_PE_SERVICE_WING + WING_FNS)
+        return wing(a, u, service - WIN_PE_SERVICE_WING, eax);
     if (service >= WIN_PE_SERVICE_NATIVE && service < WIN_PE_SERVICE_NATIVE + WIN_PE_NATIVE_PROCS) {
         WNDPROC p = u->native[service - WIN_PE_SERVICE_NATIVE];
         *eax = p ? (uint32_t)send_native(a, NULL, p, (HWND)pe_arg(a, 0), pe_arg(a, 1),
@@ -1832,8 +2020,49 @@ int pe_user_api(pe_args *a, uint16_t service, uint32_t *eax)
         v = lf ? CreateFontIndirect(lf) : 0;
         break;
     }
-    case PEF_CreateDIBSection:
-        v = 0;                              /* not yet */
+    case PEF_CreateDIBSection: {
+        uint8_t *bp = (uint8_t *)pe_buf(a, pe_arg(a, 3), 4);
+        v = dib_create(a, u, (HDC)pe_arg(a, 0), pe_arg(a, 1), pe_arg(a, 2) == 1, bp);
+        break;
+    }
+    case PEF_SelectObject: {
+        HDC dc = (HDC)pe_arg(a, 0);
+        HGDIOBJ obj = (HGDIOBJ)pe_arg(a, 1);
+        v = SelectObject(dc, obj);
+        for (int i = 0; v && i < PE_DIBS; i++) {
+            if (u->dib[i].h && u->dib[i].dc == dc)
+                u->dib[i].dc = 0;           /* another one there now */
+            if (u->dib[i].h && u->dib[i].h == obj)
+                u->dib[i].dc = dc;
+        }
+        break;
+    }
+    case PEF_DeleteObject: {
+        HGDIOBJ obj = (HGDIOBJ)pe_arg(a, 0);
+        for (int i = 0; i < PE_DIBS; i++)
+            if (u->dib[i].h && u->dib[i].h == obj) {
+                pe_heap_free(ctx, ctx->heap, u->dib[i].bits);
+                u->dib[i].h = 0;
+            }
+        v = DeleteObject(obj);
+        break;
+    }
+    case PEF_BitBlt:
+        dib_sync(u, (HDC)pe_arg(a, 5));
+        v = BitBlt((HDC)pe_arg(a, 0), (int)pe_arg(a, 1), (int)pe_arg(a, 2), (int)pe_arg(a, 3),
+                   (int)pe_arg(a, 4), (HDC)pe_arg(a, 5), (int)pe_arg(a, 6), (int)pe_arg(a, 7),
+                   pe_arg(a, 8));
+        break;
+    case PEF_StretchBlt:
+        dib_sync(u, (HDC)pe_arg(a, 5));
+        v = StretchBlt((HDC)pe_arg(a, 0), (int)pe_arg(a, 1), (int)pe_arg(a, 2), (int)pe_arg(a, 3),
+                       (int)pe_arg(a, 4), (HDC)pe_arg(a, 5), (int)pe_arg(a, 6), (int)pe_arg(a, 7),
+                       (int)pe_arg(a, 8), (int)pe_arg(a, 9), pe_arg(a, 10));
+        break;
+    case PEF_SetDIBColorTable:
+    case PEF_GetDIBColorTable:
+        v = dib_colors(a, u, (HDC)pe_arg(a, 0), pe_arg(a, 1), pe_arg(a, 2), pe_arg(a, 3),
+                       service == PEF_SetDIBColorTable);
         break;
     default:
         return user_more(a, u, service, eax);

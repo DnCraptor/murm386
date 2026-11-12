@@ -958,11 +958,31 @@ LRESULT CALLBACK user_scrollbar_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
     wwnd *w = user_wnd(h);
     switch (msg) {
-    case WM_CREATE:
+    case WM_CREATE: {
         w->vs.min = 0;
         w->vs.max = 100;
         w->vs.pos = 0;
+        /* SBS_TOPALIGN/LEFTALIGN, SBS_BOTTOMALIGN/RIGHTALIGN: the standard
+         * thickness at that edge of the rectangle given, as Windows makes it */
+        const CREATESTRUCT *cs = (const CREATESTRUCT *)lp;
+        DWORD align = (DWORD)cs->style & (SBS_TOPALIGN | SBS_BOTTOMALIGN);
+        if (align) {
+            int x = cs->x, y = cs->y, cx = cs->cx, cy = cs->cy;
+            if (cs->style & SBS_VERT) {
+                int t = GetSystemMetrics(SM_CXVSCROLL);
+                if (align & SBS_RIGHTALIGN)
+                    x += cx - t;
+                cx = t;
+            } else {
+                int t = GetSystemMetrics(SM_CYHSCROLL);
+                if (align & SBS_BOTTOMALIGN)
+                    y += cy - t;
+                cy = t;
+            }
+            MoveWindow(h, x, y, cx, cy, FALSE);
+        }
         return 0;
+    }
     case WM_ERASEBKGND:
         return 1;
     case WM_PAINT: {

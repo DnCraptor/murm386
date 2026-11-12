@@ -432,7 +432,11 @@ classes and subclassing (a native procedure it holds is a thunk it may
 call), messages (Win32's parameters converted to and from Windows 3.1's:
 WM_COMMAND's, the scroll bars', WM_CTLCOLOR*, the controls' messages'
 numbers; a CREATESTRUCT, WINDOWPOS, DRAWITEMSTRUCT as copies of its
-layout), painting, wsprintf, TEXTMETRIC, GetObject. A function WINN does
+layout), painting, wsprintf, TEXTMETRIC, GetObject; DIB sections
+(CreateDIBSection: the bits in its memory, given to the bitmap before it is
+blitted), WinG (WING32.DLL: its DCs, top-down 8-bit bitmaps as DIB
+sections, WinGBitBlt and WinGStretchBlt); WINMM, the native MMSYSTEM.DLL's
+functions (the time, MCI's strings, sounds, the devices). A function WINN does
 not have ends it as it is called, named; a DLL that is not there is named
 before it starts. `host/mkpe_watcom.py` writes `OW32.EXE` and
 `OW32DLL.DLL` (Open Watcom's `nt_win` and `nt_dll`, their sources in the
@@ -802,8 +806,9 @@ Cyrillic; TrueType fonts map the characters to Unicode themselves.
 ## Not yet
 
 Win32: threads (CreateThread fails), structured exceptions (an exception
-raised ends the program), the Unicode (W) functions, CreateDIBSection,
-WinG, ADVAPI32, WINMM, COMDLG32, SHELL32, COMCTL32; VxDs.
+raised ends the program), the Unicode (W) functions, what GDI draws into a
+DIB section (its bits are not brought back), ADVAPI32, WINMM's devices
+(waveOut, midiOut) and mciSendCommand, COMDLG32, SHELL32, COMCTL32; VxDs.
 Printing (there is no printer), `.GRP` files (`PROGMAN.INI` holds the groups as text), DLLs (`LoadLibrary`) of native applications;
 Windows 95's and NT's additions to Win16 (WOW, the thunks to Win32,
 paths, Bézier curves, enhanced metafiles), BiDi, STRESS.DLL, the

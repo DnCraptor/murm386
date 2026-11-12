@@ -1227,6 +1227,10 @@ int     WINAPI TranslateAccelerator(HWND hwnd, HACCEL h, LPMSG msg);
 
 #define SBS_HORZ            0x0000L
 #define SBS_VERT            0x0001L
+#define SBS_TOPALIGN        0x0002L
+#define SBS_LEFTALIGN       0x0002L
+#define SBS_BOTTOMALIGN     0x0004L
+#define SBS_RIGHTALIGN      0x0004L
 
 /* ---------------------------------------------------------------- combo box */
 

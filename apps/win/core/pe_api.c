@@ -17,6 +17,7 @@
 #include "wincore.h"
 #include "pe_int.h"
 #include "x86bridge.h"
+#include "windll.h"
 
 
 #define NFNS win_pe_nfns
@@ -833,10 +834,9 @@ static __attribute__((noinline)) uint32_t module_file(pe_args *a, win_pe_ctx *ct
     uint32_t h = pe_arg(a, 0), buf = pe_arg(a, 1), size = pe_arg(a, 2);
     char path[200];
     if (IS_NATIVE_HMODULE(h)) {
-        static const char *const names[PE_MODULES] = { "KERNEL32", "USER32", "GDI32" };
         GetSystemDirectory(path, sizeof(path) - 16);
         lstrcat(path, "\\");
-        lstrcat(path, names[(h - NATIVE_HMODULE(0)) >> 16]);
+        lstrcat(path, win_pe_module_names[(h - NATIVE_HMODULE(0)) >> 16]);
         lstrcat(path, ".DLL");
     } else {
         int m = module_index(ctx, h);
@@ -2176,6 +2176,52 @@ static int kernel32(pe_args *a, uint16_t service, uint32_t *eax)
     return 1;
 }
 
+/* ---------------------------------------------------------------- WINMM */
+
+/* WINMM's functions MMSYSTEM.DLL has: its name, the native one's, the
+ * generic codes */
+static const struct { const char *name, *native, *sig; } mm_fns[] = {
+    { "timeGetTime", "timeGetTime", "d:" },
+    { "timeBeginPeriod", "timeBeginPeriod", "d:d" },
+    { "timeEndPeriod", "timeEndPeriod", "d:d" },
+    { "timeGetDevCaps", "timeGetDevCaps", "d:Bd" },
+    { "timeGetSystemTime", "timeGetSystemTime", "d:Bd" },
+    { "sndPlaySoundA", "sndPlaySound", "d:sd" },
+    { "PlaySoundA", "PlaySound", "d:sdd" },
+    { "PlaySound", "PlaySound", "d:sdd" },
+    { "mciSendStringA", "mciSendString", "d:sSdw" },
+    { "mciGetErrorStringA", "mciGetErrorString", "d:dSd" },
+    { "mmsystemGetVersion", "mmsystemGetVersion", "d:" },
+    { "waveOutGetNumDevs", "waveOutGetNumDevs", "d:" },
+    { "waveInGetNumDevs", "waveInGetNumDevs", "d:" },
+    { "midiOutGetNumDevs", "midiOutGetNumDevs", "d:" },
+    { "midiInGetNumDevs", "midiInGetNumDevs", "d:" },
+    { "auxGetNumDevs", "auxGetNumDevs", "d:" },
+    { "joyGetNumDevs", "joyGetNumDevs", "d:" },
+    { "waveOutGetErrorTextA", "waveOutGetErrorText", "d:dSd" },
+    { "midiOutGetErrorTextA", "midiOutGetErrorText", "d:dSd" },
+};
+#define MM_FNS (sizeof(mm_fns) / sizeof(mm_fns[0]))
+
+uint32_t win_pe_mm_proc(win_pe_image *img, const char *name)
+{
+    for (unsigned i = 0; i < MM_FNS; i++)
+        if (!strcmp(mm_fns[i].name, name))
+            return win_pe_thunk(img, (uint16_t)(WIN_PE_SERVICE_MM + i),
+                                4 * (int)strlen(strchr(mm_fns[i].sig, ':') + 1));
+    return 0;
+}
+
+static int winmm(pe_args *a, unsigned i, uint32_t *eax)
+{
+    int slot = win_dll_use("MMSYSTEM");     /* the task's until it ends */
+    const win_dll_export *e = slot >= 0 ? win_dll_export_of(slot, 0, mm_fns[i].native) : NULL;
+    if (!e || !e->native)
+        return 0;
+    const win_pe_fn f = { PE_WINMM, mm_fns[i].name, mm_fns[i].sig, e->native, 0 };
+    return generic(a, &f, eax);
+}
+
 /* ---------------------------------------------------------------- the dispatcher */
 
 int win_pe_api(win_pe_ctx *ctx, uint32_t esp, uint16_t service, uint32_t *eax)
@@ -2194,10 +2240,22 @@ int win_pe_api(win_pe_ctx *ctx, uint32_t esp, uint16_t service, uint32_t *eax)
         return 0;
     }
     int r;
-    if (service >= WIN_PE_SERVICE_NATIVE && service < WIN_PE_SERVICE_NATIVE + WIN_PE_NATIVE_PROCS) {
+    if ((service >= WIN_PE_SERVICE_NATIVE && service < WIN_PE_SERVICE_NATIVE + WIN_PE_NATIVE_PROCS) ||
+        (service >= WIN_PE_SERVICE_WING && service < WIN_PE_SERVICE_WING + 0x100u)) {
         r = pe_user_api(&a, service, eax);
         if (a.bad)
             ctx->invalid_args = 1;
+        return r;
+    }
+    if (service >= WIN_PE_SERVICE_MM && service < WIN_PE_SERVICE_MM + MM_FNS) {
+        r = winmm(&a, service - WIN_PE_SERVICE_MM, eax);
+        if (a.bad)
+            ctx->invalid_args = 1;
+        if (r <= 0) {
+            ctx->unsupported = service;
+            pe_fmt(ctx->undefined, sizeof(ctx->undefined), "WINMM.%s",
+                   mm_fns[service - WIN_PE_SERVICE_MM].name);
+        }
         return r;
     }
     if (service >= NFNS)
