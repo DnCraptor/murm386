@@ -651,7 +651,11 @@ modal dialog: to the dialog); Ctrl+Esc (or a double click on
 the desktop) opens the Task List, `TASKMAN.EXE` or SYSTEM.INI [boot]
 `taskman.exe`, whose Cascade, Tile and Arrange Icons work on the desktop
 through `CascadeChildWindows`, `TileChildWindows` and
-`ArrangeIconicWindows`.
+`ArrangeIconicWindows`. With SYSTEM.INI [debug] `trace=1`, Ctrl+Esc
+first writes `WINNTRACE.LOG` in the Windows directory: the last 256
+calls Win16 programs made of WINN's (the task, the caller's CS:IP, the
+call, DX:AX; one repeated from the same place counted) and where their
+last turns ended, for a program that hangs.
 
 Ctrl+Shift switches between the US and Russian (Windows-1251) layouts.
 Text is ANSI Windows-1251 and is drawn with the CP866 VGA font, or with

@@ -42,4 +42,10 @@ typedef struct {
 int win_ne_execute(const char *path, const char *cmdline, int show, int (*yield)(void),
                    win_ne_result *r);
 #endif
+/* WINN's trace (core/trace.c, SYSTEM.INI [debug] trace=1): each call a
+ * program makes of WINN's, with its caller and DX:AX; a running program's
+ * place where its turn ended. NULL: no trace. */
+extern void (*win_ne_trace_call)(uint16_t service, uint16_t cs, uint16_t ip, uint32_t result);
+extern void (*win_ne_trace_turn)(uint16_t cs, uint16_t ip);
+
 #endif

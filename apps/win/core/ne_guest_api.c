@@ -437,6 +437,12 @@ static __attribute__((noinline)) uint32_t message_box(win_ne_guest_api_context *
     return (uint16_t)MessageBox(owner, message, title, type);
 }
 
+int win_ne_guest_caller(void *opaque, win_ne_regs *cpu, uint16_t *cs, uint16_t *ip)
+{
+    win_ne_guest_api_context *ctx = (win_ne_guest_api_context *)opaque;
+    return cpu && read_stack_word(ctx, cpu, 0, ip) && read_stack_word(ctx, cpu, 2, cs);
+}
+
 int win_ne_guest_api(void *opaque, win_ne_regs *cpu, uint16_t service)
 {
     if (!cpu) return 0;

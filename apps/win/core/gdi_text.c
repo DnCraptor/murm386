@@ -152,17 +152,27 @@ static const char *const alias[][2] = {
     { "Times New Roman", "MS Serif" }, { "Courier New", "Courier" },
 };
 
-static const char *canonical(const char *name)
+/* a face's name as the font files name it: an alias's face, a Cyrillic
+ * face's family's ("Arial Cyr": "Arial", so "MS Sans Serif") */
+static void canonical(const char *name, char out[LF_FACESIZE])
 {
+    int n = lstrlen(name);
+    lstrcpyn(out, name, LF_FACESIZE);
+    if (n > 4 && n < LF_FACESIZE && !lstrcmpi(name + n - 4, " Cyr"))
+        out[n - 4] = 0;
     for (unsigned i = 0; i < sizeof(alias) / sizeof(alias[0]); i++)
-        if (!lstrcmpi(name, alias[i][0]))
-            return alias[i][1];
-    return name;
+        if (!lstrcmpi(out, alias[i][0])) {
+            lstrcpyn(out, alias[i][1], LF_FACESIZE);
+            return;
+        }
 }
 
 static int same_face(const char *a, const char *b)
 {
-    return !lstrcmpi(a, b) || !lstrcmpi(canonical(a), canonical(b));
+    char ca[LF_FACESIZE], cb[LF_FACESIZE];
+    canonical(a, ca);
+    canonical(b, cb);
+    return !lstrcmpi(a, b) || !lstrcmpi(ca, cb);
 }
 
 /* the VGA glyphs' own names: theirs unless a font file has the face */
@@ -203,6 +213,10 @@ static wface *pick(const LOGFONT *lf, int key, int *scale)
                 s = 8;
             int got = h * s;
             long score = got <= target ? (long)(target - got) * 4 : (long)(got - target) * 6 + 2;
+            /* made larger: only when no face's own size is near, as
+             * Windows' mapper does (a 3-pixel face five times over is
+             * blocks, not letters) */
+            score += s > 1 ? 30L * (s - 1) : 0;
             score += (lf->lfWeight >= 600) != (f->weight >= 600) ? 3 : 0;
             score += !lf->lfItalic && f->italic ? 100 : lf->lfItalic && !f->italic ? 3 : 0;
             if (!best || score < best_score) {

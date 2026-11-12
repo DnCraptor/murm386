@@ -49,6 +49,8 @@ typedef struct {
  * Returns 1, 0 when the call is not supported, WINX86_SERVICE_EXIT when
  * the program ends. */
 int win_ne_guest_api(void *opaque, win_ne_regs *cpu, uint16_t service);
+/* the far return address of the call being made (WINN's trace) */
+int win_ne_guest_caller(void *opaque, win_ne_regs *cpu, uint16_t *cs, uint16_t *ip);
 
 /* An INT 21h of the program (or its DOS3Call): its registers, as DOS
  * takes and gives them, and the carry flag (an error: its code in AX) */

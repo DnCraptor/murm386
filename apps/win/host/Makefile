@@ -11,7 +11,7 @@ GDICORE  = $(filter-out ../core/exports.c ../core/task.c ../core/file.c ../core/
             ../core/ne.c ../core/ne_boot.c ../core/ne_exec.c \
             ../core/ne_guest.c ../core/ne_guest_api.c ../core/ne_guest_dos.c ../core/ne_guest_user.c \
             ../core/ne_res.c ../core/ne_guest_int21.c ../core/ne_guest_call.c ../core/ne_guest_kernel.c \
-            ../core/x86bridge.c ../core/windll.c ../core/sound.c,$(CORE))
+            ../core/x86bridge.c ../core/windll.c ../core/sound.c ../core/trace.c,$(CORE))
 
 # the applications, built in; each WinMain gets its own name
 APPS     = demo.o progman.o notepad.o clock.o calc.o control.o winfile.o taskman.o winmine.o winhelp.o hlpfile.o appinfo.o

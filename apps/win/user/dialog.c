@@ -780,6 +780,7 @@ int user_init(void)
 {
     memset(&U, 0, sizeof(U));
     win_files_init();               /* disk errors fail, before anything reads a file */
+    win_trace_init();               /* SYSTEM.INI [debug] trace=1 */
     U.keys[VK_NUMLOCK] = 1;
     U.mouse_x = win_sys.screen.width / 2;
     U.mouse_y = win_sys.screen.height / 2;

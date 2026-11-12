@@ -933,6 +933,7 @@ void user_syscommand(wwnd *w, UINT cmd, int x, int y)
     case SC_TASKLIST: {
         /* the Task List: the one already open, or SYSTEM.INI [boot]
          * taskman.exe (TASKMAN.EXE) started */
+        win_trace_dump();               /* SYSTEM.INI [debug] trace=1 */
         HWND tl = FindWindow(NULL, "Task List");
         if (tl && IsWindowVisible(tl)) {
             SetActiveWindow(tl);

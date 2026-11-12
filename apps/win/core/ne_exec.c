@@ -115,6 +115,9 @@ typedef struct {
     uint16_t ring0_selector;
 } win_ne_native_gate;
 
+void (*win_ne_trace_call)(uint16_t service, uint16_t cs, uint16_t ip, uint32_t result);
+void (*win_ne_trace_turn)(uint16_t cs, uint16_t ip);
+
 static void guest_put16(uint32_t linear, uint16_t v)
 {
     uint8_t *p = (uint8_t *)dos_guest_linear_ptr(linear);
@@ -191,7 +194,13 @@ static int invoke_native(void *opaque, CPU *cpu, uint16_t service)
     save_cpu(cpu, &transient);
     restore_cpu(cpu, gate->dos_context);
     int bad_before = gate->api->invalid_args;
+    uint16_t from_cs = 0, from_ip = 0;
+    if (win_ne_trace_call)
+        win_ne_guest_caller(gate->api, &guest, &from_cs, &from_ip);
     int handled = win_ne_guest_api(gate->api, &guest, service);
+    if (win_ne_trace_call)
+        win_ne_trace_call(service, from_cs, from_ip,
+                          (uint32_t)guest.gprx[regdx].r16 << 16 | guest.gprx[regax].r16);
     if (gate->api->invalid_args && !bad_before && !gate->api->invalid_call)
         gate->api->invalid_call = service;
     /* a fault or an exit in a callback this call made ends the program */
@@ -270,6 +279,8 @@ static int preempt(CPU *cpu, win_ne_native_gate *gate)
     uint16_t cs = cpu->ext_accessors->get_seg16(cpu, WIN_CS);
     if (cs == gate->rm_segment || (cs & 3u) != 3u)
         return winx86_run(cpu, invoke_native, gate, 1u);
+    if (win_ne_trace_turn)
+        win_ne_trace_turn(cs, (uint16_t)cpu->ip);
     raise_vector(cpu, (int)WIN_NE_YIELD_VECTOR);
     int rc = winx86_run(cpu, invoke_native, gate, WIN_NE_EXEC_SLICE);
     raise_done(cpu);
