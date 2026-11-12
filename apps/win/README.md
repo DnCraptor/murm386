@@ -644,6 +644,21 @@ The applications are built into the harness; `HOSTWIN/` is the Windows
 directory, with empty stand-ins for their files and a "DOS program". On
 the host, drive `C:` is the harness directory itself.
 
+## Memory
+
+Win16 programs run in protected mode, and their segments (code, data, local
+heaps, GlobalAlloc's) are in extended memory: WINN's own heap above the HMA,
+which on the target is the guest's extended memory itself (the PSRAM; XMS
+hands out the same memory, so WINN takes it from its heap, not from XMS).
+SYSTEM.INI [memory] `ext=` kilobytes they may have of it at most (0: none);
+without the key, as much as there is. When there is none, DOS memory blocks
+(the upper memory blocks first when DOS has them). What Real Mode must reach
+stays below 1M: the trampoline, each program's PSP and descriptor table,
+`GlobalDOSAlloc`'s and DPMI 0100h's blocks. A growing segment (a local heap)
+grows where it is when it can. On the host, `WINN_EXT_KB` (decimal) limits
+the extended memory (8M) and `WINN_DOS_TOP` (hex) makes DOS's memory end
+lower than 640K, as a fuller DOS has it.
+
 ## Keyboard
 
 Alt+Tab and Alt+Esc switch between applications (to one waiting in a
@@ -655,12 +670,8 @@ through `CascadeChildWindows`, `TileChildWindows` and
 first writes `WINNTRAC.LOG` in the Windows directory: the last 256
 calls Win16 programs made of WINN's (the task, the caller's CS:IP, the
 call, DX:AX; one repeated from the same place counted), where their
-last turns ended, and DOS's memory (what the programs' segments have, the
-largest free block), for a program that hangs. The programs' segments are
-DOS memory blocks, the upper memory blocks first when DOS has them; a
-growing one (a local heap) grows where it is when it can. On the host,
-`WINN_DOS_TOP` (hex) makes DOS's memory end lower than 640K, as a fuller
-DOS has it.
+last turns ended, and the programs' memory (extended and DOS's, DOS's
+largest free block), for a program that hangs.
 
 Ctrl+Shift switches between the US and Russian (Windows-1251) layouts.
 Text is ANSI Windows-1251 and is drawn with the CP866 VGA font, or with

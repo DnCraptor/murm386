@@ -8,7 +8,7 @@
 #include "dos_guest_ptr.h"
 
 void *g_pc;
-unsigned long phys_mem_size = 0x100000;
+unsigned long phys_mem_size = X86RUN_EXT_BASE + X86RUN_EXT;   /* the first 1M and 64K, then the extended memory */
 
 uint8_t iomem_read8(void *m, uint32_t a) { (void)m; return X86RUN_RAM[a & 0xfffff]; }
 uint16_t iomem_read16(void *m, uint32_t a) { (void)m; uint16_t v; memcpy(&v, X86RUN_RAM + (a & 0xfffff), 2); return v; }

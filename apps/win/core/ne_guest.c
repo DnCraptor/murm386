@@ -125,11 +125,18 @@ void win_ne_guest_release(win_ne_guest_image *image)
     memset(image, 0, sizeof(*image));
 }
 
-static int guest_alloc(win_ne_guest_image *g, uint32_t bytes, uint32_t *linear)
+static int guest_alloc_in(win_ne_guest_image *g, uint32_t bytes, uint32_t *linear, int low)
 {
     *linear = 0;
-    if (!g->io.alloc(g->opaque, bytes, linear))
+    int (*alloc)(void *, uint32_t, uint32_t *) =
+        low && g->io.alloc_low ? g->io.alloc_low : g->io.alloc;
+    if (!alloc(g->opaque, bytes, linear))
         return 0;
+    if (low && *linear + bytes > 0x100000u) {
+        g->io.free(g->opaque, *linear);
+        *linear = 0;
+        return 0;
+    }
     if (!*linear || (*linear & 15u) || *linear > UINT32_MAX - bytes) {
         if (*linear)
             g->io.free(g->opaque, *linear);
@@ -137,6 +144,12 @@ static int guest_alloc(win_ne_guest_image *g, uint32_t bytes, uint32_t *linear)
         return 0;
     }
     return 1;
+}
+
+/* the programs' segments: anywhere (the extended memory first) */
+static int guest_alloc(win_ne_guest_image *g, uint32_t bytes, uint32_t *linear)
+{
+    return guest_alloc_in(g, bytes, linear, 0);
 }
 
 /* what loading a module (the program: dll -1; a DLL) has at hand */
@@ -1073,9 +1086,9 @@ int win_ne_guest_load(const char *path, win_ne_guest_image *out,
     out->tss_selector = (uint16_t)((x + 4u) * GDT_ENTRY_BYTES);
     out->ring0_selector = (uint16_t)((x + 5u) * GDT_ENTRY_BYTES);
     out->bios_selector = (uint16_t)((x + 6u) * GDT_ENTRY_BYTES | 3u);
-    if (!guest_alloc(out, gdtsize, &out->gdt_linear) ||
-        !guest_alloc(out, WIN_NE_THUNK_SEGMENT_BYTES, &out->thunk_linear) ||
-        !guest_alloc(out, WIN_NE_GUEST_PSP_BYTES, &out->psp.linear))
+    if (!guest_alloc_in(out, gdtsize, &out->gdt_linear, 1) ||
+        !guest_alloc_in(out, WIN_NE_THUNK_SEGMENT_BYTES, &out->thunk_linear, 1) ||
+        !guest_alloc_in(out, WIN_NE_GUEST_PSP_BYTES, &out->psp.linear, 1))
         goto fail;
     seg_descriptor(out->gdt + out->thunk_selector, out->thunk_linear,
                    WIN_NE_THUNK_SEGMENT_BYTES, 0x9a);
@@ -1176,7 +1189,7 @@ win_ne_guest_segment *win_ne_guest_global(win_ne_guest_image *g, uint16_t sel)
     return NULL;
 }
 
-uint16_t win_ne_guest_global_alloc(win_ne_guest_image *g, uint32_t bytes)
+static uint16_t global_alloc(win_ne_guest_image *g, uint32_t bytes, int low)
 {
     if (!bytes || bytes > 65536u)
         return 0;
@@ -1184,7 +1197,7 @@ uint16_t win_ne_guest_global_alloc(win_ne_guest_image *g, uint32_t bytes)
         win_ne_guest_segment *s = &g->globals[i];
         if (s->selector)
             continue;
-        if (!guest_alloc(g, bytes, &s->linear))
+        if (!guest_alloc_in(g, bytes, &s->linear, low))
             return 0;
         uint8_t zero[256];
         memset(zero, 0, sizeof(zero));
@@ -1206,6 +1219,16 @@ alloc_fail:
         return 0;
     }
     return 0;
+}
+
+uint16_t win_ne_guest_global_alloc(win_ne_guest_image *g, uint32_t bytes)
+{
+    return global_alloc(g, bytes, 0);
+}
+
+uint16_t win_ne_guest_global_alloc_low(win_ne_guest_image *g, uint32_t bytes)
+{
+    return global_alloc(g, bytes, 1);
 }
 
 /* a data segment moved to a block of the new size, its selector kept: the

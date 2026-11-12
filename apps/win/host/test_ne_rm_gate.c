@@ -66,6 +66,12 @@ uint32_t GetVersion(void) { return 0x07000a03; }
 uint16_t GetCurrentTask(void) { return 0x3333; }
 unsigned GetNumTasks(void) { return 1; }
 uint32_t GetTickCount(void) { return 0; }
+/* the guest memory there is: the first 1M (no extended memory) */
+int win_ne_guest_mapped(uint32_t linear, uint32_t bytes)
+{
+    return linear < 0x100000u && bytes <= 0x100000u - linear;
+}
+
 int GetSystemMetrics(int i) { return i; }
 uint32_t GetSysColor(int i) { return (uint32_t)i; }
 int MessageBox(uint16_t owner, const char *text, const char *caption, unsigned type)

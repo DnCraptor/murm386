@@ -1088,7 +1088,7 @@ static __attribute__((noinline)) int kernel_misc(args *a, uint16_t service, uint
     }
     case 184: {                         /* GlobalDOSAlloc(DWORD): segment and selector */
         uint32_t bytes = dw(a, 4);
-        uint16_t sel = a->bad ? 0 : win_ne_guest_global_alloc(g, bytes ? bytes : 1);
+        uint16_t sel = a->bad ? 0 : win_ne_guest_global_alloc_low(g, bytes ? bytes : 1);
         win_ne_guest_segment *s = sel ? win_ne_guest_global(g, sel) : NULL;
         *dword = 1;
         if (s && !(s->linear & 15u) && s->linear < 0x100000u)

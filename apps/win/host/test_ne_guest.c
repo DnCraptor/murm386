@@ -144,7 +144,7 @@ int main(void)
     int fd = mkstemp(path);
     assert(fd >= 0);
     close(fd);
-    win_ne_guest_io io = {alloc_block, free_block, write_block, NULL};
+    win_ne_guest_io io = {alloc_block, free_block, write_block, NULL, NULL};
     win_ne_guest_image img;
     fixture(file);
     save_fixture(path, file);

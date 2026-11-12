@@ -365,7 +365,7 @@ static void dpmi(win_ne_guest_api_context *ctx, win_ne_dos_regs *r)
         break;
     }
     case 0x0100: {                      /* BX paragraphs of DOS memory: AX segment, DX selector */
-        uint16_t sel = r->bx ? win_ne_guest_global_alloc(g, (uint32_t)r->bx << 4) : 0;
+        uint16_t sel = r->bx ? win_ne_guest_global_alloc_low(g, (uint32_t)r->bx << 4) : 0;
         win_ne_guest_segment *s = sel ? win_ne_guest_global(g, sel) : NULL;
         if (s && !(s->linear & 15u) && s->linear < 0x100000u) {
             r->ax = (uint16_t)(s->linear >> 4);

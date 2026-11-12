@@ -215,7 +215,7 @@ static int invoke_native(void *opaque, CPU *cpu, uint16_t service)
 static int read_guest(void *opaque, uint32_t linear, void *dst, uint32_t bytes)
 {
     (void)opaque;
-    if (!dst || linear >= 0x100000u || bytes > 0x100000u - linear)
+    if (!dst || !win_ne_guest_mapped(linear, bytes))
         return 0;
     memcpy(dst, dos_guest_linear_ptr(linear), bytes);
     return 1;

@@ -1,7 +1,7 @@
 /*
- * mmsystem.c - MMSYSTEM.DLL, WINN's: Windows' multimedia system with no
- * devices (none of each kind: wave, MIDI, aux, joysticks, mixers; their
- * opens fail, MCI has none, sndPlaySound and PlaySound play nothing), the
+ * mmsystem.c - MMSYSTEM.DLL, WINN's multimedia system. Win16 waveOut
+ * uses an installed native driver (wave.c); other multimedia devices
+ * and sndPlaySound/PlaySound remain unsupported. The
  * multimedia timer (timeGetTime, timeSetEvent: its procedure called as its
  * task takes its messages, as a timer's, as often as its period went by
  * since, ten times at most) and mmio's files (unbuffered: RIFF chunks
@@ -18,6 +18,12 @@
 #include "windows.h"
 #include "mmsystem.h"
 #include "windll.h"
+
+/* Win16 waveOut lives in wave.c, behind installed native wave drivers. */
+int winn_wave_ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *value);
+void winn_wave_task_end(uint16_t task);
+void winn_wave_term(void);
+UINT WINAPI winn_wave_num(void);
 
 #define TIMERS      32
 #define MMIOS       16
@@ -484,6 +490,9 @@ static void ck_out(win_dll_call *c, uint32_t far, const MMCKINFO *ck)
 static int ne_call(win_dll_call *c, uint16_t o, uint32_t *v)
 {
     char s1[128], s2[128];
+    int wr = winn_wave_ne_call(c, o, v);
+    if (wr != WINDLL_NONE)
+        return wr;
     switch (o) {
     case 2: case 3:                     /* sndPlaySound, PlaySound: no sound */
         *v = 0;
@@ -494,8 +503,8 @@ static int ne_call(win_dll_call *c, uint16_t o, uint32_t *v)
     case 30:                            /* OutputDebugStr */
         *v = 0;
         return WINDLL_WORD;
-    case 101: case 201: case 301: case 350: case 401: case 501: case 800:
-        *v = 0;                         /* ...GetNumDevs: none */
+    case 101: case 201: case 301: case 350: case 501: case 800:
+        *v = 0;                         /* remaining GetNumDevs: none */
         return WINDLL_WORD;
     case 103: case 110: case 106:       /* joyGetPos(Ex), joySetCapture */
         *v = JOYERR_UNPLUGGED;
@@ -507,14 +516,14 @@ static int ne_call(win_dll_call *c, uint16_t o, uint32_t *v)
         str_back(c, NE->arg32(c, 6), mm_error(NE->arg16(c, 10)), NE->arg16(c, 4));
         *v = 0;
         return WINDLL_WORD;
-    case 202: case 302: case 351: case 402: case 502: case 801:  /* the capabilities */
-    case 204: case 304: case 404: case 504: case 802:            /* opens */
-    case 216: case 313: case 354: case 421: case 514: case 806:  /* by the device */
-        if (o == 204 || o == 304 || o == 404 || o == 504 || o == 802)
-            put16(c, NE->arg32(c, o == 404 || o == 504 ? 22 : 18), 0);   /* no handle */
+    case 202: case 302: case 351: case 502: case 801:  /* the capabilities */
+    case 204: case 304: case 504: case 802:             /* opens */
+    case 216: case 313: case 354: case 514: case 806:   /* by the device */
+        if (o == 204 || o == 304 || o == 504 || o == 802)
+            put16(c, NE->arg32(c, o == 504 ? 22 : 18), 0);    /* no handle */
         *v = MMSYSERR_BADDEVICEID;
-        return o == 216 || o == 313 || o == 354 || o == 421 || o == 514 ? WINDLL_DWORD
-                                                                         : WINDLL_WORD;
+        return o == 216 || o == 313 || o == 354 || o == 514 ? WINDLL_DWORD
+                                                            : WINDLL_WORD;
     case 601: {                         /* timeGetSystemTime(MMTIME FAR *, UINT): TIME_MS */
         uint8_t t[6];
         wr16(t, TIME_MS);
@@ -683,6 +692,7 @@ static int ne_call(win_dll_call *c, uint16_t o, uint32_t *v)
 /* a task ended: its timers, its mmio handles (its files are closed) */
 static void task_end(uint16_t task)
 {
+    winn_wave_task_end(task);
     for (int i = 0; i < TIMERS; i++)
         if (timers[i].used && (uint16_t)timers[i].task == task) {
             KillTimer(0, timers[i].id);
@@ -695,6 +705,7 @@ static void task_end(uint16_t task)
 
 static void term(void)
 {
+    winn_wave_term();
     for (int i = 0; i < TIMERS; i++)
         if (timers[i].used)
             KillTimer(0, timers[i].id);
@@ -753,10 +764,10 @@ static const win_dll_export exports[] = {
     { 352, 6, "auxGetVolume", NULL },
     { 353, 6, "auxSetVolume", NULL },
     { 354, 12, "auxOutMessage", NULL },
-    { 401, 0, "waveOutGetNumDevs", (const void *)no_devices },
+    { 401, 0, "waveOutGetNumDevs", (const void *)winn_wave_num },
     { 402, 8, "waveOutGetDevCaps", NULL },
     { 403, 8, "waveOutGetErrorText", (const void *)error_text },
-    { 404, 20, "waveOutOpen", NULL },
+    { 404, 22, "waveOutOpen", NULL },
     { 405, 2, "waveOutClose", NULL },
     { 406, 8, "waveOutPrepareHeader", NULL },
     { 407, 8, "waveOutUnprepareHeader", NULL },

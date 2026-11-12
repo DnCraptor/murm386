@@ -16,6 +16,7 @@
 #include <string.h>
 #include "wincore.h"
 #include "ne.h"
+#include "ne_guest.h"
 
 /* the built-in display drivers: VGA 640x480x16 as Windows' own, VBE
  * 640x400x256 when it cannot */
@@ -94,5 +95,6 @@ int main(int argc, char **argv)
     if (started)
         task_kernel_loop();
     win_shutdown();
+    win_ne_guest_mem_end();         /* the programs' extended memory back */
     return 0;
 }

@@ -4,7 +4,7 @@
  * made of WINN's (the task, the caller's CS:IP, the call, DX:AX; the same
  * call from the same place again and again counted, not repeated) and the
  * places programs' turns ended at (where one that loops without a call
- * is), and DOS's memory. Ctrl+Esc (the Task List) writes them to
+ * is), and the programs' memory. Ctrl+Esc (the Task List) writes them to
  * WINNTRAC.LOG in the Windows directory, the oldest first.
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
@@ -96,11 +96,12 @@ void win_trace_dump(void)
     wsprintf(line, "WINN trace at %lu ms: calls (ms task caller call -> DX:AX xcount)\r\n",
              (unsigned long)GetTickCount());
     put(f, line);
-#if defined(__arm__) || defined(__thumb__)
-    uint32_t low, any;
-    win_ne_dos_free(&low, &any);
-    wsprintf(line, "DOS memory: programs' blocks %lu, largest free %lu (with UMBs %lu)\r\n",
-             (unsigned long)win_ne_dos_used, (unsigned long)low, (unsigned long)any);
+#if defined(__arm__) || defined(__thumb__) || defined(WINN_NE_HOST)
+    win_ne_mem_info m;
+    win_ne_guest_mem_info(&m);
+    wsprintf(line, "memory: programs' extended %lu of %lu, DOS %lu; DOS's largest free %lu "
+             "(with UMBs %lu)\r\n", (unsigned long)m.ext_used, (unsigned long)m.ext_size,
+             (unsigned long)m.dos_used, (unsigned long)m.dos_free, (unsigned long)m.dos_free_umb);
     put(f, line);
 #endif
     unsigned first = ncalls > CALLS ? ncalls - CALLS : 0;

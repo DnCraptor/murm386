@@ -2,8 +2,9 @@
  * mmsystem.h - Windows' multimedia system (MMSYSTEM.DLL, a native DLL of
  * WINN's: apps/windll/mmsystem) for native callers, who take its
  * functions with LoadLibrary("MMSYSTEM") and GetProcAddress, as Windows
- * 3.1's own. WINN has no multimedia devices: none of each kind, MCI none;
- * the timers and mmio's files (RIFF) work.
+ * 3.1's own. Win16 waveOut uses a native driver selected in SYSTEM.INI;
+ * MIDI, wave input and MCI devices remain unavailable. Timers and mmio
+ * files (RIFF) work.
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */

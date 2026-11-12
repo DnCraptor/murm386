@@ -59,14 +59,24 @@ typedef struct {
     /* the allocation at linear made bytes long where it is: 0 if it cannot
      * be (what follows is in use); NULL: never */
     int (*resize)(void *opaque, uint32_t linear, uint32_t bytes);
+    /* below 1M, where Real Mode reaches it (the trampoline, the PSP, the
+     * descriptor table, GlobalDOSAlloc's); NULL: alloc's is */
+    int (*alloc_low)(void *opaque, uint32_t bytes, uint32_t *linear);
 } win_ne_guest_io;
 
-#if defined(__arm__) || defined(__thumb__)
-/* DOS's memory for the programs (WINN's trace): the bytes their blocks
- * have; the largest free block in conventional memory, and with UMBs */
-extern uint32_t win_ne_dos_used;
-void win_ne_dos_free(uint32_t *low, uint32_t *any);
-#endif
+/* the guest memory WINN may read and write directly: below 1M, and the
+ * programs' blocks of extended memory (ne_guest_dos.c, the host's) */
+int win_ne_guest_mapped(uint32_t linear, uint32_t bytes);
+
+/* the programs' memory (WINN's trace): the bytes their blocks have in DOS
+ * memory and in extended memory, what they may have of that; the largest
+ * block DOS has free in conventional memory, and with the UMBs */
+typedef struct {
+    uint32_t dos_used, ext_used, ext_size, dos_free, dos_free_umb;
+} win_ne_mem_info;
+void win_ne_guest_mem_info(win_ne_mem_info *m);
+/* the extended memory given back (WINN ends) */
+void win_ne_guest_mem_end(void);
 
 typedef struct {
     uint32_t linear;
@@ -149,6 +159,8 @@ void win_ne_guest_undefined_text(const win_ne_guest_image *g, uint16_t service, 
  * own, zeroed): its selector, 0 if there is no memory or no entry left.
  * Resized (moved: same selector), freed (all of them go with the image). */
 uint16_t win_ne_guest_global_alloc(win_ne_guest_image *g, uint32_t bytes);
+/* the same below 1M (GlobalDOSAlloc, DPMI 0100h) */
+uint16_t win_ne_guest_global_alloc_low(win_ne_guest_image *g, uint32_t bytes);
 int win_ne_guest_global_realloc(win_ne_guest_image *g, uint16_t sel, uint32_t bytes,
                                 int (*read)(void *, uint32_t, void *, uint32_t));
 int win_ne_guest_global_free(win_ne_guest_image *g, uint16_t sel);
