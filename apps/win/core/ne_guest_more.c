@@ -533,7 +533,8 @@ static __attribute__((noinline)) int kernel_more(args *a, ne_user *u, uint16_t s
                                                 uint32_t *v, int *dword)
 {
     win_ne_guest_image *g = (win_ne_guest_image *)a->ctx->image;
-    static const uint8_t reg_op[12] = { 7, 1, 2, 4, 3, 5, 0, 0, 6, 0, 0, 0 };
+    /* SHELL's ops, Windows 95's value functions their own ordinals */
+    static const uint8_t reg_op[12] = { 7, 1, 2, 4, 3, 5, 222, 223, 6, 225, 226, 0 };
     if (service >= 216 && service <= 227) {   /* KERNEL's registry: SHELL's */
         *dword = 1;
         *v = 0;
@@ -541,6 +542,30 @@ static __attribute__((noinline)) int kernel_more(args *a, ne_user *u, uint16_t s
                                      : service == 227;   /* RegFlushKey: written */
     }
     switch (service) {
+    case 144: case 145: case 146: {     /* CreateDirectory(LPCSTR, LPVOID security),
+                                         * RemoveDirectory(LPCSTR), DeleteFile(LPCSTR) */
+        char path[144];
+        int ok = str_in(a, dw(a, service == 144 ? 8 : 4), path, sizeof(path)) &&
+                 (service == 144 ? CreateDirectoryN(path) :
+                  service == 145 ? RemoveDirectoryN(path) : DeleteFileN(path));
+        if (!ok)
+            SetLastError(service == 146 ? 2 : 5);   /* not found, access denied */
+        *v = (uint16_t)ok;
+        return 1;
+    }
+    case 149: {                         /* GetVersionEx(OSVERSIONINFO FAR *): 3.10, as
+                                         * GetVersion (Win32s' platform) */
+        uint8_t o[20 + 128];
+        uint32_t far = dw(a, 4), ver = GetVersion();
+        *v = 0;
+        if (!get(a, far, o, 4) || rd32(o) < sizeof(o))
+            return 1;
+        memset(o + 4, 0, sizeof(o) - 4);
+        wr32(o + 4, ver & 0xff);        /* major, minor, build, platform 0, no CSD */
+        wr32(o + 8, (ver >> 8) & 0xff);
+        *v = put(a, far, o, sizeof(o));
+        return 1;
+    }
     case 26:                            /* GlobalFreeAll(owner): the blocks go with the task */
     case 324: case 325:                 /* LogError, LogParamError: no debugging kernel */
     case 338:                           /* HasGPHandler(FARPROC): none */
@@ -601,9 +626,142 @@ static __attribute__((noinline)) int kernel_more(args *a, ne_user *u, uint16_t s
 
 /* ---------------------------------------------------------------- USER */
 
-static __attribute__((noinline)) int user_more(args *a, uint16_t service, uint32_t *v,
-                                              int *dword)
+/* Windows 95's USER for Win16 programs: the structures' and the program's
+ * resources' */
+static __attribute__((noinline)) int user95(args *a, ne_user *u, uint16_t service, uint32_t *v)
 {
+    uint8_t b[32];
+    switch (service) {
+    case 0x1177: {                      /* DrawTextEx(HDC, LPSTR, int, LPRECT, UINT,
+                                         * LPDRAWTEXTPARAMS) */
+        static char s[512];
+        uint32_t pf = dw(a, 4), rf = dw(a, 10);
+        UINT fmt = w(a, 8);
+        int n = (int16_t)w(a, 14);
+        RECT rc;
+        DRAWTEXTPARAMS p;
+        *v = 0;
+        if ((n < 0 ? !str_in(a, dw(a, 16), s, sizeof(s)) :
+             (n >= (int)sizeof(s) || !get(a, dw(a, 16), s, (uint32_t)n))) || !get(a, rf, b, 8))
+            return 1;
+        if (n >= 0)
+            s[n] = 0;
+        rc.left = (int16_t)rd16(b); rc.top = (int16_t)rd16(b + 2);
+        rc.right = (int16_t)rd16(b + 4); rc.bottom = (int16_t)rd16(b + 6);
+        if (pf && get(a, pf, b + 8, 10)) {
+            p.cbSize = sizeof(p);
+            p.iTabLength = (int16_t)rd16(b + 10);
+            p.iLeftMargin = (int16_t)rd16(b + 12);
+            p.iRightMargin = (int16_t)rd16(b + 14);
+            p.uiLengthDrawn = 0;
+        }
+        *v = (uint16_t)DrawTextEx((HDC)w(a, 20), s, n, &rc, fmt, pf ? &p : NULL);
+        if (fmt & DT_CALCRECT) {
+            wr16(b, (uint16_t)rc.left); wr16(b + 2, (uint16_t)rc.top);
+            wr16(b + 4, (uint16_t)rc.right); wr16(b + 6, (uint16_t)rc.bottom);
+            put(a, rf, b, 8);
+        }
+        if (pf) {
+            wr16(b, (uint16_t)p.uiLengthDrawn);
+            put(a, pf + 8, b, 2);
+        }
+        return 1;
+    }
+    case 0x118f: {                      /* ChildWindowFromPointEx(HWND, POINT, UINT) */
+        POINT pt = { (int16_t)w(a, 6), (int16_t)w(a, 8) };
+        *v = (uint16_t)ChildWindowFromPointEx((HWND)w(a, 10), pt, w(a, 4));
+        return 1;
+    }
+    case 0x1185: {                      /* LoadImage(HINSTANCE, LPCSTR, type, cx, cy, flags) */
+        UINT type = w(a, 10), flags = w(a, 4);
+        uint32_t far = dw(a, 12);
+        char name[144];
+        *v = 0;
+        if (flags & LR_LOADFROMFILE) {
+            if (str_in(a, far, name, sizeof(name)))
+                *v = (uint16_t)(uintptr_t)LoadImage(0, name, type, (int16_t)w(a, 8),
+                                                    (int16_t)w(a, 6), flags);
+        } else if (type <= IMAGE_CURSOR) {
+            *v = ne_load_image(a, u, type == IMAGE_BITMAP ? 0x10af : type == IMAGE_ICON ?
+                               0x10ae : 0x10ad, w(a, 16), far);
+        }
+        return 1;
+    }
+    case 0x118b: {                      /* GetIconInfo(HICON, ICONINFO FAR *): words */
+        ICONINFO ii;
+        *v = 0;
+        if (GetIconInfo((HICON)w(a, 8), &ii)) {
+            wr16(b, (uint16_t)ii.fIcon);
+            wr16(b + 2, (uint16_t)ii.xHotspot);
+            wr16(b + 4, (uint16_t)ii.yHotspot);
+            wr16(b + 6, (uint16_t)(uintptr_t)ii.hbmMask);
+            wr16(b + 8, (uint16_t)(uintptr_t)ii.hbmColor);
+            *v = put(a, dw(a, 4), b, 10);
+        }
+        return 1;
+    }
+    case 0x118d: {                      /* RegisterClassEx(WNDCLASSEX FAR *): WNDCLASS past
+                                         * its size, hIconSm its icon's */
+        uint32_t p = dw(a, 4);
+        *v = get(a, p, b, 4) && rd32(b) >= 32 ? ne_register_class(a, u, p + 4) : 0;
+        return 1;
+    }
+    case 0x118e: {                      /* GetClassInfoEx(HINSTANCE, LPCSTR, WNDCLASSEX FAR *) */
+        uint32_t out = dw(a, 4);
+        *v = ne_class_info(a, u, w(a, 12), dw(a, 8), out + 4);
+        if (*v && get(a, out + 16, b, 2))       /* hIconSm: the class's icon */
+            put(a, out + 30, b, 2);
+        return 1;
+    }
+    }
+    return 0;
+}
+
+/* GDI's, their pointers the program's */
+static __attribute__((noinline)) int gdi_more(args *a, uint16_t service, uint32_t *v,
+                                             int *dword)
+{
+    switch (service) {
+    case 0x30bf: {                      /* GetDCHook(HDC, LPDWORD data): the procedure */
+        DWORD data = 0;
+        uint8_t b[4];
+        *v = GetDCHook((HDC)w(a, 8), &data);
+        wr32(b, data);
+        if (dw(a, 4))
+            put(a, dw(a, 4), b, 4);
+        *dword = 1;
+        return 1;
+    }
+    case 0x30bc: {                      /* GetTextExtentEx(HDC, LPCSTR, count, max, LPINT fit,
+                                         * LPINT dx, LPSIZE) */
+        static char s[256];
+        static int dx[256];
+        static uint8_t o[512];
+        int n = (int16_t)w(a, 18), fit = 0;
+        SIZE size;
+        *v = 0;
+        if (n < 0 || n > (int)sizeof(s) || (n && !get(a, dw(a, 20), s, (uint32_t)n)) ||
+            !GetTextExtentEx((HDC)w(a, 24), s, n, (int16_t)w(a, 16), &fit, dx, &size))
+            return 1;
+        for (int i = 0; i < n; i++)
+            wr16(o + 2 * i, (uint16_t)dx[i]);
+        wr16(o + 2 * n, (uint16_t)size.cx);
+        wr16(o + 2 * n + 2, (uint16_t)size.cy);
+        wr16(o + 2 * n + 4, (uint16_t)fit);
+        *v = (!dw(a, 12) || put(a, dw(a, 12), o + 2 * n + 4, 2)) &&
+             (!dw(a, 8) || put(a, dw(a, 8), o, 2u * (uint32_t)n)) &&
+             (!dw(a, 4) || put(a, dw(a, 4), o + 2 * n, 4));
+        return 1;
+    }
+    }
+    return 0;
+}
+
+static __attribute__((noinline)) int user_more(args *a, ne_user *u, uint16_t service,
+                                              uint32_t *v, int *dword)
+{
+    if (user95(a, u, service, v))
+        return 1;
     if (service >= 0x1000u + 501 && service <= 0x1000u + 532) {   /* WNet*: no network */
         *v = service == 0x1000u + 513 ? 0 : 1;  /* WNetGetCaps 0; WN_NOT_SUPPORTED */
         return 1;
@@ -664,7 +822,9 @@ int ne_more_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dwo
     if (service < 0x1000u)
         return kernel_more(a, u, service, v, dword);
     if (service < 0x2000u)
-        return user_more(a, service, v, dword);
+        return user_more(a, u, service, v, dword);
+    if (service >= 0x3000u && service < 0x4000u)
+        return gdi_more(a, service, v, dword);
     return 0;
 }
 

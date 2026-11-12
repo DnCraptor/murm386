@@ -526,6 +526,16 @@ UINT WINAPI GetPrivateProfileInt(LPCSTR section, LPCSTR key, int def, LPCSTR fil
     return (UINT)(neg ? -v : v);
 }
 
+int WINAPI GetPrivateProfileSectionNames(LPSTR buf, int size, LPCSTR file)
+{
+    return GetPrivateProfileString(NULL, NULL, "", buf, size, file);
+}
+
+int WINAPI GetProfileSectionNames(LPSTR buf, int size)
+{
+    return GetPrivateProfileString(NULL, NULL, "", buf, size, "WIN.INI");
+}
+
 int WINAPI GetProfileString(LPCSTR section, LPCSTR key, LPCSTR def, LPSTR buf, int size)
 {
     return GetPrivateProfileString(section, key, def, buf, size, "WIN.INI");

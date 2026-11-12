@@ -179,7 +179,7 @@ static uint32_t le32(const uint8_t *p)
 }
 
 /* a .BMP file (Windows', BITMAPINFOHEADER) as a bitmap of the screen's */
-static HBITMAP load_bmp(const char *name, int *w, int *h)
+HBITMAP user_load_bmp(const char *name, int *w, int *h)
 {
     char path[160];
     uint32_t n = 0;
@@ -215,7 +215,7 @@ static void set_wallpaper(const char *name)
         wallpaper = 0;
     }
     if (name && name[0] && lstrcmpi(name, "(None)"))
-        wallpaper = load_bmp(name, &wall_w, &wall_h);
+        wallpaper = user_load_bmp(name, &wall_w, &wall_h);
 }
 
 void user_draw_wallpaper(HDC dc, const RECT *rc)
@@ -641,4 +641,26 @@ int user_draw_text(HDC dc, LPCSTR s, int n, RECT *rc, UINT fmt)
 int WINAPI DrawText(HDC dc, LPCSTR s, int n, LPRECT rc, UINT fmt)
 {
     return user_draw_text(dc, s, n, rc, fmt);
+}
+
+/* DrawText within margins (average characters' widths); the characters
+ * drawn told */
+int WINAPI DrawTextEx(HDC dc, LPSTR s, int n, LPRECT rc, UINT fmt, LPDRAWTEXTPARAMS p)
+{
+    if (!p)
+        return user_draw_text(dc, s, n, rc, fmt);
+    TEXTMETRIC tm;
+    int avg = GetTextMetrics(dc, &tm) ? tm.tmAveCharWidth : 8;
+    RECT r = *rc;
+    r.left += p->iLeftMargin * avg;
+    r.right -= p->iRightMargin * avg;
+    int ht = user_draw_text(dc, s, n, &r, fmt);
+    if (fmt & DT_CALCRECT) {            /* the margins in what it needs */
+        rc->left = r.left - p->iLeftMargin * avg;
+        rc->right = r.right + p->iRightMargin * avg;
+        rc->top = r.top;
+        rc->bottom = r.bottom;
+    }
+    p->uiLengthDrawn = (UINT)(n < 0 ? lstrlen(s) : n);
+    return ht;
 }

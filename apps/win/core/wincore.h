@@ -376,6 +376,7 @@ HBITMAP  gdi_bitmap_from_dib(const uint8_t *d, uint32_t n);
 winapp_info *win_ne_app_info(const char *path);
 HICON    win_ne_icon(const char *path, uint16_t id, const char *name);
 HCURSOR  win_ne_cursor(const char *path, uint16_t id, const char *name);
+HANDLE   win_image_file(const char *path, int cursor);    /* an .ICO (.CUR) file's */
 HBITMAP  win_ne_bitmap(const char *path, uint16_t id, const char *name);
 
 /* ---------------------------------------------------------------- tasks (task.c) */

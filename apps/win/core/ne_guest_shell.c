@@ -156,12 +156,192 @@ static const char *under(const char *key, const char *path, int deep)
 }
 
 /* SHELL.1-7. Registry handles and LONG return codes are 32-bit. */
+/* ---------------------------------------------------------------- values (Windows 95's) */
+
+/* A value is a key of its key's section: its name (REG_DEFAULT the
+ * unnamed one's), its data a REG_SZ string as it is, else "#type:" and its
+ * bytes in hex (a string beginning with # or with a line break too). */
+#define REG_DATA_BYTES ((REG_VALUE_BYTES - 16) / 2)
+
+static const char *value_key(const char *name)
+{
+    return name[0] ? name : REG_DEFAULT;
+}
+
+static int value_name_ok(const char *name)
+{
+    return !strchr(name, '=') && name[0] != '[' && name[0] != ';' &&
+           lstrcmpi(name, REG_PRESENT) && lstrcmpi(name, REG_DEFAULT);
+}
+
+static void value_encode(uint32_t type, const uint8_t *d, unsigned n, char *out)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    unsigned len = 0;
+    while (len < n && d[len])
+        len++;
+    if (type == REG_SZ && d[0] != '#' && !memchr(d, '\r', len) && !memchr(d, '\n', len)) {
+        memcpy(out, d, len);
+        out[len] = 0;
+        return;
+    }
+    wsprintf(out, "#%lu:", (unsigned long)type);
+    char *p = out + strlen(out);
+    for (unsigned i = 0; i < n; i++) {
+        *p++ = hex[d[i] >> 4];
+        *p++ = hex[d[i] & 15];
+    }
+    *p = 0;
+}
+
+static int hexval(char c)
+{
+    return c >= '0' && c <= '9' ? c - '0' : (c | 0x20) >= 'a' && (c | 0x20) <= 'f' ?
+           (c | 0x20) - 'a' + 10 : -1;
+}
+
+/* the stored text as data: its type, its bytes (a string with its NUL) */
+static unsigned value_decode(const char *s, uint32_t *type, uint8_t *d)
+{
+    if (s[0] == '#' && s[1] >= '0' && s[1] <= '9') {
+        uint32_t t = 0;
+        const char *p = s + 1;
+        while (*p >= '0' && *p <= '9')
+            t = t * 10 + (uint32_t)(*p++ - '0');
+        if (*p == ':') {
+            unsigned n = 0;
+            for (p++; hexval(p[0]) >= 0 && hexval(p[1]) >= 0 && n < REG_DATA_BYTES; p += 2)
+                d[n++] = (uint8_t)(hexval(p[0]) << 4 | hexval(p[1]));
+            *type = t;
+            return n;
+        }
+    }
+    unsigned n = (unsigned)strlen(s) + 1u;
+    memcpy(d, s, n);
+    *type = REG_SZ;
+    return n;
+}
+
+/* the data (its type, its size) where the program asked for them: size
+ * told always, the bytes if they fit */
+static uint32_t value_out(args *a, uint32_t type, const uint8_t *d, unsigned n,
+                          uint32_t type_far, uint32_t data_far, uint32_t size_far)
+{
+    uint8_t b[4];
+    uint32_t r = ERROR_SUCCESS;
+    if (type_far) {
+        wr32(b, type);
+        if (!guest_write(a, type_far, b, 4))
+            return ERROR_INVALID_PARAMETER;
+    }
+    if (!size_far)
+        return data_far ? ERROR_INVALID_PARAMETER : ERROR_SUCCESS;
+    if (!guest_read(a, size_far, b, 4))
+        return ERROR_INVALID_PARAMETER;
+    uint32_t cap = rd32(b);
+    if (data_far)
+        r = cap < n ? ERROR_MORE_DATA : guest_write(a, data_far, d, n) ? ERROR_SUCCESS :
+            ERROR_INVALID_PARAMETER;
+    wr32(b, n);
+    return guest_write(a, size_far, b, 4) ? r : ERROR_INVALID_PARAMETER;
+}
+
+/* KERNEL.222 RegDeleteValue, 223 RegEnumValue, 225 RegQueryValueEx, 226
+ * RegSetValueEx (the op their ordinals) */
+static __attribute__((noinline)) int reg_values(args *a, unsigned op, uint32_t *v, HTASK task)
+{
+    static char text[REG_VALUE_BYTES];
+    static uint8_t data[REG_DATA_BYTES + 1];
+    char name[64];
+    uint32_t hkey = op == 223 ? dw(a, 32) : op == 222 ? dw(a, 8) : dw(a, 24);
+    const char *path = key_name(task, hkey);
+    if (!path) {
+        *v = ERROR_INVALID_HANDLE;
+        return 1;
+    }
+    const char *sec = section_name(path);
+    if (op != 223 && !guest_string(a, op == 222 ? dw(a, 4) : dw(a, 20), name, sizeof(name))) {
+        *v = ERROR_INVALID_PARAMETER;
+        return 1;
+    }
+    switch (op) {
+    case 226: {                         /* RegSetValueEx(HKEY, name, 0, type, data, size) */
+        uint32_t n = dw(a, 4), type = dw(a, 12);
+        if (!value_name_ok(name) || n > REG_DATA_BYTES || (n && !guest_read(a, dw(a, 8), data, n))) {
+            *v = ERROR_INVALID_PARAMETER;
+            return 1;
+        }
+        data[n] = 0;
+        value_encode(type, data, n ? n : 1, text);
+        if (!WritePrivateProfileString(sec, value_key(name), text, REG_FILE))
+            *v = ERROR_ACCESS_DENIED;
+        return 1;
+    }
+    case 225: {                         /* RegQueryValueEx(HKEY, name, 0, LPDWORD type,
+                                         * data, LPDWORD size) */
+        uint32_t type;
+        if (!GetPrivateProfileString(sec, value_key(name), "\001", text, sizeof(text), REG_FILE) ||
+            (text[0] == '\001' && !text[1])) {
+            *v = ERROR_FILE_NOT_FOUND;
+            return 1;
+        }
+        unsigned n = value_decode(text, &type, data);
+        *v = value_out(a, type, data, n, dw(a, 12), dw(a, 8), dw(a, 4));
+        return 1;
+    }
+    case 222:                           /* RegDeleteValue(HKEY, name) */
+        if (!GetPrivateProfileString(sec, value_key(name), "\001", text, sizeof(text), REG_FILE) ||
+            (text[0] == '\001' && !text[1]))
+            *v = ERROR_FILE_NOT_FOUND;
+        else if (!WritePrivateProfileString(sec, value_key(name), NULL, REG_FILE))
+            *v = ERROR_ACCESS_DENIED;
+        return 1;
+    case 223: {                         /* RegEnumValue(HKEY, index, name, LPDWORD name's
+                                         * size, 0, LPDWORD type, data, LPDWORD size) */
+        uint32_t index = dw(a, 28), type;
+        static char keys[REG_NAMES_BYTES];
+        GetPrivateProfileString(sec, NULL, "", keys, sizeof(keys), REG_FILE);
+        const char *found = NULL;
+        for (const char *k = keys; *k && !found; k += strlen(k) + 1)
+            if (lstrcmpi(k, REG_PRESENT) && !index--)
+                found = k;
+        if (!found) {
+            *v = ERROR_NO_MORE_ITEMS;
+            return 1;
+        }
+        const char *shown = lstrcmpi(found, REG_DEFAULT) ? found : "";
+        uint8_t b[4];
+        uint32_t len = (uint32_t)strlen(shown);
+        if (!guest_read(a, dw(a, 20), b, 4)) {
+            *v = ERROR_INVALID_PARAMETER;
+            return 1;
+        }
+        if (rd32(b) < len + 1) {
+            *v = ERROR_MORE_DATA;
+            return 1;
+        }
+        wr32(b, len);                   /* the name's length, its NUL not counted */
+        if (!guest_write(a, dw(a, 24), shown, len + 1) || !guest_write(a, dw(a, 20), b, 4)) {
+            *v = ERROR_INVALID_PARAMETER;
+            return 1;
+        }
+        GetPrivateProfileString(sec, found, "", text, sizeof(text), REG_FILE);
+        unsigned n = value_decode(text, &type, data);
+        *v = value_out(a, type, data, n, dw(a, 12), dw(a, 8), dw(a, 4));
+        return 1;
+    }
+    }
+    return 0;
+}
+
 int ne_shell_registry_service(args *a, unsigned op, uint32_t *v)
 {
     uint32_t h;
     HTASK task = GetCurrentTask();
     char path[REG_KEY_BYTES], child[REG_KEY_BYTES], value[REG_VALUE_BYTES];
     *v = ERROR_SUCCESS;
+    if (op == 222 || op == 223 || op == 225 || op == 226)
+        return reg_values(a, op, v, task);
     switch (op) {
     case 1:                              /* RegOpenKey(HKEY, name, PHKEY) */
     case 2: {                            /* RegCreateKey(HKEY, name, PHKEY) */

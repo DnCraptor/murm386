@@ -455,7 +455,16 @@ void WINAPI SwitchToThisWindow(HWND h, BOOL restore)
 }
 
 /* no input device leaves extra information */
-LONG WINAPI GetMessageExtraInfo(void) { return 0; }
+/* the extra information of the last message (SetMessageExtraInfo's) */
+static LPARAM extra_info;
+LONG WINAPI GetMessageExtraInfo(void) { return (LONG)extra_info; }
+
+LPARAM WINAPI SetMessageExtraInfo(LPARAM info)
+{
+    LPARAM was = extra_info;
+    extra_info = info;
+    return was;
+}
 
 /* its arrows disabled or enabled: taken, drawn as they are */
 BOOL WINAPI EnableScrollBar(HWND h, int bar, UINT arrows)
@@ -2010,3 +2019,64 @@ HWND WINAPI GetNextQueueWindow(HWND h, BOOL previous)
         cur = next;
     }
 }
+
+/* the child at a point of the parent's client area, those of the kinds
+ * not asked for passed over; the parent itself if none, 0 if the point is
+ * outside it */
+HWND WINAPI ChildWindowFromPointEx(HWND hp, POINT pt, UINT flags)
+{
+    wwnd *p = user_wnd(hp);
+    if (!p)
+        return 0;
+    POINT s = { pt.x + p->client.left, pt.y + p->client.top };
+    if (!PtInRect(&p->rc, s))
+        return 0;
+    for (wwnd *c = p->child; c; c = c->next) {
+        if (((flags & CWP_SKIPINVISIBLE) && !(c->style & WS_VISIBLE)) ||
+            ((flags & CWP_SKIPDISABLED) && (c->style & WS_DISABLED)) ||
+            ((flags & CWP_SKIPTRANSPARENT) && (c->exstyle & WS_EX_TRANSPARENT)))
+            continue;
+        if (PtInRect(&c->rc, s))
+            return c->h;
+    }
+    return hp;
+}
+
+/* a property of 32 bits: its low word the name's, its high word a second
+ * property's (the name and \001, or #\001 and the atom) */
+static LPCSTR high_name(LPCSTR name, char buf[40])
+{
+    if (!((uintptr_t)name >> 16))
+        wsprintf(buf, "#\001%u", (UINT)(uintptr_t)name);
+    else
+    {
+        lstrcpyn(buf, name, 37);
+        lstrcat(buf, "\001");
+    }
+    return buf;
+}
+
+BOOL WINAPI SetPropEx(HWND h, LPCSTR name, DWORD data)
+{
+    char hi[40];
+    return SetProp(h, name, (HANDLE)LOWORD(data)) &&
+           SetProp(h, high_name(name, hi), (HANDLE)HIWORD(data));
+}
+
+DWORD WINAPI GetPropEx(HWND h, LPCSTR name)
+{
+    char hi[40];
+    return MAKELONG((WORD)(uintptr_t)GetProp(h, name),
+                    (WORD)(uintptr_t)GetProp(h, high_name(name, hi)));
+}
+
+DWORD WINAPI RemovePropEx(HWND h, LPCSTR name)
+{
+    char hi[40];
+    return MAKELONG((WORD)(uintptr_t)RemoveProp(h, name),
+                    (WORD)(uintptr_t)RemoveProp(h, high_name(name, hi)));
+}
+
+/* a window's help context (Windows 95 keeps it as the property "SysCH") */
+BOOL WINAPI SetWindowContextHelpID(HWND h, DWORD id) { return SetPropEx(h, "SysCH", id); }
+DWORD WINAPI GetWindowContextHelpID(HWND h) { return GetPropEx(h, "SysCH"); }

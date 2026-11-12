@@ -235,7 +235,23 @@ FindEnvironmentString, ExtractAssociatedIcon and DriveType, KERNEL's
 registry functions the same; the network's (WNet*: WN_NOT_SUPPORTED,
 WNetGetCaps 0); the debugging, ROM, signal and hook functions of the
 kernel and USER answered as a retail Windows 3.1 with nothing of them
-does; palettes, CreateDC and CreateIC, SetSysColors;
+does; SwitchStackTo and SwitchStackBack (the caller's frame copied to
+the other stack and back, the old SS and BP in the segment's instance
+data); GDI's own functions USER calls (SaveVisRgn, RestoreVisRgn,
+ExcludeVisRect, IntersectVisRect, OffsetVisRgn, SelectVisRgn,
+InquireVisRgn, GetClipRgn, SetDCOrg, SetDCHook, GetDCHook and
+SetHookFlags: the hook kept, never called, WINN's USER keeping the DCs'
+areas itself; SelectBitmap, GetPhysicalFontHandle, GetSystemIconFont,
+GetTextExtentEx); and what Windows 95 added to Win16's KERNEL and USER:
+Get(Private)ProfileSectionNames, CreateDirectory, RemoveDirectory,
+DeleteFile, GetVersionEx (3.10), the registry's values (RegSetValueEx,
+RegQueryValueEx, RegEnumValue, RegDeleteValue: a REG_SZ as it is, other
+types `#type:` and hex, in WINNREG.INI), DrawTextEx, LoadImage (a module's
+or the system's, or LR_LOADFROMFILE an .ICO, .CUR or .BMP file),
+CopyImage, DrawIconEx, GetIconInfo, RegisterClassEx, GetClassInfoEx,
+ChildWindowFromPointEx, SetPropEx, GetPropEx, RemovePropEx (32 bits: two
+properties), Set/GetWindowContextHelpID, Set/GetMenuContextHelpId,
+SetMessageExtraInfo; palettes, CreateDC and CreateIC, SetSysColors;
 the mapping modes (all of them: the metric and English ones and MM_TWIPS
 at 96 pixels an inch, MM_ISOTROPIC keeping the axes alike; pens, rounded
 corners and blits scale, fonts are realized at the height the mapping
@@ -375,7 +391,9 @@ memory, KEYBOARD, OLECLI, OpenFile's OFSTRUCT: what WRITE.EXE needed),
 `OWSND` (SOUND, OLESVR),
 `OW31` (the rest of 3.1's USER, GDI, KERNEL), `OWMORE` with `OWDRV.DLL`
 (an installable driver, keybd_event and mouse_event, SystemParametersInfo,
-the registry enumerated, the environment, a wallpaper) (`make NEFIXTURES` in
+the registry enumerated, the environment, a wallpaper), `OW95` (the stack
+switched, the visible area, Windows 95's KERNEL and USER for Win16)
+(`make NEFIXTURES` in
 `host/`). All have DOS MZ stubs that explain how to launch them under WINN
 when invoked directly from DOS. `host/test_ne_run` runs them on the
 emulator's own i386 core (`src/i386.c` as it is, built for the host with
@@ -384,7 +402,7 @@ in its `HOSTWIN/` (`scripts/owwin.txt`, `scripts/owmenu.txt`,
 `scripts/owdemo.txt`, `scripts/owfile.txt`, `scripts/owres.txt`,
 `scripts/owkern.txt`, `scripts/owdll.txt`, `scripts/owfpu.txt`, `scripts/owapi.txt`, `scripts/owgdi.txt`,
 `scripts/owapi2.txt`, `scripts/owmeta.txt`, `scripts/owsys.txt`, `scripts/owfont.txt`,
-`scripts/owtt.txt`, `scripts/owmore.txt`).
+`scripts/owtt.txt`, `scripts/owmore.txt`, `scripts/ow95.txt`).
 
     WINN [:] [program [arguments]]
 
@@ -696,6 +714,7 @@ use `ucontext`):
     ./winhost scripts/ow31.txt PROGMAN       # clipboard viewers, ClipCursor, bounds, EnumObjects...
     ./winhost scripts/owtt.txt PROGMAN       # TrueType: WINNTEST.FOT/.TTF (mkttf.py), outlines, metrics
     ./winhost scripts/owmore.txt PROGMAN     # a driver (OWDRV.DLL), keybd/mouse_event, SPI, wallpaper
+    ./winhost scripts/ow95.txt PROGMAN       # SwitchStackTo, the visible area, Win95's KERNEL/USER
     ./winhost scripts/logo.txt PROGMAN       # the logo (copy the BMPs into HOSTWIN first)
     ./winhost800 scripts/vga800.txt  # the VGA800 driver, built in
     ./winhostvga scripts/vga.txt     # the built-in VGA driver (640x480x16), Win16 programs too

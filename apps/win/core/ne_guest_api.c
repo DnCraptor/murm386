@@ -343,6 +343,55 @@ static int catch_throw(win_ne_guest_api_context *ctx, win_ne_regs *cpu, int thro
     return 1;
 }
 
+/* SwitchStackTo(seg, ptr, top): the caller's frame (from the return
+ * address to its BP) copied to below seg:ptr, BP ptr (the word there 0: no
+ * frame before it), the old SS and BP kept in the segment's instance data
+ * (old_ss_sp at 2; the stack's top, minimum and bottom at 0Ah, 0Ch, 0Eh).
+ * SwitchStackBack: the frame (with what its locals became) copied back
+ * below the old BP, the old stack again. */
+static int switch_stack(win_ne_guest_api_context *ctx, win_ne_regs *cpu, int back)
+{
+    uint16_t sp = cpu->gprx[regsp].r16, ss = cpu->ss, bp;
+    static uint8_t buf[1024];           /* the frame (not on the native stack) */
+    if (!frame_get(ctx, cpu, FR_BP, &bp))
+        return 0;
+    uint16_t n = (uint16_t)(bp - sp);
+    if (bp <= sp || n > sizeof(buf) || !read_segment(ctx, ss, sp, buf, n))
+        return 0;
+    if (!back) {
+        uint16_t top, ptr, seg;
+        if (!read_stack_word(ctx, cpu, 4, &top) || !read_stack_word(ctx, cpu, 6, &ptr) ||
+            !read_stack_word(ctx, cpu, 8, &seg) || ptr < n + 16u)
+            return 0;
+        uint16_t nsp = (uint16_t)(ptr - n);
+        static const uint8_t zero[2] = { 0, 0 };
+        /* old_ss_sp (its offset the BP), then (past the heap's and the
+         * atoms' words) the stack's top, minimum, bottom */
+        const uint8_t old[4] = { (uint8_t)bp, (uint8_t)(bp >> 8), (uint8_t)ss, (uint8_t)(ss >> 8) };
+        const uint8_t stack[6] = { (uint8_t)top, (uint8_t)(top >> 8), (uint8_t)ptr,
+                                   (uint8_t)(ptr >> 8), (uint8_t)ptr, (uint8_t)(ptr >> 8) };
+        if (!write_segment(ctx, seg, nsp, buf, n) || !write_segment(ctx, seg, ptr, zero, 2) ||
+            !write_segment(ctx, seg, 2, old, 4) || !write_segment(ctx, seg, 0x0a, stack, 6) ||
+            !frame_set(ctx, cpu, 0, nsp) || !frame_set(ctx, cpu, 2, seg) ||
+            !frame_set(ctx, cpu, FR_BP, ptr))
+            return 0;
+        return 1;
+    }
+    uint8_t old[4];
+    static const uint8_t none[4] = { 0, 0, 0, 0 };
+    if (!read_segment(ctx, ss, 2, old, 4))
+        return 0;
+    uint16_t obp = (uint16_t)(old[0] | old[1] << 8), oss = (uint16_t)(old[2] | old[3] << 8);
+    if (!oss)                           /* no SwitchStackTo before: as it is */
+        return 1;
+    uint16_t osp = (uint16_t)(obp - n);
+    if (obp < n || !write_segment(ctx, oss, osp, buf, n) || !write_segment(ctx, ss, 2, none, 4) ||
+        !frame_set(ctx, cpu, 0, osp) || !frame_set(ctx, cpu, 2, oss) ||
+        !frame_set(ctx, cpu, FR_BP, obp))
+        return 0;
+    return 1;
+}
+
 /* no window services where ne_guest_user.c is not linked in */
 __attribute__((weak)) int win_ne_guest_user(win_ne_guest_api_context *ctx, win_ne_regs *cpu,
                                             uint16_t service, uint32_t *value, int *dword)
@@ -493,6 +542,11 @@ int win_ne_guest_api(void *opaque, win_ne_regs *cpu, uint16_t service)
             value = n;
         break;
     }
+    case 108:     /* KERNEL.SwitchStackTo(seg, ptr, top) */
+    case 109:     /* KERNEL.SwitchStackBack */
+        if (!switch_stack(ctx, cpu, service == 109))
+            ctx->invalid_args = 1;
+        break;
     case 55:      /* KERNEL.Catch(LPCATCHBUF): 0, and where it returns to */
     case 56: {    /* KERNEL.Throw(LPCATCHBUF, int): back there, Catch giving the int */
         int r = catch_throw(ctx, cpu, service == 56, &value);

@@ -31,6 +31,7 @@ extern void CheckDlgButton(void);
 extern void CheckMenuItem(void);
 extern void CheckRadioButton(void);
 extern void ChildWindowFromPoint(void);
+extern void ChildWindowFromPointEx(void);
 extern void ChooseColor(void);
 extern void ChooseFont(void);
 extern void Chord(void);
@@ -43,6 +44,7 @@ extern void CombineRgn(void);
 extern void CommDlgExtendedError(void);
 extern void CopyCursor(void);
 extern void CopyIcon(void);
+extern void CopyImage(void);
 extern void CopyMetaFile(void);
 extern void CopyRect(void);
 extern void CountClipboardFormats(void);
@@ -117,8 +119,10 @@ extern void DlgDirSelectEx(void);
 extern void DragDetect(void);
 extern void DrawFocusRect(void);
 extern void DrawIcon(void);
+extern void DrawIconEx(void);
 extern void DrawMenuBar(void);
 extern void DrawText(void);
+extern void DrawTextEx(void);
 extern void Ellipse(void);
 extern void EmptyClipboard(void);
 extern void EnableDos(void);
@@ -144,6 +148,7 @@ extern void EqualRect(void);
 extern void EqualRgn(void);
 extern void ExcludeClipRect(void);
 extern void ExcludeUpdateRgn(void);
+extern void ExcludeVisRect(void);
 extern void ExitWindows(void);
 extern void ExitWindowsExec(void);
 extern void ExtFloodFill(void);
@@ -191,6 +196,7 @@ extern void GetClassWord(void);
 extern void GetClientRect(void);
 extern void GetClipBox(void);
 extern void GetClipCursor(void);
+extern void GetClipRgn(void);
 extern void GetClipboardData(void);
 extern void GetClipboardFormatName(void);
 extern void GetClipboardOwner(void);
@@ -206,6 +212,7 @@ extern void GetCursor(void);
 extern void GetCursorPos(void);
 extern void GetDC(void);
 extern void GetDCEx(void);
+extern void GetDCHook(void);
 extern void GetDCOrg(void);
 extern void GetDIBits(void);
 extern void GetDesktopHwnd(void);
@@ -226,6 +233,7 @@ extern void GetFileTitle(void);
 extern void GetFocus(void);
 extern void GetFontData(void);
 extern void GetGlyphOutline(void);
+extern void GetIconInfo(void);
 extern void GetInputState(void);
 extern void GetKerningPairs(void);
 extern void GetKeyState(void);
@@ -236,6 +244,7 @@ extern void GetLocalTimeN(void);
 extern void GetMapMode(void);
 extern void GetMenu(void);
 extern void GetMenuCheckMarkDimensions(void);
+extern void GetMenuContextHelpId(void);
 extern void GetMenuItemCount(void);
 extern void GetMenuItemID(void);
 extern void GetMenuState(void);
@@ -260,15 +269,19 @@ extern void GetOpenFileName(void);
 extern void GetOutlineTextMetrics(void);
 extern void GetPaletteEntries(void);
 extern void GetParent(void);
+extern void GetPhysicalFontHandle(void);
 extern void GetPixel(void);
 extern void GetPolyFillMode(void);
 extern void GetPriorityClipboardFormat(void);
 extern void GetPrivateProfileInt(void);
+extern void GetPrivateProfileSectionNames(void);
 extern void GetPrivateProfileString(void);
 extern void GetProcAddress(void);
 extern void GetProfileInt(void);
+extern void GetProfileSectionNames(void);
 extern void GetProfileString(void);
 extern void GetProp(void);
+extern void GetPropEx(void);
 extern void GetQueueStatus(void);
 extern void GetROP2(void);
 extern void GetRasterizerCaps(void);
@@ -285,6 +298,7 @@ extern void GetSysColorBrush(void);
 extern void GetSysModalWindow(void);
 extern void GetSystemDebugState(void);
 extern void GetSystemDirectory(void);
+extern void GetSystemIconFont(void);
 extern void GetSystemMenu(void);
 extern void GetSystemMetrics(void);
 extern void GetSystemPaletteEntries(void);
@@ -295,6 +309,7 @@ extern void GetTextAlign(void);
 extern void GetTextCharacterExtra(void);
 extern void GetTextColor(void);
 extern void GetTextExtent(void);
+extern void GetTextExtentEx(void);
 extern void GetTextExtentPoint(void);
 extern void GetTextFace(void);
 extern void GetTextMetrics(void);
@@ -309,6 +324,7 @@ extern void GetViewportExtEx(void);
 extern void GetViewportOrg(void);
 extern void GetViewportOrgEx(void);
 extern void GetWindow(void);
+extern void GetWindowContextHelpID(void);
 extern void GetWindowDC(void);
 extern void GetWindowExt(void);
 extern void GetWindowExtEx(void);
@@ -340,9 +356,11 @@ extern void IconSize(void);
 extern void InSendMessage(void);
 extern void InflateRect(void);
 extern void InitAtomTable(void);
+extern void InquireVisRgn(void);
 extern void InsertMenu(void);
 extern void IntersectClipRect(void);
 extern void IntersectRect(void);
+extern void IntersectVisRect(void);
 extern void InvalidateRect(void);
 extern void InvalidateRgn(void);
 extern void InvertRect(void);
@@ -381,6 +399,7 @@ extern void LineDDA(void);
 extern void LineTo(void);
 extern void LoadCursor(void);
 extern void LoadIcon(void);
+extern void LoadImage(void);
 extern void LoadLibrary(void);
 extern void LocalAlloc(void);
 extern void LocalFree(void);
@@ -409,6 +428,7 @@ extern void OffsetRect(void);
 extern void OffsetRgn(void);
 extern void OffsetViewportOrg(void);
 extern void OffsetViewportOrgEx(void);
+extern void OffsetVisRgn(void);
 extern void OffsetWindowOrg(void);
 extern void OffsetWindowOrgEx(void);
 extern void OldYield(void);
@@ -448,14 +468,17 @@ extern void RemoveDirectoryN(void);
 extern void RemoveFontResource(void);
 extern void RemoveMenu(void);
 extern void RemoveProp(void);
+extern void RemovePropEx(void);
 extern void RepaintScreen(void);
 extern void ReplaceText(void);
 extern void ReplyMessage(void);
 extern void ResizePalette(void);
 extern void RestoreDC(void);
+extern void RestoreVisRgn(void);
 extern void Resurrection(void);
 extern void RoundRect(void);
 extern void SaveDC(void);
+extern void SaveVisRgn(void);
 extern void ScaleViewportExt(void);
 extern void ScaleViewportExtEx(void);
 extern void ScaleWindowExt(void);
@@ -465,9 +488,11 @@ extern void ScrollChildren(void);
 extern void ScrollDC(void);
 extern void ScrollWindow(void);
 extern void ScrollWindowEx(void);
+extern void SelectBitmap(void);
 extern void SelectClipRgn(void);
 extern void SelectObject(void);
 extern void SelectPalette(void);
+extern void SelectVisRgn(void);
 extern void SendDlgItemMessage(void);
 extern void SendMessage(void);
 extern void SetActiveWindow(void);
@@ -487,6 +512,8 @@ extern void SetClipboardData(void);
 extern void SetClipboardViewer(void);
 extern void SetCursor(void);
 extern void SetCursorPos(void);
+extern void SetDCHook(void);
+extern void SetDCOrg(void);
 extern void SetDIBits(void);
 extern void SetDIBitsToDevice(void);
 extern void SetDeskWallPaper(void);
@@ -495,13 +522,16 @@ extern void SetDlgItemText(void);
 extern void SetDoubleClickTime(void);
 extern void SetEnvironment(void);
 extern void SetFocus(void);
+extern void SetHookFlags(void);
 extern void SetKeyboardState(void);
 extern void SetLastError(void);
 extern void SetLocalTimeN(void);
 extern void SetMapMode(void);
 extern void SetMapperFlags(void);
 extern void SetMenu(void);
+extern void SetMenuContextHelpId(void);
 extern void SetMenuItemBitmaps(void);
+extern void SetMessageExtraInfo(void);
 extern void SetMessageQueue(void);
 extern void SetMetaFileBits(void);
 extern void SetMetaFileBitsBetter(void);
@@ -512,6 +542,7 @@ extern void SetPixel(void);
 extern void SetPolyFillMode(void);
 extern void SetPriority(void);
 extern void SetProp(void);
+extern void SetPropEx(void);
 extern void SetROP2(void);
 extern void SetRect(void);
 extern void SetRectEmpty(void);
@@ -536,6 +567,7 @@ extern void SetViewportExt(void);
 extern void SetViewportExtEx(void);
 extern void SetViewportOrg(void);
 extern void SetViewportOrgEx(void);
+extern void SetWindowContextHelpID(void);
 extern void SetWindowExt(void);
 extern void SetWindowExtEx(void);
 extern void SetWindowLong(void);
@@ -669,6 +701,8 @@ static const void *const exports_kernel[355] = {
     [134] = (const void *)GetWindowsDirectory,
     [135] = (const void *)GetSystemDirectory,
     [136] = (const void *)GetDriveType,
+    [142] = (const void *)GetProfileSectionNames,
+    [143] = (const void *)GetPrivateProfileSectionNames,
     [147] = (const void *)SetLastError,
     [148] = (const void *)GetLastError,
     [152] = (const void *)GetNumTasks,
@@ -761,6 +795,7 @@ static const void *const exports_gdi[487] = {
     [70] = (const void *)EnumFonts,
     [71] = (const void *)EnumObjects,
     [72] = (const void *)EqualRgn,
+    [73] = (const void *)ExcludeVisRect,
     [74] = (const void *)GetBitmapBits,
     [75] = (const void *)GetBkColor,
     [76] = (const void *)GetBkMode,
@@ -785,11 +820,16 @@ static const void *const exports_gdi[487] = {
     [95] = (const void *)GetViewportOrg,
     [96] = (const void *)GetWindowExt,
     [97] = (const void *)GetWindowOrg,
+    [98] = (const void *)IntersectVisRect,
     [99] = (const void *)LPtoDP,
     [100] = (const void *)LineDDA,
     [101] = (const void *)OffsetRgn,
+    [102] = (const void *)OffsetVisRgn,
     [103] = (const void *)PtVisible,
+    [105] = (const void *)SelectVisRgn,
     [106] = (const void *)SetBitmapBits,
+    [117] = (const void *)SetDCOrg,
+    [118] = (const void *)GetSystemIconFont,
     [119] = (const void *)AddFontResource,
     [121] = (const void *)Death,
     [122] = (const void *)Resurrection,
@@ -799,6 +839,9 @@ static const void *const exports_gdi[487] = {
     [126] = (const void *)CloseMetaFile,
     [127] = (const void *)DeleteMetaFile,
     [128] = (const void *)MulDiv,
+    [129] = (const void *)SaveVisRgn,
+    [130] = (const void *)RestoreVisRgn,
+    [131] = (const void *)InquireVisRgn,
     [132] = (const void *)SetEnvironment,
     [133] = (const void *)GetEnvironment,
     [134] = (const void *)GetRgnBox,
@@ -816,10 +859,16 @@ static const void *const exports_gdi[487] = {
     [162] = (const void *)GetBitmapDimension,
     [163] = (const void *)SetBitmapDimension,
     [172] = (const void *)SetRectRgn,
+    [173] = (const void *)GetClipRgn,
     [175] = (const void *)EnumMetaFile,
     [176] = (const void *)PlayMetaFileRecord,
+    [188] = (const void *)GetTextExtentEx,
+    [190] = (const void *)SetDCHook,
+    [191] = (const void *)GetDCHook,
+    [192] = (const void *)SetHookFlags,
     [193] = (const void *)SetBoundsRect,
     [194] = (const void *)GetBoundsRect,
+    [195] = (const void *)SelectBitmap,
     [196] = (const void *)SetMetaFileBitsBetter,
     [307] = (const void *)GetCharABCWidths,
     [308] = (const void *)GetOutlineTextMetrics,
@@ -835,6 +884,7 @@ static const void *const exports_gdi[487] = {
     [349] = (const void *)SetMapperFlags,
     [350] = (const void *)GetCharWidth,
     [351] = (const void *)ExtTextOut,
+    [352] = (const void *)GetPhysicalFontHandle,
     [353] = (const void *)GetAspectRatioFilter,
     [360] = (const void *)CreatePalette,
     [363] = (const void *)GetPaletteEntries,
@@ -1143,6 +1193,20 @@ static const void *const exports_user[484] = {
     [370] = (const void *)GetWindowPlacement,
     [371] = (const void *)SetWindowPlacement,
     [373] = (const void *)SubtractRect,
+    [375] = (const void *)DrawTextEx,
+    [376] = (const void *)SetMessageExtraInfo,
+    [378] = (const void *)SetPropEx,
+    [379] = (const void *)GetPropEx,
+    [380] = (const void *)RemovePropEx,
+    [382] = (const void *)SetWindowContextHelpID,
+    [383] = (const void *)GetWindowContextHelpID,
+    [384] = (const void *)SetMenuContextHelpId,
+    [385] = (const void *)GetMenuContextHelpId,
+    [389] = (const void *)LoadImage,
+    [390] = (const void *)CopyImage,
+    [394] = (const void *)DrawIconEx,
+    [395] = (const void *)GetIconInfo,
+    [399] = (const void *)ChildWindowFromPointEx,
     [402] = (const void *)GetPriorityClipboardFormat,
     [403] = (const void *)UnregisterClass,
     [404] = (const void *)GetClassInfo,

@@ -152,15 +152,12 @@ HICON win_ne_icon(const char *path, uint16_t id, const char *name)
     return ok ? user_icon_create(&ic) : 0;
 }
 
-HCURSOR win_ne_cursor(const char *path, uint16_t id, const char *name)
+/* a cursor's DIB (its XOR image, then its AND mask) as WINN's cursor */
+static HCURSOR cursor_from_dib(const uint8_t *d, uint32_t n, int hx, int hy)
 {
-    uint8_t *d;
-    uint32_t n;
     gdi_dib b;
-    if (!group_dib(path, 1, id, name, -1, &d, &n))
-        return 0;
     HCURSOR h = 0;
-    if (n > 4 && gdi_dib_parse(d + 4, n - 4, 2, &b)) {
+    if (gdi_dib_parse(d, n, 2, &b)) {
         uint8_t and_m[128], xor_m[128];
         memset(and_m, 0xff, sizeof(and_m));     /* beyond its size: the screen */
         memset(xor_m, 0, sizeof(xor_m));
@@ -172,10 +169,57 @@ HCURSOR win_ne_cursor(const char *path, uint16_t id, const char *name)
                 if (bright(gdi_dib_pixel(&b, x, y)))
                     xor_m[y * 4 + x / 8] |= m;
             }
-        int hx = r16(d), hy = r16(d + 2);
         h = user_cursor_create(and_m, xor_m, hx < 32 ? hx : 31, hy < 32 ? hy : 31);
     }
+    return h;
+}
+
+HCURSOR win_ne_cursor(const char *path, uint16_t id, const char *name)
+{
+    uint8_t *d;
+    uint32_t n;
+    if (!group_dib(path, 1, id, name, -1, &d, &n))
+        return 0;
+    HCURSOR h = n > 4 ? cursor_from_dib(d + 4, n - 4, r16(d), r16(d + 2)) : 0;
     free(d);
+    return h;
+}
+
+/* an .ICO (cursor 0) or .CUR file's image the nearest to 32 x 32 of 16
+ * colours: an icon, a cursor; 0 if the file is none. Its entries: width,
+ * height, colours, a byte, planes (a cursor's hot spot x), bits (y), the
+ * image's size and place; 16 bytes each. */
+HANDLE win_image_file(const char *path, int cursor)
+{
+    uint32_t n = 0;
+    uint8_t *d = path ? win_file_load(path, &n, 1u << 18) : NULL;
+    HANDLE h = 0;
+    long best = 0x7fffffff;
+    const uint8_t *pick = NULL;
+    for (unsigned i = 0; d && n >= 6 && !r16(d) && r16(d + 2) == (cursor ? 2 : 1) &&
+                         i < r16(d + 4) && 6u + 16u * (i + 1) <= n; i++) {
+        const uint8_t *e = d + 6 + 16 * i;
+        int w = e[0] ? e[0] : 256, ht = e[1] ? e[1] : 256;
+        int bits = cursor ? 1 : r16(e + 6) ? r16(e + 6) : e[2] == 2 ? 1 : e[2] == 16 ? 4 : 8;
+        long score = (long)abs(w - 32) * 100 + (long)abs(ht - 32) * 100 +
+                     (bits == 4 ? 0 : bits == 8 ? 1 : bits == 1 ? 2 : 3);
+        uint32_t size = r16(e + 8) | (uint32_t)r16(e + 10) << 16;
+        uint32_t at = r16(e + 12) | (uint32_t)r16(e + 14) << 16;
+        if (at < n && size <= n - at && score < best) {
+            best = score;
+            pick = e;
+        }
+    }
+    if (pick) {
+        uint32_t size = r16(pick + 8) | (uint32_t)r16(pick + 10) << 16;
+        uint32_t at = r16(pick + 12) | (uint32_t)r16(pick + 14) << 16;
+        winapp_icon ic;
+        if (cursor)
+            h = cursor_from_dib(d + at, size, r16(pick + 4), r16(pick + 6));
+        else if (icon_from_dib(d + at, size, &ic))
+            h = user_icon_create(&ic);
+    }
+    win_free(d);
     return h;
 }
 

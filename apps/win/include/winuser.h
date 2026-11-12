@@ -1324,6 +1324,53 @@ DWORD   WINAPI IconSize(void);                  /* MAKELONG(width, height) */
 int     WINAPI LockMyTask(BOOL lock);
 HWND    WINAPI GetNextQueueWindow(HWND h, BOOL previous);  /* its task's next one */
 HMENU   WINAPI LookupMenuHandle(HMENU menu, int id);       /* the (sub)menu with id */
+/* Windows 95's USER for Win16 programs (wnd.c, menu.c, icon.c, sysmet.c) */
+#define WS_EX_TRANSPARENT   0x00000020UL
+#define CWP_ALL             0x0000
+#define CWP_SKIPINVISIBLE   0x0001
+#define CWP_SKIPDISABLED    0x0002
+#define CWP_SKIPTRANSPARENT 0x0004
+HWND    WINAPI ChildWindowFromPointEx(HWND parent, POINT pt, UINT flags);
+LPARAM  WINAPI SetMessageExtraInfo(LPARAM info);
+BOOL    WINAPI SetWindowContextHelpID(HWND h, DWORD id);
+DWORD   WINAPI GetWindowContextHelpID(HWND h);
+BOOL    WINAPI SetMenuContextHelpId(HMENU menu, UINT id);
+UINT    WINAPI GetMenuContextHelpId(HMENU menu);
+/* a property of 32 bits (two of SetProp's) */
+BOOL    WINAPI SetPropEx(HWND h, LPCSTR name, DWORD data);
+DWORD   WINAPI GetPropEx(HWND h, LPCSTR name);
+DWORD   WINAPI RemovePropEx(HWND h, LPCSTR name);
+typedef struct tagDRAWTEXTPARAMS {
+    UINT cbSize;
+    int  iTabLength, iLeftMargin, iRightMargin; /* in average characters' widths */
+    UINT uiLengthDrawn;
+} DRAWTEXTPARAMS, *LPDRAWTEXTPARAMS;
+int     WINAPI DrawTextEx(HDC dc, LPSTR s, int n, LPRECT rc, UINT fmt, LPDRAWTEXTPARAMS p);
+#define IMAGE_BITMAP        0
+#define IMAGE_ICON          1
+#define IMAGE_CURSOR        2
+#define LR_DEFAULTCOLOR     0x0000
+#define LR_MONOCHROME       0x0001
+#define LR_COPYRETURNORG    0x0004
+#define LR_COPYDELETEORG    0x0008
+#define LR_LOADFROMFILE     0x0010
+#define DI_MASK             0x0001
+#define DI_IMAGE            0x0002
+#define DI_NORMAL           0x0003
+#define DI_COMPAT           0x0004
+#define DI_DEFAULTSIZE      0x0008
+typedef struct tagICONINFO {
+    BOOL    fIcon;
+    DWORD   xHotspot, yHotspot;
+    HBITMAP hbmMask, hbmColor;          /* the caller's to delete */
+} ICONINFO, *LPICONINFO;
+/* a bitmap, an icon or a cursor: the system's or a module's, or a file
+ * (LR_LOADFROMFILE: .BMP, .ICO, .CUR) */
+HANDLE  WINAPI LoadImage(HINSTANCE inst, LPCSTR name, UINT type, int cx, int cy, UINT flags);
+HANDLE  WINAPI CopyImage(HANDLE h, UINT type, int cx, int cy, UINT flags);
+BOOL    WINAPI DrawIconEx(HDC dc, int x, int y, HICON icon, int cx, int cy, UINT step,
+                          HBRUSH flicker, UINT flags);
+BOOL    WINAPI GetIconInfo(HICON icon, LPICONINFO info);
 BOOL    WINAPI LockInput(HANDLE reserved, HWND h, BOOL lock);
 BOOL    WINAPI SetMessageQueue(int size);
 DWORD   WINAPI GetSystemDebugState(void);

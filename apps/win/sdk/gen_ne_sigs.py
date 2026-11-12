@@ -78,6 +78,9 @@ SKIP = {
     'GetMetaFileBits', 'SetMetaFileBits', 'SetMetaFileBitsBetter',
     # its structures (ints of a word, LOGFONT), its strings: ne_guest_more.c
     'SystemParametersInfo', 'SetDeskWallPaper',
+    # the program's resources, structures of words (ne_guest_more.c)
+    'LoadImage', 'GetIconInfo', 'DrawTextEx', 'ChildWindowFromPointEx', 'GetDCHook',
+    'GetTextExtentEx',
 }
 
 COUNTS = re.compile(r'^(n|c|cb|cch|count|len|nCount|cbString|size)$')

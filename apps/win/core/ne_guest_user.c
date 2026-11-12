@@ -608,15 +608,55 @@ done:
     return r;
 }
 
+/* RegisterClass's WNDCLASS (26 bytes at p; RegisterClassEx's past its
+ * size): its procedure and menu kept, the class WINN's with ne_wndproc */
+uint16_t ne_register_class(args *a, ne_user *u, uint32_t p)
+{
+    uint8_t g[26];
+    uint16_t v = 0;
+    if (a->bad || !win_ne_read(a->ctx, (uint16_t)(p >> 16), (uint16_t)p, g, sizeof(g))) {
+        a->bad = 1;
+        return 0;
+    }
+    int i = 0;
+    while (i < NE_CLASSES && u->cls[i].proc)
+        i++;
+    uint32_t name = rd32(g + 22);
+    if (i == NE_CLASSES || !(name >> 16) ||
+        !win_ne_string(a->ctx, (uint16_t)(name >> 16), (uint16_t)name, u->cls[i].name,
+                       sizeof(u->cls[i].name)))
+        return 0;                       /* an atom for a name: not yet */
+    WNDCLASS wc;
+    memset(&wc, 0, sizeof(wc));
+    wc.style = rd16(g);
+    wc.lpfnWndProc = ne_wndproc;
+    wc.cbClsExtra = (int16_t)rd16(g + 6);
+    wc.cbWndExtra = (int16_t)rd16(g + 8);
+    wc.hInstance = instance(u, rd16(g + 10));
+    wc.hIcon = rd16(g + 12);
+    wc.hCursor = rd16(g + 14);
+    wc.hbrBackground = rd16(g + 16);
+    wc.lpszClassName = u->cls[i].name;
+    v = RegisterClass(&wc);
+    if (v) {
+        u->cls[i].proc = rd32(g + 2);
+        uint32_t menu = rd32(g + 18);   /* the class's menu, by name or number */
+        u->cls[i].menu[0] = 0;
+        u->cls[i].menu_id = (uint16_t)(menu >> 16 ? 0 : menu);
+        if ((menu >> 16) && !win_ne_string(a->ctx, (uint16_t)(menu >> 16), (uint16_t)menu,
+                                           u->cls[i].menu, sizeof(u->cls[i].menu)))
+            u->cls[i].menu[0] = 0;
+    }
+    return v;
+}
+
 /* ---------------------------------------------------------------- services */
 
 /* LoadCursor, LoadIcon, LoadBitmap: the system's (instance 0, a number),
  * or the program's resources (ne_res.c); its icons and cursors once each,
  * destroyed when it ends */
-static __attribute__((noinline)) uint16_t load_image(args *a, ne_user *u, uint16_t service)
+uint16_t ne_load_image(args *a, ne_user *u, uint16_t service, uint16_t inst, uint32_t far)
 {
-    uint32_t far = dw(a, 4);
-    uint16_t inst = w(a, 8);
     char name[32];
     if (a->bad)
         return 0;
@@ -742,44 +782,9 @@ int win_ne_guest_user(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint16_t 
     case 0x1035:                        /* DestroyWindow(HWND) */
         v = (uint16_t)DestroyWindow(w(&a, 4));
         break;
-    case 0x1039: {                      /* RegisterClass(const WNDCLASS FAR *) */
-        uint32_t p = dw(&a, 4);
-        uint8_t g[26];
-        if (a.bad || !win_ne_read(ctx, (uint16_t)(p >> 16), (uint16_t)p, g, sizeof(g))) {
-            a.bad = 1;
-            break;
-        }
-        int i = 0;
-        while (i < NE_CLASSES && u->cls[i].proc)
-            i++;
-        uint32_t name = rd32(g + 22);
-        if (i == NE_CLASSES || !(name >> 16) ||
-            !win_ne_string(ctx, (uint16_t)(name >> 16), (uint16_t)name, u->cls[i].name,
-                           sizeof(u->cls[i].name)))
-            break;                      /* an atom for a name: not yet */
-        WNDCLASS wc;
-        memset(&wc, 0, sizeof(wc));
-        wc.style = rd16(g);
-        wc.lpfnWndProc = ne_wndproc;
-        wc.cbClsExtra = (int16_t)rd16(g + 6);
-        wc.cbWndExtra = (int16_t)rd16(g + 8);
-        wc.hInstance = instance(u, rd16(g + 10));
-        wc.hIcon = rd16(g + 12);
-        wc.hCursor = rd16(g + 14);
-        wc.hbrBackground = rd16(g + 16);
-        wc.lpszClassName = u->cls[i].name;
-        v = RegisterClass(&wc);
-        if (v) {
-            u->cls[i].proc = rd32(g + 2);
-            uint32_t menu = rd32(g + 18);       /* the class's menu, by name or number */
-            u->cls[i].menu[0] = 0;
-            u->cls[i].menu_id = (uint16_t)(menu >> 16 ? 0 : menu);
-            if ((menu >> 16) && !win_ne_string(ctx, (uint16_t)(menu >> 16), (uint16_t)menu,
-                                               u->cls[i].menu, sizeof(u->cls[i].menu)))
-                u->cls[i].menu[0] = 0;
-        }
+    case 0x1039:                        /* RegisterClass(const WNDCLASS FAR *) */
+        v = ne_register_class(&a, u, dw(&a, 4));
         break;
-    }
     case 51:                            /* MakeProcInstance(FARPROC, HINSTANCE): itself */
         v = dw(&a, 6);                  /* (a callback gets DS anyway) */
         *dword = 1;
@@ -912,7 +917,7 @@ int win_ne_guest_user(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint16_t 
     case 0x10ad:                        /* LoadCursor(HINSTANCE, LPCSTR) */
     case 0x10ae:                        /* LoadIcon(HINSTANCE, LPCSTR) */
     case 0x10af:                        /* LoadBitmap(HINSTANCE, LPCSTR) */
-        v = load_image(&a, u, service);
+        v = ne_load_image(&a, u, service, w(&a, 8), dw(&a, 4));
         break;
     case 0x11a4:                        /* wsprintf(LPSTR, LPCSTR, ...) */
         v = (uint16_t)ne_format(&a, dw(&a, 4), dw(&a, 8), 0);

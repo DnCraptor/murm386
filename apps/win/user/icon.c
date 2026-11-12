@@ -632,3 +632,148 @@ int user_key_name(LONG lp, char *out, int cap)
     lstrcpyn(out, n, cap);
     return lstrlen(out);
 }
+
+/* ---------------------------------------------------------------- Windows 95's for Win16 */
+
+HANDLE WINAPI LoadImage(HINSTANCE inst, LPCSTR name, UINT type, int cx, int cy, UINT flags)
+{
+    (void)cx; (void)cy;                 /* the nearest to 32 x 32: WINN's only size */
+    if (flags & LR_LOADFROMFILE) {
+        char path[160];
+        int w, h;
+        if (!name || !((uintptr_t)name >> 16))
+            return 0;
+        win_find_path(name, path, sizeof(path));
+        return type == IMAGE_BITMAP ? (HANDLE)user_load_bmp(path, &w, &h) :
+               type <= IMAGE_CURSOR ? win_image_file(path, type == IMAGE_CURSOR) : 0;
+    }
+    /* a native module has no bitmaps of its resources (a Win16 program's:
+     * ne_guest_user.c) */
+    return type == IMAGE_ICON ? (HANDLE)LoadIcon(inst, name) :
+           type == IMAGE_CURSOR ? (HANDLE)LoadCursor(inst, name) : 0;
+}
+
+/* a bitmap copied (to cx x cy, 0: as it is), an icon or a cursor copied */
+HANDLE WINAPI CopyImage(HANDLE h, UINT type, int cx, int cy, UINT flags)
+{
+    HANDLE n = 0;
+    if (type == IMAGE_BITMAP) {
+        BITMAP bm;
+        if (!GetObject(h, sizeof(bm), &bm))
+            return 0;
+        int w = cx ? cx : bm.bmWidth, ht = cy ? cy : bm.bmHeight;
+        HDC sdc = GetDC(0), a = CreateCompatibleDC(sdc), b = CreateCompatibleDC(sdc);
+        n = (flags & LR_MONOCHROME) || bm.bmBitsPixel == 1 ? CreateBitmap(w, ht, 1, 1, NULL) :
+            CreateCompatibleBitmap(sdc, w, ht);
+        ReleaseDC(0, sdc);
+        if (n) {
+            HGDIOBJ oa = SelectObject(a, h), ob = SelectObject(b, n);
+            StretchBlt(b, 0, 0, w, ht, a, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
+            SelectObject(a, oa);
+            SelectObject(b, ob);
+        }
+        DeleteDC(a);
+        DeleteDC(b);
+    } else if (type == IMAGE_ICON || type == IMAGE_CURSOR) {
+        n = CopyIcon(0, h);
+    }
+    if (n && (flags & LR_COPYDELETEORG)) {
+        if (type == IMAGE_BITMAP)
+            DeleteObject(h);
+        else
+            DestroyIcon(h);
+    }
+    return n;
+}
+
+/* DrawIcon at a size (0: the icon's), its mask, its image or both, over
+ * the brush first if there is one */
+BOOL WINAPI DrawIconEx(HDC dc, int x, int y, HICON icon, int cx, int cy, UINT step,
+                       HBRUSH flicker, UINT flags)
+{
+    (void)step;                         /* an animated cursor's frame: none */
+    uicon *u = icon_of(icon);
+    int w = cx && !(flags & DI_DEFAULTSIZE) ? cx : 32, h = cy && !(flags & DI_DEFAULTSIZE) ? cy : 32;
+    if (flicker) {
+        RECT r = { x, y, x + w, y + h };
+        FillRect(dc, &r, flicker);
+    }
+    if (!(flags & DI_NORMAL))
+        flags |= DI_NORMAL;
+    if (!u)
+        return (w == 32 && h == 32) ? DrawIcon(dc, x, y, icon) : FALSE;
+    HDC m = CreateCompatibleDC(dc);
+    COLORREF fg = SetTextColor(dc, RGB(0, 0, 0)), bk = SetBkColor(dc, RGB(255, 255, 255));
+    HGDIOBJ old = SelectObject(m, u->mask);
+    if (flags & DI_MASK)
+        StretchBlt(dc, x, y, w, h, m, 0, 0, 32, 32, (flags & DI_IMAGE) ? SRCAND : SRCCOPY);
+    SelectObject(m, u->color);
+    if (flags & DI_IMAGE)
+        StretchBlt(dc, x, y, w, h, m, 0, 0, 32, 32, (flags & DI_MASK) ? SRCINVERT : SRCCOPY);
+    SelectObject(m, old);
+    DeleteDC(m);
+    SetTextColor(dc, fg);
+    SetBkColor(dc, bk);
+    return TRUE;
+}
+
+/* an icon's (a cursor's) bitmaps, copies the caller deletes: an icon's
+ * mask and image (32 x 32); a cursor's AND and XOR masks one above the
+ * other (32 x 64), no image; the system's drawn */
+BOOL WINAPI GetIconInfo(HICON icon, LPICONINFO info)
+{
+    uicon *u = icon_of(icon);
+    ucursor *c = u ? NULL : cursor_of(icon);
+    int id = (int)(intptr_t)win_handle_get(icon, WOBJ_CURSOR);
+    if (!info || (!u && !c && (id < 101 || id >= ICON_IDS)))
+        return FALSE;
+    memset(info, 0, sizeof(*info));
+    info->fIcon = !c;
+    info->xHotspot = c ? (DWORD)c->hx : 16;
+    info->yHotspot = c ? (DWORD)c->hy : 16;
+    if (c) {
+        uint8_t bits[256];
+        memcpy(bits, c->and_m, 128);
+        memcpy(bits + 128, c->xor_m, 128);
+        info->hbmMask = CreateBitmap(32, 64, 1, 1, bits);
+        return info->hbmMask != 0;
+    }
+    HDC sdc = GetDC(0), a = CreateCompatibleDC(sdc), b = CreateCompatibleDC(sdc);
+    info->hbmColor = CreateCompatibleBitmap(sdc, 32, 32);
+    info->hbmMask = CreateBitmap(32, 32, 1, 1, NULL);
+    ReleaseDC(0, sdc);
+    if (u) {
+        HBITMAP pair[2][2] = { { u->color, info->hbmColor }, { u->mask, info->hbmMask } };
+        for (int k = 0; k < 2; k++) {
+            HGDIOBJ oa = SelectObject(a, pair[k][0]), ob = SelectObject(b, pair[k][1]);
+            BitBlt(b, 0, 0, 32, 32, a, 0, 0, SRCCOPY);
+            SelectObject(a, oa);
+            SelectObject(b, ob);
+        }
+    } else {
+        /* a built-in one: drawn on black and on white, the pixels that
+         * differ the background's (the mask's 1s), the rest its own */
+        RECT all = { 0, 0, 32, 32 };
+        HGDIOBJ ob = SelectObject(b, info->hbmColor);
+        FillRect(b, &all, GetStockObject(BLACK_BRUSH));
+        user_draw_icon_id(b, 0, 0, id);
+        HBITMAP white = CreateCompatibleBitmap(b, 32, 32);
+        HGDIOBJ oa = SelectObject(a, white);
+        FillRect(a, &all, GetStockObject(WHITE_BRUSH));
+        user_draw_icon_id(a, 0, 0, id);
+        HDC mk = CreateCompatibleDC(b);
+        HGDIOBJ om = SelectObject(mk, info->hbmMask);
+        for (int y = 0; y < 32; y++)
+            for (int x = 0; x < 32; x++)
+                SetPixel(mk, x, y, GetPixel(a, x, y) != GetPixel(b, x, y) ?
+                                   RGB(255, 255, 255) : RGB(0, 0, 0));
+        SelectObject(mk, om);
+        DeleteDC(mk);
+        SelectObject(a, oa);
+        DeleteObject(white);
+        SelectObject(b, ob);
+    }
+    DeleteDC(a);
+    DeleteDC(b);
+    return info->hbmColor && info->hbmMask;
+}

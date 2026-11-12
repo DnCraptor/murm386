@@ -150,6 +150,7 @@ void    user_load_colors(void);             /* WIN.INI [colors] */
 void    user_load_desktop(void);            /* WIN.INI [Desktop] Pattern */
 HBRUSH  user_desktop_pattern(void);         /* 0: plain colour */
 void    user_draw_wallpaper(HDC dc, const RECT *rc);   /* the desktop's bitmap, if any */
+HBITMAP user_load_bmp(const char *name, int *w, int *h);  /* a .BMP file, its size */
 void    user_repaint_all(void);
 int     user_draw_text(HDC dc, LPCSTR s, int n, RECT *rc, UINT fmt);
 

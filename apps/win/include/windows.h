@@ -569,6 +569,25 @@ BOOL    WINAPI DPtoLP(HDC hdc, LPPOINT pts, int n);
 DWORD   WINAPI GetCurrentPosition(HDC hdc);
 BOOL    WINAPI GetCurrentPositionEx(HDC hdc, LPPOINT pt);
 DWORD   WINAPI GetDCOrg(HDC hdc);
+/* Windows 3.1's own GDI functions USER (and a program) may call: the
+ * visible area, the origin, USER's hook of a DC (kept, never called) */
+int     WINAPI ExcludeVisRect(HDC hdc, int l, int t, int r, int b);
+int     WINAPI IntersectVisRect(HDC hdc, int l, int t, int r, int b);
+int     WINAPI OffsetVisRgn(HDC hdc, int x, int y);
+int     WINAPI SelectVisRgn(HDC hdc, HRGN rgn);
+HRGN    WINAPI SaveVisRgn(HDC hdc);
+int     WINAPI RestoreVisRgn(HDC hdc);
+HRGN    WINAPI InquireVisRgn(HDC hdc);
+HRGN    WINAPI GetClipRgn(HDC hdc);             /* GDI's; 0: none */
+DWORD   WINAPI SetDCOrg(HDC hdc, int x, int y);
+BOOL    WINAPI SetDCHook(HDC hdc, DWORD proc, DWORD data);
+DWORD   WINAPI GetDCHook(HDC hdc, DWORD *data);
+UINT    WINAPI SetHookFlags(HDC hdc, UINT flags);
+HBITMAP WINAPI SelectBitmap(HDC hdc, HBITMAP bm);
+HFONT   WINAPI GetPhysicalFontHandle(HDC hdc);
+HFONT   WINAPI GetSystemIconFont(void);
+BOOL    WINAPI GetTextExtentEx(HDC hdc, LPCSTR s, int count, int max, LPINT fit, LPINT dx,
+                               LPSIZE size);
 int     WINAPI SetStretchBltMode(HDC hdc, int mode);
 int     WINAPI GetStretchBltMode(HDC hdc);
 int     WINAPI SetTextCharacterExtra(HDC hdc, int n);
@@ -820,6 +839,9 @@ BOOL    WINAPI EqualRect(const RECT *a, const RECT *b);
 
 int     WINAPI GetPrivateProfileString(LPCSTR section, LPCSTR key, LPCSTR def,
                                        LPSTR buf, int size, LPCSTR file);
+/* the sections' names, NUL after each, two at the end (Windows 95's) */
+int     WINAPI GetPrivateProfileSectionNames(LPSTR buf, int size, LPCSTR file);
+int     WINAPI GetProfileSectionNames(LPSTR buf, int size);
 UINT    WINAPI GetPrivateProfileInt(LPCSTR section, LPCSTR key, int def, LPCSTR file);
 int     WINAPI GetProfileString(LPCSTR section, LPCSTR key, LPCSTR def, LPSTR buf, int size);
 UINT    WINAPI GetProfileInt(LPCSTR section, LPCSTR key, int def);

@@ -306,8 +306,10 @@ static __attribute__((noinline)) int generic(args *a, ne_user *u, uint16_t servi
             const char *s = (const char *)(uintptr_t)x[i];
             /* Profile key enumeration returns a MULTI_SZ, not a single ASCIIZ.
              * Include the final extra NUL instead of stopping at the first key.
-             * Both WIN.INI's GetProfileString and GetPrivateProfileString use it. */
-            if ((service == 58u || service == 128u) && i == 3 && !raw[1]) {
+             * Both WIN.INI's GetProfileString and GetPrivateProfileString use it,
+             * and the sections' names (Get(Private)ProfileSectionNames). */
+            if (((service == 58u || service == 128u) && i == 3 && !raw[1]) ||
+                ((service == 142u || service == 143u) && i == 0)) {
                 uint32_t count = res < next ? res + 1u : next;
                 if (count < 2u && next >= 2u)
                     count = 2u;
@@ -1843,13 +1845,12 @@ static __attribute__((noinline)) int bitmap_service(args *a, uint16_t service, u
 /* USER.404 GetClassInfo(HINSTANCE, LPCSTR, WNDCLASS FAR *): its own
  * class's procedure and menu as it registered them, a native class's
  * procedure as one it can call (CallWindowProc, or a superclass's) */
-static __attribute__((noinline)) uint16_t class_info(args *a, ne_user *u)
+uint16_t ne_class_info(args *a, ne_user *u, uint16_t inst, uint32_t name_far, uint32_t out)
 {
-    uint32_t out = dw(a, 4), name_far = dw(a, 8);
     char name[32];
     WNDCLASS wc;
     LPCSTR nm = name_or_atom(a, name_far, name, sizeof(name));
-    if (a->bad || (!GetClassInfo(w(a, 12) ? instance(u, w(a, 12)) : 0, nm, &wc) &&
+    if (a->bad || (!GetClassInfo(inst ? instance(u, inst) : 0, nm, &wc) &&
                    !GetClassInfo(0, nm, &wc)))
         return 0;
     uint32_t proc = 0, menu = 0;
@@ -2152,7 +2153,7 @@ int ne_call(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword)
         ne_sys_service(a, u, service, v, dword) || ne_more_service(a, u, service, v, dword))
         return 1;
     if (service == 0x1194) {            /* GetClassInfo */
-        *v = class_info(a, u);
+        *v = ne_class_info(a, u, w(a, 12), dw(a, 8), dw(a, 4));
         return 1;
     }
     if (service == 0x11ca) {            /* DestroyCursor(HCURSOR) */

@@ -94,6 +94,49 @@ void gdi_text_init(void)
     }
 }
 
+/* the icons' titles' font (SystemParametersInfo's SPI_GETICONTITLELOGFONT),
+ * made once */
+HFONT WINAPI GetSystemIconFont(void)
+{
+    static HFONT f;
+    if (!f) {
+        LOGFONT lf;
+        memset(&lf, 0, sizeof(lf));
+        lf.lfHeight = -8;
+        lf.lfWeight = FW_NORMAL;
+        lf.lfCharSet = ANSI_CHARSET;
+        lf.lfPitchAndFamily = VARIABLE_PITCH | FF_SWISS;
+        lstrcpy(lf.lfFaceName, "MS Sans Serif");
+        f = CreateFontIndirect(&lf);
+    }
+    return f;
+}
+
+/* the extent of the first count characters, how many of them fit in max
+ * (fit NULL: none asked), where each ends (dx NULL: none asked) */
+BOOL WINAPI GetTextExtentEx(HDC h, LPCSTR s, int count, int max, LPINT fit, LPINT dx, LPSIZE size)
+{
+    SIZE sz = { 0, 0 };
+    int n = 0;
+    if (!s || count < 0)
+        return FALSE;
+    for (int i = 1; i <= count; i++) {
+        if (!GetTextExtentPoint(h, s, i, &sz))
+            return FALSE;
+        if (dx)
+            dx[i - 1] = sz.cx;
+        if (sz.cx <= max)
+            n = i;
+    }
+    if (!count && !GetTextExtentPoint(h, s, 0, &sz))
+        return FALSE;
+    if (fit)
+        *fit = n;
+    if (size)
+        *size = sz;
+    return TRUE;
+}
+
 HFONT WINAPI CreateFontIndirect(const LOGFONT *lf)
 {
     wfont *f = (wfont *)win_alloc(sizeof(*f));

@@ -185,6 +185,22 @@ OWMORE, OWDRV (OWDRV.DLL): the rest of Windows 3.1's USER, KERNEL and SHELL:
     Beta 259, gone 2; spi: beep 1 0, mouse 6 10 1, spacing 77, font MS Sans
     Serif -8", "input: keys 1 chars 1, mouse 320,200; wnet 0 1; icon 32x32;
     menu 1 1; wallpaper 1"
+OW95: the rest of Win16's KERNEL, USER and GDI: SwitchStackTo and
+    SwitchStackBack (a local changed on the other stack), the sections'
+    names, CreateDirectory, RemoveDirectory, DeleteFile, GetVersionEx, the
+    registry's values (RegSetValueEx, RegQueryValueEx, RegEnumValue,
+    RegDeleteValue); DrawTextEx with margins, LoadImage of an .ICO and a
+    .BMP it writes and of the system's, CopyImage at half, DrawIconEx at
+    twice the size, GetIconInfo, RegisterClassEx, GetClassInfoEx,
+    ChildWindowFromPointEx, SetPropEx, help contexts, SetMessageExtraInfo;
+    SaveVisRgn, ExcludeVisRect, InquireVisRgn, RestoreVisRgn, GetClipRgn,
+    SetDCOrg, SetDCHook, SetHookFlags, SelectBitmap, GetPhysicalFontHandle,
+    GetSystemIconFont, GetTextExtentEx: "kernel: stack 61; sections 1 1
+    windows; dir 1 1, del 10; ver 3.10", "values: num 12345678 type 4, name
+    hello 6; enum 0 Bin 3 14, 259", "user: text 16 77 7; images 1 1 1, half
+    8x8; info 1 1 1, arrow 0 0,0", "user: class 11 1; point 1 1; prop
+    12345678 12345678 0; help 10002 77; extra 55AA", "gdi: vis 1 3 4 23, 2;
+    clip 2,3 30 40; hook 56781234 9ABC 1; bitmap 1; font 1 1; fit 3 1 1"
 """
 import sys
 
@@ -8289,6 +8305,583 @@ PROGRAMS = {
             'c404c300050003011700010004000301330001000300030164010200ff0003018a010100580003011c030200'
             '010000000000050000000000000000000000ffff00000000000000000000000c000000000000000000000000'
             '000000000000000000000200000002000000000000000020980200004f70656e20576174636f6d00'
+        )),
+    'OW95': (
+        # wcc -bt=windows -ms ow95.c; wlink @ow95.lnk
+        # ---- ow95.c
+        #     /*
+        #      * ow95.c - the rest of Win16's KERNEL, USER and GDI: the stack switched
+        #      * (SwitchStackTo, SwitchStackBack), the sections' names, directories and
+        #      * files, GetVersionEx, the registry's values; DrawTextEx, LoadImage (an
+        #      * icon and a bitmap of files it makes, the system's), DrawIconEx,
+        #      * GetIconInfo, CopyImage, RegisterClassEx, GetClassInfoEx,
+        #      * ChildWindowFromPointEx, 32-bit properties, help contexts; the visible
+        #      * area (SaveVisRgn, ExcludeVisRect, RestoreVisRgn, InquireVisRgn),
+        #      * GetClipRgn, SetDCOrg, the DC's hook, GetTextExtentEx. What each gave,
+        #      * in six lines; the icon drawn twice its size, a bitmap copied at half.
+        #      */
+        #     #include <windows.h>
+        #     #include <shellapi.h>
+        #     #include <string.h>
+        #
+        #     typedef struct { DWORD size, major, minor, build, platform; char csd[128]; } OSVER;
+        #     typedef struct { UINT cbSize; int tab, left, right; UINT drawn; } DTPARAMS;
+        #     typedef struct { BOOL fIcon; int x, y; HBITMAP mask, color; } ICONINF;
+        #     typedef struct { DWORD cbSize; WNDCLASS wc; HICON hIconSm; } WNDCLASSX;
+        #
+        #     void FAR PASCAL SwitchStackTo(UINT seg, UINT ptr, UINT top);
+        #     void FAR PASCAL SwitchStackBack(void);
+        #     int FAR PASCAL GetProfileSectionNames(LPSTR buf, int size);
+        #     BOOL FAR PASCAL CreateDirectory(LPCSTR path, LPVOID sec);
+        #     BOOL FAR PASCAL RemoveDirectory(LPCSTR path);
+        #     BOOL FAR PASCAL DeleteFile(LPCSTR path);
+        #     BOOL FAR PASCAL GetVersionEx(OSVER FAR *v);
+        #     LONG FAR PASCAL RegSetValueEx(HKEY, LPCSTR, DWORD, DWORD, const void FAR *, DWORD);
+        #     LONG FAR PASCAL RegQueryValueEx(HKEY, LPCSTR, DWORD FAR *, DWORD FAR *, void FAR *, DWORD FAR *);
+        #     LONG FAR PASCAL RegEnumValue(HKEY, DWORD, LPSTR, DWORD FAR *, DWORD FAR *, DWORD FAR *,
+        #                                  void FAR *, DWORD FAR *);
+        #     LONG FAR PASCAL RegDeleteValue(HKEY, LPCSTR);
+        #     int FAR PASCAL DrawTextEx(HDC, LPSTR, int, RECT FAR *, UINT, DTPARAMS FAR *);
+        #     HANDLE FAR PASCAL LoadImage(HINSTANCE, LPCSTR, UINT, int, int, UINT);
+        #     HANDLE FAR PASCAL CopyImage(HANDLE, UINT, int, int, UINT);
+        #     BOOL FAR PASCAL DrawIconEx(HDC, int, int, HICON, int, int, UINT, HBRUSH, UINT);
+        #     BOOL FAR PASCAL GetIconInfo(HICON, ICONINF FAR *);
+        #     ATOM FAR PASCAL RegisterClassEx(WNDCLASSX FAR *);
+        #     BOOL FAR PASCAL GetClassInfoEx(HINSTANCE, LPCSTR, WNDCLASSX FAR *);
+        #     HWND FAR PASCAL ChildWindowFromPointEx(HWND, POINT, UINT);
+        #     BOOL FAR PASCAL SetPropEx(HWND, LPCSTR, DWORD);
+        #     DWORD FAR PASCAL GetPropEx(HWND, LPCSTR);
+        #     DWORD FAR PASCAL RemovePropEx(HWND, LPCSTR);
+        #     BOOL FAR PASCAL SetWindowContextHelpID(HWND, DWORD);
+        #     DWORD FAR PASCAL GetWindowContextHelpID(HWND);
+        #     BOOL FAR PASCAL SetMenuContextHelpId(HMENU, UINT);
+        #     UINT FAR PASCAL GetMenuContextHelpId(HMENU);
+        #     LPARAM FAR PASCAL SetMessageExtraInfo(LPARAM);
+        #     LONG FAR PASCAL GetMessageExtraInfo(void);
+        #     int FAR PASCAL ExcludeVisRect(HDC, int, int, int, int);
+        #     HRGN FAR PASCAL SaveVisRgn(HDC);
+        #     int FAR PASCAL RestoreVisRgn(HDC);
+        #     HRGN FAR PASCAL InquireVisRgn(HDC);
+        #     HRGN FAR PASCAL GetClipRgn(HDC);
+        #     DWORD FAR PASCAL SetDCOrg(HDC, int, int);
+        #     BOOL FAR PASCAL SetDCHook(HDC, FARPROC, DWORD);
+        #     DWORD FAR PASCAL GetDCHook(HDC, DWORD FAR *);
+        #     UINT FAR PASCAL SetHookFlags(HDC, UINT);
+        #     HBITMAP FAR PASCAL SelectBitmap(HDC, HBITMAP);
+        #     HFONT FAR PASCAL GetPhysicalFontHandle(HDC);
+        #     HFONT FAR PASCAL GetSystemIconFont(void);
+        #     BOOL FAR PASCAL GetTextExtentEx(HDC, LPCSTR, int, int, int FAR *, int FAR *, SIZE FAR *);
+        #
+        #     #define LR_LOADFROMFILE 0x10
+        #     #define DI_NORMAL 3
+        #     #define IMAGE_BITMAP 0
+        #     #define IMAGE_ICON 1
+        #
+        #     static char line[6][120];
+        #     static HICON file_icon;
+        #     static HBITMAP file_bmp, half_bmp;
+        #     static WORD newstack[256];
+        #
+        #     /* the stack switched to newstack, a local changed there, back */
+        #     static int stack_test(void)
+        #     {
+        #         int local = 5;
+        #         unsigned cur;
+        #         SwitchStackTo(SELECTOROF((LPVOID)newstack), OFFSETOF((LPVOID)(newstack + 256)) - 2,
+        #                       OFFSETOF((LPVOID)newstack));
+        #         _asm mov cur, sp
+        #         local++;
+        #         SwitchStackBack();
+        #         return local * 10 + (cur >= OFFSETOF((LPVOID)newstack) &&
+        #                              cur < OFFSETOF((LPVOID)(newstack + 256)));
+        #     }
+        #
+        #     static void write_file(LPCSTR name, const BYTE FAR *d, UINT n)
+        #     {
+        #         char path[144];
+        #         HFILE f;
+        #         GetWindowsDirectory(path, sizeof(path));
+        #         lstrcat(path, "\\");
+        #         lstrcat(path, name);
+        #         f = _lcreat(path, 0);
+        #         _lwrite(f, (LPCSTR)d, n);
+        #         _lclose(f);
+        #     }
+        #
+        #     /* W95.ICO (32 x 32, 16 colours: a yellow square, red edged, its corners
+        #      * clear) and W95.BMP (16 x 16, its halves blue and green) */
+        #     static void make_files(void)
+        #     {
+        #         static BYTE ico[6 + 16 + 40 + 64 + 512 + 128];
+        #         static BYTE bmp[54 + 64 + 128];
+        #         static const BYTE pal[16][3] = {
+        #             {0,0,0},{0,0,128},{0,128,0},{0,128,128},{128,0,0},{128,0,128},{128,128,0},
+        #             {192,192,192},{128,128,128},{0,0,255},{0,255,0},{0,255,255},{255,0,0},
+        #             {255,0,255},{255,255,0},{255,255,255} };
+        #         int x, y, i;
+        #         BYTE FAR *p;
+        #         _fmemset(ico, 0, sizeof(ico));
+        #         ico[2] = 1; ico[4] = 1;
+        #         ico[6] = 32; ico[7] = 32; ico[8] = 16; ico[10] = 1; ico[12] = 4;
+        #         *(WORD *)(ico + 14) = 40 + 64 + 512 + 128;
+        #         ico[18] = 22;
+        #         p = ico + 22;
+        #         p[0] = 40; p[4] = 32; p[8] = 64; p[12] = 1; p[14] = 4;
+        #         for (i = 0; i < 16; i++) {
+        #             p[40 + 4 * i] = pal[i][2]; p[41 + 4 * i] = pal[i][1]; p[42 + 4 * i] = pal[i][0];
+        #         }
+        #         for (y = 0; y < 32; y++)
+        #             for (x = 0; x < 32; x++) {
+        #                 int corner = (x < 4 || x > 27) && (y < 4 || y > 27);
+        #                 int edge = x < 3 || x > 28 || y < 3 || y > 28;
+        #                 BYTE c = corner ? 0 : edge ? 12 : 14;
+        #                 p[104 + y * 16 + x / 2] |= x & 1 ? c : c << 4;
+        #                 if (corner)
+        #                     p[616 + y * 4 + x / 8] |= 0x80 >> (x & 7);
+        #             }
+        #         write_file("W95.ICO", ico, sizeof(ico));
+        #         _fmemset(bmp, 0, sizeof(bmp));
+        #         bmp[0] = 'B'; bmp[1] = 'M'; bmp[2] = sizeof(bmp); bmp[10] = 118;
+        #         bmp[14] = 40; bmp[18] = 16; bmp[22] = 16; bmp[26] = 1; bmp[28] = 4;
+        #         for (i = 0; i < 16; i++) {
+        #             bmp[54 + 4 * i] = pal[i][2]; bmp[55 + 4 * i] = pal[i][1]; bmp[56 + 4 * i] = pal[i][0];
+        #         }
+        #         for (y = 0; y < 16; y++)
+        #             for (x = 0; x < 16; x++)
+        #                 bmp[118 + y * 8 + x / 2] |= (x & 1) ? (x < 8 ? 9 : 10) : (x < 8 ? 9 : 10) << 4;
+        #         write_file("W95.BMP", bmp, sizeof(bmp));
+        #     }
+        #
+        #     static void kernel(void)
+        #     {
+        #         char names[512], dir[144], first[16], vname[16];
+        #         OSVER ov;
+        #         HKEY k;
+        #         DWORD type, size, num = 0x12345678L, got = 0, nlen;
+        #         BYTE bin[4] = { 1, 2, 3, 4 }, back[8];
+        #         char sz[16];
+        #         int n, count = 0, made, gone, del;
+        #         LONG e0, e3;
+        #         DWORD numtype, szlen;
+        #         char *p;
+        #         n = GetProfileSectionNames(names, sizeof(names));
+        #         for (p = names; *p; p += lstrlen(p) + 1)
+        #             count++;
+        #         lstrcpyn(first, names, sizeof(first));
+        #         GetWindowsDirectory(dir, sizeof(dir));
+        #         lstrcat(dir, "\\W95DIR");
+        #         made = CreateDirectory(dir, NULL);
+        #         gone = RemoveDirectory(dir);
+        #         write_file("W95.TMP", (BYTE FAR *)"x", 1);
+        #         GetWindowsDirectory(dir, sizeof(dir));
+        #         lstrcat(dir, "\\W95.TMP");
+        #         del = DeleteFile(dir) * 10 + DeleteFile(dir);
+        #         ov.size = sizeof(ov);
+        #         GetVersionEx(&ov);
+        #         wsprintf(line[0], "kernel: stack %d; sections %d %d %s; dir %d %d, del %d; ver %ld.%ld",
+        #                  stack_test(), n > 0, count > 2, (LPSTR)first, made, gone, del, ov.major, ov.minor);
+        #         RegCreateKey(HKEY_CLASSES_ROOT, "Ow95", &k);
+        #         RegSetValueEx(k, "Name", 0, REG_SZ, "hello", 6);
+        #         RegSetValueEx(k, "Num", 0, 4, &num, 4);
+        #         RegSetValueEx(k, NULL, 0, REG_SZ, "dflt", 5);
+        #         RegSetValueEx(k, "Bin", 0, 3, bin, 4);
+        #         size = 4;
+        #         RegQueryValueEx(k, "Num", NULL, &type, &got, &size);
+        #         numtype = type;
+        #         size = sizeof(sz);
+        #         RegQueryValueEx(k, "Name", NULL, NULL, sz, &size);
+        #         szlen = size;
+        #         nlen = sizeof(vname);
+        #         size = sizeof(back);
+        #         e0 = RegEnumValue(k, 3, vname, &nlen, NULL, &type, back, &size);
+        #         RegDeleteValue(k, "Bin");
+        #         nlen = sizeof(vname);
+        #         e3 = RegEnumValue(k, 3, vname, &nlen, NULL, NULL, NULL, NULL);
+        #         wsprintf(line[1], "values: num %lX type %ld, name %s %ld; enum %ld %s %ld %d%d, %ld",
+        #                  got, numtype, (LPSTR)sz, szlen, e0, (LPSTR)vname, type, back[0], back[3], e3);
+        #         RegCloseKey(k);
+        #         RegDeleteKey(HKEY_CLASSES_ROOT, "Ow95");
+        #     }
+        #
+        #     static void user(HWND h, HINSTANCE inst)
+        #     {
+        #         HDC dc = GetDC(h);
+        #         DTPARAMS dp;
+        #         RECT rc;
+        #         ICONINF ii, si;
+        #         WNDCLASSX wx, gx;
+        #         HWND kid, hid;
+        #         POINT pt;
+        #         HMENU menu = CreateMenu();
+        #         HICON sys;
+        #         BITMAP bm;
+        #         DWORD p1, p2, p3;
+        #         int ht, ok;
+        #         _fmemset(&dp, 0, sizeof(dp));
+        #         dp.cbSize = sizeof(dp);
+        #         dp.left = 2;
+        #         dp.right = 1;
+        #         SetRect(&rc, 0, 0, 0, 0);
+        #         ht = DrawTextEx(dc, "Margins", -1, &rc, DT_CALCRECT | DT_SINGLELINE, &dp);
+        #         ReleaseDC(h, dc);
+        #         file_icon = LoadImage(NULL, "W95.ICO", IMAGE_ICON, 0, 0, LR_LOADFROMFILE);
+        #         file_bmp = LoadImage(NULL, "W95.BMP", IMAGE_BITMAP, 0, 0, LR_LOADFROMFILE);
+        #         sys = LoadImage(NULL, MAKEINTRESOURCE(32516), IMAGE_ICON, 0, 0, 0);
+        #         half_bmp = CopyImage(file_bmp, IMAGE_BITMAP, 8, 8, 0);
+        #         GetObject(half_bmp, sizeof(bm), &bm);
+        #         _fmemset(&ii, 0, sizeof(ii));
+        #         _fmemset(&si, 0, sizeof(si));
+        #         GetIconInfo(file_icon, &ii);
+        #         GetIconInfo(LoadCursor(NULL, IDC_ARROW), &si);
+        #         wsprintf(line[2], "user: text %d %d %u; images %d %d %d, half %dx%d; info %d %d %d, "
+        #                  "arrow %d %d,%d", ht, rc.right, dp.drawn, file_icon != 0, file_bmp != 0, sys != 0,
+        #                  bm.bmWidth, bm.bmHeight, ii.fIcon, ii.mask != 0, ii.color != 0, si.fIcon,
+        #                  si.x, si.y);
+        #         DeleteObject(ii.mask);
+        #         DeleteObject(ii.color);
+        #         DeleteObject(si.mask);
+        #         _fmemset(&wx, 0, sizeof(wx));
+        #         wx.cbSize = sizeof(wx);
+        #         wx.wc.lpfnWndProc = DefWindowProc;
+        #         wx.wc.hInstance = inst;
+        #         wx.wc.hIcon = LoadIcon(NULL, IDI_HAND);
+        #         wx.wc.lpszClassName = "Ow95Kid";
+        #         ok = RegisterClassEx(&wx) != 0;
+        #         _fmemset(&gx, 0, sizeof(gx));
+        #         gx.cbSize = sizeof(gx);
+        #         ok = ok * 10 + GetClassInfoEx(inst, "Ow95Kid", &gx);
+        #         hid = CreateWindow("Ow95Kid", "", WS_CHILD, 0, 0, 50, 50, h, NULL, inst, NULL);
+        #         kid = CreateWindow("Ow95Kid", "", WS_CHILD | WS_VISIBLE, 0, 0, 1, 1, h, NULL, inst, NULL);
+        #         MoveWindow(kid, 0, 0, 50, 50, FALSE);
+        #         ShowWindow(kid, SW_HIDE);
+        #         SetWindowPos(hid, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER);
+        #         pt.x = 10;
+        #         pt.y = 10;
+        #         SetPropEx(h, "Big", 0x12345678L);
+        #         SetWindowContextHelpID(h, 0x10002L);
+        #         SetMenuContextHelpId(menu, 77);
+        #         SetMessageExtraInfo(0x55AAL);
+        #         p1 = GetPropEx(h, "Big");
+        #         p2 = RemovePropEx(h, "Big");
+        #         p3 = GetPropEx(h, "Big");
+        #         wsprintf(line[3], "user: class %d %d; point %d %d; prop %lX %lX %lX; help %lX %u; extra %lX",
+        #                  ok, gx.hIconSm == wx.wc.hIcon, ChildWindowFromPointEx(h, pt, 0) == hid,
+        #                  ChildWindowFromPointEx(h, pt, 1) == h, p1, p2, p3, GetWindowContextHelpID(h),
+        #                  GetMenuContextHelpId(menu), GetMessageExtraInfo());
+        #         DestroyWindow(kid);
+        #         DestroyWindow(hid);
+        #         DestroyMenu(menu);
+        #     }
+        #
+        #     static void gdi(HWND h)
+        #     {
+        #         HDC dc = GetDC(h);
+        #         HRGN saved, vis, clip, r = CreateRectRgn(2, 3, 30, 40);
+        #         RECT box, cb;
+        #         DWORD data = 0, org, proc;
+        #         UINT was;
+        #         HFONT f = GetStockObject(SYSTEM_FONT), oldf;
+        #         int fit = 0, dx[8], t1, t2;
+        #         SIZE sz;
+        #         HDC mem = CreateCompatibleDC(dc);
+        #         HBITMAP b = CreateCompatibleBitmap(dc, 8, 8), ob;
+        #         saved = SaveVisRgn(dc);
+        #         t1 = ExcludeVisRect(dc, 0, 0, 10, 10);
+        #         vis = InquireVisRgn(dc);
+        #         GetRgnBox(vis, &box);
+        #         t2 = RestoreVisRgn(dc);
+        #         SelectClipRgn(dc, r);
+        #         clip = GetClipRgn(dc);
+        #         GetRgnBox(clip, &cb);
+        #         org = SetDCOrg(dc, 5, 6);
+        #         SetDCOrg(dc, LOWORD(org), HIWORD(org));
+        #         SetDCHook(dc, (FARPROC)MAKELONG(0x1234, 0x5678), 0x9ABCL);
+        #         proc = GetDCHook(dc, &data);
+        #         SetHookFlags(dc, 1);
+        #         was = SetHookFlags(dc, 2);
+        #         ob = SelectBitmap(mem, b);
+        #         oldf = SelectObject(dc, f);
+        #         GetTextExtentEx(dc, "abcdefgh", 8, 30, &fit, dx, &sz);
+        #         wsprintf(line[4], "gdi: vis %d %d %d %d, %d; clip %d,%d %d %d; hook %lX %lX %u; "
+        #                  "bitmap %d; font %d %d; fit %d %d %d", saved != 0, t1, box.left, box.top, t2,
+        #                  cb.left, cb.top, cb.right, cb.bottom, proc, data, was, SelectBitmap(mem, ob) == b,
+        #                  GetPhysicalFontHandle(dc) == f, GetSystemIconFont() != 0, fit, dx[7] == sz.cx,
+        #                  dx[0] > 0);
+        #         SelectObject(dc, oldf);
+        #         SelectClipRgn(dc, NULL);
+        #         DeleteObject(r);
+        #         DeleteObject(b);
+        #         DeleteDC(mem);
+        #         ReleaseDC(h, dc);
+        #         lstrcpy(line[5], "icon at twice its size, the bitmap at half:");
+        #     }
+        #
+        #     long FAR PASCAL WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+        #     {
+        #         PAINTSTRUCT ps;
+        #         HDC dc, mem;
+        #         HGDIOBJ old;
+        #         int i;
+        #         switch (msg) {
+        #         case WM_PAINT:
+        #             dc = BeginPaint(h, &ps);
+        #             for (i = 0; i < 6; i++)
+        #                 TextOut(dc, 8, 4 + 20 * i, line[i], lstrlen(line[i]));
+        #             if (file_icon)
+        #                 DrawIconEx(dc, 380, 104, file_icon, 64, 64, 0, GetStockObject(GRAY_BRUSH), DI_NORMAL);
+        #             if (half_bmp) {
+        #                 mem = CreateCompatibleDC(dc);
+        #                 old = SelectObject(mem, half_bmp);
+        #                 BitBlt(dc, 460, 104, 8, 8, mem, 0, 0, SRCCOPY);
+        #                 SelectObject(mem, file_bmp);
+        #                 BitBlt(dc, 480, 104, 16, 16, mem, 0, 0, SRCCOPY);
+        #                 SelectObject(mem, old);
+        #                 DeleteDC(mem);
+        #             }
+        #             EndPaint(h, &ps);
+        #             return 0;
+        #         case WM_DESTROY:
+        #             PostQuitMessage(0);
+        #             return 0;
+        #         }
+        #         return DefWindowProc(h, msg, wp, lp);
+        #     }
+        #
+        #     int PASCAL WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR cmd, int show)
+        #     {
+        #         WNDCLASS wc;
+        #         HWND h;
+        #         MSG m;
+        #         _fmemset(&wc, 0, sizeof(wc));
+        #         wc.lpfnWndProc = WndProc;
+        #         wc.hInstance = hInstance;
+        #         wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        #         wc.hbrBackground = GetStockObject(WHITE_BRUSH);
+        #         wc.lpszClassName = "Ow95";
+        #         if (!hPrev && !RegisterClass(&wc))
+        #             return 1;
+        #         h = CreateWindow("Ow95", "OW95", WS_OVERLAPPEDWINDOW, 0, 0, 640, 200,
+        #                          NULL, NULL, hInstance, NULL);
+        #         ShowWindow(h, show);
+        #         UpdateWindow(h);
+        #         make_files();
+        #         kernel();
+        #         user(h, hInstance);
+        #         gdi(h);
+        #         InvalidateRect(h, NULL, TRUE);
+        #         while (GetMessage(&m, NULL, 0, 0)) {
+        #             TranslateMessage(&m);
+        #             DispatchMessage(&m);
+        #         }
+        #         return m.wParam;
+        #     }
+        # ---- ow95.lnk
+        #     system windows
+        #     name ow95.exe
+        #     file ow95.o
+        #     import SWITCHSTACKTO KERNEL.108
+        #     import SWITCHSTACKBACK KERNEL.109
+        #     import GETPROFILESECTIONNAMES KERNEL.142
+        #     import CREATEDIRECTORY KERNEL.144
+        #     import REMOVEDIRECTORY KERNEL.145
+        #     import DELETEFILE KERNEL.146
+        #     import GETVERSIONEX KERNEL.149
+        #     import REGDELETEVALUE KERNEL.222
+        #     import REGENUMVALUE KERNEL.223
+        #     import REGQUERYVALUEEX KERNEL.225
+        #     import REGSETVALUEEX KERNEL.226
+        #     import REGCREATEKEY SHELL.2
+        #     import REGCLOSEKEY SHELL.3
+        #     import REGDELETEKEY SHELL.4
+        #     import DRAWTEXTEX USER.375
+        #     import SETMESSAGEEXTRAINFO USER.376
+        #     import SETPROPEX USER.378
+        #     import GETPROPEX USER.379
+        #     import REMOVEPROPEX USER.380
+        #     import SETWINDOWCONTEXTHELPID USER.382
+        #     import GETWINDOWCONTEXTHELPID USER.383
+        #     import SETMENUCONTEXTHELPID USER.384
+        #     import GETMENUCONTEXTHELPID USER.385
+        #     import LOADIMAGE USER.389
+        #     import COPYIMAGE USER.390
+        #     import DRAWICONEX USER.394
+        #     import GETICONINFO USER.395
+        #     import REGISTERCLASSEX USER.397
+        #     import GETCLASSINFOEX USER.398
+        #     import CHILDWINDOWFROMPOINTEX USER.399
+        #     import GETMESSAGEEXTRAINFO USER.288
+        #     import EXCLUDEVISRECT GDI.73
+        #     import SAVEVISRGN GDI.129
+        #     import RESTOREVISRGN GDI.130
+        #     import INQUIREVISRGN GDI.131
+        #     import GETCLIPRGN GDI.173
+        #     import SETDCORG GDI.117
+        #     import SETDCHOOK GDI.190
+        #     import GETDCHOOK GDI.191
+        #     import SETHOOKFLAGS GDI.192
+        #     import SELECTBITMAP GDI.195
+        #     import GETPHYSICALFONTHANDLE GDI.352
+        #     import GETSYSTEMICONFONT GDI.118
+        #     import GETTEXTEXTENTEX GDI.188
+        bytes.fromhex(
+            '4d5a80000100000004000000ffff0000b8000000000000004000000000000000000000000000000000000000'
+            '00000000000000000000000000000000800000000e1fba0e00b409cd21b8014ccd2154686973206973206120'
+            '57696e646f77732031362d6269742065786563757461626c650d0a240000000000000000000000004e450501'
+            '77000200000000000203020000040020500f010000000200020004000c0040005000500058006000f9000000'
+            '0000010000000200000000000000000383004a12400d4a12e90b5003410c200c044f57393500000001000800'
+            '0e00130000064b45524e454c055348454c4c0455534552034744490000086f7739352e65786500000000cceb'
+            'fd90909090005589e5b81600e8f60e535152565783ec021eb850052d020050b85003509affff000089a6f4ff'
+            'be06009affff0000817ef45003720c817ef450057305ba0100eb0231d289f0d1e0d1e001f0d1e001d08d66f6'
+            '5f5e5a595b5dc35589e550b8a600e89c0e58565781ec9200505289df894efa8d866aff1e50be9000569affff'
+            '00008d866aff1e501ebe1000569affff00008d866aff1e50ffb666ffffb668ff9affff00008d866aff1e5031'
+            'f6569affff000089c650ff76fa57ff76049affff0000569affff00008d66fc5f5e5dc202005589e5b81a00e8'
+            '270e535152565783ec0ab9fe0231dbb826088cdae8440eb001a22808a22a08b020a22c08a22d08c6062e0810'
+            'c606300801c606320804c7063408e802c606380816c746ec3c088c5eeec6063c0828a24008c606440840c606'
+            '480801c6064a080431c089c3d1e3d1e329c389c6d1e6d1e68e46ee0376ec8a973602268854288a9735022688'
+            '54298a9734022688542a403d10007cce31f6eb064683fe207d3231dbe9ce0031c08946f483fb037c0f83fb1c'
+            '7f0a83fe037c0583fe1c7e05b80100eb0231c0837ef400740ac746f00000eb12e9ae0085c07405b80c00eb03'
+            'b80e008946f0b10489f0d3e089c189d8992bc2d1f889c701cf037eec8e46ee83c768f6c30174078a4ef030ed'
+            'eb0b8a46f030e4b104d3e089c1268a0530e489c209ca268815837ef400743489f7d1e7d1e789d899b103d3e2'
+            '1bc2d3f801f8c47eec01c789d980e107b88000d3f889c1268a85680230e489c209ca26889568024383fb207c'
+            '03e934ff83fb047c0883fb1b7f03e932ff83fe047c0583fe1b7ef3b80100e924ffb8fe0250bb26088cd9b812'
+            '008cdae8f1fdb9f60031dbb8240b8cdae8bc0cc706240b424dc606260bf6c6062e0b76c606320b28b010a236'
+            '0ba23a0bc6063e0b01c606400b0431c089c3d1e3d1e329c389c6d1e6d1e68a97360288945a0b8a9735028894'
+            '5b0b8a97340288945c0b403d10007cd431f6eb064683fe107d5431dbeb18b80a0089c18b7ef28a0530e489c2'
+            '09ca88154383fb107ddeb10389f7d3e789d8992bc2d1f801c78dbd9a0b897ef2f6c301740a83fb087dc8b809'
+            '00ebc683fb087d05b80900eb03b80a00b104d3e0ebb3b8f60050bb240b8cd9b81a008cdae820fde913fd5589'
+            'e5b8c003e8ba0b535152565781ec8603c746d47856c746d6341231c08946d88946daa164028946e0a1660289'
+            '46e231ff8d9670fc1e52b80002509affff00008946ee8db670fc803c00740d1e56479affff00004001c6ebee'
+            '8d56a41e528d9670fc1e52b81000509affff00008d9604ff1e52b89000509affff00008d9604ff1e521eb822'
+            '00509affff00008d9604ff1e5231c050509affff00008946ea8d9604ff1e529affff00008946e8b8010050bb'
+            '2a008cd9b82c008cdae85ffc8d9604ff1e52b89000509affff00008d9604ff1e521eb83400509affff00008d'
+            '9604ff1e529affff000089c6d1e6d1e601c6d1e68d9604ff1e529affff000001c6c78670fe9400c78672fe00'
+            '008d9670fe1e529affff0000ffb67afeffb678feffb676feffb674fe56ff76e8ff76ea8d56a41e5283ff027e'
+            '05b80100eb0231c050837eee007e05b80100eb0231c050e874fb501eb83d00501eb85005509affff000083c4'
+            '2031c050b80100501eb88100508d56cc1e529affff0000ff76ceff76cc1eb88c005031c0505050b80100501e'
+            'b886005031c050b80600509affff0000ff76ceff76cc1eb891005031c0505050b80400508d56d41e5231c050'
+            'b80400509affff0000ff76ceff76cc31c05050505050b80100501eb895005031c050b80500509affff0000ff'
+            '76ceff76cc1eb89a005031c0505050b80300508d56e01e5231c050b80400509affff0000c746d00400c746d2'
+            '0000ff76ceff76cc1eb891005031c050508d56e41e528d56d81e528d56d01e529affff00008b46e48946ec8b'
+            '46e68946f4c746d01000c746d20000ff76ceff76cc1eb88c005031c0505050508d56b41e528d56d01e529aff'
+            'ff00008b46d08946f08b46d28946f2c746dc1000c746de0000c746d0080031c08946d2ff76ceff76cc50b803'
+            '00508d56941e528d56dc1e5231c050508d56e41e528d56c41e528d56d01e529affff000089c789d6ff76ceff'
+            '76cc1eb89a00509affff0000c746dc100031c08946deff76ceff76cc50b80300508d56941e528d56dc1e5231'
+            'c050505050505050509affff000052508a46c730e4508a46c450ff76e6ff76e48d56941e525657ff76f2ff76'
+            'f08d56b41e52ff76f4ff76ecff76daff76d81eb89e00501eb8c805509affff000083c42cff76ceff76cc9aff'
+            'ff000031c050b80100501eb88100509affff0000e9b6f95589e550b8c200e85c08585351565781ec900089c6'
+            '8956f6509affff000089c79affff00008946f2b90a0031db8cda8d46cae86308c746ca0a00c746ce0200c746'
+            'd001008d56d41e5231c0505050509affff0000571eb8df0050b8ffff508d56d41e52b82004508d56ca1e529a'
+            'ffff00008946ea56579affff000031c0501eb8120050b801005031c05050b81000509affff0000a3240831c0'
+            '501eb81a005031c0505050b81000509affff0000a3220831c05050b8047f50b801005031c05050509affff00'
+            '0089c7ff36220831c050b80800505031c0509affff0000a3200850b80e00508d56a81e529affff0000b90a00'
+            '31db8cda8d46c0e89d07b90a0031db8cda8d46b6e89007ff3624088d56c01e529affff000031c05050b8007f'
+            '509affff0000508d56b61e529affff0000ff76baff76b8ff76b68b46c885c07403b80100508b46c685c07403'
+            'b8010050ff76c0ff76acff76aa85ff7405b80100eb0231c050a1220885c07403b8010050a1240885c07403b8'
+            '010050ff76d2ff76d8ff76ea1eb8e700501eb84006509affff000083c424ff76c69affff0000ff76c89affff'
+            '0000ff76bc9affff0000b9200031db8cda8d8668ffe8df06c78668ff2000c7866aff0000c7866effffffc786'
+            '70ffffff8b46f6898676ff31c05050b8017f509affff0000898678ffc7468237018c5e848d9668ff1e529aff'
+            'ff000085c07407c746f40100eb038946f4b9200031db8cda8d4688e88106c746882000c7468a00008b7ef4d1'
+            'e7d1e7037ef4d1e7ff76f61eb83701508d56881e529affff000001c7897ee81eb83701501eb83f0150b80040'
+            '5031c0505050b8320050505631c050ff76f650509affff00008946dc8946f01eb83701501eb83f0150b80050'
+            '5031c0505050b8010050505631c050ff76f650509affff000089c78946e65031c05050b83200505031c0509a'
+            'ffff00005731c0509affff0000ff76dc31c05050505050b80700509affff0000b80a008946ec8946ee561eb8'
+            '400150b8341250b87856509affff000056b8010050b80200509affff0000ff76f2b84d00509affff000031c0'
+            '50b8aa55509affff0000561eb84001509affff000089c78956dc561eb84001509affff00008946de8956e056'
+            '1eb84001509affff00008946e28956e49affff00005250ff76f29affff000050569affff00005250ff76e4ff'
+            '76e2ff76e0ff76deff76dc5756b80a005050b80100509affff000039f07505b80100eb0231c05056ff76eeff'
+            '76ec31c0509affff00003b46f07505b80100eb0231c0508b46a63b8678ff7505b80100eb0231c050ff76e81e'
+            'b84401501eb8b806509affff000083c426ff76e69affff0000ff76f09affff0000ff76f29affff00008d66f8'
+            '5f5ee9daf55589e550b88a00e87a0458535152565783ec4a50509affff000089c689c7b8020050b8030050b8'
+            '1e0050b82800509affff00008946d48946dc31c08946d08946d2b80d00509affff00008946ee8946d8c746d6'
+            '0000569affff00008946f08946ec56b8080050509affff00008946f28946f4569affff00008946e05631c050'
+            '50b80a0050509affff00008946ea569affff0000508d56c41e529affff0000569affff00008946de56ff76d4'
+            '9affff0000569affff0000508d56bc1e529affff000056b8050050b80600509affff00005650529affff0000'
+            '56b8785650b834125031c050b8bc9a509affff0000568d56d01e529affff00008946e28956e456b80100509a'
+            'ffff000056b80200509affff00008946e6ff76f0ff76f29affff00008946e856ff76ee9affff00008946da56'
+            '1eb88d0150b8080050b81e00508d56d61e528d56ac1e528d56cc1e529affff0000837eac007e05b80100eb02'
+            '31c0508b46ba3b46cc7505b80100eb0231c050ff76d69affff000085c07403b8010050579affff00003b46d8'
+            '7505b80100eb0231c050ff76ecff76e89affff00003b46f47505b80100eb0231c050ff76e6ff76d2ff76d0ff'
+            '76e4ff76e2ff76c2ff76c0ff76beff76bcff76deff76c6ff76c4ff76ea8b46e085c07403b80100501eb89601'
+            '501eb83007509affff000083c43057ff76da9affff00005731c0509affff0000ff76dc9affff0000ff76f49a'
+            'ffff0000ff76ec9affff0000ff76aa579affff00001eb8a807501eb8f701509affff0000e9a2f31e58904555'
+            '89e51e8ed8b84200e84202565783ec228b460c3d0f00740b3d02007403e91201e90501ff760e8d56d81e529a'
+            'ffff000089c731f657b808005089f0d1e0d1e001f0d1e0d1e005040050b10389f0d3e089c2b104d3e029d0ba'
+            '500501c21e521e529affff0000509affff00004683fe067cc3833e240800742857b87c0150b8680050ff3624'
+            '08b84000505031c050b80200509affff000050b80300509affff0000833e200800746e579affff000089c650'
+            'ff3620089affff00008946f857b8cc0150b8680050b8080050505631c05050b8cc0050b82000509affff0000'
+            '56ff3622089affff000057b8e00150b8680050b8100050505631c05050b8cc0050b82000509affff000056ff'
+            '76f89affff0000569affff0000ff760e8d56d81e529affff000031c031f6eb1e31c0509affff0000ebf0ff76'
+            '0e50ff760aff7608ff76069affff000089d689f28d66fa5f5e1f5d4dca0a005589e5b85200e8f100565783ec'
+            '2c8b7e0cb91a0031db8cda8d46d0e80e01c746d2ffffc746d4ffff897eda31c05050b8007f509affff000089'
+            '46de31c0509affff00008946e0c746e681008c5ee8837e0a0075148d56d01e529affff000085c07506b80100'
+            'e984001eb88100501eb8230250b8cf005031c0505050b8800250b8c8005031c050505750509affff000089c6'
+            '50ff76049affff0000569affff0000e827f2e891f489fa89f0e8e7f789f0e8c4fb5631c05050b80100509aff'
+            'ff00008d56ea1e5231c05050509affff000085c074168d56ea1e529affff00008d56ea1e529affff0000ebd7'
+            '8b46ee8d66fc5f5e5dc20a008c166802c33bc473132bc4f7d83b060a0077068cd03b0668027401c30e5ab829'
+            '0fbb0100e9c801537461636b204f766572666c6f7721005789c788d88ec2578ae0d1e9f3ab13c9f3aa5f89f8'
+            '5fc3eb0203009affff00000bc0750e5033c0ba0f00e86a0258b44ccd218c066e02575606535253be1a0c8936'
+            '89028c1e8b02268a078804464384c075f589360a005b2bc0509affff000057579affff0000fc1e07b91a0cbf'
+            '50032bcf32c0f3aab89a10a38502b8ffffa38702b430cd21a27002882671029affff0000a272028826730286'
+            'e0a3740254583bc475120f01e0a90100740ab001a27602b003a277021ebf910257b89000509affff0000b891'
+            '02893e8d028c1e8f02b8ff00e86b01e8fdfde9f9004f70656e20576174636f6d20432f432b2b31362052756e'
+            '2d54696d652073797374656d2e20436f7079726967687420286329204f70656e20576174636f6d20436f6e74'
+            '72696275746f727320323030322d323032362e20506f7274696f6e7320436f70797269676874202843292053'
+            '79626173652c20496e632e20313938382d323030322e00c3cb005589e551565781ec800089c689df8d9e7aff'
+            '8cd98ec2268a0484c074173c0d74138d46f939c3730c268a048ec14626880743ebe031c08ec15026c607001e'
+            '8d9e7aff531eb828025031c0509affff000089f8e94400515689c189d6e8330185c0750689c889f2eb9889d8'
+            'e92c0000c3c3535289c3833e4803007404ff164803ff162203baff00b81000e8a800ff162203ff16240389d8'
+            'e928fe5289c2ff162203ff16240389d0e918fe5589e5535289c3833f0075078d66fc5a5b5dc31eff171febf3'
+            '5589e5535289c38b47028b1785c0750485d274df1eff1f1febd95589e5535152565789c11ee813ffbf500389'
+            'fabb4a0389fe88c839fb7316803f02750583c306ebf23a470172f689de8a4701ebef39fe74158d4402803c00'
+            '7508e88affc60402ebcbe89bffebf61f8d66f65f5e5a595b5dc35589e55351565789c11ee8bcfe88d5bf5003'
+            '89fabb500389fe88c839fb7316803f02750583c306ebf23a470177f689de8a4701ebef39fe741c3a6c017305'
+            'c60402ebd18d4402803c007505e827ffebeee83bffebe91f8d66f85f5eeb9f803e260300750331c0c35250cc'
+            'eb0657564944454fb8010083c404c300900003014c0e040057000301670e030039000301980e030029000301'
+            'a30e03002a000301a90e03007c000301c90e03007d000301d80e03006c000301e60e030071000301f00e0300'
+            '72000301550f01005b000301940f01001e0003019b0f030005000200b50f0100500f0301c60f010003000301'
+            'f80f010031000301e810030001000301a809030078010301b30903007b010301c30903007c010301d4090300'
+            '7b010301df09030020010301e909030081010301f00903007f010301110a03008f0103012c0a03008f010301'
+            '5c0a0300a4010301670a0300350003016f0a030035000301770a030098000301990a030042000301b20a0400'
+            '40000301c90a040057000301da0a040034000301eb0a040033000301f70a040081000301090b040049000301'
+            '120b0400830003011d0b040086000301230b0400820003012f0b04002c000301350b0400ad000301400b0400'
+            '860003014e0b040075000301560b0400750003016b0b0400be000301760b0400bf000301860b0400c0000301'
+            '900b0400c00003019e0b0400c3000301aa0b04002d000301cf0b0400bc000301f50b040076000301030c0400'
+            '600103011b0c0400c3000301690c0300a4010301750c04002d0003017e0c04002c000301860c040045000301'
+            '8e0c040045000301960c0400440003019f0c030044000301ae0c010058000301e60c0300270003011b0d0100'
+            '5a000301210d0400210003014c0d040057000301560d03008a010301630d0400340003016f0d04002d000301'
+            '920d0400220003019c0d04002d000301bc0d040022000301c50d04002d000301cb0d040044000301d80d0300'
+            '28000301e60d030006000301fa0d03006b0005002e0e0100b50c0200330e0100b50c0301410e0300ad000301'
+            '260001006c000301320001006d00030184000100860003019400010059000301a700010059000301b5000100'
+            '53000301c400010056000301ca00010051000301810301008e000301950301005a000301ae03010061010301'
+            'bd03010086000301cd03010059000301dc03010090000301ea030100910003010d040100860003011d040100'
+            '5900030128040100920003013d040100920003015604010095000301a0040300a4010301b904020002000301'
+            'de040100e200030103050100e200030125050100e20003014a050100e200030177050100e1000301ad050100'
+            'e1000301fa050100df0003010e060100de0003013c060100df0003017b060300a40103018906020003000301'
+            '9a06020004000301bb06030042000301c206030097000301f1060300480003010e0703007701030118070300'
+            '4400030131070300850103014a07030085010301630703008501030179070300860103018b07040052000301'
+            'b30703008b010301c0070300ad000301cb0703008b0103012d080300a4010301380804004500030140080400'
+            '4500030148080400450005016a0803006b000201700803006b00030182080300ae000301990803008d010301'
+            'dc0803008e010301070903002900030133090300290003014a09030038000301530903002a00030166090300'
+            'e8000301820903007a010301900903007e0103019c0903008001000000000500000000000000000000005c00'
+            '5739352e49434f005739352e424d50005c5739354449520078005739352e544d50005c5739352e544d50006b'
+            '65726e656c3a20737461636b2025643b2073656374696f6e732025642025642025733b206469722025642025'
+            '642c2064656c2025643b2076657220256c642e256c64004f7739350068656c6c6f004e616d65004e756d0064'
+            '666c740042696e0076616c7565733a206e756d20256c58207479706520256c642c206e616d6520257320256c'
+            '643b20656e756d20256c6420257320256c6420256425642c20256c64004d617267696e7300757365723a2074'
+            '6578742025642025642025753b20696d616765732025642025642025642c2068616c662025647825643b2069'
+            '6e666f2025642025642025642c206172726f772025642025642c2564004f7739354b69640000426967007573'
+            '65723a20636c6173732025642025643b20706f696e742025642025643b2070726f7020256c5820256c582025'
+            '6c583b2068656c7020256c582025753b20657874726120256c58006162636465666768006764693a20766973'
+            '2025642025642025642025642c2025643b20636c69702025642c25642025642025643b20686f6f6b20256c58'
+            '20256c582025753b206269746d61702025643b20666f6e742025642025643b20666974202564202564202564'
+            '0069636f6e206174207477696365206974732073697a652c20746865206269746d61702061742068616c663a'
+            '004f573935004f70656e20576174636f6d00000000000080008000008080800000800080808000c0c0c08080'
+            '800000ff00ff0000ffffff0000ff00ffffff00ffffff010203040000ffff00000000000000000000000c0000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000b110b1100000000'
+            '00000000000000000000000000000000000000000000000000000000000000000020020f0000'
         )),
 }
 

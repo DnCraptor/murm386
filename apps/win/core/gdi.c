@@ -1066,9 +1066,12 @@ static void dc_reset_state(wdc *dc)
 }
 
 /* USER reuses window DCs: GetDC resets attributes this way. */
+static void vis_forget(HDC h);
+
 void gdi_reset_dc(HDC h)
 {
     wdc *dc = gdi_dc(h);
+    vis_forget(h);
     if (dc) {
         while (dc->saved) {
             wdc *s = dc->saved;
@@ -3375,3 +3378,210 @@ int WINAPI EnumObjects(HDC hdc, int type, GOBJENUMPROC proc, LPARAM lp)
     }
     return r;
 }
+
+/* ---------------------------------------------------------------- Windows 3.1's own */
+
+/* The visible area USER gives a DC, as Windows 3.1's GDI lets USER (and a
+ * program) change it: rectangles in logical units, regions in the
+ * screen's. SaveVisRgn's copies (RestoreVisRgn takes the last back) and
+ * the regions InquireVisRgn and GetClipRgn hand out (GDI's, not to be
+ * deleted: they are the DC's until it goes), by DC. */
+#define VIS_SAVES 16
+static struct { HDC dc; HRGN rgn; uint8_t kind; uint32_t seq; } vis_saved[VIS_SAVES];
+                                        /* kind 1 saved (seq: the order), 2 vis, 3 clip */
+static uint32_t vis_seq;
+
+static void vis_forget(HDC h)
+{
+    for (int i = 0; i < VIS_SAVES; i++)
+        if (vis_saved[i].dc == h && vis_saved[i].rgn) {
+            DeleteObject(vis_saved[i].rgn);
+            vis_saved[i].dc = 0;
+            vis_saved[i].rgn = 0;
+        }
+}
+
+/* a slot for a DC's region of a kind: its own (inquired again), or a free
+ * one (the oldest saved one if there is none) */
+static int vis_slot(HDC h, int kind)
+{
+    int free_slot = -1;
+    for (int i = 0; i < VIS_SAVES; i++) {
+        if (kind != 1 && vis_saved[i].dc == h && vis_saved[i].kind == kind)
+            return i;
+        if (!vis_saved[i].rgn && free_slot < 0)
+            free_slot = i;
+    }
+    if (free_slot < 0) {                /* the oldest goes */
+        free_slot = 0;
+        for (int i = 1; i < VIS_SAVES; i++)
+            if (vis_saved[i].seq < vis_saved[free_slot].seq)
+                free_slot = i;
+        DeleteObject(vis_saved[free_slot].rgn);
+        vis_saved[free_slot].rgn = 0;
+    }
+    return free_slot;
+}
+
+static HRGN vis_keep(HDC h, int kind, const wrgn *g, int dx, int dy)
+{
+    int i = vis_slot(h, kind);
+    if (!vis_saved[i].rgn)
+        vis_saved[i].rgn = CreateRectRgn(0, 0, 0, 0);
+    wrgn *r = gdi_region(vis_saved[i].rgn);
+    if (!r)
+        return 0;
+    wrgn_copy(r, g);
+    wrgn_offset(r, dx, dy);
+    vis_saved[i].dc = h;
+    vis_saved[i].kind = (uint8_t)kind;
+    vis_saved[i].seq = ++vis_seq;
+    return vis_saved[i].rgn;
+}
+
+int WINAPI ExcludeVisRect(HDC h, int l, int t, int r, int b)
+{
+    DC_OR_RET(h, ERROR);
+    RECT rc = { l, t, r, b };
+    lp_rect(dc, &rc);
+    wrgn_diff_rect(&dc->vis, &rc);
+    dc->eff_dirty = 1;
+    return wrgn_type(&dc->vis);
+}
+
+int WINAPI IntersectVisRect(HDC h, int l, int t, int r, int b)
+{
+    DC_OR_RET(h, ERROR);
+    RECT rc = { l, t, r, b };
+    lp_rect(dc, &rc);
+    wrgn_and_rect(&dc->vis, &rc);
+    dc->eff_dirty = 1;
+    return wrgn_type(&dc->vis);
+}
+
+int WINAPI OffsetVisRgn(HDC h, int x, int y)
+{
+    DC_OR_RET(h, ERROR);
+    wrgn_offset(&dc->vis, x, y);
+    dc->eff_dirty = 1;
+    return wrgn_type(&dc->vis);
+}
+
+/* the region (the screen's coordinates) as the DC's visible area */
+int WINAPI SelectVisRgn(HDC h, HRGN rgn)
+{
+    DC_OR_RET(h, ERROR);
+    wrgn *g = gdi_region(rgn);
+    if (!g)
+        return ERROR;
+    wrgn_copy(&dc->vis, g);
+    dc->eff_dirty = 1;
+    return wrgn_type(&dc->vis);
+}
+
+HRGN WINAPI SaveVisRgn(HDC h)
+{
+    DC_OR_RET(h, 0);
+    return vis_keep(h, 1, &dc->vis, 0, 0);
+}
+
+/* the last one SaveVisRgn kept */
+int WINAPI RestoreVisRgn(HDC h)
+{
+    DC_OR_RET(h, ERROR);
+    int k = -1;
+    for (int j = 0; j < VIS_SAVES; j++)
+        if (vis_saved[j].dc == h && vis_saved[j].kind == 1 && vis_saved[j].rgn &&
+            (k < 0 || vis_saved[j].seq > vis_saved[k].seq))
+            k = j;
+    if (k < 0)
+        return ERROR;
+    wrgn *g = gdi_region(vis_saved[k].rgn);
+    if (g)
+        wrgn_copy(&dc->vis, g);
+    DeleteObject(vis_saved[k].rgn);
+    vis_saved[k].rgn = 0;
+    vis_saved[k].dc = 0;
+    dc->eff_dirty = 1;
+    return wrgn_type(&dc->vis);
+}
+
+/* the DC's visible area (the screen's coordinates): GDI's region */
+HRGN WINAPI InquireVisRgn(HDC h)
+{
+    DC_OR_RET(h, 0);
+    return vis_keep(h, 2, &dc->vis, 0, 0);
+}
+
+/* the program's clipping region (the DC's coordinates), 0 if it has none */
+HRGN WINAPI GetClipRgn(HDC h)
+{
+    DC_OR_RET(h, 0);
+    return dc->has_clip ? vis_keep(h, 3, &dc->clip, -dc->org_x, -dc->org_y) : 0;
+}
+
+/* the DC's origin on the surface moved (USER's); the previous one */
+DWORD WINAPI SetDCOrg(HDC h, int x, int y)
+{
+    DC_OR_RET(h, 0);
+    DWORD was = MKDW(dc->org_x, dc->org_y);
+    if (dc->has_clip)                   /* the program's region goes with it */
+        wrgn_offset(&dc->clip, x - dc->org_x, y - dc->org_y);
+    dc->org_x = x;
+    dc->org_y = y;
+    dc->eff_dirty = 1;
+    return was;
+}
+
+/* USER's hook of a DC (told as its visible area is to change): kept,
+ * never called (WINN's USER keeps the DCs' areas itself); its flags */
+#define DC_HOOKS 16
+static struct { HDC dc; DWORD proc, data; UINT flags; } dc_hooks[DC_HOOKS];
+
+static int hook_slot(HDC h, int make)
+{
+    int free_slot = -1;
+    for (int i = 0; i < DC_HOOKS; i++) {
+        if (dc_hooks[i].dc == h)
+            return i;
+        if (!dc_hooks[i].dc || !gdi_dc(dc_hooks[i].dc))
+            free_slot = free_slot < 0 ? i : free_slot;
+    }
+    if (make && free_slot >= 0) {
+        memset(&dc_hooks[free_slot], 0, sizeof(dc_hooks[free_slot]));
+        dc_hooks[free_slot].dc = h;
+    }
+    return make ? free_slot : -1;
+}
+
+BOOL WINAPI SetDCHook(HDC h, DWORD proc, DWORD data)
+{
+    int i = gdi_dc(h) ? hook_slot(h, 1) : -1;
+    if (i < 0)
+        return FALSE;
+    dc_hooks[i].proc = proc;
+    dc_hooks[i].data = data;
+    return TRUE;
+}
+
+DWORD WINAPI GetDCHook(HDC h, DWORD *data)
+{
+    int i = hook_slot(h, 0);
+    if (data)
+        *data = i >= 0 ? dc_hooks[i].data : 0;
+    return i >= 0 ? dc_hooks[i].proc : 0;
+}
+
+UINT WINAPI SetHookFlags(HDC h, UINT flags)
+{
+    int i = gdi_dc(h) ? hook_slot(h, 1) : -1;
+    if (i < 0)
+        return 0;
+    UINT was = dc_hooks[i].flags;
+    dc_hooks[i].flags = flags;
+    return was;
+}
+
+/* GDI's own SelectObject of a bitmap; the font realized for the DC */
+HBITMAP WINAPI SelectBitmap(HDC h, HBITMAP bm) { return (HBITMAP)SelectObject(h, bm); }
+HFONT WINAPI GetPhysicalFontHandle(HDC h) { DC_OR_RET(h, 0); return dc->font; }

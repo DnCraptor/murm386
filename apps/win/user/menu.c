@@ -1236,3 +1236,35 @@ HMENU WINAPI LookupMenuHandle(HMENU menu, int id)
     }
     return 0;
 }
+
+/* the menus' help contexts, by the menu */
+#define MENU_HELP_IDS 32
+static struct { HMENU menu; UINT id; } menu_help[MENU_HELP_IDS];
+
+BOOL WINAPI SetMenuContextHelpId(HMENU menu, UINT id)
+{
+    int free_slot = -1;
+    if (!IsMenu(menu))
+        return FALSE;
+    for (int i = 0; i < MENU_HELP_IDS; i++) {
+        if (menu_help[i].menu == menu) {
+            menu_help[i].id = id;
+            return TRUE;
+        }
+        if (free_slot < 0 && (!menu_help[i].menu || !IsMenu(menu_help[i].menu)))
+            free_slot = i;
+    }
+    if (free_slot < 0)
+        return FALSE;
+    menu_help[free_slot].menu = menu;
+    menu_help[free_slot].id = id;
+    return TRUE;
+}
+
+UINT WINAPI GetMenuContextHelpId(HMENU menu)
+{
+    for (int i = 0; i < MENU_HELP_IDS; i++)
+        if (menu_help[i].menu == menu && IsMenu(menu))
+            return menu_help[i].id;
+    return 0;
+}

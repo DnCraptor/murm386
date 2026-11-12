@@ -1044,6 +1044,40 @@ GetDriveType:
     .ltorg
     .size GetDriveType, .-GetDriveType
 
+    .section .text.winapi.GetProfileSectionNames,"ax",%progbits
+    .global GetProfileSectionNames
+    .type GetProfileSectionNames, %function
+    .thumb_func
+GetProfileSectionNames:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =568
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetProfileSectionNames, .-GetProfileSectionNames
+
+    .section .text.winapi.GetPrivateProfileSectionNames,"ax",%progbits
+    .global GetPrivateProfileSectionNames
+    .type GetPrivateProfileSectionNames, %function
+    .thumb_func
+GetPrivateProfileSectionNames:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =572
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetPrivateProfileSectionNames, .-GetPrivateProfileSectionNames
+
     .section .text.winapi.SetLastError,"ax",%progbits
     .global SetLastError
     .type SetLastError, %function
@@ -2557,6 +2591,23 @@ EqualRgn:
     .ltorg
     .size EqualRgn, .-EqualRgn
 
+    .section .text.winapi.ExcludeVisRect,"ax",%progbits
+    .global ExcludeVisRect
+    .type ExcludeVisRect, %function
+    .thumb_func
+ExcludeVisRect:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =292
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size ExcludeVisRect, .-ExcludeVisRect
+
     .section .text.winapi.GetBitmapBits,"ax",%progbits
     .global GetBitmapBits
     .type GetBitmapBits, %function
@@ -2965,6 +3016,23 @@ GetWindowOrg:
     .ltorg
     .size GetWindowOrg, .-GetWindowOrg
 
+    .section .text.winapi.IntersectVisRect,"ax",%progbits
+    .global IntersectVisRect
+    .type IntersectVisRect, %function
+    .thumb_func
+IntersectVisRect:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =392
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size IntersectVisRect, .-IntersectVisRect
+
     .section .text.winapi.LPtoDP,"ax",%progbits
     .global LPtoDP
     .type LPtoDP, %function
@@ -3016,6 +3084,23 @@ OffsetRgn:
     .ltorg
     .size OffsetRgn, .-OffsetRgn
 
+    .section .text.winapi.OffsetVisRgn,"ax",%progbits
+    .global OffsetVisRgn
+    .type OffsetVisRgn, %function
+    .thumb_func
+OffsetVisRgn:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =408
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size OffsetVisRgn, .-OffsetVisRgn
+
     .section .text.winapi.PtVisible,"ax",%progbits
     .global PtVisible
     .type PtVisible, %function
@@ -3033,6 +3118,23 @@ PtVisible:
     .ltorg
     .size PtVisible, .-PtVisible
 
+    .section .text.winapi.SelectVisRgn,"ax",%progbits
+    .global SelectVisRgn
+    .type SelectVisRgn, %function
+    .thumb_func
+SelectVisRgn:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =420
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SelectVisRgn, .-SelectVisRgn
+
     .section .text.winapi.SetBitmapBits,"ax",%progbits
     .global SetBitmapBits
     .type SetBitmapBits, %function
@@ -3049,6 +3151,40 @@ SetBitmapBits:
     bx   r12
     .ltorg
     .size SetBitmapBits, .-SetBitmapBits
+
+    .section .text.winapi.SetDCOrg,"ax",%progbits
+    .global SetDCOrg
+    .type SetDCOrg, %function
+    .thumb_func
+SetDCOrg:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =468
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SetDCOrg, .-SetDCOrg
+
+    .section .text.winapi.GetSystemIconFont,"ax",%progbits
+    .global GetSystemIconFont
+    .type GetSystemIconFont, %function
+    .thumb_func
+GetSystemIconFont:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =472
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetSystemIconFont, .-GetSystemIconFont
 
     .section .text.winapi.AddFontResource,"ax",%progbits
     .global AddFontResource
@@ -3202,6 +3338,57 @@ MulDiv:
     bx   r12
     .ltorg
     .size MulDiv, .-MulDiv
+
+    .section .text.winapi.SaveVisRgn,"ax",%progbits
+    .global SaveVisRgn
+    .type SaveVisRgn, %function
+    .thumb_func
+SaveVisRgn:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =516
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SaveVisRgn, .-SaveVisRgn
+
+    .section .text.winapi.RestoreVisRgn,"ax",%progbits
+    .global RestoreVisRgn
+    .type RestoreVisRgn, %function
+    .thumb_func
+RestoreVisRgn:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =520
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size RestoreVisRgn, .-RestoreVisRgn
+
+    .section .text.winapi.InquireVisRgn,"ax",%progbits
+    .global InquireVisRgn
+    .type InquireVisRgn, %function
+    .thumb_func
+InquireVisRgn:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =524
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size InquireVisRgn, .-InquireVisRgn
 
     .section .text.winapi.SetEnvironment,"ax",%progbits
     .global SetEnvironment
@@ -3492,6 +3679,23 @@ SetRectRgn:
     .ltorg
     .size SetRectRgn, .-SetRectRgn
 
+    .section .text.winapi.GetClipRgn,"ax",%progbits
+    .global GetClipRgn
+    .type GetClipRgn, %function
+    .thumb_func
+GetClipRgn:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =692
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetClipRgn, .-GetClipRgn
+
     .section .text.winapi.EnumMetaFile,"ax",%progbits
     .global EnumMetaFile
     .type EnumMetaFile, %function
@@ -3526,6 +3730,74 @@ PlayMetaFileRecord:
     .ltorg
     .size PlayMetaFileRecord, .-PlayMetaFileRecord
 
+    .section .text.winapi.GetTextExtentEx,"ax",%progbits
+    .global GetTextExtentEx
+    .type GetTextExtentEx, %function
+    .thumb_func
+GetTextExtentEx:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =752
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetTextExtentEx, .-GetTextExtentEx
+
+    .section .text.winapi.SetDCHook,"ax",%progbits
+    .global SetDCHook
+    .type SetDCHook, %function
+    .thumb_func
+SetDCHook:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =760
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SetDCHook, .-SetDCHook
+
+    .section .text.winapi.GetDCHook,"ax",%progbits
+    .global GetDCHook
+    .type GetDCHook, %function
+    .thumb_func
+GetDCHook:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =764
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetDCHook, .-GetDCHook
+
+    .section .text.winapi.SetHookFlags,"ax",%progbits
+    .global SetHookFlags
+    .type SetHookFlags, %function
+    .thumb_func
+SetHookFlags:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =768
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SetHookFlags, .-SetHookFlags
+
     .section .text.winapi.SetBoundsRect,"ax",%progbits
     .global SetBoundsRect
     .type SetBoundsRect, %function
@@ -3559,6 +3831,23 @@ GetBoundsRect:
     bx   r12
     .ltorg
     .size GetBoundsRect, .-GetBoundsRect
+
+    .section .text.winapi.SelectBitmap,"ax",%progbits
+    .global SelectBitmap
+    .type SelectBitmap, %function
+    .thumb_func
+SelectBitmap:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =780
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SelectBitmap, .-SelectBitmap
 
     .section .text.winapi.SetMetaFileBitsBetter,"ax",%progbits
     .global SetMetaFileBitsBetter
@@ -3814,6 +4103,23 @@ ExtTextOut:
     bx   r12
     .ltorg
     .size ExtTextOut, .-ExtTextOut
+
+    .section .text.winapi.GetPhysicalFontHandle,"ax",%progbits
+    .global GetPhysicalFontHandle
+    .type GetPhysicalFontHandle, %function
+    .thumb_func
+GetPhysicalFontHandle:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =1408
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetPhysicalFontHandle, .-GetPhysicalFontHandle
 
     .section .text.winapi.GetAspectRatioFilter,"ax",%progbits
     .global GetAspectRatioFilter
@@ -8999,6 +9305,244 @@ SubtractRect:
     bx   r12
     .ltorg
     .size SubtractRect, .-SubtractRect
+
+    .section .text.winapi.DrawTextEx,"ax",%progbits
+    .global DrawTextEx
+    .type DrawTextEx, %function
+    .thumb_func
+DrawTextEx:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1500
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size DrawTextEx, .-DrawTextEx
+
+    .section .text.winapi.SetMessageExtraInfo,"ax",%progbits
+    .global SetMessageExtraInfo
+    .type SetMessageExtraInfo, %function
+    .thumb_func
+SetMessageExtraInfo:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1504
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SetMessageExtraInfo, .-SetMessageExtraInfo
+
+    .section .text.winapi.SetPropEx,"ax",%progbits
+    .global SetPropEx
+    .type SetPropEx, %function
+    .thumb_func
+SetPropEx:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1512
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SetPropEx, .-SetPropEx
+
+    .section .text.winapi.GetPropEx,"ax",%progbits
+    .global GetPropEx
+    .type GetPropEx, %function
+    .thumb_func
+GetPropEx:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1516
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetPropEx, .-GetPropEx
+
+    .section .text.winapi.RemovePropEx,"ax",%progbits
+    .global RemovePropEx
+    .type RemovePropEx, %function
+    .thumb_func
+RemovePropEx:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1520
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size RemovePropEx, .-RemovePropEx
+
+    .section .text.winapi.SetWindowContextHelpID,"ax",%progbits
+    .global SetWindowContextHelpID
+    .type SetWindowContextHelpID, %function
+    .thumb_func
+SetWindowContextHelpID:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1528
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SetWindowContextHelpID, .-SetWindowContextHelpID
+
+    .section .text.winapi.GetWindowContextHelpID,"ax",%progbits
+    .global GetWindowContextHelpID
+    .type GetWindowContextHelpID, %function
+    .thumb_func
+GetWindowContextHelpID:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1532
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetWindowContextHelpID, .-GetWindowContextHelpID
+
+    .section .text.winapi.SetMenuContextHelpId,"ax",%progbits
+    .global SetMenuContextHelpId
+    .type SetMenuContextHelpId, %function
+    .thumb_func
+SetMenuContextHelpId:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1536
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SetMenuContextHelpId, .-SetMenuContextHelpId
+
+    .section .text.winapi.GetMenuContextHelpId,"ax",%progbits
+    .global GetMenuContextHelpId
+    .type GetMenuContextHelpId, %function
+    .thumb_func
+GetMenuContextHelpId:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1540
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetMenuContextHelpId, .-GetMenuContextHelpId
+
+    .section .text.winapi.LoadImage,"ax",%progbits
+    .global LoadImage
+    .type LoadImage, %function
+    .thumb_func
+LoadImage:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1556
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size LoadImage, .-LoadImage
+
+    .section .text.winapi.CopyImage,"ax",%progbits
+    .global CopyImage
+    .type CopyImage, %function
+    .thumb_func
+CopyImage:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1560
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size CopyImage, .-CopyImage
+
+    .section .text.winapi.DrawIconEx,"ax",%progbits
+    .global DrawIconEx
+    .type DrawIconEx, %function
+    .thumb_func
+DrawIconEx:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1576
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size DrawIconEx, .-DrawIconEx
+
+    .section .text.winapi.GetIconInfo,"ax",%progbits
+    .global GetIconInfo
+    .type GetIconInfo, %function
+    .thumb_func
+GetIconInfo:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1580
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetIconInfo, .-GetIconInfo
+
+    .section .text.winapi.ChildWindowFromPointEx,"ax",%progbits
+    .global ChildWindowFromPointEx
+    .type ChildWindowFromPointEx, %function
+    .thumb_func
+ChildWindowFromPointEx:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1596
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size ChildWindowFromPointEx, .-ChildWindowFromPointEx
 
     .section .text.winapi.GetPriorityClipboardFormat,"ax",%progbits
     .global GetPriorityClipboardFormat

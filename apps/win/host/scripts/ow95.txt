@@ -1,0 +1,19 @@
+# The rest of Win16's KERNEL, USER and GDI from a program on the i386 core
+# (OW95): SwitchStackTo and SwitchStackBack, the sections' names,
+# directories and files, GetVersionEx, the registry's values; DrawTextEx,
+# LoadImage of files, DrawIconEx, GetIconInfo, CopyImage,
+# RegisterClassEx, GetClassInfoEx, ChildWindowFromPointEx, 32-bit
+# properties, help contexts; the visible area, GetClipRgn, SetDCOrg, the
+# DC's hook, GetTextExtentEx:
+#     ./winhost scripts/ow95.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OW95
+key RETURN
+wait 400
+snap o95_more.ppm
+exit
