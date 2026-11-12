@@ -9,6 +9,7 @@
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
+#include <stddef.h>
 #include "wincore.h"
 #include "ne_guest_api.h"
 #include "ne_guest_int.h"
@@ -662,7 +663,12 @@ __attribute__((noinline)) uint16_t ne_open_file(args *a, const char *given)
         return a->bad = 1, (uint16_t)HFILE_ERROR;
     }
     HFILE f = OpenFile(name, &of, mode);
-    if (!win_ne_write(a->ctx, (uint16_t)(ofs >> 16), (uint16_t)ofs, &of, sizeof(of)))
+    /* its fields and the name up to its NUL, as KERNEL's copies it: a
+     * program may keep the structure in less than its 136 bytes (WRITE.EXE
+     * does, its name's length) */
+    of.szPathName[sizeof(of.szPathName) - 1] = 0;
+    uint32_t n = (uint32_t)offsetof(OFSTRUCT, szPathName) + (uint32_t)lstrlen(of.szPathName) + 1u;
+    if (!win_ne_write(a->ctx, (uint16_t)(ofs >> 16), (uint16_t)ofs, &of, n))
         a->bad = 1;
     return (uint16_t)f;
 }

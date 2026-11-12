@@ -84,7 +84,8 @@ static const win_wave_driver *wave_load(HMODULE *module)
     HMODULE h = LoadLibrary(name);
     if (h < 32u)
         return NULL;
-    win_wave_driver_entry get = (win_wave_driver_entry)GetProcAddress(h, "WinWaveDriver");
+    win_wave_driver_entry get =
+        (win_wave_driver_entry)(void (*)(void))GetProcAddress(h, "WinWaveDriver");
     const win_wave_driver *d = get ? get() : NULL;
     if (!d || d->version != WIN_WAVE_DRIVER_VERSION || d->size < sizeof(*d) ||
         !d->present || !d->open || !d->close || !d->submit || !d->finished ||

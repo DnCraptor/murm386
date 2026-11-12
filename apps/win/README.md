@@ -317,7 +317,8 @@ LZEXPAND, INT 2Fh, DPMI, DDEML, the Program Manager's DDE, DDE's messages), `OWF
 it, made by `host/mkfon.py`: its sizes, larger, bold, italic; the VGA
 glyphs larger; a dialog in the font), `OWHELP` (WinHelp), `OWDLG` (COMMDLG's
 Color, Font and Print dialogs, GetFileTitle), `OWMISC` (moveable local
-memory, KEYBOARD, OLECLI: what WRITE.EXE needed), `OWSND` (SOUND, OLESVR),
+memory, KEYBOARD, OLECLI, OpenFile's OFSTRUCT: what WRITE.EXE needed),
+`OWSND` (SOUND, OLESVR),
 `OW31` (the rest of 3.1's USER, GDI, KERNEL) (`make NEFIXTURES` in
 `host/`). All have DOS MZ stubs that explain how to launch them under WINN
 when invoked directly from DOS. `host/test_ne_run` runs them on the

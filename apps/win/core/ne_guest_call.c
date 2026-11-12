@@ -580,6 +580,69 @@ static uint32_t local_used(ne_user *u, int heap)
     return n;
 }
 
+/* a moveable block moved to at (its bytes, its entry's pointer) */
+static void local_move(args *a, ne_user *u, ne_local *o, uint16_t at)
+{
+    uint16_t sel = u->heap[o->heap].sel;
+    uint8_t buf[64], e[4];
+    for (uint32_t k = 0; k < o->size; k += sizeof(buf)) {
+        uint32_t m = o->size - k < sizeof(buf) ? o->size - k : (uint32_t)sizeof(buf);
+        win_ne_read(a->ctx, sel, (uint32_t)o->at + k, buf, m);
+        win_ne_write(a->ctx, sel, (uint32_t)at + k, buf, m);
+    }
+    entry_read(a, u, o, e);
+    o->at = at;
+    entry_write(a, u, o, e[2], e[3]);
+}
+
+/* l made want bytes long where it is, as Windows' heap makes room: the
+ * unlocked moveable blocks in the way moved elsewhere (those it cannot
+ * place, discardable ones, discarded); 0 if a fixed or locked block (or
+ * an entry) is in the way, or there is no room for them */
+static int local_make_room(args *a, ne_user *u, int heap, ne_local *l, uint32_t want,
+                           uint32_t hi)
+{
+    uint32_t from = (uint32_t)l->at + l->size, to = (uint32_t)l->at + want;
+    if (to > hi || (to > u->heap[heap].end && !local_room(a, u, heap, to)))
+        return 0;
+    for (int i = 0; i < u->nlocals; i++) {          /* all of them movable? */
+        ne_local *o = &u->local[i];
+        uint8_t e[4];
+        if (o == l || o->kind == L_FREE || !o->size || o->heap != heap ||
+            o->at >= to || (uint32_t)o->at + o->size <= from)
+            continue;
+        if (o->kind != L_MOVEABLE)
+            return 0;
+        entry_read(a, u, o, e);
+        if (e[2])
+            return 0;
+    }
+    uint16_t size_was = l->size;
+    l->size = (uint16_t)want;                       /* the room claimed */
+    for (int i = 0; i < u->nlocals; i++) {
+        ne_local *o = &u->local[i];
+        if (o == l || o->kind != L_MOVEABLE || !o->size || o->heap != heap ||
+            o->at >= to || (uint32_t)o->at + o->size <= from)
+            continue;
+        uint16_t at = local_place(a, u, heap, o->size, 0);
+        if (at) {
+            local_move(a, u, o, at);
+            continue;
+        }
+        uint8_t e[4];
+        entry_read(a, u, o, e);
+        if (!(e[3] & 0x0fu)) {                      /* not discardable: no room */
+            l->size = size_was;
+            return 0;
+        }
+        o->at = 0;                                  /* discarded */
+        o->size = 0;
+        entry_write(a, u, o, 0, e[3] | LHE_DISCARDED);
+    }
+    l->size = size_was;
+    return 1;
+}
+
 /* LocalReAlloc(h, size, flags): the handle (a moved fixed block's new
  * pointer), 0 if it fails */
 static uint16_t local_realloc(args *a, ne_user *u, int heap, uint16_t h, uint32_t want,
@@ -632,6 +695,12 @@ static uint16_t local_realloc(args *a, ne_user *u, int heap, uint16_t h, uint32_
     uint32_t fit = local_fit(u, heap, tail, hi, want - old, tail & 3u);
     l->size = size_was;
     if (fit == tail && local_room(a, u, heap, (uint32_t)l->at + want)) {
+        local_zero(a, sel, tail, want - old);
+        l->size = (uint16_t)want;
+        return h;
+    }
+    /* where it is, the moveable blocks in its way moved */
+    if (local_make_room(a, u, heap, l, want, hi)) {
         local_zero(a, sel, tail, want - old);
         l->size = (uint16_t)want;
         return h;
