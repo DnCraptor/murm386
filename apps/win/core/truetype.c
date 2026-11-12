@@ -304,6 +304,9 @@ ttfont *tt_open(uint8_t *data, uint32_t size)
         fam_class == 12 || fam_class == 9 ? 0x50 :              /* FF_DECORATIVE */
         panose_family == 2 ? (panose_serif >= 11 && panose_serif <= 13 ? 0x20 : 0x10) :
         panose_family == 3 ? 0x40 : panose_family == 4 || panose_family == 5 ? 0x50 : 0;
+    /* Cyrillic: А and а in the Unicode map, or 1251's in the symbol one */
+    in->cyrillic = f->kind == 1 ? map_lookup(f, 0x0410) && map_lookup(f, 0x0430) :
+                   f->kind == 2 ? map_lookup(f, 0xF0C0) || map_lookup(f, 0xC0) : 1;
     name_of(f, 1, in->family, sizeof(in->family));
     name_of(f, 2, in->style, sizeof(in->style));
     name_of(f, 4, in->full, sizeof(in->full));
@@ -767,6 +770,15 @@ static void sort_crossings(cross *c, int n)
     }
 }
 
+/* the span ending at crossing i goes on: another shape's starts there */
+static int abuts(const cross *c, int n, int i)
+{
+    for (int k = i + 1; k < n && c[k].at - c[i].at < 1.0f / 1024; k++)
+        if (c[k].dir)
+            return 1;
+    return 0;
+}
+
 static void set_px(uint8_t *bits, int pitch, int w, int h, int x, int y)
 {
     if (x >= 0 && x < w && y >= 0 && y < h)
@@ -820,8 +832,9 @@ uint8_t *tt_render_m(const ttfont *f, unsigned glyph, const float m[4], int *w, 
         win_free(es.e);
         return NULL;
     }
-    /* rows: the pixels whose centres are inside, and one for a span
-     * between two centres */
+    /* rows: the pixels whose centres are inside (an edge from y0 up to y1
+     * crosses the centres from y0 on, not y1: a span's bottom is in it, its
+     * top not), and one for a span between two centres */
     for (int r = 0; r < bh; r++) {
         float yc = (float)up - (float)r - 0.5f;
         int n = 0;
@@ -834,14 +847,18 @@ uint8_t *tt_render_m(const ttfont *f, unsigned glyph, const float m[4], int *w, 
             }
         }
         sort_crossings(cr, n);
-        int wind = 0;
+        int wind = 0, on = 0;               /* on: a span goes on past the next start */
         float from = 0;
         for (int i = 0; i < n; i++) {
             int was = wind;
             wind += cr[i].dir;
-            if (!was && wind)
-                from = cr[i].at;
-            else if (was && !wind) {
+            if (!was && wind) {
+                if (!on)
+                    from = cr[i].at;
+                on = 0;
+            } else if (was && !wind) {
+                if ((on = abuts(cr, n, i)) != 0)    /* two shapes side by side: one span */
+                    continue;
                 int c0 = iceil(from - 0.5f), c1 = iceil(cr[i].at - 0.5f) - 1;
                 if (c1 < c0)                        /* thinner than a pixel */
                     set_px(bits, pitch, bw, bh, ifloor((from + cr[i].at) / 2), r);
@@ -850,8 +867,10 @@ uint8_t *tt_render_m(const ttfont *f, unsigned glyph, const float m[4], int *w, 
             }
         }
     }
-    /* columns: only the spans thinner than a pixel (horizontal strokes
-     * between two rows' centres) */
+    /* columns: the spans with no row's centre in them (horizontal strokes
+     * thinner than a pixel), a pixel each; downwards from the top, a span
+     * holds the centres after its top up to its bottom, as the rows have
+     * it */
     for (int c = 0; c < bw; c++) {
         float xc = (float)left + (float)c + 0.5f;
         int n = 0;
@@ -864,15 +883,21 @@ uint8_t *tt_render_m(const ttfont *f, unsigned glyph, const float m[4], int *w, 
             }
         }
         sort_crossings(cr, n);
-        int wind = 0;
+        int wind = 0, on = 0;               /* on: a span goes on past the next start */
         float from = 0;
         for (int i = 0; i < n; i++) {
             int was = wind;
             wind += cr[i].dir;
-            if (!was && wind)
-                from = cr[i].at;
-            else if (was && !wind && iceil(cr[i].at - 0.5f) - 1 < iceil(from - 0.5f))
-                set_px(bits, pitch, bw, bh, c, ifloor((from + cr[i].at) / 2));
+            if (!was && wind) {
+                if (!on)
+                    from = cr[i].at;
+                on = 0;
+            } else if (was && !wind) {
+                if ((on = abuts(cr, n, i)) != 0)
+                    continue;
+                if (ifloor(cr[i].at - 0.5f) < ifloor(from - 0.5f) + 1)
+                    set_px(bits, pitch, bw, bh, c, ifloor((from + cr[i].at) / 2));
+            }
         }
     }
     win_free(cr);

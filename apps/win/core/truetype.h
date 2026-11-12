@@ -26,6 +26,7 @@ typedef struct {
     int      avgw, maxw;            /* OS/2's average width, hhea's largest advance */
     int      weight, italic, fixed, symbol;
     int      family_class;          /* FF_ROMAN, FF_SWISS ... */
+    int      cyrillic;              /* its map has Windows-1251's letters */
 } ttinfo;
 
 /* the rest of what it says, in font units (OUTLINETEXTMETRIC's) */

@@ -236,6 +236,12 @@ static wface *pick(const LOGFONT *lf, int key, int *scale)
                 score += s > 1 ? 30L * (s - 1) : 0;
             }
             score += same == 1 ? 40 : 0;    /* the face itself before one for it */
+            /* of a family's faces ("Arial", "Arial Cyr"): one with the
+             * Windows-1251 letters first (the text is), then the very name */
+            if (same == 2 && !f->cyrillic && lf->lfCharSet != SYMBOL_CHARSET)
+                score += 5;
+            if (same == 2 && lstrcmpi(lf->lfFaceName, f->name))
+                score += 1;
             score += (lf->lfWeight >= 600) != (f->weight >= 600) ? 3 : 0;
             score += !lf->lfItalic && f->italic ? 100 : lf->lfItalic && !f->italic ? 3 : 0;
             if (!best || score < best_score) {

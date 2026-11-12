@@ -235,7 +235,12 @@ res)=SSERIFE.FON"),
 and those AddFontResource adds (RemoveFontResource); TrueType fonts too,
 a .FOT file naming a .TTF one ("Arial (TrueType)=ARIAL.FOT", the .TTF
 looked for beside it, in the Windows and the SYSTEM directory) or the .TTF
-itself, drawn by WINN's own rasterizer (`core/truetype.c`: simple and
+itself (only its name, metrics and character map read at the start; a
+path from the root on the Windows directory's drive; WIN.INI [TrueType]
+TTEnable=0 none of them, TTOnly=1 no raster files of [fonts]; a family's
+regular, bold and italic files its faces, a face with the Windows-1251
+letters before one without for the family's name: "Arial Cyr" for
+"Arial" when Arial has none), drawn by WINN's own rasterizer (`core/truetype.c`: simple and
 composite glyphs, their curves made lines, black and white with dropout
 control as Windows 3.1 has them on a VGA, no hinting) at any height (the
 em's when lfHeight is negative, the cell's when positive), Windows-1251

@@ -23,6 +23,7 @@ typedef struct wface {
     uint8_t *data;                  /* the resource, once drawn */
     uint32_t size;
     int      tt;                    /* TrueType (truetype.h): any size, height 0 */
+    int      cyrillic;              /* has Windows-1251's letters (a raster one: as is) */
     struct ttfont *ttf;             /* its font, once drawn */
 } wface;
 

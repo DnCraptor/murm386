@@ -164,6 +164,41 @@ BOOL win_file_save(const char *path, const void *p, uint32_t size)
     return _lclose(f) == 0 && ok;
 }
 
+uint8_t *win_file_load_parts(const char *path, uint32_t *size, uint32_t max, uint32_t head,
+                             int (*part)(void *ctx, const uint8_t *d, uint32_t size, unsigned i,
+                                         uint32_t *at, uint32_t *len),
+                             void *ctx)
+{
+    HFILE f = path ? _lopen(path, OF_READ) : HFILE_ERROR;
+    if (f == HFILE_ERROR)
+        return NULL;
+    LONG n = _llseek(f, 0, 2);
+    uint8_t *b = n > 0 && (uint32_t)n <= max && (uint32_t)n >= head ?
+                 (uint8_t *)win_alloc((size_t)n) : NULL;
+    if (b) {
+        memset(b, 0, (size_t)n);
+        if (_llseek(f, 0, 0) != 0 || _hread(f, b, (LONG)head) != (LONG)head) {
+            win_free(b);
+            b = NULL;
+        }
+    }
+    for (unsigned i = 0; b; i++) {
+        uint32_t at = 0, len = 0;
+        int r = part(ctx, b, (uint32_t)n, i, &at, &len);
+        if (!r)
+            break;
+        if (r < 0 || at > (uint32_t)n || len > (uint32_t)n - at ||
+            _llseek(f, (LONG)at, 0) != (LONG)at || _hread(f, b + at, (LONG)len) != (LONG)len) {
+            win_free(b);
+            b = NULL;
+        }
+    }
+    _lclose(f);
+    if (b)
+        *size = (uint32_t)n;
+    return b;
+}
+
 uint8_t *win_file_load(const char *path, uint32_t *size, uint32_t max)
 {
     HFILE f = path ? _lopen(path, OF_READ) : HFILE_ERROR;

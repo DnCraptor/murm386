@@ -318,6 +318,14 @@ BOOL     mf_region_op(wdc *dc, int fn, HRGN rgn, HBRUSH br, int w, int h);
 BOOL     win_file_save(const char *path, const void *p, uint32_t size);
 int      win_file_codepage(int set, UINT *active, UINT *system);    /* DOS's (66h) */
 uint8_t *win_file_load(const char *path, uint32_t *size, uint32_t max);
+/* a file's bytes, zeros but for its first head ones and the parts part()
+ * asks for (called with i = 0, 1 ... and what is read so far: 1 and where
+ * the next one is, 0 no more, -1 not the file wanted); NULL if it cannot be
+ * read, is not wanted or is larger than max */
+uint8_t *win_file_load_parts(const char *path, uint32_t *size, uint32_t max, uint32_t head,
+                             int (*part)(void *ctx, const uint8_t *d, uint32_t size, unsigned i,
+                                         uint32_t *at, uint32_t *len),
+                             void *ctx);
 /* a metafile's bits (its header first), and one of a copy of them */
 const uint8_t *mf_bits(HMETAFILE mf, uint32_t *size);
 HMETAFILE mf_from_bits(const uint8_t *p, uint32_t size);

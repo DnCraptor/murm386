@@ -546,6 +546,15 @@ __attribute__((weak)) uint8_t *win_file_load(const char *path, uint32_t *size, u
     return NULL;
 }
 
+__attribute__((weak)) uint8_t *win_file_load_parts(
+    const char *path, uint32_t *size, uint32_t max, uint32_t head,
+    int (*part)(void *ctx, const uint8_t *d, uint32_t size, unsigned i, uint32_t *at, uint32_t *len),
+    void *ctx)
+{
+    (void)path; (void)size; (void)max; (void)head; (void)part; (void)ctx;
+    return NULL;
+}
+
 static BOOL write_file(LPCSTR path, uint8_t *bits, uint32_t size)
 {
     unsigned type = get16(bits);

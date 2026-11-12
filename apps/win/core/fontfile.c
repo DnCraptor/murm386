@@ -15,7 +15,7 @@
 #include "fontfile.h"
 #include "truetype.h"
 
-#define MAX_FACES 64
+#define MAX_FACES 128
 
 static wface *faces[MAX_FACES];
 static int nfaces, scanned;
@@ -61,6 +61,7 @@ static wface *face_of(const uint8_t *d, uint32_t n, const char *path, int nth)
     f->italic = d[80];
     f->weight = (int)u16(d + 83);
     f->charset = d[85];
+    f->cyrillic = 1;                /* its bytes as they are: the file's own */
     f->pixwidth = (int)u16(d + 86);
     f->pitch_family = d[90];
     f->avgw = (int)u16(d + 91);
@@ -138,6 +139,7 @@ static wface *tt_face(const char *path, uint8_t *d, uint32_t n)
     f->weight = in->weight;
     f->italic = in->italic;
     f->charset = in->symbol ? SYMBOL_CHARSET : ANSI_CHARSET;
+    f->cyrillic = in->cyrillic;
     /* bit 0 variable pitch (sic), 2 a vector font, 4 TrueType */
     f->pitch_family = in->family_class | (in->fixed ? 0 : 1) | 2 | 4;
     f->first = 0x20;
@@ -148,9 +150,60 @@ static wface *tt_face(const char *path, uint8_t *d, uint32_t n)
     return f;
 }
 
+/* WIN.INI [TrueType] TTEnable: TrueType fonts there (1, the default) */
+static int tt_enabled(void)
+{
+    return GetProfileInt("TrueType", "TTEnable", 1) != 0;
+}
+
+/* a TrueType file's bytes for its face: the file's size, the tables its
+ * name, metrics and character map are in read, the rest (its glyphs)
+ * zeros (font_tt reads it all when it is drawn); NULL if not TrueType */
+static uint32_t be32(const uint8_t *p)
+{
+    return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
+}
+
+static int tt_part(void *ctx, const uint8_t *d, uint32_t size, unsigned i, uint32_t *at,
+                   uint32_t *len)
+{
+    static const char want[][5] = { "head", "hhea", "maxp", "cmap", "name", "OS/2", "post" };
+    uint32_t *next = (uint32_t *)ctx;           /* the table to look at next */
+    uint32_t count = (uint32_t)d[4] << 8 | d[5];
+    if (!i) {                                   /* the table directory */
+        if (!tt_is_ttf(d, 12) || 12u + 16u * count > size)
+            return -1;
+        *next = 0;
+        *at = 12;
+        *len = 16u * count;
+        return 1;
+    }
+    while (*next < count) {
+        const uint8_t *r = d + 12 + 16 * (*next)++;
+        for (unsigned w = 0; w < sizeof(want) / sizeof(want[0]); w++)
+            if (!memcmp(r, want[w], 4)) {
+                *at = be32(r + 8);
+                *len = be32(r + 12);
+                if (*at > size || *len > size - *at)
+                    return -1;
+                if (w == 6 && *len > 32)
+                    *len = 32;                  /* post's header: not its glyphs' names */
+                return 1;
+            }
+    }
+    return 0;
+}
+
+static uint8_t *tt_load_info(const char *path, uint32_t *size)
+{
+    uint32_t next = 0;
+    return win_file_load_parts(path, size, 0x1000000u, 12, tt_part, &next);
+}
+
 /* a .FOT file's TrueType file: the name in it that ends ".TTF" (where it
- * says, else in the Windows or the system directory); 0 if none */
-static int fot_target(const uint8_t *d, uint32_t n, char *path, int cap)
+ * says, else beside the .FOT, else in the Windows or the system
+ * directory); 0 if none */
+static int fot_target(const char *fot, const uint8_t *d, uint32_t n, char *path, int cap)
 {
     for (uint32_t i = 4; i + 4 <= n; i++) {
         if (d[i] != '.' || (d[i + 1] | 0x20) != 't' || (d[i + 2] | 0x20) != 't' ||
@@ -171,6 +224,21 @@ static int fot_target(const uint8_t *d, uint32_t n, char *path, int cap)
         for (const char *c = name; *c; c++)
             if (*c == '\\' || *c == '/' || *c == ':')
                 base = c + 1;
+        if (fot) {                                  /* beside the .FOT */
+            char beside[160];
+            int dir = 0;
+            for (int i = 0; fot[i]; i++)
+                if (fot[i] == '\\' || fot[i] == '/' || fot[i] == ':')
+                    dir = i + 1;
+            if (dir && dir + lstrlen(base) < (int)sizeof(beside)) {
+                lstrcpyn(beside, fot, dir + 1);
+                lstrcpy(beside + dir, base);
+                if (win_file_attr(beside, 0, 0) >= 0) {
+                    lstrcpyn(path, beside, cap);
+                    return 1;
+                }
+            }
+        }
         win_find_path(base, path, cap);
         return 1;
     }
@@ -183,12 +251,12 @@ static int add_tt(const char *path, uint8_t *d, uint32_t n)
 {
     char ttf[128];
     if (!tt_is_ttf(d, n)) {
-        if (!fot_target(d, n, ttf, sizeof(ttf))) {
+        if (!fot_target(path, d, n, ttf, sizeof(ttf))) {
             win_free(d);
             return 0;
         }
         win_free(d);
-        d = win_file_load(ttf, &n, 0x1000000u);
+        d = tt_load_info(ttf, &n);
         path = ttf;
         if (!d || !tt_is_ttf(d, n)) {
             win_free(d);
@@ -213,7 +281,7 @@ static int is_fot(const uint8_t *d, uint32_t n)
         return 0;
     for (uint32_t i = 0; i + 7 <= n; i++)
         if (!memcmp(d + i, "FONTRES", 7))
-            return fot_target(d, n, ttf, sizeof(ttf));
+            return fot_target(NULL, d, n, ttf, sizeof(ttf));
     return 0;
 }
 
@@ -476,13 +544,28 @@ int font_tt_glyph(wface *f, int key, unsigned char ch, const uint8_t **rows, int
 }
 
 /* the font file's faces into the list: their number */
-static int add_file(const char *path)
+static int add_file(const char *path, int tt_only)
 {
     uint32_t n = 0;
-    uint8_t *d = win_file_load(path, &n, 0x1000000u);
+    uint8_t *d = tt_load_info(path, &n);        /* a .TTF: its tables, not its glyphs */
+    if (d) {
+        if (tt_enabled())
+            return add_tt(path, d, n);
+        win_free(d);
+        return 0;
+    }
+    d = win_file_load(path, &n, 0x1000000u);
     int added = 0;
     if (!d)
         return 0;
+    if (is_fot(d, n) && !tt_enabled()) {
+        win_free(d);
+        return 0;
+    }
+    if (tt_only && !is_fot(d, n)) {             /* [TrueType] TTOnly: no raster ones */
+        win_free(d);
+        return 0;
+    }
     if (tt_is_ttf(d, n) || is_fot(d, n))                    /* TrueType */
         return add_tt(path, d, n);
     if (n >= 2 && (u16(d) == 0x200 || u16(d) == 0x300)) {      /* a .FNT */
@@ -515,15 +598,28 @@ static void scan(void)
     if (scanned)
         return;
     scanned = 1;
-    char keys[1024];
-    int n = GetProfileString("fonts", NULL, "", keys, sizeof(keys));
+    enum { KEYS = 8192 };               /* all the keys: a Windows with its TrueType fonts has many */
+    char *keys = (char *)win_alloc(KEYS);
+    if (!keys)
+        return;
+    int n = GetProfileString("fonts", NULL, "", keys, KEYS);
+    int tt_only = tt_enabled() && GetProfileInt("TrueType", "TTOnly", 0) != 0;
     for (int k = 0; k < n && keys[k]; k += lstrlen(keys + k) + 1) {
-        char file[80], path[128];
+        char file[128], path[160];
         if (GetProfileString("fonts", keys + k, "", file, sizeof(file)) <= 0)
             continue;
-        win_find_path(file, path, sizeof(path));      /* Windows has them in SYSTEM */
-        add_file(path);
+        char wd[96];
+        if ((file[0] == '\\' || file[0] == '/') && GetWindowsDirectory(wd, sizeof(wd)) >= 2 &&
+            wd[1] == ':') {                 /* from the root: the Windows directory's drive */
+            path[0] = wd[0];
+            path[1] = ':';
+            lstrcpyn(path + 2, file, sizeof(path) - 2);
+        } else {
+            win_find_path(file, path, sizeof(path));  /* Windows has them in SYSTEM */
+        }
+        add_file(path, tt_only);
     }
+    win_free(keys);
 }
 
 int font_faces(wface *const **list)
@@ -537,10 +633,7 @@ int font_faces(wface *const **list)
  * directory's or the system one's */
 static void font_path(const char *name, char *path, int size)
 {
-    uint32_t n = 0;
-    uint8_t *d = win_file_load(name, &n, 4);
-    if (d) {
-        win_free(d);
+    if (win_file_attr(name, 0, 0) >= 0) {
         lstrcpyn(path, name, size);
     } else {
         win_find_path(name, path, size);
@@ -561,7 +654,7 @@ int WINAPI AddFontResource(LPCSTR file)
                 c += !lstrcmpi(faces[j]->file, path);
             return c;
         }
-    return add_file(path);
+    return add_file(path, 0);
 }
 
 BOOL WINAPI RemoveFontResource(LPCSTR file)
