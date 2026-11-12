@@ -56,7 +56,17 @@ typedef struct {
     int (*alloc)(void *opaque, uint32_t bytes, uint32_t *linear);
     void (*free)(void *opaque, uint32_t linear);
     int (*write)(void *opaque, uint32_t linear, const void *bytes, uint32_t size);
+    /* the allocation at linear made bytes long where it is: 0 if it cannot
+     * be (what follows is in use); NULL: never */
+    int (*resize)(void *opaque, uint32_t linear, uint32_t bytes);
 } win_ne_guest_io;
+
+#if defined(__arm__) || defined(__thumb__)
+/* DOS's memory for the programs (WINN's trace): the bytes their blocks
+ * have; the largest free block in conventional memory, and with UMBs */
+extern uint32_t win_ne_dos_used;
+void win_ne_dos_free(uint32_t *low, uint32_t *any);
+#endif
 
 typedef struct {
     uint32_t linear;

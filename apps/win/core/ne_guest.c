@@ -1214,7 +1214,25 @@ static int resize(win_ne_guest_image *g, win_ne_guest_segment *s, uint32_t bytes
                   int (*read)(void *, uint32_t, void *, uint32_t))
 {
     uint32_t linear;
-    if (!s || !read || !bytes || bytes > 65536u || !guest_alloc(g, bytes, &linear))
+    if (!s || !read || !bytes || bytes > 65536u)
+        return 0;
+    /* where it is, when what follows is free: no second copy of it while
+     * it moves (DOS's memory is all the programs have) */
+    if (g->io.resize && g->io.resize(g->opaque, s->linear, bytes)) {
+        uint8_t zero[256];
+        memset(zero, 0, sizeof(zero));
+        int ok = 1;
+        for (uint32_t at = s->size; ok && at < bytes; at += sizeof(zero))
+            ok = g->io.write(g->opaque, s->linear + at, zero,
+                             bytes - at < sizeof(zero) ? bytes - at : (uint32_t)sizeof(zero));
+        if (ok && set_descriptor(g, s->selector, s->linear, bytes)) {
+            s->size = bytes;
+            return 1;
+        }
+        g->io.resize(g->opaque, s->linear, s->size);    /* as it was */
+        return 0;
+    }
+    if (!guest_alloc(g, bytes, &linear))
         return 0;
     uint8_t buf[256];
     for (uint32_t at = 0; at < bytes; at += sizeof(buf)) {

@@ -38,7 +38,9 @@ PC *get_PC(void)
     return &pc;
 }
 
-/* DOS memory: first fit in 128K..640K, paragraph aligned, not zeroed */
+/* DOS memory: first fit in 128K..640K (WINN_DOS_TOP, hex: less, as a
+ * smaller DOS has), paragraph aligned, not zeroed */
+#define HOST_TOP (getenv("WINN_DOS_TOP") ? (uint32_t)strtoul(getenv("WINN_DOS_TOP"), 0, 16) : 0xa0000u)
 #define BLOCKS 512           /* WRITE.EXE alone has 84 segments */
 static struct { uint32_t at, size; } used[BLOCKS];
 
@@ -59,7 +61,7 @@ static int host_alloc(void *o, uint32_t bytes, uint32_t *linear)
         if (!clash)
             break;
     }
-    if (at + bytes > 0xa0000)
+    if (at + bytes > HOST_TOP)
         return 0;
     for (int i = 0; i < BLOCKS; i++)
         if (!used[i].size) {
@@ -80,6 +82,29 @@ static void host_free(void *o, uint32_t linear)
             used[i].size = 0;
 }
 
+/* in place: what follows it free (and inside the 640K) */
+static int host_resize(void *o, uint32_t linear, uint32_t bytes)
+{
+    (void)o;
+    if (!bytes || bytes > 65536)
+        return 0;
+    bytes = (bytes + 15) & ~15u;
+    int me = -1;
+    for (int i = 0; i < BLOCKS; i++)
+        if (used[i].size && used[i].at == linear)
+            me = i;
+    if (me < 0 || linear + bytes > HOST_TOP)
+        return 0;
+    for (int i = 0; i < BLOCKS; i++)
+        if (i != me && used[i].size && linear < used[i].at + used[i].size &&
+            used[i].at < linear + bytes)
+            return 0;
+    if (bytes > used[me].size)
+        memset(X86RUN_RAM + linear + used[me].size, 0xa5, bytes - used[me].size);
+    used[me].size = bytes;
+    return 1;
+}
+
 static int host_write(void *o, uint32_t linear, const void *data, uint32_t bytes)
 {
     (void)o;
@@ -91,6 +116,6 @@ static int host_write(void *o, uint32_t linear, const void *data, uint32_t bytes
 
 const win_ne_guest_io *win_ne_guest_dos_io(void)
 {
-    static const win_ne_guest_io io = { host_alloc, host_free, host_write };
+    static const win_ne_guest_io io = { host_alloc, host_free, host_write, host_resize };
     return &io;
 }

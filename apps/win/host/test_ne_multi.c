@@ -49,7 +49,7 @@ static unsigned get_le16(const uint8_t *p) { return p[0] | ((unsigned)p[1] << 8)
 int main(int argc, char **argv)
 {
     assert(argc == 2 && "usage: test_ne_multi generated/NEAPP.EXE");
-    win_ne_guest_io io = { allocate, deallocate, write_guest };
+    win_ne_guest_io io = { allocate, deallocate, write_guest, NULL };
     win_ne_guest_image g;
     assert(win_ne_guest_load(argv[1], &g, &io, NULL) == WIN_NE_OK);
     assert(g.info.segment_count == 2 && g.thunk_count == 3);

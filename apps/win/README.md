@@ -652,10 +652,15 @@ the desktop) opens the Task List, `TASKMAN.EXE` or SYSTEM.INI [boot]
 `taskman.exe`, whose Cascade, Tile and Arrange Icons work on the desktop
 through `CascadeChildWindows`, `TileChildWindows` and
 `ArrangeIconicWindows`. With SYSTEM.INI [debug] `trace=1`, Ctrl+Esc
-first writes `WINNTRACE.LOG` in the Windows directory: the last 256
+first writes `WINNTRAC.LOG` in the Windows directory: the last 256
 calls Win16 programs made of WINN's (the task, the caller's CS:IP, the
-call, DX:AX; one repeated from the same place counted) and where their
-last turns ended, for a program that hangs.
+call, DX:AX; one repeated from the same place counted), where their
+last turns ended, and DOS's memory (what the programs' segments have, the
+largest free block), for a program that hangs. The programs' segments are
+DOS memory blocks, the upper memory blocks first when DOS has them; a
+growing one (a local heap) grows where it is when it can. On the host,
+`WINN_DOS_TOP` (hex) makes DOS's memory end lower than 640K, as a fuller
+DOS has it.
 
 Ctrl+Shift switches between the US and Russian (Windows-1251) layouts.
 Text is ANSI Windows-1251 and is drawn with the CP866 VGA font, or with

@@ -248,7 +248,7 @@ int      user_init(void);                        /* user/dialog.c */
 
 /* profile.c */
 void     win_set_home(const char *exe_path);
-/* trace.c: SYSTEM.INI [debug] trace=1 starts it; the dump: WINNTRACE.LOG */
+/* trace.c: SYSTEM.INI [debug] trace=1 starts it; the dump: WINNTRAC.LOG */
 void     win_trace_init(void);
 void     win_trace_dump(void);
 void     win_path(const char *name, char *out, int size);

@@ -4,8 +4,8 @@
  * made of WINN's (the task, the caller's CS:IP, the call, DX:AX; the same
  * call from the same place again and again counted, not repeated) and the
  * places programs' turns ended at (where one that loops without a call
- * is). Ctrl+Esc (the Task List) writes them to WINNTRACE.LOG in the
- * Windows directory, the oldest first.
+ * is), and DOS's memory. Ctrl+Esc (the Task List) writes them to
+ * WINNTRAC.LOG in the Windows directory, the oldest first.
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
@@ -89,13 +89,20 @@ void win_trace_dump(void)
     if (!calls)
         return;
     char path[160], line[160], name[32];
-    win_path("WINNTRACE.LOG", path, sizeof(path));
+    win_path("WINNTRAC.LOG", path, sizeof(path));
     HFILE f = _lcreat(path, 0);
     if (f == HFILE_ERROR)
         return;
     wsprintf(line, "WINN trace at %lu ms: calls (ms task caller call -> DX:AX xcount)\r\n",
              (unsigned long)GetTickCount());
     put(f, line);
+#if defined(__arm__) || defined(__thumb__)
+    uint32_t low, any;
+    win_ne_dos_free(&low, &any);
+    wsprintf(line, "DOS memory: programs' blocks %lu, largest free %lu (with UMBs %lu)\r\n",
+             (unsigned long)win_ne_dos_used, (unsigned long)low, (unsigned long)any);
+    put(f, line);
+#endif
     unsigned first = ncalls > CALLS ? ncalls - CALLS : 0;
     for (unsigned i = first; i < ncalls; i++) {
         const tcall *t = &calls[i % CALLS];

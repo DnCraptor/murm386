@@ -636,7 +636,9 @@ static uint16_t local_realloc(args *a, ne_user *u, int heap, uint16_t h, uint32_
         l->size = (uint16_t)want;
         return h;
     }
-    if (!moveable && !(flags & LMEM_MOVEABLE) && e[2])
+    /* elsewhere: a fixed block, or a locked one, only when the caller lets
+     * it move (LMEM_MOVEABLE), as Windows has it */
+    if ((!moveable || e[2]) && !(flags & LMEM_MOVEABLE))
         return 0;
     uint16_t n = local_place(a, u, heap, want, 0);   /* elsewhere: moved */
     if (!n)
