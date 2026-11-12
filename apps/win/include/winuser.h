@@ -963,10 +963,41 @@ UINT    WINAPI GetDoubleClickTime(void);
 BOOL    WINAPI SwapMouseButton(BOOL swap);
 BOOL    WINAPI SystemParametersInfo(UINT action, UINT param, LPVOID pv, UINT ini);
 #define SPI_GETBEEP             1
+#define SPI_SETBEEP             2
+#define SPI_GETMOUSE            3
+#define SPI_SETMOUSE            4
+#define SPI_GETBORDER           5
+#define SPI_SETBORDER           6
+#define SPI_GETKEYBOARDSPEED    10
+#define SPI_SETKEYBOARDSPEED    11
+#define SPI_LANGDRIVER          12
+#define SPI_ICONHORIZONTALSPACING 13
+#define SPI_GETSCREENSAVETIMEOUT 14
+#define SPI_SETSCREENSAVETIMEOUT 15
+#define SPI_GETSCREENSAVEACTIVE 16
+#define SPI_SETSCREENSAVEACTIVE 17
+#define SPI_GETGRIDGRANULARITY  18
+#define SPI_SETGRIDGRANULARITY  19
 #define SPI_SETDESKWALLPAPER    20
 #define SPI_SETDESKPATTERN      21
+#define SPI_GETKEYBOARDDELAY    22
+#define SPI_SETKEYBOARDDELAY    23
+#define SPI_ICONVERTICALSPACING 24
+#define SPI_GETICONTITLEWRAP    25
+#define SPI_SETICONTITLEWRAP    26
+#define SPI_GETMENUDROPALIGNMENT 27
+#define SPI_SETMENUDROPALIGNMENT 28
+#define SPI_SETDOUBLECLKWIDTH   29
+#define SPI_SETDOUBLECLKHEIGHT  30
+#define SPI_GETICONTITLELOGFONT 31
 #define SPI_SETDOUBLECLICKTIME  32
 #define SPI_SETMOUSEBUTTONSWAP  33
+#define SPI_SETICONTITLELOGFONT 34
+#define SPI_GETFASTTASKSWITCH   35
+#define SPI_SETFASTTASKSWITCH   36
+#define HWND_BROADCAST          ((HWND)0xFFFF)
+/* the desktop's bitmap: a .BMP file, (LPCSTR)-1 WIN.INI's again */
+BOOL    WINAPI SetDeskWallPaper(LPCSTR file);
 #define SPIF_UPDATEINIFILE      0x0001
 #define SPIF_SENDWININICHANGE   0x0002
 #define WM_WININICHANGE         0x001A
@@ -1285,6 +1316,14 @@ DWORD   WINAPI GetTimerResolution(void);    /* microseconds a tick */
 BOOL    WINAPI IsUserIdle(void);
 void    WINAPI UserYield(void);
 BOOL    WINAPI EnableHardwareInput(BOOL enable);   /* the keyboard's and the mouse's */
+/* Windows 3.1's own USER functions a program may call (wnd.c, menu.c) */
+void    WINAPI EnableOEMLayer(void);
+void    WINAPI DisableOEMLayer(void);
+void    WINAPI UnloadInstalledDrivers(void);
+DWORD   WINAPI IconSize(void);                  /* MAKELONG(width, height) */
+int     WINAPI LockMyTask(BOOL lock);
+HWND    WINAPI GetNextQueueWindow(HWND h, BOOL previous);  /* its task's next one */
+HMENU   WINAPI LookupMenuHandle(HMENU menu, int id);       /* the (sub)menu with id */
 BOOL    WINAPI LockInput(HANDLE reserved, HWND h, BOOL lock);
 BOOL    WINAPI SetMessageQueue(int size);
 DWORD   WINAPI GetSystemDebugState(void);

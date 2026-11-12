@@ -87,6 +87,8 @@ int win_ne_read(win_ne_guest_api_context *ctx, uint16_t sel, uint32_t off, void 
 int win_ne_write(win_ne_guest_api_context *ctx, uint16_t sel, uint32_t off, const void *src,
                  uint32_t n);
 int win_ne_arg(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint32_t off, uint16_t *v);
+/* the program's BX, CX, DX, SI, DI as they were at its call */
+int win_ne_saved_regs(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint16_t r[5]);
 /* a selector freed (GlobalFree, FreeSelector ...): DS and ES of the caller
  * no longer it (0, as Windows does), lest they fault as they are loaded
  * again on the way back */

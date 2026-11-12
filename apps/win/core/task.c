@@ -654,3 +654,37 @@ HANDLE WINAPI SetTaskQueue(HTASK task, HANDLE queue)
 
 void WINAPI PostEvent(HTASK task) { (void)task; }
 BOOL WINAPI IsWinOldApTask(HTASK task) { (void)task; return FALSE; }
+
+/* ---------------------------------------------------------------- Windows 3.1's own */
+
+/* the last error of each task (Windows 95's SetLastError) */
+static struct { HTASK task; DWORD err; } last_error[8];
+
+void WINAPI SetLastError(DWORD err)
+{
+    HTASK t = GetCurrentTask();
+    int free_slot = -1;
+    for (int i = 0; i < 8; i++) {
+        if (last_error[i].task == t) {
+            last_error[i].err = err;
+            return;
+        }
+        if (free_slot < 0 && (!last_error[i].task || !IsTask(last_error[i].task)))
+            free_slot = i;
+    }
+    if (free_slot >= 0) {
+        last_error[free_slot].task = t;
+        last_error[free_slot].err = err;
+    }
+}
+
+DWORD WINAPI GetLastError(void)
+{
+    HTASK t = GetCurrentTask();
+    for (int i = 0; i < 8; i++)
+        if (last_error[i].task == t)
+            return last_error[i].err;
+    return 0;
+}
+
+void WINAPI OldYield(void) { Yield(); }

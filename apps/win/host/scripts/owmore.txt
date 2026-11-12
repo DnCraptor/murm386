@@ -1,0 +1,17 @@
+# The rest of Windows 3.1's USER, KERNEL and SHELL from a Win16 program on
+# the i386 core (OWMORE): an installable driver (OWDRV.DLL, named in
+# SYSTEM.INI), keybd_event and mouse_event, SystemParametersInfo, the
+# registry's keys enumerated and deleted, the environment, LongPtrAdd,
+# GetCodeInfo, the network (none), a wallpaper of its own tiled:
+#     ./winhost scripts/owmore.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OWMORE
+key RETURN
+wait 400
+snap om_more.ppm
+exit

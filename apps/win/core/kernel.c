@@ -639,3 +639,26 @@ HANDLE WINAPI GetAtomHandle(ATOM atom) { return (HANDLE)atom; }
 /* WINN's global memory is never discarded: no order to tell */
 HGLOBAL WINAPI GlobalLRUOldest(HGLOBAL h) { return h; }
 HGLOBAL WINAPI GlobalLRUNewest(HGLOBAL h) { return h; }
+
+/* ---------------------------------------------------------------- Windows 3.1's own */
+
+/* DOS, the kernel, the keyboard's reset: always on, nothing to switch */
+void WINAPI EnableDos(void) {}
+void WINAPI DisableDos(void) {}
+void WINAPI EnableKernel(void) {}
+void WINAPI DisableKernel(void) {}
+int WINAPI KbdRst(void) { return 0; }
+/* the A20 line: always on (the first megabyte's wrap is not used) */
+int WINAPI A20Proc(UINT on) { (void)on; return 0; }
+/* nothing runs from ROM */
+BOOL WINAPI IsRomModule(HMODULE h) { (void)h; return FALSE; }
+BOOL WINAPI IsRomFile(UINT file) { (void)file; return FALSE; }
+/* the retail kernel: no diagnostics */
+BOOL WINAPI DiagQuery(void) { return FALSE; }
+void WINAPI DiagOutput(LPCSTR s) { (void)s; }
+/* the profiles are written as they change; the files are not cached */
+void WINAPI WriteOutProfiles(void) {}
+void WINAPI FlushCachedFileHandle(UINT file) { (void)file; }
+/* no selector is shared between tasks; no compatibility hacks asked for */
+BOOL WINAPI IsSharedSelector(UINT sel) { (void)sel; return FALSE; }
+DWORD WINAPI GetAppCompatFlags(HTASK task) { (void)task; return 0; }

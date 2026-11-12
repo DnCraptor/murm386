@@ -37,9 +37,19 @@ _Static_assert(WIN_NE_RING0_OFFSET + WIN_NE_RING0_BYTES <= WIN_NE_THUNK_SEGMENT_
                "NE ring 0 area exceeds the thunk segment");
 
 /* the GDT after the globals: the ring 3 alias of the thunks, three call
- * gates, the TSS, the ring 0 area, the BIOS data (KERNEL's __0040H) */
+ * gates, the TSS, the ring 0 area, the BIOS data (KERNEL's __0040H), the
+ * first megabyte's segments KERNEL has selectors of (low_segments[]) */
 #define GDT_EXTRA(g) ((uint32_t)(g)->info.segment_count + 3u + WIN_NE_GUEST_GLOBALS)
-#define GDT_EXTRAS 7u
+#define GDT_LOW 7u
+#define GDT_EXTRAS (GDT_LOW + 9u)
+
+/* KERNEL's __0000H, __A000H ...: 64K of the first megabyte each, read
+ * only (a program writes to the screen through GDI) */
+static const struct { uint16_t ordinal; const char *name; uint32_t base; } low_segments[9] = {
+    { 183, "__0000H", 0x00000u }, { 174, "__A000H", 0xa0000u }, { 181, "__B000H", 0xb0000u },
+    { 182, "__B800H", 0xb8000u }, { 195, "__C000H", 0xc0000u }, { 179, "__D000H", 0xd0000u },
+    { 190, "__E000H", 0xe0000u }, { 194, "__F000H", 0xf0000u }, { 173, "__ROMBIOS", 0xf0000u },
+};
 /* then the DLLs' segments */
 #define GDT_DLL(g) (GDT_EXTRA(g) + GDT_EXTRAS)
 
@@ -212,6 +222,7 @@ static const struct {
     { M_KERNEL, 3, "GetVersion", 0 },
     /* DOS: its INT 21h in the thunk itself (ne_guest_int21.c) */
     { M_KERNEL, 102, "DOS3Call", 0 },
+    { M_KERNEL, 101, "NoHookDosCall", 0 },
     { M_KERNEL, 74, "OpenFile", 10 },
     { M_KERNEL, 131, "GetDOSEnvironment", 0 },
     { M_KERNEL, 207, "IsDBCSLeadByte", 2 },
@@ -579,6 +590,101 @@ static const struct {
     { M_GDI, 62, "CreatePenIndirect", 4 },
     { M_GDI, 82, "GetObject", 8 },
     { M_GDI, 93, "GetTextMetrics", 6 },
+    /* the rest of Windows 3.1's (ne_guest_more.c; AllocResource, DirectResAlloc,
+     * AccessResource, SetResourceHandler, AllocAlias: ne_guest_kernel.c) */
+    { M_KERNEL, 26, "GlobalFreeAll", 2 },
+    { M_KERNEL, 27, "GetModuleName", 8 },
+    { M_KERNEL, 28, "GlobalMasterHandle", 0 },
+    { M_KERNEL, 38, "SetTaskSignalProc", 6 },
+    { M_KERNEL, 64, "AccessResource", 4 },
+    { M_KERNEL, 66, "AllocResource", 8 },
+    { M_KERNEL, 67, "SetResourceHandler", 10 },
+    { M_KERNEL, 99, "GetLPErrMode", 0 },
+    { M_KERNEL, 103, "NetBIOSCall", 0 },
+    { M_KERNEL, 104, "GetCodeInfo", 8 },
+    { M_KERNEL, 110, "PatchCodeHandle", 2 },
+    { M_KERNEL, 118, "GetTaskQueueDS", 0 },
+    { M_KERNEL, 119, "GetTaskQueueES", 0 },
+    { M_KERNEL, 130, "FileCDR", 4 },
+    { M_KERNEL, 140, "SetSigHandler", 16 },
+    { M_KERNEL, 157, "GetCurPID", 4 },
+    { M_KERNEL, 168, "DirectResAlloc", 6 },
+    { M_KERNEL, 172, "AllocAlias", 2 },
+    { M_KERNEL, 180, "LongPtrAdd", 8 },
+    { M_KERNEL, 216, "RegEnumKey", 16 },
+    { M_KERNEL, 217, "RegOpenKey", 12 },
+    { M_KERNEL, 218, "RegCreateKey", 12 },
+    { M_KERNEL, 219, "RegDeleteKey", 8 },
+    { M_KERNEL, 220, "RegCloseKey", 4 },
+    { M_KERNEL, 221, "RegSetValue", 20 },
+    { M_KERNEL, 224, "RegQueryValue", 16 },
+    { M_KERNEL, 227, "RegFlushKey", 4 },
+    { M_KERNEL, 311, "GetSetKernelDOSProc", 4 },
+    { M_KERNEL, 318, "FatalExitHook", 4 },
+    { M_KERNEL, 324, "LogError", 6 },
+    { M_KERNEL, 325, "LogParamError", 10 },
+    { M_KERNEL, 338, "HasGPHandler", 4 },
+    { M_KERNEL, 341, "ToolHelpHook", 4 },
+    { M_KERNEL, 355, "GetWinDebugInfo", 6 },
+    { M_KERNEL, 356, "SetWinDebugInfo", 4 },
+    { M_USER, 184, "QuerySendMessage", 10 },
+    { M_USER, 216, "UserSeeUserDo", 8 },
+    { M_USER, 251, "SendDriverMessage", 12 },
+    { M_USER, 252, "OpenDriver", 12 },
+    { M_USER, 253, "CloseDriver", 10 },
+    { M_USER, 254, "GetDriverModuleHandle", 2 },
+    { M_USER, 255, "DefDriverProc", 16 },
+    { M_USER, 256, "GetDriverInfo", 6 },
+    { M_USER, 257, "GetNextDriver", 6 },
+    { M_USER, 273, "ControlPanelInfo", 8 },
+    { M_USER, 289, "keybd_event", 0 },
+    { M_USER, 299, "mouse_event", 0 },
+    { M_USER, 314, "SignalProc", 10 },
+    { M_USER, 321, "SetEventHook", 4 },
+    { M_USER, 337, "GetMouseEventProc", 0 },
+    { M_USER, 483, "SystemParametersInfo", 10 },
+    { M_USER, 285, "SetDeskWallPaper", 4 },
+    { M_USER, 501, "WNetOpenJob", 14 },
+    { M_USER, 502, "WNetCloseJob", 10 },
+    { M_USER, 503, "WNetAbortJob", 6 },
+    { M_USER, 504, "WNetHoldJob", 6 },
+    { M_USER, 505, "WNetReleaseJob", 6 },
+    { M_USER, 506, "WNetCancelJob", 6 },
+    { M_USER, 507, "WNetSetJobCopies", 8 },
+    { M_USER, 508, "WNetWatchQueue", 12 },
+    { M_USER, 509, "WNetUnwatchQueue", 4 },
+    { M_USER, 510, "WNetLockQueueData", 12 },
+    { M_USER, 511, "WNetUnlockQueueData", 4 },
+    { M_USER, 512, "WNetGetConnection", 12 },
+    { M_USER, 513, "WNetGetCaps", 2 },
+    { M_USER, 514, "WNetDeviceMode", 2 },
+    { M_USER, 515, "WNetBrowseDialog", 8 },
+    { M_USER, 516, "WNetGetUser", 8 },
+    { M_USER, 517, "WNetAddConnection", 12 },
+    { M_USER, 518, "WNetCancelConnection", 6 },
+    { M_USER, 519, "WNetGetError", 4 },
+    { M_USER, 520, "WNetGetErrorText", 10 },
+    { M_USER, 523, "WNetRestoreConnection", 6 },
+    { M_USER, 524, "WNetWriteJob", 10 },
+    { M_USER, 525, "WNetConnectDialog", 4 },
+    { M_USER, 526, "WNetDisconnectDialog", 4 },
+    { M_USER, 527, "WNetConnectionDialog", 4 },
+    { M_USER, 528, "WNetViewQueueDialog", 6 },
+    { M_USER, 529, "WNetPropertyDialog", 12 },
+    { M_USER, 530, "WNetGetDirectoryType", 8 },
+    { M_USER, 531, "WNetDirectoryNotify", 8 },
+    { M_USER, 532, "WNetGetPropertyText", 16 },
+    { M_SHELL, 4, "RegDeleteKey", 8 },
+    { M_SHELL, 7, "RegEnumKey", 16 },
+    { M_SHELL, 13, "DragQueryPoint", 6 },
+    { M_SHELL, 36, "ExtractAssociatedIcon", 10 },
+    { M_SHELL, 37, "DoEnvironmentSubst", 6 },
+    { M_SHELL, 38, "FindEnvironmentString", 4 },
+    { M_SHELL, 102, "RegisterShellHook", 4 },
+    { M_SHELL, 262, "DriveType", 4 },
+    { M_TOOLHELP, 81, "TaskSetCSIP", 6 },
+    { M_TOOLHELP, 82, "TaskGetCSIP", 2 },
+    { M_TOOLHELP, 83, "TaskSwitch", 6 },
 };
 
 /* the generic ones (sdk/gen_ne_sigs.py) */
@@ -816,6 +922,12 @@ static int constant_of(const win_ne_guest_image *g, const win_ne_import *imp, ui
             *value = k[i].value ? k[i].value : g ? g->bios_selector : 1;
             return 1;
         }
+    for (unsigned i = 0; i < sizeof(low_segments) / sizeof(low_segments[0]); i++)
+        if (imp->ordinal ? imp->ordinal == low_segments[i].ordinal && !imp->procedure[0]
+                         : name_eq(imp->procedure, low_segments[i].name)) {
+            *value = g ? (uint16_t)((GDT_EXTRA(g) + GDT_LOW + i) * GDT_ENTRY_BYTES | 3u) : 1;
+            return 1;
+        }
     return 0;
 }
 
@@ -976,7 +1088,7 @@ static void thunk_bytes(const win_ne_guest_image *g, uint16_t id, uint16_t at,
 {
     uint16_t args = service_args(id);
     memset(p, 0xcc, THUNK_BYTES);
-    if (id == WIN_NE_SERVICE_DOS3CALL) {
+    if (id == WIN_NE_SERVICE_DOS3CALL || id == 101) {   /* and NoHookDosCall */
         p[0] = 0xcd; p[1] = 0x21;          /* int 21h, with its registers */
         p[2] = 0xcb;                       /* retf */
         return;
@@ -984,6 +1096,17 @@ static void thunk_bytes(const win_ne_guest_image *g, uint16_t id, uint16_t at,
     if (id == WIN_NE_SERVICE_FPMATH) {
         p[0] = 0xe9;                       /* jmp near */
         put16(p + 1, (uint16_t)(WIN_NE_FPMATH_OFFSET - (at + 3u)));
+        return;
+    }
+    if (id == WIN_NE_SERVICE_KEYBD_EVENT || id == WIN_NE_SERVICE_MOUSE_EVENT) {
+        /* the registers are the arguments: AX too, on the stack */
+        p[0] = 0x50;                       /* push ax */
+        p[1] = 0xb8; put16(p + 2, id);     /* mov ax,service */
+        p[4] = 0x9a;                       /* call far api gate */
+        put16(p + 5, 0);
+        put16(p + 7, g->api_gate);
+        p[9] = 0x83; p[10] = 0xc4; p[11] = 0x02;  /* add sp,2 */
+        p[12] = 0xcb;                      /* retf */
         return;
     }
     p[0] = 0xb8; put16(p + 1, id);         /* mov ax,service */
@@ -1105,6 +1228,9 @@ int win_ne_guest_load(const char *path, win_ne_guest_image *out,
     seg_descriptor(out->gdt + out->ring0_selector, out->thunk_linear + WIN_NE_RING0_OFFSET,
                    WIN_NE_RING0_BYTES, 0x92);
     seg_descriptor(out->gdt + (out->bios_selector & ~7u), 0x400u, 0x300u, 0xf0);  /* read-only */
+    for (uint32_t i = 0; i < sizeof(low_segments) / sizeof(low_segments[0]); i++)
+        seg_descriptor(out->gdt + (x + GDT_LOW + i) * GDT_ENTRY_BYTES, low_segments[i].base,
+                       0x10000u, 0xf0);
     out->psp.size = WIN_NE_GUEST_PSP_BYTES;
     out->psp.flags = 1;                 /* data */
     descriptor(out->gdt + (out->psp.selector & ~7u), out->psp.linear, WIN_NE_GUEST_PSP_BYTES, 0);

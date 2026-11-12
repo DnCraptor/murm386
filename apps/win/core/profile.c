@@ -217,7 +217,8 @@ static const char *load(const char *file, int *len)
     return cache_text;
 }
 
-/* Calls fn for every key of [section]; fn returns non-zero to stop. */
+/* Calls fn for every key of [section] (NULL: every section's name, its
+ * value ""); fn returns non-zero to stop. */
 static int scan(const char *file, const char *section,
                 int (*fn)(const char *key, const char *val, void *ctx), void *ctx)
 {
@@ -244,7 +245,10 @@ static int scan(const char *file, const char *section,
             char *e = strchr(s, ']');
             if (e)
                 *e = 0;
-            in = !lstrcmpi(trim(s + 1), section);
+            if (!section)
+                stop = fn(trim(s + 1), "", ctx);
+            else
+                in = !lstrcmpi(trim(s + 1), section);
             continue;
         }
         if (!in)
@@ -490,7 +494,7 @@ int WINAPI GetPrivateProfileString(LPCSTR section, LPCSTR key, LPCSTR def,
     if (!buf || size <= 0)
         return 0;
     pctx p = { key, buf, size, 0, 0 };
-    if (!key) {                       /* all keys, double-NUL terminated */
+    if (!key || !section) {           /* all keys (sections), double-NUL terminated */
         if (size < 2)
             return 0;
         scan(file, section, list_key, &p);

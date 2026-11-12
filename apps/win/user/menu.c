@@ -1219,3 +1219,20 @@ BOOL WINAPI SetSystemMenu(HWND h, HMENU menu)
     w->sysmenu = menu;
     return TRUE;
 }
+
+/* the menu (the given one or one of its popups) with an item of the id */
+HMENU WINAPI LookupMenuHandle(HMENU menu, int id)
+{
+    int n = GetMenuItemCount(menu);
+    for (int i = 0; i < n; i++) {
+        HMENU sub = GetSubMenu(menu, i);
+        if (sub) {
+            HMENU in = LookupMenuHandle(sub, id);
+            if (in)
+                return in;
+        } else if ((int)GetMenuItemID(menu, i) == id) {
+            return menu;
+        }
+    }
+    return 0;
+}

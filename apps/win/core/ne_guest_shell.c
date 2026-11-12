@@ -26,6 +26,8 @@
 #define ERROR_NOT_ENOUGH_MEMORY 8ul
 #define ERROR_INVALID_PARAMETER 87ul
 #define ERROR_MORE_DATA         234ul
+#define ERROR_NO_MORE_ITEMS     259ul
+#define REG_NAMES_BYTES         8192
 #define REG_SZ                  1ul
 
 static struct {
@@ -123,7 +125,37 @@ static int key_create(const char *path)
     return WritePrivateProfileString(section_name(path), REG_PRESENT, "1", REG_FILE);
 }
 
-/* SHELL.1/2/3/5/6. Registry handles and LONG return codes are 32-bit. */
+/* the keys of WINNREG.INI (its sections' names, double-NUL ended), in
+ * a block of win_alloc's; NULL if there is no memory */
+static char *all_keys(void)
+{
+    char *names = (char *)win_alloc(REG_NAMES_BYTES);
+    if (names)
+        GetPrivateProfileString(NULL, NULL, "", names, REG_NAMES_BYTES, REG_FILE);
+    return names;
+}
+
+/* a key's name under path: the rest of it, if it is path's subkey (any
+ * deeper with deep), else NULL */
+static const char *under(const char *key, const char *path, int deep)
+{
+    if (!lstrcmp(key, "_WINN_ROOT"))
+        return NULL;
+    unsigned n = (unsigned)strlen(path);
+    if (n) {
+        if (strlen(key) <= n || key[n] != '\\')
+            return NULL;
+        char head[REG_KEY_BYTES];
+        memcpy(head, key, n);
+        head[n] = 0;
+        if (lstrcmpi(head, path))
+            return NULL;
+        key += n + 1;
+    }
+    return deep || !strchr(key, '\\') ? key : NULL;
+}
+
+/* SHELL.1-7. Registry handles and LONG return codes are 32-bit. */
 int ne_shell_registry_service(args *a, unsigned op, uint32_t *v)
 {
     uint32_t h;
@@ -244,6 +276,60 @@ int ne_shell_registry_service(args *a, unsigned op, uint32_t *v)
             if (!guest_write(a, data_far, value, need))
                 *v = ERROR_INVALID_PARAMETER;
         }
+        return 1;
+    }
+    case 4: {                            /* RegDeleteKey(HKEY, subkey): its subkeys too */
+        h = dw(a, 8);
+        if (!guest_string(a, dw(a, 4), child, sizeof(child)) ||
+            !path_name(task, h, child, path)) {
+            *v = ERROR_INVALID_PARAMETER;
+            return 1;
+        }
+        if (!path[0]) {
+            *v = ERROR_ACCESS_DENIED;
+            return 1;
+        }
+        if (!key_exists(path)) {
+            *v = ERROR_FILE_NOT_FOUND;
+            return 1;
+        }
+        char *names = all_keys();
+        if (!names) {
+            *v = ERROR_NOT_ENOUGH_MEMORY;
+            return 1;
+        }
+        for (const char *k = names; *k; k += strlen(k) + 1)
+            if (under(k, path, 1))
+                WritePrivateProfileString(k, NULL, NULL, REG_FILE);
+        WritePrivateProfileString(path, NULL, NULL, REG_FILE);
+        win_free(names);
+        return 1;
+    }
+    case 7: {                            /* RegEnumKey(HKEY, index, LPSTR, cb) */
+        uint32_t cap = dw(a, 4), dest = dw(a, 8), index = dw(a, 12);
+        const char *base = key_name(task, dw(a, 16));
+        if (!base) {
+            *v = ERROR_INVALID_HANDLE;
+            return 1;
+        }
+        char *names = all_keys();
+        if (!names) {
+            *v = ERROR_NOT_ENOUGH_MEMORY;
+            return 1;
+        }
+        const char *found = NULL;
+        for (const char *k = names; *k && !found; k += strlen(k) + 1) {
+            const char *rest = under(k, base, 0);
+            if (rest && rest[0] && !index--)
+                found = rest;
+        }
+        if (!found)
+            *v = ERROR_NO_MORE_ITEMS;
+        else if (strlen(found) + 1 > cap)
+            *v = ERROR_MORE_DATA;
+        else if (!guest_write(a, dest, found, (unsigned)strlen(found) + 1))
+            *v = ERROR_INVALID_PARAMETER;
+        win_free(names);
         return 1;
     }
     default:

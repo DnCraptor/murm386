@@ -159,6 +159,26 @@ DWORD   WINAPI GetVersion(void);
 HMODULE WINAPI GetModuleHandle(LPCSTR name);
 void    WINAPI FatalExit(int code);
 void    WINAPI OutputDebugString(LPCSTR str);
+/* Windows 3.1's own KERNEL functions a program may call (kernel.c): the
+ * last error (Windows 95's), DOS and the kernel switched on and off, the
+ * debugging and ROM questions; nothing of them to do */
+void    WINAPI SetLastError(DWORD err);
+DWORD   WINAPI GetLastError(void);
+void    WINAPI EnableDos(void);
+void    WINAPI DisableDos(void);
+void    WINAPI EnableKernel(void);
+void    WINAPI DisableKernel(void);
+int     WINAPI KbdRst(void);
+void    WINAPI OldYield(void);
+int     WINAPI A20Proc(UINT on);
+BOOL    WINAPI IsRomModule(HMODULE h);
+BOOL    WINAPI IsRomFile(UINT file);
+BOOL    WINAPI DiagQuery(void);
+void    WINAPI DiagOutput(LPCSTR s);
+void    WINAPI WriteOutProfiles(void);
+void    WINAPI FlushCachedFileHandle(UINT file);
+BOOL    WINAPI IsSharedSelector(UINT sel);
+DWORD   WINAPI GetAppCompatFlags(HTASK task);
 BOOL    WINAPI Yield(void);
 
 int     WINAPI lstrlen(LPCSTR s);

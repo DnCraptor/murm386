@@ -166,35 +166,248 @@ static void set_pattern(const char *s)
     }
 }
 
-void user_load_desktop(void)
+/* ---------------------------------------------------------------- wallpaper */
+
+/* the desktop's bitmap (WIN.INI [Desktop] Wallpaper, a .BMP), centred or
+ * tiled (TileWallpaper=1) over the pattern; 0: none */
+static HBITMAP wallpaper;
+static int wall_w, wall_h, wall_tile;
+
+static uint32_t le32(const uint8_t *p)
 {
-    SetDoubleClickTime(GetProfileInt("windows", "DoubleClickSpeed", 500));
-    SwapMouseButton(GetProfileInt("windows", "SwapMouseButtons", 0) != 0);
-    char v[64];
-    GetProfileString("Desktop", "Pattern", "(None)", v, sizeof(v));
-    set_pattern(v);
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+/* a .BMP file (Windows', BITMAPINFOHEADER) as a bitmap of the screen's */
+static HBITMAP load_bmp(const char *name, int *w, int *h)
+{
+    char path[160];
+    uint32_t n = 0;
+    win_find_path(name, path, sizeof(path));
+    uint8_t *d = win_file_load(path, &n, 1u << 20);
+    HBITMAP bm = 0;
+    if (d && n >= 54 && d[0] == 'B' && d[1] == 'M' && le32(d + 14) == 40) {
+        uint32_t off = le32(d + 10), bits = (uint32_t)(d[28] | d[29] << 8);
+        uint32_t used = le32(d + 46), colours = bits <= 8 ? (used ? used : 1u << bits) : 0;
+        uint32_t info = 40 + colours * 4;
+        /* the header and the colours where they can be read as a structure */
+        BITMAPINFO *bi = (BITMAPINFO *)win_alloc(info);
+        if (bi && 14 + info <= n && off < n) {
+            memcpy(bi, d + 14, info);
+            HDC dc = GetDC(0);
+            bm = CreateDIBitmap(dc, &bi->bmiHeader, CBM_INIT, d + off, bi, DIB_RGB_COLORS);
+            ReleaseDC(0, dc);
+            *w = (int)bi->bmiHeader.biWidth;
+            *h = (int)bi->bmiHeader.biHeight;
+            if (*h < 0)
+                *h = -*h;
+        }
+        win_free(bi);
+    }
+    win_free(d);
+    return bm;
+}
+
+static void set_wallpaper(const char *name)
+{
+    if (wallpaper) {
+        DeleteObject(wallpaper);
+        wallpaper = 0;
+    }
+    if (name && name[0] && lstrcmpi(name, "(None)"))
+        wallpaper = load_bmp(name, &wall_w, &wall_h);
+}
+
+void user_draw_wallpaper(HDC dc, const RECT *rc)
+{
+    if (!wallpaper || wall_w <= 0 || wall_h <= 0)
+        return;
+    HDC mem = CreateCompatibleDC(dc);
+    HGDIOBJ old = SelectObject(mem, wallpaper);
+    if (wall_tile) {
+        for (int y = rc->top; y < rc->bottom; y += wall_h)
+            for (int x = rc->left; x < rc->right; x += wall_w)
+                BitBlt(dc, x, y, wall_w, wall_h, mem, 0, 0, SRCCOPY);
+    } else {
+        BitBlt(dc, (rc->left + rc->right - wall_w) / 2, (rc->top + rc->bottom - wall_h) / 2,
+               wall_w, wall_h, mem, 0, 0, SRCCOPY);
+    }
+    SelectObject(mem, old);
+    DeleteDC(mem);
+}
+
+/* SetDeskWallPaper: a file, or (LPCSTR)-1 the one in WIN.INI again */
+BOOL WINAPI SetDeskWallPaper(LPCSTR file)
+{
+    char v[128];
+    if ((intptr_t)file == -1 || !file) {
+        GetProfileString("Desktop", "Wallpaper", "(None)", v, sizeof(v));
+        file = v;
+    }
+    wall_tile = GetProfileInt("Desktop", "TileWallpaper", 0) != 0;
+    set_wallpaper(file);
+    user_repaint_all();
+    return !file[0] || !lstrcmpi(file, "(None)") || wallpaper != 0;
 }
 
 /* ---------------------------------------------------------------- SystemParametersInfo */
 
+/* what SystemParametersInfo sets and tells, as WIN.INI has them */
+static struct {
+    int beep, mouse[3], border, kb_speed, kb_delay, icon_dx, icon_dy, saver_time, saver_on;
+    int grid, title_wrap, drop_right, dbl_w, dbl_h, fast_switch;
+} spi;
+
+static const struct {
+    int *v;
+    const char *section, *key;
+    int def;
+} spi_keys[] = {
+    { &spi.mouse[0], "windows", "MouseThreshold1", 6 },
+    { &spi.mouse[1], "windows", "MouseThreshold2", 10 },
+    { &spi.mouse[2], "windows", "MouseSpeed", 1 },
+    { &spi.border, "windows", "BorderWidth", 3 },
+    { &spi.kb_speed, "windows", "KeyboardSpeed", 31 },
+    { &spi.kb_delay, "windows", "KeyboardDelay", 2 },
+    { &spi.icon_dx, "Desktop", "IconSpacing", 77 },
+    { &spi.icon_dy, "Desktop", "IconVerticalSpacing", 72 },
+    { &spi.saver_time, "windows", "ScreenSaveTimeOut", 120 },
+    { &spi.saver_on, "windows", "ScreenSaveActive", 0 },
+    { &spi.grid, "Desktop", "GridGranularity", 0 },
+    { &spi.title_wrap, "Desktop", "IconTitleWrap", 1 },
+    { &spi.drop_right, "windows", "MenuDropAlignment", 0 },
+    { &spi.dbl_w, "windows", "DoubleClickWidth", 4 },
+    { &spi.dbl_h, "windows", "DoubleClickHeight", 4 },
+    { &spi.fast_switch, "windows", "CoolSwitch", 1 },
+};
+
+void user_load_desktop(void)
+{
+    SetDoubleClickTime(GetProfileInt("windows", "DoubleClickSpeed", 500));
+    SwapMouseButton(GetProfileInt("windows", "SwapMouseButtons", 0) != 0);
+    char v[128];
+    GetProfileString("windows", "Beep", "yes", v, sizeof(v));
+    spi.beep = !lstrcmpi(v, "yes") || !lstrcmp(v, "1");
+    for (unsigned i = 0; i < sizeof(spi_keys) / sizeof(spi_keys[0]); i++)
+        *spi_keys[i].v = (int)GetProfileInt(spi_keys[i].section, spi_keys[i].key,
+                                            spi_keys[i].def);
+    GetProfileString("Desktop", "Pattern", "(None)", v, sizeof(v));
+    set_pattern(v);
+    wall_tile = GetProfileInt("Desktop", "TileWallpaper", 0) != 0;
+    GetProfileString("Desktop", "Wallpaper", "(None)", v, sizeof(v));
+    set_wallpaper(v);
+}
+
+/* one of spi_keys[] set (WIN.INI too, when asked) */
+static BOOL spi_set(int *var, int value, UINT ini)
+{
+    *var = value;
+    for (unsigned i = 0; (ini & SPIF_UPDATEINIFILE) && i < sizeof(spi_keys) / sizeof(spi_keys[0]); i++)
+        if (spi_keys[i].v == var) {
+            char v[12];
+            wsprintf(v, "%d", value);
+            WriteProfileString(spi_keys[i].section, spi_keys[i].key, v);
+        }
+    return TRUE;
+}
+
+static BOOL spi_get(LPVOID pv, int value)
+{
+    if (!pv)
+        return FALSE;
+    *(int *)pv = value;
+    return TRUE;
+}
+
 BOOL WINAPI SystemParametersInfo(UINT action, UINT param, LPVOID pv, UINT ini)
 {
+    BOOL ok = TRUE;
     switch (action) {
     case SPI_GETBEEP:
-        if (pv)
-            *(BOOL *)pv = TRUE;
+        return spi_get(pv, spi.beep);
+    case SPI_SETBEEP:
+        spi.beep = param != 0;
+        if (ini & SPIF_UPDATEINIFILE)
+            WriteProfileString("windows", "Beep", param ? "yes" : "no");
+        break;
+    case SPI_GETMOUSE:
+        if (!pv)
+            return FALSE;
+        memcpy(pv, spi.mouse, sizeof(spi.mouse));
         return TRUE;
+    case SPI_SETMOUSE:
+        if (!pv)
+            return FALSE;
+        for (int i = 0; i < 3; i++)
+            spi_set(&spi.mouse[i], ((const int *)pv)[i], ini);
+        break;
+    case SPI_GETBORDER: return spi_get(pv, spi.border);
+    case SPI_SETBORDER: ok = spi_set(&spi.border, (int)param, ini); break;
+    case SPI_GETKEYBOARDSPEED: return spi_get(pv, spi.kb_speed);
+    case SPI_SETKEYBOARDSPEED: ok = spi_set(&spi.kb_speed, (int)(param & 31), ini); break;
+    case SPI_GETKEYBOARDDELAY: return spi_get(pv, spi.kb_delay);
+    case SPI_SETKEYBOARDDELAY: ok = spi_set(&spi.kb_delay, (int)(param & 3), ini); break;
+    case SPI_LANGDRIVER:
+        return FALSE;               /* no language driver */
+    case SPI_ICONHORIZONTALSPACING:  /* pv: the spacing; else param sets it */
+        if (pv)
+            return spi_get(pv, spi.icon_dx);
+        ok = spi_set(&spi.icon_dx, (int)param < 32 ? 32 : (int)param, ini);
+        break;
+    case SPI_ICONVERTICALSPACING:
+        if (pv)
+            return spi_get(pv, spi.icon_dy);
+        ok = spi_set(&spi.icon_dy, (int)param < 32 ? 32 : (int)param, ini);
+        break;
+    case SPI_GETSCREENSAVETIMEOUT: return spi_get(pv, spi.saver_time);
+    case SPI_SETSCREENSAVETIMEOUT: ok = spi_set(&spi.saver_time, (int)param, ini); break;
+    case SPI_GETSCREENSAVEACTIVE: return spi_get(pv, spi.saver_on);
+    case SPI_SETSCREENSAVEACTIVE: ok = spi_set(&spi.saver_on, param != 0, ini); break;
+    case SPI_GETGRIDGRANULARITY: return spi_get(pv, spi.grid);
+    case SPI_SETGRIDGRANULARITY: ok = spi_set(&spi.grid, (int)param, ini); break;
+    case SPI_GETICONTITLEWRAP: return spi_get(pv, spi.title_wrap);
+    case SPI_SETICONTITLEWRAP: ok = spi_set(&spi.title_wrap, param != 0, ini); break;
+    case SPI_GETMENUDROPALIGNMENT: return spi_get(pv, spi.drop_right);
+    case SPI_SETMENUDROPALIGNMENT: ok = spi_set(&spi.drop_right, param != 0, ini); break;
+    case SPI_SETDOUBLECLKWIDTH: ok = spi_set(&spi.dbl_w, (int)param, ini); break;
+    case SPI_SETDOUBLECLKHEIGHT: ok = spi_set(&spi.dbl_h, (int)param, ini); break;
+    case SPI_GETFASTTASKSWITCH: return spi_get(pv, spi.fast_switch);
+    case SPI_SETFASTTASKSWITCH: ok = spi_set(&spi.fast_switch, param != 0, ini); break;
+    case SPI_GETICONTITLELOGFONT:
+    case SPI_SETICONTITLELOGFONT: {
+        /* the icon titles' font: the system font's (it is not changed) */
+        if (action == SPI_SETICONTITLELOGFONT)
+            return FALSE;
+        if (!pv)
+            return FALSE;
+        LOGFONT *lf = (LOGFONT *)pv;
+        memset(lf, 0, sizeof(*lf));
+        lf->lfHeight = -8;
+        lf->lfWeight = FW_NORMAL;
+        lf->lfCharSet = ANSI_CHARSET;
+        lf->lfPitchAndFamily = VARIABLE_PITCH | FF_SWISS;
+        lstrcpy(lf->lfFaceName, "MS Sans Serif");
+        return TRUE;
+    }
+    case SPI_SETDESKWALLPAPER:
+        /* the bitmap given, or (pv = -1, NULL) the one in WIN.INI again */
+        if ((intptr_t)pv != -1 && pv && (ini & SPIF_UPDATEINIFILE))
+            WriteProfileString("Desktop", "Wallpaper", (LPCSTR)pv);
+        ok = SetDeskWallPaper((intptr_t)pv == -1 ? (LPCSTR)-1 : pv ? (LPCSTR)pv : "(None)");
+        break;
     case SPI_SETDESKPATTERN:
         /* the pattern given, or (pv = -1) the one in WIN.INI again */
         if ((intptr_t)pv == -1 || !pv) {
-            user_load_desktop();
+            char v[64];
+            GetProfileString("Desktop", "Pattern", "(None)", v, sizeof(v));
+            set_pattern(v);
         } else {
             set_pattern((LPCSTR)pv);
             if (ini & SPIF_UPDATEINIFILE)
                 WriteProfileString("Desktop", "Pattern", (LPCSTR)pv);
         }
         user_repaint_all();
-        return TRUE;
+        break;
     case SPI_SETDOUBLECLICKTIME:
         SetDoubleClickTime(param);
         if (ini & SPIF_UPDATEINIFILE) {
@@ -202,14 +415,18 @@ BOOL WINAPI SystemParametersInfo(UINT action, UINT param, LPVOID pv, UINT ini)
             wsprintf(v, "%u", param);
             WriteProfileString("windows", "DoubleClickSpeed", v);
         }
-        return TRUE;
+        break;
     case SPI_SETMOUSEBUTTONSWAP:
         SwapMouseButton(param != 0);
         if (ini & SPIF_UPDATEINIFILE)
             WriteProfileString("windows", "SwapMouseButtons", param ? "1" : "0");
-        return TRUE;
+        break;
+    default:
+        return FALSE;
     }
-    return FALSE;
+    if (ok && (ini & SPIF_SENDWININICHANGE))
+        SendMessage(HWND_BROADCAST, WM_WININICHANGE, 0, 0);
+    return ok;
 }
 
 int WINAPI GetSystemMetrics(int i)

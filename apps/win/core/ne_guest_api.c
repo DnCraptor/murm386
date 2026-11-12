@@ -186,6 +186,15 @@ static int frame_set(win_ne_guest_api_context *ctx, win_ne_regs *cpu, int at, ui
            ctx->image->io.write(ctx->image->opaque, (uint32_t)(cpu->frame + at), b, 2);
 }
 
+/* the guest's BX, CX, DX, SI, DI as they were when it called (keybd_event
+ * and mouse_event have them as their arguments) */
+int win_ne_saved_regs(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint16_t r[5])
+{
+    return frame_get(ctx, cpu, FR_BX, &r[0]) && frame_get(ctx, cpu, FR_CX, &r[1]) &&
+           frame_get(ctx, cpu, FR_DX, &r[2]) && frame_get(ctx, cpu, FR_SI, &r[3]) &&
+           frame_get(ctx, cpu, FR_DI, &r[4]);
+}
+
 static uint16_t dgroup(const win_ne_guest_image *g)
 {
     uint16_t i = g->info.auto_data ? g->info.auto_data : g->info.ss_index;

@@ -1971,3 +1971,42 @@ BOOL WINAPI DragDetect(HWND h, POINT pt)
     ReleaseCapture();
     return drag;
 }
+
+/* ---------------------------------------------------------------- Windows 3.1's own */
+
+/* the OEM layer (the display, the keyboard, the mouse) is always on;
+ * installable drivers are the programs' (their DLLs go with them) */
+void WINAPI EnableOEMLayer(void) {}
+void WINAPI DisableOEMLayer(void) {}
+void WINAPI UnloadInstalledDrivers(void) {}
+
+DWORD WINAPI IconSize(void)
+{
+    return MAKELONG(GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON));
+}
+
+/* a task locked as the only one taking input: not with WINN's tasks */
+int WINAPI LockMyTask(BOOL lock) { (void)lock; return 0; }
+
+/* the next (previous) visible top-level window of the window's task, after
+ * it in the order of the windows, around; 0 if it is the only one */
+HWND WINAPI GetNextQueueWindow(HWND h, BOOL previous)
+{
+    wwnd *w = user_wnd(h);
+    while (w && w->parent && w->parent != U.desktop)
+        w = w->parent;
+    if (!w || !w->parent)
+        return 0;
+    HTASK task = w->task;
+    HWND start = w->h, cur = start;
+    for (;;) {
+        HWND next = GetWindow(cur, previous ? GW_HWNDPREV : GW_HWNDNEXT);
+        if (!next)
+            next = GetWindow(cur, previous ? GW_HWNDLAST : GW_HWNDFIRST);
+        if (!next || next == start)
+            return 0;
+        if (GetWindowTask(next) == task && IsWindowVisible(next))
+            return next;
+        cur = next;
+    }
+}

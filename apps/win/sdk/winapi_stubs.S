@@ -364,6 +364,40 @@ GetCurrentTask:
     .ltorg
     .size GetCurrentTask, .-GetCurrentTask
 
+    .section .text.winapi.EnableDos,"ax",%progbits
+    .global EnableDos
+    .type EnableDos, %function
+    .thumb_func
+EnableDos:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =164
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size EnableDos, .-EnableDos
+
+    .section .text.winapi.DisableDos,"ax",%progbits
+    .global DisableDos
+    .type DisableDos, %function
+    .thumb_func
+DisableDos:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =168
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size DisableDos, .-DisableDos
+
     .section .text.winapi.GetModuleHandle,"ax",%progbits
     .global GetModuleHandle
     .type GetModuleHandle, %function
@@ -823,6 +857,23 @@ OutputDebugString:
     .ltorg
     .size OutputDebugString, .-OutputDebugString
 
+    .section .text.winapi.OldYield,"ax",%progbits
+    .global OldYield
+    .type OldYield, %function
+    .thumb_func
+OldYield:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =468
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size OldYield, .-OldYield
+
     .section .text.winapi.IsTaskLocked,"ax",%progbits
     .global IsTaskLocked
     .type IsTaskLocked, %function
@@ -839,6 +890,57 @@ IsTaskLocked:
     bx   r12
     .ltorg
     .size IsTaskLocked, .-IsTaskLocked
+
+    .section .text.winapi.KbdRst,"ax",%progbits
+    .global KbdRst
+    .type KbdRst, %function
+    .thumb_func
+KbdRst:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =492
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size KbdRst, .-KbdRst
+
+    .section .text.winapi.EnableKernel,"ax",%progbits
+    .global EnableKernel
+    .type EnableKernel, %function
+    .thumb_func
+EnableKernel:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =496
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size EnableKernel, .-EnableKernel
+
+    .section .text.winapi.DisableKernel,"ax",%progbits
+    .global DisableKernel
+    .type DisableKernel, %function
+    .thumb_func
+DisableKernel:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =500
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size DisableKernel, .-DisableKernel
 
     .section .text.winapi.GetPrivateProfileInt,"ax",%progbits
     .global GetPrivateProfileInt
@@ -942,6 +1044,40 @@ GetDriveType:
     .ltorg
     .size GetDriveType, .-GetDriveType
 
+    .section .text.winapi.SetLastError,"ax",%progbits
+    .global SetLastError
+    .type SetLastError, %function
+    .thumb_func
+SetLastError:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =588
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SetLastError, .-SetLastError
+
+    .section .text.winapi.GetLastError,"ax",%progbits
+    .global GetLastError
+    .type GetLastError, %function
+    .thumb_func
+GetLastError:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =592
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetLastError, .-GetLastError
+
     .section .text.winapi.GetNumTasks,"ax",%progbits
     .global GetNumTasks
     .type GetNumTasks, %function
@@ -1027,6 +1163,23 @@ GlobalLRUNewest:
     .ltorg
     .size GlobalLRUNewest, .-GlobalLRUNewest
 
+    .section .text.winapi.A20Proc,"ax",%progbits
+    .global A20Proc
+    .type A20Proc, %function
+    .thumb_func
+A20Proc:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =660
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size A20Proc, .-A20Proc
+
     .section .text.winapi.WinExec,"ax",%progbits
     .global WinExec
     .type WinExec, %function
@@ -1044,6 +1197,40 @@ WinExec:
     .ltorg
     .size WinExec, .-WinExec
 
+    .section .text.winapi.WriteOutProfiles,"ax",%progbits
+    .global WriteOutProfiles
+    .type WriteOutProfiles, %function
+    .thumb_func
+WriteOutProfiles:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =1260
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size WriteOutProfiles, .-WriteOutProfiles
+
+    .section .text.winapi.FlushCachedFileHandle,"ax",%progbits
+    .global FlushCachedFileHandle
+    .type FlushCachedFileHandle, %function
+    .thumb_func
+FlushCachedFileHandle:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =1276
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size FlushCachedFileHandle, .-FlushCachedFileHandle
+
     .section .text.winapi.IsTask,"ax",%progbits
     .global IsTask
     .type IsTask, %function
@@ -1060,6 +1247,91 @@ IsTask:
     bx   r12
     .ltorg
     .size IsTask, .-IsTask
+
+    .section .text.winapi.IsRomModule,"ax",%progbits
+    .global IsRomModule
+    .type IsRomModule, %function
+    .thumb_func
+IsRomModule:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =1292
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size IsRomModule, .-IsRomModule
+
+    .section .text.winapi.IsRomFile,"ax",%progbits
+    .global IsRomFile
+    .type IsRomFile, %function
+    .thumb_func
+IsRomFile:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =1304
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size IsRomFile, .-IsRomFile
+
+    .section .text.winapi.DiagQuery,"ax",%progbits
+    .global DiagQuery
+    .type DiagQuery, %function
+    .thumb_func
+DiagQuery:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =1356
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size DiagQuery, .-DiagQuery
+
+    .section .text.winapi.DiagOutput,"ax",%progbits
+    .global DiagOutput
+    .type DiagOutput, %function
+    .thumb_func
+DiagOutput:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =1360
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size DiagOutput, .-DiagOutput
+
+    .section .text.winapi.IsSharedSelector,"ax",%progbits
+    .global IsSharedSelector
+    .type IsSharedSelector, %function
+    .thumb_func
+IsSharedSelector:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =1380
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size IsSharedSelector, .-IsSharedSelector
 
     .section .text.winapi._hread,"ax",%progbits
     .global _hread
@@ -1111,6 +1383,23 @@ lstrcpyn:
     bx   r12
     .ltorg
     .size lstrcpyn, .-lstrcpyn
+
+    .section .text.winapi.GetAppCompatFlags,"ax",%progbits
+    .global GetAppCompatFlags
+    .type GetAppCompatFlags, %function
+    .thumb_func
+GetAppCompatFlags:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =1416
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetAppCompatFlags, .-GetAppCompatFlags
 
     .section .text.winapi.SetBkColor,"ax",%progbits
     .global SetBkColor
@@ -2234,6 +2523,23 @@ EnumFonts:
     .ltorg
     .size EnumFonts, .-EnumFonts
 
+    .section .text.winapi.EnumObjects,"ax",%progbits
+    .global EnumObjects
+    .type EnumObjects, %function
+    .thumb_func
+EnumObjects:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =284
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size EnumObjects, .-EnumObjects
+
     .section .text.winapi.EqualRgn,"ax",%progbits
     .global EqualRgn
     .type EqualRgn, %function
@@ -3271,6 +3577,57 @@ SetMetaFileBitsBetter:
     .ltorg
     .size SetMetaFileBitsBetter, .-SetMetaFileBitsBetter
 
+    .section .text.winapi.GetCharABCWidths,"ax",%progbits
+    .global GetCharABCWidths
+    .type GetCharABCWidths, %function
+    .thumb_func
+GetCharABCWidths:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =1228
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetCharABCWidths, .-GetCharABCWidths
+
+    .section .text.winapi.GetOutlineTextMetrics,"ax",%progbits
+    .global GetOutlineTextMetrics
+    .type GetOutlineTextMetrics, %function
+    .thumb_func
+GetOutlineTextMetrics:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =1232
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetOutlineTextMetrics, .-GetOutlineTextMetrics
+
+    .section .text.winapi.GetGlyphOutline,"ax",%progbits
+    .global GetGlyphOutline
+    .type GetGlyphOutline, %function
+    .thumb_func
+GetGlyphOutline:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =1236
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetGlyphOutline, .-GetGlyphOutline
+
     .section .text.winapi.CreateScalableFontResource,"ax",%progbits
     .global CreateScalableFontResource
     .type CreateScalableFontResource, %function
@@ -3287,6 +3644,23 @@ CreateScalableFontResource:
     bx   r12
     .ltorg
     .size CreateScalableFontResource, .-CreateScalableFontResource
+
+    .section .text.winapi.GetFontData,"ax",%progbits
+    .global GetFontData
+    .type GetFontData, %function
+    .thumb_func
+GetFontData:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =1244
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetFontData, .-GetFontData
 
     .section .text.winapi.GetRasterizerCaps,"ax",%progbits
     .global GetRasterizerCaps
@@ -3321,6 +3695,23 @@ EnumFontFamilies:
     bx   r12
     .ltorg
     .size EnumFontFamilies, .-EnumFontFamilies
+
+    .section .text.winapi.GetKerningPairs,"ax",%progbits
+    .global GetKerningPairs
+    .type GetKerningPairs, %function
+    .thumb_func
+GetKerningPairs:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =1328
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetKerningPairs, .-GetKerningPairs
 
     .section .text.winapi.GetTextAlign,"ax",%progbits
     .global GetTextAlign
@@ -4239,6 +4630,40 @@ MessageBox:
     bx   r12
     .ltorg
     .size MessageBox, .-MessageBox
+
+    .section .text.winapi.EnableOEMLayer,"ax",%progbits
+    .global EnableOEMLayer
+    .type EnableOEMLayer, %function
+    .thumb_func
+EnableOEMLayer:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =12
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size EnableOEMLayer, .-EnableOEMLayer
+
+    .section .text.winapi.DisableOEMLayer,"ax",%progbits
+    .global DisableOEMLayer
+    .type DisableOEMLayer, %function
+    .thumb_func
+DisableOEMLayer:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =16
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size DisableOEMLayer, .-DisableOEMLayer
 
     .section .text.winapi.PostQuitMessage,"ax",%progbits
     .global PostQuitMessage
@@ -5548,6 +5973,23 @@ DrawText:
     bx   r12
     .ltorg
     .size DrawText, .-DrawText
+
+    .section .text.winapi.IconSize,"ax",%progbits
+    .global IconSize
+    .type IconSize, %function
+    .thumb_func
+IconSize:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =344
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size IconSize, .-IconSize
 
     .section .text.winapi.EndDialog,"ax",%progbits
     .global EndDialog
@@ -7317,6 +7759,23 @@ TileChildWindows:
     .ltorg
     .size TileChildWindows, .-TileChildWindows
 
+    .section .text.winapi.LookupMenuHandle,"ax",%progbits
+    .global LookupMenuHandle
+    .type LookupMenuHandle, %function
+    .thumb_func
+LookupMenuHandle:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =868
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size LookupMenuHandle, .-LookupMenuHandle
+
     .section .text.winapi.ScrollDC,"ax",%progbits
     .global ScrollDC
     .type ScrollDC, %function
@@ -7946,6 +8405,23 @@ IsZoomed:
     .ltorg
     .size IsZoomed, .-IsZoomed
 
+    .section .text.winapi.GetNextQueueWindow,"ax",%progbits
+    .global GetNextQueueWindow
+    .type GetNextQueueWindow, %function
+    .thumb_func
+GetNextQueueWindow:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1096
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetNextQueueWindow, .-GetNextQueueWindow
+
     .section .text.winapi.RepaintScreen,"ax",%progbits
     .global RepaintScreen
     .type RepaintScreen, %function
@@ -7962,6 +8438,23 @@ RepaintScreen:
     bx   r12
     .ltorg
     .size RepaintScreen, .-RepaintScreen
+
+    .section .text.winapi.LockMyTask,"ax",%progbits
+    .global LockMyTask
+    .type LockMyTask, %function
+    .thumb_func
+LockMyTask:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1104
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size LockMyTask, .-LockMyTask
 
     .section .text.winapi.GetDlgCtrlID,"ax",%progbits
     .global GetDlgCtrlID
@@ -8065,6 +8558,23 @@ RealizePalette:
     .ltorg
     .size RealizePalette, .-RealizePalette
 
+    .section .text.winapi.SetDeskWallPaper,"ax",%progbits
+    .global SetDeskWallPaper
+    .type SetDeskWallPaper, %function
+    .thumb_func
+SetDeskWallPaper:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1140
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SetDeskWallPaper, .-SetDeskWallPaper
+
     .section .text.winapi.GetDesktopWindow,"ax",%progbits
     .global GetDesktopWindow
     .type GetDesktopWindow, %function
@@ -8149,6 +8659,23 @@ LockWindowUpdate:
     bx   r12
     .ltorg
     .size LockWindowUpdate, .-LockWindowUpdate
+
+    .section .text.winapi.UnloadInstalledDrivers,"ax",%progbits
+    .global UnloadInstalledDrivers
+    .type UnloadInstalledDrivers, %function
+    .thumb_func
+UnloadInstalledDrivers:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =1200
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size UnloadInstalledDrivers, .-UnloadInstalledDrivers
 
     .section .text.winapi.DefDlgProc,"ax",%progbits
     .global DefDlgProc

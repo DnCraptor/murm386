@@ -2149,7 +2149,7 @@ int ne_call(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword)
         return 1;
     if (ne_dos_service(a, u, service, v, dword) || text_service(a, service, v, dword) ||
         bitmap_service(a, service, v, dword) || ne_kernel_service(a, u, service, v, dword) ||
-        ne_sys_service(a, u, service, v, dword))
+        ne_sys_service(a, u, service, v, dword) || ne_more_service(a, u, service, v, dword))
         return 1;
     if (service == 0x1194) {            /* GetClassInfo */
         *v = class_info(a, u);

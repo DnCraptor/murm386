@@ -73,6 +73,7 @@ typedef struct ne_user {
      * mode */
     struct { uint16_t type, id, inst; char name[32]; } res[NE_RESOURCES];
     uint16_t error_mode;
+    uint32_t signal_proc;           /* SetTaskSignalProc's (WINN sends no signals) */
     uint16_t handle_delta;          /* LocalHandleDelta's; 0: the default */
     /* ne_guest_call.c: the clipboard's data it got, copies in its memory
      * (freed as it closes or empties the clipboard) */
@@ -188,6 +189,11 @@ uint16_t ne_open_file(args *a, const char *name);
 int ne_sys_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword);
 /* ... the service of a native DLL's export */
 uint16_t win_ne_dll_service(int slot, const struct win_dll_export *e);
+/* ne_guest_more.c: the rest of Windows 3.1's KERNEL, USER (installable
+ * drivers, the input injected, SystemParametersInfo, the network's: none),
+ * SHELL and TOOLHELP; 1 if it is one of them */
+int ne_more_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword);
+void ne_more_task_end(HTASK task);
 /* ne_guest_kernel.c: KERNEL's modules, resources and the rest, GDI's and
  * USER's few left, SHELL; 1 if it is one of them */
 int ne_kernel_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword);

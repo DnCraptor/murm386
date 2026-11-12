@@ -192,6 +192,7 @@ LRESULT CALLBACK user_desktop_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         } else {
             FillRect((HDC)wp, &rc, user_sys_brush(COLOR_BACKGROUND));
         }
+        user_draw_wallpaper((HDC)wp, &rc);
         return 1;
     }
     case WM_NCHITTEST:

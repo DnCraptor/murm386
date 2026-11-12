@@ -76,6 +76,8 @@ SKIP = {
     'DlgDirList', 'DlgDirListComboBox', 'DlgDirSelect', 'DlgDirSelectComboBox',
     # a metafile's bits in global blocks, its records to a procedure: ne_guest_kernel.c
     'GetMetaFileBits', 'SetMetaFileBits', 'SetMetaFileBitsBetter',
+    # its structures (ints of a word, LOGFONT), its strings: ne_guest_more.c
+    'SystemParametersInfo', 'SetDeskWallPaper',
 }
 
 COUNTS = re.compile(r'^(n|c|cb|cch|count|len|nCount|cbString|size)$')

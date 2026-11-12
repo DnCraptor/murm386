@@ -52,6 +52,7 @@ void win_ne_user_end(win_ne_guest_api_context *ctx)
                     DestroyIcon(u->image[i].h);
             ne_call_end(u);
             ne_shell_task_end(u->task);
+            ne_more_task_end(u->task);
             win_free(u->local);
             win_free(u);
             break;

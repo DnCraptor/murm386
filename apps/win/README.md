@@ -79,8 +79,8 @@ rest of WINN's modules, or of Windows' own DLLs WINN has nothing of:
 PENWIN, and LZEXPAND, VER, DDEML, MMSYSTEM, COMMDLG, OLECLI, OLESVR, SOUND when their DLL is
 not there or has not the function) keeps no
 program from loading: as Windows' "undefined dynalink" its call ends the
-program, the function named ("PROG.EXE called USER.216, which WINN does
-not have yet."). A program may import up to 384 of WINN's functions.
+program, the function named ("PROG.EXE called PENWIN.REGISTERPENAPP, which
+WINN does not have yet."). A program may import up to 384 of WINN's functions.
 
 A program's PSP has its DOS environment (2Ch), made before it runs, as
 DOS 3 has it: WINN's strings, the count 1, the program's path (a C
@@ -210,7 +210,32 @@ modules WINN has (KERNEL, USER, GDI, KEYBOARD, SHELL, WIN87EM) and its own
 DLLs (below), FindResource, LoadResource, LockResource, SizeofResource,
 Catch and Throw, GetTempFileName, GetWinFlags, WinExec, SetErrorMode,
 FatalAppExit and the constants __AHINCR, __AHSHIFT, __WINFLAGS, __0040H
-(the BIOS data, read only); palettes, CreateDC and CreateIC, SetSysColors;
+(the BIOS data, read only), __0000H, __A000H, __B000H, __B800H, __C000H,
+__D000H, __E000H, __F000H and __ROMBIOS (the first megabyte's segments,
+read only); the rest of Windows 3.1's (`core/ne_guest_more.c`):
+installable drivers (OpenDriver: a key of SYSTEM.INI's [drivers], or of
+the section given, names the driver's DLL and its parameters, or the name
+is the file; DRV_LOAD and DRV_ENABLE as its DLL is first opened, DRV_OPEN
+with the parameters each time, DRV_CLOSE, DRV_DISABLE and DRV_FREE as the
+last of them closes; SendDriverMessage, DefDriverProc, GetDriverInfo,
+GetNextDriver, GetDriverModuleHandle), keybd_event and mouse_event (their
+arguments the registers: the input as the keyboard's and the mouse's;
+GetMouseEventProc), SystemParametersInfo (all of Windows 3.1's actions,
+kept in WIN.INI with SPIF_UPDATEINIFILE: the beep, the mouse's
+thresholds and speed, the border, the keyboard's speed and delay, the
+icons' spacing and titles, the screen saver's time, the grid, the menus'
+alignment, the double click's size and time, fast task switching, the
+wallpaper and the pattern), SetDeskWallPaper (a .BMP, centred or with
+[Desktop] TileWallpaper=1 tiled), LongPtrAdd (the selector's base moved),
+GetCodeInfo, GetModuleName, AllocResource, DirectResAlloc,
+SetTaskSignalProc, SetLastError and GetLastError, LookupMenuHandle,
+GetNextQueueWindow, IconSize, NoHookDosCall; SHELL's RegDeleteKey (its
+subkeys too), RegEnumKey, DragQueryPoint, DoEnvironmentSubst,
+FindEnvironmentString, ExtractAssociatedIcon and DriveType, KERNEL's
+registry functions the same; the network's (WNet*: WN_NOT_SUPPORTED,
+WNetGetCaps 0); the debugging, ROM, signal and hook functions of the
+kernel and USER answered as a retail Windows 3.1 with nothing of them
+does; palettes, CreateDC and CreateIC, SetSysColors;
 the mapping modes (all of them: the metric and English ones and MM_TWIPS
 at 96 pixels an inch, MM_ISOTROPIC keeping the axes alike; pens, rounded
 corners and blits scale, fonts are realized at the height the mapping
@@ -348,7 +373,9 @@ metrics, glyph bitmaps as they are, turned and wider, an outline drawn, a
 Color, Font and Print dialogs, GetFileTitle), `OWMISC` (moveable local
 memory, KEYBOARD, OLECLI, OpenFile's OFSTRUCT: what WRITE.EXE needed),
 `OWSND` (SOUND, OLESVR),
-`OW31` (the rest of 3.1's USER, GDI, KERNEL) (`make NEFIXTURES` in
+`OW31` (the rest of 3.1's USER, GDI, KERNEL), `OWMORE` with `OWDRV.DLL`
+(an installable driver, keybd_event and mouse_event, SystemParametersInfo,
+the registry enumerated, the environment, a wallpaper) (`make NEFIXTURES` in
 `host/`). All have DOS MZ stubs that explain how to launch them under WINN
 when invoked directly from DOS. `host/test_ne_run` runs them on the
 emulator's own i386 core (`src/i386.c` as it is, built for the host with
@@ -357,13 +384,13 @@ in its `HOSTWIN/` (`scripts/owwin.txt`, `scripts/owmenu.txt`,
 `scripts/owdemo.txt`, `scripts/owfile.txt`, `scripts/owres.txt`,
 `scripts/owkern.txt`, `scripts/owdll.txt`, `scripts/owfpu.txt`, `scripts/owapi.txt`, `scripts/owgdi.txt`,
 `scripts/owapi2.txt`, `scripts/owmeta.txt`, `scripts/owsys.txt`, `scripts/owfont.txt`,
-`scripts/owtt.txt`).
+`scripts/owtt.txt`, `scripts/owmore.txt`).
 
     WINN [:] [program [arguments]]
 
 `WIN.INI` next to `WINN.EXE` (see the sample here) holds what programs
 keep with GetProfileString and WriteProfileString: [windows] (the mouse),
-[Desktop] (the pattern), [colors], [fonts] (font files) and
+[Desktop] (the pattern, the wallpaper), [colors], [fonts] (font files) and
 [Extensions], the documents' programs ("hlp=winhelp.exe ^.hlp"): the File
 Manager, the Program Manager (its items, Run) and ShellExecute open a
 document with them. Without it each setting has its default (text files
@@ -592,8 +619,9 @@ while the logo is up); `logo/mklogo.py` makes both from `logo/logo.png`.
 
 `WIN.INI` next to `WINN.EXE` is read at start, as in Windows 3.1:
 `[colors]` (the system colours, `Name=r g b`), `[Desktop] Pattern` (eight
-row bytes, or `(None)`), `[windows] DoubleClickSpeed` and
-`SwapMouseButtons`. Control Panel (`CONTROL.EXE`) edits them and applies
+row bytes, or `(None)`), `Wallpaper` (a .BMP file, or `(None)`) and
+`TileWallpaper`, `[windows] DoubleClickSpeed` and `SwapMouseButtons`, and
+what SystemParametersInfo keeps (`Beep`, `MouseThreshold1` ...). Control Panel (`CONTROL.EXE`) edits them and applies
 them at once through `SetSysColors` and `SystemParametersInfo`
 (`SPI_SETDESKPATTERN`, `SPI_SETDOUBLECLICKTIME`, `SPI_SETMOUSEBUTTONSWAP`,
 `SPIF_UPDATEINIFILE`); its own `CONTROL.INI` keeps the colour schemes
@@ -667,6 +695,7 @@ use `ucontext`):
     ./winhost scripts/owsnd.txt PROGMAN      # SOUND (tones on stderr), OLESVR
     ./winhost scripts/ow31.txt PROGMAN       # clipboard viewers, ClipCursor, bounds, EnumObjects...
     ./winhost scripts/owtt.txt PROGMAN       # TrueType: WINNTEST.FOT/.TTF (mkttf.py), outlines, metrics
+    ./winhost scripts/owmore.txt PROGMAN     # a driver (OWDRV.DLL), keybd/mouse_event, SPI, wallpaper
     ./winhost scripts/logo.txt PROGMAN       # the logo (copy the BMPs into HOSTWIN first)
     ./winhost800 scripts/vga800.txt  # the VGA800 driver, built in
     ./winhostvga scripts/vga.txt     # the built-in VGA driver (640x480x16), Win16 programs too

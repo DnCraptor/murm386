@@ -1132,7 +1132,8 @@ static __attribute__((noinline)) int kernel_misc(args *a, uint16_t service, uint
     case 175:                           /* AllocSelector(UINT): a copy of it (0: an empty one) */
         *v = win_ne_guest_selector_alloc(g, w(a, 4), -1);
         return 1;
-    case 170: case 171:                 /* AllocCStoDSAlias, AllocDStoCSAlias(UINT) */
+    case 170: case 171: case 172:       /* AllocCStoDSAlias, AllocDStoCSAlias(UINT), */
+                                        /* AllocAlias (a data one) */
         *v = win_ne_guest_selector_alloc(g, w(a, 4), service == 171);
         return 1;
     case 176: case 185: {               /* FreeSelector, GlobalDOSFree(UINT): 0 */
@@ -1507,6 +1508,28 @@ int ne_kernel_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *d
         *dword = 1;
         return 1;
     }
+    case 66: case 168: {                /* AllocResource(HINSTANCE, HRSRC, DWORD), */
+                                        /* DirectResAlloc(HINSTANCE, flags, size) */
+        uint32_t n = service == 66 ? dw(a, 4) : w(a, 4);
+        if (service == 66) {            /* at least the resource's */
+            int i = resource_index(u, w(a, 8));
+            uint8_t *d;
+            uint32_t size = 0;
+            if (i >= 0 && resource_bytes(a, u, i, &d, &size))
+                free(d);
+            if (size > n)
+                n = size;
+        }
+        *v = n && n <= 65536u ? win_ne_guest_global_alloc(g, n) : 0;
+        return 1;
+    }
+    case 64:                            /* AccessResource(HINSTANCE, HRSRC): no file */
+        *v = 0xffff;                    /* handle of the module's own (HFILE_ERROR) */
+        return 1;
+    case 67:                            /* SetResourceHandler(HINSTANCE, type, proc): */
+        *v = 0;                         /* none before (WINN loads them itself) */
+        *dword = 1;
+        return 1;
     case 92:                            /* GetTempDrive: C: */
         *v = 0x3a43;
         return 1;

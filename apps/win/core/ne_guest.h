@@ -28,6 +28,11 @@
  * an INT 21h of its own (the registers are its arguments) */
 #define WIN_NE_SERVICE_KEYBOARD 0x4000u
 #define WIN_NE_SERVICE_DOS3CALL 102u
+/* USER's keybd_event and mouse_event: their arguments are the registers
+ * (AX pushed by the thunk, the first word of the service's stack below the
+ * caller's return address; the others as the gateway saved them) */
+#define WIN_NE_SERVICE_KEYBD_EVENT 0x1121u
+#define WIN_NE_SERVICE_MOUSE_EVENT 0x112bu
 #define WIN_NE_SERVICE_SHELL    0x6000u
 /* WIN87EM's: __FPMATH (1) is x86 code of WINN's (the coprocessor is the
  * emulator's own); the rest native */
