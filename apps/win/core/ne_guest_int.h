@@ -162,6 +162,10 @@ int ne_own_window(ne_user *u, HWND h);
  * messages with pointers, timers, subclassing; 1 if it is one of them */
 int ne_call(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword);
 void ne_call_end(ne_user *u);
+/* ne_guest_shell.c: Win16 SHELL registry and dropped-file operations. */
+int ne_shell_registry_service(args *a, unsigned op, uint32_t *v);
+int ne_shell_drag_service(args *a, unsigned op, uint32_t *v);
+void ne_shell_task_end(HTASK task);
 /* ne_guest_call.c: a DDE message's global memory in lParam (WM_DDE_DATA's
  * ...) as the program's own, a copy of WINN's (remove: retrieved) */
 uint32_t ne_dde_in(win_ne_guest_api_context *c, ne_user *u, UINT msg, uint32_t lp, int remove);

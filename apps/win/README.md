@@ -128,8 +128,9 @@ Windows 3.1's common dialogs: Open and Save As, Find and Replace (the
 program's FINDREPLACE in their messages, kept up to date), Color (the 48
 basic colours, 16 custom ones, a colour defined by hue, saturation and
 luminosity or red, green and blue), Font (the faces of the system's raster
-fonts, their styles, simulated or not, sizes, effects and colour, a
-sample), Print and Print Setup (WINN has no printers: "No default
+and TrueType fonts, the screen's and the "printer's" alike, their styles,
+simulated or not, sizes (a TrueType face's Windows' list, 8 to 72), effects
+and colour, a sample), Print and Print Setup (WINN has no printers: "No default
 printer", PDERR_NODEFAULTPRN), GetFileTitle, CommDlgExtendedError; hooks
 and templates are left out. Native applications call them as they are
 (`include/commdlg.h`): WINN loads the DLL for the task at its first call
@@ -231,7 +232,15 @@ mapping mode has them; fonts: Windows' raster font files (.FON, .FNT,
 versions 2 and 3) WIN.INI's [fonts] names in the Windows directory or its
 SYSTEM, as Windows has them ("MS Sans Serif 8,10,12,14,18,24 (VGA
 res)=SSERIFE.FON"),
-and those AddFontResource adds (RemoveFontResource), their faces found by
+and those AddFontResource adds (RemoveFontResource); TrueType fonts too,
+a .FOT file naming a .TTF one ("Arial (TrueType)=ARIAL.FOT", the .TTF
+looked for beside it, in the Windows and the SYSTEM directory) or the .TTF
+itself, drawn by WINN's own rasterizer (`core/truetype.c`: simple and
+composite glyphs, their curves made lines, black and white with dropout
+control as Windows 3.1 has them on a VGA, no hinting) at any height (the
+em's when lfHeight is negative, the cell's when positive), Windows-1251
+through the font's Unicode map (Latin-1 for a font without Cyrillic) or
+its symbol one; their faces found by
 name (Helv, Arial and Helvetica for MS Sans Serif, Tms Rmn, Times and
 Times New Roman for MS Serif, Courier New for Courier) or by family and
 pitch, the nearest size, made larger by whole numbers (up to 8 times);
@@ -241,7 +250,13 @@ names a font (DS_SETFONT) a font file has is laid out in that font's
 units, bold as Windows 3.x has it, its controls drawn in it (the edit
 controls', list boxes' and combo boxes' lines its height; MapDialogRect,
 WM_GETFONT), the others as before in the system font; EnumFonts and
-EnumFontFamilies (the stock fonts and the files' faces), GetCharWidth, LineDDA, SetTextCharacterExtra; no printers
+EnumFontFamilies (the stock fonts and the files' faces; TrueType ones once
+a family, TRUETYPE_FONTTYPE, their NEWTEXTMETRIC's flags and em),
+GetCharWidth, GetRasterizerCaps (TT_AVAILABLE, TT_ENABLED when there is a
+TrueType font), GetOutlineTextMetrics, GetGlyphOutline (GGO_METRICS,
+GGO_BITMAP, GGO_NATIVE's polygons and quadratic splines, through a MAT2),
+GetFontData, GetCharABCWidths, GetKerningPairs (the kern table's),
+CreateScalableFontResource (a .FOT written), LineDDA, SetTextCharacterExtra; no printers
 (StartDoc and the rest fail, Escape does nothing); no serial or parallel
 ports (OpenComm fails with IE_HARDWARE, the other comm functions with
 their errors); SHELL's ShellExecute (a program, or a document by WIN.INI's
@@ -315,7 +330,11 @@ WINN has not), `OWMETA` (a metafile recorded, played, scaled, enumerated
 record by record, its bits and a file), `OWSYS` (MMSYSTEM, TOOLHELP, VER,
 LZEXPAND, INT 2Fh, DPMI, DDEML, the Program Manager's DDE, DDE's messages), `OWFONT` (a raster font file's faces, `WINNTEST.FON` beside
 it, made by `host/mkfon.py`: its sizes, larger, bold, italic; the VGA
-glyphs larger; a dialog in the font), `OWHELP` (WinHelp), `OWDLG` (COMMDLG's
+glyphs larger; a dialog in the font), `OWTT` (TrueType: `WINNTEST.FOT` and
+`WINNTEST.TTF` beside it, made by `host/mkttf.py` from the VGA glyphs, the
+face "Winn Test TT": its sizes, bold and italic made, Cyrillic, the outline
+metrics, glyph bitmaps as they are, turned and wider, an outline drawn, a
+.FOT made), `OWHELP` (WinHelp), `OWDLG` (COMMDLG's
 Color, Font and Print dialogs, GetFileTitle), `OWMISC` (moveable local
 memory, KEYBOARD, OLECLI, OpenFile's OFSTRUCT: what WRITE.EXE needed),
 `OWSND` (SOUND, OLESVR),
@@ -327,7 +346,8 @@ the stand-ins in `host/x86run/`), and so does the host `winhost`: they are
 in its `HOSTWIN/` (`scripts/owwin.txt`, `scripts/owmenu.txt`,
 `scripts/owdemo.txt`, `scripts/owfile.txt`, `scripts/owres.txt`,
 `scripts/owkern.txt`, `scripts/owdll.txt`, `scripts/owfpu.txt`, `scripts/owapi.txt`, `scripts/owgdi.txt`,
-`scripts/owapi2.txt`, `scripts/owmeta.txt`, `scripts/owsys.txt`, `scripts/owfont.txt`).
+`scripts/owapi2.txt`, `scripts/owmeta.txt`, `scripts/owsys.txt`, `scripts/owfont.txt`,
+`scripts/owtt.txt`).
 
     WINN [:] [program [arguments]]
 
@@ -502,9 +522,10 @@ changes, `ChangeClipboardChain`: WM_CHANGECBCHAIN), `GetPriorityClipboardFormat`
 device's pens and brushes (`EnumObjects`), `IsGDIObject`, `GetCurLogFont`,
 `SetRelAbs`, `SetMapperFlags`, `GetAspectRatioFilter(Ex)`,
 `ResizePalette`, `AnimatePalette` (PC_RESERVED entries, on the screen as
-realized), `Set/GetSystemPaletteUse`, `GetRasterizerCaps` (no TrueType:
-`GetFontData`, `GetGlyphOutline` GDI_ERROR, `GetCharABCWidths`,
-`GetOutlineTextMetrics`, `GetKerningPairs` none); KERNEL's `SetPriority`,
+realized), `Set/GetSystemPaletteUse`, TrueType's (`GetRasterizerCaps`,
+`GetFontData`, `GetGlyphOutline`, `GetCharABCWidths`,
+`GetOutlineTextMetrics`, `GetKerningPairs`, `CreateScalableFontResource`;
+a raster font has none: GDI_ERROR, 0); KERNEL's `SetPriority`,
 `LockCurrentTask`, `Get/SetTaskQueue`, `PostEvent`, `InitAtomTable`,
 `GetAtomHandle` and the like WINN has no use for, done as asked.
 
@@ -635,6 +656,7 @@ use `ucontext`):
     ./winhost scripts/owmisc.txt PROGMAN     # moveable local memory, KEYBOARD, OLECLI
     ./winhost scripts/owsnd.txt PROGMAN      # SOUND (tones on stderr), OLESVR
     ./winhost scripts/ow31.txt PROGMAN       # clipboard viewers, ClipCursor, bounds, EnumObjects...
+    ./winhost scripts/owtt.txt PROGMAN       # TrueType: WINNTEST.FOT/.TTF (mkttf.py), outlines, metrics
     ./winhost scripts/logo.txt PROGMAN       # the logo (copy the BMPs into HOSTWIN first)
     ./winhost800 scripts/vga800.txt  # the VGA800 driver, built in
     ./winhostvga scripts/vga.txt     # the built-in VGA driver (640x480x16), Win16 programs too
@@ -676,8 +698,9 @@ largest free block), for a program that hangs.
 
 Ctrl+Shift switches between the US and Russian (Windows-1251) layouts.
 Text is ANSI Windows-1251 and is drawn with the CP866 VGA font, or with
-the fonts of the font files: their bytes as they are, so the files must
-be the Windows-1251 ones (as a Russian Windows has them) for Cyrillic.
+the fonts of the font files: their bytes as they are, so the raster files
+must be the Windows-1251 ones (as a Russian Windows has them) for
+Cyrillic; TrueType fonts map the characters to Unicode themselves.
 
 ## Not yet
 

@@ -160,6 +160,19 @@ OW31: the rest of Windows 3.1's USER, GDI and KERNEL: "clipboard: draws 2,
     "dc: was 9, bounds 3 5,6,25,16 then 1; pens 20 brushes 22; relabs 1 2;
     window 1; font 1", "gdi: pen 1, pal 1, none 0; palette 5; rasterizer 6
     0; priority 3; font data -1", "system timers 2"
+
+OWTT: TrueType (WINNTEST.FOT and WINNTEST.TTF beside it, mkttf.py: the
+    face "Winn Test TT", AddFontResource): "added 1, caps 3, families 1,
+    faces 1 type 4, fot 1 1" (GetRasterizerCaps, EnumFontFamilies,
+    CreateScalableFontResource: a .FOT made, read, deleted); its em and cell
+    heights, bold and italic made, Cyrillic: "Em 11 ...: Winn Test TT
+    11/9/0 5 69", ...; "otm 161/114: em 1024, 26/-6 gap 0, box 0 26 16 -6,
+    under -4, Winn Test TT, Regular" (GetOutlineTextMetrics); "A: box 14 x
+    22 at 0,22 inc 16,0; bitmap 88, native 988; abc 0 14 2"
+    (GetGlyphOutline, GetCharABCWidths); "file 75108, name 0000 0800,
+    kerning 0, ... 88, none -1" (GetFontData); W, its bitmap as is, turned a
+    quarter and twice as wide (a MAT2); B's GGO_NATIVE outline drawn:
+    "contours 19"
 """
 import sys
 
@@ -7319,6 +7332,409 @@ PROGRAMS = {
             '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
             '0000000067076707000000000000000000000000000000000000000000000000000000000000000000000000'
             '00205e050000'
+        )),
+    'OWTT': (
+        # wcc -bt=windows -ms owtt.c; wlink @owtt.lnk (WINNTEST.FOT and WINNTEST.TTF beside it: mkttf.py)
+        # ---- owtt.c
+        #     #include <windows.h>
+        #     #include <string.h>
+        #
+        #     #define GDI_ERROR 0xFFFFFFFFUL
+        #
+        #     /* TrueType (WINNTEST.FOT and WINNTEST.TTF beside it, mkttf.py: the face
+        #      * "Winn Test TT"; AddFontResource): its sizes (em and cell heights),
+        #      * bold and italic made, Cyrillic; GetTextMetrics, GetTextExtent;
+        #      * GetRasterizerCaps, EnumFontFamilies' TrueType ones;
+        #      * CreateScalableFontResource (a .FOT made, read back, deleted);
+        #      * GetOutlineTextMetrics, GetGlyphOutline (GGO_METRICS, GGO_BITMAP, and
+        #      * that turned by a MAT2, GGO_NATIVE drawn as lines), GetFontData,
+        #      * GetCharABCWidths, GetKerningPairs; as text */
+        #     static int added, tt_fams, tt_faces, tt_type, caps, made, fot_mz;
+        #     static char path[128], dir[128];
+        #
+        #     int FAR PASCAL FamProc(LOGFONT FAR *lf, TEXTMETRIC FAR *tm, int type, LPARAM lp)
+        #     {
+        #         if (lp)
+        #             tt_faces++, tt_type = type;
+        #         else if (type & TRUETYPE_FONTTYPE)
+        #             tt_fams++;
+        #         return 1;
+        #     }
+        #
+        #     static HFONT make(int height, int weight, BYTE italic)
+        #     {
+        #         return CreateFont(height, 0, 0, 0, weight, italic, 0, 0, 0, 0, 0, 0, 0, "Winn Test TT");
+        #     }
+        #
+        #     static void line(HDC dc, int *y, int height, int weight, BYTE italic, LPCSTR text)
+        #     {
+        #         HFONT f = make(height, weight, italic);
+        #         HFONT old = SelectObject(dc, f);
+        #         TEXTMETRIC tm;
+        #         char name[40], s[120];
+        #         DWORD ext;
+        #         GetTextMetrics(dc, &tm);
+        #         GetTextFace(dc, sizeof(name), name);
+        #         ext = GetTextExtent(dc, text, lstrlen(text));
+        #         wsprintf(s, "%s: %s %d/%d/%d %d %d", text, (LPSTR)name, tm.tmHeight, tm.tmAscent,
+        #                  tm.tmInternalLeading, tm.tmAveCharWidth, LOWORD(ext));
+        #         TextOut(dc, 8, *y, s, lstrlen(s));
+        #         *y += tm.tmHeight + tm.tmExternalLeading + 1;
+        #         SelectObject(dc, old);
+        #         DeleteObject(f);
+        #     }
+        #
+        #     /* a line of text in the system font */
+        #     static void out(HDC dc, int *y, LPCSTR s)
+        #     {
+        #         HFONT cur = SelectObject(dc, GetStockObject(SYSTEM_FONT));
+        #         TextOut(dc, 8, *y, s, lstrlen(s));
+        #         SelectObject(dc, cur);
+        #         *y += 16;
+        #     }
+        #
+        #     static FIXED fx(int v)
+        #     {
+        #         FIXED f;
+        #         f.fract = 0;
+        #         f.value = v;
+        #         return f;
+        #     }
+        #
+        #     /* a glyph's GGO_BITMAP drawn at x, y (its top left) */
+        #     static void bitmap(HDC dc, int x, int y, UINT ch, MAT2 FAR *m)
+        #     {
+        #         GLYPHMETRICS gm;
+        #         DWORD n = GetGlyphOutline(dc, ch, GGO_BITMAP, &gm, 0, NULL, m);
+        #         HGLOBAL hg;
+        #         BYTE FAR *bits;
+        #         HBITMAP bm;
+        #         HDC mem;
+        #         int pitch = (gm.gmBlackBoxX + 31) / 32 * 4;
+        #         if (n == GDI_ERROR || !n)
+        #             return;
+        #         hg = GlobalAlloc(GMEM_MOVEABLE, n);
+        #         bits = GlobalLock(hg);
+        #         GetGlyphOutline(dc, ch, GGO_BITMAP, &gm, n, bits, m);
+        #         bm = CreateBitmap(pitch * 8, gm.gmBlackBoxY, 1, 1, bits);
+        #         mem = CreateCompatibleDC(dc);
+        #         SelectObject(mem, bm);
+        #         BitBlt(dc, x, y, gm.gmBlackBoxX, gm.gmBlackBoxY, mem, 0, 0, NOTSRCCOPY);  /* 1: ink */
+        #         DeleteDC(mem);
+        #         DeleteObject(bm);
+        #         GlobalUnlock(hg);
+        #         GlobalFree(hg);
+        #     }
+        #
+        #     /* a glyph's GGO_NATIVE outline as lines, its origin at x, y; its contours */
+        #     static int native(HDC dc, int x, int y, UINT ch)
+        #     {
+        #         GLYPHMETRICS gm;
+        #         DWORD n = GetGlyphOutline(dc, ch, GGO_NATIVE, &gm, 0, NULL, NULL), at = 0;
+        #         HGLOBAL hg;
+        #         BYTE FAR *b;
+        #         int contours = 0;
+        #         if (n == GDI_ERROR || !n)
+        #             return -1;
+        #         hg = GlobalAlloc(GMEM_MOVEABLE, n);
+        #         b = GlobalLock(hg);
+        #         GetGlyphOutline(dc, ch, GGO_NATIVE, &gm, n, b, NULL);
+        #         while (at < n) {
+        #             TTPOLYGONHEADER FAR *h = (TTPOLYGONHEADER FAR *)(b + at);
+        #             DWORD c = at + sizeof(TTPOLYGONHEADER);
+        #             MoveTo(dc, x + h->pfxStart.x.value, y - h->pfxStart.y.value);
+        #             while (c < at + h->cb) {
+        #                 TTPOLYCURVE FAR *pc = (TTPOLYCURVE FAR *)(b + c);
+        #                 UINT i;
+        #                 for (i = 0; i < pc->cpfx; i++)
+        #                     LineTo(dc, x + pc->apfx[i].x.value, y - pc->apfx[i].y.value);
+        #                 c += 4 + 8 * pc->cpfx;
+        #             }
+        #             LineTo(dc, x + h->pfxStart.x.value, y - h->pfxStart.y.value);
+        #             contours++;
+        #             at += h->cb;
+        #         }
+        #         GlobalUnlock(hg);
+        #         GlobalFree(hg);
+        #         return contours;
+        #     }
+        #
+        #     long FAR PASCAL WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+        #     {
+        #         PAINTSTRUCT ps;
+        #         HDC dc;
+        #         int y = 2;
+        #         char s[160], fam[40];
+        #         HFONT f, old;
+        #         OUTLINETEXTMETRIC FAR *otm;
+        #         GLYPHMETRICS gm;
+        #         ABC abc;
+        #         MAT2 m;
+        #         DWORD bmp, nat, size, name;
+        #         WORD need;
+        #         HGLOBAL hg;
+        #         switch (msg) {
+        #         case WM_PAINT:
+        #             dc = BeginPaint(h, &ps);
+        #             SetBkMode(dc, TRANSPARENT);
+        #             wsprintf(s, "added %d, caps %d, families %d, faces %d type %d, fot %d %d", added, caps,
+        #                      tt_fams, tt_faces, tt_type, made, fot_mz);
+        #             TextOut(dc, 8, y, s, lstrlen(s));
+        #             y += 16;
+        #             line(dc, &y, -11, FW_NORMAL, 0, "Em 11 \xcf\xf0\xe8\xe2\xe5\xf2");
+        #             line(dc, &y, 16, FW_NORMAL, 0, "Cell 16");
+        #             line(dc, &y, -16, FW_BOLD, 0, "Bold made");
+        #             line(dc, &y, 20, FW_NORMAL, 1, "Italic made");
+        #             line(dc, &y, -32, FW_NORMAL, 0, "Em 32 \xc0\xe1\xe2");
+        #             f = make(-32, FW_NORMAL, 0);
+        #             old = SelectObject(dc, f);
+        #             need = GetOutlineTextMetrics(dc, 0, NULL);
+        #             hg = GlobalAlloc(GMEM_MOVEABLE, need);
+        #             otm = (OUTLINETEXTMETRIC FAR *)GlobalLock(hg);
+        #             GetOutlineTextMetrics(dc, need, otm);
+        #             lstrcpy(fam, (LPSTR)otm + (WORD)otm->otmpFamilyName);
+        #             wsprintf(s, "otm %d/%d: em %u, %d/%d gap %u, box %d %d %d %d, under %d, %s, %s",
+        #                      need, sizeof(OUTLINETEXTMETRIC), otm->otmEMSquare, otm->otmAscent,
+        #                      otm->otmDescent, otm->otmLineGap, otm->otmrcFontBox.left,
+        #                      otm->otmrcFontBox.top, otm->otmrcFontBox.right, otm->otmrcFontBox.bottom,
+        #                      otm->otmsUnderscorePosition, (LPSTR)fam,
+        #                      (LPSTR)otm + (WORD)otm->otmpStyleName);
+        #             GlobalUnlock(hg);
+        #             GlobalFree(hg);
+        #             out(dc, &y, s);
+        #             GetGlyphOutline(dc, 'A', GGO_METRICS, &gm, 0, NULL, NULL);
+        #             bmp = GetGlyphOutline(dc, 'A', GGO_BITMAP, NULL, 0, NULL, NULL);
+        #             nat = GetGlyphOutline(dc, 'A', GGO_NATIVE, NULL, 0, NULL, NULL);
+        #             GetCharABCWidths(dc, 'A', 'A', &abc);
+        #             size = GetFontData(dc, 0, 0, NULL, 0);
+        #             GetFontData(dc, 0x656d616eUL, 0, &name, 4);     /* "name": its format, count */
+        #             wsprintf(s, "A: box %u x %u at %d,%d inc %d,%d; bitmap %lu, native %lu; abc %d %u %d",
+        #                      gm.gmBlackBoxX, gm.gmBlackBoxY, gm.gmptGlyphOrigin.x, gm.gmptGlyphOrigin.y,
+        #                      gm.gmCellIncX, gm.gmCellIncY, bmp, nat, abc.abcA, abc.abcB, abc.abcC);
+        #             out(dc, &y, s);
+        #             wsprintf(s, "file %lu, name %04x %04x, kerning %d, \xc6 %lu, none %ld", size,
+        #                      (WORD)name, HIWORD(name), GetKerningPairs(dc, 0, NULL),
+        #                      GetGlyphOutline(dc, 0xc6, GGO_BITMAP, NULL, 0, NULL, NULL),
+        #                      GetFontData(dc, 0x4e524b4bUL, 0, NULL, 0));
+        #             out(dc, &y, s);
+        #             y += 4;
+        #             _fmemset(&m, 0, sizeof(m));
+        #             m.eM11 = fx(1);
+        #             m.eM22 = fx(1);
+        #             bitmap(dc, 8, y, 'W', &m);
+        #             bitmap(dc, 40, y, 0xc6, NULL);
+        #             m.eM11 = fx(0);
+        #             m.eM22 = fx(0);
+        #             m.eM12 = fx(1);                                 /* turned a quarter left */
+        #             m.eM21 = fx(-1);
+        #             bitmap(dc, 80, y, 'W', &m);
+        #             m.eM12 = fx(0);
+        #             m.eM21 = fx(0);
+        #             m.eM11 = fx(2);                                 /* twice as wide */
+        #             m.eM22 = fx(1);
+        #             bitmap(dc, 120, y, 'W', &m);
+        #             SelectObject(dc, old);
+        #             DeleteObject(f);
+        #             f = make(-96, FW_NORMAL, 0);
+        #             old = SelectObject(dc, f);
+        #             wsprintf(s, "contours %d", native(dc, 200, y + 90, 'B'));
+        #             SelectObject(dc, old);
+        #             DeleteObject(f);
+        #             TextOut(dc, 300, y + 40, s, lstrlen(s));
+        #             out(dc, &y, "");
+        #             EndPaint(h, &ps);
+        #             return 0;
+        #         case WM_DESTROY:
+        #             RemoveFontResource(path);
+        #             PostQuitMessage(0);
+        #             return 0;
+        #         }
+        #         return DefWindowProc(h, msg, wp, lp);
+        #     }
+        #
+        #     int PASCAL WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR cmd, int show)
+        #     {
+        #         WNDCLASS wc;
+        #         HWND h;
+        #         MSG m;
+        #         HDC dc;
+        #         char *p, fot[140];
+        #         RASTERIZER_STATUS rs;
+        #         OFSTRUCT of;
+        #         HFILE hf;
+        #         WORD mz = 0;
+        #         GetModuleFileName(hInstance, path, sizeof(path));
+        #         for (p = path + lstrlen(path); p > path && p[-1] != '\\'; p--)
+        #             ;
+        #         lstrcpy(p, "WINNTEST.FOT");
+        #         lstrcpy(dir, path);
+        #         dir[p > path ? p - path - 1 : 0] = 0;   /* its directory ("": the current one) */
+        #         added = AddFontResource(path);
+        #         GetRasterizerCaps(&rs, sizeof(rs));
+        #         caps = rs.wFlags;
+        #         dc = GetDC(NULL);
+        #         EnumFontFamilies(dc, NULL, (FONTENUMPROC)FamProc, (LPSTR)NULL);
+        #         EnumFontFamilies(dc, "Winn Test TT", (FONTENUMPROC)FamProc, (LPSTR)"x");
+        #         ReleaseDC(NULL, dc);
+        #         /* a .FOT made for the same file, read back, deleted */
+        #         lstrcpy(fot, dir);
+        #         lstrcat(fot, dir[0] ? "\\OWTT.FOT" : "OWTT.FOT");
+        #         made = CreateScalableFontResource(0, fot, "WINNTEST.TTF", dir);
+        #         hf = _lopen(fot, READ);
+        #         if (hf != HFILE_ERROR) {
+        #             _lread(hf, &mz, 2);
+        #             _lclose(hf);
+        #         }
+        #         fot_mz = mz == 0x5a4d;
+        #         OpenFile(fot, &of, OF_DELETE);
+        #         _fmemset(&wc, 0, sizeof(wc));
+        #         wc.lpfnWndProc = WndProc;
+        #         wc.hInstance = hInstance;
+        #         wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        #         wc.hbrBackground = GetStockObject(WHITE_BRUSH);
+        #         wc.lpszClassName = "OwTT";
+        #         RegisterClass(&wc);
+        #         h = CreateWindow("OwTT", "TrueType", WS_OVERLAPPEDWINDOW, 0, 0, 640, 470, NULL, NULL,
+        #                          hInstance, NULL);
+        #         ShowWindow(h, show);
+        #         UpdateWindow(h);
+        #         while (GetMessage(&m, NULL, 0, 0)) {
+        #             TranslateMessage(&m);
+        #             DispatchMessage(&m);
+        #         }
+        #         return m.wParam;
+        #     }
+        # ---- owtt.lnk
+        #     system windows
+        #     name owtt.exe
+        #     file owtt.o
+        bytes.fromhex(
+            '4d5a80000100000004000000ffff0000b8000000000000004000000000000000000000000000000000000000'
+            '00000000000000000000000000000000800000000e1fba0e00b409cd21b8014ccd2154686973206973206120'
+            '57696e646f77732031362d6269742065786563757461626c650d0a240000000000000000000000004e450501'
+            '6f0002000000000002030200000400206a0b010000000200020003000c0040005000500058005e00f1000000'
+            '000001000000020000000000000000037f00640e400d640e7609a202410cb003044f57545400000001000500'
+            '0c000003474449064b45524e454c04555345520000086f7774742e65786500000000ccebfd90909090001e58'
+            '90455589e51e8ed8b80800e8090b8b560a8b46080b4606740a8916a203ff06a403eb09f6c2047404ff06ac03'
+            'b801001f5d4dca0e0050b82200e8db0a58515031c05050505288d830e45030d85030c05050505050501eb810'
+            '00509affff000059c35589e550b8e600e8ac0a58565781ecc40089c689d789d889ca8a5e0430ffe8b3ff8946'
+            'f856509affff00008946fa568d56d81e529affff000056b82800508d56b01e529affff000056ff7608ff7606'
+            'ff7608ff76069affff0000509affff000050ff76e2ff76deff76daff76d88d56b01e52ff7608ff76061eb81d'
+            '00508d9638ff1e529affff000083c41a56b8080050ff358d9638ff1e521e529affff0000509affff00008b46'
+            'd80346e040010556ff76fa9affff0000ff76f89affff00008d66fc5f5e5dc206005589e550b81a00e8e40958'
+            '565783ec0689c789d6895ef8894efa50b80d00509affff0000509affff00008946f657b8080050ff34ff76fa'
+            'ff76f8ff76faff76f89affff0000509affff000057ff76f69affff00008304108d66fc5f5e5dc350b80200e8'
+            '89095889c231c0c35589e550b83a00e8790958565783ec1c89c78956f6895ef4894ef85051b80100508d76e0'
+            '1e5631c050505050ff7606ff76049affff00008946fa89d68b46e0051f00b105d3e8d1e0d1e08946f283faff'
+            '7509837efaff7503e9b1008b46fa09d074f6b802005052ff76fa9affff00008946ec509affff00008946ee89'
+            '56f057ff76f8b80100508d56e01e5256ff76faff76f0ff76eeff7606ff76049affff0000b1038b46f2d3e050'
+            'ff76e2b801005050ff76f0ff76ee9affff00008946f0579affff000089c650ff76f09affff000057ff76f6ff'
+            '76f4ff76e0ff76e25631c05050b8330050b80800509affff0000569affff0000ff76f09affff0000ff76ec9a'
+            'ffff0000ff76ec9affff00008d66fc5f5e5dc204005589e550b84c00e8640858565783ec26505253515051b8'
+            '0200508d56d61e5231c05050505050509affff000089c789d68946e48956e631c08946ee8946f08946e883fa'
+            'ff750583ffff740689d009f87506b8ffffe980feb802005052579affff00008946e2509affff00008946ea89'
+            '56ecff76d4ff76cebb0200538d4ed61e515657525031c050509affff00008b46f03b46e6720d7403e9e1008b'
+            '46ee3b46e473f58b46ec8946f48b5eea035eee895ef28b46ee0510008946f68b46f01500008946f8ff76d48b'
+            '46d28e46f42603470a508b46d0262b470e509affff00008b5eeec476f226031c8b46f0261344023b46f87707'
+            '75543b5ef6764f8b46ec8946fa8b7eea037ef631f68e46fa268b450239c67323ff76d4b10389f3d3e301fb8b'
+            '46d226034706508b46d0262b470a509affff000046ebd2b10389c3d3e383c30431c0015ef61146f8eb95ff76'
+            'd48b46d289f32603470a508b46d0262b470e509affff0000ff46e88e46f489f3268b070146ee268b47021146'
+            'f0e912ffff76e29affff0000ff76e29affff00008b46e8e946fd1e5890455589e51e8ed8b85001e8cd065657'
+            '81ec1e018b460cc746f402003d0f00740b3d02007403e96f04e95804ff760e8d56a41e529affff000089c650'
+            'b80100509affff0000ff36ae03ff36a603ff36a203ff36a403ff36ac03ff36aa03ff36a8031eb83300508d96'
+            'dcfe1e529affff000083c41656b8080050ff76f48d96dcfe1e521e529affff0000509affff00001eb86f0050'
+            '31c0508346f410b99001bbf5ff8d56f489f0e87cfb1eb87c005031c050b99001bb10008d56f489f0e866fb1e'
+            'b884005031c050b9bc02bbf0ff8d56f489f0e850fb1eb88e0050b8010050b99001bb14008d56f489f0e839fb'
+            '1eb89a005031c050b99001bbe0ff8d56f489f0e823fb31dbba9001b8e0ffe8ecfa8946f856509affff000089'
+            '46f65631c05050509affff00008946eab802005031c050ff76ea9affff00008946f2509affff000089c78956'
+            'f056ff76ea52509affff00008d967cff1e528e46f0268b456a01f806509affff00008e46f0268b456e01f806'
+            '508d967cff1e5226ff756626ff754826ff754626ff754426ff754226ff753c26ff753a26ff753826ff7536b8'
+            '720050ff76ea1eb8a400508d96dcfe1e529affff000083c426ff76f29affff0000ff76f29affff00008cd98d'
+            '9edcfe8d56f489f0e81afb56b841005031c0508d56d41e525050505050509affff000056b8410050b8010050'
+            '31c050505050505050509affff00008946f089d756b8410050b802005031c050505050505050509affff0000'
+            '8946ee8956ea56b8410050508d56e01e529affff00005631c050505050505050509affff00008946f28956ec'
+            '56b86d6550b86e615031c050508d56e61e5250b80400509affff0000ff76e4ff76e2ff76e0ff76eaff76ee57'
+            'ff76f0ff76deff76dcff76daff76d8ff76d6ff76d41eb8e600508d96dcfe1e529affff000083c4228cd98d9e'
+            'dcfe8d56f489f0e83ffa56b8524e50b84b4b5031c05050505050509affff0000525056b8c60050b801005031'
+            'c050505050505050509affff000052505631c05050509affff000050ff76e8ff76e6ff76ecff76f21eb82e01'
+            '508d96dcfe1e529affff000083c41a8cd98d9edcfe8d56f489f0e8d4f98346f404b9100031db8cda8d46c4e8'
+            'e303b80100e81bfa8946c48956c6b80100e80ffa8946d08956d28d56c41e52b957008b5ef4ba080089f0e803'
+            'fa31c05050b9c6008b5ef4ba280089f0e8f1f931c0e8dff98946c48956c631c0e8d4f98946d08956d2b80100'
+            'e8c8f98946c88956cab8ffffe8bcf98946cc8956ce8d56c41e52b957008b5ef4ba500089f0e8b0f931c0e89e'
+            'f98946c88956ca31c0e893f98946cc8956ceb80200e887f98946c48956c6b80100e87bf98946d08956d28d56'
+            'c41e52b957008b5ef4ba780089f0e86ff956ff76f69affff0000ff76f89affff000031dbba9001b8a0ffe8f4'
+            'f789c756509affff00008946f08b5ef483c35ab94200bac80089f0e84bfa501eb86401508d96dcfe1e529aff'
+            'ff000083c40a56ff76f09affff0000579affff000056b82c01508b46f4052800508d96dcfe1e521e529affff'
+            '0000509affff0000bb70018cd98d56f489f0e87cf8ff760e8d56a41e529affff000031c031d2eb261eb8a202'
+            '509affff000031c0509affff0000ebe6ff760e50ff760aff7608ff76069affff00008d66fa5f5e1f5d4dca0a'
+            '005589e5b86e01e81d02565781ec48018b7e0cc746fa0000571eb8a20250b88000509affff00001eb8a20250'
+            '9affff0000bea20201c681fea2027609807cff5c74034eebf11e561eb87101509affff00001eb82203501eb8'
+            'a202509affff000081fea202760781eea2024eeb0231f6c6842203001eb8a202509affff0000a3a8038d56f4'
+            '1e52b80600509affff00008b46f6a3aa0331c0509affff000089c65031c05050b8ffff50b8ffff5031c05050'
+            '9affff0000561eb8100050b8ffff50b8ffff501eb87e01509affff000031c050569affff00008d96b4fe1e52'
+            '1eb82203509affff00008d96b4fe1e52803e2203007405b88001eb03b88a011e509affff000031c0508d96b4'
+            'fe1e521eb89301501eb82203509affff0000a3a6038d96b4fe1e5231c0509affff000089c63dffff7415508d'
+            '56fa1e52b80200509affff0000569affff0000817efa4d5a7505b80100eb0231c0a3ae038d96b4fe1e528d96'
+            '40ff1e52b80002509affff0000b91a0031db8cda8d46c8e8df00c746caffffc746ccffff897ed231c05050b8'
+            '007f509affff00008946d631c0509affff00008946d8c746dea0018c5ee08d56c81e529affff00001eb8a001'
+            '501eb8a50150b8cf005031c0505050b8800250b8d6015031c050505750509affff000089c650ff76049affff'
+            '0000569affff00008d76e21e5631c05050509affff000085c074168d76e21e569affff00008d76e21e569aff'
+            'ff0000ebd78b46e68d66fc5f5e5dc20a00008c16ba01c33bc473132bc4f7d83b060a0077068cd03b06ba0174'
+            '01c30e5ab8430bbb0100e9c801537461636b204f766572666c6f7721005789c788d88ec2578ae0d1e9f3ab13'
+            'c9f3aa5f89f85fc3eb0203009affff00000bc0750e5033c0ba0f00e86a0258b44ccd218c06c0015756065352'
+            '53beb0038936db018c1edd01268a078804464384c075f589360a005b2bc0509affff000057579affff0000fc'
+            '1e07b9b003bfa2022bcf32c0f3aab8b40ca3d701b8ffffa3d901b430cd21a2c2018826c3019affff0000a2c4'
+            '018826c50186e0a3c60154583bc475120f01e0a90100740ab001a2c801b003a2c9011ebfe30157b89000509a'
+            'ffff0000b8e301893edf018c1ee101b8ff00e86b01e8d1fce9f9004f70656e20576174636f6d20432f432b2b'
+            '31362052756e2d54696d652073797374656d2e20436f7079726967687420286329204f70656e20576174636f'
+            '6d20436f6e7472696275746f727320323030322d323032362e20506f7274696f6e7320436f70797269676874'
+            '20284329205379626173652c20496e632e20313938382d323030322e00c3cb005589e551565781ec800089c6'
+            '89df8d9e7aff8cd98ec2268a0484c074173c0d74138d46f939c3730c268a048ec14626880743ebe031c08ec1'
+            '5026c607001e8d9e7aff531eb8ae015031c0509affff000089f8e94400515689c189d6e8330185c0750689c8'
+            '89f2eb9889d8e92c0000c3c3535289c3833e9a02007404ff169a02ff167402baff00b81000e8a800ff167402'
+            'ff16760289d8e928fe5289c2ff167402ff16760289d0e918fe5589e5535289c3833f0075078d66fc5a5b5dc3'
+            '1eff171febf35589e5535289c38b47028b1785c0750485d274df1eff1f1febd95589e5535152565789c11ee8'
+            '13ffbfa20289fabb9c0289fe88c839fb7316803f02750583c306ebf23a470172f689de8a4701ebef39fe7415'
+            '8d4402803c007508e88affc60402ebcbe89bffebf61f8d66f65f5e5a595b5dc35589e55351565789c11ee8bc'
+            'fe88d5bfa20289fabba20289fe88c839fb7316803f02750583c306ebf23a470177f689de8a4701ebef39fe74'
+            '1c3a6c017305c60402ebd18d4402803c007505e827ffebeee83bffebe91f8d66f85f5eeb9f803e7802007503'
+            '31c0c35250cceb0657564944454fb8010083c404c30071000301500801002d00030175080300a40103018108'
+            '01002d0003018708010045000301a00802005a000301a608010021000301c008030028000301d00801008800'
+            '0301d808030006000301ec0803006b0003011d09020031000301270902005a00030147090200580003015609'
+            '0200580003017409010077000301850901003901030193090300420002009f09010008000500a30901000800'
+            '0301ab0901004a010200b609010008000500ba09010008000301c30901004a010301cc09030044000301dc09'
+            '020058000301f809020059000301100a010036010301210a020055000301370a0200520003013d0a02005100'
+            '0301630a02004a000500770a0100440402007c0a0100440403018a0a0300ad000301950a010057000301aa0a'
+            '030039000301d10a030029000301dc0a03002a000301e20a03007c000301f10a03006c000301ff0a03007100'
+            '0301090b0300720003016f0b02005b000301ae0b02001e000301b50b030005000200cf0b01006a0b0301e00b'
+            '020003000301120c020031000301020d0300010003016500010038000301920001002d000301a00001005d00'
+            '0301af0001005c000301c10002005a000301c70001005b000301ef000300a4010301060102005a0003010c01'
+            '0100210003011e0101002d00030126010100450003015301010057000301590101002d000301740102005a00'
+            '03017a01010021000301830101002d000301d101010035010301090202000f00030112020200120003013a02'
+            '01003501030155020100300003015e02010034000301690201002d00030188020100220003018e0201004400'
+            '030196020100450003019e02020013000301a602020011000301db02010035010301110302000f0003011a03'
+            '0200120003013c030100350103018d03010014000301e2030100130003011204010013000301320402001300'
+            '03013a040200110003017b040300270003018704010002000301b3040300a4010301cb0402005a000301d104'
+            '010021000301590501002d0003016705010034010301790502000f0003018205020012000301920501003401'
+            '0301a805020058000301f4050300a4010301ff0502001300030107060200110003012d060100350103014506'
+            '010035010301620601003501030178060100330103018806010037010301aa06010037010301df060300a401'
+            '0301060701003701030120070100350103012d0701004c0103014a070300a4010301340801002d0003013c08'
+            '010045000000000005000000000000000000000057696e6e20546573742054540025733a2025732025642f25'
+            '642f25642025642025640061646465642025642c20636170732025642c2066616d696c6965732025642c2066'
+            '6163657320256420747970652025642c20666f7420256420256400456d20313120cff0e8e2e5f20043656c6c'
+            '20313600426f6c64206d616465004974616c6963206d61646500456d20333220c0e1e2006f746d2025642f25'
+            '643a20656d2025752c2025642f2564206761702025752c20626f782025642025642025642025642c20756e64'
+            '65722025642c2025732c20257300413a20626f7820257520782025752061742025642c256420696e63202564'
+            '2c25643b206269746d617020256c752c206e617469766520256c753b20616263202564202575202564006669'
+            '6c6520256c752c206e616d65202530347820253034782c206b65726e696e672025642c20c620256c752c206e'
+            '6f6e6520256c6400636f6e746f757273202564000057494e4e544553542e464f540078005c4f5754542e464f'
+            '54004f5754542e464f540057494e4e544553542e545446004f775454005472756554797065004f70656e2057'
+            '6174636f6d000000ffff00000000000000000000000c00000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '00000000000000000000000000000000250d250d000000000000000000000000000000000000000000000000'
+            '00000000000000000000000000201c0b0000'
         )),
 }
 

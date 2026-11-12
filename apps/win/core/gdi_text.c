@@ -15,6 +15,7 @@
 #include <string.h>
 #include "wincore.h"
 #include "fontfile.h"
+#include "truetype.h"
 
 extern const uint8_t win_font8x16[4096];
 
@@ -152,14 +153,19 @@ static const char *const alias[][2] = {
     { "Times New Roman", "MS Serif" }, { "Courier New", "Courier" },
 };
 
-/* a face's name as the font files name it: an alias's face, a Cyrillic
- * face's family's ("Arial Cyr": "Arial", so "MS Sans Serif") */
-static void canonical(const char *name, char out[LF_FACESIZE])
+/* a face's name without " Cyr" (a Cyrillic face's family's: "Arial Cyr"
+ * is "Arial"), and that as an alias's face ("Arial": "MS Sans Serif") */
+static void base_name(const char *name, char out[LF_FACESIZE])
 {
     int n = lstrlen(name);
     lstrcpyn(out, name, LF_FACESIZE);
     if (n > 4 && n < LF_FACESIZE && !lstrcmpi(name + n - 4, " Cyr"))
         out[n - 4] = 0;
+}
+
+static void canonical(const char *name, char out[LF_FACESIZE])
+{
+    base_name(name, out);
     for (unsigned i = 0; i < sizeof(alias) / sizeof(alias[0]); i++)
         if (!lstrcmpi(out, alias[i][0])) {
             lstrcpyn(out, alias[i][1], LF_FACESIZE);
@@ -167,12 +173,17 @@ static void canonical(const char *name, char out[LF_FACESIZE])
         }
 }
 
+/* 2 the same face (" Cyr" or not), 1 one standing for the other, 0 not */
 static int same_face(const char *a, const char *b)
 {
     char ca[LF_FACESIZE], cb[LF_FACESIZE];
+    base_name(a, ca);
+    base_name(b, cb);
+    if (!lstrcmpi(ca, cb))
+        return 2;
     canonical(a, ca);
     canonical(b, cb);
-    return !lstrcmpi(a, b) || !lstrcmpi(ca, cb);
+    return !lstrcmpi(ca, cb);
 }
 
 /* the VGA glyphs' own names: theirs unless a font file has the face */
@@ -200,23 +211,31 @@ static wface *pick(const LOGFONT *lf, int key, int *scale)
             break;                      /* no face by its name: the family's */
         for (int i = 0; i < n; i++) {
             wface *f = list[i];
-            if (!pass && !same_face(lf->lfFaceName, f->name))
+            int same = pass ? 0 : same_face(lf->lfFaceName, f->name);
+            if (!pass && !same)
                 continue;
             if (pass && ((fam && (f->pitch_family & 0xf0) != fam) ||
                          (fixed && (f->pitch_family & 1)) || oem != (f->charset == OEM_CHARSET)))
                 continue;
-            int h = cell ? f->height : f->height - f->ileading;
-            if (h <= 0)
-                continue;
-            int s = target >= 2 * h ? target / h : 1;
-            if (s > 8)
-                s = 8;
-            int got = h * s;
-            long score = got <= target ? (long)(target - got) * 4 : (long)(got - target) * 6 + 2;
-            /* made larger: only when no face's own size is near, as
-             * Windows' mapper does (a 3-pixel face five times over is
-             * blocks, not letters) */
-            score += s > 1 ? 30L * (s - 1) : 0;
+            long score;
+            int s = 1;
+            if (f->tt) {                /* TrueType: the very size (an exact raster one first) */
+                score = 1;
+            } else {
+                int h = cell ? f->height : f->height - f->ileading;
+                if (h <= 0)
+                    continue;
+                s = target >= 2 * h ? target / h : 1;
+                if (s > 8)
+                    s = 8;
+                int got = h * s;
+                score = got <= target ? (long)(target - got) * 4 : (long)(got - target) * 6 + 2;
+                /* made larger: only when no face's own size is near, as
+                 * Windows' mapper does (a 3-pixel face five times over is
+                 * blocks, not letters) */
+                score += s > 1 ? 30L * (s - 1) : 0;
+            }
+            score += same == 1 ? 40 : 0;    /* the face itself before one for it */
             score += (lf->lfWeight >= 600) != (f->weight >= 600) ? 3 : 0;
             score += !lf->lfItalic && f->italic ? 100 : lf->lfItalic && !f->italic ? 3 : 0;
             if (!best || score < best_score) {
@@ -246,7 +265,21 @@ static const wreal *realize(const wdc *dc, const wfont *cf)
     r.key = key;
     int scale = 1;
     wface *face = pick(&f->lf, key, &scale);
-    if (face && font_data(face)) {
+    const wttsize *tt = face && face->tt ? font_tt_size(face, key) : NULL;
+    if (tt) {                           /* TrueType, at its size */
+        face->used = 1;
+        r.face = face;
+        r.scale = 1;
+        r.bold = f->lf.lfWeight >= 600 && face->weight < 600;
+        r.italic = f->lf.lfItalic && !face->italic;
+        r.fixed = !(face->pitch_family & 1);
+        r.height = tt->height;
+        r.ascent = tt->ascent;
+        r.ileading = tt->ileading;
+        r.eleading = tt->eleading;
+        r.avgw = tt->avgw + r.bold;
+        r.maxw = tt->maxw + r.bold;
+    } else if (face && !face->tt && font_data(face)) {
         face->used = 1;
         r.face = face;
         r.scale = scale;
@@ -283,6 +316,8 @@ static int char_width(const wreal *r, const wfont *f, unsigned char ch)
     int w;
     if (!r->face) {
         w = r->fixed ? 8 : glyph_width[glyph_of(f, ch)] + 1;
+    } else if (r->face->tt) {
+        w = font_tt_width(r->face, r->key, ch);
     } else {
         const uint8_t *cols;
         if (!font_glyph(r->face, ch, &cols, &w))
@@ -451,12 +486,57 @@ static int enum_fonts(LPCSTR face, FONTENUMPROC proc, LPARAM lp)
     for (int i = 0; r && i < n; i++) {
         wface *w = list[i];
         int seen = 0;
+        if (w->tt) {                    /* TrueType: once, at 12 points */
+            if (face && *face && lstrcmpi(face, w->name))
+                continue;
+            for (int k = 0; k < i && !seen; k++)
+                seen = list[k]->tt && !lstrcmpi(list[k]->name, w->name) &&
+                       (!face || !*face || (list[k]->weight == w->weight &&
+                                            list[k]->italic == w->italic));
+            if (seen)
+                continue;
+            LOGFONT lf;
+            memset(&lf, 0, sizeof(lf));
+            lf.lfHeight = -16;
+            lf.lfWeight = w->weight;
+            lf.lfItalic = (BYTE)w->italic;
+            lf.lfCharSet = (BYTE)w->charset;
+            lf.lfOutPrecision = OUT_STROKE_PRECIS;
+            lf.lfClipPrecision = CLIP_STROKE_PRECIS;
+            lf.lfQuality = PROOF_QUALITY;
+            lf.lfPitchAndFamily = (BYTE)((w->pitch_family & 0xf0) |
+                                         ((w->pitch_family & 1) ? VARIABLE_PITCH : FIXED_PITCH));
+            lstrcpyn(lf.lfFaceName, w->name, LF_FACESIZE);
+            const wttsize *tt = font_tt_size(w, lf.lfHeight);
+            if (!tt)
+                continue;
+            lf.lfHeight = tt->height;
+            lf.lfWidth = tt->avgw;
+            wfont tmp;
+            memset(&tmp, 0, sizeof(tmp));
+            tmp.lf = lf;
+            wreal real;
+            memset(&real, 0, sizeof(real));
+            real.face = w;
+            real.scale = 1;
+            real.fixed = !(w->pitch_family & 1);
+            real.height = tt->height;
+            real.ascent = tt->ascent;
+            real.ileading = tt->ileading;
+            real.eleading = tt->eleading;
+            real.avgw = tt->avgw;
+            real.maxw = tt->maxw;
+            TEXTMETRIC tm;
+            font_metrics(&real, &tmp, &tm);
+            r = proc(&lf, &tm, TRUETYPE_FONTTYPE, lp);
+            continue;
+        }
         if (face && *face) {
             if (lstrcmpi(face, w->name))
                 continue;
         } else {
             for (int k = 0; k < i && !seen; k++)
-                seen = !lstrcmpi(list[k]->name, w->name);
+                seen = !list[k]->tt && !lstrcmpi(list[k]->name, w->name);
             if (seen)
                 continue;
         }
@@ -541,6 +621,17 @@ static void draw_char(wdc *dc, const wclip *c, const wreal *r, const wfont *f, i
         dib_glyph(dc->surf, c, x, y, rows, 1, w, CELL_H, r->scale, base, color);
         if (r->bold)
             dib_glyph(dc->surf, c, x + 1, y, rows, 1, w, CELL_H, r->scale, base, color);
+        return;
+    }
+    if (r->face->tt) {                  /* TrueType: its glyph at the size */
+        const uint8_t *bits;
+        int w, h, x0, top;
+        if (!font_tt_glyph(r->face, r->key, ch, &bits, &w, &h, &x0, &top))
+            return;
+        int gx = x + x0, gy = y + r->ascent - top;
+        dib_glyph(dc->surf, c, gx, gy, bits, (w + 7) / 8, w, h, 1, base, color);
+        if (r->bold)
+            dib_glyph(dc->surf, c, gx + 1, gy, bits, (w + 7) / 8, w, h, 1, base, color);
         return;
     }
     const uint8_t *cols;
@@ -761,4 +852,387 @@ LONG WINAPI TabbedTextOut(HDC h, int x, int y, LPCSTR s, int n,
 DWORD WINAPI GetTabbedTextExtent(HDC h, LPCSTR s, int n, int ntabs, const int *tabs)
 {
     return (DWORD)tabbed(h, 0, 0, s, n, ntabs, tabs, 0, 0);
+}
+
+/* ---------------------------------------------------------------- TrueType's */
+
+/* the DC's font when it is TrueType: its file, the size's scale */
+static struct ttfont *tt_of(HDC h, const wfont **fp, const wreal **rp, float *scale)
+{
+    const wfont *f;
+    const wreal *r;
+    wdc *dc = text_dc(h, &f, &r);
+    if (!dc || !r->face || !r->face->tt)
+        return NULL;
+    struct ttfont *t = font_tt(r->face);
+    *scale = font_tt_scale(r->face, r->key);
+    if (!t || *scale <= 0)
+        return NULL;
+    if (fp)
+        *fp = f;
+    *rp = r;
+    return t;
+}
+
+static int round_i(float v) { return (int)(v < 0 ? v - 0.5f : v + 0.5f); }
+
+static float fixed_f(FIXED v) { return (float)v.value + (float)v.fract / 65536.0f; }
+
+/* GGO_NATIVE's records: a TTPOLYGONHEADER each contour, TTPOLYCURVEs */
+typedef struct {
+    uint8_t *b;
+    uint32_t n, cap;
+    uint32_t hdr, rec;          /* the open contour's, curve's (0: none) */
+    int      contour;
+    unsigned type;              /* the open curve's */
+    float    px, py, kx, ky;    /* the pen, the last control point */
+} native_out;
+
+static int put(native_out *o, const void *p, uint32_t n)
+{
+    if (o->n + n > o->cap) {
+        uint32_t cap = o->cap ? o->cap * 2 : 512;
+        while (cap < o->n + n)
+            cap *= 2;
+        uint8_t *b = (uint8_t *)win_alloc(cap);
+        if (!b)
+            return 0;
+        if (o->b) {
+            memcpy(b, o->b, o->n);
+            win_free(o->b);
+        }
+        o->b = b;
+        o->cap = cap;
+    }
+    memcpy(o->b + o->n, p, n);
+    o->n += n;
+    return 1;
+}
+
+static void put_fx(native_out *o, float x, float y)
+{
+    int32_t v[2] = { (int32_t)round_i(x * 65536.0f), (int32_t)round_i(y * 65536.0f) };
+    uint8_t b[8];
+    for (int i = 0; i < 2; i++) {               /* fract, then value */
+        b[4 * i] = (uint8_t)v[i];
+        b[4 * i + 1] = (uint8_t)(v[i] >> 8);
+        b[4 * i + 2] = (uint8_t)(v[i] >> 16);
+        b[4 * i + 3] = (uint8_t)(v[i] >> 24);
+    }
+    put(o, b, 8);
+}
+
+static void wr16le(uint8_t *p, unsigned v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
+
+static void native_close(native_out *o)
+{
+    if (o->contour && o->b) {
+        uint32_t cb = o->n - o->hdr;
+        wr16le(o->b + o->hdr, cb & 0xffffu);
+        wr16le(o->b + o->hdr + 2, cb >> 16);
+    }
+    o->contour = 0;
+    o->rec = 0;
+}
+
+static void native_curve(native_out *o, unsigned type)
+{
+    uint8_t w[4] = { (uint8_t)type, 0, 0, 0 };
+    o->rec = o->n;
+    o->type = type;
+    put(o, w, 4);
+}
+
+static void native_point(native_out *o, float x, float y)
+{
+    if (o->b && o->rec) {
+        uint8_t *c = o->b + o->rec + 2;
+        wr16le(c, (unsigned)(c[0] | c[1] << 8) + 1u);
+    }
+    put_fx(o, x, y);
+}
+
+static void native_sink(void *ctx, int op, float x0, float y0, float x1, float y1)
+{
+    native_out *o = (native_out *)ctx;
+    switch (op) {
+    case TT_MOVE: {
+        native_close(o);
+        uint8_t h[8] = { 0, 0, 0, 0, TT_POLYGON_TYPE, 0, 0, 0 };
+        o->hdr = o->n;
+        put(o, h, 8);
+        put_fx(o, x0, y0);
+        o->contour = 1;
+        o->px = x0;
+        o->py = y0;
+        return;
+    }
+    case TT_LINE:
+        if (x0 == o->px && y0 == o->py)
+            return;
+        if (!o->rec || o->type != TT_PRIM_LINE)
+            native_curve(o, TT_PRIM_LINE);
+        native_point(o, x0, y0);
+        o->px = x0;
+        o->py = y0;
+        return;
+    case TT_QUAD:
+        /* on in the same curve when the pen is the controls' midpoint (a
+         * QSPLINE's points between controls are) */
+        if (o->rec && o->type == TT_PRIM_QSPLINE && o->b &&
+            (o->kx + x0) / 2 == o->px && (o->ky + y0) / 2 == o->py) {
+            o->n -= 8;                          /* that point: implied */
+            put_fx(o, x0, y0);
+        } else {
+            native_curve(o, TT_PRIM_QSPLINE);
+            native_point(o, x0, y0);
+        }
+        native_point(o, x1, y1);
+        o->kx = x0;
+        o->ky = y0;
+        o->px = x1;
+        o->py = y1;
+        return;
+    default:
+        native_close(o);
+    }
+}
+
+/* a character's glyph: its metrics (GGO_METRICS), its bitmap (GGO_BITMAP:
+ * rows top down, each a whole number of DWORDs, MSB the leftmost pixel)
+ * or its outline (GGO_NATIVE), in device pixels, through mat; without a
+ * buffer, the bytes it takes */
+DWORD WINAPI GetGlyphOutline(HDC h, UINT ch, UINT format, LPGLYPHMETRICS gm, DWORD size,
+                             void *buffer, const MAT2 *mat)
+{
+    const wreal *r;
+    float sc;
+    struct ttfont *t = tt_of(h, NULL, &r, &sc);
+    if (!t || ch > 255 || format > GGO_NATIVE)
+        return GDI_ERROR;
+    /* x' = x eM11 + y eM21, y' = x eM12 + y eM22 */
+    float m[4] = { sc, 0, 0, sc };
+    if (mat) {
+        m[0] = sc * fixed_f(mat->eM11);
+        m[1] = sc * fixed_f(mat->eM12);
+        m[2] = sc * fixed_f(mat->eM21);
+        m[3] = sc * fixed_f(mat->eM22);
+    }
+    unsigned gi = tt_glyph_index(t, (unsigned char)ch);
+    int adv = tt_advance(t, gi), w, hh, x0, top;
+    uint8_t *bits = tt_render_m(t, gi, m, &w, &hh, &x0, &top);
+    if (gm) {
+        gm->gmBlackBoxX = bits ? (UINT)w : 1;
+        gm->gmBlackBoxY = bits ? (UINT)hh : 1;
+        gm->gmptGlyphOrigin.x = bits ? x0 : 0;
+        gm->gmptGlyphOrigin.y = bits ? top : 0;
+        gm->gmCellIncX = (short)(round_i((float)adv * m[0]) + r->bold);
+        gm->gmCellIncY = (short)round_i((float)adv * m[1]);
+    }
+    DWORD need = 1;
+    if (format == GGO_BITMAP) {
+        uint32_t pitch = ((uint32_t)w + 31u) / 32u * 4u, from = ((uint32_t)w + 7u) / 8u;
+        need = bits ? pitch * (uint32_t)hh : 0;
+        if (buffer && size) {
+            if (size < need) {
+                need = GDI_ERROR;
+            } else if (bits) {
+                memset(buffer, 0, need);
+                for (int y = 0; y < hh; y++)
+                    memcpy((uint8_t *)buffer + pitch * (uint32_t)y, bits + from * (uint32_t)y,
+                           from);
+            }
+        }
+    } else if (format == GGO_NATIVE) {
+        native_out o;
+        memset(&o, 0, sizeof(o));
+        tt_outline(t, gi, m, native_sink, &o);
+        native_close(&o);
+        need = o.n;
+        if (buffer && size) {
+            if (size < need)
+                need = GDI_ERROR;
+            else if (o.b)
+                memcpy(buffer, o.b, o.n);
+        }
+        win_free(o.b);
+    }
+    win_free(bits);
+    return need;
+}
+
+/* a table of the font file's (its tag as the bytes are in the file: "cmap"
+ * the DWORD 'pamc'; 0: the whole file) from offset; without a buffer how
+ * many bytes are there */
+DWORD WINAPI GetFontData(HDC h, DWORD table, DWORD offset, void *buffer, DWORD size)
+{
+    const wreal *r;
+    float sc;
+    struct ttfont *t = tt_of(h, NULL, &r, &sc);
+    if (!t)
+        return GDI_ERROR;
+    uint32_t tag = (table & 0xffu) << 24 | (table & 0xff00u) << 8 | (table >> 8 & 0xff00u) |
+                   table >> 24;
+    long n = tt_table(t, tag, offset, buffer, buffer ? size : 0);
+    return n < 0 ? GDI_ERROR : (DWORD)n;
+}
+
+/* the characters' A (before the glyph), B (the glyph) and C (after it)
+ * widths, TrueType's */
+BOOL WINAPI GetCharABCWidths(HDC h, UINT first, UINT last, LPABC abc)
+{
+    const wreal *r;
+    float sc;
+    struct ttfont *t = tt_of(h, NULL, &r, &sc);
+    wdc *dc = gdi_dc(h);
+    if (!t || !dc || !abc || first > last || last > 255)
+        return FALSE;
+    for (UINT c = first; c <= last; c++) {
+        const uint8_t *rows;
+        int adv = font_tt_width(r->face, r->key, (unsigned char)c), w, hh, x0, top;
+        ABC *a = &abc[c - first];
+        if (font_tt_glyph(r->face, r->key, (unsigned char)c, &rows, &w, &hh, &x0, &top)) {
+            a->abcA = x0;
+            a->abcB = (UINT)w;
+            a->abcC = adv - x0 - w + r->bold;
+        } else {
+            a->abcA = 0;
+            a->abcB = 0;
+            a->abcC = adv + r->bold;
+        }
+        if (dc->mapmode != MM_TEXT) {
+            int v = gdi_dx_to_lx(dc, (int)a->abcB);
+            a->abcA = gdi_dx_to_lx(dc, a->abcA);
+            a->abcB = (UINT)(v < 0 ? -v : v);
+            a->abcC = gdi_dx_to_lx(dc, a->abcC);
+        }
+    }
+    return TRUE;
+}
+
+/* the kerning table's pairs of the characters it has (pixels) */
+typedef struct {
+    unsigned g[256];
+    LPKERNINGPAIR out;
+    int max, n;
+    float scale;
+} kern_ctx;
+
+static void kern_pair(void *ctx, unsigned left, unsigned right, int value)
+{
+    kern_ctx *k = (kern_ctx *)ctx;
+    int amount = round_i((float)value * k->scale);
+    for (unsigned a = 0x20; a < 256; a++) {
+        if (k->g[a] != left)
+            continue;
+        for (unsigned b = 0x20; b < 256; b++) {
+            if (k->g[b] != right)
+                continue;
+            if (k->out && k->n < k->max) {
+                k->out[k->n].wFirst = (WORD)a;
+                k->out[k->n].wSecond = (WORD)b;
+                k->out[k->n].iKernAmount = amount;
+            }
+            if (!k->out || k->n < k->max)
+                k->n++;
+        }
+    }
+}
+
+int WINAPI GetKerningPairs(HDC h, int n, LPKERNINGPAIR pairs)
+{
+    const wreal *r;
+    float sc;
+    struct ttfont *t = tt_of(h, NULL, &r, &sc);
+    if (!t)
+        return 0;
+    kern_ctx *k = (kern_ctx *)win_alloc(sizeof(*k));
+    if (!k)
+        return 0;
+    memset(k, 0, sizeof(*k));
+    for (unsigned c = 0x20; c < 256; c++)
+        k->g[c] = tt_glyph_index(t, (unsigned char)c);
+    for (unsigned c = 0x20; c < 256; c++)
+        if (!k->g[c])
+            k->g[c] = 0x10000u;                 /* none: never a pair's */
+    k->out = pairs;
+    k->max = n > 0 ? n : 0;
+    k->scale = sc;
+    tt_kern(t, kern_pair, k);
+    int count = k->n;
+    win_free(k);
+    return count;
+}
+
+/* the TrueType font's metrics (pixels), its four names after them; its
+ * size (without a buffer, the bytes it takes) */
+WORD WINAPI GetOutlineTextMetrics(HDC h, UINT size, LPOUTLINETEXTMETRIC otm)
+{
+    const wfont *f;
+    const wreal *r;
+    float sc;
+    struct ttfont *t = tt_of(h, &f, &r, &sc);
+    if (!t)
+        return 0;
+    const ttinfo *in = tt_info(t);
+    ttmetrics tm;
+    tt_metrics(t, &tm);
+    const char *names[4] = { in->family, in->full, in->style, in->unique };
+    UINT total = sizeof(OUTLINETEXTMETRIC);
+    for (int i = 0; i < 4; i++)
+        total += (UINT)lstrlen(names[i]) + 1;
+    if (!otm)
+        return (WORD)total;
+    uint8_t *b = (uint8_t *)win_alloc(total);
+    if (!b)
+        return 0;
+    OUTLINETEXTMETRIC *o = (OUTLINETEXTMETRIC *)b;
+    memset(o, 0, sizeof(*o));
+#define S(v) round_i((float)(v) * sc)
+    o->otmSize = total;
+    font_metrics(r, f, &o->otmTextMetrics);
+    memcpy(&o->otmPanoseNumber, tm.panose, 10);
+    o->otmfsSelection = (UINT)(tm.fs_selection & ~0x12) | (f->lf.lfUnderline ? 2u : 0) |
+                        (f->lf.lfStrikeOut ? 0x10u : 0);
+    o->otmfsType = (UINT)tm.fs_type;
+    o->otmsCharSlopeRise = tm.slope_rise;
+    o->otmsCharSlopeRun = tm.slope_run;
+    o->otmItalicAngle = tm.italic_angle;
+    o->otmEMSquare = (UINT)in->em;
+    o->otmAscent = S(tm.typo_ascender);
+    o->otmDescent = S(tm.typo_descender);
+    o->otmLineGap = (UINT)S(tm.typo_line_gap);
+    o->otmsCapEmHeight = (UINT)S(tm.cap_height);
+    o->otmsXHeight = (UINT)S(tm.x_height);
+    o->otmrcFontBox.left = S(tm.xmin);
+    o->otmrcFontBox.top = S(tm.ymax);
+    o->otmrcFontBox.right = S(tm.xmax);
+    o->otmrcFontBox.bottom = S(tm.ymin);
+    o->otmMacAscent = S(tm.mac_ascent);
+    o->otmMacDescent = S(tm.mac_descent);
+    o->otmMacLineGap = (UINT)S(tm.mac_line_gap);
+    o->otmusMinimumPPEM = (UINT)tm.min_ppem;
+    o->otmptSubscriptSize.x = S(tm.sub_x);
+    o->otmptSubscriptSize.y = S(tm.sub_y);
+    o->otmptSubscriptOffset.x = S(tm.sub_xoff);
+    o->otmptSubscriptOffset.y = S(tm.sub_yoff);
+    o->otmptSuperscriptSize.x = S(tm.sup_x);
+    o->otmptSuperscriptSize.y = S(tm.sup_y);
+    o->otmptSuperscriptOffset.x = S(tm.sup_xoff);
+    o->otmptSuperscriptOffset.y = S(tm.sup_yoff);
+    o->otmsStrikeoutSize = (UINT)S(tm.strike_size);
+    o->otmsStrikeoutPosition = S(tm.strike_pos);
+    o->otmsUnderscorePosition = S(tm.under_pos);
+    o->otmsUnderscoreSize = S(tm.under_size);
+#undef S
+    char **ptr[4] = { &o->otmpFamilyName, &o->otmpFaceName, &o->otmpStyleName, &o->otmpFullName };
+    UINT at = sizeof(OUTLINETEXTMETRIC);
+    for (int i = 0; i < 4; i++) {
+        *ptr[i] = (char *)(uintptr_t)at;        /* from its start */
+        lstrcpy((char *)b + at, names[i]);
+        at += (UINT)lstrlen(names[i]) + 1;
+    }
+    memcpy(otm, b, size < total ? size : total);
+    win_free(b);
+    return (WORD)(size < total ? size : total);
 }

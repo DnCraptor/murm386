@@ -1131,7 +1131,7 @@ static const char *const style_names[4] = { "Regular", "Italic", "Bold", "Bold I
 typedef struct {
     CHOOSEFONT *cf;
     int nfaces;
-    struct { char name[LF_FACESIZE]; BYTE charset, pitch; BYTE styles; } face[FACES];
+    struct { char name[LF_FACESIZE]; BYTE charset, pitch; BYTE styles, tt; } face[FACES];
     COLORREF color;
     HFONT sample;
 } fntdlg;
@@ -1139,15 +1139,16 @@ typedef struct {
 /* EnumFontFamilies' faces: those the flags let in */
 static int CALLBACK face_enum(const LOGFONT *lf, const TEXTMETRIC *tm, int type, LPARAM lp)
 {
-    (void)tm; (void)type;
+    (void)tm;
     fntdlg *d = (fntdlg *)(intptr_t)lp;
     DWORD f = d->cf->Flags;
+    int tt = (type & TRUETYPE_FONTTYPE) != 0;
     if ((f & CF_FIXEDPITCHONLY) && (lf->lfPitchAndFamily & 3) != FIXED_PITCH)
         return 1;
     if ((f & CF_ANSIONLY) && lf->lfCharSet != ANSI_CHARSET)
         return 1;
-    if (f & (CF_SCALABLEONLY | CF_TTONLY))
-        return 1;                   /* raster fonts only */
+    if ((f & (CF_SCALABLEONLY | CF_TTONLY)) && !tt)
+        return 1;                   /* scalable: TrueType (WINN has no vector fonts) */
     for (int i = 0; i < d->nfaces; i++)
         if (!lstrcmpi(d->face[i].name, lf->lfFaceName))
             return 1;
@@ -1156,6 +1157,7 @@ static int CALLBACK face_enum(const LOGFONT *lf, const TEXTMETRIC *tm, int type,
         d->face[d->nfaces].charset = lf->lfCharSet;
         d->face[d->nfaces].pitch = lf->lfPitchAndFamily;
         d->face[d->nfaces].styles = (BYTE)((lf->lfItalic ? 1 : 0) | (lf->lfWeight >= FW_BOLD ? 2 : 0));
+        d->face[d->nfaces].tt = (BYTE)tt;
         d->nfaces++;
     }
     return 1;
@@ -1282,9 +1284,20 @@ static void font_face_changed(HWND dlg, fntdlg *d)
             s.min = d->cf->nSizeMin;
             s.max = d->cf->nSizeMax;
         }
-        HDC dc = GetDC(0);
-        EnumFontFamilies(dc, d->face[f].name, size_enum, (LPARAM)(intptr_t)&s);
-        ReleaseDC(0, dc);
+        if (d->face[f].tt) {            /* scalable: the sizes Windows offers */
+            static const BYTE pts[] = { 8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 36, 48, 72 };
+            for (unsigned i = 0; i < sizeof(pts); i++) {
+                char t[8];
+                if ((s.min && pts[i] < s.min) || (s.max && pts[i] > s.max))
+                    continue;
+                wsprintf(t, "%d", pts[i]);
+                SendMessage(sizes, CB_ADDSTRING, 0, (LPARAM)(intptr_t)t);
+            }
+        } else {
+            HDC dc = GetDC(0);
+            EnumFontFamilies(dc, d->face[f].name, size_enum, (LPARAM)(intptr_t)&s);
+            ReleaseDC(0, dc);
+        }
     }
     /* the size kept when the face has it, else its first */
     if (!size[0] || SendMessage(sizes, CB_SELECTSTRING, (WPARAM)-1, (LPARAM)(intptr_t)size) < 0)
@@ -1505,8 +1518,9 @@ static BOOL WINAPI cd_font(LPCHOOSEFONT cf)
         return FALSE;
     }
     d->cf = cf;
-    /* the screen's fonts (no printer's: WINN has none) */
-    if (cf->Flags & CF_SCREENFONTS) {
+    /* the screen's fonts; the printer's the same (WINN has no printer: its
+     * DC, Write's, is the display's) */
+    if (cf->Flags & (CF_SCREENFONTS | CF_PRINTERFONTS)) {
         HDC dc = GetDC(0);
         EnumFontFamilies(dc, NULL, face_enum, (LPARAM)(intptr_t)d);
         ReleaseDC(0, dc);

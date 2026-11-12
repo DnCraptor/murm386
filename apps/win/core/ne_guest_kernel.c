@@ -315,6 +315,21 @@ typedef struct {
     int family;
 } font_enum;
 
+/* a TEXTMETRIC the Win16 one (31 bytes) */
+static void tm16(uint8_t *g, const TEXTMETRIC *tm)
+{
+    const int v16[] = { tm->tmHeight, tm->tmAscent, tm->tmDescent, tm->tmInternalLeading,
+                        tm->tmExternalLeading, tm->tmAveCharWidth, tm->tmMaxCharWidth,
+                        tm->tmWeight };
+    for (int i = 0; i < 8; i++)
+        wr16(g + 2 * i, (uint16_t)v16[i]);
+    g[16] = tm->tmItalic; g[17] = tm->tmUnderlined; g[18] = tm->tmStruckOut;
+    g[19] = tm->tmFirstChar; g[20] = tm->tmLastChar; g[21] = tm->tmDefaultChar;
+    g[22] = tm->tmBreakChar; g[23] = tm->tmPitchAndFamily; g[24] = tm->tmCharSet;
+    wr16(g + 25, (uint16_t)tm->tmOverhang); wr16(g + 27, (uint16_t)tm->tmDigitizedAspectX);
+    wr16(g + 29, (uint16_t)tm->tmDigitizedAspectY);
+}
+
 static int CALLBACK ne_fontproc(const LOGFONT *lf, const TEXTMETRIC *tm, int type, LPARAM lp)
 {
     const font_enum *e = (const font_enum *)(uintptr_t)lp;
@@ -332,17 +347,14 @@ static int CALLBACK ne_fontproc(const LOGFONT *lf, const TEXTMETRIC *tm, int typ
     if (e->family)                      /* NEWLOGFONT: its full name, its style */
         lstrcpyn((char *)g + 50, lf->lfFaceName, 64);
     g = blob + lfn;
-    const int v16[] = { tm->tmHeight, tm->tmAscent, tm->tmDescent, tm->tmInternalLeading,
-                        tm->tmExternalLeading, tm->tmAveCharWidth, tm->tmMaxCharWidth,
-                        tm->tmWeight };
-    for (int i = 0; i < 8; i++)
-        wr16(g + 2 * i, (uint16_t)v16[i]);
-    g[16] = tm->tmItalic; g[17] = tm->tmUnderlined; g[18] = tm->tmStruckOut;
-    g[19] = tm->tmFirstChar; g[20] = tm->tmLastChar; g[21] = tm->tmDefaultChar;
-    g[22] = tm->tmBreakChar; g[23] = tm->tmPitchAndFamily; g[24] = tm->tmCharSet;
-    wr16(g + 25, (uint16_t)tm->tmOverhang); wr16(g + 27, (uint16_t)tm->tmDigitizedAspectX);
-    wr16(g + 29, (uint16_t)tm->tmDigitizedAspectY);
-    if (e->family) {                    /* NEWTEXTMETRIC: flags, em, cell height, average */
+    tm16(g, tm);
+    if (e->family && (type & TRUETYPE_FONTTYPE)) {  /* NEWTEXTMETRIC: regular, bold, italic */
+        uint32_t flags = (tm->tmItalic ? 0x01u : 0) | (tm->tmWeight >= FW_BOLD ? 0x20u : 0);
+        wr16(g + 31, (uint16_t)(flags ? flags : 0x40u));
+        wr16(g + 35, (uint16_t)(tm->tmHeight - tm->tmInternalLeading));
+        wr16(g + 37, (uint16_t)tm->tmHeight);
+        wr16(g + 39, (uint16_t)tm->tmAveCharWidth);
+    } else if (e->family) {             /* NEWTEXTMETRIC: flags, em, cell height, average */
         wr16(g + 35, (uint16_t)tm->tmHeight);
         wr16(g + 37, (uint16_t)tm->tmHeight);
         wr16(g + 39, (uint16_t)tm->tmAveCharWidth);
@@ -353,6 +365,184 @@ static int CALLBACK ne_fontproc(const LOGFONT *lf, const TEXTMETRIC *tm, int typ
                                 (uint16_t)(far + lfn), (uint16_t)type, (uint16_t)(e->lp >> 16),
                                 (uint16_t)e->lp };
     return (int16_t)win_ne_call(e->c, e->proc, words, 7, blob, len);
+}
+
+/* TrueType's (GDI 307..311, 332): the native ones, their structures the
+ * Win16 layouts (GLYPHMETRICS 12 bytes, ABC 6, KERNINGPAIR 6,
+ * OUTLINETEXTMETRIC 114 and its names; GGO_NATIVE's records the same) */
+#define OTM16 114u
+#define TT_BUF_MAX 0xfff0u
+
+static int gdi_tt(args *a, uint16_t service, uint32_t *v, int *dword)
+{
+    switch (service) {
+    case 0x3135: {          /* GetGlyphOutline(HDC, ch, format, LPGLYPHMETRICS, cb, buf, LPMAT2) */
+        uint32_t gmp = dw(a, 16), size = dw(a, 12), buf = dw(a, 8), matp = dw(a, 4);
+        MAT2 mat;
+        uint8_t m16[16];
+        *dword = 1;
+        *v = GDI_ERROR;
+        if (matp) {
+            if (!rd_(a, matp, m16, 16))
+                return 1;
+            FIXED *f[4] = { &mat.eM11, &mat.eM12, &mat.eM21, &mat.eM22 };
+            for (int i = 0; i < 4; i++) {
+                f[i]->fract = rd16(m16 + 4 * i);
+                f[i]->value = (short)rd16(m16 + 4 * i + 2);
+            }
+        }
+        if (!buf)
+            size = 0;
+        if (size > TT_BUF_MAX)
+            size = TT_BUF_MAX;
+        uint8_t *b = size ? (uint8_t *)win_alloc(size) : NULL;
+        if (size && !b)
+            return 1;
+        GLYPHMETRICS gm;
+        memset(&gm, 0, sizeof(gm));
+        DWORD r = GetGlyphOutline(w(a, 24), w(a, 22), w(a, 20), &gm, size, b, matp ? &mat : NULL);
+        if (r != GDI_ERROR) {
+            uint8_t g[12];
+            wr16(g, (uint16_t)gm.gmBlackBoxX);
+            wr16(g + 2, (uint16_t)gm.gmBlackBoxY);
+            wr16(g + 4, (uint16_t)gm.gmptGlyphOrigin.x);
+            wr16(g + 6, (uint16_t)gm.gmptGlyphOrigin.y);
+            wr16(g + 8, (uint16_t)gm.gmCellIncX);
+            wr16(g + 10, (uint16_t)gm.gmCellIncY);
+            if ((gmp && !wr_(a, gmp, g, 12)) ||
+                (b && r <= size && w(a, 20) != 0 && !wr_(a, buf, b, r)))
+                r = GDI_ERROR;
+        }
+        win_free(b);
+        *v = r;
+        return 1;
+    }
+    case 0x3137: {          /* GetFontData(HDC, table, offset, buf, cb) */
+        uint32_t size = dw(a, 4), buf = dw(a, 8);
+        *dword = 1;
+        if (!buf)
+            size = 0;
+        if (size > TT_BUF_MAX)
+            size = TT_BUF_MAX;
+        uint8_t *b = size ? (uint8_t *)win_alloc(size) : NULL;
+        if (size && !b) {
+            *v = GDI_ERROR;
+            return 1;
+        }
+        DWORD r = GetFontData(w(a, 20), dw(a, 16), dw(a, 12), b, size);
+        if (b && r != GDI_ERROR && !wr_(a, buf, b, r))
+            r = GDI_ERROR;
+        win_free(b);
+        *v = r;
+        return 1;
+    }
+    case 0x3133: {          /* GetCharABCWidths(HDC, first, last, LPABC) */
+        UINT first = w(a, 10), last = w(a, 8);
+        ABC abc[256];
+        *v = 0;
+        if (first > last || last > 255 || !GetCharABCWidths(w(a, 12), first, last, abc))
+            return 1;
+        uint8_t g[6 * 256];
+        for (UINT i = 0; i <= last - first; i++) {
+            wr16(g + 6 * i, (uint16_t)abc[i].abcA);
+            wr16(g + 6 * i + 2, (uint16_t)abc[i].abcB);
+            wr16(g + 6 * i + 4, (uint16_t)abc[i].abcC);
+        }
+        *v = wr_(a, dw(a, 4), g, 6u * (last - first + 1));
+        return 1;
+    }
+    case 0x314c: {          /* GetKerningPairs(HDC, n, LPKERNINGPAIR) */
+        int n = (int16_t)w(a, 8);
+        uint32_t out = dw(a, 4);
+        *v = 0;
+        if (!out) {
+            *v = (uint16_t)GetKerningPairs(w(a, 10), 0, NULL);
+            return 1;
+        }
+        if (n <= 0)
+            return 1;
+        if (n > 0x2000)
+            n = 0x2000;
+        KERNINGPAIR *k = (KERNINGPAIR *)win_alloc(sizeof(KERNINGPAIR) * (size_t)n);
+        uint8_t *g = (uint8_t *)win_alloc(6u * (uint32_t)n);
+        if (k && g) {
+            int got = GetKerningPairs(w(a, 10), n, k);
+            for (int i = 0; i < got; i++) {
+                wr16(g + 6 * i, k[i].wFirst);
+                wr16(g + 6 * i + 2, k[i].wSecond);
+                wr16(g + 6 * i + 4, (uint16_t)k[i].iKernAmount);
+            }
+            if (wr_(a, out, g, 6u * (uint32_t)got))
+                *v = (uint16_t)got;
+        }
+        win_free(k);
+        win_free(g);
+        return 1;
+    }
+    case 0x3134: {          /* GetOutlineTextMetrics(HDC, cb, LPOUTLINETEXTMETRIC) */
+        UINT size = w(a, 8);
+        uint32_t out = dw(a, 4);
+        uint16_t h = w(a, 10);
+        *v = 0;
+        UINT native = GetOutlineTextMetrics(h, 0, NULL);
+        if (!native)
+            return 1;
+        uint8_t *nb = (uint8_t *)win_alloc(native);
+        if (!nb)
+            return 1;
+        GetOutlineTextMetrics(h, native, (LPOUTLINETEXTMETRIC)nb);
+        const OUTLINETEXTMETRIC *o = (const OUTLINETEXTMETRIC *)nb;
+        const char *base = (const char *)nb;
+        const char *names[4] = {
+            base + (uintptr_t)o->otmpFamilyName, base + (uintptr_t)o->otmpFaceName,
+            base + (uintptr_t)o->otmpStyleName, base + (uintptr_t)o->otmpFullName,
+        };
+        uint32_t total = OTM16;
+        for (int i = 0; i < 4; i++)
+            total += (uint32_t)strlen(names[i]) + 1;
+        uint8_t *g = (uint8_t *)win_alloc(total);
+        if (!g) {
+            win_free(nb);
+            return 1;
+        }
+        memset(g, 0, total);
+        wr16(g, (uint16_t)total);
+        tm16(g + 2, &o->otmTextMetrics);
+        memcpy(g + 34, &o->otmPanoseNumber, 10);
+        const int words[] = {
+            (int)o->otmfsSelection, (int)o->otmfsType, o->otmsCharSlopeRise, o->otmsCharSlopeRun,
+            o->otmItalicAngle, (int)o->otmEMSquare, o->otmAscent, o->otmDescent,
+            (int)o->otmLineGap, (int)o->otmsCapEmHeight, (int)o->otmsXHeight,
+            o->otmrcFontBox.left, o->otmrcFontBox.top, o->otmrcFontBox.right,
+            o->otmrcFontBox.bottom, o->otmMacAscent, o->otmMacDescent, (int)o->otmMacLineGap,
+            (int)o->otmusMinimumPPEM, o->otmptSubscriptSize.x, o->otmptSubscriptSize.y,
+            o->otmptSubscriptOffset.x, o->otmptSubscriptOffset.y, o->otmptSuperscriptSize.x,
+            o->otmptSuperscriptSize.y, o->otmptSuperscriptOffset.x, o->otmptSuperscriptOffset.y,
+            (int)o->otmsStrikeoutSize, o->otmsStrikeoutPosition, o->otmsUnderscorePosition,
+            o->otmsUnderscoreSize,
+        };
+        uint32_t at = 44;
+        for (unsigned i = 0; i < sizeof(words) / sizeof(words[0]); i++, at += 2)
+            wr16(g + at, (uint16_t)words[i]);
+        uint32_t str = OTM16;           /* at 106: the names' offsets */
+        for (int i = 0; i < 4; i++, at += 2) {
+            wr16(g + at, (uint16_t)str);
+            memcpy(g + str, names[i], strlen(names[i]) + 1);
+            str += (uint32_t)strlen(names[i]) + 1;
+        }
+        win_free(nb);
+        if (!out) {
+            *v = (uint16_t)total;
+        } else {
+            uint32_t n = size < total ? size : total;
+            if (wr_(a, out, g, n))
+                *v = (uint16_t)n;
+        }
+        win_free(g);
+        return 1;
+    }
+    }
+    return 0;
 }
 
 /* EnumObjects' LOGPEN (style, width's POINT, colour: 10 bytes) or
@@ -747,16 +937,9 @@ static __attribute__((noinline)) int gdi_more(args *a, uint16_t service, uint32_
             *v = (uint16_t)EnumObjects(w(a, 14), e.type, ne_objproc, (LPARAM)(uintptr_t)&e);
         return 1;
     }
-    /* TrueType's: WINN's fonts are raster ones */
-    case 0x3133: case 0x3134: case 0x314c:  /* GetCharABCWidths, GetOutlineTextMetrics,
-                                             * GetKerningPairs: none */
-        *v = 0;
-        *dword = service == 0x3134;
-        return 1;
-    case 0x3135: case 0x3137:           /* GetGlyphOutline, GetFontData: GDI_ERROR */
-        *v = GDI_ERROR;
-        *dword = 1;
-        return 1;
+    /* TrueType's */
+    case 0x3133: case 0x3134: case 0x3135: case 0x3137: case 0x314c:
+        return gdi_tt(a, service, v, dword);
     case 0x3178:                        /* ResetDC(HDC, DEVMODE FAR *): no printer's to change */
         *v = w(a, 8);
         return 1;
@@ -1101,17 +1284,19 @@ static __attribute__((noinline)) int kernel_misc(args *a, uint16_t service, uint
     return 0;
 }
 
-static __attribute__((noinline)) int shell_service(args *a, uint16_t service, uint32_t *v)
+static __attribute__((noinline)) int shell_service(args *a, uint16_t service,
+                                                   uint32_t *v, int *dword)
 {
+    unsigned op = service - WIN_NE_SERVICE_SHELL;
+    if (ne_shell_registry_service(a, op, v)) {
+        *dword = 1;                     /* Win16 registry functions return LONG */
+        return 1;
+    }
+    if (ne_shell_drag_service(a, op, v))
+        return 1;
     char file[128], params[128], cmd[300];
-    switch (service - WIN_NE_SERVICE_SHELL) {
-    case 1: case 6:                     /* RegOpenKey, RegQueryValue: no such key */
-        *v = 2;
-        return 1;
-    case 2:                             /* RegCreateKey: no registration database */
-        *v = 5;
-        return 1;
-    case 3: case 9: case 12:            /* RegCloseKey, DragAcceptFiles, DragFinish */
+    switch (op) {
+    case 9:                             /* DragAcceptFiles: no drop source yet */
         *v = 0;
         return 1;
     case 20: {                          /* ShellExecute(HWND, op, file, params, dir, show) */
@@ -1243,7 +1428,7 @@ int ne_kernel_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *d
     win_ne_guest_api_context *c = a->ctx;
     win_ne_guest_image *g = (win_ne_guest_image *)c->image;
     if (service >= WIN_NE_SERVICE_SHELL && service < WIN_NE_SERVICE_SHELL + 0x1000u)
-        return shell_service(a, service, v);
+        return shell_service(a, service, v, dword);
     if (kernel_misc(a, service, v, dword))
         return 1;
     switch (service) {

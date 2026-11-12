@@ -12,6 +12,7 @@
  */
 #include <string.h>
 #include "wincore.h"
+#include "fontfile.h"
 
 void (*gdi_overlay_hook)(HWND source, const RECT *damage);
 
@@ -3329,17 +3330,20 @@ int WINAPI SetEnvironment(LPCSTR port, LPCSTR env, UINT size)
 
 BOOL WINAPI GetRasterizerCaps(void *status, int size)
 {
-    RASTERIZER_STATUS rs = { sizeof(RASTERIZER_STATUS), 0, 0 };   /* no TrueType */
+    /* TrueType there, and on, when a font file has it */
+    RASTERIZER_STATUS rs = { sizeof(RASTERIZER_STATUS),
+                             (short)(font_tt_any() ? TT_AVAILABLE | TT_ENABLED : 0), 0 };
     if (!status || size <= 0)
         return FALSE;
     memcpy(status, &rs, (size_t)size < sizeof(rs) ? (size_t)size : sizeof(rs));
     return TRUE;
 }
 
+/* a .FOT file naming a TrueType one (hidden: all are listed here) */
 BOOL WINAPI CreateScalableFontResource(UINT hidden, LPCSTR fot, LPCSTR ttf, LPCSTR path)
 {
-    (void)hidden; (void)fot; (void)ttf; (void)path;
-    return FALSE;
+    (void)hidden;
+    return font_make_fot(fot, ttf, path) != 0;
 }
 
 /* the device's pens (its 16 colours, solid; black in each style) or its

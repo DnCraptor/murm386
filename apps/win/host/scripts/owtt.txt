@@ -1,0 +1,21 @@
+# TrueType for a Win16 program on the i386 core (WINNTEST.FOT and
+# WINNTEST.TTF beside it, AddFontResource): its sizes, bold and italic
+# made, Cyrillic; the outline metrics, a glyph's bitmap (as is, turned,
+# wider), its outline drawn; a .FOT made and deleted:
+#     ./winhost scripts/owtt.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OWTT
+key RETURN
+wait 1500
+snap ok_tt.ppm
+keydown ALT
+key F4
+keyup ALT
+wait 50
+snap ok_tt_end.ppm
+exit

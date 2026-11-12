@@ -378,6 +378,7 @@ UINT    WINAPI GlobalGetAtomName(ATOM a, LPSTR buf, int size);
 #define FW_NORMAL       400
 #define FW_BOLD         700
 #define ANSI_CHARSET    0
+#define SYMBOL_CHARSET  2
 #define OEM_CHARSET     255
 #define DEFAULT_PITCH   0
 #define FIXED_PITCH     1
@@ -620,6 +621,8 @@ BOOL    WINAPI GetTextMetrics(HDC hdc, LPTEXTMETRIC tm);
 int     WINAPI GetTextFace(HDC hdc, int n, LPSTR face);
 BOOL    WINAPI GetCharWidth(HDC hdc, UINT first, UINT last, int *widths);
 #define RASTER_FONTTYPE 0x0001
+#define DEVICE_FONTTYPE 0x0002
+#define TRUETYPE_FONTTYPE 0x0004
 typedef int (CALLBACK *FONTENUMPROC)(const LOGFONT *lf, const TEXTMETRIC *tm, int type,
                                      LPARAM lp);
 /* a raster font file's faces (.FON, .FNT) for all to use: how many */
@@ -934,9 +937,61 @@ int     WINAPI SetEnvironment(LPCSTR port, LPCSTR env, UINT size);
  * LOGBRUSH each, to proc until it returns 0 */
 typedef int (CALLBACK *GOBJENUMPROC)(void *obj, LPARAM lp);
 int     WINAPI EnumObjects(HDC hdc, int type, GOBJENUMPROC proc, LPARAM lp);
-/* TrueType: WINN's fonts are raster ones */
+/* TrueType: whether there is any; a .FOT file made for a .TTF one */
 BOOL    WINAPI GetRasterizerCaps(void *status, int size);
 BOOL    WINAPI CreateScalableFontResource(UINT hidden, LPCSTR fot, LPCSTR ttf, LPCSTR path);
+
+/* TrueType's (Windows 3.1): a font's outlines, tables and metrics */
+typedef struct tagFIXED { WORD fract; short value; } FIXED;
+typedef struct tagMAT2 { FIXED eM11, eM12, eM21, eM22; } MAT2, *LPMAT2;
+typedef struct tagPOINTFX { FIXED x, y; } POINTFX, *LPPOINTFX;
+/* GGO_NATIVE's records (the Win16 layout too) */
+typedef struct tagTTPOLYCURVE { WORD wType, cpfx; POINTFX apfx[1]; } TTPOLYCURVE, *LPTTPOLYCURVE;
+typedef struct tagTTPOLYGONHEADER { DWORD cb, dwType; POINTFX pfxStart; } TTPOLYGONHEADER,
+    *LPTTPOLYGONHEADER;
+typedef struct tagGLYPHMETRICS {
+    UINT gmBlackBoxX, gmBlackBoxY;
+    POINT gmptGlyphOrigin;
+    short gmCellIncX, gmCellIncY;
+} GLYPHMETRICS, *LPGLYPHMETRICS;
+typedef struct tagABC { int abcA; UINT abcB; int abcC; } ABC, *LPABC;
+typedef struct tagKERNINGPAIR { WORD wFirst, wSecond; int iKernAmount; } KERNINGPAIR,
+    *LPKERNINGPAIR;
+typedef struct tagPANOSE {
+    BYTE bFamilyType, bSerifStyle, bWeight, bProportion, bContrast;
+    BYTE bStrokeVariation, bArmStyle, bLetterform, bMidline, bXHeight;
+} PANOSE, *LPPANOSE;
+/* its four names after it, each otmp* their offset from its start */
+typedef struct tagOUTLINETEXTMETRIC {
+    UINT otmSize;
+    TEXTMETRIC otmTextMetrics;
+    BYTE otmFiller;
+    PANOSE otmPanoseNumber;
+    UINT otmfsSelection, otmfsType;
+    int otmsCharSlopeRise, otmsCharSlopeRun, otmItalicAngle;
+    UINT otmEMSquare;
+    int otmAscent, otmDescent;
+    UINT otmLineGap, otmsCapEmHeight, otmsXHeight;
+    RECT otmrcFontBox;
+    int otmMacAscent, otmMacDescent;
+    UINT otmMacLineGap, otmusMinimumPPEM;
+    POINT otmptSubscriptSize, otmptSubscriptOffset, otmptSuperscriptSize, otmptSuperscriptOffset;
+    UINT otmsStrikeoutSize;
+    int otmsStrikeoutPosition, otmsUnderscorePosition, otmsUnderscoreSize;
+    char *otmpFamilyName, *otmpFaceName, *otmpStyleName, *otmpFullName;
+} OUTLINETEXTMETRIC, *LPOUTLINETEXTMETRIC;
+#define GGO_METRICS     0
+#define GGO_BITMAP      1
+#define GGO_NATIVE      2
+#define TT_POLYGON_TYPE 24
+#define TT_PRIM_LINE    1
+#define TT_PRIM_QSPLINE 2
+DWORD   WINAPI GetGlyphOutline(HDC hdc, UINT ch, UINT format, LPGLYPHMETRICS gm, DWORD size,
+                               void *buffer, const MAT2 *mat);
+DWORD   WINAPI GetFontData(HDC hdc, DWORD table, DWORD offset, void *buffer, DWORD size);
+WORD    WINAPI GetOutlineTextMetrics(HDC hdc, UINT size, LPOUTLINETEXTMETRIC otm);
+BOOL    WINAPI GetCharABCWidths(HDC hdc, UINT first, UINT last, LPABC abc);
+int     WINAPI GetKerningPairs(HDC hdc, int n, LPKERNINGPAIR pairs);
 
 /* ---------------------------------------------------------------- tasks */
 /* the rest of KERNEL 3.1's: a task's priority (-32..15) changed by delta,

@@ -78,6 +78,11 @@ extern void CreateRectRgn(void);
 extern void CreateRectRgnIndirect(void);
 extern void CreateRoundRectRgn(void);
 extern void CreateScalableFontResource(void);
+extern void GetCharABCWidths(void);
+extern void GetOutlineTextMetrics(void);
+extern void GetGlyphOutline(void);
+extern void GetFontData(void);
+extern void GetKerningPairs(void);
 extern void CreateSolidBrush(void);
 extern void CreateWindow(void);
 extern void CreateWindowEx(void);
@@ -772,9 +777,14 @@ static const void *const exports_gdi[487] = {
     [193] = (const void *)SetBoundsRect,
     [194] = (const void *)GetBoundsRect,
     [196] = (const void *)SetMetaFileBitsBetter,
+    [307] = (const void *)GetCharABCWidths,
+    [308] = (const void *)GetOutlineTextMetrics,
+    [309] = (const void *)GetGlyphOutline,
     [310] = (const void *)CreateScalableFontResource,
+    [311] = (const void *)GetFontData,
     [313] = (const void *)GetRasterizerCaps,
     [330] = (const void *)EnumFontFamilies,
+    [332] = (const void *)GetKerningPairs,
     [345] = (const void *)GetTextAlign,
     [346] = (const void *)SetTextAlign,
     [348] = (const void *)Chord,
