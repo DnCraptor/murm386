@@ -1,8 +1,8 @@
 /*
  * mmsystem.c - MMSYSTEM.DLL, WINN's multimedia system. Win16 waveOut
- * and midiOut use installed native drivers (wave.c / midi.c). Wave input,
- * MCI and sndPlaySound/PlaySound remain unsupported. The
- * multimedia timer (timeGetTime, timeSetEvent: its procedure called as its
+ * and midiOut use installed native drivers (wave.c / midi.c). Wave input
+ * and sndPlaySound/PlaySound remain unsupported; Win16 MCI MIDI lives in
+ * mci.c. The multimedia timer (timeGetTime, timeSetEvent: its procedure called as its
  * task takes its messages, as a timer's, as often as its period went by
  * since, ten times at most) and mmio's files (unbuffered: RIFF chunks
  * found, made). A native DLL (ddi/windll.h): its functions for native
@@ -29,6 +29,10 @@ int winn_midi_ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *value);
 void winn_midi_task_end(uint16_t task);
 void winn_midi_term(void);
 UINT WINAPI winn_midi_num(void);
+/* Win16 MCI sequencer for standard MIDI files. */
+int winn_mci_ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *value);
+void winn_mci_task_end(uint16_t task);
+void winn_mci_term(void);
 
 #define TIMERS      32
 #define MMIOS       16
@@ -80,6 +84,14 @@ static const char *mm_error(DWORD e)
     case MMSYSERR_NODRIVER: return "There is no driver installed on your system.";
     case MCIERR_DEVICE_NOT_INSTALLED:
         return "The specified device is not installed on the system.";
+    case 263: return "The specified MCI device name is invalid.";
+    case 264: return "Not enough memory to open the MIDI file.";
+    case 273: return "A required MCI parameter is missing.";
+    case 274: return "This MCI command is not supported.";
+    case 275: return "The specified media file was not found.";
+    case 276: return "The MCI device is not ready.";
+    case 293: return "The specified MCI time format is not supported.";
+    case 296: return "The MIDI file is invalid or uses an unsupported format.";
     default: return "An unknown error has occurred.";
     }
 }
@@ -501,6 +513,9 @@ static int ne_call(win_dll_call *c, uint16_t o, uint32_t *v)
     wr = winn_midi_ne_call(c, o, v);
     if (wr != WINDLL_NONE)
         return wr;
+    wr = winn_mci_ne_call(c, o, v);
+    if (wr != WINDLL_NONE)
+        return wr;
     switch (o) {
     case 2: case 3:                     /* sndPlaySound, PlaySound: no sound */
         *v = 0;
@@ -563,18 +578,11 @@ static int ne_call(win_dll_call *c, uint16_t o, uint32_t *v)
     case 607:                           /* timeGetTime */
         *v = GetTickCount();
         return WINDLL_DWORD;
-    case 701:                           /* mciSendCommand: no devices */
-        *v = MCIERR_DEVICE_NOT_INSTALLED;
-        return WINDLL_DWORD;
-    case 702:                           /* mciSendString(cmd, LPSTR, UINT, HWND) */
-        str_back(c, NE->arg32(c, 8), "", NE->arg16(c, 6));
-        *v = MCIERR_DEVICE_NOT_INSTALLED;
-        return WINDLL_DWORD;
     case 706:                           /* mciGetErrorString(DWORD, LPSTR, UINT) */
         str_back(c, NE->arg32(c, 6), mm_error(NE->arg32(c, 10)), NE->arg16(c, 4));
         *v = 1;
         return WINDLL_WORD;
-    case 703: case 707: case 708: case 710: case 711: case 712: case 713: case 714:
+    case 707: case 708: case 710: case 711: case 712: case 713: case 714:
     case 715: case 716: case 717:
         *v = 0;
         return o == 708 || o == 716 ? WINDLL_DWORD : WINDLL_WORD;
@@ -700,6 +708,7 @@ static int ne_call(win_dll_call *c, uint16_t o, uint32_t *v)
 /* a task ended: its timers, its mmio handles (its files are closed) */
 static void task_end(uint16_t task)
 {
+    winn_mci_task_end(task);
     winn_wave_task_end(task);
     winn_midi_task_end(task);
     for (int i = 0; i < TIMERS; i++)
@@ -714,6 +723,7 @@ static void task_end(uint16_t task)
 
 static void term(void)
 {
+    winn_mci_term();
     winn_wave_term();
     winn_midi_term();
     for (int i = 0; i < TIMERS; i++)

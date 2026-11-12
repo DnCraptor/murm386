@@ -3,7 +3,8 @@
  * WINN's: apps/windll/mmsystem) for native callers, who take its
  * functions with LoadLibrary("MMSYSTEM") and GetProcAddress, as Windows
  * 3.1's own. Win16 waveOut and midiOut use native drivers selected in
- * SYSTEM.INI. Wave input and MCI remain unavailable. Timers and mmio
+ * SYSTEM.INI. MCI supports Standard MIDI Files via the MIDI drivers.
+ * Wave input and MCI waveaudio remain unavailable. Timers and mmio
  * files (RIFF) work.
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.

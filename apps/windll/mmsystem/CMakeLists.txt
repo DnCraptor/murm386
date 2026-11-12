@@ -26,4 +26,4 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/../../../bin/${CMAKE_BUILD_TYPE}")
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/../../win/sdk/windll.cmake)
-win_dll(MMSYSTEM mmsystem.c wave.c midi.c)
+win_dll(MMSYSTEM mmsystem.c wave.c midi.c mci.c)

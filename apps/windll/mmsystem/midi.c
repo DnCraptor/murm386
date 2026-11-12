@@ -37,6 +37,7 @@ typedef struct {
     uint16_t device;
 } midi_open_state;
 static midi_open_state devices[MIDI_SLOTS];
+static midi_open_state mci_output;   /* reserves the selected physical port */
 
 static uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | (uint16_t)p[1] << 8); }
 static uint32_t rd32(const uint8_t *p) { return (uint32_t)rd16(p) | (uint32_t)rd16(p + 2) << 16; }
@@ -86,6 +87,45 @@ static const win_midi_driver *driver_by_id(unsigned id, HMODULE *module)
     }
     *module = 0;
     return NULL;
+}
+
+/* MCI and midiOut must not open the same hardware driver simultaneously. */
+int winn_midi_mci_open(uint16_t task)
+{
+    if (mci_output.driver) return 0;
+    HMODULE h;
+    const win_midi_driver *d = driver_by_id(0, &h);
+    if (!d) return 0;
+    for (unsigned i = 0; i < MIDI_SLOTS; i++) {
+        if (devices[i].driver == d) {
+            FreeLibrary(h);
+            return 0;
+        }
+    }
+    if (!d->open()) { FreeLibrary(h); return 0; }
+    memset(&mci_output, 0, sizeof(mci_output));
+    mci_output.module = h;
+    mci_output.driver = d;
+    mci_output.task = task;
+    return 1;
+}
+int winn_midi_mci_send(uint32_t packed)
+{
+    return mci_output.driver && mci_output.task == GetCurrentTask() &&
+           mci_output.driver->short_msg(packed);
+}
+void winn_midi_mci_reset(void)
+{
+    if (mci_output.driver) mci_output.driver->reset();
+}
+void winn_midi_mci_close(uint16_t task)
+{
+    if (!mci_output.driver || (task && mci_output.task != task)) return;
+    mci_output.driver->reset();
+    mci_output.driver->close();
+    HMODULE h = mci_output.module;
+    memset(&mci_output, 0, sizeof(mci_output));
+    FreeLibrary(h);
 }
 
 UINT WINAPI winn_midi_num(void)
@@ -171,6 +211,7 @@ static MMRESULT out_open(win_dll_call *c)
     HMODULE h;
     const win_midi_driver *d = driver_by_id(id, &h);
     if (!d) return MMSYSERR_BADDEVICEID;
+    if (mci_output.driver == d) { FreeLibrary(h); return MMSYSERR_ALLOCATED; }
     for (unsigned i = 0; i < MIDI_SLOTS; i++)
         if (devices[i].driver == d) { FreeLibrary(h); return MMSYSERR_ALLOCATED; }
     if (!d->open()) { FreeLibrary(h); return MMSYSERR_ALLOCATED; }
@@ -271,11 +312,13 @@ int winn_midi_ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *value)
 
 void winn_midi_task_end(uint16_t task)
 {
+    if (mci_output.driver && mci_output.task == task) winn_midi_mci_close(task);
     for (unsigned i = 0; i < MIDI_SLOTS; i++)
         if (devices[i].driver && devices[i].task == task) close_state(i, 0);
 }
 void winn_midi_term(void)
 {
+    winn_midi_mci_close(0);
     for (unsigned i = 0; i < MIDI_SLOTS; i++)
         if (devices[i].driver) close_state(i, 0);
 }
