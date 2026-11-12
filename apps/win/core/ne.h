@@ -122,6 +122,9 @@ win_ne_launch_status win_ne_classify_launch(const char *path, unsigned cpu_gen);
  * frees them), WIN_NE_UNRESOLVED when there is none. */
 int win_ne_resource(const char *path, uint16_t type, uint16_t id, const char *name,
                     uint8_t **data, uint32_t *bytes);
+/* where a resource is in the file (its offset), its size */
+int win_ne_resource_place(const char *path, uint16_t type, uint16_t id, const char *name,
+                          uint32_t *place, uint32_t *bytes);
 /* ... the n-th resource of the type (0 the first), as it is in the table */
 int win_ne_resource_nth(const char *path, uint16_t type, int n, uint8_t **data,
                         uint32_t *bytes);

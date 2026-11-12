@@ -39,8 +39,8 @@ goes on where it was. So a program busy computing does not stop the rest
 of the system, as it would in Windows 3.1, and one that never returns ends
 with Windows. Neither x86 CPU implementation is modified.
 
-A program can have windows of its own classes: `RegisterClass` registers
-them with a native window procedure that calls the program's (USER's
+A program can have windows of its own classes (by a name, or an atom's):
+`RegisterClass` registers them with a native window procedure that calls the program's (USER's
 calls go through a callback entry of the trampoline, into protected mode
 and ring 3 and back, nesting as the procedure calls the API in turn), and its
 messages, painting and drawing are converted between the Win16 structures
@@ -87,7 +87,9 @@ DOS 3 has it: WINN's strings, the count 1, the program's path (a C
 startup reads it there, without GetDOSEnvironment, which gives the same
 block). LocalReAlloc keeps a block where it is when what follows it is
 free, its bytes whether moved or not. A dialog template's menu, or its
-class's, is the dialog's (a dialog as a program's main window).
+class's, is the dialog's (a dialog as a program's main window); its ICON
+controls show the program's icons, by name or number (a static control
+takes an icon by STM_SETICON as well).
 
 The BIOS's software interrupts a program calls itself (INT 10h, 11h, 12h,
 16h, 1Ah) are answered as Windows' DOS extender would: VGA, colour (the
@@ -208,6 +210,7 @@ _hread/_hwrite (within one block: a huge pointer's segments are not
 tiled); KERNEL's GetModuleHandle, LoadLibrary and GetProcAddress for the
 modules WINN has (KERNEL, USER, GDI, KEYBOARD, SHELL, WIN87EM) and its own
 DLLs (below), FindResource, LoadResource, LockResource, SizeofResource,
+AccessResource (the module's file opened at the resource),
 Catch and Throw, GetTempFileName, GetWinFlags, WinExec, SetErrorMode,
 FatalAppExit and the constants __AHINCR, __AHSHIFT, __WINFLAGS, __0040H
 (the BIOS data, read only), __0000H, __A000H, __B000H, __B800H, __C000H,
@@ -475,8 +478,10 @@ needs one and unloaded when none does any more, as Windows 3.x does with
 its DLLs, instead of being built into `WINN.EXE`: `LZEXPAND.DLL`,
 `VER.DLL` (it reads a file's resources with the core's
 `GetFileResourceN`), `DDEML.DLL`, `MMSYSTEM.DLL`, `COMMDLG.DLL`, `OLECLI.DLL`,
-`OLESVR.DLL` and `SOUND.DLL` (WINN's speaker: `SoundQueueN` and the rest)
-so far. A program importing one that is not there, or a
+`OLESVR.DLL`, `SOUND.DLL` (WINN's speaker: `SoundQueueN` and the rest),
+`SYSTEM.DLL` (SYSTEM.DRV's: InquireSystem, the system timers called as
+their task takes its messages, GetSystemMSecCount, the 80x87's state
+size) and `MOUSE.DLL` (MOUSE.DRV's Inquire). A program importing one that is not there, or a
 function the DLL has not, still loads; the call ends it.
 A native DLL is an EZ image built with `sdk/windll.cmake` (no crt0; its
 `__ez_start`, from `sdk/windll_entry.c`, begins with a branch over the
@@ -764,6 +769,7 @@ Cyrillic; TrueType fonts map the characters to Unicode themselves.
 
 ## Not yet
 
-Resources (stage 2 brings the NE loader), printing, `.GRP`
-files (`PROGMAN.INI` holds the groups as text), DLLs (`LoadLibrary`) of
-native applications.
+Printing (there is no printer), `.GRP` files (`PROGMAN.INI` holds the groups as text), DLLs (`LoadLibrary`) of native applications;
+Windows 95's and NT's additions to Win16 (WOW, the thunks to Win32,
+paths, Bézier curves, enhanced metafiles), BiDi, STRESS.DLL, the
+undocumented CallProcInstance and Windows 2's GetContinuingTextExtent.

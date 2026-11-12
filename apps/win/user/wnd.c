@@ -62,8 +62,16 @@ void user_unregister_task_classes(HTASK task)
 
 ATOM WINAPI RegisterClass(const WNDCLASS *wc)
 {
-    if (!wc || !wc->lpszClassName || IS_INTRESOURCE(wc->lpszClassName))
+    char atom_name[64];
+    if (!wc || !wc->lpszClassName)
         return 0;
+    if (IS_INTRESOURCE(wc->lpszClassName)) {    /* an atom: its name's class */
+        WNDCLASS named = *wc;
+        if (!GetAtomName((ATOM)(uintptr_t)wc->lpszClassName, atom_name, sizeof(atom_name)))
+            return 0;
+        named.lpszClassName = atom_name;
+        return RegisterClass(&named);
+    }
     wclass *same = user_find_class(wc->lpszClassName);
     if (same && (same->wc.hInstance == wc->hInstance || (same->wc.style & CS_GLOBALCLASS)))
         return 0;

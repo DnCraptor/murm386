@@ -494,6 +494,9 @@ static uint8_t *template_at(args *a, uint32_t far, int global, uint32_t *n)
  * WM_INITDIALOG before them (param). */
 enum { TPL_RESOURCE, TPL_FAR, TPL_GLOBAL };
 
+static uint16_t load_shape(args *a, ne_user *u, uint16_t service, uint16_t inst, uint16_t id,
+                           const char *nm);
+
 static __attribute__((noinline)) int dialog_box(args *a, ne_user *u, int modeless, int how,
                                                 int param)
 {
@@ -579,11 +582,30 @@ static __attribute__((noinline)) int dialog_box(args *a, ne_user *u, int modeles
         } else if (!(it->klass = res_string(&p, end))) {
             goto done;
         }
-        if (p < end && *p == 0xff) {            /* an icon by number: not yet */
+        /* an icon's static: the module's icon, by number or name, given to
+         * the control as its handle (\001 and four hex digits) */
+        static char icon_text[64][6];
+        int icon = !lstrcmpi(it->klass, "STATIC") && (it->style & 0x0f) == SS_ICON;
+        HICON ic = 0;
+        if (p + 3 <= end && *p == 0xff) {
             it->text = "";
+            if (icon)
+                ic = load_shape(a, u, 0x10ae, a->inst, rd16(p + 1), NULL);
             p += 3;
         } else if (!(it->text = res_string(&p, end))) {
             goto done;
+        } else if (icon && it->text[0] == '#') {   /* "#n": the n-th, the system's */
+            unsigned n = 0;
+            for (const char *s = it->text + 1; *s >= '0' && *s <= '9'; s++)
+                n = n * 10 + (unsigned)(*s - '0');
+            if (n && n < 32512)
+                ic = load_shape(a, u, 0x10ae, a->inst, (uint16_t)n, NULL);
+        } else if (icon && it->text[0]) {
+            ic = load_shape(a, u, 0x10ae, a->inst, 0, it->text);
+        }
+        if (ic) {
+            wsprintf(icon_text[k], "\001%04X", (UINT)ic);
+            it->text = icon_text[k];
         }
         if (p >= end)
             goto done;
@@ -621,11 +643,12 @@ uint16_t ne_register_class(args *a, ne_user *u, uint32_t p)
     int i = 0;
     while (i < NE_CLASSES && u->cls[i].proc)
         i++;
-    uint32_t name = rd32(g + 22);
-    if (i == NE_CLASSES || !(name >> 16) ||
-        !win_ne_string(a->ctx, (uint16_t)(name >> 16), (uint16_t)name, u->cls[i].name,
-                       sizeof(u->cls[i].name)))
-        return 0;                       /* an atom for a name: not yet */
+    uint32_t name = rd32(g + 22);       /* a name, or an atom's (MAKEINTATOM) */
+    if (i == NE_CLASSES ||
+        ((name >> 16) ? !win_ne_string(a->ctx, (uint16_t)(name >> 16), (uint16_t)name,
+                                       u->cls[i].name, sizeof(u->cls[i].name))
+                      : !GetAtomName((ATOM)name, u->cls[i].name, sizeof(u->cls[i].name))))
+        return 0;
     WNDCLASS wc;
     memset(&wc, 0, sizeof(wc));
     wc.style = rd16(g);
@@ -666,12 +689,19 @@ uint16_t ne_load_image(args *a, ne_user *u, uint16_t service, uint16_t inst, uin
         return service == 0x10ad ? LoadCursor(0, MAKEINTRESOURCE((WORD)far)) :
                service == 0x10ae ? LoadIcon(0, MAKEINTRESOURCE((WORD)far)) : 0;
     }
-    uint16_t id = (uint16_t)far;
     name[0] = 0;
     if ((far >> 16) && !win_ne_string(a->ctx, (uint16_t)(far >> 16), (uint16_t)far, name,
                                       sizeof(name)))
         return a->bad = 1, 0;
-    const char *nm = (far >> 16) ? name : NULL;
+    return load_shape(a, u, service, inst, (uint16_t)far, (far >> 16) ? name : NULL);
+}
+
+/* a module's bitmap, cursor or icon (service as ne_load_image's) by number
+ * or name; its icons and cursors once each */
+static uint16_t load_shape(args *a, ne_user *u, uint16_t service, uint16_t inst, uint16_t id,
+                           const char *nm)
+{
+    const char *name = nm ? nm : "";
     a->inst = inst;
     const char *path = res_path(a);
     if (service == 0x10af)

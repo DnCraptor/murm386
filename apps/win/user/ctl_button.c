@@ -435,8 +435,40 @@ LRESULT CALLBACK user_static_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     case WM_GETFONT:
         return GetProp(h, MAKEINTATOM(1));
+    case WM_CREATE:
+        /* an icon's: its text the icon (#n the system's or the module's
+         * n-th, \001 and four hex digits a handle, else a name) */
+        if (t == SS_ICON) {
+            const char *s = ((const CREATESTRUCT *)lp)->lpszName;
+            HINSTANCE inst = ((const CREATESTRUCT *)lp)->hInstance;
+            HICON ic = 0;
+            if (s && s[0] == '\001') {
+                unsigned v = 0;
+                for (int i = 1; i < 5 && s[i]; i++)
+                    v = v * 16 + (unsigned)(s[i] <= '9' ? s[i] - '0' : (s[i] | 0x20) - 'a' + 10);
+                ic = (HICON)(uintptr_t)v;
+            } else if (s && s[0] == '#') {
+                int id = 0;
+                for (const char *p = s + 1; *p >= '0' && *p <= '9'; p++)
+                    id = id * 10 + (*p - '0');
+                ic = LoadIcon(id >= 32512 ? 0 : inst, MAKEINTRESOURCE(id ? id : 32512));
+            } else if (s && s[0]) {
+                ic = LoadIcon(inst, s);
+            }
+            SetProp(h, MAKEINTATOM(2), ic ? ic : LoadIcon(0, IDI_APPLICATION));
+        }
+        return 0;
+    case STM_SETICON: {                 /* the icon drawn, the one before */
+        HANDLE was = GetProp(h, MAKEINTATOM(2));
+        SetProp(h, MAKEINTATOM(2), (HANDLE)wp);
+        InvalidateRect(h, NULL, TRUE);
+        return (LRESULT)(uintptr_t)was;
+    }
+    case STM_GETICON:
+        return (LRESULT)(uintptr_t)GetProp(h, MAKEINTATOM(2));
     case WM_NCDESTROY:
         RemoveProp(h, MAKEINTATOM(1));
+        RemoveProp(h, MAKEINTATOM(2));
         return 0;
     case WM_PAINT: {
         PAINTSTRUCT ps;
@@ -453,12 +485,7 @@ LRESULT CALLBACK user_static_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         case SS_ICON: {
             HBRUSH bg = user_ctl_color(h, dc, CTLCOLOR_STATIC);
             FillRect(dc, &rc, bg);
-            char name[16];
-            GetWindowText(h, name, sizeof(name));
-            int id = name[0] == '#' ? 0 : 0;
-            for (const char *p = name + 1; name[0] == '#' && *p >= '0' && *p <= '9'; p++)
-                id = id * 10 + (*p - '0');
-            DrawIcon(dc, 0, 0, LoadIcon(0, MAKEINTRESOURCE(id ? id : 32512)));
+            DrawIcon(dc, 0, 0, (HICON)GetProp(h, MAKEINTATOM(2)));
             break;
         }
         default: {

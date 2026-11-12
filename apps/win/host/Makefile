@@ -16,7 +16,7 @@ GDICORE  = $(filter-out ../core/exports.c ../core/task.c ../core/file.c ../core/
 # the applications, built in; each WinMain gets its own name
 APPS     = demo.o progman.o notepad.o clock.o calc.o control.o winfile.o taskman.o winmine.o winhelp.o hlpfile.o appinfo.o
 # the native DLLs, built in (host_dlls.c names them); each WinDllInit its own
-DLLS     = lzexpand.o ver.o ddeml.o mmsystem.o wave.o midi.o mci.o mci_wave.o commdlg.o olecli.o olesvr.o sound.o host_dlls.c
+DLLS     = lzexpand.o ver.o ddeml.o mmsystem.o wave.o midi.o mci.o mci_wave.o commdlg.o olecli.o olesvr.o sound.o system.o mouse.o host_dlls.c
 
 all: test_gdi test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_launch test_ne_rm_gate test_ne_run NEFIXTURES winhost winhost800 winhostvga HOSTWIN
 
@@ -184,6 +184,10 @@ olesvr.o: ../../windll/olesvr/olesvr.c ../include/ole.h ../ddi/windll.h
 	$(CC) $(CFLAGS) $(INC) -DWinDllInit=olesvr_WinDllInit -c -o $@ $<
 sound.o: ../../windll/sound/sound.c ../include/sound.h ../ddi/windll.h
 	$(CC) $(CFLAGS) $(INC) -DWinDllInit=sound_WinDllInit -c -o $@ $<
+system.o: ../../windll/system/system.c ../ddi/windll.h
+	$(CC) $(CFLAGS) $(INC) -DWinDllInit=system_WinDllInit -c -o $@ $<
+mouse.o: ../../windll/mouse/mouse.c ../ddi/windll.h
+	$(CC) $(CFLAGS) $(INC) -DWinDllInit=mouse_WinDllInit -c -o $@ $<
 
 # their names and icons, from their CMakeLists.txt and .icon files
 appinfo.c: mkappinfo.py $(wildcard ../../winapps/*/CMakeLists.txt) $(wildcard ../../winapps/*/*.icon)

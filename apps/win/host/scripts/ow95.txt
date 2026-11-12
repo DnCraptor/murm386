@@ -4,7 +4,8 @@
 # LoadImage of files, DrawIconEx, GetIconInfo, CopyImage,
 # RegisterClassEx, GetClassInfoEx, ChildWindowFromPointEx, 32-bit
 # properties, help contexts; the visible area, GetClipRgn, SetDCOrg, the
-# DC's hook, GetTextExtentEx:
+# DC's hook, GetTextExtentEx; SYSTEM's timer, MOUSE's Inquire, a class
+# by an atom, AccessResource, a dialog's icons of the program's own:
 #     ./winhost scripts/ow95.txt PROGMAN
 wait 100
 keydown ALT

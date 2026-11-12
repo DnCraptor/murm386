@@ -615,7 +615,7 @@ static int res_id_match(FILE *f, uint64_t size, uint64_t table, uint16_t v,
 
 /* the resource of type by id or name, or (nth >= 0) the nth of the type */
 static int find_resource(const char *path, uint16_t type, uint16_t id, const char *name,
-                         int nth, uint8_t **data, uint32_t *bytes)
+                         int nth, uint8_t **data, uint32_t *bytes, uint32_t *place)
 {
     *data = NULL;
     *bytes = 0;
@@ -666,6 +666,12 @@ static int find_resource(const char *path, uint16_t type, uint16_t id, const cha
                 continue;
             uint64_t at = (uint64_t)rd16(ni) << shift;
             uint32_t len = (uint32_t)rd16(ni + 2) << shift;
+            if (place) {                        /* where it is, not its bytes */
+                *place = (uint32_t)at;
+                *bytes = len;
+                rc = at + len <= size ? WIN_NE_OK : WIN_NE_BAD_IMAGE;
+                goto out;
+            }
             uint8_t *d = len ? (uint8_t *)malloc(len) : NULL;
             if (!d) {
                 rc = WIN_NE_NO_MEMORY;
@@ -690,7 +696,14 @@ out:
 int win_ne_resource(const char *path, uint16_t type, uint16_t id, const char *name,
                     uint8_t **data, uint32_t *bytes)
 {
-    return find_resource(path, type, id, name, -1, data, bytes);
+    return find_resource(path, type, id, name, -1, data, bytes, NULL);
+}
+
+int win_ne_resource_place(const char *path, uint16_t type, uint16_t id, const char *name,
+                          uint32_t *place, uint32_t *bytes)
+{
+    uint8_t *none;
+    return find_resource(path, type, id, name, -1, &none, bytes, place);
 }
 
 int win_ne_resource_nth(const char *path, uint16_t type, int n, uint8_t **data,
@@ -698,7 +711,7 @@ int win_ne_resource_nth(const char *path, uint16_t type, int n, uint8_t **data,
 {
     *data = NULL;
     *bytes = 0;
-    return n < 0 ? WIN_NE_UNRESOLVED : find_resource(path, type, 0, NULL, n, data, bytes);
+    return n < 0 ? WIN_NE_UNRESOLVED : find_resource(path, type, 0, NULL, n, data, bytes, NULL);
 }
 
 int win_ne_description(const char *path, char *buf, uint32_t cap)

@@ -179,6 +179,8 @@ typedef struct {
 #define SS_CENTER           0x01L
 #define SS_RIGHT            0x02L
 #define SS_ICON             0x03L
+#define STM_SETICON         (WM_USER + 0)   /* a static's icon: wParam the icon */
+#define STM_GETICON         (WM_USER + 1)
 #define SS_BLACKRECT        0x04L
 #define SS_GRAYRECT         0x05L
 #define SS_WHITERECT        0x06L

@@ -1523,9 +1523,23 @@ int ne_kernel_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *d
         *v = n && n <= 65536u ? win_ne_guest_global_alloc(g, n) : 0;
         return 1;
     }
-    case 64:                            /* AccessResource(HINSTANCE, HRSRC): no file */
-        *v = 0xffff;                    /* handle of the module's own (HFILE_ERROR) */
+    case 64: {                          /* AccessResource(HINSTANCE, HRSRC): the module's
+                                         * file opened, at the resource */
+        int i = resource_index(u, w(a, 4));
+        uint32_t place, size;
+        HFILE f = HFILE_ERROR;
+        const char *path = i >= 0 ? win_ne_guest_path_of(a->ctx->image, u->res[i].inst,
+                                                         a->ctx->path) : NULL;
+        if (path && win_ne_resource_place(path, u->res[i].type, u->res[i].id,
+                                          u->res[i].name[0] ? u->res[i].name : NULL,
+                                          &place, &size) == WIN_NE_OK &&
+            (f = _lopen(path, OF_READ)) != HFILE_ERROR && _llseek(f, (LONG)place, 0) != (LONG)place) {
+            _lclose(f);
+            f = HFILE_ERROR;
+        }
+        *v = (uint16_t)f;
         return 1;
+    }
     case 67:                            /* SetResourceHandler(HINSTANCE, type, proc): */
         *v = 0;                         /* none before (WINN loads them itself) */
         *dword = 1;
