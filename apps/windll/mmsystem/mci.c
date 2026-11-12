@@ -89,6 +89,8 @@
 #define MIDI_FILE_MAX (256u * 1024u)
 #define MIDI_EVENT_MAX 16384u
 #define MCI_ID 1u
+#define MCI_WAVE_ID 2u
+#define MCI_DEVTYPE_WAVEFORM_AUDIO 522u
 
 typedef struct {
     uint32_t tick, ms, data;
@@ -99,7 +101,7 @@ typedef struct {
     uint16_t task;
     uint16_t timer;
     uint16_t division, tracks;
-    uint32_t time_format, mode;
+    uint32_t endtick, time_format, mode;
     uint32_t position_ms, duration_ms, origin_ms, started;
     uint32_t end_at, index, count;
     seq_event *events;
@@ -116,6 +118,16 @@ int winn_midi_mci_send(uint32_t packed);
 void winn_midi_mci_reset(void);
 void winn_midi_mci_close(uint16_t task);
 UINT WINAPI winn_midi_num(void);
+UINT WINAPI winn_wave_num(void);
+uint32_t winn_mci_wave_open(const char *filename, const char *alias);
+uint32_t winn_mci_wave_command(win_dll_call *c, uint16_t msg, uint32_t flags, uint32_t p);
+void winn_mci_wave_close(void);
+int winn_mci_wave_owned(void);
+int winn_mci_wave_match(const char *name);
+uint32_t winn_mci_wave_string(const char *op, const char *rest, char *result,
+                              unsigned cap, HWND hwnd);
+void winn_mci_wave_task_end(uint16_t task);
+void winn_mci_wave_term(void);
 
 static uint16_t le16(const uint8_t *p) { return (uint16_t)p[0] | (uint16_t)p[1] << 8; }
 static uint32_t le32(const uint8_t *p) { return le16(p) | (uint32_t)le16(p + 2) << 16; }
@@ -232,7 +244,7 @@ static void sort_events(seq_event *events, uint32_t count)
 
 /* Standard MIDI File format 0/1; preserve a global tempo map across tracks. */
 static uint32_t load_smf(const char *path, seq_event **out, uint32_t *count,
-                         uint32_t *duration, uint16_t *division, uint16_t *tracks) {
+                         uint32_t *duration, uint32_t *lasttick, uint16_t *division, uint16_t *tracks) {
     HFILE f = _lopen(path, OF_READ);
     if (f == HFILE_ERROR) return MCIERR_FILE_NOT_FOUND;
     LONG sz = _llseek(f, 0, 2);
@@ -324,6 +336,7 @@ static uint32_t load_smf(const char *path, seq_event **out, uint32_t *count,
     *out = events;
     *count = used;
     *duration = (uint32_t)(us / 1000u);
+    *lasttick = endtick;
     *division = div;
     *tracks = nt;
     return 0;
@@ -387,10 +400,10 @@ static uint32_t do_open(const char *filename, const char *alias) {
     if (owned() || seq.opened) return MCIERR_UNSUPPORTED_FUNCTION;
     if (!winn_midi_num()) return MCIERR_DEVICE_NOT_INSTALLED;
     seq_event *events = NULL;
-    uint32_t count = 0, duration = 0;
+    uint32_t count = 0, duration = 0, endtick = 0;
     uint16_t division = 0, tracks = 0;
     if (filename && filename[0]) {
-        uint32_t e = load_smf(filename, &events, &count, &duration, &division, &tracks);
+        uint32_t e = load_smf(filename, &events, &count, &duration, &endtick, &division, &tracks);
         if (e) return e;
     }
     if (!winn_midi_mci_open((uint16_t)GetCurrentTask())) {
@@ -405,6 +418,7 @@ static uint32_t do_open(const char *filename, const char *alias) {
     seq.events = events;
     seq.count = count;
     seq.duration_ms = duration;
+    seq.endtick = endtick;
     seq.end_at = duration;
     seq.division = division;
     seq.tracks = tracks;
@@ -419,23 +433,50 @@ static void do_close(void) {
     free(seq.events);
     memset(&seq, 0, sizeof(seq));
 }
+/* Interpolate across MIDI events, including the last track's end-of-track
+ * tick. A position between two events must not jump to the next event. */
+static uint32_t ms_for_tick(uint32_t tick) {
+    if (tick >= seq.endtick) return seq.duration_ms;
+    uint32_t left_tick = 0, left_ms = 0;
+    for (uint32_t i = 0; i < seq.count; ++i) {
+        const seq_event *e = &seq.events[i];
+        if (e->tick > tick) {
+            uint32_t span = e->tick - left_tick;
+            return span ? left_ms + (uint32_t)(((uint64_t)(tick - left_tick) *
+                           (e->ms - left_ms)) / span) : left_ms;
+        }
+        left_tick = e->tick;
+        left_ms = e->ms;
+    }
+    uint32_t span = seq.endtick - left_tick;
+    return span ? left_ms + (uint32_t)(((uint64_t)(tick - left_tick) *
+                   (seq.duration_ms - left_ms)) / span) : left_ms;
+}
+static uint32_t tick_for_ms(uint32_t ms) {
+    if (ms >= seq.duration_ms) return seq.endtick;
+    uint32_t left_tick = 0, left_ms = 0;
+    for (uint32_t i = 0; i < seq.count; ++i) {
+        const seq_event *e = &seq.events[i];
+        if (e->ms > ms) {
+            uint32_t span = e->ms - left_ms;
+            return span ? left_tick + (uint32_t)(((uint64_t)(ms - left_ms) *
+                           (e->tick - left_tick)) / span) : left_tick;
+        }
+        left_tick = e->tick;
+        left_ms = e->ms;
+    }
+    uint32_t span = seq.duration_ms - left_ms;
+    return span ? left_tick + (uint32_t)(((uint64_t)(ms - left_ms) *
+                   (seq.endtick - left_tick)) / span) : left_tick;
+}
 static uint32_t to_milliseconds(uint32_t p) {
-    /* Song-pointer format uses units of 1/16 quarter note: map through
-     * the file's tick grid. With tempo changes a linear mapping would be
-     * inaccurate; the sequencer can instead use milliseconds. */
     if (seq.time_format != MCI_SEQ_FORMAT_SONGPTR || !seq.division) return p;
-    uint32_t tick = (uint32_t)(((uint64_t)p * seq.division) / 16u);
-    uint32_t i = 0;
-    while (i < seq.count && seq.events[i].tick < tick) ++i;
-    return i < seq.count ? seq.events[i].ms : seq.duration_ms;
+    uint64_t tick = ((uint64_t)p * seq.division) / 16u;
+    return ms_for_tick(tick > UINT32_MAX ? UINT32_MAX : (uint32_t)tick);
 }
 static uint32_t from_milliseconds(uint32_t ms) {
     if (seq.time_format != MCI_SEQ_FORMAT_SONGPTR || !seq.division) return ms;
-    uint32_t i = 0;
-    while (i < seq.count && seq.events[i].ms < ms) ++i;
-    uint32_t tick = i < seq.count ? seq.events[i].tick :
-                    (seq.count ? seq.events[seq.count - 1].tick : 0);
-    return (uint32_t)(((uint64_t)tick * 16u) / seq.division);
+    return (uint32_t)(((uint64_t)tick_for_ms(ms) * 16u) / seq.division);
 }
 static uint32_t do_play(uint32_t flags, uint32_t from, uint32_t to, HWND callback) {
     if (!owned()) return MCIERR_INVALID_DEVICE_ID;
@@ -511,6 +552,12 @@ static uint32_t do_caps(uint32_t item, uint32_t *value) {
 
 /* Win16 MCI_OPEN_PARMS: dwCallback (4), wDeviceID (2), reserved (2),
  * lpstrDeviceType (4), lpstrElementName (4), lpstrAlias (4). */
+static int wave_extension(const char *path) {
+    const char *dot = NULL;
+    for (const char *p = path; *p; ++p)
+        if (*p == '.') dot = p;
+    return dot && !lstrcmpi(dot, ".wav");
+}
 static uint32_t cmd_open(win_dll_call *c, uint32_t flags, uint32_t p) {
     uint8_t b[20];
     char file[160] = "", alias[64] = "", type[48] = "";
@@ -518,9 +565,12 @@ static uint32_t cmd_open(win_dll_call *c, uint32_t flags, uint32_t p) {
     uint32_t t = le32(b + 8), f = le32(b + 12), a = le32(b + 16);
     if (flags & MCI_OPEN_TYPE) {
         if (flags & MCI_OPEN_TYPE_ID) {
-            if ((uint16_t)t != MCI_DEVTYPE_SEQUENCER) return MCIERR_DEVICE_NOT_INSTALLED;
-        } else if (!text_guest(c, t, type, sizeof(type)) ||
-                   (lstrcmpi(type, "sequencer") && lstrcmpi(type, "MCISEQ")))
+            if ((uint16_t)t == MCI_DEVTYPE_WAVEFORM_AUDIO)
+                lstrcpyn(type, "waveaudio", sizeof(type));
+            else if ((uint16_t)t == MCI_DEVTYPE_SEQUENCER)
+                lstrcpyn(type, "sequencer", sizeof(type));
+            else return MCIERR_DEVICE_NOT_INSTALLED;
+        } else if (!text_guest(c, t, type, sizeof(type)))
             return MCIERR_DEVICE_NOT_INSTALLED;
     }
     if ((flags & MCI_OPEN_ELEMENT) && !text_guest(c, f, file, sizeof(file)))
@@ -528,11 +578,18 @@ static uint32_t cmd_open(win_dll_call *c, uint32_t flags, uint32_t p) {
     if ((flags & MCI_OPEN_ALIAS) && !text_guest(c, a, alias, sizeof(alias)))
         return MCIERR_MISSING_PARAMETER;
     if (!file[0] && !(flags & MCI_OPEN_TYPE)) return MCIERR_MISSING_PARAMETER;
-    uint32_t err = do_open(file, alias);
+    int wav = wave_extension(file) || !lstrcmpi(type, "waveaudio") ||
+              !lstrcmpi(type, "MCIWAVE");
+    if (!wav && type[0] && lstrcmpi(type, "sequencer") && lstrcmpi(type, "MCISEQ"))
+        return MCIERR_DEVICE_NOT_INSTALLED;
+    uint32_t err = wav ? winn_mci_wave_open(file, alias) : do_open(file, alias);
     if (!err) {
         uint8_t id[2];
-        put16(id, MCI_ID);
-        if (!write_guest(c, p + 4u, id, 2)) { do_close(); return MCIERR_MISSING_PARAMETER; }
+        put16(id, wav ? MCI_WAVE_ID : MCI_ID);
+        if (!write_guest(c, p + 4u, id, 2)) {
+            if (wav) winn_mci_wave_close(); else do_close();
+            return MCIERR_MISSING_PARAMETER;
+        }
         if (flags & MCI_NOTIFY) send_notify((HWND)le16(b), MCI_NOTIFY_SUCCESSFUL);
     }
     return err;
@@ -545,14 +602,24 @@ static uint32_t cmd_sysinfo(win_dll_call *c, uint32_t flags, uint32_t p) {
     if (!dest || !cap) return MCIERR_MISSING_PARAMETER;
     if (flags & MCI_SYSINFO_QUANTITY) {
         if (cap < 4u) return MCIERR_MISSING_PARAMETER;
-        /* MIDI sequencer only; cdaudio, waveaudio and others not installed. */
-        uint32_t n = (type == 0 || type == MCI_DEVTYPE_SEQUENCER) && winn_midi_num() ? 1u : 0u;
+        uint32_t n = 0;
+        if ((type == 0 || type == MCI_DEVTYPE_SEQUENCER) && winn_midi_num()) ++n;
+        if ((type == 0 || type == MCI_DEVTYPE_WAVEFORM_AUDIO) && winn_wave_num()) ++n;
         return write_dword(c, dest, n) ? 0 : MCIERR_MISSING_PARAMETER;
     }
     if (flags & MCI_SYSINFO_NAME) {
-        if (type != MCI_DEVTYPE_SEQUENCER || le32(b + 12) != 1 || !winn_midi_num())
-            return MCIERR_DEVICE_NOT_INSTALLED;
-        return write_string(c, dest, cap, "sequencer") ? 0 : MCIERR_MISSING_PARAMETER;
+        uint32_t number = le32(b + 12);
+        const char *name = NULL;
+        if (type == MCI_DEVTYPE_SEQUENCER && number == 1 && winn_midi_num())
+            name = "sequencer";
+        else if (type == MCI_DEVTYPE_WAVEFORM_AUDIO && number == 1 && winn_wave_num())
+            name = "waveaudio";
+        else if (type == 0 && number == 1 && winn_midi_num())
+            name = "sequencer";
+        else if (type == 0 && number == (winn_midi_num() ? 2u : 1u) && winn_wave_num())
+            name = "waveaudio";
+        if (!name) return MCIERR_DEVICE_NOT_INSTALLED;
+        return write_string(c, dest, cap, name) ? 0 : MCIERR_MISSING_PARAMETER;
     }
     return MCIERR_UNSUPPORTED_FUNCTION;
 }
@@ -560,9 +627,10 @@ static uint32_t cmd_other(win_dll_call *c, uint16_t id, uint16_t msg,
                           uint32_t flags, uint32_t p) {
     if (msg == MCI_SYSINFO) return cmd_sysinfo(c, flags, p);
     if (msg == MCI_OPEN) return cmd_open(c, flags, p);
+    if (id == MCI_WAVE_ID) return winn_mci_wave_command(c, msg, flags, p);
     if (!owned() || id != MCI_ID) return MCIERR_INVALID_DEVICE_ID;
     uint8_t b[16] = {0};
-    if (!read_guest(c, p, b, sizeof(uint32_t))) return MCIERR_MISSING_PARAMETER;
+    if (p && !read_guest(c, p, b, sizeof(uint32_t))) return MCIERR_MISSING_PARAMETER;
     HWND callback = (HWND)le16(b);
     uint32_t result = 0, err = 0;
     switch (msg) {
@@ -604,15 +672,16 @@ static uint32_t cmd_other(win_dll_call *c, uint16_t id, uint16_t msg,
         if (!text_guest(c, le32(b + 4), filename, sizeof(filename)))
             return MCIERR_MISSING_PARAMETER;
         seq_event *events = NULL;
-        uint32_t count, duration;
+        uint32_t count, duration, endtick;
         uint16_t division, tracks;
-        err = load_smf(filename, &events, &count, &duration, &division, &tracks);
+        err = load_smf(filename, &events, &count, &duration, &endtick, &division, &tracks);
         if (!err) {
             halt(1);
             free(seq.events);
             seq.events = events;
             seq.count = count;
             seq.duration_ms = seq.end_at = duration;
+            seq.endtick = endtick;
             seq.division = division;
             seq.tracks = tracks;
             seq.index = seq.position_ms = 0;
@@ -689,7 +758,9 @@ static uint32_t cmd_string(const char *cmd, char *result, unsigned cap, HWND h) 
         word(&p, arg, sizeof(arg));
         if (same(arg, "quantity")) {
             if (result && cap) {
-                char n[2] = { (char)(winn_midi_num() && (same(dev,"all") || same(dev,"sequencer")) ? '1':'0'), 0 };
+                unsigned count = (winn_midi_num() && (same(dev,"all") || same(dev,"sequencer"))) +
+                                 (winn_wave_num() && (same(dev,"all") || same(dev,"waveaudio")));
+                char n[2] = { (char)('0' + count), 0 };
                 lstrcpyn(result, n, (int)cap);
             }
             return 0;
@@ -698,16 +769,20 @@ static uint32_t cmd_string(const char *cmd, char *result, unsigned cap, HWND h) 
     }
     if (same(op, "open")) {
         char file[160] = "", alias[64] = "", type[40] = "";
-        if (same(dev, "sequencer")) lstrcpyn(type, "sequencer", sizeof(type));
+        if (same(dev, "sequencer") || same(dev, "waveaudio"))
+            lstrcpyn(type, dev, sizeof(type));
         else lstrcpyn(file, dev, sizeof(file));
         while ((word(&p, arg, sizeof(arg)), arg[0])) {
             if (same(arg, "type")) word(&p, type, sizeof(type));
             else if (same(arg, "alias")) word(&p, alias, sizeof(alias));
         }
+        if (wave_extension(file) || same(type, "waveaudio") || same(type, "MCIWAVE"))
+            return winn_mci_wave_open(file, alias);
         if (type[0] && !same(type, "sequencer") && !same(type, "MCISEQ"))
             return MCIERR_DEVICE_NOT_INSTALLED;
         return do_open(file, alias);
     }
+    if (winn_mci_wave_match(dev)) return winn_mci_wave_string(op, p, result, cap, h);
     if (!owned() || !match_device(dev)) return MCIERR_INVALID_DEVICE_NAME;
     if (same(op, "close")) { do_close(); return 0; }
     if (same(op, "stop")) { halt(1); return 0; }
@@ -792,8 +867,9 @@ int winn_mci_ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *value) {
     if (ordinal == 703) {
         char alias[80];
         uint32_t ptr = NE->arg32(c, 4);
-        *value = text_guest(c, ptr, alias, sizeof(alias)) && owned() &&
-                 match_device(alias) ? MCI_ID : 0;
+        *value = text_guest(c, ptr, alias, sizeof(alias)) ?
+                 (winn_mci_wave_match(alias) ? MCI_WAVE_ID :
+                  owned() && match_device(alias) ? MCI_ID : 0) : 0;
         return WINDLL_WORD;
     }
     return WINDLL_NONE;
@@ -801,5 +877,6 @@ int winn_mci_ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *value) {
 
 void winn_mci_task_end(uint16_t task) {
     if (seq.opened && seq.task == task) do_close();
+    winn_mci_wave_task_end(task);
 }
-void winn_mci_term(void) { do_close(); }
+void winn_mci_term(void) { do_close(); winn_mci_wave_term(); }
