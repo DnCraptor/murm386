@@ -304,6 +304,17 @@ static __attribute__((noinline)) int generic(args *a, ne_user *u, uint16_t servi
         switch (codes[i]) {
         case 'S': {
             const char *s = (const char *)(uintptr_t)x[i];
+            /* Profile key enumeration returns a MULTI_SZ, not a single ASCIIZ.
+             * Include the final extra NUL instead of stopping at the first key.
+             * Both WIN.INI's GetProfileString and GetPrivateProfileString use it. */
+            if ((service == 58u || service == 128u) && i == 3 && !raw[1]) {
+                uint32_t count = res < next ? res + 1u : next;
+                if (count < 2u && next >= 2u)
+                    count = 2u;
+                if (count)
+                    wr(a, r, s, count);
+                break;
+            }
             uint32_t len = 0;
             while (len + 1 < next && s[len])
                 len++;
