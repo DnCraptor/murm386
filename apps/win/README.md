@@ -242,7 +242,10 @@ regular, bold and italic files its faces, a face with the Windows-1251
 letters before one without for the family's name: "Arial Cyr" for
 "Arial" when Arial has none), drawn by WINN's own rasterizer (`core/truetype.c`: simple and
 composite glyphs, their curves made lines, black and white with dropout
-control as Windows 3.1 has them on a VGA, no hinting) at any height (the
+control as Windows 3.1 has them on a VGA; the fonts' hints not run, the
+glyphs fitted up and down instead: each horizontal edge on a pixel's
+boundary, a stroke at least a pixel, so the baseline, the capitals' and
+small letters' tops and the bars stay level) at any height (the
 em's when lfHeight is negative, the cell's when positive), Windows-1251
 through the font's Unicode map (Latin-1 for a font without Cyrillic) or
 its symbol one; their faces found by

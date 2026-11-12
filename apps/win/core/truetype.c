@@ -503,6 +503,87 @@ static void add_curve(edges *es, float x0, float y0, float cx, float cy, float x
 
 /* the glyph's outline to the sink, its points through m (x' = m0 x + m2 y +
  * m4, y' = m1 x + m3 y + m5, in pixels, y up) */
+#define FIT_EDGES 96
+
+static float fabs_(float v) { return v < 0 ? -v : v; }
+
+/* the glyph fitted to the pixels up and down, as Windows' hints do for a
+ * VGA's sizes (without running them): its horizontal edges (on-curve
+ * points a level line joins, a curve's flat top or bottom) each on a
+ * pixel's boundary, a stroke or a gap between two of them a pixel at
+ * least, the other points moved in proportion between the edges about
+ * them (y in pixels, up) */
+static void fit_y(const float *px, float *py, const uint8_t *flag, int points,
+                  const uint8_t *ends, int contours)
+{
+    float e[FIT_EDGES], s[FIT_EDGES];
+    int ne = 0, first = 0;
+    for (int c = 0; c < contours; c++) {
+        int last = (int)be16(ends + 2 * c);
+        if (last < first || last >= points)
+            break;
+        for (int i = first; i <= last; i++) {
+            int pr = i == first ? last : i - 1, nx = i == last ? first : i + 1;
+            if (!(flag[i] & 1))
+                continue;
+            int level_pr = fabs_(py[pr] - py[i]) < 0.02f, level_nx = fabs_(py[nx] - py[i]) < 0.02f;
+            int edge = ((flag[nx] & 1) && level_nx && fabs_(px[nx] - px[i]) > 0.3f) ||
+                       ((flag[pr] & 1) && level_pr && fabs_(px[pr] - px[i]) > 0.3f) ||
+                       (!(flag[pr] & 1) && !(flag[nx] & 1) && level_pr && level_nx);
+            if (!edge)
+                continue;
+            int k = 0;
+            while (k < ne && fabs_(e[k] - py[i]) >= 0.02f)
+                k++;
+            if (k == ne && ne < FIT_EDGES)
+                e[ne++] = py[i];
+        }
+        first = last + 1;
+    }
+    if (!ne)
+        return;
+    for (int i = 1; i < ne; i++) {                  /* low to high */
+        float v = e[i];
+        int k = i;
+        for (; k > 0 && e[k - 1] > v; k--)
+            e[k] = e[k - 1];
+        e[k] = v;
+    }
+    for (int k = 0; k < ne; k++) {
+        int r = (int)(e[k] + 0.5f);
+        if ((float)r > e[k] + 0.5f)
+            r--;                                    /* the nearest boundary */
+        s[k] = (float)r;
+    }
+    /* two edges that met: a pixel apart, the one away from the glyph's
+     * bottom or top moved, so that the baseline and the tops (capitals',
+     * small letters') stay level; closer than 0.3 pixel (a round letter's
+     * overshoot) the same edge */
+    float mid = (e[0] + e[ne - 1]) / 2;
+    for (int k = 1; k < ne && e[k] <= mid; k++)         /* the lower half: up */
+        if (s[k] <= s[k - 1])
+            s[k] = e[k] - e[k - 1] >= 0.3f ? s[k - 1] + 1 : s[k - 1];
+    for (int k = ne - 1; k > 0 && e[k - 1] > mid; k--)  /* the upper half: down */
+        if (s[k - 1] >= s[k])
+            s[k - 1] = e[k] - e[k - 1] >= 0.3f ? s[k] - 1 : s[k];
+    for (int k = 1; k < ne; k++)                        /* where they meet */
+        if (s[k] < s[k - 1])
+            s[k] = s[k - 1];
+    for (int i = 0; i < points; i++) {
+        float y = py[i];
+        if (y <= e[0]) {
+            py[i] = y + s[0] - e[0];
+        } else if (y >= e[ne - 1]) {
+            py[i] = y + s[ne - 1] - e[ne - 1];
+        } else {
+            int k = 0;
+            while (y > e[k + 1])
+                k++;
+            py[i] = s[k] + (y - e[k]) * (s[k + 1] - s[k]) / (e[k + 1] - e[k]);
+        }
+    }
+}
+
 static void outline(const ttfont *f, unsigned glyph, const float m[6], tt_sink sink, void *ctx,
                     int depth)
 {
@@ -650,6 +731,8 @@ static void outline(const ttfont *f, unsigned glyph, const float m[6], tt_sink s
         px[i] = m[0] * x + m[2] * y + m[4];
         py[i] = m[1] * x + m[3] * y + m[5];
     }
+    if (m[1] == 0 && m[2] == 0)                     /* upright: fitted to the rows */
+        fit_y(px, py, flag, points, g + 10, contours);
     /* each contour: on-curve points joined by lines, an off-curve one
      * the control point of a curve (two in a row: on-curve between them) */
     int first = 0;
