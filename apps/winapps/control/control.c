@@ -9,6 +9,7 @@
  *   Mouse      the double-click speed and the swapped buttons, WIN.INI
  *              [windows] DoubleClickSpeed, SwapMouseButtons
  *   Date/Time  the DOS date and time
+ *   System     boot display driver, TrueType fonts and default MIDI output
  *
  * The colours offered are the 16 of the VGA, which every display driver
  * shows as they are.
@@ -17,7 +18,7 @@
 
 #define INI         "CONTROL.INI"
 
-enum { APP_COLOR, APP_DESKTOP, APP_MOUSE, APP_DATETIME, APP_COUNT };
+enum { APP_COLOR, APP_DESKTOP, APP_MOUSE, APP_DATETIME, APP_SYSTEM, APP_COUNT };
 
 #define IDM_COLOR    100
 #define IDM_EXIT     110
@@ -26,7 +27,9 @@ enum { APP_COLOR, APP_DESKTOP, APP_MOUSE, APP_DATETIME, APP_COUNT };
 static HINSTANCE hinst;
 static HWND      hmain;
 static int       sel;               /* the applet selected */
-static const char *const app_names[APP_COUNT] = { "Color", "Desktop", "Mouse", "Date/Time" };
+static const char *const app_names[APP_COUNT] = {
+    "Color", "Desktop", "Mouse", "Date/Time", "System"
+};
 
 /* ---------------------------------------------------------------- shared */
 
@@ -802,6 +805,130 @@ static const DLGITEM_N date_items[] = {
     { 80, 50, 46, 14, IDCANCEL, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "Cancel" },
 };
 
+/* ---------------------------------------------------------------- System */
+
+#define IDC_SYS_DISPLAY 601
+#define IDC_SYS_MIDI    602
+#define IDC_SYS_TT      603
+#define IDC_SYS_TTONLY  604
+
+/* Only display modes supported by WINN's built-in drivers or its supplied
+ * VGA800.DRV are listed. Custom SYSTEM.INI values are left untouched unless
+ * a different entry is explicitly selected. All changes require restart. */
+static const struct {
+    const char *label, *driver, *width, *height;
+} display_modes[] = {
+    { "Automatic (built-in VGA/VBE)", "", "", "" },
+    { "VGA 640x480 (16 colours)", "", "640", "480" },
+    { "VBE 640x400 (256 colours)", "", "640", "400" },
+    { "VGA800.DRV 800x600 (16 colours)", "VGA800.DRV", "800", "600" },
+    { "Custom / keep current", NULL, NULL, NULL },
+};
+
+static const char *const midi_modes[] = {
+    "MPU-401 (General MIDI)", "AdLib OPL2 (FM)", "Custom / keep current"
+};
+
+static int display_initial, midi_initial;
+
+static BOOL CALLBACK SystemProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    (void)lp;
+    switch (msg) {
+    case WM_INITDIALOG: {
+        char driver[64], midi[64], midi1[64];
+        int width, height;
+        HWND combo = GetDlgItem(dlg, IDC_SYS_DISPLAY);
+        for (unsigned i = 0; i < sizeof(display_modes) / sizeof(display_modes[0]); i++)
+            SendMessage(combo, CB_ADDSTRING, 0, (LPARAM)(intptr_t)display_modes[i].label);
+        GetPrivateProfileString("boot", "display.drv", "", driver, sizeof(driver), "SYSTEM.INI");
+        width = (int)GetPrivateProfileInt("display", "width", 0, "SYSTEM.INI");
+        height = (int)GetPrivateProfileInt("display", "height", 0, "SYSTEM.INI");
+        display_initial = 4;
+        if (!driver[0]) {
+            if (width == 0 && height == 0) display_initial = 0;
+            else if (width == 640 && height == 480) display_initial = 1;
+            else if (width == 640 && height == 400) display_initial = 2;
+        } else if (!lstrcmpi(driver, "VGA800.DRV") &&
+                   (width == 0 || width == 800) && (height == 0 || height == 600)) {
+            display_initial = 3;
+        }
+        SendMessage(combo, CB_SETCURSEL, (WPARAM)display_initial, 0);
+
+        combo = GetDlgItem(dlg, IDC_SYS_MIDI);
+        for (unsigned i = 0; i < sizeof(midi_modes) / sizeof(midi_modes[0]); i++)
+            SendMessage(combo, CB_ADDSTRING, 0, (LPARAM)(intptr_t)midi_modes[i]);
+        GetPrivateProfileString("drivers", "midi", "", midi, sizeof(midi), "SYSTEM.INI");
+        GetPrivateProfileString("drivers", "midi1", "", midi1, sizeof(midi1), "SYSTEM.INI");
+        midi_initial = 2;
+        if (!lstrcmpi(midi, "MPUMIDI.DLL") && !lstrcmpi(midi1, "OPLMIDI.DLL"))
+            midi_initial = 0;
+        else if (!lstrcmpi(midi, "OPLMIDI.DLL") && !lstrcmpi(midi1, "MPUMIDI.DLL"))
+            midi_initial = 1;
+        SendMessage(combo, CB_SETCURSEL, (WPARAM)midi_initial, 0);
+
+        CheckDlgButton(dlg, IDC_SYS_TT,
+                       GetPrivateProfileInt("TrueType", "TTEnable", 1, "WIN.INI") != 0);
+        CheckDlgButton(dlg, IDC_SYS_TTONLY,
+                       GetPrivateProfileInt("TrueType", "TTOnly", 0, "WIN.INI") != 0);
+        return TRUE;
+    }
+    case WM_COMMAND:
+        if (wp == IDOK) {
+            int display = (int)SendDlgItemMessage(dlg, IDC_SYS_DISPLAY, CB_GETCURSEL, 0, 0);
+            int midi = (int)SendDlgItemMessage(dlg, IDC_SYS_MIDI, CB_GETCURSEL, 0, 0);
+            int tt = IsDlgButtonChecked(dlg, IDC_SYS_TT) != 0;
+            int only = IsDlgButtonChecked(dlg, IDC_SYS_TTONLY) != 0;
+            BOOL ok = TRUE;
+            if (display >= 0 && display < 4 && display != display_initial) {
+                ok = WritePrivateProfileString("boot", "display.drv",
+                                               display_modes[display].driver, "SYSTEM.INI") && ok;
+                ok = WritePrivateProfileString("display", "width",
+                                               display_modes[display].width, "SYSTEM.INI") && ok;
+                ok = WritePrivateProfileString("display", "height",
+                                               display_modes[display].height, "SYSTEM.INI") && ok;
+            }
+            if (midi >= 0 && midi < 2 && midi != midi_initial) {
+                ok = WritePrivateProfileString("drivers", "midi",
+                                               midi ? "OPLMIDI.DLL" : "MPUMIDI.DLL", "SYSTEM.INI") && ok;
+                ok = WritePrivateProfileString("drivers", "midi1",
+                                               midi ? "MPUMIDI.DLL" : "OPLMIDI.DLL", "SYSTEM.INI") && ok;
+            }
+            ok = WritePrivateProfileString("TrueType", "TTEnable", tt ? "1" : "0", "WIN.INI") && ok;
+            ok = WritePrivateProfileString("TrueType", "TTOnly", only ? "1" : "0", "WIN.INI") && ok;
+            if (!ok) {
+                MessageBox(dlg, "Could not save all settings to SYSTEM.INI / WIN.INI.",
+                           "System", MB_OK | MB_ICONSTOP);
+                return TRUE;
+            }
+            EndDialog(dlg, IDOK);
+            return TRUE;
+        }
+        if (wp == IDCANCEL) {
+            EndDialog(dlg, IDCANCEL);
+            return TRUE;
+        }
+        break;
+    }
+    return FALSE;
+}
+
+static const DLGTEMPLATE_N system_tpl = {
+    WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME,
+    9, 24, 24, 260, 157, NULL, NULL, "System Settings", 0, NULL
+};
+static const DLGITEM_N system_items[] = {
+    { 8, 8, 190, 10, -1, SS_LEFT | WS_VISIBLE, "STATIC", "&Display driver" },
+    { 8, 21, 240, 72, IDC_SYS_DISPLAY, CBS_DROPDOWNLIST | WS_TABSTOP | WS_VISIBLE | WS_VSCROLL, "COMBOBOX", "" },
+    { 8, 49, 190, 10, -1, SS_LEFT | WS_VISIBLE, "STATIC", "Default &MIDI output" },
+    { 8, 62, 240, 62, IDC_SYS_MIDI, CBS_DROPDOWNLIST | WS_TABSTOP | WS_VISIBLE | WS_VSCROLL, "COMBOBOX", "" },
+    { 8, 93, 220, 12, IDC_SYS_TT, BS_AUTOCHECKBOX | WS_TABSTOP | WS_VISIBLE, "BUTTON", "Enable &TrueType fonts" },
+    { 8, 107, 220, 12, IDC_SYS_TTONLY, BS_AUTOCHECKBOX | WS_TABSTOP | WS_VISIBLE, "BUTTON", "TrueType fonts &only" },
+    { 8, 123, 240, 10, -1, SS_LEFT | WS_VISIBLE, "STATIC", "Changes take effect after restarting Windows." },
+    { 110, 138, 62, 14, IDOK, BS_DEFPUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "OK" },
+    { 182, 138, 62, 14, IDCANCEL, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "Cancel" },
+};
+
 /* ---------------------------------------------------------------- main window */
 
 static void run_applet(int i)
@@ -811,6 +938,11 @@ static void run_applet(int i)
     case APP_DESKTOP:  DialogBoxIndirectN(hinst, &desk_tpl, desk_items, hmain, DesktopProc); break;
     case APP_MOUSE:    DialogBoxIndirectN(hinst, &mouse_tpl, mouse_items, hmain, MouseProc); break;
     case APP_DATETIME: DialogBoxIndirectN(hinst, &date_tpl, date_items, hmain, DateProc); break;
+    case APP_SYSTEM:
+        if (DialogBoxIndirectN(hinst, &system_tpl, system_items, hmain, SystemProc) == IDOK)
+            MessageBox(hmain, "Settings saved. Restart Windows to apply the changes.",
+                       "System", MB_OK | MB_ICONINFORMATION);
+        break;
     }
 }
 
@@ -839,7 +971,7 @@ static void paint_main(HDC dc)
     SetBkMode(dc, TRANSPARENT);
     for (int i = 0; i < APP_COUNT; i++) {
         int x = (i % cols) * CELL_W, y = 4 + (i / cols) * CELL_H;
-        /* the applets' icons follow the program's: 2 Color ... 5 Date/Time */
+        /* the applets' icons follow the program's: 2 Color ... 6 System */
         DrawIcon(dc, x + (CELL_W - 32) / 2, y + 4, LoadIcon(hinst, MAKEINTRESOURCE(2 + i)));
         RECT t = { x + 2, y + 40, x + CELL_W - 2, y + CELL_H };
         RECT m = t;
@@ -948,6 +1080,7 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     AppendMenu(settings, MF_STRING, IDM_COLOR + APP_DESKTOP, "&Desktop...");
     AppendMenu(settings, MF_STRING, IDM_COLOR + APP_MOUSE, "&Mouse...");
     AppendMenu(settings, MF_STRING, IDM_COLOR + APP_DATETIME, "Date/&Time...");
+    AppendMenu(settings, MF_STRING, IDM_COLOR + APP_SYSTEM, "&System...");
     AppendMenu(settings, MF_SEPARATOR, 0, NULL);
     AppendMenu(settings, MF_STRING, IDM_EXIT, "E&xit");
     HMENU help = CreatePopupMenu();
