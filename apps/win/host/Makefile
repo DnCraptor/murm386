@@ -11,7 +11,8 @@ GDICORE  = $(filter-out ../core/exports.c ../core/task.c ../core/file.c ../core/
             ../core/ne.c ../core/ne_boot.c ../core/ne_exec.c \
             ../core/ne_guest.c ../core/ne_guest_api.c ../core/ne_guest_dos.c ../core/ne_guest_user.c \
             ../core/ne_res.c ../core/ne_guest_int21.c ../core/ne_guest_call.c ../core/ne_guest_kernel.c \
-            ../core/x86bridge.c ../core/windll.c ../core/sound.c ../core/trace.c,$(CORE))
+            ../core/x86bridge.c ../core/windll.c ../core/sound.c ../core/trace.c \
+            ../core/pe.c ../core/pe_api.c ../core/pe_user.c,$(CORE))
 
 # the applications, built in; each WinMain gets its own name
 APPS     = demo.o progman.o notepad.o clock.o calc.o control.o winfile.o taskman.o winmine.o winhelp.o hlpfile.o appinfo.o
@@ -78,10 +79,14 @@ WINNTEST.FOT: WINNTEST.TTF
 OWHELLO.EXE OWBUSY.EXE OWWIN.EXE OWMENU.EXE OWSEGS.EXE OWDEMO.EXE OWFILE.EXE OWFILEL.EXE OWRES.EXE OWKERN.EXE OWUSE.EXE \
 	OWDLL.DLL OWDLL2.DLL OWFPU.EXE OWAPI.EXE OWGDI.EXE OWAPI2.EXE OWMETA.EXE OWSYS.EXE OWFONT.EXE OWHELP.EXE OWDLG.EXE OWMISC.EXE OWSND.EXE OW31.EXE OWTT.EXE OWMORE.EXE OWDRV.DLL OW95.EXE: mkne_watcom.py
 	python3 mkne_watcom.py $(basename $@) $@
+# Win32 programs (PE) built by Open Watcom
+OW32.EXE OW32DLL.DLL: mkpe_watcom.py
+	python3 mkpe_watcom.py $(basename $@) $@
 NEFIXTURES: NEAPP-fixture.exe NEDIALOG.EXE NELOOP-fixture.exe NEFAULT.EXE NEHANG.EXE \
 	NESTACK.EXE NECLI.EXE NEOUT.EXE NECR0.EXE NEHLT.EXE NEFPU.EXE NEUNDEF.EXE OWHELLO.EXE OWBUSY.EXE \
 	OWWIN.EXE OWMENU.EXE OWSEGS.EXE OWDEMO.EXE OWFILE.EXE OWFILEL.EXE OWRES.EXE OWKERN.EXE \
-	OWUSE.EXE OWDLL.DLL OWDLL2.DLL OWFPU.EXE OWAPI.EXE OWGDI.EXE OWAPI2.EXE OWMETA.EXE OWSYS.EXE OWFONT.EXE OWHELP.EXE OWDLG.EXE OWMISC.EXE OWSND.EXE OW31.EXE OWTT.EXE OWMORE.EXE OWDRV.DLL OW95.EXE WINNTEST.FON WINNTEST.HLP WINNTEST.TTF WINNTEST.FOT
+	OWUSE.EXE OWDLL.DLL OWDLL2.DLL OWFPU.EXE OWAPI.EXE OWGDI.EXE OWAPI2.EXE OWMETA.EXE OWSYS.EXE OWFONT.EXE OWHELP.EXE OWDLG.EXE OWMISC.EXE OWSND.EXE OW31.EXE OWTT.EXE OWMORE.EXE OWDRV.DLL OW95.EXE WINNTEST.FON WINNTEST.HLP WINNTEST.TTF WINNTEST.FOT \
+	OW32.EXE OW32DLL.DLL
 
 test_ne_multi: ../core/ne.c ../core/ne_guest.c test_ne_multi.c NEAPP-fixture.exe
 	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne.c ../core/ne_guest.c test_ne_multi.c
@@ -107,7 +112,7 @@ fpu-host.o: ../../../src/fpu.c x86run/pico.h
 X86RUN   = x86run/i386_host.c x86run/ne_host.c i386-host.o fpu-host.o
 test_ne_run: test_ne_run.c $(X86RUN) ../core/ne_exec.c ../core/ne_guest.c ../core/ne.c \
 		../core/ne_boot.c ../core/ne_guest_api.c ../core/x86bridge.c
-	$(CC) -std=c11 -m32 -O1 -g -Wall -Wextra -Werror -DWINN_NE_HOST -Ix86run -o $@ test_ne_run.c \
+	$(CC) -std=c11 -m32 -O1 -g -Wall -Wextra -Werror -DWINN_NE_HOST -DWINN_NE_EXEC_NO_PE -Ix86run -o $@ test_ne_run.c \
 		$(X86RUN) ../core/ne_exec.c ../core/ne_guest.c ../core/ne.c ../core/ne_boot.c \
 		../core/ne_guest_api.c ../core/x86bridge.c -lm
 
@@ -215,7 +220,8 @@ HOSTWIN: NEFIXTURES
 	mkdir -p HOSTWIN
 	cp NEDIALOG.EXE NEFAULT.EXE NEHANG.EXE OWHELLO.EXE OWBUSY.EXE OWWIN.EXE OWMENU.EXE OWSEGS.EXE \
 		OWDEMO.EXE OWFILE.EXE OWFILEL.EXE OWRES.EXE OWKERN.EXE OWUSE.EXE OWDLL.DLL OWDLL2.DLL OWFPU.EXE \
-		OWAPI.EXE OWGDI.EXE OWAPI2.EXE OWMETA.EXE OWSYS.EXE OWFONT.EXE OWHELP.EXE OWDLG.EXE OWMISC.EXE OWSND.EXE OW31.EXE OWTT.EXE OWMORE.EXE OWDRV.DLL OW95.EXE WINNTEST.FON WINNTEST.HLP WINNTEST.TTF WINNTEST.FOT HOSTWIN/
+		OWAPI.EXE OWGDI.EXE OWAPI2.EXE OWMETA.EXE OWSYS.EXE OWFONT.EXE OWHELP.EXE OWDLG.EXE OWMISC.EXE OWSND.EXE OW31.EXE OWTT.EXE OWMORE.EXE OWDRV.DLL OW95.EXE WINNTEST.FON WINNTEST.HLP WINNTEST.TTF WINNTEST.FOT \
+		OW32.EXE OW32DLL.DLL HOSTWIN/
 	cp ../WIN.INI HOSTWIN/
 	touch HOSTWIN/DEMO.EXE HOSTWIN/PROGMAN.EXE HOSTWIN/NOTEPAD.EXE HOSTWIN/CLOCK.EXE HOSTWIN/CALC.EXE HOSTWIN/CONTROL.EXE HOSTWIN/WINFILE.EXE HOSTWIN/TASKMAN.EXE HOSTWIN/WINMINE.EXE HOSTWIN/WINN.EXE HOSTWIN/NC.EXE
 	mkdir -p HOSTWIN/DOCS

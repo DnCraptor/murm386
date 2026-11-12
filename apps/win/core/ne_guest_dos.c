@@ -204,6 +204,12 @@ static int ne_alloc_low(void *opaque, uint32_t bytes, uint32_t *linear)
     return dos_alloc(bytes, linear);
 }
 
+static int ne_alloc_ext(void *opaque, uint32_t bytes, uint32_t *linear)
+{
+    (void)opaque;
+    return bytes && ext_alloc(bytes, linear);
+}
+
 static void ne_free(void *opaque, uint32_t linear)
 {
     (void)opaque;
@@ -265,7 +271,8 @@ static int ne_write(void *opaque, uint32_t linear, const void *data, uint32_t by
 
 const win_ne_guest_io *win_ne_guest_dos_io(void)
 {
-    static const win_ne_guest_io io = {ne_alloc, ne_free, ne_write, ne_resize, ne_alloc_low};
+    static const win_ne_guest_io io = {ne_alloc, ne_free, ne_write, ne_resize, ne_alloc_low,
+                                       ne_alloc_ext};
     return &io;
 }
 #endif

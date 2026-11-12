@@ -407,6 +407,37 @@ in its `HOSTWIN/` (`scripts/owwin.txt`, `scripts/owmenu.txt`,
 `scripts/owapi2.txt`, `scripts/owmeta.txt`, `scripts/owsys.txt`, `scripts/owfont.txt`,
 `scripts/owtt.txt`, `scripts/owmore.txt`, `scripts/ow95.txt`).
 
+Win32 programs (PE, the 386's: Win32s', Windows 95's) run on the same core
+(`core/pe.c`, `core/pe_api.c`, `core/pe_user.c`, the executor in
+`core/ne_exec.c`): in ring 3, in a flat 4G code and data segment whose base
+is where WINN put the image less the address it was linked for (so an EXE
+without relocations, as most are, runs where WINN has the memory; its
+DLLs, PE as well, are relocated), FS its thread's information block (the
+exception handlers' chain, the TLS slots); its stack, image and heaps are
+extended memory. Its calls of KERNEL32's, USER32's and GDI32's functions
+are thunks of WINN's through a 386 call gate to the gateway (32-bit: the
+result in EAX), its procedures are called back with the arguments on its
+stack (stdcall); its time slice is ended by the yield vector (a 386
+interrupt gate), its faults name the module and the offset. Most functions
+are WINN's native ones as they are (the program's pointers are WINN's:
+nothing is copied; `sdk/gen_pe_sigs.py` writes `core/pe_sigs.h` from
+`sdk/win32.ord` and the native prototypes), the others have code of their
+own: the process (its command line, environment, modules, LoadLibrary and
+GetProcAddress, DllMain), memory (VirtualAlloc, heaps of its own in its
+memory, Global and Local), files (CreateFile and the rest, FindFirstFile),
+time, code pages and strings, TLS, events and critical sections (one
+thread), resources (FindResource; its menus, dialogs (DLGTEMPLATE and
+DLGTEMPLATEEX), strings, accelerators, icons, cursors and bitmaps), window
+classes and subclassing (a native procedure it holds is a thunk it may
+call), messages (Win32's parameters converted to and from Windows 3.1's:
+WM_COMMAND's, the scroll bars', WM_CTLCOLOR*, the controls' messages'
+numbers; a CREATESTRUCT, WINDOWPOS, DRAWITEMSTRUCT as copies of its
+layout), painting, wsprintf, TEXTMETRIC, GetObject. A function WINN does
+not have ends it as it is called, named; a DLL that is not there is named
+before it starts. `host/mkpe_watcom.py` writes `OW32.EXE` and
+`OW32DLL.DLL` (Open Watcom's `nt_win` and `nt_dll`, their sources in the
+script; `scripts/ow32.txt`).
+
     WINN [:] [program [arguments]]
 
 `WIN.INI` next to `WINN.EXE` (see the sample here) holds what programs
@@ -433,7 +464,8 @@ nothing leaves the program from the command line in that part (`WINN DEMO`).
 | `user/` | windows, messages, painting, non-client area, menus and accelerators, controls (BUTTON, STATIC, EDIT, LISTBOX, COMBOBOX, SCROLLBAR), dialogs, MessageBox, MDI (MDICLIENT, DefFrameProc, DefMDIChildProc), clipboard, the common dialogs' entries for native applications (COMMDLG.DLL's, loaded for them) |
 | `drivers/dos/` | display drivers `VGA` (mode 12h 640x480 in 16 colours, the default; `planar16.h`, shared with VGA800.DRV) and `VBE8` (VBE 100h 640x400x8, fallback 13h), the `DOS` input driver (keyboard through the BIOS buffer, INT 33h mouse), the `SPEAKER` sound driver (the PC speaker through PIT channel 2: MessageBeep, SOUND.DLL; `core/sound.c` times the notes) |
 | `runtime/` | `WINN.EXE` `main()`: drivers, core, shell and command-line program as tasks |
-| `sdk/` | for applications: API stubs by Win16 ordinal, `__ez_start`, `winapp.cmake`; `gen_exports.py` makes the export tables |
+| `sdk/` | for applications: API stubs by Win16 ordinal, `__ez_start`, `winapp.cmake`; `gen_exports.py` makes the export tables; `gen_ne_sigs.py` and `gen_pe_sigs.py` (with `win32.ord`) the Win16 and Win32 programs' generic calls |
+| `core/ne*.c`, `core/pe*.c` | Win16 (NE) and Win32 (PE) programs and DLLs on the emulator's 386 core: the loaders, the trampoline and gateway (`ne_boot.c`), the executor (`ne_exec.c`), their calls of WINN's functions |
 | `../winapps/<name>/` | applications: `progman` (the Program Manager, the default shell), `winfile` (File Manager), `taskman` (Task List), `winmine` (Minesweeper), `winhelp` (Windows Help), `notepad`, `clock`, `calc`, `control` (Control Panel), `demo` (a tour of the API) |
 | `../windrv/<name>/` | driver modules; `vga800` is VBE 102h 800x600 in 16 colours |
 | `ddi/windll.h`, `core/windll.c` | native DLLs: the interface, and their loading, uses and unloading |
@@ -769,6 +801,9 @@ Cyrillic; TrueType fonts map the characters to Unicode themselves.
 
 ## Not yet
 
+Win32: threads (CreateThread fails), structured exceptions (an exception
+raised ends the program), the Unicode (W) functions, CreateDIBSection,
+WinG, ADVAPI32, WINMM, COMDLG32, SHELL32, COMCTL32; VxDs.
 Printing (there is no printer), `.GRP` files (`PROGMAN.INI` holds the groups as text), DLLs (`LoadLibrary`) of native applications;
 Windows 95's and NT's additions to Win16 (WOW, the thunks to Win32,
 paths, Bézier curves, enhanced metafiles), BiDi, STRESS.DLL, the

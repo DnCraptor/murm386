@@ -138,6 +138,16 @@ static int host_alloc_any(void *o, uint32_t bytes, uint32_t *linear)
     return 1;
 }
 
+static int host_alloc_ext(void *o, uint32_t bytes, uint32_t *linear)
+{
+    (void)o;
+    ext_start();
+    if (!ne_pool_alloc(&ext, bytes, linear))
+        return 0;
+    memset(X86RUN_RAM + *linear, 0xa5, ne_pool_round(bytes));
+    return 1;
+}
+
 static int host_alloc_low(void *o, uint32_t bytes, uint32_t *linear)
 {
     if (!host_alloc(o, bytes, linear))
@@ -203,6 +213,6 @@ void win_ne_guest_mem_end(void)
 const win_ne_guest_io *win_ne_guest_dos_io(void)
 {
     static const win_ne_guest_io io = { host_alloc_any, host_free_any, host_write,
-                                        host_resize_any, host_alloc_low };
+                                        host_resize_any, host_alloc_low, host_alloc_ext };
     return &io;
 }

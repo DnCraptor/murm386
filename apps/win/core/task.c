@@ -418,7 +418,9 @@ static int run_ne_app(wtask *t)
 {
     win_ne_result r;
     const char *path = (const char *)t->module;
-    int rc = win_ne_execute(path, t->cmdline, t->show, ne_yield, &r);
+    int pe = win_pe_is(path);           /* a Win32 program (PE) */
+    int rc = pe ? win_pe_execute(path, t->cmdline, t->show, ne_yield, &r)
+                : win_ne_execute(path, t->cmdline, t->show, ne_yield, &r);
     char msg[160];
     const char *file = path;
     for (const char *p = path; *p; p++)
@@ -426,12 +428,17 @@ static int run_ne_app(wtask *t)
             file = p + 1;
     if (rc == WIN_NE_EXEC_FAULT) {
         const win_ne_fault f = r.fault;
-        char where[24];
-        if (f.segment)
+        char where[40];
+        if (f.flat && f.module[0])
+            wsprintf(where, "%s+%08lX", f.module, (unsigned long)f.eip);
+        else if (f.flat)
+            wsprintf(where, "%08lX", (unsigned long)f.eip);
+        else if (f.segment)
             wsprintf(where, "%04X:%04X", f.segment, f.ip);
         else
             wsprintf(where, "%04X:%04X (selector)", f.cs, f.ip);
-        const char *what = f.vector == 0 ? "a Divide by Zero" :
+        const char *what = f.vector == -1 ? "an exception it did not handle" :
+                           f.vector == 0 ? "a Divide by Zero" :
                            f.vector == 6 ? "an Invalid Instruction" :
                            f.vector == 12 ? "a Stack Fault" :
                            f.vector == 13 ? "a General Protection Fault" : NULL;
@@ -450,7 +457,17 @@ static int run_ne_app(wtask *t)
         return 0;
     win_ne_unresolved u;
     char fn[64];
-    if (rc == WIN_NE_EXEC_UNSUPPORTED && r.unsupported >= WIN_NE_SERVICE_UNDEFINED)
+    if (pe && rc == WIN_NE_EXEC_UNSUPPORTED && r.undefined[0])
+        wsprintf(msg, "%s called %s, which WINN does not have yet.", file, r.undefined);
+    else if (pe && rc == WIN_NE_UNRESOLVED)
+        wsprintf(msg, "%s needs %s, which WINN does not have.", file, r.undefined);
+    else if (pe && rc == WIN_NE_EXEC_BAD_ARGS && r.invalid_call &&
+             win_pe_service_name(r.invalid_call, fn, sizeof(fn)))
+        wsprintf(msg, "%s called %s with a pointer outside its memory; WINN refused "
+                 "that call.", file, fn);
+    else if (pe && rc)
+        wsprintf(msg, "Win32 program %s: unsupported or failed (%d)", t->name, rc);
+    else if (rc == WIN_NE_EXEC_UNSUPPORTED && r.unsupported >= WIN_NE_SERVICE_UNDEFINED)
         wsprintf(msg, "%s called %s, which WINN does not have yet.", file, r.undefined);
     else if (rc == WIN_NE_EXEC_UNSUPPORTED && r.unsupported >= WIN_NE_SERVICE_DLL &&
              win_ne_native_name(r.unsupported, fn, sizeof(fn)))
@@ -476,7 +493,8 @@ static int run_ne_app(wtask *t)
         wsprintf(msg, "NE program %s completed. DX:AX=%08lx", t->name,
                  (unsigned long)r.value);
     win_logo_end();
-    MessageBox(0, msg, "WINN Win16", MB_OK | (rc ? MB_ICONSTOP : MB_ICONINFORMATION));
+    MessageBox(0, msg, pe ? "WINN Win32" : "WINN Win16",
+               MB_OK | (rc ? MB_ICONSTOP : MB_ICONINFORMATION));
     return rc ? 1 : 0;
 }
 #endif
@@ -527,7 +545,8 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
             fclose(f);
 #ifdef TASK_NE
         /* or a Win16 program, on the emulator's 386 core built in */
-        if (rc == -2 && win_ne_classify_launch(path, 3) == WIN_NE_LAUNCH_READY) {
+        if (rc == -2 && (win_ne_classify_launch(path, 3) == WIN_NE_LAUNCH_READY ||
+                         win_pe_is(path))) {
             ne_guest = 1;
             rc = 0;
         }
@@ -544,7 +563,10 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
          * the guest executor requires the 386 protected-mode core. */
         PC *pc = get_PC();
         unsigned gen = pc && pc->cpu ? pc->cpu->gen : 0;
-        switch (win_ne_classify_launch(path, gen)) {
+        win_ne_launch_status st = win_ne_classify_launch(path, gen);
+        if (st == WIN_NE_LAUNCH_OTHER && win_pe_is(path))       /* Win32 */
+            st = gen < 3 ? WIN_NE_LAUNCH_REQUIRES_386 : WIN_NE_LAUNCH_READY;
+        switch (st) {
         case WIN_NE_LAUNCH_REQUIRES_386:
             cursor_wait_end();
             return WIN_EXEC_NE_REQUIRES_386;

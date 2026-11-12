@@ -375,6 +375,12 @@ HBITMAP  gdi_bitmap_from_dib(const uint8_t *d, uint32_t n);
  * application's; its icon, cursor and bitmap resources by number or name */
 winapp_info *win_ne_app_info(const char *path);
 HICON    win_ne_icon(const char *path, uint16_t id, const char *name);
+/* the same from a resource's bytes (a Win32 program's): an icon's DIB, a
+ * cursor's after its hot spot, a group's entry the nearest to 32 x 32 of
+ * 16 colours (its id) */
+HICON    win_icon_from_dib(const uint8_t *d, uint32_t n);
+HCURSOR  win_cursor_from_dib(const uint8_t *d, uint32_t n, int hx, int hy);
+int      win_group_pick(const uint8_t *g, uint32_t n, int cursor, uint16_t *id);
 HCURSOR  win_ne_cursor(const char *path, uint16_t id, const char *name);
 HANDLE   win_image_file(const char *path, int cursor);    /* an .ICO (.CUR) file's */
 HBITMAP  win_ne_bitmap(const char *path, uint16_t id, const char *name);

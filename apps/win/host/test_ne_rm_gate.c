@@ -12,6 +12,7 @@
 /* Compile the ARM-only executor path on the host with a mocked DOS ABI.
  * Include it so the static native callback itself is under test. */
 #define __arm__ 1
+#define WINN_NE_EXEC_NO_PE 1        /* no Win32 programs here */
 #include "../core/ne_exec.c"
 
 uint8_t test_guest_ram[0x100000];

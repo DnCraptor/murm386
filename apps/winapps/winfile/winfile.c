@@ -1269,8 +1269,15 @@ static void run_cmd(const char *cmd)
 {
     UINT r = WinExec(cmd, SW_SHOWNORMAL);
     if (r < 32) {
-        char t[MAXPATH + 64];
-        wsprintf(t, "Cannot run '%s'.%s", cmd, r == 11 ? "\nIt is not a Windows application." : "");
+        char t[MAXPATH + 128];
+        const char *reason =
+            r == 2 ? "The file was not found." :
+            r == 8 ? "There is not enough memory." :
+            r == 11 ? "It is not a Windows application." :
+            r == 12 ? "Win16 NE requires a 386 or newer CPU." :
+            r == 13 ? "This Win16 NE image layout is not supported." :
+            "An unknown WinExec error occurred.";
+        wsprintf(t, "Cannot run '%s' (WinExec error %u).\n%s", cmd, r, reason);
         MessageBox(hframe, t, "File Manager", MB_OK | MB_ICONEXCLAMATION);
     }
 }

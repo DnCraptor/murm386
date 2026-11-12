@@ -20,6 +20,10 @@ static void b16(emitter *e, uint16_t v)
 {
     b8(e, (uint8_t)v); b8(e, (uint8_t)(v >> 8));
 }
+static void b32(emitter *e, uint32_t v)
+{
+    b16(e, (uint16_t)v); b16(e, (uint16_t)(v >> 16));
+}
 static void put16(uint8_t *p, uint16_t v)
 {
     p[0] = (uint8_t)v;
@@ -36,7 +40,8 @@ size_t win_ne_boot_make(uint8_t *buffer, size_t capacity,
 {
     if (!buffer || !a || capacity < WIN_NE_BOOT_CAPACITY ||
         (a->pm_segment & 7u) || !a->pm_segment || !a->rm_segment ||
-        !a->ne_cs || !a->ne_ss || a->ne_sp < 64u || !a->tss || !a->ring0 ||
+        !a->ne_cs || !a->ne_ss || (!a->flat && a->ne_sp < 64u) || !a->tss || !a->ring0 ||
+        (a->flat && (!a->fs || a->flat_sp < 64u)) ||
         !a->exit_gate || !a->cbret_gate ||
         a->gdt_linear >= 0x1000000u || !a->gdt_limit ||
         ((uint32_t)a->rm_segment << 4) < WIN_NE_BOOT_OFFSET ||
@@ -72,13 +77,25 @@ size_t win_ne_boot_make(uint8_t *buffer, size_t capacity,
     b8(&e, 0xb8); b16(&e, a->ring0);          /* mov ax,ring0 */
     b8(&e, 0x8e); b8(&e, 0xd0);               /* mov ss,ax */
     b8(&e, 0xbc); b16(&e, (uint16_t)WIN_NE_RING0_BYTES); /* mov sp,top */
-    b8(&e, 0x68); b16(&e, a->ne_ss);          /* push ss3 */
-    b8(&e, 0x68); b16(&e, a->ne_sp);          /* push sp3 */
-    b8(&e, 0x68); b16(&e, a->ne_cs);          /* push cs3 */
-    b8(&e, 0x68); b16(&e, a->ne_ip);          /* push ip3 */
+    if (a->flat) {                            /* push dword ss3, esp3, cs3, eip3 */
+        b8(&e, 0x66); b8(&e, 0x68); b32(&e, a->ne_ss);
+        b8(&e, 0x66); b8(&e, 0x68); b32(&e, a->flat_sp);
+        b8(&e, 0x66); b8(&e, 0x68); b32(&e, a->ne_cs);
+        b8(&e, 0x66); b8(&e, 0x68); b32(&e, a->flat_ip);
+    } else {
+        b8(&e, 0x68); b16(&e, a->ne_ss);      /* push ss3 */
+        b8(&e, 0x68); b16(&e, a->ne_sp);      /* push sp3 */
+        b8(&e, 0x68); b16(&e, a->ne_cs);      /* push cs3 */
+        b8(&e, 0x68); b16(&e, a->ne_ip);      /* push ip3 */
+    }
     b8(&e, 0xb8); b16(&e, a->ne_ss);          /* mov ax,ds3 */
     b8(&e, 0x8e); b8(&e, 0xd8);               /* mov ds,ax */
     b8(&e, 0x8e); b8(&e, 0xc0);               /* mov es,ax */
+    if (a->flat) {
+        b8(&e, 0xb8); b16(&e, a->fs);         /* mov ax,fs3 */
+        b8(&e, 0x8e); b8(&e, 0xe0);           /* mov fs,ax */
+        b8(&e, 0x66);                         /* o32 */
+    }
     b8(&e, 0xcb);                             /* retf: ring 3 */
 
     /* the exit: the entry returned to the exit stub, which called the exit
@@ -87,8 +104,12 @@ size_t win_ne_boot_make(uint8_t *buffer, size_t capacity,
         return 0;
     while (e.n < WIN_NE_BOOT_EXIT_OFFSET - WIN_NE_BOOT_OFFSET)
         b8(&e, 0xcc);
-    b8(&e, 0x89); b8(&e, 0xc3);               /* mov bx,ax (return LO) */
-    b8(&e, 0x89); b8(&e, 0xd1);               /* mov cx,dx (return HI) */
+    if (a->flat) {
+        b8(&e, 0x66); b8(&e, 0x89); b8(&e, 0xc3); /* mov ebx,eax */
+    } else {
+        b8(&e, 0x89); b8(&e, 0xc3);           /* mov bx,ax (return LO) */
+        b8(&e, 0x89); b8(&e, 0xd1);           /* mov cx,dx (return HI) */
+    }
     b8(&e, 0xfa);                             /* cli */
     b8(&e, 0x0f); b8(&e, 0x20); b8(&e, 0xc0); /* mov eax,cr0 */
     b8(&e, 0x24); b8(&e, 0xfe);               /* and al,~PE */
@@ -131,6 +152,10 @@ size_t win_ne_boot_make(uint8_t *buffer, size_t capacity,
     b16(&e, PM_SCRATCH(WIN_NE_BOOT_CALL_SP_OFFSET)); /* mov cs:[call_sp],sp */
     b8(&e, 0x60); /* pusha (16-bit) */
     b8(&e, 0x1e); b8(&e, 0x06); b8(&e, 0x9c); /* push ds,es,flags */
+    if (a->flat) {
+        b8(&e, 0x0f); b8(&e, 0xa0);           /* push fs */
+        b8(&e, 0x0f); b8(&e, 0xa8);           /* push gs */
+    }
     b8(&e, 0x8c); b8(&e, 0xd0); /* mov ax,ss */
     b8(&e, 0x2e); b8(&e, 0xa3); b16(&e, PM_SCRATCH(WIN_NE_BOOT_PM_SS_OFFSET));
     b8(&e, 0x2e); b8(&e, 0x89); b8(&e, 0x26);
@@ -173,11 +198,22 @@ size_t win_ne_boot_make(uint8_t *buffer, size_t capacity,
     b8(&e, 0x8e); b8(&e, 0xd0); /* mov ss,ax */
     b8(&e, 0x2e); b8(&e, 0x8b); b8(&e, 0x26);
     b16(&e, PM_SCRATCH(WIN_NE_BOOT_PM_SP_OFFSET)); /* mov sp,cs:[saved] */
+    if (a->flat) {
+        b8(&e, 0x0f); b8(&e, 0xa9);           /* pop gs */
+        b8(&e, 0x0f); b8(&e, 0xa1);           /* pop fs */
+    }
     b8(&e, 0x9d); b8(&e, 0x07); b8(&e, 0x1f); b8(&e, 0x61); /* popf,es,ds,popa */
-    b8(&e, 0x2e); b8(&e, 0xa1); b16(&e, PM_SCRATCH(WIN_NE_BOOT_RESULT_AX_OFFSET));
-    b8(&e, 0x2e); b8(&e, 0x8b); b8(&e, 0x16);
-    b16(&e, PM_SCRATCH(WIN_NE_BOOT_RESULT_DX_OFFSET));
-    b8(&e, 0xcb); /* RETF to the importing Win16 thunk (ring 3) */
+    if (a->flat) {                            /* EAX = DX:AX, o32 retf */
+        b8(&e, 0x2e); b8(&e, 0xa1); b16(&e, PM_SCRATCH(WIN_NE_BOOT_RESULT_DX_OFFSET));
+        b8(&e, 0x66); b8(&e, 0xc1); b8(&e, 0xe0); b8(&e, 0x10);   /* shl eax,16 */
+        b8(&e, 0x2e); b8(&e, 0xa1); b16(&e, PM_SCRATCH(WIN_NE_BOOT_RESULT_AX_OFFSET));
+        b8(&e, 0x66); b8(&e, 0xcb);
+    } else {
+        b8(&e, 0x2e); b8(&e, 0xa1); b16(&e, PM_SCRATCH(WIN_NE_BOOT_RESULT_AX_OFFSET));
+        b8(&e, 0x2e); b8(&e, 0x8b); b8(&e, 0x16);
+        b16(&e, PM_SCRATCH(WIN_NE_BOOT_RESULT_DX_OFFSET));
+        b8(&e, 0xcb); /* RETF to the importing Win16 thunk (ring 3) */
+    }
 #undef PM_SCRATCH
     if (e.overflow || e.n > WIN_NE_BOOT_SCRATCH_OFFSET)
         return 0;
@@ -226,6 +262,14 @@ static void gate(uint8_t *idt, unsigned v, uint16_t offset, uint16_t selector, i
     idt[8u*v + 5u] = dpl3 ? 0xe6 : 0x86;
 }
 
+/* a flat program's: a 386 interrupt gate (its frames 32-bit), DPL 0 */
+static void gate386(uint8_t *idt, unsigned v, uint16_t offset, uint16_t selector)
+{
+    put16(idt + 8u*v, offset);
+    put16(idt + 8u*v + 2u, selector);
+    idt[8u*v + 5u] = 0x8e;
+}
+
 int win_ne_fault_make(uint8_t idt[WIN_NE_FAULT_IDT_BYTES],
                       uint8_t code[WIN_NE_FAULT_CODE_BYTES],
                       const win_ne_boot_args *a)
@@ -235,15 +279,26 @@ int win_ne_fault_make(uint8_t idt[WIN_NE_FAULT_IDT_BYTES],
         return 0;
     memset(idt, 0, WIN_NE_FAULT_IDT_BYTES);
     memset(code, 0xcc, WIN_NE_FAULT_CODE_BYTES);
-    gate(idt, 0x20, WIN_NE_INT20_OFFSET, a->pm_segment, 1);
-    gate(idt, 0x21, WIN_NE_INT21_OFFSET, a->pm_segment, 1);
+    if (!a->flat) {
+        gate(idt, 0x20, WIN_NE_INT20_OFFSET, a->pm_segment, 1);
+        gate(idt, 0x21, WIN_NE_INT21_OFFSET, a->pm_segment, 1);
+    }
     /* a stub of 6 bytes for each vector but INT 20h's and 21h's */
     const unsigned common = 6u * WIN_NE_IDT_VECTORS;
     for (unsigned v = 0; v < WIN_NE_IDT_VECTORS; v++) {
         unsigned pos = 6u * v;
+        uint16_t off = (uint16_t)(WIN_NE_FAULT_CODE_OFFSET + pos);
+        if (a->flat) {                          /* all of them faults but the yield */
+            gate386(idt, v, v == WIN_NE_YIELD_VECTOR ? (uint16_t)WIN_NE_YIELD32_OFFSET : off,
+                    a->pm_segment);
+            code[pos] = 0xbb;
+            put16(code + pos + 1u, (uint16_t)v);
+            code[pos + 3u] = 0xe9;
+            put16(code + pos + 4u, (uint16_t)(common - (pos + 6u)));
+            continue;
+        }
         if (v == 0x20u || v == 0x21u)
             continue;
-        uint16_t off = (uint16_t)(WIN_NE_FAULT_CODE_OFFSET + pos);
         gate(idt, v, v == WIN_NE_YIELD_VECTOR ? (uint16_t)WIN_NE_YIELD_OFFSET : off,
              a->pm_segment, WIN_NE_BIOS_VECTOR(v));
         if (WIN_NE_BIOS_VECTOR(v)) {            /* push vector; jmp near bios (below) */
@@ -289,7 +344,7 @@ int win_ne_fault_make(uint8_t idt[WIN_NE_FAULT_IDT_BYTES],
     b8(&e, 0xcf);                              /* iret */
     if (e.overflow || common + e.n > WIN_NE_FAULT_CODE_BYTES)
         return 0;
-    for (unsigned v = 0; v < WIN_NE_IDT_VECTORS; v++)
+    for (unsigned v = 0; v < WIN_NE_IDT_VECTORS && !a->flat; v++)
         if (WIN_NE_BIOS_VECTOR(v))
             put16(code + 6u * v + 3u, (uint16_t)(common + bios - (6u * v + 5u)));
     patch16(&e, rmref, (uint16_t)(WIN_NE_FAULT_CODE_OFFSET -
@@ -317,15 +372,26 @@ int win_ne_dos_make(uint8_t stub[WIN_NE_DOS_STUB_BYTES], const win_ne_boot_args 
         return 0;
     memset(stub, 0xcc, WIN_NE_DOS_STUB_BYTES);
     emitter e = { 0 };
-    b8(&e, 0xb8); b16(&e, 0x4c00);            /* INT 20h: mov ax,4C00h */
-    if (e.n != WIN_NE_INT21_OFFSET - WIN_NE_INT20_OFFSET)
-        return 0;
-    int21_like(&e, WIN_NE_SERVICE_INT21, a->pm_segment);
-    while (e.n < WIN_NE_YIELD_OFFSET - WIN_NE_INT20_OFFSET)
-        b8(&e, 0xcc);
-    if (e.n != WIN_NE_YIELD_OFFSET - WIN_NE_INT20_OFFSET)
-        return 0;
-    int21_like(&e, WIN_NE_SERVICE_YIELD, a->pm_segment);
+    if (a->flat) {
+        /* the yield vector's (a 386 interrupt gate): EAX kept, the
+         * gateway called as a 386 one is, IRETD */
+        b8(&e, 0x66); b8(&e, 0x50);           /* push eax */
+        b8(&e, 0xb8); b16(&e, WIN_NE_SERVICE_YIELD); /* mov ax,service */
+        b8(&e, 0x66); b8(&e, 0x9a);           /* o32 call far gateway */
+        b32(&e, WIN_NE_BOOT_GATEWAY_OFFSET); b16(&e, a->pm_segment);
+        b8(&e, 0x66); b8(&e, 0x58);           /* pop eax */
+        b8(&e, 0x66); b8(&e, 0xcf);           /* iretd */
+    } else {
+        b8(&e, 0xb8); b16(&e, 0x4c00);        /* INT 20h: mov ax,4C00h */
+        if (e.n != WIN_NE_INT21_OFFSET - WIN_NE_INT20_OFFSET)
+            return 0;
+        int21_like(&e, WIN_NE_SERVICE_INT21, a->pm_segment);
+        while (e.n < WIN_NE_YIELD_OFFSET - WIN_NE_INT20_OFFSET)
+            b8(&e, 0xcc);
+        if (e.n != WIN_NE_YIELD_OFFSET - WIN_NE_INT20_OFFSET)
+            return 0;
+        int21_like(&e, WIN_NE_SERVICE_YIELD, a->pm_segment);
+    }
 
     /* the callback: from Real Mode (CS the trampoline's segment) to PM,
      * ring 0, and by a far return into the procedure in ring 3 */
@@ -349,6 +415,21 @@ int win_ne_dos_make(uint8_t stub[WIN_NE_DOS_STUB_BYTES], const win_ne_boot_args 
     b8(&e, 0x8e); b8(&e, 0xd0);                /* mov ss,ax */
     b8(&e, 0x2e); b8(&e, 0x8b); b8(&e, 0x26);  /* mov sp,cs:[cb_r0sp] */
     b16(&e, WIN_NE_CB_R0SP_OFFSET);
+    if (a->flat) {                             /* push dword ss3, [esp], cs3, [eip] */
+        b8(&e, 0x66); b8(&e, 0x68); b32(&e, a->ne_ss);
+        b8(&e, 0x66); b8(&e, 0x2e); b8(&e, 0xff); b8(&e, 0x36);
+        b16(&e, WIN_NE_CB_ESP_OFFSET);
+        b8(&e, 0x66); b8(&e, 0x68); b32(&e, a->ne_cs);
+        b8(&e, 0x66); b8(&e, 0x2e); b8(&e, 0xff); b8(&e, 0x36);
+        b16(&e, WIN_NE_CB_PROC_OFFSET);
+        b8(&e, 0xb8); b16(&e, a->ne_ss);       /* mov ax,ds3 */
+        b8(&e, 0x8e); b8(&e, 0xd8);            /* mov ds,ax */
+        b8(&e, 0x8e); b8(&e, 0xc0);            /* mov es,ax */
+        b8(&e, 0xb8); b16(&e, a->fs);          /* mov ax,fs3 */
+        b8(&e, 0x8e); b8(&e, 0xe0);            /* mov fs,ax */
+        b8(&e, 0x66); b8(&e, 0xcb);            /* o32 retf: ring 3 */
+        goto cbret;
+    }
     b8(&e, 0x2e); b8(&e, 0xff); b8(&e, 0x36);  /* push word cs:[cb_ss] */
     b16(&e, WIN_NE_CB_SS_OFFSET);
     b8(&e, 0x2e); b8(&e, 0xff); b8(&e, 0x36);  /* push word cs:[cb_sp] */
@@ -369,13 +450,18 @@ int win_ne_dos_make(uint8_t stub[WIN_NE_DOS_STUB_BYTES], const win_ne_boot_args 
     b8(&e, 0xcb);                              /* retf: ring 3 */
 
     /* the procedure returned to the callback-return stub, which called the
-     * gate to here: ring 0, its result in DX:AX */
+     * gate to here: ring 0, its result in DX:AX (a flat one's in EAX) */
+cbret:
     if (e.n > WIN_NE_CBRET_OFFSET - WIN_NE_INT20_OFFSET)
         return 0;
     while (e.n < WIN_NE_CBRET_OFFSET - WIN_NE_INT20_OFFSET)
         b8(&e, 0xcc);
-    b8(&e, 0x89); b8(&e, 0xc3);                /* mov bx,ax */
-    b8(&e, 0x89); b8(&e, 0xd1);                /* mov cx,dx */
+    if (a->flat) {
+        b8(&e, 0x66); b8(&e, 0x89); b8(&e, 0xc3);  /* mov ebx,eax */
+    } else {
+        b8(&e, 0x89); b8(&e, 0xc3);            /* mov bx,ax */
+        b8(&e, 0x89); b8(&e, 0xd1);            /* mov cx,dx */
+    }
     b8(&e, 0xfa);                              /* cli */
     b8(&e, 0x0f); b8(&e, 0x20); b8(&e, 0xc0);  /* mov eax,cr0 */
     b8(&e, 0x24); b8(&e, 0xfe);                /* and al,~PE */
@@ -401,10 +487,12 @@ int win_ne_dos_make(uint8_t stub[WIN_NE_DOS_STUB_BYTES], const win_ne_boot_args 
         return 0;
     while (e.n < WIN_NE_EXIT_STUB_OFFSET - WIN_NE_INT20_OFFSET)
         b8(&e, 0xcc);
-    b8(&e, 0x9a); b16(&e, 0); b16(&e, a->exit_gate);   /* call far exit gate */
+    b8(&e, 0x9a); b16(&e, 0); if (a->flat) b16(&e, 0);  /* call far exit gate */
+    b16(&e, a->exit_gate);
     while (e.n < WIN_NE_CBRET_STUB_OFFSET - WIN_NE_INT20_OFFSET)
         b8(&e, 0xcc);
-    b8(&e, 0x9a); b16(&e, 0); b16(&e, a->cbret_gate);  /* call far return gate */
+    b8(&e, 0x9a); b16(&e, 0); if (a->flat) b16(&e, 0);  /* call far return gate */
+    b16(&e, a->cbret_gate);
     if (e.overflow || e.n > WIN_NE_CB_PROC_OFFSET - WIN_NE_INT20_OFFSET)
         return 0;
     memcpy(stub, e.bytes, e.n);

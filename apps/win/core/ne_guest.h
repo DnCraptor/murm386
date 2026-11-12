@@ -67,6 +67,9 @@ typedef struct {
     /* below 1M, where Real Mode reaches it (the trampoline, the PSP, the
      * descriptor table, GlobalDOSAlloc's); NULL: alloc's is */
     int (*alloc_low)(void *opaque, uint32_t bytes, uint32_t *linear);
+    /* extended memory of any size (a Win32 program's), 16-aligned; NULL:
+     * none */
+    int (*alloc_ext)(void *opaque, uint32_t bytes, uint32_t *linear);
 } win_ne_guest_io;
 
 /* the guest memory WINN may read and write directly: below 1M, and the

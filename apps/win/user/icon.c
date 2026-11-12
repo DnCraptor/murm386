@@ -211,11 +211,15 @@ HICON WINAPI CreateIcon(HINSTANCE inst, int w, int h, BYTE planes, BYTE bpp,
     return user_icon_create(&ic);
 }
 
+static HCURSOR current_cursor;     /* SetCursor's (below) */
+
 BOOL WINAPI DestroyIcon(HICON icon)
 {
     uicon *u = icon_of(icon);
     ucursor *c = u ? NULL : cursor_of(icon);
-    if (c) {                        /* a program's cursor */
+    if (c) {                        /* a program's cursor (the arrow, if it is shown) */
+        if (current_cursor == icon)
+            user_cursor_builtin(WCUR_ARROW);
         c->magic = 0;
         win_free(c);
         win_handle_free(icon);

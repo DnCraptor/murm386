@@ -17,6 +17,11 @@ enum {
 typedef struct {
     int vector;
     uint16_t cs, ip, segment;
+    /* a Win32 program's (flat): EIP in its module (segment: its index + 1;
+     * 0 none of them, eip the address) */
+    int flat;
+    uint32_t eip;
+    char module[16];
 } win_ne_fault;
 
 /* How a program ended */
@@ -28,11 +33,14 @@ typedef struct {
     uint16_t unsupported;   /* WIN_NE_EXEC_UNSUPPORTED: the call it made,
                              * KERNEL n, USER 1000h + n, INT 21h 2100h + AH,
                              * WIN_NE_SERVICE_UNDEFINED + ... (undefined) */
-    char undefined[48];     /* that one's MODULE.function */
+    char undefined[48];     /* that one's MODULE.function; a Win32 program's
+                             * WIN_NE_UNRESOLVED: the DLL it needs */
     win_ne_fault fault;     /* WIN_NE_EXEC_FAULT */
     uint16_t invalid_call;  /* WIN_NE_EXEC_BAD_ARGS: the first call WINN refused,
                              * its arguments pointing outside the program's
                              * memory (as unsupported) */
+    int flat;               /* a Win32 program's: unsupported its service
+                             * (win_pe_service_name) */
 } win_ne_result;
 
 #if defined(__arm__) || defined(__thumb__) || defined(WINN_NE_HOST)
@@ -41,6 +49,15 @@ typedef struct {
  * has run its time slice without calling the API; nonzero: it ends. */
 int win_ne_execute(const char *path, const char *cmdline, int show, int (*yield)(void),
                    win_ne_result *r);
+/* the same of a Win32 program (PE, core/pe.c): its command line, its
+ * window's nCmdShow */
+int win_pe_execute(const char *path, const char *cmdline, int show, int (*yield)(void),
+                   win_ne_result *r);
+/* a Win32 program (MZ, PE, i386) */
+int win_pe_is(const char *path);
+/* the name of a Win32 program's call, "MODULE.Function", NULL none */
+#include <stddef.h>
+const char *win_pe_service_name(uint16_t service, char *buf, size_t cap);
 #endif
 /* WINN's trace (core/trace.c, SYSTEM.INI [debug] trace=1): each call a
  * program makes of WINN's, with its caller and DX:AX; a running program's

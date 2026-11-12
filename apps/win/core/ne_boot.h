@@ -55,6 +55,8 @@
 #define WIN_NE_INT20_OFFSET        WIN_NE_DOS_STUB_OFFSET
 #define WIN_NE_INT21_OFFSET        (WIN_NE_DOS_STUB_OFFSET + 3u)
 #define WIN_NE_YIELD_OFFSET        (WIN_NE_DOS_STUB_OFFSET + 16u)
+/* a flat program's (it has no INT 20h, 21h) */
+#define WIN_NE_YIELD32_OFFSET      WIN_NE_DOS_STUB_OFFSET
 /* A callback (USER calling the program's window procedure): Real Mode
  * entry at CALLBACK_OFFSET (in the trampoline's RM segment: minus
  * WIN_NE_BOOT_OFFSET); it enters protected mode, loads the TSS, and from
@@ -68,6 +70,7 @@
 #define WIN_NE_EXIT_STUB_OFFSET    (WIN_NE_DOS_STUB_OFFSET + 168u)  /* ring 3 */
 #define WIN_NE_CBRET_STUB_OFFSET   (WIN_NE_DOS_STUB_OFFSET + 176u)  /* ring 3 */
 #define WIN_NE_CB_PROC_OFFSET      (WIN_NE_DOS_STUB_OFFSET + 192u)
+#define WIN_NE_CB_ESP_OFFSET       (WIN_NE_DOS_STUB_OFFSET + 196u)  /* flat */
 #define WIN_NE_CB_SS_OFFSET        (WIN_NE_DOS_STUB_OFFSET + 196u)
 #define WIN_NE_CB_SP_OFFSET        (WIN_NE_DOS_STUB_OFFSET + 198u)
 #define WIN_NE_CB_DS_OFFSET        (WIN_NE_DOS_STUB_OFFSET + 200u)
@@ -123,6 +126,18 @@ typedef struct {
     uint16_t tss;          /* the TSS's selector */
     uint16_t ring0;        /* the ring 0 area's data selector (SS0) */
     uint16_t exit_gate, cbret_gate; /* call gates, DPL 3 */
+    /* A Win32 program (PE): its code 32-bit and flat (ne_cs and ne_ss its
+     * flat code and data selectors, base 0), entered at flat_ip with ESP
+     * flat_sp, FS its thread's information block (fs). The gates are then
+     * 386 ones (32-bit frames); the gateway keeps FS and GS too, and gives
+     * the result in EAX (DX:AX of the service), EDX the caller's; the
+     * entry's and a callback's results come back in EBX (the whole EAX).
+     * The IDT has 386 interrupt gates, none for a program's INT n (no DOS,
+     * no BIOS: its own INT n faults); the yield vector's stub keeps EAX.
+     * The callback's words: EIP at CB_PROC, ESP at CB_SS (both dwords). */
+    uint8_t flat;
+    uint16_t fs;
+    uint32_t flat_ip, flat_sp;
 } win_ne_boot_args;
 
 /* Returns bytes emitted (<= WIN_NE_BOOT_CAPACITY), or zero on error. */

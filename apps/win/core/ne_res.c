@@ -268,3 +268,21 @@ DWORD WINAPI GetFileResourceN(LPCSTR path, LPCSTR type, LPCSTR id, DWORD offset,
     free(d);
     return n;
 }
+
+/* the same for a Win32 program's resources (pe_user.c): an icon's DIB, a
+ * cursor's (after its hot spot), a group's best entry */
+HICON win_icon_from_dib(const uint8_t *d, uint32_t n)
+{
+    winapp_icon ic;
+    return icon_from_dib(d, n, &ic) ? user_icon_create(&ic) : 0;
+}
+
+HCURSOR win_cursor_from_dib(const uint8_t *d, uint32_t n, int hx, int hy)
+{
+    return cursor_from_dib(d, n, hx, hy);
+}
+
+int win_group_pick(const uint8_t *g, uint32_t n, int cursor, uint16_t *id)
+{
+    return group_pick(g, n, cursor, id);
+}

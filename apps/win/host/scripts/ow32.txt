@@ -1,0 +1,56 @@
+# A Win32 program (PE) on the i386 core (OW32, its DLL OW32DLL.DLL):
+# KERNEL32, USER32 and GDI32 as its window shows them; characters typed
+# into its subclassed edit control, Ctrl+T (an accelerator) twice, Ctrl+D
+# its dialog (42 typed), its menu; SPACE a function WINN has not; then
+# "OW32 fault", a division by zero:
+#     ./winhost scripts/ow32.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OW32
+key RETURN
+wait 500
+snap o32_main.ppm
+click 60 350
+type abc
+keydown CTRL
+key T
+key T
+keyup CTRL
+wait 50
+keydown CTRL
+key D
+keyup CTRL
+wait 100
+snap o32_dialog.ppm
+type 42
+key RETURN
+wait 100
+keydown ALT
+key F
+keyup ALT
+wait 50
+snap o32_menu.ppm
+key ESC
+key ESC
+click 400 200
+key SPACE
+wait 100
+snap o32_undefined.ppm
+key RETURN
+wait 50
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OW32 fault
+key RETURN
+wait 200
+snap o32_fault.ppm
+key RETURN
+wait 50
+exit
