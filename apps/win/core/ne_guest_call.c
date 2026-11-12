@@ -971,6 +971,24 @@ LRESULT ne_message(ne_user *u, uint32_t proc, HWND h, UINT msg, WPARAM wp, LPARA
         const CREATESTRUCT *cs = (const CREATESTRUCT *)(uintptr_t)lp;
         len = create_size(cs);
         create_to_guest(u, cs, win_ne_blob_far(c, len), blob);
+    } else if (msg == WM_SETTEXT &&
+               (!lp || !win_ne_read(c, (uint16_t)((uint32_t)lp >> 16),
+                                    (uint16_t)lp, blob, 1))) {
+        /* Native SetWindowText/SendMessage passes an ARM pointer, not a
+         * Win16 selector:offset. A Win16 WndProc may dereference lParam
+         * itself (MPLAYER.EXE does), so lend it a string on its own stack.
+         * A valid guest far pointer, sent by the NE program itself, stays
+         * unchanged. The lent pointer also lets DefWindowProc recover the
+         * original native string rather than treating SS:offset as ARM. */
+        const char *s = (const char *)(uintptr_t)lp;
+        size_t n = 0;
+        if (s)
+            while (n + 1 < sizeof(blob) && s[n])
+                n++;
+        if (n)
+            memcpy(blob, s, n);
+        blob[n] = 0;
+        len = (uint16_t)(n + 1);
     } else if (msg == WM_GETMINMAXINFO && lp) {
         fmt = F_MINMAX;
     } else if ((msg == WM_WINDOWPOSCHANGING || msg == WM_WINDOWPOSCHANGED) && lp) {
@@ -1027,6 +1045,14 @@ static void lp_back(args *a, ne_user *u, UINT msg, uint32_t lp, int lent)
 LRESULT ne_defproc(args *a, ne_user *u, LRESULT (WINAPI *fn)(HWND, UINT, WPARAM, LPARAM),
                    HWND h, UINT msg, WPARAM wp, uint32_t lp)
 {
+    if (msg == WM_SETTEXT && (lp >> 16) && lend_find(u, lp) < 0) {
+        /* A Win16 caller's own far string also needs converting in the
+         * opposite direction when it forwards WM_SETTEXT to USER. */
+        char text[160];
+        if (!str(a, lp, text, sizeof(text)))
+            return 0;
+        return fn(h, msg, wp, (LPARAM)(uintptr_t)text);
+    }
     int lent;
     LPARAM l = lp_native(a, u, msg, lp, &lent);
     LRESULT r = fn(h, msg, wp, l);
