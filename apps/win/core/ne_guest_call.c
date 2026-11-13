@@ -1973,7 +1973,10 @@ static uint32_t hook_call(ne_user *u, int i, int code, uint16_t wp, uint32_t lp,
                           uint8_t *blob, uint16_t len)
 {
     const uint16_t words[4] = { (uint16_t)code, wp, (uint16_t)(lp >> 16), (uint16_t)lp };
-    return win_ne_call(u->ctx, u->hook[i].proc, words, 4, blob, len);
+    win_trace_event("hook-enter", u->hook[i].proc, (uint16_t)code);
+    uint32_t result = win_ne_call(u->ctx, u->hook[i].proc, words, 4, blob, len);
+    win_trace_event("hook-leave", u->hook[i].proc, result);
+    return result;
 }
 
 static uint16_t hook_add(ne_user *u, int type, uint32_t proc, uint16_t task)
@@ -2032,6 +2035,12 @@ static __attribute__((noinline)) LRESULT ne_hook(int type, int code, WPARAM wp, 
     if (!c || c->dead || c->exited || c->stopped)
         return 0;
     int i = hook_next(u, type, 0);
+    win_trace_event("hook-dispatch", (uint16_t)type, (uint16_t)code);
+    /* WH_MSGFILTER is used by CLIPBRD.EXE. Persist the last events before
+     * entering its guest callback: the native keyboard may not be polled
+     * again if the callback never returns. Diagnostic builds only. */
+    if (type == WH_MSGFILTER)
+        win_trace_dump();
     if (i < 0)
         return 0;
     uint8_t blob[10 + 30 + 64 + 64];

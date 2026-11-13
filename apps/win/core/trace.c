@@ -17,6 +17,7 @@
 
 #define CALLS 256
 #define TURNS 32
+#define EVENTS 128
 
 typedef struct {
     uint32_t ms, result, count;
@@ -31,6 +32,26 @@ typedef struct {
 static tcall *calls;
 static tturn turns[TURNS];
 static unsigned ncalls, nturns;     /* how many ever (the ring's next: % size) */
+
+typedef struct {
+    uint32_t ms, a, b;
+    uint16_t task;
+    const char *name;
+} tevent;
+static tevent events[EVENTS];
+static unsigned nevents;
+
+void win_trace_event(const char *name, uint32_t a, uint32_t b)
+{
+    if (!calls)
+        return;
+    tevent *e = &events[nevents++ % EVENTS];
+    e->ms = GetTickCount();
+    e->task = (uint16_t)GetCurrentTask();
+    e->name = name;
+    e->a = a;
+    e->b = b;
+}
 
 #if defined(__arm__) || defined(__thumb__) || defined(WINN_NE_HOST)
 static void on_call(uint16_t service, uint16_t cs, uint16_t ip, uint32_t result)
@@ -71,12 +92,23 @@ void win_trace_init(void)
 #if defined(__arm__) || defined(__thumb__) || defined(WINN_NE_HOST)  /* Win16 programs run */
     if (calls || !GetPrivateProfileInt("debug", "trace", 0, "SYSTEM.INI"))
         return;
+    /* Confirm that trace=1 was read and the Windows directory is writable.
+     * This marker is created before any guest program can hang. */
+    char path[160];
+    win_path("WINNTRAC.LOG", path, sizeof(path));
+    HFILE f = _lcreat(path, 0);
+    if (f != HFILE_ERROR) {
+        static const char marker[] = "WINN trace enabled\\r\\n";
+        _lwrite(f, marker, sizeof(marker) - 1);
+        _lclose(f);
+    }
     calls = (tcall *)win_alloc(sizeof(tcall) * CALLS);
     if (!calls)
         return;
     memset(calls, 0, sizeof(tcall) * CALLS);
     win_ne_trace_call = on_call;
     win_ne_trace_turn = on_turn;
+    win_trace_dump();
 #endif
 }
 
@@ -124,6 +156,15 @@ void win_trace_dump(void)
     for (unsigned i = first; i < nturns; i++) {
         const tturn *t = &turns[i % TURNS];
         wsprintf(line, "%8lu %04X %04X:%04X\r\n", (unsigned long)t->ms, t->task, t->cs, t->ip);
+        put(f, line);
+    }
+    put(f, "events (ms task event arg1 arg2)\r\n");
+    first = nevents > EVENTS ? nevents - EVENTS : 0;
+    for (unsigned i = first; i < nevents; i++) {
+        const tevent *e = &events[i % EVENTS];
+        wsprintf(line, "%8lu %04X %s %08lX %08lX\r\n",
+                 (unsigned long)e->ms, e->task, e->name,
+                 (unsigned long)e->a, (unsigned long)e->b);
         put(f, line);
     }
     _lclose(f);

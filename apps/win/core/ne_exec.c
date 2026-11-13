@@ -41,6 +41,7 @@
 #include "ne_guest.h"
 #include "ne_guest_api.h"
 #include "ne_boot.h"
+#include "wincore.h"
 
 /* CPU_ext_accessors segment indices, matching native int386x(). */
 enum { WIN_ES, WIN_CS, WIN_SS, WIN_DS, WIN_FS, WIN_GS, WIN_SEG_COUNT };
@@ -211,7 +212,10 @@ static int invoke_native(void *opaque, CPU *cpu, uint16_t service)
     uint16_t from_cs = 0, from_ip = 0;
     if (win_ne_trace_call)
         win_ne_guest_caller(gate->api, &guest, &from_cs, &from_ip);
+    win_trace_event("api-enter", service, ((uint32_t)from_cs << 16) | from_ip);
+    win_trace_dump();
     int handled = win_ne_guest_api(gate->api, &guest, service);
+    win_trace_event("api-leave", service, (uint32_t)handled);
     if (win_ne_trace_call)
         win_ne_trace_call(service, from_cs, from_ip,
                           (uint32_t)guest.gprx[regdx].r16 << 16 | guest.gprx[regax].r16);
@@ -331,6 +335,9 @@ static void fault_where(const win_ne_guest_image *g, const win_ne_native_gate *g
  * mode ends nothing. */
 static int run_guest(CPU *cpu, win_ne_native_gate *gate)
 {
+    uint16_t cs0 = cpu->ext_accessors->get_seg16(cpu, WIN_CS);
+    win_trace_event("guest-enter", cs0, (uint16_t)cpu->ip);
+    win_trace_dump();
     int rc = winx86_run(cpu, invoke_native, gate, WIN_NE_EXEC_SLICE);
     unsigned privileged_steps = 0;
     while (!back_in_rm(cpu, gate, rc) && rc != WINX86_BAD_CONTEXT) {
@@ -489,6 +496,7 @@ static uint32_t call_with(win_ne_guest_api_context *ctx, uint32_t proc, const ui
     guest_put16(thunks + WIN_NE_CB_R0SP_OFFSET, r0sp);
     guest_put16(tss + 2u, r0sp);
 
+    win_trace_event("callback-start", proc, (uint16_t)n);
     win_cpu_snapshot here;
     save_cpu(cpu, &here);
     win_ne_native_gate gate = run->gate;
@@ -511,6 +519,7 @@ static uint32_t call_with(win_ne_guest_api_context *ctx, uint32_t proc, const ui
         ctx->dead = 1;                  /* a call WINN has not, in the procedure */
         ctx->dead_call = 1;
     }
+    win_trace_event("callback-end", proc, (uint32_t)rc);
     restore_cpu(cpu, &here);
     guest_put16(tss + 2u, sp0);
     memcpy(dos_guest_linear_ptr(boot + WIN_NE_BOOT_SCRATCH_OFFSET), scratch, sizeof(scratch));

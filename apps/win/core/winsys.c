@@ -123,6 +123,7 @@ int win_boot(const char *exe_path, const win_display_driver *const *disp,
              const win_input_driver *in)
 {
     win_set_home(exe_path);
+    win_trace_init();
     const char *dname = boot_module("display.drv", 1);
     const char *iname = boot_module("input.drv", 0);
     for (int i = 0; disp && disp[i]; i++)

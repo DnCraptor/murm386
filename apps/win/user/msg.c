@@ -264,6 +264,12 @@ void win_ddi_key_event(int vk, int sc, int down)
     }
 
     int alt = key_down(VK_MENU), ctrl = key_down(VK_CONTROL);
+    /* Dump without posting to the desktop's (possibly blocked) queue. */
+    if (vk == VK_ESCAPE && ctrl && key_down(VK_SHIFT) && !alt) {
+        if (down && !was)
+            win_trace_dump();
+        return;
+    }
     /* Ctrl+Esc belongs to the system, whatever has the focus: the Task List */
     if (vk == VK_ESCAPE && ctrl && !alt) {
         if (down && !was && U.desktop)
