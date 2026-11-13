@@ -205,6 +205,10 @@ uint16_t win_ne_guest_selector_array(win_ne_guest_image *g, unsigned n);
  * the function. */
 uint32_t win_ne_guest_proc(win_ne_guest_image *g, unsigned module, uint16_t ordinal,
                            const char *name);
+/* ... as an import is resolved: one WINN has not, an undefined call's
+ * (WIN_NE_SERVICE_UNDEFINED: the program's call of it ends it) */
+uint32_t win_ne_guest_import_proc(win_ne_guest_image *g, unsigned module, uint16_t ordinal,
+                                  const char *name);
 /* ... the thunk of a service, a native DLL's (WIN_NE_DLL_SERVICE) */
 uint32_t win_ne_guest_thunk(win_ne_guest_image *g, uint16_t id);
 /* Native DLLs (core/windll.c, through ne_guest_sys.c; none in a program
@@ -247,7 +251,8 @@ uint16_t win_ne_guest_module_db(win_ne_guest_image *g,
                                 void *opaque);
 /* KERNEL's MyAlloc for its loader: a zeroed block for one of its segments
  * (code but for DATA flags), in the slot of the segment being loaded
- * (g->loading), or the first free one, else a global block; its selector
+ * (g->loading), or the first free one, else a global block; of 0 bytes a
+ * handle only (in a slot: GlobalReAlloc gives it its memory); its selector
  * (its handle as well), 0 if there is no memory */
 uint16_t win_ne_guest_myalloc(win_ne_guest_image *g, uint16_t flags, uint32_t bytes);
 /* its loader loaded segment k (LoadAppSeg's answer, handle): the program's

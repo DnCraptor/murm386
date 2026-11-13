@@ -140,13 +140,58 @@ winapp_info *win_ne_app_info(const char *path)
     return inf;
 }
 
+/* A Windows 2.x program's icon or cursor (no group of them): a header
+ * (its kind, 1 icon, 3 cursor; a byte; the hot spot x, y; width, height;
+ * the bytes of a row; a word), then the AND mask and the XOR mask, one bit
+ * a pixel, top row first. As 32x32 masks (sampled), the hot spot scaled. */
+static int old_shape(const char *path, int cursor, uint16_t id, const char *name,
+                     uint8_t and_m[128], uint8_t xor_m[128], int *hx, int *hy)
+{
+    uint8_t *d;
+    uint32_t n;
+    if (win_ne_resource(path, cursor ? RT_CURSOR_ : RT_ICON_, id, name, &d, &n) != WIN_NE_OK)
+        return 0;
+    int w = n >= 14 ? r16(d + 6) : 0, h = n >= 14 ? r16(d + 8) : 0;
+    uint32_t row = n >= 14 ? r16(d + 10) : 0;
+    int ok = n >= 14 && d[1] == 1 && w > 0 && h > 0 && w <= 256 && h <= 256 &&
+             row * 8u >= (uint32_t)w && 14u + 2u * row * (uint32_t)h <= n;
+    if (ok) {
+        const uint8_t *a = d + 14, *x = a + row * (uint32_t)h;
+        memset(and_m, 0, 128);
+        memset(xor_m, 0, 128);
+        for (int y = 0; y < 32; y++)
+            for (int k = 0; k < 32; k++) {
+                int sx = k * w / 32, sy = y * h / 32;
+                uint8_t m = (uint8_t)(0x80 >> (k & 7)), s = (uint8_t)(0x80 >> (sx & 7));
+                if (a[sy * row + sx / 8] & s)
+                    and_m[y * 4 + k / 8] |= m;
+                if (x[sy * row + sx / 8] & s)
+                    xor_m[y * 4 + k / 8] |= m;
+            }
+        *hx = r16(d + 2) * 32 / w;
+        *hy = r16(d + 4) * 32 / h;
+    }
+    free(d);
+    return ok;
+}
+
 HICON win_ne_icon(const char *path, uint16_t id, const char *name)
 {
     uint8_t *d;
     uint32_t n;
     winapp_icon ic;
-    if (!group_dib(path, 0, id, name, -1, &d, &n))
-        return 0;
+    if (!group_dib(path, 0, id, name, -1, &d, &n)) {
+        uint8_t and_m[128], xor_m[128];
+        int hx, hy;
+        if (!old_shape(path, 0, id, name, and_m, xor_m, &hx, &hy))
+            return 0;
+        memset(&ic, 0, sizeof(ic));
+        memcpy(ic.and_bits, and_m, sizeof(and_m));
+        for (int i = 0; i < 32 * 32; i++)               /* white or black */
+            if (xor_m[i / 8] & (0x80 >> (i & 7)))
+                ic.xor_bits[i / 2] |= (uint8_t)(0x0f << (i & 1 ? 0 : 4));
+        return user_icon_create(&ic);
+    }
     int ok = icon_from_dib(d, n, &ic);
     free(d);
     return ok ? user_icon_create(&ic) : 0;
@@ -178,8 +223,12 @@ HCURSOR win_ne_cursor(const char *path, uint16_t id, const char *name)
 {
     uint8_t *d;
     uint32_t n;
-    if (!group_dib(path, 1, id, name, -1, &d, &n))
-        return 0;
+    if (!group_dib(path, 1, id, name, -1, &d, &n)) {
+        uint8_t and_m[128], xor_m[128];
+        int hx, hy;
+        return old_shape(path, 1, id, name, and_m, xor_m, &hx, &hy) ?
+               user_cursor_create(and_m, xor_m, hx < 32 ? hx : 31, hy < 32 ? hy : 31) : 0;
+    }
     HCURSOR h = n > 4 ? cursor_from_dib(d + 4, n - 4, r16(d), r16(d + 2)) : 0;
     free(d);
     return h;

@@ -182,8 +182,8 @@ int main(void)
     assert(code[0] == 0x90 && code[0x7f] == 0);
     assert(r16(code + 0x10) == 0 && r16(code + 0x12) == img.thunk3_selector);
     assert(r16(code + 0x20) == 0 && r16(code + 0x22) == img.thunk3_selector);
-    const uint8_t stub[9] = {
-        0xb8, 0x03, 0x00, 0x9a, 0x00, 0x00,
+    const uint8_t stub[10] = {
+        0xc7, 0xc0, 0x03, 0x00, 0x9a, 0x00, 0x00,
         (uint8_t)img.api_gate, (uint8_t)(img.api_gate >> 8), 0xcb
     };
     assert(!memcmp(guest + img.thunk_linear, stub, sizeof(stub)));

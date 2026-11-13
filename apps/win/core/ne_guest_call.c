@@ -876,9 +876,11 @@ static int global_service(args *a, uint16_t service, uint32_t *v, int *dword)
             *v = 0;
         }
         return 1;
-    case 18: case 111:                  /* GlobalLock, GlobalWire(h): sel:0 */
+    case 18: case 111:                  /* GlobalLock, GlobalWire(h): sel:0, the
+                                         * selector (odd, RPL 3) as Windows has it:
+                                         * programs tell it from a handle by bit 0 */
         h = w(a, 4);
-        *v = win_ne_guest_global(g, h) ? (uint32_t)(h & ~7u) << 16 : 0;
+        *v = win_ne_guest_global(g, h) ? (uint32_t)(h | 3u) << 16 : 0;
         *dword = 1;
         return 1;
     case 19: case 24:                   /* GlobalUnlock, UnlockSegment */

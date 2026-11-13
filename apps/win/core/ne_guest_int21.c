@@ -508,6 +508,8 @@ int win_ne_dos(win_ne_guest_api_context *ctx, win_ne_dos_regs *r)
         return 0;
     uint8_t ah = (uint8_t)(r->ax >> 8), al = (uint8_t)r->ax;
     switch (ah) {
+    case 0x0d:                          /* disk reset: WINN's files write through */
+        return 1;
     case 0x0e:                          /* select drive DL: AL the number of drives */
         r->ax = (uint16_t)((r->ax & 0xff00) | (uint8_t)win_file_drive(r->dx & 0xff));
         return 1;

@@ -64,9 +64,9 @@ int main(int argc, char **argv)
         assert(get_le16(code+off+1) == i * WIN_NE_THUNK_BYTES);
         assert(get_le16(code+off+3) == g.thunk3_selector);
         const uint8_t *thunk = mem + g.thunk_linear + i*WIN_NE_THUNK_BYTES;
-        assert(thunk[0] == 0xb8 && get_le16(thunk+1) == g.thunk_services[i]);
-        assert(thunk[3] == 0x9a && get_le16(thunk+4) == 0);       /* the API gate */
-        assert(get_le16(thunk+6) == g.api_gate && thunk[8] == 0xcb);
+        assert(thunk[0] == 0xc7 && thunk[1] == 0xc0 && get_le16(thunk+2) == g.thunk_services[i]);
+        assert(thunk[4] == 0x9a && get_le16(thunk+5) == 0);       /* the API gate */
+        assert(get_le16(thunk+7) == g.api_gate && thunk[9] == 0xcb);
     }
     assert(code[15] == 0xcb);
     assert(mem[g.thunk_linear + WIN_NE_GUEST_ACTIVE_THUNKS*WIN_NE_THUNK_BYTES] == 0xcc);

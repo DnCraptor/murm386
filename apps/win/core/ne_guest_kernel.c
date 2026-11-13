@@ -83,6 +83,32 @@ static uint32_t own_entry(win_ne_guest_api_context *c, uint16_t ordinal)
     return (uint32_t)g->segments[seg].selector << 16 | off;
 }
 
+/* a module's procedure (GetProcAddress, EntryAddrProc): WINN's modules',
+ * a native DLL's, a DLL's, the program's own (its instance, its module
+ * database); by ordinal or name; 0 if none, but for an import (a
+ * self-loading program's loader's): one of WINN's modules' it has not, an
+ * undefined call's thunk, as the NE loader resolves it */
+static uint32_t module_proc(win_ne_guest_api_context *c, uint16_t h, uint16_t ordinal,
+                            const char *name, int import)
+{
+    win_ne_guest_image *g = (win_ne_guest_image *)c->image;
+    int d = win_ne_guest_dll_of(g, h), s = win_dll_of(h);
+    const win_dll_export *e = s >= 0 ? win_dll_export_of(s, ordinal, name) : NULL;
+    if (e)
+        return win_ne_guest_thunk(g, win_ne_dll_service(s, e));
+    if (s >= 0)
+        return 0;
+    if (d >= 0)
+        return win_ne_guest_dll_proc(g, d, ordinal, name);
+    if (h && ((h & ~3u) == (g->module_db & ~3u) || (h & ~3u) == (dgroup(c) & ~3u)))
+        return own_entry(c, name ? win_ne_ordinal(c->path, name) : ordinal);
+    uint16_t m = (uint16_t)(h - 0xf000u);
+    if (!win_ne_guest_module_name(m))
+        return 0;
+    return import ? win_ne_guest_import_proc(g, m, ordinal, name) :
+                    win_ne_guest_proc(g, m, ordinal, name);
+}
+
 /* ---------------------------------------------------------------- KERNEL */
 
 /* the program's own module name: its file's without the extension */
@@ -1377,19 +1403,8 @@ static __attribute__((noinline)) int kernel_strings(args *a, ne_user *u, uint16_
         *dword = 1;
         if (a->bad || ((far >> 16) && !str_(a, far, name, sizeof(name))))
             return 1;
-        int d = win_ne_guest_dll_of(g, h), s = win_dll_of(h);
-        const win_dll_export *e = s >= 0 ? win_dll_export_of(s, (uint16_t)far,
-                                                             (far >> 16) ? name : NULL) : NULL;
-        if (e)
-            *v = win_ne_guest_thunk(g, win_ne_dll_service(s, e));
-        else if (s >= 0)
-            *v = 0;
-        else if (d >= 0)
-            *v = win_ne_guest_dll_proc(g, d, (uint16_t)far, (far >> 16) ? name : NULL);
-        else if (h && ((h & ~3u) == (g->module_db & ~3u) || (h & ~3u) == (dgroup(c) & ~3u)))
-            *v = own_entry(c, (far >> 16) ? win_ne_ordinal(c->path, name) : (uint16_t)far);
-        else if (win_ne_guest_module_name(m))
-            *v = win_ne_guest_proc(g, m, (uint16_t)far, (far >> 16) ? name : NULL);
+        (void)m;
+        *v = module_proc(c, h, (uint16_t)far, (far >> 16) ? name : NULL, 0);
         return 1;
     }
     case 95: {                          /* LoadLibrary: the modules WINN has, native DLLs
@@ -1555,21 +1570,20 @@ static __attribute__((noinline)) int selfload_service(args *a, uint16_t service,
         *v = 0;
         return selfload(a);
     case 668: {                         /* MyAlloc(UINT flags, UINT size, UINT shift):
-                                         * MAKELONG(handle, selector) */
+                                         * MAKELONG(handle, selector); of size 0 a handle
+                                         * without memory, MAKELONG(0, handle) */
         uint32_t bytes = (uint32_t)w(a, 6) << (w(a, 4) & 15u);
-        uint16_t sel = win_ne_guest_myalloc(g, w(a, 8),
-                                            !bytes || bytes > 65536u ? 65536u : bytes);
-        *v = (uint32_t)sel << 16 | sel;
+        uint16_t sel = win_ne_guest_myalloc(g, w(a, 8), bytes > 65536u ? 65536u : bytes);
+        *v = (uint32_t)sel << 16 | (bytes ? sel : 0u);
         *dword = 1;
         return 1;
     }
-    case 667: {                         /* EntryAddrProc(HMODULE, ordinal) */
-        uint16_t hm = w(a, 6), ord = w(a, 4);
-        int d = win_ne_guest_dll_of(g, hm);
-        *v = d >= 0 ? win_ne_guest_dll_proc(g, d, ord, NULL) : own_entry(c, ord);
+    case 667:                           /* EntryAddrProc(HMODULE, ordinal): any module's
+                                         * (Word for Windows 1.0's loader resolves its
+                                         * imports through it) */
+        *v = module_proc(c, w(a, 6), w(a, 4), NULL, 1);
         *dword = 1;
         return 1;
-    }
     case 403:                           /* FarSetOwner(HGLOBAL, owner): nothing to own */
         *v = 0;
         return 1;

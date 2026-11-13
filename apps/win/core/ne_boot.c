@@ -299,6 +299,11 @@ int win_ne_fault_make(uint8_t idt[WIN_NE_FAULT_IDT_BYTES],
         }
         if (v == 0x20u || v == 0x21u)
             continue;
+        if (v == 3u) {                          /* INT 3, a breakpoint: no debugger, */
+            gate(idt, v, off, a->pm_segment, 1);    /* nothing (as Windows without one: */
+            code[pos] = 0xcf;                   /* Word for Windows 1.0 calls one) */
+            continue;                           /* iret */
+        }
         gate(idt, v, v == WIN_NE_YIELD_VECTOR ? (uint16_t)WIN_NE_YIELD_OFFSET : off,
              a->pm_segment, WIN_NE_BIOS_VECTOR(v));
         if (WIN_NE_BIOS_VECTOR(v)) {            /* push vector; jmp near bios (below) */

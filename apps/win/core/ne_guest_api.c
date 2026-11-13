@@ -660,6 +660,10 @@ int win_ne_guest_api(void *opaque, win_ne_regs *cpu, uint16_t service)
     }
     cpu->gprx[regax].r16 = (uint16_t)value;
     cpu->gprx[regdx].r16 = dword ? (uint16_t)(value >> 16) : 0;
+    /* KERNEL's GetProcAddress and EntryAddrProc leave CX = AX OR DX (zero:
+     * none), as callers test it (Word for Windows 1.0's loader: JCXZ) */
+    if ((service == 50 || service == 667) && !frame_set(ctx, cpu, FR_CX, (uint16_t)(value | value >> 16)))
+        return 0;
     if (ctx && ctx->image)
         forget_dead(ctx, cpu);
     return 1;

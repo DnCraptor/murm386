@@ -887,6 +887,16 @@ static int service_index(const win_ne_import *imp)
 /* the service number of an import, and the bytes of its arguments */
 static int service_id_args(const win_ne_import *imp, uint16_t *id, uint16_t *args)
 {
+    /* KERNEL's Reserved1 to 4: Windows 2.x's AnsiNext, AnsiPrev, AnsiUpper,
+     * AnsiLower there, USER's */
+    static const uint16_t ansi[4] = { 472, 473, 431, 432 };
+    if (module_of(imp) == M_KERNEL && !imp->procedure[0] && imp->ordinal >= 77 &&
+        imp->ordinal <= 80) {
+        win_ne_import u = *imp;
+        lstrcpy_n(u.module, "USER", sizeof(u.module));
+        u.ordinal = ansi[imp->ordinal - 77];
+        return service_id_args(&u, id, args);
+    }
     int i = service_index(imp), module = module_of(imp);
     if (i >= 0) {
         *id = (uint16_t)(module_base[services[i].module] + services[i].ordinal);
@@ -1144,19 +1154,23 @@ static void thunk_bytes(const win_ne_guest_image *g, uint16_t id, uint16_t at,
         p[12] = 0xcb;                      /* retf */
         return;
     }
-    p[0] = 0xb8; put16(p + 1, id);         /* mov ax,service */
-    p[3] = 0x9a;                           /* call far api gate */
-    put16(p + 4, 0);
-    put16(p + 6, g->api_gate);
+    /* MOV AX,service in its long form (C7 C0): a thunk does not look like
+     * a Windows module's exported prologue (MOV AX,DGROUP, B8), which
+     * programs take that DGROUP from (Word for Windows 1.0 does, for
+     * USER's and GDI's heaps) */
+    p[0] = 0xc7; p[1] = 0xc0; put16(p + 2, id);   /* mov ax,service */
+    p[4] = 0x9a;                           /* call far api gate */
+    put16(p + 5, 0);
+    put16(p + 7, g->api_gate);
     if (args) {
-        p[8] = 0xca; put16(p + 9, args);
+        p[9] = 0xca; put16(p + 10, args);
     } else {
-        p[8] = 0xcb;
+        p[9] = 0xcb;
     }
 }
 
-uint32_t win_ne_guest_proc(win_ne_guest_image *g, unsigned module, uint16_t ordinal,
-                           const char *name)
+static uint32_t module_proc(win_ne_guest_image *g, unsigned module, uint16_t ordinal,
+                            const char *name, int undefined)
 {
     if (!g || module >= M_COUNT)
         return 0;
@@ -1168,9 +1182,23 @@ uint32_t win_ne_guest_proc(win_ne_guest_image *g, unsigned module, uint16_t ordi
     else
         imp.ordinal = ordinal;
     uint16_t id;
-    if (constant_of(g, &imp, &id) || !service_id(&imp, &id))
+    if (constant_of(g, &imp, &id))      /* a constant: FFFF:value, as Windows has it */
+        return 0xffff0000u | id;
+    if (!service_id(&imp, &id) && (!undefined || !(id = undefined_id(g, &imp))))
         return 0;
     return win_ne_guest_thunk(g, id);
+}
+
+uint32_t win_ne_guest_proc(win_ne_guest_image *g, unsigned module, uint16_t ordinal,
+                           const char *name)
+{
+    return module_proc(g, module, ordinal, name, 0);
+}
+
+uint32_t win_ne_guest_import_proc(win_ne_guest_image *g, unsigned module, uint16_t ordinal,
+                                  const char *name)
+{
+    return module_proc(g, module, ordinal, name, 1);
 }
 
 uint32_t win_ne_guest_thunk(win_ne_guest_image *g, uint16_t id)
@@ -1359,7 +1387,7 @@ win_ne_guest_segment *win_ne_guest_global(win_ne_guest_image *g, uint16_t sel)
             return &g->globals[i];
     if (g->info.module_flags & WIN_NE_SELF_LOADING)
         for (uint16_t i = 2; i <= g->info.segment_count; i++)
-            if ((g->segments[i].flags & WIN_NE_GUEST_MYALLOC) && g->segments[i].linear &&
+            if ((g->segments[i].flags & WIN_NE_GUEST_MYALLOC) &&
                 (g->segments[i].selector & ~7u) == (sel & ~7u))
                 return &g->segments[i];
     return NULL;
@@ -1416,8 +1444,9 @@ static int resize(win_ne_guest_image *g, win_ne_guest_segment *s, uint32_t bytes
     if (!s || !read || !bytes || bytes > 65536u)
         return 0;
     /* where it is, when what follows is free: no second copy of it while
-     * it moves (DOS's memory is all the programs have) */
-    if (g->io.resize && g->io.resize(g->opaque, s->linear, bytes)) {
+     * it moves (DOS's memory is all the programs have); a block of none
+     * yet (MyAlloc's of size 0) gets its first */
+    if (s->linear && g->io.resize && g->io.resize(g->opaque, s->linear, bytes)) {
         uint8_t zero[256];
         memset(zero, 0, sizeof(zero));
         int ok = 1;
@@ -1445,7 +1474,8 @@ static int resize(win_ne_guest_image *g, win_ne_guest_segment *s, uint32_t bytes
     }
     if (!set_descriptor(g, s->selector, linear, bytes, myalloc_code(s)))
         goto realloc_fail;
-    g->io.free(g->opaque, s->linear);
+    if (s->linear)
+        g->io.free(g->opaque, s->linear);
     s->linear = linear;
     s->size = bytes;
     return 1;
@@ -1472,7 +1502,7 @@ int win_ne_guest_global_free(win_ne_guest_image *g, uint16_t sel)
                      absent, sizeof(absent)))
         return 0;
     memcpy(g->gdt + (s->selector & ~7u), absent, sizeof(absent));
-    if (!(s->flags & WIN_NE_GUEST_ALIAS))
+    if (!(s->flags & WIN_NE_GUEST_ALIAS) && s->linear)
         g->io.free(g->opaque, s->linear);
     uint16_t slot = s->flags & WIN_NE_GUEST_MYALLOC ? s->selector : 0;
     memset(s, 0, sizeof(*s));
@@ -1941,18 +1971,26 @@ out:
 
 uint16_t win_ne_guest_myalloc(win_ne_guest_image *g, uint16_t flags, uint32_t bytes)
 {
-    if (!g || !bytes || bytes > 65536u || !(g->info.module_flags & WIN_NE_SELF_LOADING))
+    if (!g || bytes > 65536u || !(g->info.module_flags & WIN_NE_SELF_LOADING))
         return 0;
     /* code but for DATA (and DATA, ALLOCATED, LOADED), as Windows has it */
     int code = (flags & 7u) != 1u && (flags & 7u) != 7u;
+    const uint16_t taken = WIN_NE_GUEST_MYALLOC | WIN_NE_GUEST_ALIAS;
     win_ne_guest_segment *s = NULL;
     if (g->loading >= 2 && g->loading <= g->info.segment_count &&
-        !g->segments[g->loading].linear && !(g->segments[g->loading].flags & WIN_NE_GUEST_ALIAS))
+        !g->segments[g->loading].linear && !(g->segments[g->loading].flags & taken))
         s = &g->segments[g->loading];
     for (uint16_t i = 2; !s && i <= g->info.segment_count; i++)
         if (!g->segments[i].linear && g->segments[i].selector &&
-            !(g->segments[i].flags & WIN_NE_GUEST_ALIAS))
+            !(g->segments[i].flags & taken))
             s = &g->segments[i];
+    if (!bytes) {                       /* a handle, no memory yet (GlobalReAlloc gives it) */
+        if (!s)
+            return 0;
+        s->size = 0;
+        s->flags = (uint16_t)((flags & 0x0ffeu) | (code ? 0u : 1u) | WIN_NE_GUEST_MYALLOC);
+        return s->selector;
+    }
     if (!s) {                                           /* a global block */
         uint16_t sel = win_ne_guest_global_alloc(g, bytes);
         win_ne_guest_segment *b = sel ? win_ne_guest_global(g, sel) : NULL;
@@ -1989,7 +2027,8 @@ int win_ne_guest_selfloaded(win_ne_guest_image *g, uint16_t k, uint16_t handle,
         return 0;
     uint16_t j = 0;
     for (uint16_t i = 2; i <= g->info.segment_count && !j; i++)
-        if (g->segments[i].linear && !(g->segments[i].flags & WIN_NE_GUEST_ALIAS) &&
+        if ((g->segments[i].linear || (g->segments[i].flags & WIN_NE_GUEST_MYALLOC)) &&
+            !(g->segments[i].flags & WIN_NE_GUEST_ALIAS) &&
             (g->segments[i].selector & ~7u) == (handle & ~7u))
             j = i;
     if (j && j != k) {                  /* allocated in another's slot: the two swapped */

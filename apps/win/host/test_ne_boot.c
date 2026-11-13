@@ -82,6 +82,10 @@ int main(void)
             assert(to+sizeof(bios)<=WIN_NE_FAULT_CODE_BYTES && !memcmp(code+to,bios,sizeof(bios)));
             continue;
         }
+        if (v == 3) {                           /* INT 3: DPL 3, IRET (no debugger) */
+            assert(idt[v*8+4]==0 && idt[v*8+5]==0xe6 && code[pos]==0xcf);
+            continue;
+        }
         assert(idt[v*8+4]==0 && idt[v*8+5]==0x86);  /* DPL 0: no INT n from ring 3 */
         assert(code[pos]==0xbb && r16(code+pos+1)==v);
         assert(code[pos+3]==0xe9 && r16(code+pos+4)==
