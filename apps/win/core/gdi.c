@@ -3585,3 +3585,75 @@ UINT WINAPI SetHookFlags(HDC h, UINT flags)
 /* GDI's own SelectObject of a bitmap; the font realized for the DC */
 HBITMAP WINAPI SelectBitmap(HDC h, HBITMAP bm) { return (HBITMAP)SelectObject(h, bm); }
 HFONT WINAPI GetPhysicalFontHandle(HDC h) { DC_OR_RET(h, 0); return dc->font; }
+
+/* ---------------------------------------------------------------- Windows 3.1's own */
+
+/* the state of a DC (its objects, colours, modes, mapping, position) from
+ * one to another */
+static void copy_dc_state(HDC to, HDC from)
+{
+    static const int kinds[3] = { WHITE_BRUSH, BLACK_PEN, SYSTEM_FONT };
+    for (int i = 0; i < 3; i++) {           /* what is selected: swapped out and back */
+        HGDIOBJ cur = SelectObject(from, GetStockObject(kinds[i]));
+        SelectObject(from, cur);
+        SelectObject(to, cur);
+    }
+    SetTextColor(to, GetTextColor(from));
+    SetBkColor(to, GetBkColor(from));
+    SetBkMode(to, GetBkMode(from));
+    SetROP2(to, GetROP2(from));
+    SetPolyFillMode(to, GetPolyFillMode(from));
+    SetStretchBltMode(to, GetStretchBltMode(from));
+    SetTextAlign(to, GetTextAlign(from));
+    SetTextCharacterExtra(to, GetTextCharacterExtra(from));
+    SetMapMode(to, GetMapMode(from));
+    POINT p;
+    SIZE s;
+    GetWindowExtEx(from, &s);
+    SetWindowExtEx(to, s.cx, s.cy, NULL);
+    GetViewportExtEx(from, &s);
+    SetViewportExtEx(to, s.cx, s.cy, NULL);
+    GetWindowOrgEx(from, &p);
+    SetWindowOrgEx(to, p.x, p.y, NULL);
+    GetViewportOrgEx(from, &p);
+    SetViewportOrgEx(to, p.x, p.y, NULL);
+    GetBrushOrgEx(from, &p);
+    SetBrushOrg(to, p.x, p.y);
+    GetCurrentPositionEx(from, &p);
+    MoveToEx(to, p.x, p.y, NULL);
+}
+
+/* GetDCState: a DC of its own holding the state of hdc (DeleteDC's);
+ * SetDCState: that state given back to a DC */
+HDC WINAPI GetDCState(HDC hdc)
+{
+    HDC saved = hdc ? CreateCompatibleDC(hdc) : 0;
+    if (saved)
+        copy_dc_state(saved, hdc);
+    return saved;
+}
+
+void WINAPI SetDCState(HDC hdc, HDC saved)
+{
+    if (hdc && saved)
+        copy_dc_state(hdc, saved);
+}
+
+/* ScanLR: from x along row y, to the left (style 2) or right, the first
+ * pixel of colour (style 1) or not of it; its x, -1 if none to the edge,
+ * 0x8000 if x, y is outside */
+int WINAPI ScanLR(HDC hdc, int x, int y, COLORREF color, UINT style)
+{
+    COLORREF c = GetPixel(hdc, x, y);
+    if (c == CLR_INVALID)
+        return (int)0x8000;
+    int step = (style & 2) ? -1 : 1, match = (style & 1) != 0;
+    for (;;) {
+        if (((c & 0xffffffu) == (color & 0xffffffu)) == match)
+            return x;
+        x += step;
+        c = GetPixel(hdc, x, y);
+        if (c == CLR_INVALID)
+            return -1;
+    }
+}

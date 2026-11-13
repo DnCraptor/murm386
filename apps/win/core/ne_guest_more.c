@@ -542,6 +542,12 @@ static __attribute__((noinline)) int kernel_more(args *a, ne_user *u, uint16_t s
                                      : service == 227;   /* RegFlushKey: written */
     }
     switch (service) {
+    case 120:                           /* UndefDynLink: a call of a link Windows could
+                                         * not resolve, the program's end, as there */
+        MessageBox(0, "Call to Undefined Dynalink", "Application Error", MB_OK | MB_ICONSTOP);
+        a->ctx->exited = 1;
+        a->ctx->exit_code = 0xff;
+        return 1;
     case 144: case 145: case 146: {     /* CreateDirectory(LPCSTR, LPVOID security),
                                          * RemoveDirectory(LPCSTR), DeleteFile(LPCSTR) */
         char path[144];

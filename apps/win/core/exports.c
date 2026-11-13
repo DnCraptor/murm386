@@ -214,6 +214,7 @@ extern void GetDC(void);
 extern void GetDCEx(void);
 extern void GetDCHook(void);
 extern void GetDCOrg(void);
+extern void GetDCState(void);
 extern void GetDIBits(void);
 extern void GetDesktopHwnd(void);
 extern void GetDesktopWindow(void);
@@ -277,6 +278,7 @@ extern void GetPrivateProfileInt(void);
 extern void GetPrivateProfileSectionNames(void);
 extern void GetPrivateProfileString(void);
 extern void GetProcAddress(void);
+extern void GetProductName(void);
 extern void GetProfileInt(void);
 extern void GetProfileSectionNames(void);
 extern void GetProfileString(void);
@@ -483,6 +485,7 @@ extern void ScaleViewportExt(void);
 extern void ScaleViewportExtEx(void);
 extern void ScaleWindowExt(void);
 extern void ScaleWindowExtEx(void);
+extern void ScanLR(void);
 extern void ScreenToClient(void);
 extern void ScrollChildren(void);
 extern void ScrollDC(void);
@@ -514,6 +517,7 @@ extern void SetCursor(void);
 extern void SetCursorPos(void);
 extern void SetDCHook(void);
 extern void SetDCOrg(void);
+extern void SetDCState(void);
 extern void SetDIBits(void);
 extern void SetDIBitsToDevice(void);
 extern void SetDeskWallPaper(void);
@@ -712,6 +716,7 @@ static const void *const exports_kernel[355] = {
     [164] = (const void *)GlobalLRUNewest,
     [165] = (const void *)A20Proc,
     [166] = (const void *)WinExec,
+    [236] = (const void *)GetProductName,
     [315] = (const void *)WriteOutProfiles,
     [319] = (const void *)FlushCachedFileHandle,
     [320] = (const void *)IsTask,
@@ -845,6 +850,7 @@ static const void *const exports_gdi[487] = {
     [132] = (const void *)SetEnvironment,
     [133] = (const void *)GetEnvironment,
     [134] = (const void *)GetRgnBox,
+    [135] = (const void *)ScanLR,
     [136] = (const void *)RemoveFontResource,
     [148] = (const void *)SetBrushOrg,
     [149] = (const void *)GetBrushOrg,
@@ -862,6 +868,8 @@ static const void *const exports_gdi[487] = {
     [173] = (const void *)GetClipRgn,
     [175] = (const void *)EnumMetaFile,
     [176] = (const void *)PlayMetaFileRecord,
+    [179] = (const void *)GetDCState,
+    [180] = (const void *)SetDCState,
     [188] = (const void *)GetTextExtentEx,
     [190] = (const void *)SetDCHook,
     [191] = (const void *)GetDCHook,

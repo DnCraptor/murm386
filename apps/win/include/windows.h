@@ -156,6 +156,8 @@ UINT    WINAPI LocalSize(HLOCAL h);
 DWORD   WINAPI GetTickCount(void);
 DWORD   WINAPI GetCurrentTime(void);
 DWORD   WINAPI GetVersion(void);
+/* Windows 3.1's own: the product's name into buf (n bytes); its length */
+int     WINAPI GetProductName(LPSTR buf, int n);
 HMODULE WINAPI GetModuleHandle(LPCSTR name);
 void    WINAPI FatalExit(int code);
 void    WINAPI OutputDebugString(LPCSTR str);
@@ -625,6 +627,12 @@ BOOL    WINAPI LineTo(HDC hdc, int x, int y);
 BOOL    WINAPI Polyline(HDC hdc, const POINT *pts, int n);
 BOOL    WINAPI Polygon(HDC hdc, const POINT *pts, int n);
 int     WINAPI SetPolyFillMode(HDC hdc, int mode);
+/* Windows 3.1's own: a DC's state kept in a DC and given back; a row
+ * scanned for a colour (style 1: of it, else not; 2: leftwards) */
+HDC     WINAPI GetDCState(HDC hdc);
+void    WINAPI SetDCState(HDC hdc, HDC saved);
+int     WINAPI ScanLR(HDC hdc, int x, int y, COLORREF color, UINT style);
+#define CLR_INVALID 0xFFFFFFFFu
 int     WINAPI GetPolyFillMode(HDC hdc);
 BOOL    WINAPI PolyPolygon(HDC hdc, const POINT *pts, const int *counts, int npoly);
 BOOL    WINAPI Arc(HDC hdc, int l, int t, int r, int b, int x1, int y1, int x2, int y2);

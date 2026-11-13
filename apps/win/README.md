@@ -337,7 +337,9 @@ EnumTaskWindows, GrayString (a string grayed; a procedure of its own draws
 as it is), AnsiUpperBuff and AnsiLowerBuff, LoadBitmap(NULL, OBM_...)
 (the system's bitmaps: the arrows, the caption's buttons, the check marks,
 drawn at their sizes), scroll bars of SBS_TOPALIGN or SBS_BOTTOMALIGN
-(LEFT/RIGHT: their standard thickness at that edge). Hooks (SetWindowsHook(Ex),
+(LEFT/RIGHT: their standard thickness at that edge), GDI's GetDCState and
+SetDCState (a DC's state kept in a DC of its own), ScanLR, KERNEL's
+GetProductName and UndefDynLink (the program's end, as in Windows). Hooks (SetWindowsHook(Ex),
 CallNextHookEx, DefHookProc, CallMsgFilter) are called as Windows calls
 them: WH_CALLWNDPROC with a message sent to a window of the task;
 WH_CBT with a window made (HCBT_CREATEWND), destroyed, activated, given
@@ -815,4 +817,5 @@ DIB section (its bits are not brought back), ADVAPI32, WINMM's devices
 Printing (there is no printer), `.GRP` files (`PROGMAN.INI` holds the groups as text), DLLs (`LoadLibrary`) of native applications;
 Windows 95's and NT's additions to Win16 (WOW, the thunks to Win32,
 paths, Bézier curves, enhanced metafiles), BiDi, STRESS.DLL, the
-undocumented CallProcInstance and Windows 2's GetContinuingTextExtent.
+undocumented CallProcInstance, InitLib and DoSignal (KERNEL's own, whose
+arguments nothing tells) and Windows 2's GetContinuingTextExtent.

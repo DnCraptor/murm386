@@ -1231,6 +1231,23 @@ WinExec:
     .ltorg
     .size WinExec, .-WinExec
 
+    .section .text.winapi.GetProductName,"ax",%progbits
+    .global GetProductName
+    .type GetProductName, %function
+    .thumb_func
+GetProductName:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =944
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetProductName, .-GetProductName
+
     .section .text.winapi.WriteOutProfiles,"ax",%progbits
     .global WriteOutProfiles
     .type WriteOutProfiles, %function
@@ -3441,6 +3458,23 @@ GetRgnBox:
     .ltorg
     .size GetRgnBox, .-GetRgnBox
 
+    .section .text.winapi.ScanLR,"ax",%progbits
+    .global ScanLR
+    .type ScanLR, %function
+    .thumb_func
+ScanLR:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =540
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size ScanLR, .-ScanLR
+
     .section .text.winapi.RemoveFontResource,"ax",%progbits
     .global RemoveFontResource
     .type RemoveFontResource, %function
@@ -3729,6 +3763,40 @@ PlayMetaFileRecord:
     bx   r12
     .ltorg
     .size PlayMetaFileRecord, .-PlayMetaFileRecord
+
+    .section .text.winapi.GetDCState,"ax",%progbits
+    .global GetDCState
+    .type GetDCState, %function
+    .thumb_func
+GetDCState:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =716
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetDCState, .-GetDCState
+
+    .section .text.winapi.SetDCState,"ax",%progbits
+    .global SetDCState
+    .type SetDCState, %function
+    .thumb_func
+SetDCState:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =720
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SetDCState, .-SetDCState
 
     .section .text.winapi.GetTextExtentEx,"ax",%progbits
     .global GetTextExtentEx

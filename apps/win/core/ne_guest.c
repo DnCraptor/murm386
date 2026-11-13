@@ -652,6 +652,7 @@ static const struct {
     { M_KERNEL, 145, "RemoveDirectory", 4 },
     { M_KERNEL, 146, "DeleteFile", 4 },
     { M_KERNEL, 149, "GetVersionEx", 4 },
+    { M_KERNEL, 120, "UndefDynLink", 0 },
     { M_KERNEL, 222, "RegDeleteValue", 8 },
     { M_KERNEL, 223, "RegEnumValue", 32 },
     { M_KERNEL, 225, "RegQueryValueEx", 24 },

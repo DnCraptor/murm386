@@ -267,6 +267,15 @@ DWORD WINAPI GetCurrentTime(void) { return GetTickCount(); }
 /* Windows 3.10 on DOS 7.0 (HIWORD = DOS version, LOWORD = 0x0A03). */
 DWORD WINAPI GetVersion(void) { return 0x07000A03UL; }
 
+int WINAPI GetProductName(LPSTR buf, int n)
+{
+    static const char name[] = "Microsoft Windows";
+    if (!buf || n <= 0)
+        return 0;
+    lstrcpyn(buf, name, n);
+    return lstrlen(buf);
+}
+
 HMODULE WINAPI GetModuleHandle(LPCSTR name)
 {
     wtask *t = task_current();
