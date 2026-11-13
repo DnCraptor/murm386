@@ -2091,10 +2091,15 @@ static int hook_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int 
         return 1;
     case 0x1079: {                      /* SetWindowsHook(int, HOOKPROC): the one before */
         int type = (int16_t)w(a, 8), i = hook_next(u, type, 0);
-        *v = i >= 0 ? u->hook[i].proc : 0;
+        *v = 0;
         *dword = 1;
-        if (!a->bad)
-            hook_add(u, type, dw(a, 4), 0);
+        if (!a->bad && type >= -1 && type <= WH_SHELL) {
+            uint32_t proc = dw(a, 4);
+            uint32_t prev = i >= 0 ? u->hook[i].proc :
+                            win_ne_guest_hook_terminator(a->ctx->image);
+            if (!a->bad && proc && prev && hook_add(u, type, proc, 0))
+                *v = prev;
+        }
         return 1;
     }
     case 0x1124:                        /* UnhookWindowsHookEx(HHOOK) */
@@ -2183,6 +2188,11 @@ int ne_call(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword)
         return 1;
     }
     switch (service) {
+    case 0x1201:                        /* USER.513 WNetGetCaps(WORD) */
+        /* WINN has no network redirector. Report no network capabilities;
+         * do not abort applications that probe WNetGetCaps(0xffff). */
+        *v = 0;
+        return 1;
     case 0x10ab: {                      /* WinHelp(HWND, LPCSTR, UINT, DWORD): a string or a
                                          * MULTIKEYHELP of the program's for some */
         char file[144], text[256];

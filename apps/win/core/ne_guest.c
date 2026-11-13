@@ -1134,6 +1134,13 @@ static void thunk_bytes(const win_ne_guest_image *g, uint16_t id, uint16_t at,
 {
     uint16_t args = service_args(id);
     memset(p, 0xcc, THUNK_BYTES);
+    if (id == 0xfffeu) {                /* Win16's initial system HOOKPROC */
+        p[0] = 0x31; p[1] = 0xc0;       /* xor ax,ax */
+        p[2] = 0x31; p[3] = 0xd2;       /* xor dx,dx */
+        p[4] = 0xca;                    /* retf 8: HOOKPROC(code,wp,lp) */
+        put16(p + 5, 8);
+        return;
+    }
     if (id == WIN_NE_SERVICE_DOS3CALL || id == 101) {   /* and NoHookDosCall */
         p[0] = 0xcd; p[1] = 0x21;          /* int 21h, with its registers */
         p[2] = 0xcb;                       /* retf */
@@ -1219,6 +1226,12 @@ uint32_t win_ne_guest_thunk(win_ne_guest_image *g, uint16_t id)
         }
     }
     return (uint32_t)sel << 16 | off;
+}
+
+uint32_t win_ne_guest_hook_terminator(const win_ne_guest_image *g)
+{
+    /* The thunk table is mutable even when reached through a running context. */
+    return win_ne_guest_thunk((win_ne_guest_image *)g, 0xfffeu);
 }
 
 const char *win_ne_guest_module_name(int m)

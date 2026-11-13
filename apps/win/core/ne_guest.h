@@ -211,6 +211,9 @@ uint32_t win_ne_guest_import_proc(win_ne_guest_image *g, unsigned module, uint16
                                   const char *name);
 /* ... the thunk of a service, a native DLL's (WIN_NE_DLL_SERVICE) */
 uint32_t win_ne_guest_thunk(win_ne_guest_image *g, uint16_t id);
+/* Win16 SetWindowsHook's initial system procedure: a callable FARPROC
+ * returning zero, with a PASCAL HOOKPROC's eight argument bytes. */
+uint32_t win_ne_guest_hook_terminator(const win_ne_guest_image *g);
 /* Native DLLs (core/windll.c, through ne_guest_sys.c; none in a program
  * without them): the service of a module's export, the DLL loaded and the
  * current task's use of it counted (1), no native DLL of the name (0), one

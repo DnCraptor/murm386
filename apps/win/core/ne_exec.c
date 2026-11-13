@@ -332,8 +332,19 @@ static void fault_where(const win_ne_guest_image *g, const win_ne_native_gate *g
 static int run_guest(CPU *cpu, win_ne_native_gate *gate)
 {
     int rc = winx86_run(cpu, invoke_native, gate, WIN_NE_EXEC_SLICE);
-    while (!back_in_rm(cpu, gate, rc) && rc != WINX86_BAD_CONTEXT)
+    unsigned privileged_steps = 0;
+    while (!back_in_rm(cpu, gate, rc) && rc != WINX86_BAD_CONTEXT) {
+        uint16_t cs = cpu->ext_accessors->get_seg16(cpu, WIN_CS);
+        if (cs == gate->rm_segment || (cs & 3u) != 3u) {
+            /* A guest stuck in the gateway must not monopolize core 0.
+             * This path cannot yield to the WINN task scheduler. */
+            if (++privileged_steps >= 65536u)
+                return WINX86_BAD_CONTEXT;
+        } else {
+            privileged_steps = 0;
+        }
         rc = preempt(cpu, gate);
+    }
     return rc;
 }
 
@@ -348,9 +359,9 @@ static int run_guest(CPU *cpu, win_ne_native_gate *gate)
  * could not run again. */
 static int take_back(CPU *cpu, const win_ne_native_gate *gate, int rc)
 {
-    if (!back_in_rm(cpu, gate, rc))
-        for (;;) { }
-    return rc;
+    /* The CPU is emulated: callers restore its saved snapshot even when
+     * guest code failed to return through the real-mode gateway. */
+    return back_in_rm(cpu, gate, rc) ? rc : WINX86_BAD_CONTEXT;
 }
 
 /* USER calls the program's window procedure (selector:offset proc) while
@@ -488,7 +499,10 @@ static uint32_t call_with(win_ne_guest_api_context *ctx, uint32_t proc, const ui
     cpu->prefetch_base = (uint32_t)-1;
     int rc = take_back(cpu, &gate, run_guest(cpu, &gate));
     uint32_t result = 0;
-    if (rc == WINX86_FAULT) {
+    if (rc == WINX86_BAD_CONTEXT) {
+        ctx->dead = 1;
+        memset(&ctx->fault, 0, sizeof(ctx->fault));
+    } else if (rc == WINX86_FAULT) {
         fault_where(g, &gate, cpu, &ctx->fault);
         ctx->dead = 1;
     } else if (rc == WINX86_OK && !ctx->exited && !ctx->stopped) {
@@ -631,6 +645,10 @@ static int execute(win_ne_guest_image *gp, const char *path, const char *cmdline
     api.exec = &run;
     win_ne_user_start(&api);
     rc = take_back(cpu, &run.gate, run_guest(cpu, &run.gate));
+    if (rc == WINX86_BAD_CONTEXT) {
+        api.dead = 1;
+        memset(&api.fault, 0, sizeof(api.fault));
+    }
 
     const uint32_t result = ((uint32_t)cpu->gprx[regcx].r16 << 16) |
                              cpu->gprx[regbx].r16;
@@ -849,7 +867,10 @@ uint32_t win_pe_call(win_pe_ctx *ctx, uint32_t proc, const uint32_t *args, int n
     cpu->prefetch_base = (uint32_t)-1;
     int rc = take_back(cpu, &inner.gate, run_guest(cpu, &inner.gate));
     uint32_t result = 0;
-    if (rc == WINX86_FAULT) {
+    if (rc == WINX86_BAD_CONTEXT) {
+        ctx->dead = 1;
+        memset(&ctx->fault, 0, sizeof(ctx->fault));
+    } else if (rc == WINX86_FAULT) {
         pe_fault_where(&inner, cpu, &ctx->fault);
         ctx->dead = 1;
     } else if (rc == WINX86_OK && !ctx->exited && !ctx->stopped) {
@@ -957,6 +978,10 @@ static int pe_execute(win_pe_image *img, const char *path, const char *cmdline, 
     ctx->exec = &run;
     win_pe_start(ctx, cmdline);
     rc = take_back(cpu, &run.gate, run_guest(cpu, &run.gate));
+    if (rc == WINX86_BAD_CONTEXT) {
+        ctx->dead = 1;
+        memset(&ctx->fault, 0, sizeof(ctx->fault));
+    }
     const uint32_t result = cpu->gprx[regbx].r32;
     if (rc != WINX86_FAULT && ctx->dead_call)
         rc = WINX86_BAD_SERVICE;
