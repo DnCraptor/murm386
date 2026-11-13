@@ -1423,4 +1423,8 @@ BOOL    WINAPI DragDetect(HWND h, POINT pt);
 void    WINAPI CalcChildScroll(HWND h, UINT bar);
 void    WINAPI ScrollChildren(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 
+/* WINN native extensions: shared keyboard layout, 0=Latin, 1=Russian. */
+int     WINAPI GetKeyboardLayoutN(void);
+void    WINAPI SetKeyboardLayoutN(int russian);
+
 #endif /* MURM_WINUSER_H */

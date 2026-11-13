@@ -527,7 +527,7 @@ static void run_startup(void)
                 lstrcpyn(commands[n++], gr->it[i].cmd, sizeof(commands[0]));
         }
         for (int i = 0; i < n; i++)
-            run(commands[i], 0, 1);
+            run(commands[i], 1, 1);
         break;
     }
 }

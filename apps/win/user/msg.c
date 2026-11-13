@@ -209,12 +209,14 @@ BOOL WINAPI InSendMessage(void) { return FALSE; }
 static int key_down(int vk) { return (U.keys[vk & 0xFF] & 0x80) != 0; }
 
 /* Shared layout state for the legacy KEYBOARD.DRV RusLat protocol. */
-int user_keyboard_layout(void) { return U.layout; }
+int WINAPI GetKeyboardLayoutN(void) { return U.layout; }
+int user_keyboard_layout(void) { return GetKeyboardLayoutN(); }
 
-void user_set_keyboard_layout(int russian)
+void WINAPI SetKeyboardLayoutN(int russian)
 {
     U.layout = russian != 0;
 }
+void user_set_keyboard_layout(int russian) { SetKeyboardLayoutN(russian); }
 
 /* EnableHardwareInput's: the keys and the mouse's buttons ignored */
 static int input_off;

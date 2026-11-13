@@ -238,6 +238,8 @@ extern void GetIconInfo(void);
 extern void GetInputState(void);
 extern void GetKerningPairs(void);
 extern void GetKeyState(void);
+extern void GetKeyboardLayoutN(void);
+extern void SetKeyboardLayoutN(void);
 extern void GetKeyboardState(void);
 extern void GetLastActivePopup(void);
 extern void GetLastError(void);
@@ -1259,7 +1261,7 @@ static const void *const exports_user[484] = {
     [483] = (const void *)SystemParametersInfo,
 };
 
-static const void *const exports_winn[26] = {
+static const void *const exports_winn[28] = {
     [1] = (const void *)DialogBoxIndirectN,
     [2] = (const void *)CreateDialogIndirectN,
     [3] = (const void *)CreateAcceleratorTableN,
@@ -1285,6 +1287,8 @@ static const void *const exports_winn[26] = {
     [23] = (const void *)SoundStopN,
     [24] = (const void *)SoundCountN,
     [25] = (const void *)SoundWaitN,
+    [26] = (const void *)GetKeyboardLayoutN,
+    [27] = (const void *)SetKeyboardLayoutN,
 };
 
 static const void *const exports_commdlg[28] = {

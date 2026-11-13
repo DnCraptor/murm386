@@ -10903,3 +10903,37 @@ GetFileTitle:
     bx   r12
     .ltorg
     .size GetFileTitle, .-GetFileTitle
+
+    .section .text.winapi.GetKeyboardLayoutN,"ax",%progbits
+    .global GetKeyboardLayoutN
+    .type GetKeyboardLayoutN, %function
+    .thumb_func
+GetKeyboardLayoutN:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #12]
+    ldr  r1, =104
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetKeyboardLayoutN, .-GetKeyboardLayoutN
+
+    .section .text.winapi.SetKeyboardLayoutN,"ax",%progbits
+    .global SetKeyboardLayoutN
+    .type SetKeyboardLayoutN, %function
+    .thumb_func
+SetKeyboardLayoutN:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #12]
+    ldr  r1, =108
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SetKeyboardLayoutN, .-SetKeyboardLayoutN

@@ -25,3 +25,5 @@
 23 SoundStopN
 24 SoundCountN
 25 SoundWaitN
+26 GetKeyboardLayoutN
+27 SetKeyboardLayoutN
