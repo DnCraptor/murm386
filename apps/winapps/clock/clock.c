@@ -202,15 +202,7 @@ static void draw_icon_digital(HDC dc, const RECT *rc, const SYSTEMTIME_N *t)
     SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
     RECT text = *rc;
-    if (seconds)
-        text.bottom = (text.top + text.bottom) / 2;
     DrawText(dc, time, -1, &text, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    if (seconds) {
-        wsprintf(time, ":%02d", t->wSecond);
-        text.top = text.bottom;
-        text.bottom = rc->bottom;
-        DrawText(dc, time, -1, &text, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    }
 }
 
 static void render(HDC dc)
