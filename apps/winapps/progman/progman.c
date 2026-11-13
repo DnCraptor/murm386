@@ -54,6 +54,7 @@
 #define IDC_DESC    201
 #define IDC_CMD     202
 #define IDC_MIN     203
+#define WM_RUN_STARTUP (WM_USER + 1)
 
 typedef struct {
     char  desc[32];
@@ -489,13 +490,13 @@ static void with_program(const char *cmd, char *out, int size)
         wsprintf(out, "%s %s", v, cmd);
 }
 
-static void run(const char *given, int minimized)
+static void run(const char *given, int minimized, int startup)
 {
     char cmd[200];
     with_program(given, cmd, sizeof(cmd));
     UINT r = WinExec(cmd, minimized ? SW_SHOWMINNOACTIVE : SW_SHOWNORMAL);
     if (r >= 32) {
-        if (min_on_run)
+        if (min_on_run && !startup)
             ShowWindow(hframe, SW_MINIMIZE);
         return;
     }
@@ -505,6 +506,30 @@ static void run(const char *given, int minimized)
              r == 8 ? "there is not enough memory" :
              r == 11 ? "it is not a Windows application" : "it cannot be started");
     MessageBox(hframe, msg, "Program Manager", MB_OK | MB_ICONEXCLAMATION);
+}
+
+/* The startup list is a snapshot: WinExec can yield, and a running program
+ * can modify groups through DDE while the remaining items are starting. */
+static void run_startup(void)
+{
+    static int started;
+    static char commands[MAXITEMS][sizeof(groups[0].it[0].cmd)];
+    if (started)
+        return;
+    started = 1;
+    for (int g = 0; g < ngroups; g++) {
+        pm_group *gr = &groups[g];
+        if (lstrcmpi(gr->name, "Startup"))
+            continue;
+        int n = 0;
+        for (int i = 0; i < gr->n && n < MAXITEMS; i++) {
+            if (gr->it[i].cmd[0])
+                lstrcpyn(commands[n++], gr->it[i].cmd, sizeof(commands[0]));
+        }
+        for (int i = 0; i < n; i++)
+            run(commands[i], 0, 1);
+        break;
+    }
 }
 
 static const DLGTEMPLATE_N item_tpl = {
@@ -738,7 +763,7 @@ static void open_selected(void)
         return;
     }
     if (gr->sel >= 0)
-        run(gr->it[gr->sel].cmd, 0);
+        run(gr->it[gr->sel].cmd, 0, 0);
 }
 
 /* Commit the shutdown while the confirmation is still on screen.
@@ -848,7 +873,7 @@ static LRESULT CALLBACK GroupProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             int i = hit_item(gr, (short)LOWORD(lp), (short)HIWORD(lp));
             set_sel(gr, i);
             if (msg == WM_LBUTTONDBLCLK && i >= 0)
-                run(gr->it[i].cmd, 0);
+                run(gr->it[i].cmd, 0, 0);
             return 0;
         }
         case WM_KEYDOWN:
@@ -900,6 +925,9 @@ static LRESULT CALLBACK FrameProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
                                0, 0, 0, 0, h, (HMENU)1, hinst, (LPVOID)&cc);
         return hclient ? 0 : -1;
     }
+    case WM_RUN_STARTUP:
+        run_startup();
+        return 0;
     case WM_SIZE:
     case WM_MOVE:
         if (!IsIconic(h) && !IsZoomed(h))
@@ -927,7 +955,7 @@ static LRESULT CALLBACK FrameProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         case IDM_RUN:
             edit_item.cmd[0] = 0;
             if (DialogBoxIndirectN(hinst, &run_tpl, run_items, h, RunProc) == IDOK)
-                run(edit_item.cmd, run_min);
+                run(edit_item.cmd, run_min, 0);
             return 0;
         case IDM_EXIT:    exit_windows(); return 0;
         case IDM_MINRUN:
@@ -1371,6 +1399,9 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
             open_group_window(g, 0);
     UpdateWindow(h);
     dde_start();
+    /* Defer startup until the frame, groups and DDE service are ready. */
+    if (!prev)
+        PostMessage(h, WM_RUN_STARTUP, 0, 0);
 
     MSG m;
     while (GetMessage(&m, 0, 0, 0)) {

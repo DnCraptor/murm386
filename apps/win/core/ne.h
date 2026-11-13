@@ -47,6 +47,16 @@ typedef struct {
     uint16_t module_flags;         /* 8000h: a library (DLL) */
 } win_ne_info;
 
+/* A self-loading module (Word for Windows 1.x, Excel 2.x ...): segment 1,
+ * an ordinary one, holds its loader (a SELFLOADHEADER at offset 0: BootApp,
+ * LoadAppSeg ...), which loads the others itself, in its own format: their
+ * entries' sizes and relocations on disk mean what the loader has them
+ * mean. Only segment 1 is read and relocated; the others get a selector
+ * each (no memory: the loader allocates it, MyAlloc) */
+#define WIN_NE_SELF_LOADING 0x0800u
+#define WIN_NE_LOADER_SEGMENT(info, i) \
+    (!((info)->module_flags & WIN_NE_SELF_LOADING) || (i) == 1u)
+
 /* This describes one IMPORT fixup record, not each location in its source
  * chain. module_index is 1-based as in the NE file. ordinal is zero for a
  * name import. Source types and relocation flags are the on-disk NE values.
@@ -78,6 +88,8 @@ typedef struct {
 } win_ne_image;
 
 /* Assign a selector for a loaded segment. Must return 1 on success.
+ * Size 0: a self-loading module's segment its loader loads (a selector
+ * only, WIN_NE_SELF_LOADING).
  * The caller retains ownership of selectors / descriptor allocations.
  * A failure rolls back image buffers but not external selector allocations.
  */

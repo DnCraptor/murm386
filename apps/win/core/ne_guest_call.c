@@ -18,6 +18,10 @@
 
 #if defined(__arm__) || defined(__thumb__) || defined(WINN_NE_HOST)
 
+/* USER's keyboard layout is shared by native and NE applications. */
+extern int user_keyboard_layout(void);
+extern void user_set_keyboard_layout(int russian);
+
 enum { M_KERNEL, M_USER, M_GDI };
 
 /* ---------------------------------------------------------------- guest memory helpers */
@@ -2152,6 +2156,22 @@ int ne_call(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword)
         bitmap_service(a, service, v, dword) || ne_kernel_service(a, u, service, v, dword) ||
         ne_sys_service(a, u, service, v, dword) || ne_more_service(a, u, service, v, dword))
         return 1;
+    if (service == WIN_NE_SERVICE_KEYBOARD + 4u) { /* KEYBOARD.4 ToAscii */
+        /* Microsoft RusLat (1992) uses private KEYBOARD.DRV virtual keys:
+         * 88h selects Latin, 89h Russian, 8Ah queries the active layout.
+         * Its first ToAscii argument is at SP+16 (14 PASCAL bytes). */
+        uint16_t vk = w(a, 16);
+        if (a->bad)
+            return 1;
+        if (vk == 0x88u)
+            user_set_keyboard_layout(0);
+        else if (vk == 0x89u)
+            user_set_keyboard_layout(1);
+        else if (vk != 0x8au)
+            return 0; /* Other ToAscii calls still require a real handler. */
+        *v = user_keyboard_layout() ? 0x89u : 0x88u;
+        return 1;
+    }
     if (service == 0x1194) {            /* GetClassInfo */
         *v = ne_class_info(a, u, w(a, 12), dw(a, 8), dw(a, 4));
         return 1;

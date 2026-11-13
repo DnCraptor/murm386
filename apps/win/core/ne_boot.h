@@ -79,6 +79,14 @@
  * instance and its local heap's size there */
 #define WIN_NE_CB_DI_OFFSET        (WIN_NE_DOS_STUB_OFFSET + 204u)
 #define WIN_NE_CB_CX_OFFSET        (WIN_NE_DOS_STUB_OFFSET + 206u)
+/* A self-loading program's entry (ring 3, win_ne_selfload_make): on its
+ * loader's stack, the service WIN_NE_SERVICE_SELFLOAD through the API gate
+ * (WINN calls the loader's BootApp and LoadAppSeg from it), then onto the
+ * program's own stack and into its entry, as SELFLOAD_ENTRY's words (IP,
+ * CS, SS, SP: the service writes them) have them, DS and ES its SS */
+#define WIN_NE_SELFLOAD_OFFSET     (WIN_NE_DOS_STUB_OFFSET + 208u)
+#define WIN_NE_SELFLOAD_ENTRY_OFFSET (WIN_NE_DOS_STUB_OFFSET + 240u)
+#define WIN_NE_SERVICE_SELFLOAD  0x2400u
 #define WIN_NE_FAULT_IDT_OFFSET    (WIN_NE_DOS_STUB_OFFSET + WIN_NE_DOS_STUB_BYTES)
 #define WIN_NE_IDT_VECTORS         0x34u
 #define WIN_NE_FAULT_IDT_BYTES     (WIN_NE_IDT_VECTORS * 8u)
@@ -156,4 +164,7 @@ int win_ne_fault_make(uint8_t idt[WIN_NE_FAULT_IDT_BYTES],
  * Then the callback entry. */
 int win_ne_dos_make(uint8_t stub[WIN_NE_DOS_STUB_BYTES],
                     const win_ne_boot_args *args);
+/* ... and a self-loading program's entry in them (api_gate its API call
+ * gate): 1 */
+int win_ne_selfload_make(uint8_t stub[WIN_NE_DOS_STUB_BYTES], uint16_t api_gate);
 #endif

@@ -208,6 +208,14 @@ BOOL WINAPI InSendMessage(void) { return FALSE; }
 
 static int key_down(int vk) { return (U.keys[vk & 0xFF] & 0x80) != 0; }
 
+/* Shared layout state for the legacy KEYBOARD.DRV RusLat protocol. */
+int user_keyboard_layout(void) { return U.layout; }
+
+void user_set_keyboard_layout(int russian)
+{
+    U.layout = russian != 0;
+}
+
 /* EnableHardwareInput's: the keys and the mouse's buttons ignored */
 static int input_off;
 
@@ -247,7 +255,7 @@ void win_ddi_key_event(int vk, int sc, int down)
             ctrl_shift_pending = 1;
         else if (!down && ctrl_shift_pending) {
             ctrl_shift_pending = 0;
-            U.layout ^= 1;
+            user_set_keyboard_layout(!user_keyboard_layout());
         }
     } else if (down) {
         ctrl_shift_pending = 0;

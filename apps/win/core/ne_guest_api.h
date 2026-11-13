@@ -107,6 +107,9 @@ uint32_t win_ne_callback(win_ne_guest_api_context *ctx, uint32_t proc, uint16_t 
 uint32_t win_ne_call(win_ne_guest_api_context *ctx, uint32_t proc, const uint16_t *words,
                      int n, void *blob, uint16_t len);
 uint32_t win_ne_blob_far(win_ne_guest_api_context *ctx, uint16_t len);
+/* ... with DS ds (a self-loading program's loader: its stack's) */
+uint32_t win_ne_call_ds(win_ne_guest_api_context *ctx, uint32_t proc, const uint16_t *words,
+                        int n, uint16_t ds);
 /* the DLLs the program loaded and has not started: their entries called
  * (ne_exec.c; without it, nothing) */
 void win_ne_dll_init(win_ne_guest_api_context *ctx);

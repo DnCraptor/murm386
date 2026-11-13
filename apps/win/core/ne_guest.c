@@ -115,7 +115,8 @@ void win_ne_guest_release(win_ne_guest_image *image)
     if (image->io.free) {
         if (image->segments)
             for (uint16_t i = 1; i <= image->info.segment_count; i++)
-                if (image->segments[i].linear)
+                if (image->segments[i].linear &&
+                    !(image->segments[i].flags & WIN_NE_GUEST_ALIAS))
                     image->io.free(image->opaque, image->segments[i].linear);
         if (image->thunk_linear)
             image->io.free(image->opaque, image->thunk_linear);
@@ -189,9 +190,17 @@ static int assign_selector(void *opaque, uint16_t index, uint16_t flags,
         descriptor(g->gdt + (s->selector & ~7u), s->linear, s->size, !(flags & 1u));
         return 1;
     }
-    if (!index || index > g->info.segment_count || !bytes || bytes > 65536u)
+    if (!index || index > g->info.segment_count || bytes > 65536u)
         return 0;
     win_ne_guest_segment *s = &g->segments[index];
+    if (!bytes) {                       /* its loader's: the selector, not present yet */
+        if (!(g->info.module_flags & WIN_NE_SELF_LOADING) || index == 1)
+            return 0;
+        s->flags = flags & 0x0fffu;
+        s->selector = (uint16_t)(GDT_SEGMENT_INDEX(index) * GDT_ENTRY_BYTES | 3u);
+        *selector = s->selector;
+        return 1;
+    }
     if (s->linear || !guest_alloc(g, bytes, &s->linear))
         return 0;
     s->size = bytes;
@@ -653,6 +662,11 @@ static const struct {
     { M_KERNEL, 146, "DeleteFile", 4 },
     { M_KERNEL, 149, "GetVersionEx", 4 },
     { M_KERNEL, 120, "UndefDynLink", 0 },
+    /* a self-loading program's loader's (ne_guest_kernel.c) */
+    { M_KERNEL, 403, "FarSetOwner", 4 },
+    { M_KERNEL, 404, "FarGetOwner", 2 },
+    { M_KERNEL, 667, "EntryAddrProc", 4 },
+    { M_KERNEL, 668, "MyAlloc", 6 },
     { M_KERNEL, 222, "RegDeleteValue", 8 },
     { M_KERNEL, 223, "RegEnumValue", 32 },
     { M_KERNEL, 225, "RegQueryValueEx", 24 },
@@ -1268,7 +1282,7 @@ int win_ne_guest_load(const char *path, win_ne_guest_image *out,
     rc = WIN_NE_IO_ERROR;
     for (uint16_t i = 1; i <= info.segment_count; i++) {
         const win_ne_guest_segment *s = &out->segments[i];
-        if (!io->write(opaque, s->linear, image.segments[i].data, s->size))
+        if (s->linear && !io->write(opaque, s->linear, image.segments[i].data, s->size))
             goto loaded_fail;
     }
     /* Every unused byte of the thunk segment INT3, so an unallocated
@@ -1315,10 +1329,11 @@ fail:
 /* ---------------------------------------------------------------- global memory */
 
 /* Publish descriptor changes only after the guest GDT write succeeds. */
-static int set_descriptor(win_ne_guest_image *g, uint16_t sel, uint32_t linear, uint32_t size)
+static int set_descriptor(win_ne_guest_image *g, uint16_t sel, uint32_t linear, uint32_t size,
+                          int code)
 {
     uint8_t desc[GDT_ENTRY_BYTES];
-    descriptor(desc, linear, size, 0);
+    descriptor(desc, linear, size, code);
     sel &= ~7u;
     if (!g->io.write(g->opaque, g->gdt_linear + sel, desc, sizeof(desc)))
         return 0;
@@ -1331,11 +1346,22 @@ static uint16_t global_selector(const win_ne_guest_image *g, unsigned i)
     return (uint16_t)(GDT_SEGMENT_INDEX(g->info.segment_count + 2u + i) * GDT_ENTRY_BYTES | 3u);
 }
 
+/* a block MyAlloc gave its loader (a segment of a self-loading module) */
+static int myalloc_code(const win_ne_guest_segment *s)
+{
+    return (s->flags & WIN_NE_GUEST_MYALLOC) && !(s->flags & 1u);
+}
+
 win_ne_guest_segment *win_ne_guest_global(win_ne_guest_image *g, uint16_t sel)
 {
     for (unsigned i = 0; i < WIN_NE_GUEST_GLOBALS; i++)
         if (g->globals[i].selector && (g->globals[i].selector & ~7u) == (sel & ~7u))
             return &g->globals[i];
+    if (g->info.module_flags & WIN_NE_SELF_LOADING)
+        for (uint16_t i = 2; i <= g->info.segment_count; i++)
+            if ((g->segments[i].flags & WIN_NE_GUEST_MYALLOC) && g->segments[i].linear &&
+                (g->segments[i].selector & ~7u) == (sel & ~7u))
+                return &g->segments[i];
     return NULL;
 }
 
@@ -1357,7 +1383,7 @@ static uint16_t global_alloc(win_ne_guest_image *g, uint32_t bytes, int low)
                 goto alloc_fail;
         }
         uint16_t selector = global_selector(g, i);
-        if (!set_descriptor(g, selector, s->linear, bytes))
+        if (!set_descriptor(g, selector, s->linear, bytes, 0))
             goto alloc_fail;
         s->size = bytes;
         s->flags = 1;
@@ -1398,7 +1424,7 @@ static int resize(win_ne_guest_image *g, win_ne_guest_segment *s, uint32_t bytes
         for (uint32_t at = s->size; ok && at < bytes; at += sizeof(zero))
             ok = g->io.write(g->opaque, s->linear + at, zero,
                              bytes - at < sizeof(zero) ? bytes - at : (uint32_t)sizeof(zero));
-        if (ok && set_descriptor(g, s->selector, s->linear, bytes)) {
+        if (ok && set_descriptor(g, s->selector, s->linear, bytes, myalloc_code(s))) {
             s->size = bytes;
             return 1;
         }
@@ -1417,7 +1443,7 @@ static int resize(win_ne_guest_image *g, win_ne_guest_segment *s, uint32_t bytes
         if (!g->io.write(g->opaque, linear + at, buf, n))
             goto realloc_fail;
     }
-    if (!set_descriptor(g, s->selector, linear, bytes))
+    if (!set_descriptor(g, s->selector, linear, bytes, myalloc_code(s)))
         goto realloc_fail;
     g->io.free(g->opaque, s->linear);
     s->linear = linear;
@@ -1448,7 +1474,9 @@ int win_ne_guest_global_free(win_ne_guest_image *g, uint16_t sel)
     memcpy(g->gdt + (s->selector & ~7u), absent, sizeof(absent));
     if (!(s->flags & WIN_NE_GUEST_ALIAS))
         g->io.free(g->opaque, s->linear);
+    uint16_t slot = s->flags & WIN_NE_GUEST_MYALLOC ? s->selector : 0;
     memset(s, 0, sizeof(*s));
+    s->selector = slot;                 /* a segment's slot keeps its selector */
     return 1;
 }
 
@@ -1680,6 +1708,7 @@ static int load_dll(win_ne_guest_image *g, const char *module, int depth)
     if (depth > 4 || g->dll_count >= WIN_NE_GUEST_DLLS || strlen(base) > 8 ||
         !locate_dll(g->path, module, path, sizeof(path)) ||
         win_ne_scan(path, &info, NULL, NULL) || !(info.module_flags & 0x8000u) ||
+        (info.module_flags & WIN_NE_SELF_LOADING) ||   /* a self-loading DLL: not WINN's */
         info.target_os != 2u ||
         info.segment_count > WIN_NE_GUEST_DLL_SEGMENTS - g->dll_segment_count)
         return -1;
@@ -1782,7 +1811,8 @@ win_ne_guest_segment *win_ne_guest_segment_of(win_ne_guest_image *g, uint16_t se
 {
     sel &= (uint16_t)~3u;
     for (uint16_t i = 1; i <= g->info.segment_count; i++)
-        if ((g->segments[i].selector & ~3u) == sel)
+        if ((g->segments[i].selector & ~3u) == sel && g->segments[i].linear &&
+            !(g->segments[i].flags & WIN_NE_GUEST_ALIAS))
             return &g->segments[i];
     for (unsigned i = 0; i < g->dll_segment_count; i++)
         if (g->dll_segments[i].linear && (g->dll_segments[i].selector & ~3u) == sel)
@@ -1797,4 +1827,205 @@ int win_ne_guest_grow(win_ne_guest_image *g, uint16_t sel, uint32_t bytes,
     if (!s || !(s->flags & 1u) || bytes < s->size)
         return 0;
     return bytes == s->size || resize(g, s, bytes, read);
+}
+
+/* ---------------------------------------------------------------- self-loading modules */
+
+static uint16_t get16(const uint8_t *p)
+{
+    return (uint16_t)(p[0] | p[1] << 8);
+}
+
+/* The module database, as Windows 3.x keeps one (its loader reads the
+ * segment table, the module references, the imported names through
+ * hModule): the NE header, its offsets near pointers into the database;
+ * the segment table of 10-byte entries (sector, length, flags, minimum
+ * size, handle); the resource, resident-name, module-reference (the
+ * modules' handles), imported-name and entry tables as on disk; the file's
+ * OFSTRUCT (fileinfo). */
+#define DB_SEGMENT_BYTES 10u
+#define DB_OFSTRUCT_BYTES 136u
+
+uint16_t win_ne_guest_module_db(win_ne_guest_image *g,
+                                uint16_t (*modref)(void *opaque, const char *module),
+                                void *opaque)
+{
+    if (!g || g->module_db)
+        return g ? g->module_db : 0;
+    FILE *f = fopen(g->path, "rb");
+    if (!f)
+        return 0;
+    uint8_t mz[64], h[64], *db = NULL;
+    uint16_t sel = 0;
+    long base;
+    if (fread(mz, 1, sizeof(mz), f) != sizeof(mz) || get16(mz) != 0x5a4du)
+        goto out;
+    base = (long)(get16(mz + 0x3c) | (uint32_t)get16(mz + 0x3e) << 16);
+    if (fseek(f, base, SEEK_SET) || fread(h, 1, sizeof(h), f) != sizeof(h) ||
+        get16(h) != 0x454eu)
+        goto out;
+    uint16_t nseg = get16(h + 0x1c), nmod = get16(h + 0x1e);
+    uint16_t segtab = get16(h + 0x22), rsrc = get16(h + 0x24), restab = get16(h + 0x26);
+    uint16_t modtab = get16(h + 0x28), imptab = get16(h + 0x2a);
+    uint16_t enttab = get16(h + 0x04), entlen = get16(h + 0x06);
+    /* the tables in their usual order after the segment table */
+    if (nseg != g->info.segment_count || segtab < 64u ||
+        (uint32_t)segtab + nseg * 8u > rsrc || rsrc > restab || restab > modtab ||
+        modtab + nmod * 2u > imptab || imptab > enttab)
+        goto out;
+    uint32_t tables = (uint32_t)enttab + entlen - rsrc;
+    uint32_t seg_at = 64u, rest_at = seg_at + nseg * DB_SEGMENT_BYTES;
+    uint32_t file_at = (rest_at + tables + 1u) & ~1u;
+    uint32_t bytes = file_at + DB_OFSTRUCT_BYTES;
+    if (bytes > 65536u || !(db = (uint8_t *)calloc(bytes, 1)))
+        goto out;
+    uint16_t delta = (uint16_t)(rest_at - rsrc);
+    memcpy(db, h, sizeof(h));
+    put16(db + 0x02, 1);                            /* used once */
+    put16(db + 0x04, (uint16_t)(enttab + delta));
+    put16(db + 0x06, 0);                            /* the next module: none */
+    put16(db + 0x08, g->info.auto_data ?
+          (uint16_t)(seg_at + (g->info.auto_data - 1u) * DB_SEGMENT_BYTES) : 0);
+    put16(db + 0x0a, (uint16_t)file_at);
+    put16(db + 0x22, (uint16_t)seg_at);
+    put16(db + 0x24, (uint16_t)(rsrc + delta));
+    put16(db + 0x26, (uint16_t)(restab + delta));
+    put16(db + 0x28, (uint16_t)(modtab + delta));
+    put16(db + 0x2a, (uint16_t)(imptab + delta));
+    put16(db + 0x38, 0);
+    put16(db + 0x3a, 0);
+    for (uint16_t i = 0; i < nseg; i++) {
+        uint8_t e[8];
+        if (fseek(f, base + segtab + i * 8L, SEEK_SET) || fread(e, 1, sizeof(e), f) != sizeof(e))
+            goto out;
+        uint8_t *d = db + seg_at + i * DB_SEGMENT_BYTES;
+        memcpy(d, e, sizeof(e));
+        if (i == 0) {                                   /* the loader's: loaded */
+            put16(d + 4, (uint16_t)(get16(e + 4) | 0x0006u));
+            put16(d + 8, g->segments[1].selector);
+        }
+    }
+    if (fseek(f, base + rsrc, SEEK_SET) ||
+        fread(db + rest_at, 1, tables, f) != tables)
+        goto out;
+    for (uint16_t i = 0; i < nmod; i++) {               /* the names: their handles */
+        uint8_t *m = db + rest_at + (modtab - rsrc) + i * 2u;
+        uint32_t at = rest_at + (imptab - rsrc) + get16(m);
+        char name[16] = "";
+        if (at < rest_at + tables && db[at] < sizeof(name) &&
+            at + 1u + db[at] <= rest_at + tables) {
+            memcpy(name, db + at + 1u, db[at]);
+            name[db[at]] = 0;
+        }
+        put16(m, modref && name[0] ? modref(opaque, name) : 0);
+    }
+    uint8_t *of = db + file_at;                         /* OFSTRUCT */
+    size_t n = strlen(g->path);
+    if (n > 127)
+        n = 127;
+    of[0] = (uint8_t)(8u + n + 1u);
+    of[1] = 1;                                          /* a fixed disk */
+    memcpy(of + 8, g->path, n);
+    sel = win_ne_guest_global_alloc(g, bytes);
+    win_ne_guest_segment *s = sel ? win_ne_guest_global(g, sel) : NULL;
+    if (s && !g->io.write(g->opaque, s->linear, db, bytes)) {
+        win_ne_guest_global_free(g, sel);
+        sel = 0;
+    }
+    g->module_db = sel;
+out:
+    free(db);
+    fclose(f);
+    return sel;
+}
+
+uint16_t win_ne_guest_myalloc(win_ne_guest_image *g, uint16_t flags, uint32_t bytes)
+{
+    if (!g || !bytes || bytes > 65536u || !(g->info.module_flags & WIN_NE_SELF_LOADING))
+        return 0;
+    /* code but for DATA (and DATA, ALLOCATED, LOADED), as Windows has it */
+    int code = (flags & 7u) != 1u && (flags & 7u) != 7u;
+    win_ne_guest_segment *s = NULL;
+    if (g->loading >= 2 && g->loading <= g->info.segment_count &&
+        !g->segments[g->loading].linear && !(g->segments[g->loading].flags & WIN_NE_GUEST_ALIAS))
+        s = &g->segments[g->loading];
+    for (uint16_t i = 2; !s && i <= g->info.segment_count; i++)
+        if (!g->segments[i].linear && g->segments[i].selector &&
+            !(g->segments[i].flags & WIN_NE_GUEST_ALIAS))
+            s = &g->segments[i];
+    if (!s) {                                           /* a global block */
+        uint16_t sel = win_ne_guest_global_alloc(g, bytes);
+        win_ne_guest_segment *b = sel ? win_ne_guest_global(g, sel) : NULL;
+        if (b && code && !set_descriptor(g, sel, b->linear, b->size, 1)) {
+            win_ne_guest_global_free(g, sel);
+            return 0;
+        }
+        return sel;
+    }
+    uint32_t linear;
+    if (!guest_alloc(g, bytes, &linear))
+        return 0;
+    uint8_t zero[256];
+    memset(zero, 0, sizeof(zero));
+    for (uint32_t at = 0; at < bytes; at += sizeof(zero))
+        if (!g->io.write(g->opaque, linear + at, zero,
+                         bytes - at < sizeof(zero) ? bytes - at : (uint32_t)sizeof(zero)))
+            goto fail;
+    if (!set_descriptor(g, s->selector, linear, bytes, code))
+        goto fail;
+    s->linear = linear;
+    s->size = bytes;
+    s->flags = (uint16_t)((flags & 0x0ffeu) | (code ? 0u : 1u) | WIN_NE_GUEST_MYALLOC);
+    return s->selector;
+fail:
+    g->io.free(g->opaque, linear);
+    return 0;
+}
+
+int win_ne_guest_selfloaded(win_ne_guest_image *g, uint16_t k, uint16_t handle,
+                            int (*read)(void *, uint32_t, void *, uint32_t))
+{
+    if (!g || k < 2 || k > g->info.segment_count || !handle)
+        return 0;
+    uint16_t j = 0;
+    for (uint16_t i = 2; i <= g->info.segment_count && !j; i++)
+        if (g->segments[i].linear && !(g->segments[i].flags & WIN_NE_GUEST_ALIAS) &&
+            (g->segments[i].selector & ~7u) == (handle & ~7u))
+            j = i;
+    if (j && j != k) {                  /* allocated in another's slot: the two swapped */
+        win_ne_guest_segment t = g->segments[j];
+        g->segments[j] = g->segments[k];
+        g->segments[k] = t;
+    } else if (!j) {                    /* a global block: segment k is it */
+        const win_ne_guest_segment *b = win_ne_guest_global(g, handle);
+        if (!b || (g->segments[k].linear && !(g->segments[k].flags & WIN_NE_GUEST_ALIAS)))
+            return 0;
+        g->segments[k] = *b;
+        g->segments[k].flags |= WIN_NE_GUEST_ALIAS;
+    }
+    win_ne_guest_segment *s = &g->segments[k];
+    const win_ne_guest_segment *db = g->module_db ? win_ne_guest_global(g, g->module_db) : NULL;
+    uint8_t e[DB_SEGMENT_BYTES], h[64];
+    uint32_t at = 0;
+    if (db && read && read(NULL, db->linear, h, sizeof(h))) {
+        at = db->linear + get16(h + 0x22) + (k - 1u) * DB_SEGMENT_BYTES;
+        if ((uint32_t)get16(h + 0x22) + k * DB_SEGMENT_BYTES > db->size ||
+            !read(NULL, at, e, sizeof(e)))
+            at = 0;
+    }
+    if (at) {                           /* the database's entry: loaded, its handle */
+        put16(e + 4, (uint16_t)(get16(e + 4) | 0x0006u));
+        put16(e + 8, s->selector);
+        g->io.write(g->opaque, at, e, sizeof(e));
+    }
+    if (k == g->info.auto_data && (s->flags & 1u) && !(s->flags & WIN_NE_GUEST_ALIAS)) {
+        /* DGROUP: its local heap and its stack after what the loader has */
+        uint32_t need = at && get16(e + 6) ? get16(e + 6) : (at ? 65536u : s->size);
+        need += (uint32_t)g->info.heap_size + g->info.stack_size;
+        if (need > 65536u)
+            need = 65536u;
+        if (need > s->size && !win_ne_guest_grow(g, s->selector, need, read))
+            return 0;
+    }
+    return 1;
 }

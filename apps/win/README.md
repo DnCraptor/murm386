@@ -57,6 +57,26 @@ the Program Manager, Alt+Tab and the Task List show, as an EZ
 application's. A class it registers with a native class's procedure
 (`GetClassInfo`: a superclass) works as that class.
 
+A self-loading program (NE flag 0800h: Word for Windows 1.x, Excel 2.x)
+loads itself, as Windows lets it: WINN loads and relocates its first
+segment, the loader (a `SELFLOADHEADER` at its offset 0), and gives each
+other segment a selector (up to 1024 segments: Word for Windows 1.0 has
+196), nothing more of them is read (on disk they are the loader's, its
+own format). The program starts on a stack of its own (64K less 256
+bytes); WINN builds its module database (hModule: the NE header and
+tables as Windows keeps them, the segment table with handles, the module
+references the imported modules' handles), puts KERNEL's `MyAlloc`,
+`EntryAddrProc` and `FarSetOwner` into the header, calls `BootApp(hModule,
+hFile)` and then `LoadAppSeg(hModule, hFile, n)` for every segment after
+the first (the file opened for each), and the handle each answers is that
+segment's from then on (`MyAlloc`'s blocks are global ones, in the
+segments' own selectors, `GlobalReAlloc` and the rest work on them; DGROUP
+gets its local heap and stack added); then it switches to the program's
+stack and enters it as any other program. Its `ExitProc` is not called.
+`host/mkne_selfload.py` makes `SELFLOAD.EXE` of `OWSEGS.EXE` (201
+segments, the program's scrambled on disk, its loader in the script;
+`scripts/selfload.txt`).
+
 A Win16 program's own DLLs (NE libraries) are loaded with it, from its
 directory, the Windows one or its `SYSTEM` (Windows' own NE DLLs, as
 CARDS.DLL, are there): those it imports from (by name or ordinal,

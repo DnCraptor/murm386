@@ -120,6 +120,8 @@ int win_ne_scan(const char *path, win_ne_info *info,
         if (!read_at(f, size, segments + (uint64_t)i * NE_SEG_SIZE,
                      seg, sizeof(seg)))
             goto done;
+        if (!WIN_NE_LOADER_SEGMENT(&found, i + 1u))
+            continue;                   /* the loader's own format */
         uint16_t sector = rd16(seg), seglen = rd16(seg + 2);
         uint16_t flags = rd16(seg + 4);
         uint32_t length = seglen ? seglen : 65536u;
@@ -300,7 +302,8 @@ static int ne_entry_target(FILE *f, uint64_t size, uint64_t base,
             unsigned target_seg = type == 0xffu ? entry[3] : type;
             unsigned target_off = type == 0xffu ? rd16(entry + 4) : rd16(entry + 1);
             if (!target_seg || target_seg > img->info.segment_count ||
-                target_off >= img->segments[target_seg].size)
+                (target_off >= img->segments[target_seg].size &&
+                 WIN_NE_LOADER_SEGMENT(&img->info, target_seg)))
                 return WIN_NE_BAD_IMAGE;
             *sel = img->segments[target_seg].selector;
             *off = (uint16_t)target_off;
@@ -379,7 +382,9 @@ static int ne_apply_record(FILE *f, uint64_t file_size, uint64_t base,
                 return WIN_NE_BAD_IMAGE;
             target_sel = img->segments[target_idx].selector;
             target_off = rd16(rec + 6);
-            if (target_off >= img->segments[target_idx].size)
+            /* a segment its loader loads: where it will be, unchecked */
+            if (target_off >= img->segments[target_idx].size &&
+                WIN_NE_LOADER_SEGMENT(&img->info, target_idx))
                 return WIN_NE_BAD_IMAGE;
         }
     } else {
@@ -519,6 +524,15 @@ int win_ne_load_image(const char *path, win_ne_image *image,
         if (!min_size)
             min_size = 65536u;
         uint32_t mem_size = sector && disk_len > min_size ? disk_len : min_size;
+        win_ne_segment_image *seg = &image->segments[i];
+        seg->flags = rd16(ent + 4);
+        if (!WIN_NE_LOADER_SEGMENT(&info, i)) {    /* its loader's: a selector, no memory */
+            if (!assign(opaque, (uint16_t)i, seg->flags, 0, &seg->selector) || !seg->selector) {
+                rc = WIN_NE_UNRESOLVED;
+                goto out;
+            }
+            continue;
+        }
         if (i == info.auto_data) {      /* DGROUP: the local heap and the stack follow */
             mem_size += (uint32_t)info.heap_size + info.stack_size;
             if (mem_size > 65536u) {
@@ -526,8 +540,6 @@ int win_ne_load_image(const char *path, win_ne_image *image,
                 goto out;
             }
         }
-        win_ne_segment_image *seg = &image->segments[i];
-        seg->flags = rd16(ent + 4);
         seg->size = mem_size;
         seg->data = (uint8_t *)calloc(mem_size, 1);
         if (!seg->data) {
@@ -550,7 +562,7 @@ int win_ne_load_image(const char *path, win_ne_image *image,
         if (!read_at(f, size, segtab + (uint64_t)(i - 1) * NE_SEG_SIZE,
                      ent, sizeof(ent)))
             goto out;
-        if (!(rd16(ent + 4) & NE_HAS_RELOCS))
+        if (!(rd16(ent + 4) & NE_HAS_RELOCS) || !WIN_NE_LOADER_SEGMENT(&info, i))
             continue;
         uint16_t sector = rd16(ent);
         uint32_t disk_len = rd16(ent + 2);

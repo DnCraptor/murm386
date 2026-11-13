@@ -15,6 +15,7 @@
 #include "windll.h"
 #include "ne_guest_api.h"
 #include "ne_guest_int.h"
+#include "ne_boot.h"
 
 #if defined(__arm__) || defined(__thumb__) || defined(WINN_NE_HOST)
 
@@ -67,6 +68,19 @@ static uint16_t dgroup(win_ne_guest_api_context *c)
 {
     const win_ne_guest_image *g = c->image;
     return g->segments[g->info.auto_data ? g->info.auto_data : g->info.ss_index].selector;
+}
+
+/* the program's entry ordinal (EntryAddrProc, GetProcAddress of its own
+ * module): selector:offset, 0 if none */
+static uint32_t own_entry(win_ne_guest_api_context *c, uint16_t ordinal)
+{
+    const win_ne_guest_image *g = c->image;
+    uint8_t flags;
+    uint16_t seg, off;
+    if (!ordinal || win_ne_entry(c->path, ordinal, &flags, &seg, &off) != WIN_NE_OK ||
+        !seg || seg > g->info.segment_count)
+        return 0;
+    return (uint32_t)g->segments[seg].selector << 16 | off;
 }
 
 /* ---------------------------------------------------------------- KERNEL */
@@ -1372,6 +1386,8 @@ static __attribute__((noinline)) int kernel_strings(args *a, ne_user *u, uint16_
             *v = 0;
         else if (d >= 0)
             *v = win_ne_guest_dll_proc(g, d, (uint16_t)far, (far >> 16) ? name : NULL);
+        else if (h && ((h & ~3u) == (g->module_db & ~3u) || (h & ~3u) == (dgroup(c) & ~3u)))
+            *v = own_entry(c, (far >> 16) ? win_ne_ordinal(c->path, name) : (uint16_t)far);
         else if (win_ne_guest_module_name(m))
             *v = win_ne_guest_proc(g, m, (uint16_t)far, (far >> 16) ? name : NULL);
         return 1;
@@ -1424,10 +1440,152 @@ static __attribute__((noinline)) int kernel_strings(args *a, ne_user *u, uint16_
     return 0;
 }
 
+/* ---------------------------------------------------------------- self-loading */
+
+/* a module a self-loading program imports from, for its module database:
+ * its handle (WINN's modules', a native DLL's, a DLL's loaded now), 0 if
+ * there is none */
+static uint16_t selfload_modref(void *opaque, const char *name)
+{
+    args *a = (args *)opaque;
+    win_ne_guest_image *g = (win_ne_guest_image *)a->ctx->image;
+    int m = win_ne_guest_module(name);
+    if (m >= 0)
+        return MODULE_HANDLE(m);
+    if ((m = win_dll_find(name)) >= 0 || (m = win_dll_load(name)) >= 0)
+        return win_dll_handle(m);
+    int d = win_ne_guest_load_library(g, name);
+    return d >= 0 ? win_ne_guest_dll_instance(g, d) : 0;
+}
+
+/* The program's start, its loader's work (Windows' NE_LoadAllSegments):
+ * the module database, the SELFLOADHEADER's MyAlloc, EntryAddrProc and
+ * SetOwner (KERNEL's), BootApp(hModule, hFile) on the loader's stack (DS
+ * the stack's), then LoadAppSeg(hModule, hFile, n) for every segment after
+ * the first, the file opened for each; the segment its answer's handle.
+ * Then onto its own stack, into its entry (the stub's words); the exit
+ * stub its return address. */
+static __attribute__((noinline)) int selfload(args *a)
+{
+    win_ne_guest_api_context *c = a->ctx;
+    win_ne_guest_image *g = (win_ne_guest_image *)c->image;
+    const win_ne_guest_segment *one = &g->segments[1];
+    uint8_t h[40];
+    const char *why = "Its loader could not load it";
+    uint16_t db = win_ne_guest_module_db(g, selfload_modref, a);
+    win_ne_dll_init(c);                 /* the DLLs it imports from, started */
+    if (!db || !c->read || !c->read(NULL, one->linear, h, sizeof(h))) {
+        why = "No module database";
+        goto fail;
+    }
+    uint32_t boot = rd32(h + 4), load = rd32(h + 8);
+    uint32_t procs[3] = { win_ne_guest_proc(g, 0, 668, NULL), win_ne_guest_proc(g, 0, 667, NULL),
+                          win_ne_guest_proc(g, 0, 403, NULL) };
+    static const uint8_t at[3] = { 16, 20, 36 };      /* MyAlloc, EntryAddrProc, SetOwner */
+    for (int i = 0; i < 3; i++) {
+        uint8_t p[4] = { (uint8_t)procs[i], (uint8_t)(procs[i] >> 8), (uint8_t)(procs[i] >> 16),
+                         (uint8_t)(procs[i] >> 24) };
+        if (!procs[i] || !g->io.write(g->opaque, one->linear + at[i], p, 4))
+            goto fail;
+    }
+    if (!(boot >> 16) || !(load >> 16)) {
+        why = "No BootApp or LoadAppSeg";
+        goto fail;
+    }
+    HFILE f = _lopen(c->path, OF_READ);
+    uint16_t words[3] = { db, (uint16_t)f, 0 };
+    if (f == HFILE_ERROR)
+        goto fail;
+    win_ne_call_ds(c, boot, words, 2, g->loader_stack);
+    _lclose(f);
+    for (uint16_t k = 2; k <= g->info.segment_count; k++) {
+        if (c->dead || c->exited || c->stopped)
+            return 1;
+        if ((f = _lopen(c->path, OF_READ)) == HFILE_ERROR)
+            goto fail;
+        g->loading = k;
+        words[1] = (uint16_t)f;
+        words[2] = k;
+        uint16_t handle = (uint16_t)win_ne_call_ds(c, load, words, 3, g->loader_stack);
+        _lclose(f);
+        g->loading = 0;
+        if (c->dead || c->exited || c->stopped)
+            return 1;
+        if (!win_ne_guest_selfloaded(g, k, handle, c->read)) {
+            why = "A segment its loader did not load";
+            goto fail;
+        }
+    }
+    /* its entry, its stack (DGROUP's top unless the header says) */
+    const win_ne_guest_segment *cs = &g->segments[g->info.cs_index];
+    const win_ne_guest_segment *ss = &g->segments[g->info.ss_index];
+    uint16_t sp = g->info.sp ? g->info.sp : (uint16_t)(ss->size < 65536u ? ss->size : 0xfffeu);
+    if (!cs->linear || (cs->flags & 1u) || g->info.ip >= cs->size ||
+        !ss->linear || !(ss->flags & 1u) || sp < 68u || sp > ss->size) {
+        why = "No entry or stack after loading";
+        goto fail;
+    }
+    g->cs = cs->selector;
+    g->ip = g->info.ip;
+    g->ss = ss->selector;
+    g->sp = sp;
+    sp = (uint16_t)(sp - 4u);
+    const uint8_t ret[4] = { (uint8_t)WIN_NE_EXIT_STUB_OFFSET, (uint8_t)(WIN_NE_EXIT_STUB_OFFSET >> 8),
+                             (uint8_t)g->thunk3_selector, (uint8_t)(g->thunk3_selector >> 8) };
+    const uint8_t entry[8] = { (uint8_t)g->ip, (uint8_t)(g->ip >> 8), (uint8_t)g->cs,
+                               (uint8_t)(g->cs >> 8), (uint8_t)g->ss, (uint8_t)(g->ss >> 8),
+                               (uint8_t)sp, (uint8_t)(sp >> 8) };
+    if (g->io.write(g->opaque, ss->linear + sp, ret, sizeof(ret)) &&
+        g->io.write(g->opaque, g->thunk_linear + WIN_NE_SELFLOAD_ENTRY_OFFSET, entry,
+                    sizeof(entry)))
+        return 1;
+fail:
+    MessageBox(0, why, "Self-loading program", MB_OK | MB_ICONSTOP);
+    c->exited = 1;
+    c->exit_code = 0xff;
+    return 1;
+}
+
+static __attribute__((noinline)) int selfload_service(args *a, uint16_t service, uint32_t *v, int *dword)
+{
+    win_ne_guest_api_context *c = a->ctx;
+    win_ne_guest_image *g = (win_ne_guest_image *)c->image;
+    switch (service) {
+    case WIN_NE_SERVICE_SELFLOAD:
+        *v = 0;
+        return selfload(a);
+    case 668: {                         /* MyAlloc(UINT flags, UINT size, UINT shift):
+                                         * MAKELONG(handle, selector) */
+        uint32_t bytes = (uint32_t)w(a, 6) << (w(a, 4) & 15u);
+        uint16_t sel = win_ne_guest_myalloc(g, w(a, 8),
+                                            !bytes || bytes > 65536u ? 65536u : bytes);
+        *v = (uint32_t)sel << 16 | sel;
+        *dword = 1;
+        return 1;
+    }
+    case 667: {                         /* EntryAddrProc(HMODULE, ordinal) */
+        uint16_t hm = w(a, 6), ord = w(a, 4);
+        int d = win_ne_guest_dll_of(g, hm);
+        *v = d >= 0 ? win_ne_guest_dll_proc(g, d, ord, NULL) : own_entry(c, ord);
+        *dword = 1;
+        return 1;
+    }
+    case 403:                           /* FarSetOwner(HGLOBAL, owner): nothing to own */
+        *v = 0;
+        return 1;
+    case 404:                           /* FarGetOwner(HGLOBAL): the program's */
+        *v = g->module_db ? g->module_db : dgroup(c);
+        return 1;
+    }
+    return 0;
+}
+
 int ne_kernel_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword)
 {
     win_ne_guest_api_context *c = a->ctx;
     win_ne_guest_image *g = (win_ne_guest_image *)c->image;
+    if (selfload_service(a, service, v, dword))
+        return 1;
     if (service >= WIN_NE_SERVICE_SHELL && service < WIN_NE_SERVICE_SHELL + 0x1000u)
         return shell_service(a, service, v, dword);
     if (kernel_misc(a, service, v, dword))

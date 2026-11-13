@@ -498,3 +498,28 @@ cbret:
     memcpy(stub, e.bytes, e.n);
     return 1;
 }
+
+int win_ne_selfload_make(uint8_t stub[WIN_NE_DOS_STUB_BYTES], uint16_t api_gate)
+{
+    if (!stub || !api_gate)
+        return 0;
+    emitter e = { 0 };
+    const uint16_t entry = (uint16_t)WIN_NE_SELFLOAD_ENTRY_OFFSET;
+    b8(&e, 0xb8); b16(&e, WIN_NE_SERVICE_SELFLOAD);     /* mov ax,service */
+    b8(&e, 0x9a); b16(&e, 0); b16(&e, api_gate);        /* call far api gate */
+    b8(&e, 0x2e); b8(&e, 0x8e); b8(&e, 0x16);           /* mov ss,cs:[entry+4] */
+    b16(&e, (uint16_t)(entry + 4u));
+    b8(&e, 0x2e); b8(&e, 0x8b); b8(&e, 0x26);           /* mov sp,cs:[entry+6] */
+    b16(&e, (uint16_t)(entry + 6u));
+    b8(&e, 0x8c); b8(&e, 0xd0);                         /* mov ax,ss */
+    b8(&e, 0x8e); b8(&e, 0xd8);                         /* mov ds,ax */
+    b8(&e, 0x8e); b8(&e, 0xc0);                         /* mov es,ax */
+    b8(&e, 0x31); b8(&e, 0xc0);                         /* xor ax,ax */
+    b8(&e, 0x2e); b8(&e, 0xff); b8(&e, 0x2e);           /* jmp far cs:[entry] */
+    b16(&e, entry);
+    if (e.overflow || e.n > WIN_NE_SELFLOAD_ENTRY_OFFSET - WIN_NE_SELFLOAD_OFFSET)
+        return 0;
+    memcpy(stub + (WIN_NE_SELFLOAD_OFFSET - WIN_NE_DOS_STUB_OFFSET), e.bytes, e.n);
+    memset(stub + (WIN_NE_SELFLOAD_ENTRY_OFFSET - WIN_NE_DOS_STUB_OFFSET), 0, 8);
+    return 1;
+}

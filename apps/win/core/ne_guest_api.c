@@ -409,6 +409,12 @@ __attribute__((weak)) void win_ne_guest_undefined_text(const win_ne_guest_image 
         out[0] = 0;
 }
 __attribute__((weak)) void win_ne_dll_init(win_ne_guest_api_context *ctx) { (void)ctx; }
+/* ... nor global blocks (a self-loading program's loader's stack) */
+__attribute__((weak)) int win_ne_guest_global_free(win_ne_guest_image *g, uint16_t sel)
+{
+    (void)g; (void)sel;
+    return 0;
+}
 __attribute__((weak)) int win_ne_dos(win_ne_guest_api_context *ctx, win_ne_dos_regs *r)
 {
     (void)ctx; (void)r;
@@ -509,7 +515,12 @@ int win_ne_guest_api(void *opaque, win_ne_regs *cpu, uint16_t service)
     int dword = 0;
     uint16_t arg, ptr_seg;
     switch (service) {
-    case 91:      /* KERNEL.InitTask: registers; the DLLs it needs started first */
+    case 91: {    /* KERNEL.InitTask: registers; the DLLs it needs started first */
+        win_ne_guest_image *g = (win_ne_guest_image *)ctx->image;
+        if (g && g->loader_stack && (cpu->ss & ~3u) != (g->loader_stack & ~3u)) {
+            win_ne_guest_global_free(g, g->loader_stack);   /* a self-loading one's */
+            g->loader_stack = 0;                            /* loader's: done */
+        }
         win_ne_dll_init(ctx);
         if (!init_task(ctx, cpu, &value)) {
             ctx->invalid_args = 1;
@@ -517,6 +528,7 @@ int win_ne_guest_api(void *opaque, win_ne_regs *cpu, uint16_t service)
         }
         dword = 1;
         break;
+    }
     case 30:      /* KERNEL.WaitEvent(HTASK): nothing waits */
         value = 0;
         break;

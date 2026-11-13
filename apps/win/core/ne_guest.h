@@ -14,7 +14,8 @@
 #include <stdint.h>
 #include "ne.h"
 
-#define WIN_NE_GUEST_MAX_SEGMENTS 128u
+/* (Word for Windows 1.0 has 196) */
+#define WIN_NE_GUEST_MAX_SEGMENTS 1024u
 #define WIN_NE_THUNK_BYTES 16u /* includes FAR return + Pascal stack adjustment */
 /* the thunk segment (ne_boot.h) up to its boot code: the API thunks */
 #define WIN_NE_GUEST_ACTIVE_THUNKS 384u
@@ -142,6 +143,11 @@ typedef struct {
     /* the functions it imports by name that WINN has not (its calls of
      * them end it: WIN_NE_SERVICE_UNDEFINED) */
     char undefined[8][32];
+    /* a self-loading one's (WIN_NE_SELF_LOADING): its module database (a
+     * global block: the selector its loader is given as hModule), the
+     * segment its loader is loading (0: none), the loader's stack (a
+     * global block) */
+    uint16_t module_db, loading, loader_stack;
 } win_ne_guest_image;
 
 /* Complete staging is atomic with respect to allocations (all allocated
@@ -179,6 +185,10 @@ int win_ne_guest_global_free(win_ne_guest_image *g, uint16_t sel);
  * (0) or as that one (-1). A descriptor's base, limit and kind (0 if the
  * selector is none of the program's); an alias's set. */
 #define WIN_NE_GUEST_ALIAS 0x8000u
+/* a self-loading module's segment its loader allocated (MyAlloc): in its
+ * slot, a global block as GlobalAlloc's are (GlobalReAlloc, GlobalFree
+ * ...); its other bits the NE segment's flags */
+#define WIN_NE_GUEST_MYALLOC 0x4000u
 uint16_t win_ne_guest_selector_alloc(win_ne_guest_image *g, uint16_t like, int code);
 int win_ne_guest_selector_get(const win_ne_guest_image *g, uint16_t sel, uint32_t *base,
                               uint32_t *limit, int *code);
@@ -227,6 +237,24 @@ const char *win_ne_guest_path_of(const win_ne_guest_image *g, uint16_t instance,
 win_ne_guest_segment *win_ne_guest_segment_of(win_ne_guest_image *g, uint16_t sel);
 int win_ne_guest_grow(win_ne_guest_image *g, uint16_t sel, uint32_t bytes,
                       int (*read)(void *, uint32_t, void *, uint32_t));
+/* A self-loading module's (WIN_NE_SELF_LOADING): its module database built
+ * (a global block, g->module_db: the NE header and tables as Windows keeps
+ * them, the segment table's entries with their handles, the module
+ * references the handles modref gives for the names); its selector, 0 if
+ * it cannot be */
+uint16_t win_ne_guest_module_db(win_ne_guest_image *g,
+                                uint16_t (*modref)(void *opaque, const char *module),
+                                void *opaque);
+/* KERNEL's MyAlloc for its loader: a zeroed block for one of its segments
+ * (code but for DATA flags), in the slot of the segment being loaded
+ * (g->loading), or the first free one, else a global block; its selector
+ * (its handle as well), 0 if there is no memory */
+uint16_t win_ne_guest_myalloc(win_ne_guest_image *g, uint16_t flags, uint32_t bytes);
+/* its loader loaded segment k (LoadAppSeg's answer, handle): the program's
+ * segment k from now on, DGROUP grown by its local heap and stack, the
+ * database's entry; 0 if handle is no block of the program's */
+int win_ne_guest_selfloaded(win_ne_guest_image *g, uint16_t k, uint16_t handle,
+                            int (*read)(void *, uint32_t, void *, uint32_t));
 /* the name of a service (a Win16 function), NULL if WINN has none */
 const char *win_ne_service_name(uint16_t service);
 win_ne_guest_segment *win_ne_guest_global(win_ne_guest_image *g, uint16_t sel);

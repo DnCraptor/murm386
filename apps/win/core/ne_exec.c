@@ -96,6 +96,10 @@ static void restore_cpu(CPU *cpu, const win_cpu_snapshot *s)
  * holds the stack. */
 static int valid_entry(const win_ne_guest_image *g)
 {
+    if (g->info.module_flags & WIN_NE_SELF_LOADING)   /* its loader's segment: the rest later */
+        return g->info.cs_index && g->info.ss_index && g->info.segment_count >= 2 &&
+               g->segments[1].linear && g->segments[1].size >= 40u &&
+               !(g->segments[1].flags & 1u);
     return g->info.cs_index && g->info.ss_index &&
            g->info.cs_index != g->info.ss_index &&
            g->info.segment_count >= 2 &&
@@ -364,8 +368,14 @@ static const win_ne_guest_segment *guest_stack(const ne_run *run, uint16_t *ss, 
     if (!gateway_entry(&run->gate, ss, sp))
         return NULL;
     for (uint16_t i = 1; i <= g->info.segment_count; i++)
-        if ((g->segments[i].flags & 1u) && (g->segments[i].selector & ~3u) == (*ss & ~3u))
+        if ((g->segments[i].flags & 1u) && g->segments[i].linear &&
+            (g->segments[i].selector & ~3u) == (*ss & ~3u))
             return &g->segments[i];
+    for (unsigned i = 0; i < WIN_NE_GUEST_GLOBALS; i++)   /* a stack of its own (a loader's) */
+        if (g->globals[i].linear && (g->globals[i].flags & 1u) &&
+            !(g->globals[i].flags & WIN_NE_GUEST_ALIAS) &&
+            (g->globals[i].selector & ~3u) == (*ss & ~3u))
+            return &g->globals[i];
     return NULL;
 }
 
@@ -392,6 +402,12 @@ uint32_t win_ne_call(win_ne_guest_api_context *ctx, uint32_t proc, const uint16_
                      int n, void *blob, uint16_t len)
 {
     return call_with(ctx, proc, words, n, blob, len, 0, 0, 0);
+}
+
+uint32_t win_ne_call_ds(win_ne_guest_api_context *ctx, uint32_t proc, const uint16_t *words,
+                        int n, uint16_t ds)
+{
+    return call_with(ctx, proc, words, n, NULL, 0, ds, 0, 0);
 }
 
 /* The DLLs loaded and not yet started: their entries (LibEntry: DS its
@@ -538,14 +554,23 @@ static int execute(win_ne_guest_image *gp, const char *path, const char *cmdline
     uint8_t boot[WIN_NE_BOOT_CAPACITY];
     const uint32_t linear = gp->thunk_linear + WIN_NE_BOOT_OFFSET;
     const uint32_t ring0 = gp->thunk_linear + WIN_NE_RING0_OFFSET;
-    /* the entry's return address on its stack: the exit stub (ring 3) */
-    const uint16_t sp = (uint16_t)(gp->sp - 4u);
-    const win_ne_guest_segment *stack = &gp->segments[gp->info.ss_index];
+    /* the entry's return address on its stack: the exit stub (ring 3); a
+     * self-loading program's entry the stub calling its loader, on a
+     * stack of its own (64K less 256 bytes, as Windows gives it) */
+    const int self = !!(gp->info.module_flags & WIN_NE_SELF_LOADING);
+    if (self && !(gp->loader_stack = win_ne_guest_global_alloc(gp, 0xff00u))) {
+        rc = WIN_NE_NO_MEMORY;
+        goto done;
+    }
+    const uint16_t sp = (uint16_t)((self ? 0xff00u : gp->sp) - 4u);
+    const win_ne_guest_segment *stack = self ? win_ne_guest_global(gp, gp->loader_stack) :
+                                        &gp->segments[gp->info.ss_index];
     win_ne_boot_args args = {
         .rm_segment = (uint16_t)(linear >> 4),
         .pm_segment = gp->thunk_selector,
-        .ne_cs = gp->cs, .ne_ip = gp->ip,
-        .ne_ss = gp->ss, .ne_sp = sp,
+        .ne_cs = self ? gp->thunk3_selector : gp->cs,
+        .ne_ip = self ? (uint16_t)WIN_NE_SELFLOAD_OFFSET : gp->ip,
+        .ne_ss = self ? gp->loader_stack : gp->ss, .ne_sp = sp,
         .gdt_limit = gp->gdt_limit, .gdt_linear = gp->gdt_linear,
         .tss = gp->tss_selector, .ring0 = gp->ring0_selector,
         .exit_gate = gp->exit_gate, .cbret_gate = gp->cbret_gate
@@ -568,6 +593,7 @@ static int execute(win_ne_guest_image *gp, const char *path, const char *cmdline
     if (!win_ne_boot_make(boot, sizeof(boot), &args) ||
         !win_ne_fault_make(fault_idt, fault_code, &args) ||
         !win_ne_dos_make(dos, &args) ||
+        (self && !win_ne_selfload_make(dos, gp->api_gate)) ||
         !write_psp(gp, cmdline) ||
         !gp->io.write(gp->opaque, ring0, tss, sizeof(tss)) ||
         !gp->io.write(gp->opaque, stack->linear + sp, exit_ret, sizeof(exit_ret)) ||
