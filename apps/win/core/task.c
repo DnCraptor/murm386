@@ -632,8 +632,14 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
      * message loop or a dialog's, or ends (task_started) */
     t->starting = 1;
     /* let it start right away, as Windows does */
+    /* The new task may finish and be reaped while the caller is suspended.
+     * Do not dereference t after switching away: reap() frees it.  WinExec
+     * reports success as a value > 31, not necessarily a task handle. */
+    UINT result = t->h;
+    if (result < 32)
+        result = 33;
     task_run_now(t);
-    return t->h;
+    return result;
 }
 
 /* ---------------------------------------------------------------- the rest of 3.1's */
