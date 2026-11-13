@@ -800,9 +800,10 @@ static int module_of(const win_ne_import *imp)
  * be none, or one without the function): a program importing them loads
  * (WIN_NE_SERVICE_UNDEFINED); their indices after WINN's (M_COUNT on) */
 static const char *const system_modules[] = { "DDEML", "OLECLI", "OLESVR", "SOUND", "PENWIN",
-                                              "LZEXPAND", "VER", "MMSYSTEM", "COMMDLG" };
-_Static_assert(M_COUNT + sizeof(system_modules) / sizeof(system_modules[0]) <= 16,
-               "an undefined call's module takes 4 bits");
+                                              "LZEXPAND", "VER", "MMSYSTEM", "COMMDLG",
+                                              "COMMCTRL", "NDDEAPI" };
+_Static_assert(M_COUNT + sizeof(system_modules) / sizeof(system_modules[0]) <= 32,
+               "an undefined call's module takes 5 bits");
 
 /* the module of an import as an undefined call's: WINN's, or Windows' own */
 static int trap_module(const win_ne_import *imp)
@@ -825,7 +826,7 @@ static uint16_t undefined_id(win_ne_guest_image *g, const win_ne_import *imp)
     if (m < 0)
         return 0;
     unsigned ord = imp->ordinal;
-    if (imp->procedure[0] || !ord || ord >= 1016) {
+    if (imp->procedure[0] || !ord || ord >= 504) {
         char num[8];                    /* a large ordinal: its number as the name */
         const char *name = imp->procedure;
         if (!name[0]) {
@@ -842,15 +843,15 @@ static uint16_t undefined_id(win_ne_guest_image *g, const win_ne_import *imp)
             k++;
         if (g && !g->undefined[k][0])
             lstrcpy_n(g->undefined[k], name[0] ? name : "?", sizeof(g->undefined[k]));
-        ord = 1016 + k;
+        ord = 504 + k;
     }
-    return (uint16_t)(WIN_NE_SERVICE_UNDEFINED | (unsigned)m << 10 | ord);
+    return (uint16_t)(WIN_NE_SERVICE_UNDEFINED | (unsigned)m << 9 | ord);
 }
 
 void win_ne_guest_undefined_text(const win_ne_guest_image *g, uint16_t service, char *out,
                                  size_t cap)
 {
-    unsigned m = (service >> 10) & 15u, ord = service & 1023u;
+    unsigned m = (service >> 9) & 31u, ord = service & 511u;
     const char *mod = m < M_COUNT ? module_names[m] :
                       m - M_COUNT < sizeof(system_modules) / sizeof(system_modules[0]) ?
                       system_modules[m - M_COUNT] : "?";
@@ -858,8 +859,8 @@ void win_ne_guest_undefined_text(const win_ne_guest_image *g, uint16_t service, 
     size_t n = strlen(mod);
     memcpy(buf, mod, n);
     buf[n++] = '.';
-    const char *fn = g ? g->undefined[ord - 1016 < 8 ? ord - 1016 : 0] : "?";
-    if (ord < 1016) {                   /* the ordinal in decimal */
+    const char *fn = g ? g->undefined[ord - 504 < 8 ? ord - 504 : 0] : "?";
+    if (ord < 504) {                   /* the ordinal in decimal */
         int k = (int)sizeof(num) - 1;
         num[k] = 0;
         do {

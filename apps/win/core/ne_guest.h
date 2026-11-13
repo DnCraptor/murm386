@@ -48,8 +48,8 @@
 #define WIN_NE_DLL_SERVICE(slot, n) ((uint16_t)(WIN_NE_SERVICE_DLL + ((unsigned)(slot) << 10) + (n)))
 /* A function of Windows' WINN has not (of its modules, or of Windows' own
  * ones it has nothing of): the program loads, its call of it ends it, as
- * Windows' "undefined dynalink" would. C000h + the module (its index, 4
- * bits) << 10 + the ordinal (1016 + n: the nth imported by name) */
+ * Windows' "undefined dynalink" would. C000h + the module (its index, 5
+ * bits) << 9 + the ordinal (504 + n: the nth imported by name) */
 #define WIN_NE_SERVICE_UNDEFINED 0xC000u
 _Static_assert(WIN_NE_SERVICE_DLL + (12u << 10) == WIN_NE_SERVICE_UNDEFINED, "the DLLs' services");
 /* GetWinFlags: protected mode, a 386, 386 enhanced mode (WINN runs 32-bit
