@@ -190,6 +190,29 @@ static void set_title(const SYSTEMTIME_N *t)
         SetWindowText(hmain, s);
 }
 
+/* A minimized digital clock has too little space for the full seven-segment
+ * face. Render the selected time format directly into the icon instead. */
+static void draw_icon_digital(HDC dc, const RECT *rc, const SYSTEMTIME_N *t)
+{
+    char time[16];
+    int hour = t->wHour % 12;
+    if (!hour)
+        hour = 12;
+    wsprintf(time, "%02d:%02d", hour, t->wMinute);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
+    RECT text = *rc;
+    if (seconds)
+        text.bottom = (text.top + text.bottom) / 2;
+    DrawText(dc, time, -1, &text, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    if (seconds) {
+        wsprintf(time, ":%02d", t->wSecond);
+        text.top = text.bottom;
+        text.bottom = rc->bottom;
+        DrawText(dc, time, -1, &text, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+}
+
 static void render(HDC dc)
 {
     RECT rc;
@@ -209,8 +232,10 @@ static void render(HDC dc)
         memh = rc.bottom;
     }
     FillRect(mem, &rc, (HBRUSH)(COLOR_WINDOW + 1));
-    if (analog || IsIconic(hmain))    /* the icon is always the dial */
+    if (analog)
         draw_analog(mem, rc.right, rc.bottom, &shown);
+    else if (IsIconic(hmain))
+        draw_icon_digital(mem, &rc, &shown);
     else
         draw_digital(mem, rc.right, rc.bottom, &shown);
     BitBlt(dc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);

@@ -11,7 +11,6 @@ static void refresh(HWND h)
     int layout = GetKeyboardLayoutN();
     if (layout != last_layout) {
         last_layout = layout;
-        SetWindowText(h, layout ? "RU" : "EN");
         InvalidateRect(h, NULL, TRUE);
     }
 }
@@ -37,6 +36,16 @@ static LRESULT CALLBACK RusLatProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         SetKeyboardLayoutN(!GetKeyboardLayoutN());
         refresh(h);
         return 0;
+    case WM_QUERYOPEN:
+        return FALSE;
+    case WM_SIZE:
+        if (wp != SIZE_MINIMIZED)
+            ShowWindow(h, SW_SHOWMINNOACTIVE);
+        return 0;
+    case WM_SYSCOMMAND:
+        if ((wp & 0xFFF0u) == SC_RESTORE || (wp & 0xFFF0u) == SC_MAXIMIZE)
+            return 0;
+        break;
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(h, &ps);
@@ -70,7 +79,7 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
         if (!RegisterClass(&wc))
             return 1;
     }
-    HWND h = CreateWindow("RusLatNative", "EN", WS_OVERLAPPEDWINDOW,
+    HWND h = CreateWindow("RusLatNative", "Rus/Lat", WS_OVERLAPPED | WS_SYSMENU,
                           CW_USEDEFAULT, CW_USEDEFAULT, 120, 80,
                           0, 0, inst, NULL);
     if (!h)
