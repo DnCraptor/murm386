@@ -807,8 +807,14 @@ static void wait_turn(void)
     wtask *me = task_current();
     task_started(me);
     me->waiting = WTASK_WAIT_MESSAGE;
-    if (!task_yield() && win_sys.input)
-        win_sys.input->idle();
+    if (!task_yield()) {
+        /* The kernel's idle task need not run again after it yields to the
+         * shell (e.g. when Startup launches another task immediately).
+         * Complete the splash transition on the first true idle turn. */
+        win_logo_end();
+        if (win_sys.input)
+            win_sys.input->idle();
+    }
     me->waiting = WTASK_WAIT_NONE;
 }
 
