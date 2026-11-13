@@ -662,7 +662,16 @@ uint16_t ne_register_class(args *a, ne_user *u, uint32_t p)
     wc.lpszClassName = u->cls[i].name;
     v = RegisterClass(&wc);
     if (v) {
-        u->cls[i].proc = rd32(g + 2);
+        uint32_t proc = rd32(g + 2);
+        /* Some Win16 applications (including Microsoft RusLat) put
+         * FFFF:offset in WNDCLASS.lpfnWndProc to denote a procedure in
+         * their current code segment.  FFFF is not a valid PM selector:
+         * resolve it before the first WM_NCCREATE callback. */
+        if ((proc >> 16) == 0xffffu) {
+            const win_ne_guest_image *image = a->ctx->image;
+            proc = (uint32_t)image->cs << 16 | (uint16_t)proc;
+        }
+        u->cls[i].proc = proc;
         uint32_t menu = rd32(g + 18);   /* the class's menu, by name or number */
         u->cls[i].menu[0] = 0;
         u->cls[i].menu_id = (uint16_t)(menu >> 16 ? 0 : menu);
