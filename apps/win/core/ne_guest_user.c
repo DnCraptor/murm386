@@ -687,7 +687,8 @@ uint16_t ne_load_image(args *a, ne_user *u, uint16_t service, uint16_t inst, uin
         if (far >> 16)
             return 0;
         return service == 0x10ad ? LoadCursor(0, MAKEINTRESOURCE((WORD)far)) :
-               service == 0x10ae ? LoadIcon(0, MAKEINTRESOURCE((WORD)far)) : 0;
+               service == 0x10ae ? LoadIcon(0, MAKEINTRESOURCE((WORD)far)) :
+               user_obm_bitmap((WORD)far);
     }
     name[0] = 0;
     if ((far >> 16) && !win_ne_string(a->ctx, (uint16_t)(far >> 16), (uint16_t)far, name,

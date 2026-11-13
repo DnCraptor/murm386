@@ -51,8 +51,9 @@
  * bits) << 10 + the ordinal (1016 + n: the nth imported by name) */
 #define WIN_NE_SERVICE_UNDEFINED 0xC000u
 _Static_assert(WIN_NE_SERVICE_DLL + (12u << 10) == WIN_NE_SERVICE_UNDEFINED, "the DLLs' services");
-/* GetWinFlags: protected mode, a 386, standard mode, a coprocessor */
-#define WIN_NE_WINFLAGS         0x0415u
+/* GetWinFlags: protected mode, a 386, 386 enhanced mode (WINN runs 32-bit
+ * programs, Win32's), a coprocessor */
+#define WIN_NE_WINFLAGS         0x0425u
 
 /* Guest linear allocations must be addressable via an x86 segment base and
  * remain allocated until the entire staged image is released. The callbacks

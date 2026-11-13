@@ -379,6 +379,9 @@ HICON    win_ne_icon(const char *path, uint16_t id, const char *name);
  * cursor's after its hot spot, a group's entry the nearest to 32 x 32 of
  * 16 colours (its id) */
 HICON    win_icon_from_dib(const uint8_t *d, uint32_t n);
+/* LoadBitmap(NULL, OBM_...): one of the system's bitmaps, made now (the
+ * caller's to delete); 0 none (user/nc.c) */
+HBITMAP  user_obm_bitmap(int id);
 HCURSOR  win_cursor_from_dib(const uint8_t *d, uint32_t n, int hx, int hy);
 int      win_group_pick(const uint8_t *g, uint32_t n, int cursor, uint16_t *id);
 HCURSOR  win_ne_cursor(const char *path, uint16_t id, const char *name);

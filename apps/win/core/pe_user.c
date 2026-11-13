@@ -1833,7 +1833,8 @@ int pe_user_api(pe_args *a, uint16_t service, uint32_t *eax)
         if (a->bad)
             break;
         if (!inst)
-            v = kind == 2 ? LoadIcon(0, name) : kind == 1 ? LoadCursor(0, name) : 0;
+            v = kind == 2 ? LoadIcon(0, name) : kind == 1 ? LoadCursor(0, name) :
+                (uint32_t)user_obm_bitmap((int)(uintptr_t)name);
         else
             v = load_image(a, u, kind, res_module(a, inst), name);
         break;
@@ -1847,7 +1848,8 @@ int pe_user_api(pe_args *a, uint16_t service, uint32_t *eax)
         if (pe_arg(a, 5) & 0x10u)           /* LR_LOADFROMFILE */
             v = type == 0 ? 0 : win_image_file(name, type == 2);
         else if (!inst)
-            v = kind == 2 ? LoadIcon(0, name) : kind == 1 ? LoadCursor(0, name) : 0;
+            v = kind == 2 ? LoadIcon(0, name) : kind == 1 ? LoadCursor(0, name) :
+                (uint32_t)user_obm_bitmap((int)(uintptr_t)name);
         else
             v = load_image(a, u, kind, res_module(a, inst), name);
         break;

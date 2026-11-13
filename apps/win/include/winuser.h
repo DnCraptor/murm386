@@ -539,6 +539,34 @@ typedef struct {
 #define SM_CXSCREEN         0
 #define SM_CYSCREEN         1
 #define SM_CXVSCROLL        2
+
+/* the system's bitmaps (LoadBitmap(NULL, MAKEINTRESOURCE(OBM_...))) */
+#define OBM_CLOSE           32754
+#define OBM_UPARROW         32753
+#define OBM_DNARROW         32752
+#define OBM_RGARROW         32751
+#define OBM_LFARROW         32750
+#define OBM_REDUCE          32749
+#define OBM_ZOOM            32748
+#define OBM_RESTORE         32747
+#define OBM_REDUCED         32746
+#define OBM_ZOOMD           32745
+#define OBM_RESTORED        32744
+#define OBM_UPARROWD        32743
+#define OBM_DNARROWD        32742
+#define OBM_RGARROWD        32741
+#define OBM_LFARROWD        32740
+#define OBM_MNARROW         32739
+#define OBM_COMBO           32738
+#define OBM_UPARROWI        32737
+#define OBM_DNARROWI        32736
+#define OBM_RGARROWI        32735
+#define OBM_LFARROWI        32734
+#define OBM_SIZE            32766
+#define OBM_BTSIZE          32761
+#define OBM_CHECK           32760
+#define OBM_CHECKBOXES      32759
+#define OBM_BTNCORNERS      32758
 #define SM_CYHSCROLL        3
 #define SM_CYCAPTION        4
 #define SM_CXBORDER         5

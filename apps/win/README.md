@@ -334,7 +334,10 @@ memory: a far pointer, or a global block), with their WM_INITDIALOG
 lParam; SetClassWord, SetClassLong (the class's extra bytes, its procedure
 for its own classes), CreateWindowEx, MapWindowPoints, Get/SetKeyboardState,
 EnumTaskWindows, GrayString (a string grayed; a procedure of its own draws
-as it is), AnsiUpperBuff and AnsiLowerBuff. Hooks (SetWindowsHook(Ex),
+as it is), AnsiUpperBuff and AnsiLowerBuff, LoadBitmap(NULL, OBM_...)
+(the system's bitmaps: the arrows, the caption's buttons, the check marks,
+drawn at their sizes), scroll bars of SBS_TOPALIGN or SBS_BOTTOMALIGN
+(LEFT/RIGHT: their standard thickness at that edge). Hooks (SetWindowsHook(Ex),
 CallNextHookEx, DefHookProc, CallMsgFilter) are called as Windows calls
 them: WH_CALLWNDPROC with a message sent to a window of the task;
 WH_CBT with a window made (HCBT_CREATEWND), destroyed, activated, given

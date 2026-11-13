@@ -207,23 +207,27 @@ static __attribute__((noinline)) int paths(win_ne_guest_api_context *ctx, ne_use
 
 static uint8_t bcd(unsigned v) { return (uint8_t)((v / 10u % 10u) << 4 | v % 10u); }
 
-/* INT 2Fh, the multiplex, as Windows 3.1 in standard mode answers a
+/* INT 2Fh, the multiplex, as Windows 3.1 in 386 enhanced mode answers a
  * program: Windows there (its version GetVersion's), the idle calls, no
- * XMS, no CD-ROM extensions; the rest as without anyone to answer */
+ * virtual devices' API, no XMS, no CD-ROM extensions; the rest as without
+ * anyone to answer */
 static void multiplex(win_ne_dos_regs *r)
 {
     uint16_t version = (uint16_t)GetVersion();          /* 0A03h: 3.10 */
     switch (r->ax) {
-    case 0x1600:                        /* Windows mode: AL=2 standard, AL=3 enhanced */
-        r->ax = (uint16_t)((version & 0xff00u) | 2u);
+    case 0x1600:                        /* enhanced mode: AL its major, AH its minor */
+        r->ax = version;
         break;
     case 0x160a:                        /* the version (BX, major high) and mode (CX) */
         r->ax = 0;
         r->bx = (uint16_t)((version & 0xffu) << 8 | version >> 8);
-        r->cx = 2;                      /* match GetWinFlags WF_STANDARD */
+        r->cx = 3;                      /* as GetWinFlags: WF_ENHANCED */
         break;
     case 0x1680:                        /* release the time slice: done */
         r->ax &= 0xff00u;
+        break;
+    case 0x1684:                        /* a VxD's API entry: none (ES:DI 0) */
+        r->es = r->di = 0;
         break;
     case 0x1683:                        /* the virtual machine: the system's */
         r->bx = 1;

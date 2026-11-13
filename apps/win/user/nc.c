@@ -1006,3 +1006,91 @@ LRESULT CALLBACK user_scrollbar_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     }
     return DefWindowProc(h, msg, wp, lp);
 }
+
+/* ---------------------------------------------------------------- the system's bitmaps */
+
+/* LoadBitmap(NULL, OBM_...): the scroll bars' arrows (pressed: D,
+ * inactive: I), the caption's buttons, the size box, the combo box's and
+ * the menus' arrows, the check mark and boxes, drawn as the frames draw
+ * them, of their sizes; 0 for none of them */
+HBITMAP user_obm_bitmap(int id)
+{
+    int cx, cy, dir = -1, pressed = 0, gray = 0, box = 1;
+    int sbx = GetSystemMetrics(SM_CXVSCROLL), sby = GetSystemMetrics(SM_CYHSCROLL);
+    int bx = GetSystemMetrics(SM_CXSIZE), by = GetSystemMetrics(SM_CYSIZE);
+    switch (id) {
+    case OBM_UPARROW: case OBM_UPARROWD: case OBM_UPARROWI: dir = 0; cx = sbx; cy = sbx; break;
+    case OBM_DNARROW: case OBM_DNARROWD: case OBM_DNARROWI: dir = 1; cx = sbx; cy = sbx; break;
+    case OBM_LFARROW: case OBM_LFARROWD: case OBM_LFARROWI: dir = 2; cx = sby; cy = sby; break;
+    case OBM_RGARROW: case OBM_RGARROWD: case OBM_RGARROWI: dir = 3; cx = sby; cy = sby; break;
+    case OBM_COMBO: dir = 1; cx = sbx; cy = sbx; break;
+    case OBM_MNARROW: dir = 3; cx = 8; cy = 16; box = 0; break;
+    case OBM_REDUCE: case OBM_REDUCED: dir = 1; cx = bx; cy = by; break;
+    case OBM_ZOOM: case OBM_ZOOMD: dir = 0; cx = bx; cy = by; break;
+    case OBM_RESTORE: case OBM_RESTORED: dir = 4; cx = bx; cy = by; break;
+    case OBM_CLOSE: dir = 5; cx = 2 * bx; cy = by; box = 0; break;
+    case OBM_SIZE: case OBM_BTSIZE: cx = sbx; cy = sby; break;
+    case OBM_CHECK: dir = 6; cx = 13; cy = 13; box = 0; break;
+    case OBM_CHECKBOXES: dir = 7; cx = 4 * 13; cy = 3 * 13; box = 0; break;
+    case OBM_BTNCORNERS: cx = 5; cy = 5; box = 0; break;
+    default: return 0;
+    }
+    pressed = id == OBM_UPARROWD || id == OBM_DNARROWD || id == OBM_LFARROWD ||
+              id == OBM_RGARROWD || id == OBM_REDUCED || id == OBM_ZOOMD || id == OBM_RESTORED;
+    gray = id == OBM_UPARROWI || id == OBM_DNARROWI || id == OBM_LFARROWI || id == OBM_RGARROWI;
+    HDC screen = GetDC(0);
+    HDC dc = CreateCompatibleDC(screen);
+    HBITMAP b = CreateCompatibleBitmap(screen, cx, cy);
+    ReleaseDC(0, screen);
+    if (!dc || !b) {
+        if (b)
+            DeleteObject(b);
+        if (dc)
+            DeleteDC(dc);
+        return 0;
+    }
+    HGDIOBJ old = SelectObject(dc, b);
+    RECT r = { 0, 0, cx, cy };
+    COLORREF ink = gray ? GetSysColor(COLOR_GRAYTEXT) : GetSysColor(COLOR_BTNTEXT);
+    if (box)
+        draw_button_box(dc, &r, pressed);
+    else
+        FillRect(dc, &r, user_sys_brush(dir == 5 ? COLOR_BTNFACE : COLOR_WINDOW));
+    if (pressed)
+        OffsetRect(&r, 1, 1);
+    if (dir >= 0 && dir <= 3) {
+        user_draw_arrow(dc, &r, dir, ink);
+    } else if (dir == 4) {                  /* restore: up over down */
+        RECT up = r, dn = r;
+        up.bottom = (r.top + r.bottom) / 2 + 1;
+        dn.top = (r.top + r.bottom) / 2 - 1;
+        user_draw_arrow(dc, &up, 0, ink);
+        user_draw_arrow(dc, &dn, 1, ink);
+    } else if (dir == 5) {                  /* the system menu's boxes */
+        for (int i = 0; i < 2; i++) {
+            RECT bar = { i * bx + bx / 4, by / 2 - 1, i * bx + bx - bx / 4, by / 2 + 2 };
+            FillRect(dc, &bar, user_sys_brush(COLOR_BTNTEXT));
+        }
+    } else if (dir == 6 || dir == 7) {      /* a check mark; the boxes' grid */
+        int n = dir == 6 ? 1 : 4, m = dir == 6 ? 1 : 3;
+        for (int j = 0; j < m; j++)
+            for (int i = 0; i < n; i++) {
+                RECT c = { i * 13, j * 13, i * 13 + 13, j * 13 + 13 };
+                if (dir == 7)
+                    FrameRect(dc, &c, user_sys_brush(COLOR_WINDOWFRAME));
+                if (dir == 6 || (i & 1)) {
+                    for (int k = 0; k < 3; k++) {
+                        RECT t = { c.left + 3 + k, c.top + 6 + k, c.left + 4 + k, c.top + 8 + k };
+                        FillRect(dc, &t, user_sys_brush(COLOR_BTNTEXT));
+                    }
+                    for (int k = 0; k < 5; k++) {
+                        RECT t = { c.left + 6 + k, c.top + 7 - k, c.left + 7 + k, c.top + 9 - k };
+                        FillRect(dc, &t, user_sys_brush(COLOR_BTNTEXT));
+                    }
+                }
+            }
+    }
+    SelectObject(dc, old);
+    DeleteDC(dc);
+    return b;
+}

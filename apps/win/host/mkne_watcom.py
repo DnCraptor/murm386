@@ -41,7 +41,7 @@ OWKERN: KERNEL and the modules around it: GetWinFlags, GetModuleHandle and
     GetProcAddress (MessageBox through it), LoadLibrary, Catch and Throw, an
     RCDATA resource, GetTempFileName, a palette, DPtoLP, the error mode;
     COMMDLG's Open and Find (its messages) dialogs, SHELL's ShellAbout:
-    "flags 415, user 1, box 1, dlg 1", "caught 42, custom resource, 16
+    "flags 425, user 1, box 1, dlg 1", "caught 42, custom resource, 16
     bytes, temp ~owk", "palette 200,100,50 30, dp->lp 15,25, mode 1"
 
 OWUSE, OWDLL, OWDLL2 (OWDLL.DLL, OWDLL2.DLL): a program and its DLLs:
