@@ -388,6 +388,8 @@ struct IDEState {
     int      xfer_sectors;      /* sectors in current batch (for accounting in done callback */
     int      xfer_is_write;     /* 1 = CPU is writing (HDD write / ATAPI packet) */
     EndTransferFunc *xfer_done; /* called when xfer_left reaches 0 */
+    int      atapi_phase_limit; /* max bytes per PIO phase */
+    int      atapi_phase_left;  /* bytes remaining in the active phase */
 
     /* CD-ROM streaming state (set by ide_atapi_cmd_read_pio) */
     int32_t  cd_lba;            /* next LBA to read */
@@ -537,6 +539,19 @@ static int media_is_cd(IDEState *s)   { return media_present(s) && ide_cd_total_
 /* -------------------------------------------------------------------------
  * ATAPI reply: fill atapi_buf and arm transfer to CPU
  * ---------------------------------------------------------------------- */
+static void atapi_data_phase(IDEState *s)
+{
+    int bytes = s->xfer_left;
+    if (bytes > s->atapi_phase_limit)
+        bytes = s->atapi_phase_limit;
+    s->atapi_phase_left = bytes;
+    s->lcyl = bytes & 0xff;
+    s->hcyl = bytes >> 8;
+    s->nsector = (s->nsector & ~7) | ATAPI_INT_REASON_IO;
+    s->status = READY_STAT | SEEK_STAT | DRQ_STAT;
+    ide_set_irq(s);
+}
+
 static void ide_atapi_reply_start(IDEState *s, int size, int max_size)
 {
     atapi_tlog("[%d]  -> ide_atapi_reply_start(%d, %d)\r\n", time_us_32(), size, max_size);
@@ -556,13 +571,9 @@ static void ide_atapi_reply_start(IDEState *s, int size, int max_size)
     int byte_count = s->lcyl | (s->hcyl << 8);
     if (byte_count == 0xffff) byte_count--;
     if (byte_count == 0 || byte_count > size) byte_count = size;
-    /* make even */
     if (byte_count & 1) byte_count--;
-
-    s->lcyl    = byte_count & 0xff;
-    s->hcyl    = byte_count >> 8;
-    s->nsector = (s->nsector & ~7) | ATAPI_INT_REASON_IO;
-    s->status  = READY_STAT | SEEK_STAT | DRQ_STAT;
+    if (byte_count < 2) byte_count = 2;
+    s->atapi_phase_limit = byte_count;
 
     s->atapi_buf_len = size;
     s->atapi_buf_pos = 0;
@@ -570,7 +581,7 @@ static void ide_atapi_reply_start(IDEState *s, int size, int max_size)
     s->xfer_is_write = 0;
     s->xfer_done     = ide_transfer_stop;
 
-    ide_set_irq(s);
+    atapi_data_phase(s);
 }
 
 /* -------------------------------------------------------------------------
@@ -596,12 +607,9 @@ static void ide_atapi_cmd_read_pio(IDEState *s, int lba, int nb_sectors, int sec
     if (byte_count_limit == 0xffff) byte_count_limit--;
     if (byte_count_limit == 0) byte_count_limit = sector_size;
     if (byte_count_limit & 1) byte_count_limit--;
+    if (byte_count_limit < 2) byte_count_limit = 2;
     if (byte_count_limit > sector_size) byte_count_limit = sector_size;
-
-    s->lcyl    = byte_count_limit & 0xff;
-    s->hcyl    = byte_count_limit >> 8;
-    s->nsector = (s->nsector & ~7) | ATAPI_INT_REASON_IO;
-    s->status  = READY_STAT | SEEK_STAT | DRQ_STAT;
+    s->atapi_phase_limit = byte_count_limit;
 
     s->xfer_left     = nb_sectors * sector_size;
     s->xfer_is_write = 0;
@@ -609,7 +617,7 @@ static void ide_atapi_cmd_read_pio(IDEState *s, int lba, int nb_sectors, int sec
 
     atapi_tlog("[%d]    bcl=%d xfer_left=%d\r\n",
         time_us_32(), byte_count_limit, s->xfer_left);
-    ide_set_irq(s);
+    atapi_data_phase(s);
 }
 
 static void ide_atapi_cmd_read(IDEState *s, int lba, int nb_sectors, int sector_size)
@@ -1497,9 +1505,20 @@ static uint32_t xfer_read32(IDEState *s)
 
 static void xfer_advance(IDEState *s, int n)
 {
+    const int cd_data_in = s->drive_kind == IDE_CD && !s->xfer_is_write;
     s->xfer_left -= n;
+    if (cd_data_in) {
+        s->atapi_phase_left -= n;
+        if (s->atapi_buf_len == 0 && s->cd_sector_size > 0) {
+            s->cd_sector_off += n;
+            while (s->cd_sector_off >= s->cd_sector_size) {
+                s->cd_sector_off -= s->cd_sector_size;
+                s->cd_lba++;
+            }
+        }
+    }
     if (s->xfer_left <= 0) {
-        if (s->drive_kind == IDE_CD && !s->xfer_is_write)
+        if (cd_data_in)
             atapi_tlog("[%d]  xfer_done lba=%d..%d was_write=%d\r\n",
                 time_us_32(), s->cd_lba, s->cd_lba_end, s->xfer_is_write);
         if (!s->xfer_is_write && s->atapi_buf_len > 0) {
@@ -1510,26 +1529,10 @@ static void xfer_advance(IDEState *s, int n)
         EndTransferFunc *fn = s->xfer_done;
         ide_transfer_stop(s);
         if (fn && fn != ide_transfer_stop) fn(s);
-    } else if (s->drive_kind == IDE_CD && !s->xfer_is_write
-               && s->cd_sector_size > 0
-               && (s->xfer_left % s->cd_sector_size) == 0) {
-        /* Host has consumed exactly one CD sector.
-         * Advance the logical LBA counter and re-arm DRQ so the host
-         * knows the next sector is ready to be read.
-         * Without this, xfer_left silently counts down but no new IRQ is
-         * ever raised, causing the host to time out on any n > 1 read. */
-        s->cd_lba++;
-        int byte_count_limit = s->lcyl | (s->hcyl << 8);
-        if (byte_count_limit == 0 || byte_count_limit > s->cd_sector_size)
-            byte_count_limit = s->cd_sector_size;
-        if (byte_count_limit & 1) byte_count_limit--;
-        s->lcyl    = byte_count_limit & 0xff;
-        s->hcyl    = byte_count_limit >> 8;
-        s->nsector = (s->nsector & ~7) | ATAPI_INT_REASON_IO; /* Data-In, DRQ */
-        s->status  = READY_STAT | SEEK_STAT | DRQ_STAT;
-        atapi_tlog("[%d]  xfer_sector_done lba=%d remaining=%d\r\n",
-            time_us_32(), s->cd_lba, s->xfer_left);
-        ide_set_irq(s);
+    } else if (cd_data_in && s->atapi_phase_left == 0) {
+        /* Advance the ATAPI PIO phase at the negotiated byte count,
+         * independently of the ISO logical sector boundary. */
+        atapi_data_phase(s);
     }
 }
 
@@ -1555,6 +1558,7 @@ uint32_t ide_data_readw(void *opaque)
     IDEIFState *s1 = opaque;
     IDEState *s = s1->cur_drive;
     if (!s || s->xfer_left < 2 || s->xfer_is_write) return 0;
+    if (s->drive_kind == IDE_CD && s->atapi_phase_left < 2) return 0;
     uint16_t v = xfer_read16(s);
     xfer_advance(s, 2);
     return v;
@@ -1583,6 +1587,7 @@ uint32_t ide_data_readl(void *opaque)
     IDEIFState *s1 = opaque;
     IDEState *s = s1->cur_drive;
     if (!s || s->xfer_left < 4 || s->xfer_is_write) return 0;
+    if (s->drive_kind == IDE_CD && s->atapi_phase_left < 4) return 0;
     uint32_t v = xfer_read32(s);
     xfer_advance(s, 4);
     return v;
@@ -1624,6 +1629,8 @@ int ide_data_read_string(void *opaque, uint32_t addr, int size, int count)
     if (!s || s->xfer_is_write) return 0;
     int len = size * count;
     if (len > s->xfer_left) len = s->xfer_left;
+    if (s->drive_kind == IDE_CD && len > s->atapi_phase_left)
+        len = s->atapi_phase_left;
     len -= len % size;
     if (xfer_from_file(s)) {
         UINT br;
