@@ -72,6 +72,13 @@ void atapi_tlog(const char *fmt, ...)
 #define atapi_tlog(...) (void)0
 #endif
 
+/* Narrow native DOS -> redirector diagnostics, enabled by the existing
+ * DEBUG_IDE_ATAPI switch. No additional file or tracing mechanism. */
+void atapi_trace_fdos(int stage, int a, int b)
+{
+    atapi_tlog("FDOS_REDIRECT stage=%d a=%d b=%d\r\n", stage, a, b);
+}
+
 #define MAX_MULT_SECTORS 4
 
 /* Bits of HD_STATUS */
@@ -396,6 +403,8 @@ struct IDEState {
     int32_t  cd_lba_end;        /* LBA past last sector */
     int      cd_sector_off;     /* byte position inside current CD sector */
     int      cd_sector_size;
+    int      cd_file_sector_size;   /* 2048 cooked or 2352 raw Mode 1 */
+    int      cd_file_data_offset;   /* 0 cooked, 16 raw Mode 1 */
 
     /* small ATAPI buffer: receives 12-byte command packet, holds small replies */
     uint8_t  atapi_buf[ATAPI_BUF_SIZE];
@@ -529,7 +538,9 @@ static int64_t ide_nb_sectors(IDEState *s)
 /* CD: nb_sectors in 512-byte units → CD-sector count */
 static int64_t ide_cd_total_sectors(IDEState *s)
 {
-    return ide_nb_sectors(s) >> 2;  /* 512→2048 */
+    if (!s->fp) return 0;
+    int stride = s->cd_file_sector_size ? s->cd_file_sector_size : CD_SECTOR_SIZE;
+    return ((int64_t)f_size(s->fp) - s->start_offset) / stride;
 }
 
 static int media_present(IDEState *s) { return ide_cd_total_sectors(s) > 0; }
@@ -589,7 +600,9 @@ static void ide_atapi_reply_start(IDEState *s, int size, int max_size)
  * ---------------------------------------------------------------------- */
 static void ide_atapi_cmd_read_pio(IDEState *s, int lba, int nb_sectors, int sector_size)
 {
-    FSIZE_t pos = (FSIZE_t)s->start_offset + (FSIZE_t)lba * sector_size;
+    FSIZE_t pos = (FSIZE_t)s->start_offset
+                + (FSIZE_t)lba * s->cd_file_sector_size
+                + s->cd_file_data_offset;
     atapi_tlog("[%d]  -> read_pio lba=%d n=%d ss=%d pos=%lu fp=%s\r\n",
         time_us_32(), lba, nb_sectors, sector_size,
         (unsigned long)pos, s->fp ? "ok" : "NULL");
@@ -1334,6 +1347,11 @@ static void idecd_exec_cmd(IDEState *s, int val)
         s->atapi_buf_len = 512;
         s->atapi_buf_pos = 0;
         s->xfer_left     = 512;
+        /* IDENTIFY PACKET DEVICE is a 512-byte PIO data-in transfer,
+         * just like an ATAPI reply; the data-port readers enforce the
+         * remaining phase byte count. */
+        s->atapi_phase_limit = 512;
+        s->atapi_phase_left  = 512;
         s->xfer_is_write = 0;
         s->xfer_done     = ide_transfer_stop;
         ide_set_irq(s);
@@ -1468,11 +1486,44 @@ static inline int xfer_from_file(IDEState *s)
     return s->xfer_done == ide_sector_read_next;
 }
 
+/* Raw Mode 1 files contain 2352 bytes per sector.  ATAPI READ(10) must
+ * return only the 2048-byte user area.  'ahead' is the number of logical
+ * bytes already copied within a single bulk DATA-port operation; xfer_advance()
+ * runs only after that whole operation. */
+static void cd_read_payload(IDEState *s, uint8_t *buf, int len, int ahead)
+{
+    int logical = s->cd_sector_off + ahead;
+    while (len > 0) {
+        int sector = logical / CD_SECTOR_SIZE;
+        int off = logical % CD_SECTOR_SIZE;
+        int n = CD_SECTOR_SIZE - off;
+        if (n > len) n = len;
+        FSIZE_t pos = (FSIZE_t)s->start_offset
+                    + (FSIZE_t)(s->cd_lba + sector) * s->cd_file_sector_size
+                    + s->cd_file_data_offset + off;
+        UINT br = 0;
+        if ((f_tell(s->fp) != pos && f_lseek(s->fp, pos) != FR_OK) ||
+            f_read(s->fp, buf, n, &br) != FR_OK) {
+            br = 0;
+        }
+        if (br < (UINT)n)
+            memset(buf + br, 0, n - br);
+        buf += n;
+        len -= n;
+        logical += n;
+    }
+}
+
 static uint16_t xfer_read16(IDEState *s)
 {
     uint8_t buf[2]; UINT br;
     if (xfer_from_file(s)) {
-        f_read(s->fp, buf, 2, &br);
+        if (s->drive_kind == IDE_CD && s->cd_file_sector_size != CD_SECTOR_SIZE) {
+            cd_read_payload(s, buf, 2, 0);
+            br = 2;
+        } else {
+            f_read(s->fp, buf, 2, &br);
+        }
         /* log first word of each sector (xfer_left is multiple of sector_size at start) */
         if (s->drive_kind == IDE_CD && s->xfer_left % s->cd_sector_size == s->cd_sector_size - 2)
             atapi_tlog("[%d]  xfer16 lba=%d w0=%02x%02x br=%d\r\n",
@@ -1490,7 +1541,10 @@ static uint32_t xfer_read32(IDEState *s)
 {
     uint8_t buf[4]; UINT br;
     if (xfer_from_file(s)) {
-        f_read(s->fp, buf, 4, &br);
+        if (s->drive_kind == IDE_CD && s->cd_file_sector_size != CD_SECTOR_SIZE)
+            cd_read_payload(s, buf, 4, 0);
+        else
+            f_read(s->fp, buf, 4, &br);
         return buf[0] | (buf[1]<<8) | (buf[2]<<16) | (buf[3]<<24);
     } else {
         if (s->atapi_buf_pos + 3 >= s->atapi_buf_len) return 0;
@@ -1638,7 +1692,10 @@ int ide_data_read_string(void *opaque, uint32_t addr, int size, int count)
         for (int i = 0; i < len; i += 512) {
             UINT l = len - i;
             if (l > 512) l = 512;
-            f_read(s->fp, buf, l, &br);
+            if (s->drive_kind == IDE_CD && s->cd_file_sector_size != CD_SECTOR_SIZE)
+                cd_read_payload(s, buf, l, i);
+            else
+                f_read(s->fp, buf, l, &br);
             for (int j = 0; j < l; ++j) {
                 pstore8(addr + i + j, buf[j]);
             }
@@ -1803,12 +1860,34 @@ void ide_change_cd(IDEIFState *sif, int drive, FIL *f, int was_present)
     if (!s || s->drive_kind != IDE_CD) return;
 
     s->fp = f;
+    s->cd_file_sector_size = CD_SECTOR_SIZE;
+    s->cd_file_data_offset = 0;
 
     if (f) {
-        atapi_tlog("  f_size=%lu nb_512=%ld cd_sec=%ld\r\n",
+        /* Check the actual raw Mode 1 sync/header, not just the extension
+         * or the file-size remainder: some cooked images have trailers. */
+        if (f_size(f) % 2352u == 0) {
+            const FSIZE_t saved_pos = f_tell(f);
+            uint8_t hdr[16];
+            UINT br = 0;
+            if (f_lseek(f, 0) == FR_OK &&
+                f_read(f, hdr, sizeof(hdr), &br) == FR_OK &&
+                br == sizeof(hdr) && hdr[0] == 0 && hdr[11] == 0 &&
+                hdr[15] == 1) {
+                int sync = 1;
+                for (int i = 1; i <= 10; ++i)
+                    if (hdr[i] != 0xff) sync = 0;
+                if (sync) {
+                    s->cd_file_sector_size = 2352;
+                    s->cd_file_data_offset = 16;
+                }
+            }
+            f_lseek(f, saved_pos);
+        }
+        atapi_tlog("  f_size=%lu cd_sec=%ld stride=%d data_off=%d\r\n",
             (unsigned long)f_size(f),
-            (long)(f_size(f) / 512),
-            (long)(f_size(f) / 2048));
+            (long)(f_size(f) / s->cd_file_sector_size),
+            s->cd_file_sector_size, s->cd_file_data_offset);
         if (was_present) {
             /* disc swap: signal UA so driver re-reads TOC */
             s->sense_key     = SENSE_UNIT_ATTENTION;

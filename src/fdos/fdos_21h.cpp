@@ -1621,18 +1621,13 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         break;
 
       case 0x52: { // DOS 2+ internal - SYSVARS - GET LIST OF LISTS -> ES:BX -> DOS list of lists (see #01627)
-          /*
-          * DOS 2+ GET LIST OF LISTS.
-          *
-          * Return ES:BX pointing at LoL->DPBp (MARK0026H).
-          * Documented consumers access:
-          *
-          *   ES:[BX-2] = first MCB segment
-          *
-          * Do not duplicate the fixed-data and structure offsets here.
-          */
-          R_ES = (FP_SEG(x86_FIXED_DATA));
-          R_BX = FP_OFF(x86_FIXED_DATA) + offsetof(struct lol, DPBp); // see MARK0026H
+          /* ES is the paragraph-aligned LoL base, not DOS_PSP.
+           * Its offset 0320h aliases the real DOS SDA (ErrorMode),
+           * as expected by DOS 4+ redirectors including SHSUCDX.
+           * ES:BX still addresses the original LoL->DPBp. */
+          R_ES = (UWORD)(FP_SEG(x86_FIXED_DATA) +
+                         FP_OFF(x86_FIXED_DATA) / 16u);
+          R_BX = (UWORD)offsetof(struct lol, DPBp);
         }
         break;
 // 53h — Translate BIOS

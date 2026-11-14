@@ -8,6 +8,8 @@
 #include "i8254.h"
 #include "core0_stack.h"
 
+void atapi_trace_fdos(int stage, int a, int b);
+
 #define printf(...) dos_printf(__VA_ARGS__)
 CPU* cpu;
 
@@ -1623,26 +1625,97 @@ dos_far_ptr /*sft*/ idx_to_sft(int SftIndex)
 */
 long network_redirector_mx(unsigned cmd, void *s, void *arg)
 {
-  UNREFERENCED_PARAMETER(cmd);
-  UNREFERENCED_PARAMETER(s);
-  UNREFERENCED_PARAMETER(arg);
-  return -DE_INVLDFUNC;
+  /* The installed redirector is a guest x86 INT 2Fh handler, even though
+   * the FreeDOS kernel itself is native. Enter through the guest IVT. */
+  switch (cmd) {
+  case REM_RMDIR:
+  case REM_MKDIR:
+  case REM_CHDIR:
+  case REM_CLOSE:
+  case REM_FLUSH:
+  case REM_READ:
+  case REM_WRITE:
+  case REM_GETSPACE:
+  case REM_SETATTR:
+  case REM_GETATTRZ:
+  case REM_RENAME:
+  case REM_DELETE:
+  case REM_OPEN:
+  case REM_CREATE:
+  case REM_FINDFIRST:
+  case REM_FINDNEXT:
+  case REM_LSEEK:
+  case REM_EXTOC:
+  case REM_GETLARGESPACE:
+    break;
+  default:
+    return -DE_INVLDFUNC;
+  }
+
+  CPU_regs saved;
+  const dos_far_ptr guest_s = MK_FP((UWORD)((uintptr_t)s >> 16),
+                                    (UWORD)(uintptr_t)s);
+  cpu_save_regs(cpu, &saved);
+
+  CPU_AX = (UWORD)cmd;
+  SET_ES(FP_SEG(guest_s));
+  CPU_DI = FP_OFF(guest_s);
+  CPU_CX = 0;
+
+  const UWORD original_sp = CPU_SP;
+  if (cmd == REM_OPEN || cmd == REM_CREATE || cmd == REM_EXTOC ||
+      cmd == REM_SETATTR) {
+    CPU_SP = (UWORD)(CPU_SP - 2u);
+    putmem8(CPU_SS, CPU_SP, (UBYTE)(uintptr_t)arg);
+    putmem8(CPU_SS, (UWORD)(CPU_SP + 1u), (UBYTE)((uintptr_t)arg >> 8));
+  } else if (cmd == REM_READ || cmd == REM_WRITE) {
+    CPU_CX = (UWORD)(uintptr_t)arg;
+  } else if (cmd == REM_LSEEK && arg) {
+    const ULONG offset = *(const ULONG *)arg;
+    CPU_DX = (UWORD)offset;
+    CPU_CX = (UWORD)(offset >> 16);
+  }
+
+  /* FreeDOS int2f.asm enters the redirector with CF clear. */
+  cf = 0;
+  atapi_trace_fdos(2, cmd, FP_SEG(guest_s)); /* stage 2: guest INT2F entry */
+  bios_intcall(cpu, 0x2f, "FDOS REDIRECTOR");
+  atapi_trace_fdos(3, CPU_AX, cf); /* stage 3: guest INT2F returned */
+
+  const int failed = cf != 0;
+  const UWORD result_ax = CPU_AX;
+  const UWORD result_cx = CPU_CX;
+  const UWORD result_dx = CPU_DX;
+  if (!failed && (cmd == REM_GETSPACE || cmd == REM_GETLARGESPACE) && arg) {
+    UWORD *space = (UWORD *)arg;
+    space[0] = CPU_AX;
+    space[1] = CPU_BX;
+    space[2] = CPU_CX;
+    space[3] = CPU_DX;
+    space[4] = CPU_SI;
+  }
+  CPU_SP = original_sp;
+  cpu_restore_regs(cpu, &saved);
+
+  if (failed)
+    return -(long)result_ax;
+  if (cmd == REM_GETSPACE || cmd == REM_GETLARGESPACE)
+    return SUCCESS;
+  if (cmd == REM_GETATTRZ)
+    return (long)result_ax;
+  if (cmd == REM_LSEEK)
+    return ((long)result_dx << 16) | result_ax;
+  return (long)result_cx;
 }
 
 int network_redirector_fp(unsigned cmd, void *s)
 {
-  UNREFERENCED_PARAMETER(cmd);
-  UNREFERENCED_PARAMETER(s);
-  return -DE_INVLDFUNC;
+  return (int)network_redirector_mx(cmd, s, NULL);
 }
 
-/* Declared in proto.h but never defined until now: the ///-disabled call
-   sites in dosfns.c (REM_GETATTRZ, REM_MKDIR/REM_RMDIR, REM_RENAME, ...)
-   reference it, so they can be re-enabled without a link error. */
 int network_redirector(unsigned cmd)
 {
-  UNREFERENCED_PARAMETER(cmd);
-  return -DE_INVLDFUNC;
+  return (int)network_redirector_mx(cmd, NULL, NULL);
 }
 
 /*
@@ -1755,7 +1828,11 @@ static int dpb_chain_contains(dos_far_ptr needle)
 static void panic_bad_cds_dpb(const char *tag, dos_far_ptr x86_cds,
                               UWORD flags, const char *path, dos_far_ptr cds_dpb)
 {
-  if (far_is_null(cds_dpb) || dpb_chain_contains(cds_dpb))
+  /* Remote CDS entries are owned by the redirector, not by a local
+   * block device.  The original FreeDOS truename() does not validate
+   * their cdsDpb against the local DPB chain. */
+  if ((flags & CDSNETWDRV) || far_is_null(cds_dpb) ||
+      dpb_chain_contains(cds_dpb))
     return;
 
   {

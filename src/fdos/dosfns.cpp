@@ -10,6 +10,8 @@ extern "C" {
 #include "guest_ref.hpp"
 #include "path_guest.h"
 
+extern "C" void atapi_trace_fdos(int stage, int a, int b);
+
 using fdos_guest::cds_ref;
 using fdos_guest::dhdr_ref;
 using fdos_guest::dos_data_ref;
@@ -374,21 +376,20 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
   dpb_watch_check_chain("DosOpenSft 8");
   if (path_kind & IS_NETWORK)
   {
-    return DE_PATHNOTFND;
-    /// TODO:
-  #if 0
     int status;
     unsigned cmd;
     if ((flags & (O_TRUNC | O_CREAT)) == O_CREAT)
       attrib |= 0x100;
 
-    internal_data->lpCurSft = lpCurSft;
+    dosfns_idata.lp_cur_sft(lpCurSft);
     cmd = REM_CREATE;
     if (!(flags & O_LEGACY))
     {
-      internal_data->ext_open_mode = flags & 0x70ff;
-      internal_data->ext_open_attrib = attrib & 0xff;
-      internal_data->ext_open_action = ((flags & 0x0300) >> 8) | ((flags & O_CREAT) >> 6);
+      const uint32_t sda = ((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF;
+      pstore16(sda + offsetof(dos_data, ext_open_mode), flags & 0x70ff);
+      pstore16(sda + offsetof(dos_data, ext_open_attrib), attrib & 0xff);
+      pstore16(sda + offsetof(dos_data, ext_open_action),
+               ((flags & 0x0300) >> 8) | ((flags & O_CREAT) >> 6));
       cmd = REM_EXTOC;
     }
     else if (!(flags & O_CREAT))
@@ -396,15 +397,17 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
       cmd = REM_OPEN;
       attrib = (BYTE)flags;
     }
-    status = (int)network_redirector_mx(cmd, sftp, (void *)(intptr_t)attrib);
+
+    status = (int)network_redirector_mx(
+        cmd, (void *)(uintptr_t)(((uint32_t)FP_SEG(lpCurSft) << 16) | FP_OFF(lpCurSft)), (void *)(uintptr_t)attrib);
     if (status >= SUCCESS)
     {
-      if (sftp->sft_count == 0)
-        sftp->sft_count++;
+      const sft_ref ref(lpCurSft);
+      if (ref.count() == 0)
+        ref.count(1);
       return sft_idx | ((long)status << 16);
     }
     return status;
-    #endif
   }
 
   /* First test the flags to see if the user has passed a valid   */
@@ -663,6 +666,20 @@ long DosRWSft(int sft_idx, size_t n, dos_far_ptr bp, int mode)
   if (mode == XFR_FORCE_WRITE)
     mode = XFR_WRITE;
 
+  if (entry_flags & SFT_FSHARED)
+  {
+    const dos_far_ptr saved_dta = dosfns_idata.dta();
+    dosfns_idata.lp_cur_sft(x86_sft);
+    pstore32(((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF
+             + offsetof(dos_data, current_filepos), sft.position());
+    dosfns_idata.dta(bp);
+    const long count = network_redirector_mx(
+        mode == XFR_READ ? REM_READ : REM_WRITE,
+        (void *)(uintptr_t)(((uint32_t)FP_SEG(x86_sft) << 16) | FP_OFF(x86_sft)), (void *)(uintptr_t)n);
+    dosfns_idata.dta(saved_dta);
+    return count;
+  }
+
   if (entry_flags & SFT_FDEVICE)
   {
     dos_far_ptr dev = sft.dev();
@@ -903,9 +920,8 @@ COUNT DosGetFattr(dos_far_ptr name)
     return 0x10;
 
   set_fcbname_ref(pri_path_ref());
-/// TODO:
-///  if (result & IS_NETWORK)
-///    return network_redirector(REM_GETATTRZ);
+  if (result & IS_NETWORK)
+    return network_redirector(REM_GETATTRZ);
 
   if (result & IS_DEVICE)
     return DE_FILENOTFND;
@@ -958,9 +974,8 @@ COUNT DosMkRmdir(const dos_far_ptr dir, int action)
     return result;
 
   set_fcbname_ref(pri_path_ref());
-/// TODO:
-///  if (result & IS_NETWORK)
-///    return network_redirector(action == 0x39 ? REM_MKDIR : REM_RMDIR);
+  if (result & IS_NETWORK)
+    return network_redirector(action == 0x39 ? REM_MKDIR : REM_RMDIR);
 
   if (result & IS_DEVICE)
     return DE_ACCESS;
@@ -1069,7 +1084,21 @@ UWORD DosGetFree(UBYTE drive, UWORD * navc, UWORD * bps, UWORD * nc)
   const cds_ref cdsp(cdsp_x86);
   dosfns_idata.current_ldt(cdsp_x86);
   if (cdsp.flags() & CDSNETWDRV)
+  {
+    UWORD space[5] = {};
+    if (network_redirector_mx(
+            REM_GETSPACE, (void *)(uintptr_t)(((uint32_t)FP_SEG(cdsp_x86) << 16) | FP_OFF(cdsp_x86)), space) != SUCCESS)
+      return spc;
+    spc = space[0];
+    if (navc != NULL)
+    {
+      *navc = space[3];
+      spc &= 0xffu;
+    }
+    *nc = space[1];
+    *bps = space[2];
     return spc;
+  }
   const dos_far_ptr dpbp_x86 = cdsp.dpb();
   if (far_is_null(dpbp_x86))
     return spc;
@@ -1373,11 +1402,10 @@ COUNT DosChangeDir(dos_far_ptr s)
   if (CDS_WRITABLE(dosfns_idata.current_ldt()) && (fdos_path_len(pri_path_ref(), FDOS_PATHLEN) >= MAX_CDSPATH))
     return DE_PATHNOTFND;
 
-  /// TODO:
-  ///  if (result & IS_NETWORK)
-  ///    return network_redirector(REM_CHDIR);
-
-  result = dos_cd_ref(pri_path_ref());
+  if (result & IS_NETWORK)
+    result = network_redirector(REM_CHDIR);
+  else
+    result = dos_cd_ref(pri_path_ref());
   if (result < SUCCESS)
     return result;
 
@@ -1470,6 +1498,7 @@ COUNT DosFindFirst(UCOUNT attr, dos_far_ptr name)
   dos_far_ptr dta_far = dosfns_idata.dta();
 
   rc = truename_guest(name, pri_path_far(), CDS_MODE_CHECK_DEV_PATH | CDS_MODE_ALLOW_WILDCARDS);
+  atapi_trace_fdos(1, rc, attr); /* stage 1: path resolution result */
   dpb_watch_check_chain("DosFindFirst");
   if (rc < SUCCESS)
     return rc;
@@ -1482,9 +1511,12 @@ COUNT DosFindFirst(UCOUNT attr, dos_far_ptr name)
   guest_fill_block(sda_dmatch_linear(), 0, offsetof(dmatch, dm_attr_fnd));
   guest_fill_block(sda_searchdir_linear(), 0, sizeof(struct dirent));
 
-  /// TODO:
-  ///  if (rc & IS_NETWORK)
-  ///    return network_redirector_fp(REM_FINDFIRST, current_ldt);
+  if (rc & IS_NETWORK)
+  {
+    const int remote_rc = network_redirector_fp(
+        REM_FINDFIRST, (void *)(uintptr_t)(((uint32_t)FP_SEG(dosfns_idata.current_ldt()) << 16) | FP_OFF(dosfns_idata.current_ldt())));
+    return pop_dmp(remote_rc, dta_far);
+  }
 
   if (rc & IS_DEVICE)
   {
@@ -1548,7 +1580,11 @@ COUNT DosFindNext(void)
 
   guest_fill_block(sda_searchdir_linear(), 0, sizeof(struct dirent));
   dosfns_idata.dta(sda_dmatch_far());
-  rc = dos_findnext();
+  if (pload8(sda_dmatch_linear() + offsetof(dmatch, dm_drive)) & 0x80)
+    rc = network_redirector_fp(
+        REM_FINDNEXT, (void *)(uintptr_t)(((uint32_t)FP_SEG(sda_dmatch_far()) << 16) | FP_OFF(sda_dmatch_far())));
+  else
+    rc = dos_findnext();
 
   return pop_dmp(rc, dta_far);
 }

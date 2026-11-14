@@ -60,6 +60,11 @@
 
 #define X86_INTERNAL_DATA_OFF   (0x08F0u + 0x01FBu /*+LoL*/)
 #define x86_INTERNAL_DATA       MK_FP(DOS_PSP, X86_INTERNAL_DATA_OFF) // internal_data
+/* The DOS 4+ SDA begins at ErrorMode, not at struct dos_data.
+ * SHSUCDX derives it as LoL-segment:0320h. */
+_Static_assert(X86_INTERNAL_DATA_OFF + offsetof(struct dos_data, ErrorMode)
+               == 0x08F0u + 0x0320u,
+               "DOS 4+ SDA must be at LoL:0320h");
 
 /*
  * _DATA must begin AFTER the end of internal_data.

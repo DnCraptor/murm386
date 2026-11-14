@@ -970,6 +970,9 @@ COUNT DosCloseSft(int sft_idx, BOOL commitonly)
   fatfs_idata.lp_cur_sft(_s);
 
   const UWORD flags = sftp.flags();
+  if (flags & SFT_FSHARED)
+    return network_redirector_fp(
+        commitonly ? REM_FLUSH : REM_CLOSE, (void *)(uintptr_t)(((uint32_t)FP_SEG(_s) << 16) | FP_OFF(_s)));
   if (flags & SFT_FDEVICE)
   {
     const dos_far_ptr devp = sftp.dev();
