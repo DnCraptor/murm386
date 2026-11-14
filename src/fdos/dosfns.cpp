@@ -10,8 +10,6 @@ extern "C" {
 #include "guest_ref.hpp"
 #include "path_guest.h"
 
-extern "C" void atapi_trace_fdos(int stage, int a, int b);
-
 using fdos_guest::cds_ref;
 using fdos_guest::dhdr_ref;
 using fdos_guest::dos_data_ref;
@@ -1498,7 +1496,6 @@ COUNT DosFindFirst(UCOUNT attr, dos_far_ptr name)
   dos_far_ptr dta_far = dosfns_idata.dta();
 
   rc = truename_guest(name, pri_path_far(), CDS_MODE_CHECK_DEV_PATH | CDS_MODE_ALLOW_WILDCARDS);
-  atapi_trace_fdos(1, rc, attr); /* stage 1: path resolution result */
   dpb_watch_check_chain("DosFindFirst");
   if (rc < SUCCESS)
     return rc;

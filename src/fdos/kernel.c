@@ -8,8 +8,6 @@
 #include "i8254.h"
 #include "core0_stack.h"
 
-void atapi_trace_fdos(int stage, int a, int b);
-
 #define printf(...) dos_printf(__VA_ARGS__)
 CPU* cpu;
 
@@ -1678,9 +1676,7 @@ long network_redirector_mx(unsigned cmd, void *s, void *arg)
 
   /* FreeDOS int2f.asm enters the redirector with CF clear. */
   cf = 0;
-  atapi_trace_fdos(2, cmd, FP_SEG(guest_s)); /* stage 2: guest INT2F entry */
   bios_intcall(cpu, 0x2f, "FDOS REDIRECTOR");
-  atapi_trace_fdos(3, CPU_AX, cf); /* stage 3: guest INT2F returned */
 
   const int failed = cf != 0;
   const UWORD result_ax = CPU_AX;

@@ -72,13 +72,6 @@ void atapi_tlog(const char *fmt, ...)
 #define atapi_tlog(...) (void)0
 #endif
 
-/* Narrow native DOS -> redirector diagnostics, enabled by the existing
- * DEBUG_IDE_ATAPI switch. No additional file or tracing mechanism. */
-void atapi_trace_fdos(int stage, int a, int b)
-{
-    atapi_tlog("FDOS_REDIRECT stage=%d a=%d b=%d\r\n", stage, a, b);
-}
-
 #define MAX_MULT_SECTORS 4
 
 /* Bits of HD_STATUS */
@@ -1162,9 +1155,37 @@ static void ide_atapi_cmd(IDEState *s)
         break;
 
     case GPCMD_READ_SUBCHANNEL:
-        ide_atapi_cmd_error(s, SENSE_ILLEGAL_REQUEST,
-                            ASC_ILLEGAL_OPCODE);
-        atapi_tlog("[%d]  -> UNKNOWN CMD 42\r\n", time_us_32());
+        {
+            /* SFF-8020i: SubQ=0 returns the four-byte header only,
+             * regardless of the selected subchannel data format. */
+            const int alloc = ube16_to_cpu(packet + 7);
+            const int subq = (packet[2] & 0x40) != 0;
+            const int format = packet[3];
+            if (alloc == 0) {
+                ide_atapi_cmd_ok(s);
+                break;
+            }
+            if (subq && format != 1) {
+                ide_atapi_cmd_error(s, SENSE_ILLEGAL_REQUEST,
+                                    ASC_INV_FIELD_IN_CMD_PACKET);
+                break;
+            }
+            memset(buf, 0, 16);
+            buf[1] = 0x15; /* no current audio status */
+            if (subq) {
+                buf[3] = 12; /* current-position block length */
+                buf[4] = 1;  /* current position */
+                buf[5] = 0x14; /* ADR=1, data track */
+                buf[6] = 1;  /* track 1 */
+                buf[7] = 1;  /* index 1 */
+                /* No audio playback. Current data position is LBA 0. */
+                if (packet[1] & 2) {
+                    lba_to_msf(buf + 9, 0);
+                    /* relative MSF starts at 00:00:00 */
+                }
+            }
+            ide_atapi_reply_start(s, subq ? 16 : 4, alloc);
+        }
         break;
     case GPCMD_READ_CDVD_CAPACITY:
         {
