@@ -378,6 +378,8 @@ struct IDEState {
     uint8_t  sense_key;
     uint8_t  asc;
     uint8_t  cdrom_changed;
+    uint8_t  media_event_pending; /* unreported ATAPI media-change event */
+    uint8_t  cd_media_seen; /* at least one medium inserted since IDE init */
 
     /* underlying file (FatFS) */
     FIL*     fp;
@@ -1243,10 +1245,24 @@ static void ide_atapi_cmd(IDEState *s)
 
     case GPCMD_GET_EVENT_STATUS_NOTIFICATION:
         max_len = ube16_to_cpu(packet + 7);
-        if (packet[1] & 1) { /* polled */
-            buf[0] = 0x00; buf[1] = 0x06; buf[2] = 0x00; buf[3] = 0x10;
-            buf[4] = 0x00; buf[5] = 0x00; buf[6] = 0x00; buf[7] = 0x00;
-            ide_atapi_reply_start(s, 8, max_len);
+        if ((packet[1] & 1) && (packet[4] & 0x10)) { /* polled media event */
+            const int changed = s->media_event_pending;
+            const int present = media_present(s);
+            /* MMC media-event descriptor, 8 bytes:
+             * NEA=0, notification class=4 (media), supported class mask=0x10.
+             * Event 4 = media changed; event 0 = no change.
+             * Media status bit 1 = present; bit 0 = tray open. */
+            buf[0] = 0x00; buf[1] = 0x06;
+            buf[2] = 0x04; buf[3] = 0x10;
+            buf[4] = changed ? 0x04 : 0x00;
+            buf[5] = present ? 0x02 : 0x01;
+            buf[6] = 0x00; buf[7] = 0x00;
+            if (max_len == 0) {
+                ide_atapi_cmd_ok(s);
+            } else {
+                ide_atapi_reply_start(s, 8, max_len);
+                s->media_event_pending = 0;
+            }
         } else {
             ide_atapi_cmd_error(s, SENSE_ILLEGAL_REQUEST, ASC_INV_FIELD_IN_CMD_PACKET);
         }
@@ -1881,6 +1897,26 @@ void ide_change_cd(IDEIFState *sif, int drive, FIL *f, int was_present)
     if (!s || s->drive_kind != IDE_CD) return;
 
     s->fp = f;
+    /* Eject clears ata[].iscdrom; the following insert reports
+     * was_present=0. Preserve the device's history instead. */
+    const int media_change = was_present || s->cd_media_seen;
+    if (f)
+        s->cd_media_seen = 1;
+
+    /* Discard PIO state associated with the previous medium. */
+    s->xfer_left = 0;
+    s->xfer_is_write = 0;
+    s->xfer_done = ide_transfer_stop;
+    s->atapi_phase_left = 0;
+    s->atapi_buf_len = 0;
+    s->atapi_buf_pos = 0;
+    s->cd_lba = s->cd_lba_end = 0;
+    s->cd_sector_off = 0;
+    s->status = READY_STAT | SEEK_STAT;
+
+     s->fp = f;
+    if (media_change)
+        s->media_event_pending = 1;
     s->cd_file_sector_size = CD_SECTOR_SIZE;
     s->cd_file_data_offset = 0;
 
@@ -1909,8 +1945,8 @@ void ide_change_cd(IDEIFState *sif, int drive, FIL *f, int was_present)
             (unsigned long)f_size(f),
             (long)(f_size(f) / s->cd_file_sector_size),
             s->cd_file_sector_size, s->cd_file_data_offset);
-        if (was_present) {
-            /* disc swap: signal UA so driver re-reads TOC */
+        if (media_change) {
+            /* disc swap, including reinsertion after separate GUI eject */
             s->sense_key     = SENSE_UNIT_ATTENTION;
             s->asc           = ASC_MEDIUM_MAY_HAVE_CHANGED;
             s->cdrom_changed = 1;
@@ -1931,7 +1967,10 @@ void ide_change_cd(IDEIFState *sif, int drive, FIL *f, int was_present)
         s->cdrom_changed = 1;
         atapi_tlog("  eject -> UA\r\n");
     }
-    ide_set_irq(s);
+    /* Media changes are reported by subsequent ATAPI commands (TUR,
+     * REQUEST SENSE, GET EVENT STATUS NOTIFICATION).  An asynchronous
+     * IRQ here is not the completion of any ATA command and can confuse
+     * guest drivers waiting for a command-specific interrupt. */
 }
 
 PCIDevice *piix3_ide_init(PCIBus *pci_bus, int devfn)

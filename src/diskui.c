@@ -117,6 +117,7 @@ static bool modem_firmware_selected(void);
 static void apply_remaining_and_close(void);
 static void update_reboot_required(void);
 static bool filenames_equal(const char *a, const char *b);
+static bool file_is_iso(const char *filename);
 static void set_pending_filename(int drive_idx, char *name);
 static void set_browser_start_dir(int drive_idx);
 static char *browser_join_path(const char *name);
@@ -157,10 +158,18 @@ static void update_reboot_required(void) {
                       pending_changed[DRIVE_BIOS];
 
     for (int i = DRIVE_ATA0_0; i <= DRIVE_ATA1_1; i++) {
-        if (pending_changed[i]) {
-            reboot_required = true;
-            break;
-        }
+        if (!pending_changed[i])
+            continue;
+
+        /* An existing ATAPI device supports live media eject/insert.
+         * Changing an HDD or converting a slot's device type still
+         * requires rebuilding the IDE device at boot. */
+        if (ata_is_cdrom(i - DRIVE_ATA0_0) &&
+            (!pending_filename[i] || file_is_iso(pending_filename[i])))
+            continue;
+
+        reboot_required = true;
+        break;
     }
 }
 
