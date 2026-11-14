@@ -205,8 +205,11 @@ static void parse_text(topic *t, const uint8_t *rec, DWORD size, int *font, int 
     const char *te = text + len2;
     const uint8_t *p = rec + 0x15, *end = rec + ld1;
     int table = rec[0x14] == 0x23, ncols = 1, row = -1;
-    hlp_clong(&p);
-    hlp_cushort(&p);
+    /* Help 3.0 (type 1) has no compressed paragraph length prefix. */
+    if (rec[0x14] != 1) {
+        hlp_clong(&p);
+        hlp_cushort(&p);
+    }
     if (table && p + 2 <= end) {
         row_fmt *r = (row_fmt *)grow(t->rf, &t->caprf, t->nrf + 1, sizeof(row_fmt));
         if (!r)
@@ -241,9 +244,10 @@ static void parse_text(topic *t, const uint8_t *rec, DWORD size, int *font, int 
                 pc->index = (int16_t)(c >= 0 && c < ncols ? c : col);
             p += 5;
         }
-        if (p + 6 > end)
+        int prefix = rec[0x14] == 1 ? 6 : 4;
+        if (p + prefix + 2 > end)
             break;
-        p += 4;
+        p += prefix;
         unsigned bits = hlp_u16(p);
         p += 2;
         para_fmt *f = (para_fmt *)grow(t->pf, &t->cappf, t->npf + 1, sizeof(para_fmt));
@@ -426,15 +430,13 @@ static int topic_load(topic *t, int page)
                     free(s);
                 }
             }
-        } else if (type == 0x20 || type == 0x23) {
+        } else if (type == 1 || type == 0x20 || type == 0x23) {
             if (scroll != HLP_NONE && pos == scroll)
                 t->scroll_from = t->npc;
             parse_text(t, rec, size, &font, &link);
         }
         free(rec);
-        if (next <= pos)
-            break;
-        pos = next;
+        pos = hlp_topic_next(H, pos, next);
     }
     if (scroll == HLP_NONE)
         t->scroll_from = 0;

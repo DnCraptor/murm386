@@ -78,6 +78,8 @@ uint8_t *hlp_load(hlp_file *h, const char *name, DWORD *len);
 /* n bytes of |TOPIC from a TOPICPOS on, the blocks' headers skipped;
  * the number read */
 DWORD hlp_topic_read(hlp_file *h, DWORD pos, uint8_t *dst, DWORD n);
+/* Next TOPICPOS: absolute in Help 3.1, relative in Help 3.0. */
+DWORD hlp_topic_next(hlp_file *h, DWORD pos, DWORD next);
 /* a record's LinkData2 (dst: size bytes), phrases expanded */
 void hlp_expand(hlp_file *h, const uint8_t *src, DWORD n, uint8_t *dst, DWORD size);
 

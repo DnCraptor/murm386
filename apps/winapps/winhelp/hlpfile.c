@@ -27,6 +27,7 @@
 
 #define BLOCK_IN   0x1000u          /* a |TOPIC block in the file */
 #define BLOCK_OUT  0x4000u          /* ... expanded, at most */
+#define BLOCK_30   0x0800u          /* WinHelp 3.0: uncompressed 2K blocks */
 #define BLOCK_HEAD 12u
 
 /* ---------------------------------------------------------------- numbers */
@@ -229,6 +230,12 @@ static int read_system(hlp_file *h)
     if (h->minor <= 16) {               /* 3.0's: the title after the header */
         lstrcpyn(h->title, (const char *)s + 12, sizeof(h->title));
         free(s);
+        /* Help 3.0 uses |TOMAP offsets (not |SYSTEM record 3). */
+        DWORD nmap;
+        uint8_t *map = hlp_load(h, "|TOMAP", &nmap);
+        if (map && nmap >= 4)
+            h->contents = hlp_u32(map);
+        free(map);
         return 1;
     }
     char *cfg = NULL;
@@ -341,12 +348,14 @@ static int block(hlp_file *h, int b, uint8_t **buf, DWORD *len)
     k = oldest;
     if (!h->cache[k].buf && !(h->cache[k].buf = (uint8_t *)malloc(BLOCK_OUT)))
         return 0;
-    DWORD at = (DWORD)b * BLOCK_IN, n = h->topic_len - at < BLOCK_IN ? h->topic_len - at : BLOCK_IN;
+    DWORD block_in = h->minor <= 16 ? BLOCK_30 : BLOCK_IN;
+    DWORD at = (DWORD)b * block_in;
+    DWORD n = h->topic_len - at < block_in ? h->topic_len - at : block_in;
     static uint8_t in[BLOCK_IN];
     h->cache[k].blk = -1;
     if (n <= BLOCK_HEAD || !read_at(h, h->topic_at + at, in, n))
         return 0;
-    if (h->flags & 4) {
+    if (h->minor > 16 && (h->flags & 4)) {
         h->cache[k].len = lz77(in + BLOCK_HEAD, n - BLOCK_HEAD, h->cache[k].buf, BLOCK_OUT);
     } else {
         memcpy(h->cache[k].buf, in + BLOCK_HEAD, n - BLOCK_HEAD);
@@ -363,8 +372,9 @@ DWORD hlp_topic_read(hlp_file *h, DWORD pos, uint8_t *dst, DWORD n)
 {
     if (pos < BLOCK_HEAD)
         return 0;
-    int b = (int)((pos - BLOCK_HEAD) >> 14);
-    DWORD off = (pos - BLOCK_HEAD) & 0x3fffu, got = 0;
+    DWORD span = h->minor <= 16 ? BLOCK_30 - BLOCK_HEAD : BLOCK_OUT;
+    int b = (int)((pos - BLOCK_HEAD) / span);
+    DWORD off = (pos - BLOCK_HEAD) % span, got = 0;
     while (got < n) {                   /* a record goes on in the next block */
         uint8_t *buf;
         DWORD len;
@@ -381,6 +391,23 @@ DWORD hlp_topic_read(hlp_file *h, DWORD pos, uint8_t *dst, DWORD n)
     return got;
 }
 
+DWORD hlp_topic_next(hlp_file *h, DWORD pos, DWORD next)
+{
+    if (h->minor > 16)
+        return next > pos ? next : HLP_NONE;
+    if (!next || pos < BLOCK_HEAD || next > h->topic_len || next > HLP_NONE - pos)
+        return HLP_NONE;
+    /* WinHelp 3.0 links store a relative delta, including the 12-byte
+     * headers when a link crosses a 2K topic block boundary. */
+    DWORD span = BLOCK_30 - BLOCK_HEAD;
+    DWORD old_block = (pos - BLOCK_HEAD) / span;
+    DWORD result = pos + next;
+    DWORD new_block = (result - BLOCK_HEAD) / span;
+    if (new_block > old_block)
+        result -= (new_block - old_block) * BLOCK_HEAD;
+    return result > pos ? result : HLP_NONE;
+}
+
 /* every topic's header: its offset and place (the chain of records) */
 static int read_pages(hlp_file *h)
 {
@@ -392,7 +419,8 @@ static int read_pages(hlp_file *h)
         if (got < 0x15)
             break;
         DWORD size = hlp_u32(r), next = hlp_u32(r + 12), ld1 = hlp_u32(r + 16);
-        int blk = (int)((pos - BLOCK_HEAD) >> 14);
+        int blk = (int)((pos - BLOCK_HEAD) /
+                        (h->minor <= 16 ? BLOCK_30 - BLOCK_HEAD : BLOCK_OUT));
         if (blk != blk_last) {
             chars = 0;
             blk_last = blk;
@@ -406,7 +434,8 @@ static int read_pages(hlp_file *h)
                 h->pages = p;
                 cap = ncap;
             }
-            h->pages[h->npages].offset = (DWORD)blk * 0x8000u + chars;
+            h->pages[h->npages].offset = h->minor <= 16 ? pos + (DWORD)blk * BLOCK_HEAD :
+                                                      (DWORD)blk * 0x8000u + chars;
             h->pages[h->npages].pos = pos;
             h->npages++;
         } else if ((r[0x14] == 0x20 || r[0x14] == 0x23) && ld1 > 0x15 && got >= 0x15 + 7) {
@@ -414,9 +443,9 @@ static int read_pages(hlp_file *h)
             hlp_clong(&p);
             chars += hlp_cushort(&p);
         }
-        if (next <= pos || size < 0x15)
-            break;                      /* the chain goes on forward */
-        pos = next;
+        if (size < 0x15)
+            break;
+        pos = hlp_topic_next(h, pos, next);
     }
     return h->npages > 0;
 }
@@ -516,13 +545,15 @@ hlp_file *hlp_open(const char *path)
         return NULL;
     }
     h->dir_len = dlen;
-    if (!read_system(h) || (h->flags & 8)) {    /* 2K blocks: Windows 95's compiler */
+    if (!read_system(h) || (h->minor > 16 && (h->flags & 8))) {
+        /* Compressed 2K blocks: Windows 95's compiler, not WinHelp 3.0. */
         hlp_close(h);
         return NULL;
     }
     read_phrases(h);
     h->topic_at = hlp_find(h, "|TOPIC", &h->topic_len);
-    h->nblocks = (int)((h->topic_len + BLOCK_IN - 1) / BLOCK_IN);
+    DWORD block_in = h->minor <= 16 ? BLOCK_30 : BLOCK_IN;
+    h->nblocks = (int)((h->topic_len + block_in - 1) / block_in);
     if (!h->topic_at || !read_pages(h)) {
         hlp_close(h);
         return NULL;

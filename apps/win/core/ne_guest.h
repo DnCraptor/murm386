@@ -85,6 +85,9 @@ typedef struct {
     uint32_t dos_used, ext_used, ext_size, dos_free, dos_free_umb;
 } win_ne_mem_info;
 void win_ne_guest_mem_info(win_ne_mem_info *m);
+/* Largest available extended-memory block, respecting [memory] ext.
+ * Safe from a Win16 thunk: does not call DOS. */
+uint32_t win_ne_guest_free_space(void);
 /* the extended memory given back (WINN ends) */
 void win_ne_guest_mem_end(void);
 

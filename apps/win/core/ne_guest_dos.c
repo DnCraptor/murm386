@@ -31,6 +31,7 @@ static struct {
     void *raw;                      /* malloc's */
 } ext[EXT_BLOCKS];
 static uint32_t ext_used, ext_limit;    /* the bytes they have; at most (0: none) */
+static uint32_t ext_free_initial;       /* snapshot before NE segment allocation */
 static uint32_t ext_lo, ext_hi;         /* where they have been: from, to */
 static int ext_started;
 
@@ -71,6 +72,9 @@ static void ext_start(void)
             kb = kb * 10u + (uint32_t)(*c - '0');
         ext_limit = kb > 0x3fffffu ? 0xffffffffu : kb * 1024u;
     }
+    /* Do not scan the heap from repeated GetFreeSpace/GlobalCompact thunks:
+     * they run with the protected-mode guest active and video running. */
+    ext_free_initial = (uint32_t)malloc_largest_block();
 }
 
 /* a block of the heap above 1M, 16-aligned; 0 if there is none */
@@ -186,6 +190,19 @@ void win_ne_guest_mem_info(win_ne_mem_info *m)
     }
     if (!no_link)
         dos_ax(0x5803, (uint16_t)(link & 0xffu), &cf);
+}
+
+/* Extended-memory availability only: no DOS calls while CR0.PE is set. */
+uint32_t win_ne_guest_free_space(void)
+{
+    ext_start();
+    if (ext_used >= ext_limit)
+        return 0;
+    /* Conservative snapshot-based estimate: allocation itself still checks
+     * the real allocator. No potentially long heap walk per Win16 API call. */
+    uint32_t available = ext_free_initial > ext_used ? ext_free_initial - ext_used : 0;
+    uint32_t allowed = ext_limit - ext_used;
+    return available < allowed ? available : allowed;
 }
 
 /* ---------------------------------------------------------------- the programs' */

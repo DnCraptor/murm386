@@ -1636,8 +1636,12 @@ int ne_kernel_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *d
         *v = 0xffffffffu;
         *dword = 1;
         return 1;
-    case 25: case 169:                  /* GlobalCompact, GetFreeSpace: what DOS has left */
-        *v = 0x00080000u;
+    case 25: case 169:                  /* GlobalCompact, GetFreeSpace */
+#if defined(__arm__) || defined(__thumb__)
+        *v = win_ne_guest_free_space();
+#else
+        *v = 0x00080000u;               /* host-test fallback */
+#endif
         *dword = 1;
         return 1;
     case 37:                            /* GetCurrentPDB: its PSP */
