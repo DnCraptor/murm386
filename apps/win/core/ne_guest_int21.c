@@ -668,6 +668,25 @@ __attribute__((noinline)) uint16_t ne_open_file(args *a, const char *given)
                               sizeof(name))) {
         return a->bad = 1, (uint16_t)HFILE_ERROR;
     }
+    /* WinExec accepts a full program path, but WINN does not change the
+     * process-wide DOS current directory for a new Win16 task.  Installers
+     * such as SETUP.EXE use OpenFile("", OF_PARSE) to find their launch
+     * directory before looking for INSTALL.DAT alongside the executable.
+     * Supply that directory without changing the cwd of other tasks. */
+    if (!(mode & OF_REOPEN) && (mode & OF_PARSE) && !name[0] && a->ctx->path) {
+        const char *path = a->ctx->path;
+        const char *slash = NULL;
+        for (const char *p = path; *p; p++)
+            if (*p == '\\' || *p == '/')
+                slash = p;
+        if (slash) {
+            size_t n = (size_t)(slash - path + 1);
+            if (n < sizeof(name)) {
+                memcpy(name, path, n);
+                name[n] = 0;
+            }
+        }
+    }
     HFILE f = OpenFile(name, &of, mode);
     /* its fields and the name up to its NUL, as KERNEL's copies it: a
      * program may keep the structure in less than its 136 bytes (WRITE.EXE
