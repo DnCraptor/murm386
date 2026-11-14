@@ -127,6 +127,46 @@ int main(void)
     b[0] = 0;
     assert(check_file(path, b, sizeof(b), &info) == WIN_NE_BAD_IMAGE);
     assert(win_ne_scan("/path/that/does/not/exist/NE.EXE", &info, NULL, NULL) == WIN_NE_NO_FILE);
+
+    /* Windows 3.0 RT_NAMETABLE: "WELCOME" names RT_DIALOG #4.
+     * Place RT_NAMETABLE after RT_DIALOG to test order independence. */
+    image(b);
+    uint8_t *h = b + 0x80, *rt = b + 0x100;
+    w16(h + 0x24, 0x80);       /* resource table */
+    w16(h + 0x26, 0xac);       /* end of resource table */
+    w16(rt, 4);               /* 16-byte resource alignment */
+    w16(rt + 2, 0x8005);      /* RT_DIALOG */
+    w16(rt + 4, 1);
+    w16(rt + 10, 0x28);       /* 0x280 */
+    w16(rt + 12, 1);         /* 16 bytes */
+    w16(rt + 16, 0x8004);    /* dialog #4 */
+    w16(rt + 22, 0x800f);    /* RT_NAMETABLE */
+    w16(rt + 24, 1);
+    w16(rt + 30, 0x25);      /* 0x250 */
+    w16(rt + 32, 3);         /* 48 bytes */
+    w16(rt + 36, 0x8001);
+    uint8_t *names = b + 0x250;
+    w16(names, 15);          /* entry length */
+    w16(names + 2, 5);       /* RT_DIALOG */
+    w16(names + 4, 0x8004);
+    memcpy(names + 7, "WELCOME", 8);  /* empty type name, then ID name */
+    memcpy(b + 0x280, "WELCOME DIALOG!", 15);
+    FILE *f = fopen(path, "wb");
+    assert(f && fwrite(b, 1, sizeof(b), f) == sizeof(b));
+    assert(!fclose(f));
+    uint8_t *resource = NULL;
+    uint32_t length, offset;
+    assert(win_ne_resource(path, 5, 0, "WELCOME", &resource, &length) == WIN_NE_OK);
+    assert(length == 16 && !memcmp(resource, "WELCOME DIALOG!", 15));
+    free(resource);
+    assert(win_ne_resource(path, 5, 0, "welcome", &resource, &length) == WIN_NE_OK);
+    free(resource);
+    assert(win_ne_resource(path, 5, 4, NULL, &resource, &length) == WIN_NE_OK);
+    free(resource);
+    assert(win_ne_resource(path, 5, 0, "MISSING", &resource, &length) == WIN_NE_UNRESOLVED);
+    assert(win_ne_resource_place(path, 5, 0, "WELCOME", &offset, &length) == WIN_NE_OK);
+    assert(offset == 0x280 && length == 16);
+
     unlink(path);
     puts("ne: PASS");
     return 0;

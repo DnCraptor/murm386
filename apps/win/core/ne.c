@@ -599,13 +599,62 @@ out:
 
 /* ---------------------------------------------------------------- resources */
 
+/* Windows 3.0 RT_NAMETABLE (type 15): a named resource may have been
+ * assigned a numeric ID by RC. Each entry contains its byte count, type,
+ * numeric ID, then two NUL-terminated strings (type name and resource name).
+ * A numeric lookup of RT_NAMETABLE does not recurse into this function. */
+static uint16_t res_name_alias(const char *path, uint16_t type, const char *name)
+{
+    for (int n = 0;; n++) {
+        uint8_t *data;
+        uint32_t size;
+        if (win_ne_resource_nth(path, 15, n, &data, &size) != WIN_NE_OK)
+            return 0;
+        uint16_t id = 0;
+        for (uint32_t at = 0; size >= 8 && at <= size - 8;) {
+            uint16_t len = rd16(data + at);
+            if (!len || len < 8 || len > size - at)
+                break;
+            const uint8_t *end = data + at + len;
+            const uint8_t *start = data + at + 6;
+            const uint8_t *sep = memchr(start, 0, (size_t)(end - start));
+            if ((rd16(data + at + 2) & 0x7fffu) == type &&
+                (rd16(data + at + 4) & 0x8000u) && sep && sep + 1 < end) {
+                const uint8_t *s = sep + 1;
+                const uint8_t *nul = memchr(s, 0, (size_t)(end - s));
+                if (nul && (size_t)(nul - s) == strlen(name)) {
+                    const char *p = name;
+                    int equal = 1;
+                    while (s < nul) {
+                        char a = (char)*s++, b = *p++;
+                        if (a >= 'a' && a <= 'z') a = (char)(a - 32);
+                        if (b >= 'a' && b <= 'z') b = (char)(b - 32);
+                        if (a != b) {
+                            equal = 0;
+                            break;
+                        }
+                    }
+                    if (equal)
+                        id = rd16(data + at + 4);
+                }
+            }
+            if (id)
+                break;
+            at += len;
+        }
+        free(data);
+        if (id)
+            return id;
+    }
+}
+
 /* A resource's id in the table: high bit, the number; else the offset of
  * its length-prefixed name from the table's start. */
 static int res_id_match(FILE *f, uint64_t size, uint64_t table, uint16_t v,
-                        uint16_t id, const char *name)
+                        uint16_t id, const char *name, uint16_t alias)
 {
     if (v & 0x8000u)
-        return !name && (v & 0x7fffu) == id;
+        return name ? alias && v == alias : (v & 0x7fffu) == id;
     if (!name)
         return 0;
     uint8_t len;
@@ -637,6 +686,7 @@ static int find_resource(const char *path, uint16_t type, uint16_t id, const cha
             id = (uint16_t)(id * 10 + (*p - '0'));
         name = NULL;
     }
+    uint16_t alias = name && nth < 0 ? res_name_alias(path, type, name) : 0;
     FILE *f = path ? fopen(path, "rb") : NULL;
     if (!f)
         return WIN_NE_NO_FILE;
@@ -674,7 +724,7 @@ static int find_resource(const char *path, uint16_t type, uint16_t id, const cha
             if (!read_at(f, size, p, ni, sizeof(ni)))
                 goto out;
             if (!this_type || (nth >= 0 ? nth-- != 0
-                                            : !res_id_match(f, size, table, rd16(ni + 6), id, name)))
+                                            : !res_id_match(f, size, table, rd16(ni + 6), id, name, alias)))
                 continue;
             uint64_t at = (uint64_t)rd16(ni) << shift;
             uint32_t len = (uint32_t)rd16(ni + 2) << shift;
