@@ -13,6 +13,8 @@ extern int hdcount;
 // Disk management functions
 void ejectdisk(uint8_t drivenum, bool is_fdd);
 uint8_t insertdisk(uint8_t drivenum, bool is_fdd, bool is_cd, const char *pathname);
+/* Classify .img/.bin by CD sector signature, not by previous IDE device type. */
+bool disk_image_is_cd(const char *filename);
 void disk_set_cpu(CPU *cpu);
 // Disk UI API functions
 uint8_t ata_is_inserted(uint8_t drivenum);
@@ -28,6 +30,7 @@ void disk_set_cdrom_change_callback(void (*cb)(int drive, const char *filename, 
 
 struct VGAState;
 void disk_set_vga(struct VGAState *vga);
+void disk_set_cdrom(uint8_t drivenum, uint8_t iscdrom);
 uint8_t ata_is_cdrom(uint8_t drivenum);
 /* Map dense BIOS HDD index (0 = 80h) to physical ATA slot 0..3. */
 int8_t ata_hdd_slot(uint8_t bios_index);

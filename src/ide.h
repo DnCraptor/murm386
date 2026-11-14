@@ -43,6 +43,8 @@ int ide_attach_cd(IDEIFState *s, int drive);
 
 /* Returns non-zero if a drive (0=master, 1=slave) is attached */
 int ide_has_drive(IDEIFState *s, int drive);
+/* Actual attached device type, independent of removable media state. */
+int ide_is_cd_drive(IDEIFState *s, int drive);
 
 /* Hot-swap CD image: pass open FIL* on insert, NULL to eject */
 void ide_change_cd(IDEIFState *sif, int drive, FIL *f, int was_present);

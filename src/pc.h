@@ -148,6 +148,8 @@ typedef struct {
 
 PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	   u8 *fb, PCConfig *conf);
+/* Hardware type for ATA slot 0..3, regardless of the inserted file. */
+int pc_ata_is_cd_device(int ata_slot);
 
 // XXX: still contains ESP32-specific logic
 void pc_vga_step(void *o);

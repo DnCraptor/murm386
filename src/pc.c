@@ -1372,6 +1372,15 @@ static void fdc_mediachange_notify(int drive) {
  *   ata[3] -> ide2, drive 1  (secondary slave)
  */
 static PC *_pc_for_cdrom = NULL;
+
+int pc_ata_is_cd_device(int ata_slot)
+{
+    if (!_pc_for_cdrom || ata_slot < 0 || ata_slot >= 4)
+        return 0;
+    IDEIFState *ide = ata_slot < 2 ? _pc_for_cdrom->ide : _pc_for_cdrom->ide2;
+    return ide_is_cd_drive(ide, ata_slot & 1);
+}
+
 static void cdrom_change_notify(int drivenum, const char *filename, int was_present) {
     if (!_pc_for_cdrom) return;
     IDEIFState *ide = drivenum < 2 ? _pc_for_cdrom->ide : _pc_for_cdrom->ide2;
@@ -1450,13 +1459,20 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	_pc_for_cdrom = pc;
 	disk_set_cdrom_change_callback(cdrom_change_notify);
 
-	/* Attach hard disks and configured CD-ROMs.
-	 * ide_attach_cd MUST come before insertdisk for CD slots: insertdisk
-	 * immediately fires disk_cdrom_change_cb which calls ide_change_cd,
-	 * and that requires drives[n] to already exist. */
+	/* An absent ATA entry is an empty slot (no device).  A cdX= entry
+	 * with an empty value creates an ATAPI device without media. */
 	for (int i = 0; i < 4; i++) {
-		if (!conf->ata[i] || conf->ata[i][0] == 0)
+		if (!conf->ata[i] || conf->ata[i][0] == 0) {
+			if (conf->iscd[i]) {
+				IDEIFState *ide = i < 2 ? pc->ide : pc->ide2;
+				ide_attach_cd(ide, i & 1);
+				disk_set_cdrom(i, 1);
+			}
 			continue;
+		}
+		/* Repair cdX= entries written for HDD .img/.bin by older builds. */
+		if (conf->iscd[i] && !disk_image_is_cd(conf->ata[i]))
+			conf->iscd[i] = 0;
 		if (conf->iscd[i]) {
 			/* Attach ATAPI slot first, then open the image */
 			if (i < 2)
@@ -1479,14 +1495,6 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	}
 
 	disk_set_raw_sd_hdd(conf->raw_sd_hdd);
-
-	/* CD-ROM E: always present on ide2/drive0 (secondary master).
-	 * Only attach if cdc= didn't already claim that slot (ata[2]). */
-	if (!ide_has_drive(pc->ide2, 0))
-		ide_attach_cd(pc->ide2, 0);
-
-
-
 	ide_fill_cmos(pc->ide, pc->cmos, cmos_set);
 
 	/* CMOS 0x10 — типы FDD (4 = 1.44M 3.5") */

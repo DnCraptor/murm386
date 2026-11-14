@@ -1886,6 +1886,11 @@ int ide_has_drive(IDEIFState *s, int drive)
     return s && drive >= 0 && drive < 2 && s->drives[drive] != NULL;
 }
 
+int ide_is_cd_drive(IDEIFState *s, int drive)
+{
+    return ide_has_drive(s, drive) && s->drives[drive]->drive_kind == IDE_CD;
+}
+
 /* Hot-swap CD image: pass open FIL* on insert, NULL to eject.
  * was_present: 1 if a disc was loaded before this call (for correct UA signalling
  * when eject+insert happen back-to-back without the guest seeing the empty tray). */

@@ -624,6 +624,10 @@ bool config_save_all(void) {
             char key[5];
             snprintf(key, sizeof(key), ata_is_cdrom(i) ? "cd%c=" : "hd%c=", 'a' + i);
             write_file_key_value(&fp, key, fname);
+        } else if (ata_is_cdrom(i)) {
+            /* A CD-ROM drive without a disc must survive reboot. */
+            snprintf(line, sizeof(line), "cd%c=\r\n", 'a' + i);
+            write_line(&fp, line);
         }
     }
 

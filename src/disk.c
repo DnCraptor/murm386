@@ -4,6 +4,7 @@
  */
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <stdlib.h>
 #include <hardware/gpio.h>
 #include "i386.h"
@@ -20,6 +21,51 @@ extern FATFS fs;
 int hdcount = 0;
 
 static uint8_t sectorbuffer[512] __attribute__((aligned(4)));
+
+/* A .bin/.img may be either an HDD image or an optical image.  Detect
+ * raw Mode 1 sync or an ISO9660 Primary Volume Descriptor; do not infer
+ * device type from the slot previously occupied by a CD-ROM. */
+bool disk_image_is_cd(const char *filename)
+{
+    if (!filename) return false;
+    const char *ext = strrchr(filename, '.');
+    if (!ext) return false;
+    if (strcasecmp(ext, ".iso") == 0) return true;
+    if (strcasecmp(ext, ".img") != 0 &&
+        strcasecmp(ext, ".bin") != 0) return false;
+
+    char path[FF_LFN_BUF + 1 + sizeof(SD_DATA_DIR_SLASH)];
+    if (strchr(filename, '/') || strchr(filename, '\\') ||
+        (filename[0] && filename[1] == ':'))
+        snprintf(path, sizeof(path), "%s", filename);
+    else
+        snprintf(path, sizeof(path), SD_DATA_DIR_SLASH "%s", filename);
+
+    FIL file;
+    if (f_open(&file, path, FA_READ) != FR_OK) return false;
+    bool is_cd = false;
+    UINT br = 0;
+    uint8_t hdr[16];
+    if (f_size(&file) >= 2352 && f_size(&file) % 2352u == 0 &&
+        f_read(&file, hdr, sizeof(hdr), &br) == FR_OK &&
+        br == sizeof(hdr) && hdr[0] == 0 && hdr[11] == 0 &&
+        hdr[15] == 1) {
+        is_cd = true;
+        for (int j = 1; j <= 10; j++)
+            if (hdr[j] != 0xff) is_cd = false;
+    }
+    if (!is_cd && f_size(&file) >= 17u * 2048u &&
+        f_lseek(&file, 16u * 2048u) == FR_OK) {
+        uint8_t pvd[6];
+        br = 0;
+        if (f_read(&file, pvd, sizeof(pvd), &br) == FR_OK &&
+            br == sizeof(pvd) && pvd[0] == 1 &&
+            memcmp(pvd + 1, "CD001", 5) == 0)
+            is_cd = true;
+    }
+    f_close(&file);
+    return is_cd;
+}
 
 static uint8_t raw_sd_hdd_mode = RAW_SD_HDD_OFF;
 static uint32_t raw_sd_hdd_sectors = 0;
@@ -142,11 +188,11 @@ void ejectdisk(uint8_t drivenum, bool is_fdd) {
         return;
     }
     if (drivenum < 4 && ata[drivenum].iscdrom && ata[drivenum].name) {
-        /* ATA eject: CD (from GUI or insertdisk) */
+        /* ATA eject: remove the medium, not the ATAPI device. */
         f_close(&ata[drivenum].fil);
         free(ata[drivenum].name);
         ata[drivenum].name = 0;
-        ata[drivenum].iscdrom = 0;
+        /* Keep iscdrom: an empty drive is still an ATAPI CD-ROM. */
         ata[drivenum].usable_size = 0;
         ata[drivenum].cyls = 0;
         ata[drivenum].heads = 0;
@@ -250,6 +296,8 @@ uint8_t insertdisk(uint8_t drivenum, bool is_fdd, bool is_cd, const char *pathna
     uint16_t cyls = 0, heads = 0, sects = 0, drive_type = 47;
     if (!is_fdd) {  // Hard disk
         ata[drivenum].name = new_name;
+        /* Preserve HDD type after replacing a CD in the same slot. */
+        ata[drivenum].iscdrom = 0;
         sects = 63;
         heads = 16;
         // Try to detect geometry from MBR partition table.

@@ -11,6 +11,7 @@
 #include "diskui.h"
 #include "vga_osd.h"
 #include "disk.h"
+#include "pc.h"
 #include "config_save.h"
 #include "espflash.h"
 #ifdef USB_HID_ENABLED
@@ -57,6 +58,9 @@ static int file_scroll_offset = 0;
 
 // Pending changes: track what the user wants for each drive
 // NULL = eject/native BIOS, non-NULL = full selected filename
+/* Internal selection marker: an ATAPI device with no inserted medium.
+ * Unlike NULL ([empty]), it is saved as cdX= in config.ini. */
+#define CDROM_EMPTY "[CD-ROM]"
 static char *pending_filename[DRIVE_TOTAL];
 static bool pending_changed[DRIVE_TOTAL];  // true if user modified this drive
 static bool reboot_required;               // derived from pending reboot-only changes
@@ -118,6 +122,7 @@ static void apply_remaining_and_close(void);
 static void update_reboot_required(void);
 static bool filenames_equal(const char *a, const char *b);
 static bool file_is_iso(const char *filename);
+static bool file_is_cd_for_slot(int ata_slot, const char *filename);
 static void set_pending_filename(int drive_idx, char *name);
 static void set_browser_start_dir(int drive_idx);
 static char *browser_join_path(const char *name);
@@ -146,7 +151,9 @@ static const char *get_drive_filename(int drive_idx) {
     } else if (drive_idx < 2) {
         return fdd_get_filename(drive_idx);      // FDD-0 / FDD-1
     } else if (drive_idx >= DRIVE_ATA0_0 && drive_idx <= DRIVE_ATA1_1) {
-        return ata_get_filename(drive_idx - 2);  // ATA0-0 .. ATA1-1
+        int slot = drive_idx - DRIVE_ATA0_0;
+        const char *name = ata_get_filename(slot);
+        return name ? name : (ata_is_cdrom(slot) ? CDROM_EMPTY : NULL);
     }
     return NULL;                                 // SD-CARD / USB toggles: no file
 }
@@ -161,11 +168,12 @@ static void update_reboot_required(void) {
         if (!pending_changed[i])
             continue;
 
-        /* An existing ATAPI device supports live media eject/insert.
-         * Changing an HDD or converting a slot's device type still
-         * requires rebuilding the IDE device at boot. */
-        if (ata_is_cdrom(i - DRIVE_ATA0_0) &&
-            (!pending_filename[i] || file_is_iso(pending_filename[i])))
+        /* The live IDE device type, not the image metadata, determines
+         * whether removable media can be changed without rebooting. */
+        int ata_slot = i - DRIVE_ATA0_0;
+        if (pc_ata_is_cd_device(ata_slot) && pending_filename[i] &&
+            (strcmp(pending_filename[i], CDROM_EMPTY) == 0 ||
+             file_is_cd_for_slot(ata_slot, pending_filename[i])))
             continue;
 
         reboot_required = true;
@@ -203,6 +211,13 @@ static bool file_is_iso(const char *filename) {
     if (!ext) return false;
     if (strcasecmp(ext, ".iso") == 0) return true;
     return false;
+}
+
+/* The file's content, not the previous device in this slot, determines
+ * whether .img/.bin is optical media or an ordinary HDD image. */
+static bool file_is_cd_for_slot(int ata_slot, const char *filename) {
+    (void)ata_slot;
+    return disk_image_is_cd(filename);
 }
 
 // Returns true if the extension is valid for the given drive type.
@@ -512,7 +527,7 @@ static void draw_main_menu(void) {
 
         if (i == DRIVE_BIOS || i == DRIVE_ESP_FW) {
             osd_print(MENU_X + MENU_W - 12, y, "[Select]", attr);
-        } else if (filename) {
+        } else if (filename && strcmp(filename, CDROM_EMPTY) != 0) {
             osd_print(MENU_X + MENU_W - 12, y, "[Eject] ", attr);
         } else {
             osd_print(MENU_X + MENU_W - 12, y, "[Select]", attr);
@@ -700,6 +715,8 @@ static void browser_parent_dir(void) {
 
 static int browser_special_count(int drive_idx) {
     int count = 0;
+    if (drive_idx >= DRIVE_ATA0_0 && drive_idx <= DRIVE_ATA1_1)
+        count += 2; /* [empty] and [CD-ROM] */
     if (drive_idx == DRIVE_BIOS || drive_idx == DRIVE_ESP_FW) count++;
     if (browser && browser->dir_path && strcmp(browser->dir_path, "/") != 0) count++;
     return count;
@@ -710,6 +727,17 @@ static bool browser_get_entry(int index, const char **name, bool *is_dir, bool *
     int drive_idx = selected_row;
 
     if (!browser || !browser->dir_path || index < 0) return false;
+
+    if (drive_idx >= DRIVE_ATA0_0 && drive_idx <= DRIVE_ATA1_1) {
+        if (index == pos) {
+            *name = "[empty]"; *is_dir = false; *is_special = true; return true;
+        }
+        pos++;
+        if (index == pos) {
+            *name = CDROM_EMPTY; *is_dir = false; *is_special = true; return true;
+        }
+        pos++;
+    }
 
     if (drive_idx == DRIVE_BIOS) {
         if (index == pos) {
@@ -805,7 +833,10 @@ static void select_file(void) {
     }
 
     char *name = NULL;
-    if (!is_special) {
+    if (is_special && strcmp(entry_name, CDROM_EMPTY) == 0) {
+        name = strdup(CDROM_EMPTY);
+        if (!name) return;
+    } else if (!is_special) {
         name = browser_join_path(entry_name);
         if (!name) return;
     }
@@ -823,7 +854,13 @@ static void select_file(void) {
 
 static void eject_pending(void) {
     int drive_idx = selected_row;
-    set_pending_filename(drive_idx, NULL);
+    char *empty_cd = NULL;
+    if (drive_idx >= DRIVE_ATA0_0 && drive_idx <= DRIVE_ATA1_1 &&
+        pc_ata_is_cd_device(drive_idx - DRIVE_ATA0_0)) {
+        empty_cd = strdup(CDROM_EMPTY);
+        if (!empty_cd) return;
+    }
+    set_pending_filename(drive_idx, empty_cd);
 
     draw_main_menu();
 }
@@ -891,6 +928,7 @@ static void apply_remaining_and_close(void)
                 ejectdisk(i, true);
             } else if (i >= DRIVE_ATA0_0 && i <= DRIVE_ATA1_1) {
                 ejectdisk(i - 2, false);
+                disk_set_cdrom(i - DRIVE_ATA0_0, 0); /* remove the device */
             }
         } else {
             if (i == DRIVE_BIOS) {
@@ -898,9 +936,14 @@ static void apply_remaining_and_close(void)
             } else if (i < 2) {
                 insertdisk(i, true, false, pending_filename[i]);
             } else if (i >= DRIVE_ATA0_0 && i <= DRIVE_ATA1_1) {
-                int ata_index = i - 2;
-                bool is_cdrom = file_is_iso(pending_filename[i]);
-                insertdisk(ata_index, false, is_cdrom, pending_filename[i]);
+                int ata_index = i - DRIVE_ATA0_0;
+                if (strcmp(pending_filename[i], CDROM_EMPTY) == 0) {
+                    ejectdisk(ata_index, false);
+                    disk_set_cdrom(ata_index, 1);
+                } else {
+                    bool is_cdrom = file_is_cd_for_slot(ata_index, pending_filename[i]);
+                    insertdisk(ata_index, false, is_cdrom, pending_filename[i]);
+                }
             }
         }
     }
@@ -1012,7 +1055,8 @@ bool diskui_handle_key(int keycode, bool is_down) {
                     if (selected_row == DRIVE_USB_MODE) { toggle_usb_mode(); break; }
                     if (selected_row == DRIVE_NATIVE_DOS) { toggle_native_dos(); break; }
                     const char *filename = get_display_filename(selected_row);
-                    if (selected_row == DRIVE_BIOS || selected_row == DRIVE_ESP_FW || !filename) {
+                    if (selected_row == DRIVE_BIOS || selected_row == DRIVE_ESP_FW || !filename ||
+                        strcmp(filename, CDROM_EMPTY) == 0) {
                         set_browser_start_dir(selected_row);
                         scan_disk_images(selected_row);
                         menu_state = MENU_FILE_BROWSER;
