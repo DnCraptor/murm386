@@ -667,10 +667,14 @@ int WINAPI WinFindFilesN(LPCSTR spec, UINT attr, WINFIND_N *out, int max)
 
 BOOL WINAPI DeleteFileN(LPCSTR path)
 {
+    char absolute[256];
+    if (!win_file_resolve(path, absolute, sizeof(absolute)) ||
+        task_ne_image_in_use(absolute))
+        return FALSE;
 #ifdef FILE_HOST
-    return path && !unlink(host_path(path));
+    return !unlink(host_path(absolute));
 #else
-    return dos_path_op(0x41, path);
+    return dos_path_op(0x41, absolute);
 #endif
 }
 

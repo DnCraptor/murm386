@@ -517,6 +517,25 @@ static int run_ne_app(wtask *t)
 }
 #endif
 
+/* A running Win16/Win32 module must stay on disk: the NE resource loader
+ * reopens its file for FindResource/LoadResource, even after WinExec has
+ * finished its initial staging. The caller may try to delete a temporary
+ * installer immediately after starting it. */
+BOOL task_ne_image_in_use(LPCSTR path)
+{
+#ifdef TASK_NE
+    if (!path)
+        return FALSE;
+    for (wtask *t = tasks; t; t = t->next)
+        if (t->state != WTASK_DEAD && t->run == run_ne_app && t->module &&
+            !lstrcmpi((LPCSTR)t->module, path))
+            return TRUE;
+#else
+    (void)path;
+#endif
+    return FALSE;
+}
+
 /* "PROG.EXE args" -> program file and argument text */
 static void split_cmd(LPCSTR cmd, char *prog, int psize, const char **args)
 {

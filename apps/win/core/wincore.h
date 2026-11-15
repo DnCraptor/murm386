@@ -430,6 +430,7 @@ void   task_init(void);
 wtask *task_current(void);
 wtask *task_set_dispatch_owner(wtask *owner); /* returns previous owner */
 wtask *task_kernel(void);
+BOOL   task_ne_image_in_use(LPCSTR absolute_path);
 HTASK  task_next(HTASK h);                  /* 0: the first; 0 after the last */
 wtask *task_from_handle(HTASK h);
 wtask *task_create(const char *name, int (*run)(wtask *), uint32_t stack_size);
