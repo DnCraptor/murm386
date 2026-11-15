@@ -6,27 +6,36 @@
 #include <string.h>
 #include "user.h"
 
-static wwnd *find_paint_in(wwnd *w, HTASK task)
+/* With a filtered GetMessage/PeekMessage, skip dirty windows outside the
+ * filter instead of letting the first such window hide all matching paints. */
+static wwnd *find_paint_in(wwnd *w, HTASK task, HWND filter)
 {
     for (; w; w = w->next) {
         if (!(w->style & WS_VISIBLE) || (w->task && w->task != task))
             continue;
-        if (w->update.n || w->ncpaint)
+        if ((w->update.n || w->ncpaint) &&
+            (!filter || w->h == filter || IsChild(filter, w->h)))
             return w;
-        wwnd *c = find_paint_in(w->child, task);
+        wwnd *c = find_paint_in(w->child, task, filter);
         if (c)
             return c;
     }
     return NULL;
 }
 
-wwnd *user_find_paint(HTASK task)
+wwnd *user_find_paint_for(HTASK task, HWND filter)
 {
     if (U.shutting_down || !U.desktop)
         return NULL;
-    if (U.desktop->update.n || U.desktop->ncpaint)
+    if ((U.desktop->update.n || U.desktop->ncpaint) &&
+        (!filter || filter == U.desktop->h))
         return U.desktop;
-    return find_paint_in(U.desktop->child, task);
+    return find_paint_in(U.desktop->child, task, filter);
+}
+
+wwnd *user_find_paint(HTASK task)
+{
+    return user_find_paint_for(task, 0);
 }
 
 /* ---------------------------------------------------------------- DCs */

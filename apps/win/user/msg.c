@@ -747,8 +747,8 @@ static int get_one(MSG *out, HWND h, UINT first, UINT last, int remove)
     if (me->quit)
         return quit_message(out, me, remove);
     if (!first || (WM_PAINT >= first && WM_PAINT <= last)) {
-        wwnd *w = user_find_paint(me->h);
-        if (w && (!h || w->h == h || IsChild(h, w->h))) {
+        wwnd *w = user_find_paint_for(me->h, h);
+        if (w) {
             memset(out, 0, sizeof(*out));
             out->hwnd = w->h;
             out->message = WM_PAINT;

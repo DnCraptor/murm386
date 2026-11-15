@@ -120,6 +120,7 @@ int     user_pump_one(void);        /* modal loops: one message, 0 on WM_QUIT */
 
 /* paint.c */
 wwnd   *user_find_paint(HTASK task);    /* desktop windows count for any task */
+wwnd   *user_find_paint_for(HTASK task, HWND filter); /* filtered WM_PAINT */
 HDC     user_get_dc(wwnd *w, int whole, const wrgn *limit);
 
 /* nc.c */

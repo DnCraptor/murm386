@@ -1102,7 +1102,9 @@ BOOL WINAPI MoveWindow(HWND h, int x, int y, int cx, int cy, BOOL repaint)
                         (repaint ? 0 : SWP_NOREDRAW));
 }
 
-/* Owned windows stay above their owner. */
+/* Raise owners before their popups, oldest popup first.  Raising the
+ * newest first reverses z-order and leaves a modal popup behind an older,
+ * disabled dialog.  Repeat recursively for dialogs owned by dialogs. */
 void user_bring_to_top(wwnd *w)
 {
     if (!w || !w->parent)
@@ -1110,22 +1112,18 @@ void user_bring_to_top(wwnd *w)
     SetWindowPos(w->h, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     if (w->style & WS_CHILD)
         return;
-    for (int again = 1; again;) {
-        again = 0;
+    for (;;) {
+        wwnd *lowest = NULL;
+        int below_owner = 0;
         for (wwnd *o = U.desktop->child; o; o = o->next) {
-            if (o->owner != w || o == U.desktop->child)
-                continue;
-            /* o must be above w */
-            int above = 0;
-            for (wwnd *s = U.desktop->child; s && s != w; s = s->next)
-                if (s == o)
-                    above = 1;
-            if (!above) {
-                SetWindowPos(o->h, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-                again = 1;
-                break;
-            }
+            if (o == w)
+                below_owner = 1;
+            else if (below_owner && o->owner == w)
+                lowest = o;
         }
+        if (!lowest)
+            break;
+        user_bring_to_top(lowest);
     }
 }
 
