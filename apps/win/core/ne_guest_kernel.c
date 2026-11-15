@@ -157,58 +157,82 @@ static uint16_t module_handle(args *a, uint32_t far)
 static int resource_index(ne_user *u, uint16_t h)
 {
     int i = h - RESOURCE_HANDLE(0);
-    return i >= 0 && i < NE_RESOURCES && u->res[i].type ? i : -1;
+    return i >= 0 && i < NE_RESOURCES && (u->res[i].type || u->res[i].type_name[0]) ? i : -1;
 }
 
 static int resource_bytes(args *a, ne_user *u, int i, uint8_t **d, uint32_t *n)
 {
-    return win_ne_resource(win_ne_guest_path_of(a->ctx->image, u->res[i].inst, a->ctx->path),
-                           u->res[i].type, u->res[i].id,
-                           u->res[i].name[0] ? u->res[i].name : NULL, d, n) == WIN_NE_OK;
+    const char *path = win_ne_guest_path_of(a->ctx->image, u->res[i].inst, a->ctx->path);
+    const char *name = u->res[i].name[0] ? u->res[i].name : NULL;
+    return (u->res[i].type_name[0] ?
+            win_ne_resource_named_type(path, u->res[i].type_name, u->res[i].id, name, d, n) :
+            win_ne_resource(path, u->res[i].type, u->res[i].id, name, d, n)) == WIN_NE_OK;
 }
 
-/* FindResource(HINSTANCE, LPCSTR name, LPCSTR type): numbered types (or
- * "#n"); names or numbers */
+/* Query the file offset and length without loading large embedded EXEs into
+ * the native heap solely to check their existence or size. */
+static int resource_place(args *a, ne_user *u, int i, uint32_t *place, uint32_t *size)
+{
+    const char *path = win_ne_guest_path_of(a->ctx->image, u->res[i].inst, a->ctx->path);
+    const char *name = u->res[i].name[0] ? u->res[i].name : NULL;
+    return (u->res[i].type_name[0] ?
+            win_ne_resource_named_type_place(path, u->res[i].type_name, u->res[i].id,
+                                             name, place, size) :
+            win_ne_resource_place(path, u->res[i].type, u->res[i].id,
+                                  name, place, size)) == WIN_NE_OK;
+}
+
+/* FindResource(HINSTANCE, LPCSTR name, LPCSTR type): numeric and named
+ * resource types, each with numeric or named resource IDs. */
 static uint16_t find_resource(args *a, ne_user *u)
 {
     uint32_t type_far = dw(a, 4), name_far = dw(a, 8);
     uint16_t inst = w(a, 12);
     const char *path = win_ne_guest_path_of(a->ctx->image, inst, a->ctx->path);
-    char name[32], type[16];
+    char name[32], type[16] = "";
     uint16_t t = (uint16_t)type_far, id = (uint16_t)name_far;
     if (a->bad)
         return 0;
     if (type_far >> 16) {
-        if (!str_(a, type_far, type, sizeof(type)) || type[0] != '#')
-            return 0;                   /* a type by its name: not here */
-        t = 0;
-        for (const char *p = type + 1; *p >= '0' && *p <= '9'; p++)
-            t = (uint16_t)(t * 10 + (*p - '0'));
+        if (!str_(a, type_far, type, sizeof(type)))
+            return 0;
+        if (type[0] == '#') {
+            t = 0;
+            for (const char *p = type + 1; *p >= '0' && *p <= '9'; p++)
+                t = (uint16_t)(t * 10 + (*p - '0'));
+        } else {
+            t = 0;                     /* named type; kept in type_name */
+        }
     }
+    const char *type_name = type[0] && type[0] != '#' ? type : NULL;
     name[0] = 0;
     if ((name_far >> 16) && !str_(a, name_far, name, sizeof(name)))
         return 0;
     int free_slot = -1;
     for (int i = 0; i < NE_RESOURCES; i++) {
-        if (!u->res[i].type) {
+        if (!u->res[i].type && !u->res[i].type_name[0]) {
             if (free_slot < 0)
                 free_slot = i;
         } else if (u->res[i].type == t && u->res[i].id == (name[0] ? 0 : id) &&
                    !lstrcmpi(u->res[i].name, name) &&
+                   !lstrcmpi(u->res[i].type_name, type_name ? type_name : "") &&
                    win_ne_guest_path_of(a->ctx->image, u->res[i].inst, a->ctx->path) == path) {
             return RESOURCE_HANDLE(i);
         }
     }
-    uint8_t *d;
-    uint32_t n;
-    if (free_slot < 0 || win_ne_resource(path, t, name[0] ? 0 : id,
-                                         name[0] ? name : NULL, &d, &n) != WIN_NE_OK)
+    uint32_t place, n;
+    if (free_slot < 0 ||
+        (type_name ? win_ne_resource_named_type_place(path, type_name, name[0] ? 0 : id,
+                                                      name[0] ? name : NULL, &place, &n) :
+                     win_ne_resource_place(path, t, name[0] ? 0 : id,
+                                           name[0] ? name : NULL, &place, &n)) != WIN_NE_OK)
         return 0;
-    free(d);
     u->res[free_slot].type = t;
     u->res[free_slot].id = name[0] ? 0 : id;
     u->res[free_slot].inst = inst;
     lstrcpyn(u->res[free_slot].name, name, sizeof(u->res[free_slot].name));
+    lstrcpyn(u->res[free_slot].type_name, type_name ? type_name : "",
+             sizeof(u->res[free_slot].type_name));
     return RESOURCE_HANDLE(free_slot);
 }
 
@@ -221,8 +245,11 @@ static uint16_t load_resource(args *a, ne_user *u)
     if (i < 0 || !resource_bytes(a, u, i, &d, &n))
         return 0;
     win_ne_guest_image *g = (win_ne_guest_image *)a->ctx->image;
-    uint16_t sel = n <= 65536u ? win_ne_guest_global_alloc(g, n ? n : 1) : 0;
-    if (sel && !win_ne_write(a->ctx, sel, 0, d, n)) {
+    uint16_t sel = win_ne_guest_global_alloc(g, n ? n : 1);
+    win_ne_guest_segment *block = sel ? win_ne_guest_global(g, sel) : NULL;
+    /* A resource may span several 64K descriptors. Copy into the single
+     * backing allocation, not through a 16-bit far pointer's first tile. */
+    if (sel && (!block || !g->io.write(g->opaque, block->linear, d, n))) {
         win_ne_guest_global_free(g, sel);
         sel = 0;
     }
@@ -1678,10 +1705,9 @@ int ne_kernel_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *d
         return 1;
     case 65: {                          /* SizeofResource(HINSTANCE, HRSRC) */
         int i = resource_index(u, w(a, 4));
-        uint8_t *d;
-        uint32_t n = 0;
-        if (i >= 0 && resource_bytes(a, u, i, &d, &n))
-            free(d);
+        uint32_t place, n = 0;
+        if (i >= 0 && !resource_place(a, u, i, &place, &n))
+            n = 0;
         *v = n;
         *dword = 1;
         return 1;
@@ -1691,14 +1717,13 @@ int ne_kernel_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *d
         uint32_t n = service == 66 ? dw(a, 4) : w(a, 4);
         if (service == 66) {            /* at least the resource's */
             int i = resource_index(u, w(a, 8));
-            uint8_t *d;
-            uint32_t size = 0;
-            if (i >= 0 && resource_bytes(a, u, i, &d, &size))
-                free(d);
+            uint32_t place, size = 0;
+            if (i >= 0)
+                resource_place(a, u, i, &place, &size);
             if (size > n)
                 n = size;
         }
-        *v = n && n <= 65536u ? win_ne_guest_global_alloc(g, n) : 0;
+        *v = n ? win_ne_guest_global_alloc(g, n) : 0;
         return 1;
     }
     case 64: {                          /* AccessResource(HINSTANCE, HRSRC): the module's
@@ -1708,9 +1733,7 @@ int ne_kernel_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *d
         HFILE f = HFILE_ERROR;
         const char *path = i >= 0 ? win_ne_guest_path_of(a->ctx->image, u->res[i].inst,
                                                          a->ctx->path) : NULL;
-        if (path && win_ne_resource_place(path, u->res[i].type, u->res[i].id,
-                                          u->res[i].name[0] ? u->res[i].name : NULL,
-                                          &place, &size) == WIN_NE_OK &&
+        if (path && resource_place(a, u, i, &place, &size) &&
             (f = _lopen(path, OF_READ)) != HFILE_ERROR && _llseek(f, (LONG)place, 0) != (LONG)place) {
             _lclose(f);
             f = HFILE_ERROR;

@@ -675,8 +675,9 @@ static int res_id_match(FILE *f, uint64_t size, uint64_t table, uint16_t v,
 }
 
 /* the resource of type by id or name, or (nth >= 0) the nth of the type */
-static int find_resource(const char *path, uint16_t type, uint16_t id, const char *name,
-                         int nth, uint8_t **data, uint32_t *bytes, uint32_t *place)
+static int find_resource(const char *path, uint16_t type, const char *type_name,
+                         uint16_t id, const char *name, int nth,
+                         uint8_t **data, uint32_t *bytes, uint32_t *place)
 {
     *data = NULL;
     *bytes = 0;
@@ -686,7 +687,7 @@ static int find_resource(const char *path, uint16_t type, uint16_t id, const cha
             id = (uint16_t)(id * 10 + (*p - '0'));
         name = NULL;
     }
-    uint16_t alias = name && nth < 0 ? res_name_alias(path, type, name) : 0;
+    uint16_t alias = !type_name && name && nth < 0 ? res_name_alias(path, type, name) : 0;
     FILE *f = path ? fopen(path, "rb") : NULL;
     if (!f)
         return WIN_NE_NO_FILE;
@@ -718,7 +719,8 @@ static int find_resource(const char *path, uint16_t type, uint16_t id, const cha
             goto out;
         uint16_t t = rd16(ti), count = rd16(ti + 2);
         p += 8;
-        int this_type = (t & 0x8000u) && (t & 0x7fffu) == type;
+        int this_type = type_name ? res_id_match(f, size, table, t, 0, type_name, 0) :
+                                    (t & 0x8000u) && (t & 0x7fffu) == type;
         for (unsigned i = 0; i < count; i++, p += 12) {
             uint8_t ni[12];
             if (!read_at(f, size, p, ni, sizeof(ni)))
@@ -758,14 +760,29 @@ out:
 int win_ne_resource(const char *path, uint16_t type, uint16_t id, const char *name,
                     uint8_t **data, uint32_t *bytes)
 {
-    return find_resource(path, type, id, name, -1, data, bytes, NULL);
+    return find_resource(path, type, NULL, id, name, -1, data, bytes, NULL);
 }
 
 int win_ne_resource_place(const char *path, uint16_t type, uint16_t id, const char *name,
                           uint32_t *place, uint32_t *bytes)
 {
     uint8_t *none;
-    return find_resource(path, type, id, name, -1, &none, bytes, place);
+    return find_resource(path, type, NULL, id, name, -1, &none, bytes, place);
+}
+
+/* User-defined NE resource types are length-prefixed names in the type table.
+ * Keep them separate from numeric RT_* types, including RT_NAMETABLE aliases. */
+int win_ne_resource_named_type(const char *path, const char *type_name, uint16_t id,
+                               const char *name, uint8_t **data, uint32_t *bytes)
+{
+    return find_resource(path, 0, type_name, id, name, -1, data, bytes, NULL);
+}
+
+int win_ne_resource_named_type_place(const char *path, const char *type_name, uint16_t id,
+                                     const char *name, uint32_t *place, uint32_t *bytes)
+{
+    uint8_t *none;
+    return find_resource(path, 0, type_name, id, name, -1, &none, bytes, place);
 }
 
 int win_ne_resource_nth(const char *path, uint16_t type, int n, uint8_t **data,
@@ -773,7 +790,8 @@ int win_ne_resource_nth(const char *path, uint16_t type, int n, uint8_t **data,
 {
     *data = NULL;
     *bytes = 0;
-    return n < 0 ? WIN_NE_UNRESOLVED : find_resource(path, type, 0, NULL, n, data, bytes, NULL);
+    return n < 0 ? WIN_NE_UNRESOLVED :
+           find_resource(path, type, NULL, 0, NULL, n, data, bytes, NULL);
 }
 
 int win_ne_description(const char *path, char *buf, uint32_t cap)

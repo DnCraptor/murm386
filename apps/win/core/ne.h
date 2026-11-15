@@ -137,6 +137,12 @@ int win_ne_resource(const char *path, uint16_t type, uint16_t id, const char *na
 /* where a resource is in the file (its offset), its size */
 int win_ne_resource_place(const char *path, uint16_t type, uint16_t id, const char *name,
                           uint32_t *place, uint32_t *bytes);
+/* User-defined resource types, e.g. EXEFILE. The resource identifier may
+ * independently be numeric or a string. */
+int win_ne_resource_named_type(const char *path, const char *type_name, uint16_t id,
+                               const char *name, uint8_t **data, uint32_t *bytes);
+int win_ne_resource_named_type_place(const char *path, const char *type_name, uint16_t id,
+                                     const char *name, uint32_t *place, uint32_t *bytes);
 /* ... the n-th resource of the type (0 the first), as it is in the table */
 int win_ne_resource_nth(const char *path, uint16_t type, int n, uint8_t **data,
                         uint32_t *bytes);

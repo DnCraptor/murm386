@@ -70,8 +70,8 @@ typedef struct ne_user {
     /* its icons (kind 2) and cursors (1), by number or name */
     struct { HANDLE h; uint8_t kind; uint16_t id, inst; char name[32]; } image[NE_IMAGES];
     /* ne_guest_kernel.c: the resources it found (FindResource), its error
-     * mode */
-    struct { uint16_t type, id, inst; char name[32]; } res[NE_RESOURCES];
+     * mode. A type can be numeric (type) or user-defined (type_name). */
+    struct { uint16_t type, id, inst; char name[32], type_name[16]; } res[NE_RESOURCES];
     uint16_t error_mode;
     uint32_t signal_proc;           /* SetTaskSignalProc's (WINN sends no signals) */
     uint16_t handle_delta;          /* LocalHandleDelta's; 0: the default */
