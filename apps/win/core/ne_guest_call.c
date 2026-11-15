@@ -358,6 +358,44 @@ static __attribute__((noinline)) int generic(args *a, ne_user *u, uint16_t servi
 
 /* ---------------------------------------------------------------- local heap */
 
+/* Capture a small number of failed allocations, without enabling API tracing.
+ * Called from the native side of the Win16 gateway (DOS context restored). */
+static void ne_memory_failure_note(win_ne_guest_image *g, const char *api,
+                                   uint32_t size, uint16_t flags, uint16_t handle)
+{
+    static unsigned failures, logged;
+    if (++failures > 16 && (failures & (failures - 1u)))
+        return;     /* subsequent failures: 32nd, 64th, 128th, etc. */
+    unsigned slots = 0;
+    uint32_t global_bytes = 0;
+    for (unsigned i = 0; i < WIN_NE_GUEST_GLOBALS; i++)
+        if (g->globals[i].selector) {
+            slots++;
+            global_bytes += g->globals[i].size;
+        }
+    win_ne_mem_info mem = { 0 };
+#if defined(__arm__) || defined(__thumb__)
+    win_ne_guest_mem_info(&mem);
+#endif
+    char path[160], line[240];
+    win_path("WINNMEM.LOG", path, sizeof(path));
+    HFILE f = logged ? _lopen(path, OF_WRITE) : _lcreat(path, 0);
+    if (f == HFILE_ERROR)
+        return;
+    if (logged)
+        _llseek(f, 0, 2);
+    wsprintf(line, "fail=%lu %s size=%lu flags=%04X handle=%04X globals=%u/%u bytes=%lu "
+             "extblocks=%lu/1024 extused=%lu extcapacity=%lu dosfree=%lu umbfree=%lu\r\n",
+             (unsigned long)failures, api, (unsigned long)size, flags, handle,
+             slots, (unsigned)WIN_NE_GUEST_GLOBALS,
+             (unsigned long)global_bytes, (unsigned long)mem.ext_blocks,
+             (unsigned long)mem.ext_used, (unsigned long)mem.ext_size,
+             (unsigned long)mem.dos_free, (unsigned long)mem.dos_free_umb);
+    _lwrite(f, line, (UINT)lstrlen(line));
+    _lclose(f);
+    logged++;
+}
+
 /* LocalAlloc and the rest: blocks in a local heap, the caller's DS's (the
  * program's DGROUP, or a DLL's); a handle is the offset. DGROUP's is
  * between its data and its stack, as the NE header sizes it, then beyond
@@ -806,9 +844,15 @@ static int local_service(args *a, ne_user *u, uint16_t service, uint32_t *v)
     }
     case 5:                             /* LocalAlloc(flags, size) */
         *v = local_alloc(a, u, heap, w(a, 6), w(a, 4));
+        if (!*v && !a->bad && w(a, 4))
+            ne_memory_failure_note((win_ne_guest_image *)a->ctx->image,
+                                   "LocalAlloc", w(a, 4), w(a, 6), (uint16_t)heap);
         return 1;
     case 6:                             /* LocalReAlloc(h, size, flags) */
         *v = local_realloc(a, u, heap, w(a, 8), w(a, 6), w(a, 4));
+        if (!*v && !a->bad && w(a, 6))
+            ne_memory_failure_note((win_ne_guest_image *)a->ctx->image,
+                                   "LocalReAlloc", w(a, 6), w(a, 4), w(a, 8));
         return 1;
     case 7:                             /* LocalFree(h): 0 */
         *v = w(a, 4);
@@ -862,11 +906,15 @@ static int global_service(args *a, uint16_t service, uint32_t *v, int *dword)
     case 15: {                          /* GlobalAlloc(flags, DWORD size): a selector */
         uint32_t size = dw(a, 4);
         *v = a->bad ? 0 : win_ne_guest_global_alloc(g, size ? size : 1);
+        if (!*v && !a->bad)
+            ne_memory_failure_note(g, "GlobalAlloc", size, w(a, 8), 0);
         return 1;
     }
     case 16:                            /* GlobalReAlloc(h, DWORD size, flags) */
         h = w(a, 10);
         *v = !a->bad && win_ne_guest_global_realloc(g, h, dw(a, 6), a->ctx->read) ? h : 0;
+        if (!*v && !a->bad)
+            ne_memory_failure_note(g, "GlobalReAlloc", dw(a, 6), w(a, 4), h);
         return 1;
     case 17:                            /* GlobalFree(h): 0 */
         h = w(a, 4);

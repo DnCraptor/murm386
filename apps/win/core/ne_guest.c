@@ -1397,7 +1397,8 @@ static int myalloc_code(const win_ne_guest_segment *s)
 win_ne_guest_segment *win_ne_guest_global(win_ne_guest_image *g, uint16_t sel)
 {
     for (unsigned i = 0; i < WIN_NE_GUEST_GLOBALS; i++)
-        if (g->globals[i].selector && (g->globals[i].selector & ~7u) == (sel & ~7u))
+        if (g->globals[i].selector && !(g->globals[i].flags & WIN_NE_GUEST_HUGE_TAIL) &&
+            (g->globals[i].selector & ~7u) == (sel & ~7u))
             return &g->globals[i];
     if (g->info.module_flags & WIN_NE_SELF_LOADING)
         for (uint16_t i = 2; i <= g->info.segment_count; i++)
@@ -1407,34 +1408,92 @@ win_ne_guest_segment *win_ne_guest_global(win_ne_guest_image *g, uint16_t sel)
     return NULL;
 }
 
+/* Huge Win16 pointers use consecutive selectors, with __AHINCR = 8.
+ * The first entry owns the entire allocation. Following entries are views
+ * of successive 64 KiB windows and must never free its memory separately. */
+static unsigned global_pages(uint32_t bytes)
+{
+    return (unsigned)((bytes + 0xffffu) >> 16);
+}
+
+/* Commit all affected GDT descriptors in one guest write, or none. For
+ * shrinking, descriptors outside the new range are cleared. */
+static int global_descriptors(win_ne_guest_image *g, unsigned index, unsigned old_pages,
+                              uint32_t linear, uint32_t bytes)
+{
+    unsigned pages = global_pages(bytes);
+    unsigned count = pages > old_pages ? pages : old_pages;
+    /* Freeing ordinary and two-selector huge blocks must not require
+     * another heap allocation when the system is short of memory. */
+    uint8_t small[4u * GDT_ENTRY_BYTES];
+    uint8_t *buf = count <= 4u ? small : (uint8_t *)malloc(count * GDT_ENTRY_BYTES);
+    if (!buf)
+        return 0;
+    memset(buf, 0, count * GDT_ENTRY_BYTES);
+    for (unsigned k = 0; k < pages; k++) {
+        uint32_t offset = (uint32_t)k << 16;
+        uint32_t len = bytes - offset;
+        descriptor(buf + k * GDT_ENTRY_BYTES, linear + offset,
+                   len > 65536u ? 65536u : len, 0);
+    }
+    uint32_t at = global_selector(g, index) & ~7u;
+    int ok = g->io.write(g->opaque, g->gdt_linear + at,
+                         buf, count * GDT_ENTRY_BYTES);
+    if (ok)
+        memcpy(g->gdt + at, buf, count * GDT_ENTRY_BYTES);
+    if (buf != small)
+        free(buf);
+    return ok;
+}
+
+static void global_mark(win_ne_guest_image *g, unsigned index, unsigned old_pages,
+                        uint32_t linear, uint32_t bytes)
+{
+    unsigned pages = global_pages(bytes);
+    for (unsigned k = 0; k < pages; k++) {
+        win_ne_guest_segment *s = &g->globals[index + k];
+        uint32_t off = (uint32_t)k << 16;
+        s->linear = linear + off;
+        s->size = bytes - off;
+        if (k && s->size > 65536u)
+            s->size = 65536u;
+        s->selector = global_selector(g, index + k);
+        s->flags = k ? (WIN_NE_GUEST_ALIAS | WIN_NE_GUEST_HUGE_TAIL | 1u) : 1u;
+    }
+    for (unsigned k = pages; k < old_pages; k++)
+        memset(&g->globals[index + k], 0, sizeof(g->globals[index + k]));
+}
+
 static uint16_t global_alloc(win_ne_guest_image *g, uint32_t bytes, int low)
 {
-    if (!bytes || bytes > 65536u)
+    if (!bytes || bytes > 0x00ff0000u || (low && bytes > 65536u))
         return 0;
-    for (unsigned i = 0; i < WIN_NE_GUEST_GLOBALS; i++) {
-        win_ne_guest_segment *s = &g->globals[i];
-        if (s->selector)
+    unsigned pages = global_pages(bytes);
+    for (unsigned i = 0; i + pages <= WIN_NE_GUEST_GLOBALS; i++) {
+        unsigned k = 0;
+        while (k < pages && !g->globals[i + k].selector)
+            k++;
+        if (k != pages) {
+            i += k;                    /* skip the occupied entry */
             continue;
-        if (!guest_alloc_in(g, bytes, &s->linear, low))
+        }
+        uint32_t linear;
+        if (!guest_alloc_in(g, bytes, &linear, low))
             return 0;
-        uint8_t zero[256];
-        memset(zero, 0, sizeof(zero));
+        uint8_t zero[256] = { 0 };
         for (uint32_t at = 0; at < bytes; at += sizeof(zero)) {
             uint32_t n = bytes - at < sizeof(zero) ? bytes - at : (uint32_t)sizeof(zero);
-            if (!g->io.write(g->opaque, s->linear + at, zero, n))
-                goto alloc_fail;
+            if (!g->io.write(g->opaque, linear + at, zero, n)) {
+                g->io.free(g->opaque, linear);
+                return 0;
+            }
         }
-        uint16_t selector = global_selector(g, i);
-        if (!set_descriptor(g, selector, s->linear, bytes, 0))
-            goto alloc_fail;
-        s->size = bytes;
-        s->flags = 1;
-        s->selector = selector;
-        return selector;
-alloc_fail:
-        g->io.free(g->opaque, s->linear);
-        memset(s, 0, sizeof(*s));
-        return 0;
+        if (!global_descriptors(g, i, 0, linear, bytes)) {
+            g->io.free(g->opaque, linear);
+            return 0;
+        }
+        global_mark(g, i, 0, linear, bytes);
+        return g->globals[i].selector;
     }
     return 0;
 }
@@ -1502,7 +1561,46 @@ int win_ne_guest_global_realloc(win_ne_guest_image *g, uint16_t sel, uint32_t by
                                 int (*read)(void *, uint32_t, void *, uint32_t))
 {
     win_ne_guest_segment *s = win_ne_guest_global(g, sel);
-    return s && !(s->flags & WIN_NE_GUEST_ALIAS) && resize(g, s, bytes, read);
+    if (!s || (s->flags & WIN_NE_GUEST_ALIAS) || !read || !bytes ||
+        bytes > 0x00ff0000u)
+        return 0;
+    unsigned i = 0;
+    while (i < WIN_NE_GUEST_GLOBALS && s != &g->globals[i])
+        i++;
+    if (i == WIN_NE_GUEST_GLOBALS || (s->size <= 65536u && bytes <= 65536u))
+        return resize(g, s, bytes, read);
+
+    unsigned old_pages = global_pages(s->size), new_pages = global_pages(bytes);
+    if (i + new_pages > WIN_NE_GUEST_GLOBALS)
+        return 0;
+    for (unsigned k = old_pages; k < new_pages; k++)
+        if (g->globals[i + k].selector)
+            return 0;
+    if (bytes == s->size)
+        return 1;
+
+    uint32_t linear;
+    if (!guest_alloc(g, bytes, &linear))
+        return 0;
+    uint8_t buf[256];
+    for (uint32_t at = 0; at < bytes; at += sizeof(buf)) {
+        uint32_t n = bytes - at < sizeof(buf) ? bytes - at : (uint32_t)sizeof(buf);
+        memset(buf, 0, sizeof(buf));
+        if (at < s->size && !read(NULL, s->linear + at, buf,
+                                 s->size - at < n ? s->size - at : n))
+            goto fail;
+        if (!g->io.write(g->opaque, linear + at, buf, n))
+            goto fail;
+    }
+    if (!global_descriptors(g, i, old_pages, linear, bytes))
+        goto fail;
+    uint32_t old_linear = s->linear;
+    global_mark(g, i, old_pages, linear, bytes);
+    g->io.free(g->opaque, old_linear);
+    return 1;
+fail:
+    g->io.free(g->opaque, linear);
+    return 0;
 }
 
 int win_ne_guest_global_free(win_ne_guest_image *g, uint16_t sel)
@@ -1510,17 +1608,32 @@ int win_ne_guest_global_free(win_ne_guest_image *g, uint16_t sel)
     win_ne_guest_segment *s = win_ne_guest_global(g, sel);
     if (!s)
         return 0;
-    uint8_t absent[GDT_ENTRY_BYTES] = {0};
-    /* A failed descriptor write must not release still-addressable memory. */
-    if (!g->io.write(g->opaque, g->gdt_linear + (s->selector & ~7u),
-                     absent, sizeof(absent)))
-        return 0;
-    memcpy(g->gdt + (s->selector & ~7u), absent, sizeof(absent));
+    unsigned i = 0;
+    while (i < WIN_NE_GUEST_GLOBALS && s != &g->globals[i])
+        i++;
+    unsigned pages = i == WIN_NE_GUEST_GLOBALS || (s->flags & WIN_NE_GUEST_ALIAS) ?
+                     1u : global_pages(s->size);
+    /* Revoke every selector before releasing the underlying RAM. */
+    if (i < WIN_NE_GUEST_GLOBALS) {
+        if (!global_descriptors(g, i, pages, 0, 0))
+            return 0;
+    } else {
+        uint8_t absent[GDT_ENTRY_BYTES] = { 0 };
+        if (!g->io.write(g->opaque, g->gdt_linear + (s->selector & ~7u),
+                         absent, sizeof(absent)))
+            return 0;
+        memcpy(g->gdt + (s->selector & ~7u), absent, sizeof(absent));
+    }
     if (!(s->flags & WIN_NE_GUEST_ALIAS) && s->linear)
         g->io.free(g->opaque, s->linear);
-    uint16_t slot = s->flags & WIN_NE_GUEST_MYALLOC ? s->selector : 0;
-    memset(s, 0, sizeof(*s));
-    s->selector = slot;                 /* a segment's slot keeps its selector */
+    if (i < WIN_NE_GUEST_GLOBALS) {
+        for (unsigned k = 0; k < pages; k++)
+            memset(&g->globals[i + k], 0, sizeof(g->globals[i + k]));
+    } else {
+        uint16_t slot = s->flags & WIN_NE_GUEST_MYALLOC ? s->selector : 0;
+        memset(s, 0, sizeof(*s));
+        s->selector = slot;            /* a self-loader's reserved segment */
+    }
     return 1;
 }
 

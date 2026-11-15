@@ -1139,8 +1139,8 @@ static __attribute__((noinline)) int kernel_misc(args *a, uint16_t service, uint
     case 348: {                         /* hmemcpy(void huge *, const void huge *, LONG) */
         uint32_t n = dw(a, 4), src = dw(a, 8), dst = dw(a, 12);
         uint8_t buf[128];
-        /* within the blocks: a block is 64K at most here, no selectors
-         * tiled beyond (__AHINCR), so a copy past 64K ends there */
+        /* A huge pointer crosses a 64 KiB window by incrementing its
+         * selector by __AHINCR (8), not by carrying one into the selector. */
         while (!a->bad && n) {
             uint32_t k = n < sizeof(buf) ? n : (uint32_t)sizeof(buf);
             if (0x10000u - (uint16_t)src < k)
@@ -1152,8 +1152,10 @@ static __attribute__((noinline)) int kernel_misc(args *a, uint16_t service, uint
             n -= k;
             src += k;
             dst += k;
-            if (!(uint16_t)src || !(uint16_t)dst)
-                break;
+            if (n && !(uint16_t)src)
+                src += 7u << 16;     /* arithmetic carry already added one */
+            if (n && !(uint16_t)dst)
+                dst += 7u << 16;
         }
         return 1;
     }

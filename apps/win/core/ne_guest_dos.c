@@ -169,6 +169,9 @@ void win_ne_guest_mem_info(win_ne_mem_info *m)
     memset(m, 0, sizeof(*m));
     m->dos_used = dos_used;
     m->ext_used = ext_used;
+    for (unsigned i = 0; i < EXT_BLOCKS; i++)
+        if (ext[i].size)
+            m->ext_blocks++;
     m->ext_size = ext_limit == 0xffffffffu ? (uint32_t)malloc_largest_block() + ext_used : ext_limit;
     int no_strategy, no_link, cf;
     uint16_t strategy = dos_ax(0x5800, 0, &no_strategy);
@@ -210,8 +213,12 @@ uint32_t win_ne_guest_free_space(void)
 static int ne_alloc(void *opaque, uint32_t bytes, uint32_t *linear)
 {
     (void)opaque;
-    if (!bytes || bytes > 65536u)
+    if (!bytes || bytes > 0x00ff0000u)
         return 0;
+    /* DOS paragraphs cannot represent a block larger than 64 KiB.
+     * Huge Win16 globals are one contiguous allocation in extended RAM. */
+    if (bytes > 65536u)
+        return ext_alloc(bytes, linear);
     return ext_alloc(bytes, linear) || dos_alloc(bytes, linear);
 }
 

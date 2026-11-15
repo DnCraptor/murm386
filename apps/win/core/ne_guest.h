@@ -82,7 +82,7 @@ int win_ne_guest_mapped(uint32_t linear, uint32_t bytes);
  * memory and in extended memory, what they may have of that; the largest
  * block DOS has free in conventional memory, and with the UMBs */
 typedef struct {
-    uint32_t dos_used, ext_used, ext_size, dos_free, dos_free_umb;
+    uint32_t dos_used, ext_used, ext_size, dos_free, dos_free_umb, ext_blocks;
 } win_ne_mem_info;
 void win_ne_guest_mem_info(win_ne_mem_info *m);
 /* Largest available extended-memory block, respecting [memory] ext.
@@ -192,6 +192,8 @@ int win_ne_guest_global_free(win_ne_guest_image *g, uint16_t sel);
  * slot, a global block as GlobalAlloc's are (GlobalReAlloc, GlobalFree
  * ...); its other bits the NE segment's flags */
 #define WIN_NE_GUEST_MYALLOC 0x4000u
+/* Extra selectors of a huge GlobalAlloc block: descriptors, not owners. */
+#define WIN_NE_GUEST_HUGE_TAIL 0x2000u
 uint16_t win_ne_guest_selector_alloc(win_ne_guest_image *g, uint16_t like, int code);
 int win_ne_guest_selector_get(const win_ne_guest_image *g, uint16_t sel, uint32_t *base,
                               uint32_t *limit, int *code);
