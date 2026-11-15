@@ -23,7 +23,7 @@
  * at 81h, as DOS has it, but ending with a NUL (Windows). */
 #define WIN_NE_GUEST_PSP_BYTES 256u
 /* GDT entries for the program's global memory blocks (GlobalAlloc) */
-#define WIN_NE_GUEST_GLOBALS 64u
+#define WIN_NE_GUEST_GLOBALS 256u
 /* Service numbers beyond KERNEL's (its ordinals), USER's (0x1000 + n) and
  * GDI's (0x3000 + n): KEYBOARD's, and KERNEL.102 DOS3Call, whose thunk is
  * an INT 21h of its own (the registers are its arguments) */
