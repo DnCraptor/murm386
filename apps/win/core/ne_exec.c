@@ -119,7 +119,20 @@ typedef struct {
     uint16_t rm_segment;
     uint16_t ring0_selector;
     void *pe;                   /* a Win32 program's: its pe_run */
+    unsigned api_calls;         /* calls since the last safe scheduler yield */
 } win_ne_native_gate;
+
+/* A broken bridge is not a CPU divide exception. Record the actual
+ * execution address while the transient guest CPU state still exists. */
+static void context_fault(win_ne_fault *f, CPU *cpu, int flat)
+{
+    memset(f, 0, sizeof(*f));
+    f->vector = -2;
+    f->cs = cpu->ext_accessors->get_seg16(cpu, WIN_CS);
+    f->ip = (uint16_t)cpu->ip;
+    f->eip = cpu->ip;
+    f->flat = flat;
+}
 
 /* Win32 programs' (below; WINN_NE_EXEC_NO_PE: not, a test's) */
 #ifndef WINN_NE_EXEC_NO_PE
@@ -221,6 +234,13 @@ static int invoke_native(void *opaque, CPU *cpu, uint16_t service)
                           (uint32_t)guest.gprx[regdx].r16 << 16 | guest.gprx[regax].r16);
     if (gate->api->invalid_args && !bad_before && !gate->api->invalid_call)
         gate->api->invalid_call = service;
+    /* Yield only while the shared CPU is in its original DOS context. */
+    if (handled == 1 && !gate->api->dead && !gate->api->exited && !gate->api->stopped &&
+        ++gate->api_calls >= 64u) {
+        gate->api_calls = 0;
+        if (gate->api->yield && gate->api->yield())
+            gate->api->stopped = 1;
+    }
     /* a fault or an exit in a callback this call made ends the program */
     if (handled == 1 && (gate->api->dead || gate->api->exited || gate->api->stopped))
         handled = WINX86_SERVICE_EXIT;
@@ -317,11 +337,16 @@ static void fault_where(const win_ne_guest_image *g, const win_ne_native_gate *g
 {
     f->vector = cpu->gprx[regbx].r16;
     f->cs = f->ip = f->segment = 0;
-    uint32_t sp = cpu->gprx[regdi].r16 + (is_error_code_vector(f->vector) ? 2u : 0u);
+    f->frame_ss = cpu->gprx[regsi].r16;
+    f->frame_sp = cpu->gprx[regdi].r16;
+    f->frame_ring0_ss = gate->ring0_selector;
+    f->frame_valid = 0;
+    uint32_t sp = (uint32_t)f->frame_sp + (is_error_code_vector(f->vector) ? 2u : 0u);
     uint8_t fr[4];
-    if ((cpu->gprx[regsi].r16 & ~3u) != gate->ring0_selector || sp + 4u > WIN_NE_RING0_BYTES ||
+    if ((f->frame_ss & ~3u) != gate->ring0_selector || sp + 4u > WIN_NE_RING0_BYTES ||
         !read_guest(NULL, gate->ring0_linear + sp, fr, 4))
         return;
+    f->frame_valid = 1;
     f->ip = (uint16_t)(fr[0] | fr[1] << 8);
     f->cs = (uint16_t)(fr[2] | fr[3] << 8);
     for (uint16_t i = 1; i <= g->info.segment_count; i++)
@@ -509,7 +534,7 @@ static uint32_t call_with(win_ne_guest_api_context *ctx, uint32_t proc, const ui
     uint32_t result = 0;
     if (rc == WINX86_BAD_CONTEXT) {
         ctx->dead = 1;
-        memset(&ctx->fault, 0, sizeof(ctx->fault));
+        context_fault(&ctx->fault, cpu, 0);
     } else if (rc == WINX86_FAULT) {
         fault_where(g, &gate, cpu, &ctx->fault);
         ctx->dead = 1;
@@ -656,7 +681,7 @@ static int execute(win_ne_guest_image *gp, const char *path, const char *cmdline
     rc = take_back(cpu, &run.gate, run_guest(cpu, &run.gate));
     if (rc == WINX86_BAD_CONTEXT) {
         api.dead = 1;
-        memset(&api.fault, 0, sizeof(api.fault));
+        context_fault(&api.fault, cpu, 0);
     }
 
     const uint32_t result = ((uint32_t)cpu->gprx[regcx].r16 << 16) |
@@ -785,6 +810,12 @@ static int invoke_pe(win_ne_native_gate *gate, CPU *cpu, uint16_t service)
     }
     if (ctx->invalid_args && !bad_before && !ctx->invalid_call)
         ctx->invalid_call = service;
+    if (handled == 1 && !ctx->dead && !ctx->exited && !ctx->stopped &&
+        ++gate->api_calls >= 64u) {
+        gate->api_calls = 0;
+        if (ctx->yield && ctx->yield())
+            ctx->stopped = 1;
+    }
     if (handled == 1 && (ctx->dead || ctx->exited || ctx->stopped))
         handled = WINX86_SERVICE_EXIT;
     restore_cpu(cpu, &transient);
@@ -878,7 +909,7 @@ uint32_t win_pe_call(win_pe_ctx *ctx, uint32_t proc, const uint32_t *args, int n
     uint32_t result = 0;
     if (rc == WINX86_BAD_CONTEXT) {
         ctx->dead = 1;
-        memset(&ctx->fault, 0, sizeof(ctx->fault));
+        context_fault(&ctx->fault, cpu, 1);
     } else if (rc == WINX86_FAULT) {
         pe_fault_where(&inner, cpu, &ctx->fault);
         ctx->dead = 1;
@@ -989,7 +1020,7 @@ static int pe_execute(win_pe_image *img, const char *path, const char *cmdline, 
     rc = take_back(cpu, &run.gate, run_guest(cpu, &run.gate));
     if (rc == WINX86_BAD_CONTEXT) {
         ctx->dead = 1;
-        memset(&ctx->fault, 0, sizeof(ctx->fault));
+        context_fault(&ctx->fault, cpu, 1);
     }
     const uint32_t result = cpu->gprx[regbx].r32;
     if (rc != WINX86_FAULT && ctx->dead_call)

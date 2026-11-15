@@ -86,8 +86,10 @@ int winx86_run(CPU *cpu, winx86_service_fn service, void *opaque,
             rc = WINX86_OK;
             break;
         }
-        /* Service calls consume the same slice; otherwise an API-heavy
-         * guest can starve task switching and keyboard processing. */
+        /* A completed native call returns to the same guest run. WINN
+         * yields cooperatively at its API boundary (ne_exec.c), rather
+         * than timing out in the Real Mode gateway. */
+        left = max_bursts + 1;
     }
 
     if (!--runs) {

@@ -17,6 +17,10 @@ enum {
 typedef struct {
     int vector;
     uint16_t cs, ip, segment;
+    /* Diagnostics when the exception frame cannot be decoded: the raw
+     * selector:offset reported by the PM fault stub and expected SS0. */
+    uint16_t frame_ss, frame_sp, frame_ring0_ss;
+    int frame_valid;
     /* a Win32 program's (flat): EIP in its module (segment: its index + 1;
      * 0 none of them, eip the address) */
     int flat;

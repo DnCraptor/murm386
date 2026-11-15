@@ -437,10 +437,17 @@ static int run_ne_app(wtask *t)
     if (rc == WIN_NE_EXEC_FAULT) {
         const win_ne_fault f = r.fault;
         char where[40];
-        if (f.flat && f.module[0])
+        if (f.vector == -2 && f.flat)
+            wsprintf(where, "%04X:%08lX", f.cs, (unsigned long)f.eip);
+        else if (f.vector == -2)
+            wsprintf(where, "%04X:%04X", f.cs, f.ip);
+        else if (f.flat && f.module[0])
             wsprintf(where, "%s+%08lX", f.module, (unsigned long)f.eip);
         else if (f.flat)
             wsprintf(where, "%08lX", (unsigned long)f.eip);
+        else if (!f.frame_valid)
+            wsprintf(where, "frame %04X:%04X, ring0 %04X", f.frame_ss, f.frame_sp,
+                     f.frame_ring0_ss);
         else if (f.segment)
             wsprintf(where, "%04X:%04X", f.segment, f.ip);
         else
@@ -450,7 +457,10 @@ static int run_ne_app(wtask *t)
                            f.vector == 6 ? "an Invalid Instruction" :
                            f.vector == 12 ? "a Stack Fault" :
                            f.vector == 13 ? "a General Protection Fault" : NULL;
-        if (what)
+        if (f.vector == -2)
+            wsprintf(msg, "%s lost its x86 execution context in module %s at %s.",
+                     t->name, file, where);
+        else if (what)
             wsprintf(msg, "%s caused %s in module %s at %s.", t->name, what, file, where);
         else
             wsprintf(msg, "%s caused exception %d in module %s at %s.",
