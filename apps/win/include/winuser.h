@@ -107,6 +107,12 @@ typedef struct tagDRAWITEMSTRUCT {
     HWND hwndItem; HDC hDC; RECT rcItem; DWORD itemData;
 } DRAWITEMSTRUCT, *LPDRAWITEMSTRUCT;
 
+/* Native owner-draw measurement; Win16 marshals its 16-bit form. */
+typedef struct tagMEASUREITEMSTRUCT {
+    UINT CtlType, CtlID, itemID, itemWidth, itemHeight;
+    DWORD itemData;
+} MEASUREITEMSTRUCT, *LPMEASUREITEMSTRUCT;
+
 /* Dialog templates (in memory, DialogBoxIndirect) */
 typedef struct {
     DWORD style; BYTE cdit; int x, y, cx, cy;
@@ -249,6 +255,11 @@ typedef struct {
 #define WM_MOUSEACTIVATE    0x0021
 #define WM_GETMINMAXINFO    0x0024
 #define WM_DRAWITEM         0x002B
+#define WM_MEASUREITEM      0x002C
+#define ODT_LISTBOX         2
+#define ODA_DRAWENTIRE      0x0001
+#define ODS_SELECTED        0x0001
+#define ODS_FOCUS           0x0010
 #define WM_SETFONT          0x0030
 #define WM_GETFONT          0x0031
 #define WM_WINDOWPOSCHANGING 0x0046

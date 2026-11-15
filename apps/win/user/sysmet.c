@@ -534,9 +534,10 @@ static void draw_seg(HDC dc, int x, int y, LPCSTR s, int n, UINT fmt, int tabw, 
         HPEN p = CreatePen(PS_SOLID, 1, GetTextColor(dc));
         HGDIOBJ o = SelectObject(dc, p);
         TEXTMETRIC tm;
-        GetTextMetrics(dc, &tm);
-        MoveTo(dc, ul_x, y + tm.tmAscent + 1);
-        LineTo(dc, ul_x + ul_w, y + tm.tmAscent + 1);
+        if (GetTextMetrics(dc, &tm)) {
+            MoveTo(dc, ul_x, y + tm.tmAscent + 1);
+            LineTo(dc, ul_x + ul_w, y + tm.tmAscent + 1);
+        }
         SelectObject(dc, o);
         DeleteObject(p);
     }
@@ -545,12 +546,23 @@ static void draw_seg(HDC dc, int x, int y, LPCSTR s, int n, UINT fmt, int tabw, 
 
 int user_draw_text(HDC dc, LPCSTR s, int n, RECT *rc, UINT fmt)
 {
+    if (!s || !rc || !dc)
+        return 0;
     if (n < 0)
         n = lstrlen(s);
     TEXTMETRIC tm;
-    GetTextMetrics(dc, &tm);
+    if (!GetTextMetrics(dc, &tm) || tm.tmHeight <= 0)
+        return 0;
     int lh = tm.tmHeight + tm.tmExternalLeading;
+    if (lh <= 0)
+        return 0;
     int tabw = 8 * tm.tmAveCharWidth;
+    if (tabw <= 0) {
+        SIZE space;
+        if (!GetTextExtentPoint(dc, " ", 1, &space) || space.cx <= 0)
+            return 0;
+        tabw = 8 * space.cx;
+    }
     int width = rc->right - rc->left;
     int y = rc->top, maxw = 0;
 

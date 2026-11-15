@@ -39,23 +39,28 @@ static wdlg *dlg_state(HWND h)
 
 DWORD WINAPI GetDialogBaseUnits(void) { return (DWORD)MAKELONG(DLG_BASE_X, DLG_BASE_Y); }
 
-/* DS_SETFONT: the template's font, bold as Windows 3.x makes it, when a
- * font file has the face (the VGA glyphs are the system font: the dialog
- * as without it); its base units, the average of the letters' widths and
- * its height */
+/* DS_SETFONT uses a normal-weight font. If the requested face is not
+ * installed, GDI substitutes the closest font and we still use its metrics
+ * for dialog-unit conversion, as Windows does. */
 static HFONT template_font(const DLGTEMPLATE_N *t, int *bx, int *by)
 {
     if (!(t->style & DS_SETFONT) || !t->font || !t->pointsize)
         return 0;
-    HFONT f = CreateFont(-(int)((t->pointsize * 96u + 36) / 72), 0, 0, 0, FW_BOLD, 0, 0, 0, 0,
+    HFONT f = CreateFont(-(int)((t->pointsize * 96u + 36) / 72), 0, 0, 0, FW_NORMAL, 0, 0, 0, 0,
                          0, 0, 0, 0, t->font);
-    if (!f || !gdi_font_filed(f)) {
-        if (f)
-            DeleteObject(f);
+    if (!f)
+        return 0;
+    HDC dc = GetDC(0);
+    if (!dc) {
+        DeleteObject(f);
         return 0;
     }
-    HDC dc = GetDC(0);
     HGDIOBJ old = SelectObject(dc, f);
+    if (!old) {
+        ReleaseDC(0, dc);
+        DeleteObject(f);
+        return 0;
+    }
     SIZE sz;
     TEXTMETRIC tm;
     if (GetTextExtentPoint(dc, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz", 52, &sz) &&
@@ -325,6 +330,23 @@ void user_dialog_menu(HMENU menu)
     next_menu = menu;
 }
 
+/* Do not leave an incomplete modal dialog with missing controls. This
+ * message is shown once; MessageBox itself creates a dialog. */
+static void dialog_creation_error(LPCSTR klass, int id, const char *reason)
+{
+    static int reporting;
+    if (reporting)
+        return;
+    reporting = 1;
+    char msg[192];
+    if (id < 0)
+        wsprintf(msg, "Unable to create dialog class '%s': %s.", klass, reason);
+    else
+        wsprintf(msg, "Unable to create control '%s' (ID %d): %s.", klass, id, reason);
+    MessageBox(0, msg, "WINN: Dialog creation error", MB_OK | MB_ICONSTOP);
+    reporting = 0;
+}
+
 HWND WINAPI CreateDialogIndirectN(HINSTANCE inst, const DLGTEMPLATE_N *t,
                                   const DLGITEM_N *items, HWND owner, DLGPROC proc)
 {
@@ -358,11 +380,16 @@ HWND WINAPI CreateDialogIndirectN(HINSTANCE inst, const DLGTEMPLATE_N *t,
     wwnd *w = h ? user_wnd(h) : NULL;
     wdlg *d = h ? (wdlg *)win_alloc(sizeof(*d)) : NULL;
     if (!d || !w->extra || w->cb_extra < DLG_EXTRA) {
+        WNDCLASS wc;
+        const char *reason = !h ? (GetClassInfo(inst, klass, &wc) ?
+                                    "CreateWindowEx returned 0" : "window class is not registered") :
+                             !d ? "out of memory" : "class does not reserve DLGWINDOWEXTRA";
         win_free(d);
         if (font)
             DeleteObject(font);
         if (h)
             DestroyWindow(h);
+        dialog_creation_error(klass, -1, reason);
         return 0;
     }
     d->proc = proc;
@@ -389,8 +416,14 @@ HWND WINAPI CreateDialogIndirectN(HINSTANCE inst, const DLGTEMPLATE_N *t,
         HWND c = CreateWindowEx(cex, k, it->text ? it->text : "", cs,
                                 it->x * bx / 4, it->y * by / 8, cw, ch,
                                 h, (HMENU)it->id, inst, NULL);
-        if (!c)
-            continue;
+        if (!c) {
+            WNDCLASS wc;
+            const char *reason = GetClassInfo(inst, k, &wc) ?
+                                 "CreateWindowEx returned 0" : "window class is not registered";
+            DestroyWindow(h);           /* release the partial template and font */
+            dialog_creation_error(k, it->id, reason);
+            return 0;
+        }
         if (font)
             SendMessage(c, WM_SETFONT, (WPARAM)font, 0);
         if (!lstrcmpi(k, "BUTTON") && (cs & 0x0F) == BS_DEFPUSHBUTTON)

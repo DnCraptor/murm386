@@ -1056,6 +1056,33 @@ LRESULT ne_message(ne_user *u, uint32_t proc, HWND h, UINT msg, WPARAM wp, LPARA
             memcpy(blob, s, n);
         blob[n] = 0;
         len = (uint16_t)(n + 1);
+    } else if (msg == WM_DRAWITEM && lp) {
+        /* Win16 DRAWITEMSTRUCT: seven WORDs, four WORDs for RECT, DWORD data.
+         * Never forward a native ARM pointer to the guest WndProc. */
+        const DRAWITEMSTRUCT *di = (const DRAWITEMSTRUCT *)(uintptr_t)lp;
+        wr16(blob, (uint16_t)di->CtlType);
+        wr16(blob + 2, (uint16_t)di->CtlID);
+        wr16(blob + 4, (uint16_t)di->itemID);
+        wr16(blob + 6, (uint16_t)di->itemAction);
+        wr16(blob + 8, (uint16_t)di->itemState);
+        wr16(blob + 10, di->hwndItem);
+        wr16(blob + 12, di->hDC);
+        wr16(blob + 14, (uint16_t)di->rcItem.left);
+        wr16(blob + 16, (uint16_t)di->rcItem.top);
+        wr16(blob + 18, (uint16_t)di->rcItem.right);
+        wr16(blob + 20, (uint16_t)di->rcItem.bottom);
+        wr32(blob + 22, di->itemData);
+        len = 26;
+    } else if (msg == WM_MEASUREITEM && lp) {
+        /* Win16 MEASUREITEMSTRUCT: five WORDs followed by a DWORD. */
+        const MEASUREITEMSTRUCT *mi = (const MEASUREITEMSTRUCT *)(uintptr_t)lp;
+        wr16(blob, (uint16_t)mi->CtlType);
+        wr16(blob + 2, (uint16_t)mi->CtlID);
+        wr16(blob + 4, (uint16_t)mi->itemID);
+        wr16(blob + 6, (uint16_t)mi->itemWidth);
+        wr16(blob + 8, (uint16_t)mi->itemHeight);
+        wr32(blob + 10, mi->itemData);
+        len = 14;
     } else if (msg == WM_GETMINMAXINFO && lp) {
         fmt = F_MINMAX;
     } else if ((msg == WM_WINDOWPOSCHANGING || msg == WM_WINDOWPOSCHANGED) && lp) {
@@ -1067,9 +1094,11 @@ LRESULT ne_message(ne_user *u, uint32_t proc, HWND h, UINT msg, WPARAM wp, LPARA
         len = (uint16_t)((guest_size(fmt) + 1) & ~1u);
         pack(fmt, blob, (uint8_t *)(uintptr_t)lp, 0);
     }
-    if (!len || u->lents >= NE_LENT)
+    if (!len)
         return (LRESULT)(int32_t)win_ne_callback(c, proc, (uint16_t)h, (uint16_t)msg,
                                                  (uint16_t)wp, (uint32_t)lp);
+    if (u->lents >= NE_LENT)
+        return 0;                       /* do not leak a native pointer into Win16 */
     uint32_t far = win_ne_blob_far(c, len);
     u->lent[u->lents].far = far;
     u->lent[u->lents].native = (void *)(uintptr_t)lp;
@@ -1080,6 +1109,11 @@ LRESULT ne_message(ne_user *u, uint32_t proc, HWND h, UINT msg, WPARAM wp, LPARA
     u->lents--;
     if (fmt)                            /* what the procedure set in its copy */
         pack(fmt, blob, (uint8_t *)(uintptr_t)lp, 1);
+    if (msg == WM_MEASUREITEM && lp) {  /* the application's measured size */
+        MEASUREITEMSTRUCT *mi = (MEASUREITEMSTRUCT *)(uintptr_t)lp;
+        mi->itemWidth = rd16(blob + 6);
+        mi->itemHeight = rd16(blob + 8);
+    }
     return r;
 }
 
@@ -1158,6 +1192,17 @@ static __attribute__((noinline)) uint32_t send(args *a, ne_user *u, HWND h, UINT
     char cls[16];
     GetClassName(h, cls, sizeof(cls));
     int lb = !lstrcmpi(cls, "LISTBOX"), cb = !lstrcmpi(cls, "COMBOBOX"), ed = !lstrcmpi(cls, "EDIT");
+    DWORD style = lb ? (DWORD)GetWindowLong(h, GWL_STYLE) : 0;
+    int data_list = lb && (style & LBS_OWNERDRAWFIXED) && !(style & LBS_HASSTRINGS);
+    if (data_list && (msg == LB_ADDSTRING_ || msg == LB_INSERTSTRING_))
+        return post ? (uint32_t)PostMessage(h, msg, wp, (LPARAM)lp)
+                    : (uint32_t)SendMessage(h, msg, wp, (LPARAM)lp);
+    if (data_list && msg == LB_GETTEXT_) {
+        DWORD data = (DWORD)SendMessage(h, LB_GETITEMDATA, wp, 0);
+        if (SendMessage(h, LB_GETTEXTLEN, wp, 0) == LB_ERR || !wr(a, lp, &data, sizeof(data)))
+            return LB_ERR;
+        return sizeof(data);
+    }
     enum { NONE, IN, OUT, LINE, RECT_IN, RECT_OUT } kind = NONE;
     uint32_t size = 0;
     if (msg == WM_SETTEXT)

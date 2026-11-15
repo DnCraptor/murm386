@@ -26,6 +26,23 @@ typedef struct {
 
 static DWORD lstyle(HWND h) { return (DWORD)GetWindowLong(h, GWL_STYLE); }
 static int multisel(HWND h) { return (lstyle(h) & LBS_MULTIPLESEL) != 0; }
+static int own_draw(HWND h) { return (lstyle(h) & LBS_OWNERDRAWFIXED) != 0; }
+static int data_items(HWND h) { return own_draw(h) && !(lstyle(h) & LBS_HASSTRINGS); }
+
+static void measure_fixed(HWND h, wlist *l)
+{
+    wwnd *w = user_wnd(h);
+    if (!own_draw(h) || !w || !w->parent)
+        return;
+    MEASUREITEMSTRUCT m = { 0 };
+    m.CtlType = ODT_LISTBOX;
+    m.CtlID = w->id;
+    m.itemID = (UINT)-1;
+    m.itemHeight = l->ih;
+    SendMessage(w->parent->h, WM_MEASUREITEM, w->id, (LPARAM)(uintptr_t)&m);
+    if (m.itemHeight > 0 && m.itemHeight <= 0x7fff)
+        l->ih = (int)m.itemHeight;
+}
 
 static void notify(HWND h, int code)
 {
@@ -77,7 +94,25 @@ static void paint_item(HWND h, HDC dc, wlist *l, int i, HBRUSH bg, COLORREF fg, 
         SetTextColor(dc, fg);
         SetBkColor(dc, bk);
     }
-    if (i < l->n) {
+    if (own_draw(h) && i < l->n) {
+        wwnd *w = user_wnd(h);
+        if (w && w->parent) {
+            DRAWITEMSTRUCT di = { 0 };
+            di.CtlType = ODT_LISTBOX;
+            di.CtlID = w->id;
+            di.itemID = (UINT)i;
+            di.itemAction = ODA_DRAWENTIRE;
+            di.itemState = (sel ? ODS_SELECTED : 0) |
+                           (l->focus && i == l->caret ? ODS_FOCUS : 0);
+            di.hwndItem = h;
+            di.hDC = dc;
+            di.rcItem = r;
+            di.itemData = l->items[i].data;
+            SendMessage(w->parent->h, WM_DRAWITEM, w->id, (LPARAM)(uintptr_t)&di);
+        }
+        return;                         /* the owner draws text and focus */
+    }
+    if (i < l->n && l->items[i].s) {
         SetBkMode(dc, TRANSPARENT);
         TextOut(dc, r.left + 2, r.top, l->items[i].s, lstrlen(l->items[i].s));
     }
@@ -135,9 +170,14 @@ static int insert(HWND h, wlist *l, int at, LPCSTR s)
     }
     if (at < 0 || at > l->n)
         at = l->n;
+    char *copy = data_items(h) ? NULL : win_strdup(s ? s : "");
+    if (!data_items(h) && !copy) {
+        notify(h, LBN_ERRSPACE);
+        return LB_ERRSPACE;
+    }
     memmove(&l->items[at + 1], &l->items[at], sizeof(lbitem) * (size_t)(l->n - at));
-    l->items[at].s = win_strdup(s ? s : "");
-    l->items[at].data = 0;
+    l->items[at].s = copy;
+    l->items[at].data = data_items(h) ? (DWORD)(uintptr_t)s : 0;
     l->items[at].sel = 0;
     l->n++;
     if (l->cur >= at) l->cur++;
@@ -172,6 +212,7 @@ LRESULT CALLBACK user_listbox_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         l->cur = -1;
         l->ih = 16;
         l->has_vs = (lstyle(h) & WS_VSCROLL) != 0;
+        measure_fixed(h, l);
         return 0;
     case WM_NCDESTROY:
         if (l) {
@@ -201,6 +242,7 @@ LRESULT CALLBACK user_listbox_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         SetProp(h, MAKEINTATOM(1), (HANDLE)wp);
         if (l) {                        /* its lines the font's height */
             l->ih = user_ctl_line(h);
+            measure_fixed(h, l);
             update_scroll(h, l);
         }
         if (lp)
@@ -305,7 +347,7 @@ LRESULT CALLBACK user_listbox_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
     case WM_CHAR: {
-        if (!l || !l->n || wp < 32)
+        if (!l || !l->n || wp < 32 || data_items(h))
             return 0;
         char c = (char)wp;
         int start = l->caret < 0 ? 0 : l->caret;
@@ -354,7 +396,7 @@ LRESULT CALLBACK user_listbox_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             return LB_ERR;
         LPCSTR s = (LPCSTR)(intptr_t)lp;
         int at = l->n;
-        if (lstyle(h) & LBS_SORT)
+        if ((lstyle(h) & LBS_SORT) && !data_items(h))
             for (at = 0; at < l->n && lstrcmpi(l->items[at].s, s) <= 0; at++)
                 ;
         return insert(h, l, at, s);
@@ -402,10 +444,15 @@ LRESULT CALLBACK user_listbox_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     case LB_GETTEXT:
         if (!l || (int)wp < 0 || (int)wp >= l->n)
             return LB_ERR;
+        if (data_items(h)) {
+            memcpy((void *)(intptr_t)lp, &l->items[wp].data, sizeof(DWORD));
+            return sizeof(DWORD);
+        }
         lstrcpy((LPSTR)(intptr_t)lp, l->items[wp].s);
         return lstrlen(l->items[wp].s);
     case LB_GETTEXTLEN:
-        return (l && (int)wp >= 0 && (int)wp < l->n) ? lstrlen(l->items[wp].s) : LB_ERR;
+        return (l && (int)wp >= 0 && (int)wp < l->n) ?
+               (data_items(h) ? sizeof(DWORD) : lstrlen(l->items[wp].s)) : LB_ERR;
     case LB_GETCOUNT:
         return l ? l->n : 0;
     case LB_SETTOPINDEX:
@@ -447,7 +494,7 @@ LRESULT CALLBACK user_listbox_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         return c;
     }
     case LB_FINDSTRING: {
-        if (!l || !l->n)
+        if (!l || !l->n || data_items(h))
             return LB_ERR;
         LPCSTR s = (LPCSTR)(intptr_t)lp;
         int n = lstrlen(s), start = (int)(int16_t)wp;
