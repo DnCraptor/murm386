@@ -86,7 +86,8 @@ int winx86_run(CPU *cpu, winx86_service_fn service, void *opaque,
             rc = WINX86_OK;
             break;
         }
-        left = max_bursts + 1;          /* it came back: a new count */
+        /* Service calls consume the same slice; otherwise an API-heavy
+         * guest can starve task switching and keyboard processing. */
     }
 
     if (!--runs) {

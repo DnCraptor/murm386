@@ -41,9 +41,9 @@ typedef int (*winx86_service_fn)(void *opaque, CPU *cpu, uint16_t service);
  * caller.  The caller also owns its restoration.  A service may start another
  * run (nested), or switch to another task whose run starts or resumes; the
  * caller then keeps each guest's CPU state while it is not stepping.
- * Each burst is at most 4096 instructions; max_bursts bounds the bursts in
- * a row without a service call (runaway code), the count starts again at
- * each call.
+ * Each burst is at most 4096 instructions; max_bursts bounds every run,
+ * including bursts that call native services.  Frequent Win16 API calls
+ * must not postpone preemption indefinitely.
  */
 int winx86_run(CPU *cpu, winx86_service_fn service, void *opaque,
                unsigned max_bursts);
