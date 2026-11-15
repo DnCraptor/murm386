@@ -79,16 +79,11 @@ static char host_cwd[128];
 /* host tests: DOS paths to Linux ones; drive C: is the test directory */
 static const char *host_path_to(const char *p, char *buf, int size)
 {
-    if (p[0] && p[1] == ':')
-        p += 2;
-    if (*p == '\\' || *p == '/') {
-        lstrcpyn(buf, ".", size);
-        lstrcpyn(buf + 1, p, size - 1);
-    } else if (host_cwd[0]) {
-        snprintf(buf, (size_t)size, "%s/%s", host_cwd, p);
-    } else {
-        lstrcpyn(buf, p, size);
-    }
+    char absolute[256];
+    if (!win_file_resolve(p, absolute, sizeof(absolute))) return NULL;
+    p = absolute + 2;
+    lstrcpyn(buf, ".", size);
+    lstrcpyn(buf + 1, p, size - 1);
     for (char *q = buf; *q; q++)
         if (*q == '\\')
             *q = '/';
@@ -105,17 +100,21 @@ static const char *host_path(const char *p)
 
 HFILE WINAPI _lopen(LPCSTR path, int mode)
 {
+    char absolute[256];
     int flags = (mode & 3) == OF_WRITE ? O_WRONLY : (mode & 3) == OF_READWRITE ? F_RDWR : O_RDONLY;
-    return path ? track(open(path, flags | O_BINARY)) : HFILE_ERROR;
+    return win_file_resolve(path, absolute, sizeof(absolute)) ?
+           track(open(absolute, flags | O_BINARY)) : HFILE_ERROR;
 }
 
 HFILE WINAPI _lcreat(LPCSTR path, int attr)
 {
+    char absolute[256];
     (void)attr;
+    if (!win_file_resolve(path, absolute, sizeof(absolute))) return HFILE_ERROR;
 #ifdef FILE_HOST
-    return path ? track(open(path, O_RDWR | O_CREAT | O_TRUNC, 0644)) : HFILE_ERROR;
+    return track(open(absolute, O_RDWR | O_CREAT | O_TRUNC, 0644));
 #else
-    return path ? track(open(path, O_WRONLY | O_CREAT | O_TRUNC)) : HFILE_ERROR;
+    return track(open(absolute, O_WRONLY | O_CREAT | O_TRUNC));
 #endif
 }
 
@@ -252,7 +251,7 @@ static const char *host_split(LPCSTR spec, char *dir, int size)
         return NULL;
     memcpy(d, spec, (size_t)dn);
     d[dn] = 0;
-    host_path_to(d, dir, size);
+    if (!host_path_to(d, dir, size)) return NULL;
     if (!dir[0])
         lstrcpyn(dir, ".", size);
     return pat;
@@ -309,7 +308,10 @@ int WINAPI WinDirListAttrN(LPCSTR spec, UINT attr, LPSTR buf, int size)
     }
 #else
     static struct find_t ft;        /* big, keep it off the task stack */
-    for (int r = _dos_findfirst(spec, dirs ? 0x10 : 0, &ft); !r; r = _dos_findnext(&ft)) {
+    char absolute[256];
+    if (!win_file_resolve(spec, absolute, sizeof(absolute)))
+        return 0;
+    for (int r = _dos_findfirst(absolute, dirs ? 0x10 : 0, &ft); !r; r = _dos_findnext(&ft)) {
         if (((ft.attrib & 0x10) != 0) != dirs || ft.name[0] == '.')
             continue;
         if (!add_name(buf, size, &len, ft.name))
@@ -385,10 +387,11 @@ static int dos_call(union REGS *r) { return dos_call_seg(r, db_seg); }
 
 static int dos_path(unsigned ofs, LPCSTR p)
 {
-    int n = p ? lstrlen(p) : -1;
-    if (n < 0 || n >= DB_PATHMAX || !dos_block())
-        return 0;
-    memcpy(db_mem + ofs, p, (size_t)n + 1);
+    char absolute[256];
+    if (!win_file_resolve(p, absolute, sizeof(absolute))) return 0;
+    int n = lstrlen(absolute);
+    if (n >= DB_PATHMAX || !dos_block()) return 0;
+    memcpy(db_mem + ofs, absolute, (size_t)n + 1);
     return 1;
 }
 
@@ -402,6 +405,160 @@ static BOOL dos_path_op(UINT ah, LPCSTR path)
     return dos_call(&r);
 }
 #endif
+
+/* The underlying DOS has one process-wide working directory.  WINN does not
+ * switch it between tasks: every WINN path is made absolute below, using the
+ * task's drive and that drive's independently maintained directory. */
+static int dos_letter(char c)
+{
+    if (c >= 'a' && c <= 'z') c -= 'a' - 'A';
+    return c >= 'A' && c <= 'Z' ? c - 'A' : -1;
+}
+
+/* On entry to WINN only: read the real DOS cwd, before virtualizing it. */
+static int physical_cwd(char *buf, int size)
+{
+    if (size < 4) return 0;
+#ifdef FILE_HOST
+    buf[0] = 'C'; buf[1] = ':'; buf[2] = '\\'; buf[3] = 0;
+    if (host_cwd[0]) {
+        if ((int)strlen(host_cwd) + 4 > size) return 0;
+        strcpy(buf + 3, host_cwd);
+        for (char *p = buf; *p; p++) if (*p == '/') *p = '\\';
+    }
+#else
+    union REGS r = { 0 };
+    r.h.ah = 0x19;
+    int386(0x21, &r, &r);
+    buf[0] = (char)('A' + r.h.al);
+    buf[1] = ':'; buf[2] = '\\'; buf[3] = 0;
+    if (dos_block()) {
+        memset(&r, 0, sizeof(r));
+        r.h.ah = 0x47;
+        r.h.dl = (uint8_t)(buf[0] - 'A' + 1);
+        r.w.si = DB_PATH1;
+        if (dos_call(&r)) {
+            size_t n = strlen((const char *)db_mem + DB_PATH1);
+            if (n + 4 > (size_t)size) return 0;
+            memcpy(buf + 3, db_mem + DB_PATH1, n + 1);
+        }
+    }
+#endif
+    return 1;
+}
+
+void win_file_task_end(wtask *task)
+{
+    for (int i = 0; i < 26; ++i) {
+        win_free(task->dos_cwd[i]);
+        task->dos_cwd[i] = NULL;
+    }
+}
+
+BOOL win_file_task_init(wtask *task, const wtask *parent)
+{
+    if (parent) {
+        task->dos_drive = parent->dos_drive;
+        for (int i = 0; i < 26; ++i)
+            if (parent->dos_cwd[i] &&
+                !(task->dos_cwd[i] = win_strdup(parent->dos_cwd[i]))) {
+                win_file_task_end(task);
+                return FALSE;
+            }
+        return TRUE;
+    }
+    char initial[128];
+    if (!physical_cwd(initial, sizeof(initial))) return FALSE;
+    int d = dos_letter(initial[0]);
+    if (d < 0) return FALSE;
+    task->dos_drive = (uint8_t)d;
+    task->dos_cwd[d] = win_strdup(initial);
+    return task->dos_cwd[d] != NULL;
+}
+
+/* Canonicalize DOS paths without touching the physical current directory.
+ * C:foo uses C:'s cwd, \foo uses the current drive's root, and .. stays
+ * within its drive's root.  The same function handles wildcard searches. */
+BOOL win_file_resolve(LPCSTR name, LPSTR out, int size)
+{
+    if (!name || !out || size < 4) return FALSE;
+    const wtask *t = task_current();
+    int drive = t->dos_drive, specified = dos_letter(name[0]);
+    const char *p = name;
+    if (specified >= 0 && name[1] == ':') {
+        drive = specified;
+        p += 2;
+    }
+    if (drive < 0 || drive >= 26) return FALSE;
+    char buf[256];
+    int n = 3;
+    buf[0] = (char)('A' + drive); buf[1] = ':'; buf[2] = '\\'; buf[3] = 0;
+    int rooted = *p == '\\' || *p == '/';
+    if (!rooted && t->dos_cwd[drive]) {
+        n = (int)strlen(t->dos_cwd[drive]);
+        if (n < 3 || n >= (int)sizeof(buf)) return FALSE;
+        memcpy(buf, t->dos_cwd[drive], (size_t)n + 1);
+    }
+    while (*p) {
+        while (*p == '\\' || *p == '/') ++p;
+        if (!*p) break;
+        const char *component = p;
+        while (*p && *p != '\\' && *p != '/') ++p;
+        int len = (int)(p - component);
+        if (len == 1 && component[0] == '.') continue;
+        if (len == 2 && component[0] == '.' && component[1] == '.') {
+            if (n > 3) {
+                while (n > 3 && buf[n-1] != '\\') --n;
+                if (n > 3) --n;
+                buf[n] = 0;
+            }
+            continue;
+        }
+        if (n > 3 && buf[n-1] != '\\') buf[n++] = '\\';
+        if (n + len >= (int)sizeof(buf)) return FALSE;
+        memcpy(buf + n, component, (size_t)len);
+        n += len;
+        buf[n] = 0;
+    }
+    if (n >= size) return FALSE;
+    memcpy(out, buf, (size_t)n + 1);
+    return TRUE;
+}
+
+int win_file_getcwd(int drive, LPSTR out, int size)
+{
+    wtask *t = task_current();
+    int d = drive ? drive - 1 : t->dos_drive;
+    if (!out || size < 4 || d < 0 || d >= 26) return 0;
+    char root[4] = { (char)('A' + d), ':', '\\', 0 };
+    const char *cwd = t->dos_cwd[d] ? t->dos_cwd[d] : root;
+    int len = (int)strlen(cwd);
+    if (len >= size) return 0;
+    memcpy(out, cwd, (size_t)len + 1);
+    return len;
+}
+
+void win_file_task_workdir(wtask *task, LPCSTR exe)
+{
+    char full[256];
+    if (!win_file_resolve(exe, full, sizeof(full))) return;
+    char *slash = NULL;
+    for (char *p = full; *p; ++p)
+        if (*p == '\\')
+            slash = p;
+    if (!slash) return;
+    if (slash > full + 2)
+        *slash = 0;
+    else
+        slash[1] = 0;            /* an executable in C:\\ (drive root) */
+    int drive = dos_letter(full[0]);
+    if (drive < 0) return;
+    char *copy = win_strdup(full);
+    if (!copy) return;
+    win_free(task->dos_cwd[drive]);
+    task->dos_cwd[drive] = copy;
+    task->dos_drive = (uint8_t)drive;
+}
 
 /* DOS critical errors (a drive without a disk) fail the call instead of
  * asking "Abort, Retry, Fail?" on a screen in graphics mode: INT 24h points
@@ -569,7 +726,7 @@ BOOL WINAPI GetDiskFreeSpaceN(int drive, DWORD *free_bytes, DWORD *total_bytes)
 #else
     union REGS r = { 0 };
     r.h.ah = 0x36;
-    r.h.dl = (uint8_t)drive;
+    r.h.dl = (uint8_t)(drive ? drive : win_file_drive(-1) + 1);
     int386(0x21, &r, &r);
     if (r.w.ax == 0xFFFF)
         return FALSE;
@@ -583,33 +740,7 @@ BOOL WINAPI GetDiskFreeSpaceN(int drive, DWORD *free_bytes, DWORD *total_bytes)
 /* The current directory with its drive: "C:\\WINN". */
 int WINAPI GetCurrentDirectoryN(LPSTR buf, int size)
 {
-    if (!buf || size < 4)
-        return 0;
-#ifdef FILE_HOST
-    lstrcpyn(buf, "C:\\", size);
-    lstrcpyn(buf + 3, host_cwd, size - 3);
-    for (char *q = buf; *q; q++)
-        if (*q == '/')
-            *q = '\\';
-#else
-    union REGS r = { 0 };
-    r.h.ah = 0x19;
-    int386(0x21, &r, &r);
-    int drive = r.h.al;
-    buf[0] = (char)('A' + drive);
-    buf[1] = ':';
-    buf[2] = '\\';
-    buf[3] = 0;
-    if (dos_block()) {
-        memset(&r, 0, sizeof(r));
-        r.h.ah = 0x47;
-        r.h.dl = (uint8_t)(drive + 1);
-        r.w.si = DB_PATH1;
-        if (dos_call(&r))
-            lstrcpyn(buf + 3, (const char *)db_mem + DB_PATH1, size - 3);
-    }
-#endif
-    return lstrlen(buf);
+    return win_file_getcwd(0, buf, size);
 }
 
 /* KERNEL: 0 no such drive, DRIVE_REMOVABLE, DRIVE_FIXED, DRIVE_REMOTE
@@ -647,53 +778,42 @@ UINT WINAPI GetDriveType(int drive)
 /* INT 21h 3Bh: the current directory of the path's drive */
 BOOL win_file_chdir(LPCSTR path)
 {
-    if (!path)
-        return FALSE;
-#ifdef FILE_HOST
-    char d[256], full[256];
-    struct stat st;
-    host_path_to(path, d, sizeof(d));
-    if (stat(d, &st) || !S_ISDIR(st.st_mode))
-        return FALSE;
-    /* the new one below the test directory, "." and ".." resolved */
-    char out[128] = "";
-    lstrcpyn(full, d[0] == '.' && (d[1] == '/' || !d[1]) ? d + 1 : d, sizeof(full));
-    for (char *t = strtok(full, "/"); t; t = strtok(NULL, "/")) {
-        if (!strcmp(t, "."))
-            continue;
-        if (!strcmp(t, "..")) {
-            char *slash = strrchr(out, '/');
-            if (slash)
-                *slash = 0;
-            else
-                out[0] = 0;
-            continue;
-        }
-        if (strlen(out) + strlen(t) + 2 > sizeof(out))
-            return FALSE;
-        if (out[0])
-            strcat(out, "/");
-        strcat(out, t);
-    }
-    lstrcpyn(host_cwd, out, sizeof(host_cwd));
+    char absolute[256];
+    if (!win_file_resolve(path, absolute, sizeof(absolute))) return FALSE;
+    int attr = win_file_attr(absolute, 0, 0);
+    if (attr < 0 || !(attr & 0x10)) return FALSE;
+    int d = dos_letter(absolute[0]);
+    if (d < 0) return FALSE;
+    char *copy = win_strdup(absolute);
+    if (!copy) return FALSE;
+    wtask *task = task_current();
+    win_free(task->dos_cwd[d]);
+    task->dos_cwd[d] = copy;
     return TRUE;
-#else
-    return dos_path_op(0x3B, path);
-#endif
 }
 
 /* INT 21h 19h (set < 0: the current drive, 0 A:) and 0Eh (select drive
  * set: the number of drives) */
 int win_file_drive(int set)
 {
+    wtask *task = task_current();
+    if (set < 0) return task->dos_drive;
 #ifdef FILE_HOST
-    return set < 0 ? 2 : 26;
+    if (set == 2) task->dos_drive = (uint8_t)set;
+    return 26;
 #else
+    /* Query the number of drives without changing DOS's actual drive. */
     union REGS r = { 0 };
-    r.h.ah = set < 0 ? 0x19 : 0x0E;
-    r.h.dl = (uint8_t)(set < 0 ? 0 : set);
+    r.h.ah = 0x19;
     int386(0x21, &r, &r);
-    return r.h.al;
+    uint8_t physical = r.h.al;
+    r.h.ah = 0x0E;
+    r.h.dl = physical;
+    int386(0x21, &r, &r);
+    int count = r.h.al;
+    if (set >= 0 && set < count && GetDriveType(set))
+        task->dos_drive = (uint8_t)set;
+    return count;
 #endif
 }
 
@@ -837,22 +957,19 @@ int win_file_environment(char *buf, int size)
 /* a name made full: the current directory's, with the drive, upper case */
 static void full_path(const char *name, char *out, int cap)
 {
-    char cwd[128];
-    if (name[0] && name[1] == ':') {
-        lstrcpyn(out, name, cap);
-    } else if (name[0] == '\\' || name[0] == '/') {
-        GetCurrentDirectoryN(cwd, sizeof(cwd));
-        cwd[2] = 0;
-        wsprintf(out, "%s%s", cwd, name);
-    } else {
-        int n = GetCurrentDirectoryN(cwd, sizeof(cwd));
-        wsprintf(out, n && cwd[n - 1] == '\\' ? "%s%s" : "%s\\%s", cwd, name);
+    if (!win_file_resolve(name, out, cap)) {
+        if (cap > 0) out[0] = 0;
+        return;
     }
-    for (char *p = out; *p; p++)
+    /* OF_PARSE of an empty string is the task's working directory. */
+    int n = lstrlen(out);
+    if (!name[0] && n > 3 && n + 1 < cap) {
+        out[n++] = '\\';
+        out[n] = 0;
+    }
+    for (char *p = out; *p; ++p)
         if (*p >= 'a' && *p <= 'z')
-            *p = (char)(*p - 32);
-        else if (*p == '/')
-            *p = '\\';
+            *p -= 'a' - 'A';
 }
 
 /* KERNEL.74: the file opened (created, only looked for, deleted, its name

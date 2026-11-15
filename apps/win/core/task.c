@@ -233,6 +233,7 @@ void task_init(void)
     lstrcpy(kernel_task.name, "KERNEL");
     tasks = &kernel_task;
     cur = &kernel_task;
+    win_file_task_init(&kernel_task, NULL);
 }
 
 /* ---------------------------------------------------------------- life cycle */
@@ -275,6 +276,12 @@ wtask *task_create(const char *name, int (*run)(wtask *), uint32_t stack_size)
     t->stack = (uint8_t *)win_alloc(stack_size);
     t->h = t->stack ? win_handle_alloc(WOBJ_TASK, t) : 0;
     if (!t->h) {
+        win_free(t->stack);
+        win_free(t);
+        return NULL;
+    }
+    if (!win_file_task_init(t, task_current())) {
+        win_handle_free(t->h);
         win_free(t->stack);
         win_free(t);
         return NULL;
@@ -341,6 +348,7 @@ static void reap(void)
             win_handle_free(t->h);
             win_free(t->stack);
             win_free(t->module);
+            win_file_task_end(t);
             for (int i = 0; i < WINAPP_MAX_ICONS; i++)
                 if (t->icons[i])
                     DestroyIcon(t->icons[i]);
@@ -529,6 +537,12 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
     if (!dot && lstrlen(prog) + 4 < (int)sizeof(prog))
         lstrcat(prog, ".EXE");
     win_path(prog, path, sizeof(path));
+#ifndef TASK_HOST
+    /* The NE loader uses fopen on this filename, not the virtual file APIs. */
+    char image_path[sizeof(path)];
+    if (win_file_resolve(path, image_path, sizeof(image_path)))
+        lstrcpyn(path, image_path, sizeof(path));
+#endif
     cursor_wait_begin();
 
     win_ez_image img;
@@ -627,6 +641,8 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
     t->info = win_app_info(path);
     lstrcpyn(t->cmdline, args, sizeof(t->cmdline));
     t->show = (int)show;
+    /* Give the new task the executable directory before it starts. */
+    win_file_task_workdir(t, path);
     /* The hourglass stays while it starts (a Win16 program loads in its
      * own task), as in Windows: until it first waits for input, in its
      * message loop or a dialog's, or ends (task_started) */

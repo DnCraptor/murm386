@@ -408,6 +408,9 @@ typedef struct wtask {
     char      name[16];
     char      cmdline[128];
     int       show;
+    /* Virtual DOS filesystem state: independent of the underlying DOS cwd. */
+    uint8_t   dos_drive;          /* 0=A:, 2=C:, etc. */
+    char     *dos_cwd[26];        /* absolute directory for each visited drive */
     uint8_t  *stack;
     uint32_t  stack_size;
     void     *module;           /* EZ image memory */
@@ -484,6 +487,11 @@ extern HBRUSH (*gdi_sys_color_brush)(int index);
 /* file.c */
 void   win_files_task_ended(HTASK task);
 void   win_files_init(void);
+BOOL   win_file_task_init(wtask *task, const wtask *parent);
+void   win_file_task_end(wtask *task);
+void   win_file_task_workdir(wtask *task, LPCSTR exe);
+BOOL   win_file_resolve(LPCSTR name, LPSTR out, int size);
+int    win_file_getcwd(int drive, LPSTR out, int size);
 /* file.c: DOS's functions for Win16 programs (INT 21h 3Bh, 19h/0Eh, 43h,
  * 57h; the environment) */
 BOOL   win_file_chdir(LPCSTR path);

@@ -133,9 +133,7 @@ static int find(win_ne_guest_api_context *ctx, ne_user *u, win_ne_dos_regs *r)
 static int getcwd_(win_ne_guest_api_context *ctx, ne_user *u, win_ne_dos_regs *r)
 {
     char cwd[80];
-    if ((r->dx & 0xff) && (r->dx & 0xff) - 1 != win_file_drive(-1))
-        return fail(u, r, 15);          /* only the current drive's */
-    if (GetCurrentDirectoryN(cwd, sizeof(cwd)) < 3)
+    if (win_file_getcwd(r->dx & 0xff, cwd, sizeof(cwd)) < 3)
         return fail(u, r, E_NO_PATH);
     const char *p = cwd + 3;
     uint32_t n = (uint32_t)strlen(p) + 1;
@@ -667,25 +665,6 @@ __attribute__((noinline)) uint16_t ne_open_file(args *a, const char *given)
     } else if (!win_ne_string(a->ctx, (uint16_t)(name_far >> 16), (uint16_t)name_far, name,
                               sizeof(name))) {
         return a->bad = 1, (uint16_t)HFILE_ERROR;
-    }
-    /* WinExec accepts a full program path, but WINN does not change the
-     * process-wide DOS current directory for a new Win16 task.  Installers
-     * such as SETUP.EXE use OpenFile("", OF_PARSE) to find their launch
-     * directory before looking for INSTALL.DAT alongside the executable.
-     * Supply that directory without changing the cwd of other tasks. */
-    if (!(mode & OF_REOPEN) && (mode & OF_PARSE) && !name[0] && a->ctx->path) {
-        const char *path = a->ctx->path;
-        const char *slash = NULL;
-        for (const char *p = path; *p; p++)
-            if (*p == '\\' || *p == '/')
-                slash = p;
-        if (slash) {
-            size_t n = (size_t)(slash - path + 1);
-            if (n < sizeof(name)) {
-                memcpy(name, path, n);
-                name[n] = 0;
-            }
-        }
     }
     HFILE f = OpenFile(name, &of, mode);
     /* its fields and the name up to its NUL, as KERNEL's copies it: a
