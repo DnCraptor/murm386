@@ -291,7 +291,7 @@ int WINAPI WinDirListAttrN(LPCSTR spec, UINT attr, LPSTR buf, int size)
     if (d) {
         struct dirent *e;
         while ((e = readdir(d)) != NULL) {
-            if (e->d_name[0] == '.')
+            if (e->d_name[0] == '.' || strchr(e->d_name, ':'))   /* "C:", "A:": drives' links */
                 continue;
             if (!host_match(pat, e->d_name))
                 continue;
@@ -610,7 +610,8 @@ int WINAPI WinFindFilesN(LPCSTR spec, UINT attr, WINFIND_N *out, int max)
         return 0;
     struct dirent *e;
     while (n < max && (e = readdir(d)) != NULL) {
-        if (e->d_name[0] == '.' || strlen(e->d_name) > 12 || !host_match(pat, e->d_name))
+        if (e->d_name[0] == '.' || strlen(e->d_name) > 12 || strchr(e->d_name, ':') ||
+            !host_match(pat, e->d_name))
             continue;
         char full[512];
         struct stat st;

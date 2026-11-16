@@ -553,7 +553,8 @@ int win_ne_guest_api(void *opaque, win_ne_regs *cpu, uint16_t service)
         const char *p = ctx->path ? ctx->path : "";
         /* A nonzero hInstance can designate a loaded Win16 DLL, not just
          * the running EXE.  An unknown handle is not the EXE's filename. */
-        if (module && (module & ~3u) != (dgroup(g) & ~3u)) {
+        if (module && (module & ~3u) != (dgroup(g) & ~3u) &&
+            (!g->module_db || (module & ~3u) != (g->module_db & ~3u))) {
             p = NULL;
             for (uint16_t i = 0; i < g->dll_count && !p; i++) {
                 const win_ne_guest_dll *dll = &g->dlls[i];

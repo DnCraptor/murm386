@@ -654,7 +654,8 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
     char name[16];
     int k = 0;
     while (base[k] && base[k] != '.' && k < 15) {
-        name[k] = base[k];
+        char c = base[k];               /* upper case, as Windows' module names */
+        name[k] = c >= 'a' && c <= 'z' ? (char)(c - 32) : c;
         k++;
     }
     name[k] = 0;

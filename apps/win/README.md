@@ -52,7 +52,8 @@ menus (`LoadMenu`, the menu of a class), accelerators, strings, dialogs
 icons and cursors (`LoadIcon`, `LoadCursor`: WINN's 32x32 16-colour icons,
 the group's entry closest to that, scaled; 32x32 cursors with their hot
 spot), bitmaps (`LoadBitmap`: DIBs of 1, 4, 8 and 24 bits, monochrome or of
-the screen's palette). Its icons and the description in its file are those
+the screen's palette); names RC numbered in its RT_NAMETABLE (Windows 3.0),
+resources' and types' (Taipei finds its "LAYOUT" so). Its icons and the description in its file are those
 the Program Manager, Alt+Tab and the Task List show, as an EZ
 application's. A class it registers with a native class's procedure
 (`GetClassInfo`: a superclass) works as that class.
@@ -765,7 +766,9 @@ use `ucontext`):
 
 Drive C: is the directory the test runs in, `C:` a link to it there that
 winhost makes (the Windows directory `C:/HOSTWIN`, a full path for fopen
-and for DOS alike: tasks run in their programs' directories).
+and for DOS alike: tasks run in their programs' directories); `A:` too
+(a setup run from `A:\`). File Manager and the directory searches do not
+list the links.
 
     ./winhost scripts/menus.txt      # menus, combo box, scroll bar
     ./winhost scripts/tasks.txt      # two DEMO tasks

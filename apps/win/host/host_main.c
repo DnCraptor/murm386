@@ -292,6 +292,11 @@ int main(int argc, char **argv)
         printf("cannot link C: to the test directory\n");
         return 1;
     }
+    /* A: too (file.c maps every drive there): a setup run from A:\ */
+    if (symlink(".", "A:") && access("A:/HOSTWIN", F_OK)) {
+        printf("cannot link A: to the test directory\n");
+        return 1;
+    }
     if (win_boot("C:/HOSTWIN/WINN.EXE", displays, &host_script_input))
         return 1;
     win_logo_show();                /* HOSTWIN/WINLOGO.BMP, if the test put one there */

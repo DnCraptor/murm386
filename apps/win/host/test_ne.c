@@ -133,7 +133,7 @@ int main(void)
     image(b);
     uint8_t *h = b + 0x80, *rt = b + 0x100;
     w16(h + 0x24, 0x80);       /* resource table */
-    w16(h + 0x26, 0xac);       /* end of resource table */
+    w16(h + 0x26, 0xc0);       /* end of resource table */
     w16(rt, 4);               /* 16-byte resource alignment */
     w16(rt + 2, 0x8005);      /* RT_DIALOG */
     w16(rt + 4, 1);
@@ -145,12 +145,22 @@ int main(void)
     w16(rt + 30, 0x25);      /* 0x250 */
     w16(rt + 32, 3);         /* 48 bytes */
     w16(rt + 36, 0x8001);
+    w16(rt + 42, 0xf009);    /* a type RC numbered for its name "LAYOUT" (Taipei) */
+    w16(rt + 44, 1);
+    w16(rt + 50, 0x2a);      /* 0x2a0 */
+    w16(rt + 52, 1);
+    w16(rt + 56, 0x80c8);    /* #200 */
     uint8_t *names = b + 0x250;
     w16(names, 15);          /* entry length */
     w16(names + 2, 5);       /* RT_DIALOG */
     w16(names + 4, 0x8004);
     memcpy(names + 7, "WELCOME", 8);  /* empty type name, then ID name */
+    w16(names + 15, 14);
+    w16(names + 17, 0xf009);
+    w16(names + 19, 0xc8);
+    memcpy(names + 21, "LAYOUT", 7);  /* the type's name, an empty ID name */
     memcpy(b + 0x280, "WELCOME DIALOG!", 15);
+    memcpy(b + 0x2a0, "TAIPEI LAYOUT", 13);
     FILE *f = fopen(path, "wb");
     assert(f && fwrite(b, 1, sizeof(b), f) == sizeof(b));
     assert(!fclose(f));
@@ -166,6 +176,12 @@ int main(void)
     assert(win_ne_resource(path, 5, 0, "MISSING", &resource, &length) == WIN_NE_UNRESOLVED);
     assert(win_ne_resource_place(path, 5, 0, "WELCOME", &offset, &length) == WIN_NE_OK);
     assert(offset == 0x280 && length == 16);
+    assert(win_ne_resource_named_type(path, "layout", 200, NULL, &resource, &length) ==
+           WIN_NE_OK);
+    assert(length == 16 && !memcmp(resource, "TAIPEI LAYOUT", 13));
+    free(resource);
+    assert(win_ne_resource_named_type(path, "LAYOUTS", 200, NULL, &resource, &length) ==
+           WIN_NE_UNRESOLVED);
 
     unlink(path);
     puts("ne: PASS");

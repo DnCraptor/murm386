@@ -648,6 +648,42 @@ static uint16_t res_name_alias(const char *path, uint16_t type, const char *name
     }
 }
 
+/* ... and a type's name RC numbered so (Taipei's "LAYOUT"): the number of
+ * the type its first entry of that type name gives, 0 if none */
+static uint16_t res_type_alias(const char *path, const char *type_name)
+{
+    uint16_t type = 0;
+    for (int n = 0; !type; n++) {
+        uint8_t *data;
+        uint32_t size;
+        if (win_ne_resource_nth(path, 15, n, &data, &size) != WIN_NE_OK)
+            return 0;
+        for (uint32_t at = 0; size >= 8 && at <= size - 8 && !type;) {
+            uint16_t len = rd16(data + at);
+            if (!len || len < 8 || len > size - at)
+                break;
+            const uint8_t *s = data + at + 6, *end = data + at + len;
+            const uint8_t *nul = memchr(s, 0, (size_t)(end - s));
+            if ((rd16(data + at + 2) & 0x8000u) && nul &&
+                (size_t)(nul - s) == strlen(type_name)) {
+                const char *p = type_name;
+                int equal = 1;
+                for (const uint8_t *q = s; q < nul && equal; q++, p++) {
+                    char a = (char)*q, b = *p;
+                    if (a >= 'a' && a <= 'z') a = (char)(a - 32);
+                    if (b >= 'a' && b <= 'z') b = (char)(b - 32);
+                    equal = a == b;
+                }
+                if (equal)
+                    type = rd16(data + at + 2) & 0x7fffu;
+            }
+            at += len;
+        }
+        free(data);
+    }
+    return type;
+}
+
 /* A resource's id in the table: high bit, the number; else the offset of
  * its length-prefixed name from the table's start. */
 static int res_id_match(FILE *f, uint64_t size, uint64_t table, uint16_t v,
@@ -688,6 +724,7 @@ static int find_resource(const char *path, uint16_t type, const char *type_name,
         name = NULL;
     }
     uint16_t alias = !type_name && name && nth < 0 ? res_name_alias(path, type, name) : 0;
+    uint16_t type_alias = type_name ? res_type_alias(path, type_name) : 0;
     FILE *f = path ? fopen(path, "rb") : NULL;
     if (!f)
         return WIN_NE_NO_FILE;
@@ -719,7 +756,8 @@ static int find_resource(const char *path, uint16_t type, const char *type_name,
             goto out;
         uint16_t t = rd16(ti), count = rd16(ti + 2);
         p += 8;
-        int this_type = type_name ? res_id_match(f, size, table, t, 0, type_name, 0) :
+        int this_type = type_name ? res_id_match(f, size, table, t, 0, type_name, 0) ||
+                                    (type_alias && (t & 0x8000u) && (t & 0x7fffu) == type_alias) :
                                     (t & 0x8000u) && (t & 0x7fffu) == type;
         for (unsigned i = 0; i < count; i++, p += 12) {
             uint8_t ni[12];
