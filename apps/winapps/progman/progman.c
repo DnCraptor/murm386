@@ -159,31 +159,39 @@ static void group_state(pm_group *gr)
     gr->state = IsIconic(gr->hwnd) ? 2 : IsZoomed(gr->hwnd) ? 1 : 0;
 }
 
-static void save_groups(void)
+static BOOL save_groups(void)
 {
     char sec[16], key[16], val[128];
+    BOOL ok = TRUE;
     for (int g = ngroups; g < saved_groups; g++) {     /* groups deleted */
         wsprintf(sec, "Group%d", g + 1);
-        WritePrivateProfileString(sec, NULL, NULL, INI);
+        if (!WritePrivateProfileString(sec, NULL, NULL, INI))
+            ok = FALSE;
     }
     for (int g = 0; g < ngroups; g++) {
         pm_group *gr = &groups[g];
         group_state(gr);
         wsprintf(sec, "Group%d", g + 1);
-        WritePrivateProfileString(sec, NULL, NULL, INI);
-        WritePrivateProfileString(sec, "Name", gr->name, INI);
+        if (!WritePrivateProfileString(sec, NULL, NULL, INI))
+            ok = FALSE;
+        if (!WritePrivateProfileString(sec, "Name", gr->name, INI))
+            ok = FALSE;
         if (!IsRectEmpty(&gr->normal)) {
             wsprintf(val, "%d %d %d %d %d", gr->normal.left, gr->normal.top,
                      gr->normal.right, gr->normal.bottom, gr->state);
-            WritePrivateProfileString(sec, "Window", val, INI);
+            if (!WritePrivateProfileString(sec, "Window", val, INI))
+                ok = FALSE;
         }
         for (int i = 0; i < gr->n; i++) {
             wsprintf(key, "Item%d", i + 1);
             wsprintf(val, "%s,%s", gr->it[i].desc, gr->it[i].cmd);
-            WritePrivateProfileString(sec, key, val, INI);
+            if (!WritePrivateProfileString(sec, key, val, INI))
+                ok = FALSE;
         }
     }
-    saved_groups = ngroups;
+    if (ok)
+        saved_groups = ngroups;
+    return ok;
 }
 
 static RECT frame_normal;           /* restored frame position */
@@ -642,11 +650,12 @@ static BOOL CALLBACK RunProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
     return FALSE;
 }
 
-static void items_changed(pm_group *gr)
+static BOOL items_changed(pm_group *gr)
 {
-    save_groups();
+    BOOL ok = save_groups();
     layout(gr);
     InvalidateRect(gr->hwnd, NULL, TRUE);
+    return ok;
 }
 
 static void new_item(void)
@@ -1091,9 +1100,17 @@ static int dde_group(const char *name, const char *path)
 {
     int g = group_named(name);
     if (g >= 0) {
+        pm_group *gr = &groups[g];
+        /* A group can have been saved even if its MDI window was not made. */
+        if (!gr->hwnd && !open_group_window(g, 1))
+            return -1;
         /* A previously created empty group may now have a .GRP to import. */
-        if (!groups[g].n && path && path[0] && grp_import(&groups[g], path))
-            items_changed(&groups[g]);
+        if (!gr->n && path && path[0] && grp_import(gr, path)) {
+            if (!items_changed(gr))
+                return -1;
+        } else if (!save_groups()) {
+            return -1;               /* retry a previously failed write */
+        }
         return g;
     }
     if (ngroups >= MAXGROUPS || !name[0])
@@ -1105,8 +1122,13 @@ static int dde_group(const char *name, const char *path)
     if (path && path[0])
         grp_import(gr, path);
     ngroups++;
-    open_group_window(ngroups - 1, 1);
-    save_groups();
+    if (!open_group_window(ngroups - 1, 1)) {
+        ngroups--;                   /* do not persist an invisible group */
+        memset(gr, 0, sizeof(*gr));
+        return -1;
+    }
+    if (!save_groups())
+        return -1;                   /* leave it in memory so a retry can save it */
     return ngroups - 1;
 }
 
@@ -1133,7 +1155,7 @@ static int item_named(pm_group *gr, const char *name)
     return -1;
 }
 
-static void remove_item(pm_group *gr, int i)
+static BOOL remove_item(pm_group *gr, int i)
 {
     forget_icon(&gr->it[i]);
     for (; i < gr->n - 1; i++)
@@ -1141,14 +1163,14 @@ static void remove_item(pm_group *gr, int i)
     gr->n--;
     if (gr->sel >= gr->n)
         gr->sel = gr->n - 1;
-    items_changed(gr);
+    return items_changed(gr);
 }
 
 /* "[Cmd(a,"b, c",d)][Cmd2]...": each command and its arguments (quotes
  * kept out); 1 when all were done */
 static int dde_execute(const char *s)
 {
-    int ok = 1;
+    int ok = 1, commands = 0;
     while (*s) {
         while (*s && *s != '[')
             s++;
@@ -1191,21 +1213,24 @@ static int dde_execute(const char *s)
         }
         while (*s && *s != ']')
             s++;
-        if (*s == ']')
-            s++;
+        if (!*s)
+            return 0;               /* never acknowledge a truncated command */
+        s++;
+        commands++;
         for (int i = n; i < 8; i++)
             arg[i][0] = 0;
         if (!lstrcmpi(name, "CreateGroup") || !lstrcmpi(name, "ShowGroup")) {
-            int g = dde_group(arg[0], !lstrcmpi(name, "CreateGroup") ? arg[1] : NULL);
+            int create = !lstrcmpi(name, "CreateGroup");
+            int g = create ? dde_group(arg[0], arg[1]) : group_named(arg[0]);
+            if (g >= 0 && !groups[g].hwnd && !open_group_window(g, 1))
+                g = -1;
             if (g < 0) {
                 ok = 0;
                 continue;
             }
             dde.current = g;
-            if (!lstrcmpi(name, "ShowGroup"))
-                show_group(g, n > 1 ? atoi_(arg[1]) : SW_SHOWNORMAL);
-            else
-                show_group(g, SW_SHOWNORMAL);
+            show_group(g, create ? SW_SHOWNORMAL :
+                       n > 1 ? atoi_(arg[1]) : SW_SHOWNORMAL);
         } else if (!lstrcmpi(name, "AddItem")) {
             pm_group *gr = dde.current >= 0 && dde.current < ngroups ? &groups[dde.current] : NULL;
             if (!gr || !arg[0][0] || gr->n >= MAXITEMS) {
@@ -1220,14 +1245,13 @@ static int dde_execute(const char *s)
             else
                 title_of(arg[0], it->desc, sizeof(it->desc));
             gr->n++;
-            items_changed(gr);
+            if (!items_changed(gr))
+                ok = 0;             /* a failed INI write is not a DDE success */
         } else if (!lstrcmpi(name, "DeleteItem") || !lstrcmpi(name, "ReplaceItem")) {
             pm_group *gr = dde.current >= 0 && dde.current < ngroups ? &groups[dde.current] : NULL;
             int i = gr ? item_named(gr, arg[0]) : -1;
-            if (i < 0)
+            if (i < 0 || !remove_item(gr, i))
                 ok = 0;
-            else
-                remove_item(gr, i);
         } else if (!lstrcmpi(name, "DeleteGroup")) {
             int g = group_named(arg[0]);
             if (g < 0) {
@@ -1247,14 +1271,15 @@ static int dde_execute(const char *s)
                 dde.current--;
             if (h)
                 SendMessage(hclient, WM_MDIDESTROY, h, 0);
-            save_groups();
+            if (!save_groups())
+                ok = 0;
         } else if (!lstrcmpi(name, "Reload") || !lstrcmpi(name, "ExitProgman")) {
             /* the groups are what PROGMAN.INI has; the shell stays */
         } else {
             ok = 0;
         }
     }
-    return ok;
+    return ok && commands != 0;
 }
 
 static HDDEDATA CALLBACK dde_callback(UINT type, UINT fmt, HCONV conv, HSZ hsz1, HSZ hsz2,
@@ -1265,10 +1290,19 @@ static HDDEDATA CALLBACK dde_callback(UINT type, UINT fmt, HCONV conv, HSZ hsz1,
     case XTYP_CONNECT:
         return hsz1 == dde.name && hsz2 == dde.name;
     case XTYP_EXECUTE: {
-        static char text[1024];
-        DWORD n = dde.get_data(data, (LPBYTE)text, sizeof(text) - 1, 0);
-        text[n] = 0;
-        return dde_execute(text) ? DDE_FACK : DDE_FNOTPROCESSED;
+        DWORD size = dde.get_data(data, NULL, 0, 0);
+        HGLOBAL h = size && size <= 65536u ? GlobalAlloc(GMEM_MOVEABLE, size) : 0;
+        char *text = h ? (char *)GlobalLock(h) : NULL;
+        int ok = 0;
+        if (text) {
+            DWORD n = dde.get_data(data, (LPBYTE)text, size, 0);
+            if (n == size && memchr(text, 0, size))
+                ok = dde_execute(text);
+            GlobalUnlock(h);
+        }
+        if (h)
+            GlobalFree(h);
+        return ok ? DDE_FACK : DDE_FNOTPROCESSED;
     }
     case XTYP_REQUEST: {
         if (hsz2 != dde.groups || fmt != CF_TEXT)
@@ -1308,13 +1342,16 @@ static LRESULT dde_message(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     case WM_DDE_EXECUTE: {
         HGLOBAL cmds = (HGLOBAL)HIWORD(lp);
-        const char *s = cmds ? (const char *)GlobalLock(cmds) : NULL;
+        DWORD size = cmds ? GlobalSize(cmds) : 0;
+        const char *s = size && size <= 65536u ? (const char *)GlobalLock(cmds) : NULL;
         int ok = 0;
         if (s) {
-            static char text[1024];
-            lstrcpyn(text, s, sizeof(text));
+            DWORD len = 0;
+            while (len < size && s[len])
+                len++;
+            if (len < size)         /* only execute a complete, NUL-ended command */
+                ok = dde_execute(s);
             GlobalUnlock(cmds);
-            ok = dde_execute(text);
         }
         PostMessage(client, WM_DDE_ACK, (WPARAM)h, MAKELPARAM(ok ? 0x8000 : 0, cmds));
         return 0;
