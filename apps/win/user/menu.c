@@ -333,7 +333,9 @@ void user_menu_destroy_window(wwnd *w)
     w->sysmenu = 0;
 }
 
-static HMENU default_sysmenu(void)
+/* Windows 3.1's: Switch To... after a second separator (Word for Windows
+ * 1.0 changes it in its document windows' menus), but in an MDI child's */
+static HMENU default_sysmenu(const wwnd *w)
 {
     HMENU m = CreatePopupMenu();
     AppendMenu(m, MF_STRING, SC_RESTORE, "&Restore");
@@ -343,6 +345,13 @@ static HMENU default_sysmenu(void)
     AppendMenu(m, MF_STRING, SC_MAXIMIZE, "Ma&ximize");
     AppendMenu(m, MF_SEPARATOR, 0, NULL);
     AppendMenu(m, MF_STRING, SC_CLOSE, "&Close\tAlt+F4");
+    char klass[16] = "";
+    if ((w->style & WS_CHILD) && w->parent)
+        GetClassName(w->parent->h, klass, sizeof(klass));
+    if (lstrcmpi(klass, "MDIClient")) {
+        AppendMenu(m, MF_SEPARATOR, 0, NULL);
+        AppendMenu(m, MF_STRING, SC_TASKLIST, "S&witch To...\tCtrl+Esc");
+    }
     return m;
 }
 
@@ -358,7 +367,7 @@ HMENU WINAPI GetSystemMenu(HWND h, BOOL revert)
         return 0;
     }
     if (!w->sysmenu)
-        w->sysmenu = default_sysmenu();
+        w->sysmenu = default_sysmenu(w);
     return w->sysmenu;
 }
 
@@ -410,10 +419,12 @@ static int text_part_width(HDC dc, const char *s, int n)
     return r.right - r.left;
 }
 
+/* the text before its tab or '\b' (RC's "\a", Windows 2.x's way: Word
+ * for Windows 1.0's), the rest right of it */
 static void split_tab(const char *s, int *left_n, const char **right)
 {
     const char *t = s;
-    while (*t && *t != '\t')
+    while (*t && *t != '\t' && *t != '\b')
         t++;
     *left_n = (int)(t - s);
     *right = *t ? t + 1 : NULL;
@@ -427,14 +438,15 @@ static void layout_bar(wmenu *m, int width)
     for (int i = 0; i < m->n; i++) {
         mitem *it = &m->it[i];
         int ln;
-        const char *r;
-        split_tab(it->text ? it->text : "", &ln, &r);
-        int w = text_part_width(dc, it->text ? it->text : "", ln) + 2 * BAR_PAD;
+        const char *r, *text = it->text ? it->text : "";
+        int right_item = *text == '\b';    /* "\bHelp": to the right, as MF_HELP */
+        split_tab(text + right_item, &ln, &r);
+        int w = text_part_width(dc, text + right_item, ln) + 2 * BAR_PAD;
         if (it->flags & MF_SEPARATOR)
             w = BAR_PAD;
         if (it->kind)
             w = UM_MENU + 2;
-        if ((it->flags & MF_HELP) && help < 0)
+        if (((it->flags & MF_HELP) || right_item) && help < 0)
             help = i;
         SetRect(&it->rc, x, 0, x + w, UM_MENU);
         x += w;
@@ -538,6 +550,8 @@ static void draw_item(HDC dc, wmenu *m, int i, int selected, int ox, int oy)
     const char *text = it->text ? it->text : "";
     int ln;
     const char *acc;
+    if (!m->popup && *text == '\b')    /* a right one's mark */
+        text++;
     split_tab(text, &ln, &acc);
     if (!m->popup) {
         user_draw_text(dc, text, ln, &r, DT_SINGLELINE | DT_CENTER | DT_VCENTER);

@@ -1663,10 +1663,12 @@ static void send_destroy(wwnd *w)
 
 static void free_tree(wwnd *w)
 {
+    /* the children first, their parent still theirs (GetParent at their
+     * WM_NCDESTROY, as in Windows: Word for Windows 1.0's subclassed
+     * controls find their data through it) */
     while (w->child) {
         wwnd *c = w->child;
         w->child = c->next;
-        c->parent = NULL;
         free_tree(c);
     }
     HWND h = w->h;
@@ -1743,7 +1745,6 @@ static BOOL destroy_window(HWND h)
 
     send_destroy(w);
     unlink_wnd(w);
-    w->parent = NULL;
     free_tree(w);
     if (was_active)
         activate_other(NULL);

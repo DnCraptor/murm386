@@ -208,6 +208,11 @@ BOOL WINAPI InSendMessage(void) { return FALSE; }
 
 static int key_down(int vk) { return (U.keys[vk & 0xFF] & 0x80) != 0; }
 
+/* keys (and buttons) pressed since GetAsyncKeyState last asked (its bit 0:
+ * a press and release between two of its calls, Word for Windows 1.0's
+ * Esc, is seen) */
+static uint8_t async_hit[256];
+
 /* Shared layout state for the legacy KEYBOARD.DRV RusLat protocol. */
 int WINAPI GetKeyboardLayoutN(void) { return U.layout; }
 int user_keyboard_layout(void) { return GetKeyboardLayoutN(); }
@@ -245,6 +250,7 @@ void win_ddi_key_event(int vk, int sc, int down)
     int was = key_down(vk);
     if (down) {
         U.keys[vk] |= 0x80;
+        async_hit[vk & 0xFF] = 1;
         if (!was)
             U.keys[vk] ^= 1;
     } else {
@@ -305,7 +311,12 @@ int WINAPI GetKeyState(int vk)
     return (int16_t)(((s & 0x80) ? 0x8000 : 0) | (s & 1));
 }
 
-int WINAPI GetAsyncKeyState(int vk) { return (int16_t)(GetKeyState(vk) & 0x8000); }
+int WINAPI GetAsyncKeyState(int vk)
+{
+    int hit = async_hit[vk & 0xFF];
+    async_hit[vk & 0xFF] = 0;
+    return (int16_t)((GetKeyState(vk) & 0x8000) | hit);
+}
 
 BOOL WINAPI TranslateMessage(const MSG *msg)
 {
@@ -470,8 +481,10 @@ void win_ddi_mouse_event(int x, int y, unsigned buttons)
             continue;
         U.buttons ^= 1u << b;
         mouse_button(x, y, b, (buttons >> b) & 1);
-        U.keys[b == 0 ? VK_LBUTTON : b == 1 ? VK_RBUTTON : VK_MBUTTON] =
-            (uint8_t)(((buttons >> b) & 1) ? 0x80 : 0);
+        int vkb = b == 0 ? VK_LBUTTON : b == 1 ? VK_RBUTTON : VK_MBUTTON;
+        U.keys[vkb] = (uint8_t)(((buttons >> b) & 1) ? 0x80 : 0);
+        if ((buttons >> b) & 1)
+            async_hit[vkb] = 1;
     }
 }
 

@@ -578,6 +578,15 @@ typedef struct {
 #define OBM_CHECK           32760
 #define OBM_CHECKBOXES      32759
 #define OBM_BTNCORNERS      32758
+/* Windows 2.x's (its programs load them) */
+#define OBM_OLD_CLOSE       32767
+#define OBM_OLD_UPARROW     32765
+#define OBM_OLD_DNARROW     32764
+#define OBM_OLD_RGARROW     32763
+#define OBM_OLD_LFARROW     32762
+#define OBM_OLD_REDUCE      32757
+#define OBM_OLD_ZOOM        32756
+#define OBM_OLD_RESTORE     32755
 #define SM_CYHSCROLL        3
 #define SM_CYCAPTION        4
 #define SM_CXBORDER         5

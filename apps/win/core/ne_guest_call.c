@@ -443,12 +443,9 @@ static int heap_of(args *a, ne_user *u, uint16_t ds)
     if (free_slot < 0 || !s)
         return -1;
     uint32_t lo, hi, end;
-    if ((ds & ~3u) == (own & ~3u)) {
-        end = g->sp ? g->sp : s->size;
-        hi = end - g->info.stack_size;
-        lo = hi - g->info.heap_size + 256u;
-        if (g->info.heap_size <= 256u || lo >= hi)
-            lo = hi;                    /* none there: beyond the stack only */
+    if ((ds & ~3u) == (own & ~3u)) {    /* above the stack, as Windows has it */
+        lo = g->sp && g->sp < s->size ? g->sp : s->size;
+        end = hi = s->size;
     } else {                            /* a DLL's: its header's size at the end */
         const win_ne_guest_dll *d = &g->dlls[win_ne_guest_dll_of(g, ds)];
         end = hi = s->size;
@@ -922,6 +919,10 @@ static int global_service(args *a, uint16_t service, uint32_t *v, int *dword)
     }
     case 16:                            /* GlobalReAlloc(h, DWORD size, flags) */
         h = w(a, 10);
+        if (!dw(a, 6) && (w(a, 4) & 2u)) { /* size 0, GMEM_MOVEABLE: a discard; WINN */
+            *v = !a->bad && win_ne_guest_global(g, h) ? h : 0;   /* keeps it (no */
+            return 1;                   /* reloading: Word for Windows 1.0 discards its */
+        }                               /* code segments so) */
         *v = !a->bad && win_ne_guest_global_realloc(g, h, dw(a, 6), a->ctx->read) ? h : 0;
         if (!*v && !a->bad)
             ne_memory_failure_note(g, "GlobalReAlloc", dw(a, 6), w(a, 4), h);

@@ -1353,10 +1353,13 @@ int win_ne_guest_load(const char *path, win_ne_guest_image *out,
     out->cs = out->segments[info.cs_index].selector;
     out->ip = info.ip;
     if (info.ss_index) {
-        /* SP 0: the top of the segment, after DGROUP's data, heap, stack */
+        /* SP 0: as Windows has DGROUP, its data, the stack, the local heap
+         * at the end (where the segment grows; programs that keep their
+         * heaps themselves, as Word for Windows 1.0, count on it): the
+         * stack's top after the data */
         const win_ne_guest_segment *ss = &out->segments[info.ss_index];
         out->ss = ss->selector;
-        out->sp = info.sp ? info.sp : (uint16_t)(ss->size < 65536u ? ss->size : 0xfffeu);
+        out->sp = info.sp ? info.sp : win_ne_guest_stack_top(out, ss->size);
     }
     rc = WIN_NE_OK;
 loaded_fail:
@@ -1366,6 +1369,13 @@ loaded_fail:
 fail:
     win_ne_guest_release(out);
     return rc;
+}
+
+uint16_t win_ne_guest_stack_top(const win_ne_guest_image *g, uint32_t size)
+{
+    if (g->info.ss_index == g->info.auto_data && size > g->info.heap_size)
+        size -= g->info.heap_size;
+    return (uint16_t)((size < 65536u ? size : 0xfffeu) & ~1u);
 }
 
 /* ---------------------------------------------------------------- global memory */
@@ -1464,8 +1474,16 @@ static void global_mark(win_ne_guest_image *g, unsigned index, unsigned old_page
         memset(&g->globals[index + k], 0, sizeof(g->globals[index + k]));
 }
 
+/* a global block's size as Windows makes it: whole paragraphs (GlobalSize
+ * gives that; Word for Windows 1.0 takes its heaps' ends from it) */
+static uint32_t paragraphs(uint32_t bytes)
+{
+    return bytes > 65536u - 16u ? bytes : (bytes + 15u) & ~15u;
+}
+
 static uint16_t global_alloc(win_ne_guest_image *g, uint32_t bytes, int low)
 {
+    bytes = paragraphs(bytes);
     if (!bytes || bytes > 0x00ff0000u || (low && bytes > 65536u))
         return 0;
     unsigned pages = global_pages(bytes);
@@ -1561,6 +1579,7 @@ int win_ne_guest_global_realloc(win_ne_guest_image *g, uint16_t sel, uint32_t by
                                 int (*read)(void *, uint32_t, void *, uint32_t))
 {
     win_ne_guest_segment *s = win_ne_guest_global(g, sel);
+    bytes = paragraphs(bytes);
     if (!s || (s->flags & WIN_NE_GUEST_ALIAS) || !read || !bytes ||
         bytes > 0x00ff0000u)
         return 0;

@@ -1,0 +1,31 @@
+# Word for Windows 1.0 (WINWORD.EXE, not in the tests: put it in HOSTWIN/):
+# its name dialog, Document1 with two lines typed, its Format Character
+# dialog, then its File menu
+#     ./winhost scripts/winword.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type WINWORD
+key RETURN
+wait 1000
+snap ww_name.ppm
+type Mike
+key TAB
+type MV
+key RETURN
+wait 300
+type Hello world from Word for Windows 1.0
+key RETURN
+type Second line.
+wait 300
+snap ww_doc.ppm
+keydown ALT
+key T
+keyup ALT
+key C
+wait 200
+snap ww_char.ppm
+exit

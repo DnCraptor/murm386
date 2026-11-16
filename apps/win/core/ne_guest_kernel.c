@@ -139,6 +139,8 @@ static uint16_t module_handle(args *a, uint32_t far)
         return MODULE_HANDLE(m);
     if ((m = win_dll_find(name)) >= 0)                  /* a native DLL loaded */
         return win_dll_handle(m);
+    if (!lstrcmpi(name, "DISPLAY"))
+        return NE_DISPLAY_HANDLE;
     if (own_module(a, name))
         return dgroup(a->ctx);
     const win_ne_guest_image *g = a->ctx->image;      /* a DLL it has loaded */
@@ -1563,7 +1565,7 @@ static __attribute__((noinline)) int selfload(args *a)
     /* its entry, its stack (DGROUP's top unless the header says) */
     const win_ne_guest_segment *cs = &g->segments[g->info.cs_index];
     const win_ne_guest_segment *ss = &g->segments[g->info.ss_index];
-    uint16_t sp = g->info.sp ? g->info.sp : (uint16_t)(ss->size < 65536u ? ss->size : 0xfffeu);
+    uint16_t sp = g->info.sp ? g->info.sp : win_ne_guest_stack_top(g, ss->size);
     if (!cs->linear || (cs->flags & 1u) || g->info.ip >= cs->size ||
         !ss->linear || !(ss->flags & 1u) || sp < 68u || sp > ss->size) {
         why = "No entry or stack after loading";

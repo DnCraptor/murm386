@@ -699,7 +699,7 @@ uint16_t ne_load_image(args *a, ne_user *u, uint16_t service, uint16_t inst, uin
     char name[32];
     if (a->bad)
         return 0;
-    if (!inst) {
+    if (!inst || inst == NE_DISPLAY_HANDLE) {
         if (far >> 16)
             return 0;
         return service == 0x10ad ? LoadCursor(0, MAKEINTRESOURCE((WORD)far)) :

@@ -1018,6 +1018,16 @@ HBITMAP user_obm_bitmap(int id)
     int cx, cy, dir = -1, pressed = 0, gray = 0, box = 1;
     int sbx = GetSystemMetrics(SM_CXVSCROLL), sby = GetSystemMetrics(SM_CYHSCROLL);
     int bx = GetSystemMetrics(SM_CXSIZE), by = GetSystemMetrics(SM_CYSIZE);
+    switch (id) {                       /* Windows 2.x's: as 3.x's */
+    case OBM_OLD_CLOSE: id = OBM_CLOSE; break;
+    case OBM_OLD_UPARROW: id = OBM_UPARROW; break;
+    case OBM_OLD_DNARROW: id = OBM_DNARROW; break;
+    case OBM_OLD_RGARROW: id = OBM_RGARROW; break;
+    case OBM_OLD_LFARROW: id = OBM_LFARROW; break;
+    case OBM_OLD_REDUCE: id = OBM_REDUCE; break;
+    case OBM_OLD_ZOOM: id = OBM_ZOOM; break;
+    case OBM_OLD_RESTORE: id = OBM_RESTORE; break;
+    }
     switch (id) {
     case OBM_UPARROW: case OBM_UPARROWD: case OBM_UPARROWI: dir = 0; cx = sbx; cy = sbx; break;
     case OBM_DNARROW: case OBM_DNARROWD: case OBM_DNARROWI: dir = 1; cx = sbx; cy = sbx; break;

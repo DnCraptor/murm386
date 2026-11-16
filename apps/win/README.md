@@ -77,6 +77,20 @@ stack and enters it as any other program. Its `ExitProc` is not called.
 segments, the program's scrambled on disk, its loader in the script;
 `scripts/selfload.txt`).
 
+Word for Windows 1.0 (WINWORD.EXE, November 1989) runs so: it starts, asks
+for the user's name, opens Document1, takes typing, its menus and dialogs
+work. What it counts on, as Windows 2.x and 3.x had it: DGROUP's stack
+right after its data, the local heap above it (the initial SP, its own
+heap manager grows the segment); global blocks in whole paragraphs
+(`GlobalSize`); `GlobalReAlloc(h, 0, GMEM_MOVEABLE)` a discard (WINN keeps
+the block: no reloading); `GetModuleHandle("DISPLAY")`, whose bitmaps are
+the system's (`OBM_OLD_*` too); Windows 2.x icons and cursors (no groups);
+menu texts with `\b` (RC's `\a`: the right column, at a menu bar's start
+the item to the right); "Switch To..." in a system menu; up to 32 window
+classes; `GetParent` of a child at its `WM_NCDESTROY`;
+`GetAsyncKeyState`'s "pressed since" bit. Its own dialogs do not take Esc
+yet.
+
 A Win16 program's own DLLs (NE libraries) are loaded with it, from its
 directory, the Windows one or its `SYSTEM` (Windows' own NE DLLs, as
 CARDS.DLL, are there): those it imports from (by name or ordinal,
@@ -748,6 +762,11 @@ use `ucontext`):
 
     cd apps/win/host && make
     ./winhost scripts/tour.txt       # writes tour_*.ppm snapshots
+
+Drive C: is the directory the test runs in, `C:` a link to it there that
+winhost makes (the Windows directory `C:/HOSTWIN`, a full path for fopen
+and for DOS alike: tasks run in their programs' directories).
+
     ./winhost scripts/menus.txt      # menus, combo box, scroll bar
     ./winhost scripts/tasks.txt      # two DEMO tasks
     rm -f HOSTWIN/PROGMAN.INI

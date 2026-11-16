@@ -107,6 +107,8 @@ uint32_t win_ne_callback(win_ne_guest_api_context *ctx, uint32_t proc, uint16_t 
 uint32_t win_ne_call(win_ne_guest_api_context *ctx, uint32_t proc, const uint16_t *words,
                      int n, void *blob, uint16_t len);
 uint32_t win_ne_blob_far(win_ne_guest_api_context *ctx, uint16_t len);
+/* the trace's event (trace.c; none without it: the tests) */
+void win_trace_event(const char *name, uint32_t a, uint32_t b);
 /* ... with DS ds (a self-loading program's loader: its stack's) */
 uint32_t win_ne_call_ds(win_ne_guest_api_context *ctx, uint32_t proc, const uint16_t *words,
                         int n, uint16_t ds);

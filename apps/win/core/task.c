@@ -579,12 +579,11 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
                 lstrcpyn(path, local, sizeof(path));
         }
     }
-#ifndef TASK_HOST
-    /* The NE loader uses fopen on this filename, not the virtual file APIs. */
+    /* The NE loader uses fopen on this filename, not the virtual file APIs
+     * (the host tests': their own file names, drive C: their directory) */
     char image_path[sizeof(path)];
-    if (win_file_resolve(path, image_path, sizeof(image_path)))
+    if (win_file_native(path, image_path, sizeof(image_path)))
         lstrcpyn(path, image_path, sizeof(path));
-#endif
     cursor_wait_begin();
 
     win_ez_image img;

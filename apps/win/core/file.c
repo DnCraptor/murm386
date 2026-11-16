@@ -525,6 +525,20 @@ BOOL win_file_resolve(LPCSTR name, LPSTR out, int size)
     return TRUE;
 }
 
+BOOL win_file_native(LPCSTR name, LPSTR out, int size)
+{
+    if (!win_file_resolve(name, out, size))
+        return FALSE;
+#ifdef FILE_HOST
+    /* host tests: "C:/DIR/FILE" (the test directory has "C:" link to
+     * itself), a full path to DOS as well */
+    for (char *p = out; *p; p++)
+        if (*p == '\\')
+            *p = '/';
+#endif
+    return TRUE;
+}
+
 int win_file_getcwd(int drive, LPSTR out, int size)
 {
     wtask *t = task_current();

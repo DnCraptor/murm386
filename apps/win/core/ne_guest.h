@@ -249,6 +249,9 @@ const char *win_ne_guest_path_of(const win_ne_guest_image *g, uint16_t instance,
 win_ne_guest_segment *win_ne_guest_segment_of(win_ne_guest_image *g, uint16_t sel);
 int win_ne_guest_grow(win_ne_guest_image *g, uint16_t sel, uint32_t bytes,
                       int (*read)(void *, uint32_t, void *, uint32_t));
+/* the initial SP (the header's 0) in a stack segment of size bytes: in
+ * DGROUP after the data and the stack, the local heap above it */
+uint16_t win_ne_guest_stack_top(const win_ne_guest_image *g, uint32_t size);
 /* A self-loading module's (WIN_NE_SELF_LOADING): its module database built
  * (a global block, g->module_db: the NE header and tables as Windows keeps
  * them, the segment table's entries with their handles, the module

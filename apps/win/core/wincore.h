@@ -492,6 +492,9 @@ BOOL   win_file_task_init(wtask *task, const wtask *parent);
 void   win_file_task_end(wtask *task);
 void   win_file_task_workdir(wtask *task, LPCSTR exe);
 BOOL   win_file_resolve(LPCSTR name, LPSTR out, int size);
+/* ... as fopen takes it (the host tests': "C:/DIR/FILE", their directory
+ * having "C:" link to itself) */
+BOOL   win_file_native(LPCSTR name, LPSTR out, int size);
 int    win_file_getcwd(int drive, LPSTR out, int size);
 /* file.c: DOS's functions for Win16 programs (INT 21h 3Bh, 19h/0Eh, 43h,
  * 57h; the environment) */

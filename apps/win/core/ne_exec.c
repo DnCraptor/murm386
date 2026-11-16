@@ -41,7 +41,6 @@
 #include "ne_guest.h"
 #include "ne_guest_api.h"
 #include "ne_boot.h"
-#include "wincore.h"
 
 /* CPU_ext_accessors segment indices, matching native int386x(). */
 enum { WIN_ES, WIN_CS, WIN_SS, WIN_DS, WIN_FS, WIN_GS, WIN_SEG_COUNT };
@@ -479,7 +478,9 @@ static uint32_t call_with(win_ne_guest_api_context *ctx, uint32_t proc, const ui
 {
     PC *pc = get_PC();
     ne_run *run = ctx ? (ne_run *)ctx->exec : NULL;
-    if (!pc || !pc->cpu || !run || ctx->dead || ctx->exited || ctx->stopped || n < 0 || n > 16)
+    /* a procedure of selector 0 (CallWindowProc(NULL, ...)): none to call */
+    if (!pc || !pc->cpu || !run || ctx->dead || ctx->exited || ctx->stopped || n < 0 || n > 16 ||
+        !(proc >> 16))
         return 0;
     CPU *cpu = pc->cpu;
     const win_ne_guest_image *g = run->g;

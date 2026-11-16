@@ -409,6 +409,11 @@ __attribute__((weak)) void win_ne_guest_undefined_text(const win_ne_guest_image 
         out[0] = 0;
 }
 __attribute__((weak)) void win_ne_dll_init(win_ne_guest_api_context *ctx) { (void)ctx; }
+/* ... nor a trace */
+__attribute__((weak)) void win_trace_event(const char *name, uint32_t a, uint32_t b)
+{
+    (void)name; (void)a; (void)b;
+}
 /* ... nor global blocks (a self-loading program's loader's stack) */
 __attribute__((weak)) int win_ne_guest_global_free(win_ne_guest_image *g, uint16_t sel)
 {

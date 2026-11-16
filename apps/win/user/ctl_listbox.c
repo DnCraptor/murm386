@@ -452,7 +452,7 @@ LRESULT CALLBACK user_listbox_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         return lstrlen(l->items[wp].s);
     case LB_GETTEXTLEN:
         return (l && (int)wp >= 0 && (int)wp < l->n) ?
-               (data_items(h) ? sizeof(DWORD) : lstrlen(l->items[wp].s)) : LB_ERR;
+               (data_items(h) ? (int)sizeof(DWORD) : lstrlen(l->items[wp].s)) : LB_ERR;
     case LB_GETCOUNT:
         return l ? l->n : 0;
     case LB_SETTOPINDEX:

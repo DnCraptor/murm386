@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "wincore.h"
 #include "host_drivers.h"
 
@@ -283,7 +284,15 @@ int main(int argc, char **argv)
     static const win_display_driver *const displays[] = { &host_snap_display, NULL };
 #endif
     win_register_sound_driver(&host_sound);
-    if (win_boot("HOSTWIN/WINN.EXE", displays, &host_script_input))
+    /* Drive C: is the test's directory (file.c), "C:" a link to it there:
+     * the Windows directory a full path (C:/HOSTWIN) both as DOS has it
+     * (tasks run in their programs' directories, relative names would
+     * follow them) and as fopen takes it */
+    if (symlink(".", "C:") && access("C:/HOSTWIN", F_OK)) {
+        printf("cannot link C: to the test directory\n");
+        return 1;
+    }
+    if (win_boot("C:/HOSTWIN/WINN.EXE", displays, &host_script_input))
         return 1;
     win_logo_show();                /* HOSTWIN/WINLOGO.BMP, if the test put one there */
     UINT r = WinExec(argc > 2 ? argv[2] : "DEMO.EXE", SW_SHOWNORMAL);

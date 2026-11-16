@@ -11,7 +11,12 @@
 #include "wincore.h"
 #include "ne_guest_api.h"
 
-#define NE_CLASSES 16
+/* the display driver's module (GetModuleHandle("DISPLAY")): Windows 2.x's
+ * programs load the system's bitmaps, cursors and icons from it (Word for
+ * Windows 1.0), as LoadBitmap(NULL, ...) does now */
+#define NE_DISPLAY_HANDLE 0xf0ffu
+#define NE_CLASSES 32                   /* Word for Windows 1.0 registers 17 */
+#define NE_PAINTS  4
 #define NE_DIALOGS 8
 #define NE_ACCELS  4
 #define NE_TIMERS  16
