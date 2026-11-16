@@ -26,6 +26,7 @@ typedef struct win_module_host {
     uint32_t size;                  /* sizeof(win_module_host) */
     void (*key_event)(int vk, int scancode, int down);
     void (*mouse_event)(int x, int y, unsigned buttons);
+    void (*mouse_track)(int x, int y);          /* size covers it: WINDDI 3 */
 } win_module_host;
 
 /* What a module gives back. Append only. */

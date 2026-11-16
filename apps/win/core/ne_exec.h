@@ -68,5 +68,9 @@ const char *win_pe_service_name(uint16_t service, char *buf, size_t cap);
  * place where its turn ended. NULL: no trace. */
 extern void (*win_ne_trace_call)(uint16_t service, uint16_t cs, uint16_t ip, uint32_t result);
 extern void (*win_ne_trace_turn)(uint16_t cs, uint16_t ip);
+/* WINN's win_busy, after each call a program makes: nonzero, input has
+ * waited, the program yields there (as it does every 64 calls anyway).
+ * NULL: only the count. */
+extern int (*win_ne_busy)(void);
 
 #endif

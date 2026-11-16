@@ -41,6 +41,7 @@ typedef struct {
 
 static int read_at(FILE *f, uint32_t off, void *buf, uint32_t n)
 {
+    win_busy();                     /* the cursor follows the mouse meanwhile */
     return off <= LONG_MAX && !fseek(f, (long)off, SEEK_SET) && fread(buf, 1, n, f) == n;
 }
 

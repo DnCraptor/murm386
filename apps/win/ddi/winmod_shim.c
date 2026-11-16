@@ -19,3 +19,9 @@ void win_ddi_mouse_event(int x, int y, unsigned buttons)
     if (winmod_host && winmod_host->mouse_event)
         winmod_host->mouse_event(x, y, buttons);
 }
+
+void win_ddi_mouse_track(int x, int y)
+{
+    if (winmod_host && winmod_host->size >= sizeof(win_module_host) && winmod_host->mouse_track)
+        winmod_host->mouse_track(x, y);
+}

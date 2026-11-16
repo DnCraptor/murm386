@@ -140,6 +140,17 @@ static int invoke_pe(win_ne_native_gate *gate, CPU *cpu, uint16_t service);
 
 void (*win_ne_trace_call)(uint16_t service, uint16_t cs, uint16_t ip, uint32_t result);
 void (*win_ne_trace_turn)(uint16_t cs, uint16_t ip);
+int (*win_ne_busy)(void);
+
+/* after a call, in the DOS context: time for the other tasks' turn */
+static int turn_due(win_ne_native_gate *gate)
+{
+    int busy = win_ne_busy && win_ne_busy();
+    if (++gate->api_calls < 64u && !busy)
+        return 0;
+    gate->api_calls = 0;
+    return 1;
+}
 
 static void guest_put16(uint32_t linear, uint16_t v)
 {
@@ -234,8 +245,7 @@ static int invoke_native(void *opaque, CPU *cpu, uint16_t service)
         gate->api->invalid_call = service;
     /* Yield only while the shared CPU is in its original DOS context. */
     if (handled == 1 && !gate->api->dead && !gate->api->exited && !gate->api->stopped &&
-        ++gate->api_calls >= 64u) {
-        gate->api_calls = 0;
+        turn_due(gate)) {
         if (gate->api->yield && gate->api->yield())
             gate->api->stopped = 1;
     }
@@ -810,8 +820,7 @@ static int invoke_pe(win_ne_native_gate *gate, CPU *cpu, uint16_t service)
     if (ctx->invalid_args && !bad_before && !ctx->invalid_call)
         ctx->invalid_call = service;
     if (handled == 1 && !ctx->dead && !ctx->exited && !ctx->stopped &&
-        ++gate->api_calls >= 64u) {
-        gate->api_calls = 0;
+        turn_due(gate)) {
         if (ctx->yield && ctx->yield())
             ctx->stopped = 1;
     }

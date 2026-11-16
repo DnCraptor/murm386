@@ -131,6 +131,7 @@ LONG WINAPI _hread(HFILE f, void *buf, LONG n)
 {
     if (tracked(f) < 0 || n < 0)
         return HFILE_ERROR;
+    win_busy();                     /* a program loading: the cursor follows the mouse */
     int r = (int)read((int)f, buf, (unsigned)n);
     return r < 0 ? HFILE_ERROR : r;
 }

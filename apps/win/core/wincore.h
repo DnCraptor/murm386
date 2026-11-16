@@ -345,7 +345,7 @@ void     cursor_unexclude(void);
 void     cursor_set_shape(const uint8_t *and_mask, const uint8_t *xor_mask, int hx, int hy);
 int      cursor_show(int show);                 /* ShowCursor counter */
 void     cursor_wait_begin(void);              /* nested WinExec loading */
-void     cursor_wait_end(void);
+int      cursor_wait_end(void);               /* 1: the hourglass is gone */
 enum { WCUR_ARROW, WCUR_IBEAM, WCUR_WAIT, WCUR_CROSS, WCUR_SIZEWE, WCUR_SIZENS, WCUR_COUNT };
 void     cursor_select_builtin(int id);
 /* icon.c: an icon (32x32, 16 colours) and a cursor (32x32 masks) made from
@@ -422,6 +422,7 @@ typedef struct wtask {
     struct wtask_ctx *ctx;
     struct wtask *dispatch_owner;  /* logical owner during cross-task SendMessage */
     int       starting;         /* WinExec's hourglass is its until it first waits */
+    uint32_t  queue_time;       /* when it last looked at its queue (GetTickCount) */
     int       priority;         /* SetPriority's: noted */
     HANDLE    queue;            /* SetTaskQueue's (0: the task) */
 } wtask;
@@ -448,6 +449,14 @@ void   task_started(wtask *t);           /* it waits for input: its hourglass en
 int    user_task_has_work(HTASK h);
 void   user_task_ended(HTASK h);
 void   user_poll_input(void);
+/* the cursor the window under the mouse asks for (WM_SETCURSOR), as a
+ * move of the mouse would have it */
+void   user_cursor_refresh(void);
+/* Busy work (loading, a long run of calls): now and then the cursor
+ * follows the mouse (the input driver's track); nonzero when input has
+ * waited long enough that the caller should give the tasks a turn, where
+ * it can (Yield) */
+int    win_busy(void);
 
 /* module.c: an EZ image loaded and relocated */
 typedef struct {

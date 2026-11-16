@@ -115,6 +115,9 @@ int win_ne_load_image(const char *path, win_ne_image *image,
                       win_ne_selector_cb assign, win_ne_resolve_cb resolve,
                       void *opaque);
 void win_ne_free_image(win_ne_image *image);
+/* called as the file is read (WINN's win_busy: the cursor follows the
+ * mouse while a big program loads); NULL: nothing */
+extern void (*win_ne_reading)(void);
 
 /* On success fills info and invokes cb for each import relocation record.
  * Callback returning nonzero aborts with WIN_NE_CANCELLED. No guest state is

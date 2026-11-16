@@ -94,8 +94,12 @@ static void in_idle(void)
     host_script_idle(now_ms);
 }
 
+/* the script's time stands while the core is busy: its events wait for
+ * the poll */
+static void in_track(void) {}
+
 const win_input_driver host_script_input = {
-    WINDDI_VERSION, "SCRIPT", in_enable, in_disable, in_poll, in_ticks, in_idle,
+    WINDDI_VERSION, "SCRIPT", in_enable, in_disable, in_poll, in_ticks, in_idle, in_track,
 };
 
 unsigned host_tones;

@@ -177,7 +177,20 @@ static uint32_t update_ticks(void)
 static uint32_t dos_in_ticks(void) { return ms_acc; }
 static void dos_in_idle(void) { (void)update_ticks(); }
 
+/* The core is busy: the emulator serviced (the mouse's IRQ), the cursor
+ * where the mouse is. last_x/y stay: poll reports the move. */
+static void dos_in_track(void)
+{
+    (void)update_ticks();
+    if (!has_mouse)
+        return;
+    union REGS r = { 0 };
+    r.w.ax = 0x0003;
+    int386(0x33, &r, &r);
+    win_ddi_mouse_track((int16_t)r.w.cx, (int16_t)r.w.dx);
+}
+
 const win_input_driver win_input_dos = {
     WINDDI_VERSION, "DOS", dos_in_enable, dos_in_disable, dos_in_poll,
-    dos_in_ticks, dos_in_idle,
+    dos_in_ticks, dos_in_idle, dos_in_track,
 };

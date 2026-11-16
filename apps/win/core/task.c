@@ -223,6 +223,10 @@ winapp_info *win_app_info(const char *path)
     return win_ne_app_info(full);
 }
 
+#ifdef TASK_NE
+static void busy_reading(void) { (void)win_busy(); }
+#endif
+
 void task_init(void)
 {
     memset(&kernel_task, 0, sizeof(kernel_task));
@@ -234,6 +238,10 @@ void task_init(void)
     tasks = &kernel_task;
     cur = &kernel_task;
     win_file_task_init(&kernel_task, NULL);
+#ifdef TASK_NE
+    win_ne_busy = win_busy;             /* a program's long run of calls */
+    win_ne_reading = busy_reading;      /* its file read as it loads */
+#endif
 }
 
 /* ---------------------------------------------------------------- life cycle */
@@ -242,7 +250,10 @@ void task_started(wtask *t)
 {
     if (t && t->starting) {
         t->starting = 0;
-        cursor_wait_end();
+        /* its own cursor now: what it set meanwhile (an hourglass while it
+         * started, as Taipei) is no longer what the mouse is over */
+        if (cursor_wait_end())
+            user_cursor_refresh();
     }
 }
 
@@ -251,7 +262,10 @@ static void task_start(void)
     wtask *t = cur;
     t->state = WTASK_RUNNING;
     t->exit_code = t->run(t);
-    task_started(t);                    /* it ended without waiting once */
+    if (t->starting) {                  /* it ended without waiting once: */
+        t->starting = 0;                /* no window of its to ask */
+        cursor_wait_end();
+    }
     /* Final window/file teardown may block on SD or driver operations. */
     cursor_wait_begin();
     user_task_ended(t->h);

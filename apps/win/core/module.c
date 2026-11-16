@@ -41,9 +41,10 @@ enum { EZ_ABS32 = 1, EZ_THM_G0_NC = 2 };
 
 static void key_cb(int vk, int sc, int down) { win_ddi_key_event(vk, sc, down); }
 static void mouse_cb(int x, int y, unsigned b) { win_ddi_mouse_event(x, y, b); }
+static void track_cb(int x, int y) { win_ddi_mouse_track(x, y); }
 
 static const win_module_host host_table = {
-    WINMOD_VERSION, sizeof(win_module_host), key_cb, mouse_cb,
+    WINMOD_VERSION, sizeof(win_module_host), key_cb, mouse_cb, track_cb,
 };
 
 /* 16-bit immediate split as imm4:i:imm3:imm8 (MOVW encoding). */

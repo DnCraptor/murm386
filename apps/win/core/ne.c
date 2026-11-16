@@ -28,8 +28,12 @@ static uint32_t rd32(const uint8_t *p)
     return (uint32_t)rd16(p) | (uint32_t)rd16(p + 2) << 16;
 }
 
+void (*win_ne_reading)(void);
+
 static int read_at(FILE *f, uint64_t size, uint64_t offset, void *dst, size_t n)
 {
+    if (win_ne_reading)
+        win_ne_reading();
     if (offset > size || n > size - offset || offset > LONG_MAX ||
         fseek(f, (long)offset, SEEK_SET))
         return 0;

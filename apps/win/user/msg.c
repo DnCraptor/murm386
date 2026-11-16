@@ -233,6 +233,21 @@ BOOL WINAPI EnableHardwareInput(BOOL enable)
     return was;
 }
 
+/* the last input poll; an Alt+Tab USER does itself (unresponsive), the
+ * switching running */
+static uint32_t last_pump;
+static HWND alt_tab_for;            /* the busy application's window */
+static uint32_t alt_tab_when;
+static int alt_tab_running;
+
+/* a window whose task has not looked at its queue for a while, and is
+ * not waiting for a message either */
+static int unresponsive(wwnd *w)
+{
+    wtask *t = task_from_handle(user_toplevel(w)->task);
+    return t && t->waiting != WTASK_WAIT_MESSAGE && now_ms() - t->queue_time >= 250u;
+}
+
 void win_ddi_key_event(int vk, int sc, int down)
 {
     if (input_off)
@@ -283,6 +298,15 @@ void win_ddi_key_event(int vk, int sc, int down)
         return;
     }
     wwnd *target = U.focus;
+    /* Alt+Tab while the active application does not look at its queue
+     * (it loads, computes): USER switches without it, at the end of this
+     * poll, not after its long work (Windows 3.1 had it wait) */
+    if (vk == VK_TAB && alt && !ctrl && down && !alt_tab_running && U.active &&
+        unresponsive(U.active)) {
+        alt_tab_for = user_toplevel(U.active)->h;
+        alt_tab_when = now_ms();
+        return;
+    }
     int sys = (alt && !ctrl) || vk == VK_F10 || (vk == VK_MENU);
     if (!target) {
         target = U.active;
@@ -645,8 +669,68 @@ static void pump_input(void)
 {
     if (win_sys.input)
         win_sys.input->poll();
-    user_caret_tick(now_ms());
-    sound_service(now_ms());
+    last_pump = now_ms();
+    user_caret_tick(last_pump);
+    sound_service(last_pump);
+    /* an Alt+Tab held back for a busy application: run where the keys
+     * that follow come, its task's (its turn's end, a call of its) */
+    if (alt_tab_for && last_pump - alt_tab_when >= 1000u)
+        alt_tab_for = 0;                /* Alt long released: too late */
+    if (alt_tab_for && !alt_tab_running && U.active &&
+        user_toplevel(U.active)->h == alt_tab_for && U.active->task == task_current()->h) {
+        alt_tab_for = 0;
+        alt_tab_running = 1;
+        user_alt_tab(user_toplevel(U.active));
+        alt_tab_running = 0;
+    }
+}
+
+/* ---------------------------------------------------------------- busy */
+
+/* The core's long work (win_busy): the driver's track once in so many
+ * calls, as many as make some 10 ms between two (the count doubles or
+ * halves to keep it there); input waiting 100 ms asks for a turn. */
+static uint32_t last_track;
+static unsigned track_every = 1, track_count;
+
+int win_busy(void)
+{
+    const win_input_driver *in = win_sys.input;
+    if (!in)
+        return 0;
+    if (in->ddi_version >= 3 && in->track && ++track_count >= track_every) {
+        track_count = 0;
+        in->track();
+        uint32_t now = now_ms(), d = now - last_track;
+        last_track = now;
+        if (d < 5 && track_every < 4096)
+            track_every <<= 1;
+        else if (d > 20 && track_every > 1)
+            track_every >>= 1;
+    }
+    return now_ms() - last_pump >= 100u;
+}
+
+void win_ddi_mouse_track(int x, int y)
+{
+    int sw = win_sys.screen.width, sh = win_sys.screen.height;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x >= sw) x = sw - 1;
+    if (y >= sh) y = sh - 1;
+    clip_point(&x, &y);
+    if (!input_off)
+        cursor_move(x, y);      /* U.mouse_x/y stay: the next event moves */
+}
+
+void user_cursor_refresh(void)
+{
+    int hit;
+    wwnd *w = U.capture || !U.desktop ? NULL : user_window_from_point(U.mouse_x, U.mouse_y, &hit);
+    if (w && hit != HTERROR)
+        SendMessage(w->h, WM_SETCURSOR, w->h, MAKELPARAM(hit, WM_MOUSEMOVE));
+    else if (w)
+        user_cursor_builtin(WCUR_ARROW);
 }
 
 /* One pass; 1 = message, 0 = nothing, -1 = WM_QUIT. */
@@ -724,6 +808,7 @@ static int get_one(MSG *out, HWND h, UINT first, UINT last, int remove)
 {
     pump_input();
     wtask *me = task_current();
+    me->queue_time = now_ms();
     /* A committed exit must not drain queued GUI input or begin a paint. */
     if (U.shutting_down && me->quit)
         return quit_message(out, me, remove);
@@ -871,7 +956,8 @@ static BOOL peek(LPMSG msg, HWND h, UINT first, UINT last, UINT flags, int idle)
         got_message(msg);
         U.cur_msg = *msg;
     } else {
-        task_started(task_current());   /* a game's loop: nothing waiting for it */
+        if (!alt_tab_running)           /* not USER's switching in its turn */
+            task_started(task_current());   /* a game's loop: nothing waiting for it */
         if (!(flags & PM_NOYIELD)) {
             task_yield();
             if (idle && win_sys.input)

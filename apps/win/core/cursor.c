@@ -140,11 +140,12 @@ void cursor_wait_begin(void)
     wait_depth = 1;
 }
 
-void cursor_wait_end(void)
+int cursor_wait_end(void)
 {
     if (!wait_depth || --wait_depth)
-        return;
+        return 0;
     cursor_set_shape(wait_and, wait_xor, wait_hx, wait_hy);
+    return 1;
 }
 
 /* ShowCursor semantics: counter, visible while >= 0. */

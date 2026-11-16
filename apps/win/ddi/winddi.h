@@ -15,8 +15,9 @@
 
 #include <stdint.h>
 
-/* 2 added description and colors to the display driver */
-#define WINDDI_VERSION 2
+/* 2 added description and colors to the display driver,
+ * 3 track to the input driver */
+#define WINDDI_VERSION 3
 
 /* A framebuffer or memory bitmap. bpp: 1 (MSB = leftmost pixel) or 8
  * (palette index). pitch is in bytes. */
@@ -54,6 +55,9 @@ void win_ddi_key_event(int vk, int scancode, int down);
 /* Absolute position in screen pixels; buttons: bit0 left, bit1 right,
  * bit2 middle. */
 void win_ddi_mouse_event(int x, int y, unsigned buttons);
+/* The cursor where the mouse is now, nothing else: no message, the
+ * windows learn of the move at the next win_ddi_mouse_event. */
+void win_ddi_mouse_track(int x, int y);
 
 typedef struct win_input_driver {
     uint32_t    ddi_version;
@@ -66,6 +70,11 @@ typedef struct win_input_driver {
     uint32_t (*ticks_ms)(void);
     /* Nothing to do: give the platform a service point (may sleep). */
     void     (*idle)(void);
+    /* version 3: the core is busy (loading a program, a long run of
+     * calls): only the mouse's position, to win_ddi_mouse_track(), and the
+     * time (ticks_ms) brought up to date; keys and buttons wait for poll.
+     * NULL: the cursor stays until the next poll. */
+    void     (*track)(void);
 } win_input_driver;
 
 /* A sound device of one voice (the PC speaker): a tone of hz, 0 for
