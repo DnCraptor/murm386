@@ -50,6 +50,13 @@ void win_ne_user_end(win_ne_guest_api_context *ctx)
             for (int i = 0; i < NE_IMAGES; i++)
                 if (u->image[i].h)
                     DestroyIcon(u->image[i].h);
+            /* Even a guest that exited during WM_PAINT must release its DCs. */
+            while (u->paints) {
+                ne_paint *p = u->paints;
+                u->paints = p->next;
+                EndPaint(p->hwnd, &p->ps);
+                win_free(p);
+            }
             ne_call_end(u);
             ne_shell_task_end(u->task);
             ne_more_task_end(u->task);
@@ -782,35 +789,51 @@ int win_ne_guest_user(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint16_t 
     case 0x1027: {                      /* BeginPaint(HWND, LPPAINTSTRUCT) */
         uint32_t ps = dw(&a, 4);
         HWND h = w(&a, 8);
-        int i = 0;
-        while (i < NE_PAINTS && u->paint[i].hwnd)
-            i++;
-        if (a.bad || i == NE_PAINTS)
+        if (a.bad || !ps || !h)
             break;
-        PAINTSTRUCT *p = &u->paint[i].ps;
-        HDC dc = BeginPaint(h, p);
-        u->paint[i].hwnd = h;
+        ne_paint *p = (ne_paint *)win_alloc(sizeof(*p));
+        if (!p)
+            break;
+        HDC dc = BeginPaint(h, &p->ps);
+        if (!dc) {
+            win_free(p);
+            break;
+        }
         uint8_t g[32];
         memset(g, 0, sizeof(g));
-        wr16(g, (uint16_t)p->hdc);
-        wr16(g + 2, (uint16_t)p->fErase);
-        wr16(g + 4, (uint16_t)p->rcPaint.left);
-        wr16(g + 6, (uint16_t)p->rcPaint.top);
-        wr16(g + 8, (uint16_t)p->rcPaint.right);
-        wr16(g + 10, (uint16_t)p->rcPaint.bottom);
-        if (!win_ne_write(ctx, (uint16_t)(ps >> 16), (uint16_t)ps, g, sizeof(g)))
+        wr16(g, (uint16_t)p->ps.hdc);
+        wr16(g + 2, (uint16_t)p->ps.fErase);
+        wr16(g + 4, (uint16_t)p->ps.rcPaint.left);
+        wr16(g + 6, (uint16_t)p->ps.rcPaint.top);
+        wr16(g + 8, (uint16_t)p->ps.rcPaint.right);
+        wr16(g + 10, (uint16_t)p->ps.rcPaint.bottom);
+        if (!win_ne_write(ctx, (uint16_t)(ps >> 16), (uint16_t)ps, g, sizeof(g))) {
             a.bad = 1;
+            EndPaint(h, &p->ps);
+            win_free(p);
+            break;
+        }
+        p->hwnd = h;
+        p->guest_ps = ps;
+        p->next = u->paints;
+        u->paints = p;
         v = dc;
         break;
     }
     case 0x1028: {                      /* EndPaint(HWND, const PAINTSTRUCT FAR *) */
+        uint32_t ps = dw(&a, 4);
         HWND h = w(&a, 8);
-        for (int i = 0; i < NE_PAINTS; i++)
-            if (u->paint[i].hwnd == h && h) {
-                EndPaint(h, &u->paint[i].ps);
-                u->paint[i].hwnd = 0;
+        if (a.bad)
+            break;
+        for (ne_paint **at = &u->paints; *at; at = &(*at)->next) {
+            ne_paint *p = *at;
+            if (p->hwnd == h && p->guest_ps == ps) {
+                *at = p->next;
+                EndPaint(h, &p->ps);
+                win_free(p);
                 break;
             }
+        }
         break;
     }
     case 0x1029: case 0x11c4:           /* CreateWindow, CreateWindowEx */

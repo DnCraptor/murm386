@@ -12,7 +12,6 @@
 #include "ne_guest_api.h"
 
 #define NE_CLASSES 16
-#define NE_PAINTS  4
 #define NE_DIALOGS 8
 #define NE_ACCELS  4
 #define NE_TIMERS  16
@@ -30,6 +29,15 @@ typedef struct {
     uint8_t heap, kind;
 } ne_local;
 
+/* Each active BeginPaint has its own PAINTSTRUCT and Win16 far address.
+ * A linked list avoids a fixed slot limit and survives nested callbacks. */
+typedef struct ne_paint {
+    struct ne_paint *next;
+    uint32_t guest_ps;
+    HWND hwnd;
+    PAINTSTRUCT ps;
+} ne_paint;
+
 typedef struct ne_user {
     struct ne_user *next;
     win_ne_guest_api_context *ctx;
@@ -40,7 +48,7 @@ typedef struct ne_user {
         char menu[32];              /* its menu resource: a name, */
         uint16_t menu_id;           /* or a number */
     } cls[NE_CLASSES];
-    struct { HWND hwnd; PAINTSTRUCT ps; } paint[NE_PAINTS];
+    ne_paint *paints;                   /* active BeginPaint/EndPaint pairs */
     /* the dialog procedures of its dialogs (and the lParam of their
      * WM_INITDIALOG), and those of the dialog being made */
     struct { HWND hwnd; uint32_t proc, param; } dlg[NE_DIALOGS];

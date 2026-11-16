@@ -760,17 +760,24 @@ UINT WINAPI GetDriveType(int drive)
     r.w.ax = 0x4409;                        /* device remote? */
     r.h.bl = (uint8_t)(drive + 1);
     int386(0x21, &r, &r);
-    if (r.x.cflag)
-        return r.w.ax == 0x0F ? 0 : DRIVE_FIXED;
-    if (r.w.dx & 0x1000)
+    /* 4409h may fail for an invalid or not-ready drive, or because
+     * the DOS implementation lacks this IOCTL. An error does not prove
+     * that the drive exists, much less that it has fixed media. */
+    if (r.x.cflag && r.w.ax == 0x0f)    /* invalid drive */
+        return 0;
+    if (!r.x.cflag && (r.w.dx & 0x1000))
         return DRIVE_REMOTE;
     memset(&r, 0, sizeof(r));
     r.w.ax = 0x4408;                        /* removable media? */
     r.h.bl = (uint8_t)(drive + 1);
     int386(0x21, &r, &r);
     if (r.x.cflag)
+        return 0;
+    if (r.w.ax == 0)
+        return DRIVE_REMOVABLE;
+    if (r.w.ax == 1)
         return DRIVE_FIXED;
-    return r.w.ax == 0 ? DRIVE_REMOVABLE : DRIVE_FIXED;
+    return 0;
 #endif
 }
 
