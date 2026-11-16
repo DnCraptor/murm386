@@ -4,8 +4,9 @@
  * made of WINN's (the task, the caller's CS:IP, the call, DX:AX; the same
  * call from the same place again and again counted, not repeated) and the
  * places programs' turns ended at (where one that loops without a call
- * is), and the programs' memory. Ctrl+Esc (the Task List) writes them to
- * WINNTRAC.LOG in the Windows directory, the oldest first.
+ * is), and the programs' memory. Ctrl+Alt+Shift+Esc or a normally
+ * exiting Win16 task writes the accumulated trace to WINNTRAC.LOG in the
+ * Windows directory, the oldest first.
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */

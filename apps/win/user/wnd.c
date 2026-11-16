@@ -53,6 +53,7 @@ void user_unregister_task_classes(HTASK task)
             *pp = c->next;
             DeleteAtom(c->atom);
             win_free(c->name);
+            win_free(c->extra);
             win_free(c);
             continue;
         }

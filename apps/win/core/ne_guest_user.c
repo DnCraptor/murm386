@@ -191,7 +191,7 @@ __attribute__((noinline)) int ne_format(args *a, uint32_t dst, uint32_t fmtp, ui
             lng = 1;
             f++;
         }
-        char tmp[64];
+        char tmp[1025];  /* %s may use the full formatted-output capacity */
         const char *s = tmp;
         int len = 0;
         switch (*f) {

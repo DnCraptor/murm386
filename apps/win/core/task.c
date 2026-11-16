@@ -469,8 +469,11 @@ static int run_ne_app(wtask *t)
         MessageBox(0, msg, "Application Error", MB_OK | MB_ICONSTOP);
         return 1;
     }
-    if (!rc && r.exited)            /* it ended as a program does */
+    if (!rc && r.exited) {          /* it ended as a program does */
+        win_trace_event("ne-exit", (uint32_t)r.value, 0);
+        win_trace_dump();          /* once at exit, not on every guest API call */
         return (int)r.value;
+    }
     if (!rc && r.stopped)           /* Windows ends */
         return 0;
     win_ne_unresolved u;
@@ -566,6 +569,16 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
     if (!dot && lstrlen(prog) + 4 < (int)sizeof(prog))
         lstrcat(prog, ".EXE");
     win_path(prog, path, sizeof(path));
+    /* WinExec searches the calling task's directory before the Windows
+     * directory.  win_path() alone forces bare names into the latter. */
+    if (!strchr(prog, '\\') && !strchr(prog, '/') && !strchr(prog, ':')) {
+        char local[sizeof(path)];
+        if (win_file_resolve(prog, local, sizeof(local))) {
+            int attr = win_file_attr(local, 0, 0);
+            if (attr >= 0 && !(attr & 0x10))
+                lstrcpyn(path, local, sizeof(path));
+        }
+    }
 #ifndef TASK_HOST
     /* The NE loader uses fopen on this filename, not the virtual file APIs. */
     char image_path[sizeof(path)];
