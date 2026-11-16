@@ -1022,17 +1022,88 @@ static int group_named(const char *name)
     return -1;
 }
 
+/* Windows 3.x GROUPHEADER / ITEMDATA (SDK Programmer's Reference, vol. 4,
+ * chapter 5).  Import the commands and captions from an existing .GRP;
+ * WINN keeps its own groups in PROGMAN.INI and extracts icons from EXEs. */
+static unsigned grp_word(const BYTE *p, unsigned off)
+{
+    return (unsigned)p[off] | (unsigned)p[off + 1] << 8;
+}
+
+static const char *grp_string(const BYTE *p, unsigned size, unsigned off)
+{
+    if (!off || off >= size)
+        return NULL;
+    for (unsigned i = off; i < size; i++)
+        if (!p[i])
+            return (const char *)(p + off);
+    return NULL;
+}
+
+static int grp_import(pm_group *gr, const char *path)
+{
+    HFILE f = _lopen(path, OF_READ);
+    if (f == HFILE_ERROR)
+        return 0;                       /* CreateGroup may name a new file */
+    LONG size = _llseek(f, 0, 2);
+    if (size < 34 || size > 65534L) {
+        _lclose(f);
+        return 0;
+    }
+    HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, (DWORD)size);
+    BYTE *p = h ? (BYTE *)GlobalLock(h) : NULL;
+    int good = p && _llseek(f, 0, 0) == 0 && _hread(f, p, size) == size;
+    _lclose(f);
+    if (good) {
+        unsigned cb = grp_word(p, 6), count = grp_word(p, 32);
+        good = !memcmp(p, "PMCC", 4) && cb >= 34 && cb <= (unsigned)size &&
+               count <= (cb - 34) / 2;
+        if (good) {
+            for (unsigned i = 0; i < count && gr->n < MAXITEMS; i++) {
+                unsigned at = grp_word(p, 34 + i * 2);
+                if (!at || at > cb || cb - at < 24)
+                    continue;           /* empty or malformed item */
+                const char *name = grp_string(p, cb, grp_word(p, at + 18));
+                const char *cmd = grp_string(p, cb, grp_word(p, at + 20));
+                if (!cmd || !cmd[0])
+                    continue;
+                pm_item *it = &gr->it[gr->n++];
+                lstrcpyn(it->cmd, cmd, sizeof(it->cmd));
+                if (name && name[0])
+                    lstrcpyn(it->desc, name, sizeof(it->desc));
+                else
+                    title_of(cmd, it->desc, sizeof(it->desc));
+            }
+            if (gr->n)
+                gr->sel = 0;
+        }
+    }
+    if (p)
+        GlobalUnlock(h);
+    if (h)
+        GlobalFree(h);
+    return good;
+}
+
 /* a group of the name (made when there is none): its index, -1 if none
- * can be made */
-static int dde_group(const char *name)
+ * can be made. CreateGroup(name,path) can refer to an existing .GRP. */
+static int dde_group(const char *name, const char *path)
 {
     int g = group_named(name);
-    if (g >= 0 || ngroups >= MAXGROUPS || !name[0])
+    if (g >= 0) {
+        /* A previously created empty group may now have a .GRP to import. */
+        if (!groups[g].n && path && path[0] && grp_import(&groups[g], path))
+            items_changed(&groups[g]);
         return g;
+    }
+    if (ngroups >= MAXGROUPS || !name[0])
+        return -1;
     pm_group *gr = &groups[ngroups];
     memset(gr, 0, sizeof(*gr));
     lstrcpyn(gr->name, name, sizeof(gr->name));
     gr->sel = -1;
+    if (path && path[0])
+        grp_import(gr, path);
     ngroups++;
     open_group_window(ngroups - 1, 1);
     save_groups();
@@ -1125,7 +1196,7 @@ static int dde_execute(const char *s)
         for (int i = n; i < 8; i++)
             arg[i][0] = 0;
         if (!lstrcmpi(name, "CreateGroup") || !lstrcmpi(name, "ShowGroup")) {
-            int g = dde_group(arg[0]);
+            int g = dde_group(arg[0], !lstrcmpi(name, "CreateGroup") ? arg[1] : NULL);
             if (g < 0) {
                 ok = 0;
                 continue;

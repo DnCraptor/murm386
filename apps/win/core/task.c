@@ -683,8 +683,16 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
     t->info = win_app_info(path);
     lstrcpyn(t->cmdline, args, sizeof(t->cmdline));
     t->show = (int)show;
-    /* Give the new task the executable directory before it starts. */
-    win_file_task_workdir(t, path);
+    /* task_create() already gave the child a private copy of the caller's
+     * drive and working directories.  Win16 WinExec must preserve that copy:
+     * a setup stub run from A:\ can launch A:\BIN\INSTALL.EXE while the
+     * child still opens files relative to A:\ (e.g. its setup INF).
+     * For a native shell's launch, keep WINN's default working directory
+     * of the program file (as for a Program Manager item). */
+#ifdef TASK_NE
+    if (task_current()->run != run_ne_app)
+#endif
+        win_file_task_workdir(t, path);
     /* The hourglass stays while it starts (a Win16 program loads in its
      * own task), as in Windows: until it first waits for input, in its
      * message loop or a dialog's, or ends (task_started) */

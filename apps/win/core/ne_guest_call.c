@@ -329,7 +329,17 @@ static __attribute__((noinline)) int generic(args *a, ne_user *u, uint16_t servi
             break;
         }
         case 'b':
-            wr(a, r, (const void *)(uintptr_t)x[i], next);
+            /* KERNEL._lread returns the number of bytes received, not the
+             * requested length. Bytes after that count belong to the guest
+             * and must not be overwritten (especially on EOF or error). */
+            if (service == 82u) {
+                uint32_t nread = (uint16_t)res == (uint16_t)HFILE_ERROR ? 0u : res;
+                if (nread > next)
+                    nread = next;
+                if (nread)
+                    wr(a, r, (const void *)(uintptr_t)x[i], nread);
+            } else
+                wr(a, r, (const void *)(uintptr_t)x[i], next);
             break;
         case 'r':
             struct_out(a, F_RECT, r, (void *)(uintptr_t)x[i]);

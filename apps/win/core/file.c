@@ -1005,7 +1005,11 @@ HFILE WINAPI OpenFile(LPCSTR given, OFSTRUCT *of, UINT mode)
         err = E_NO_FILE;
     } else if (mode & OF_CREATE) {
         f = _lcreat(path, 0);
-        if (f != HFILE_ERROR && (mode & 3) != OF_WRITE) {   /* reopened for reading too */
+        /* OF_CREATE alone (1000h) returns a writable handle. Reopening it
+         * as OF_READ made subsequent _lwrite fail; Win16 setup stubs use
+         * exactly that combination when copying files from a floppy.
+         * Reopen only when the caller explicitly requested read/write. */
+        if (f != HFILE_ERROR && (mode & 3) == OF_READWRITE) {
             _lclose(f);
             f = _lopen(path, mode & 3);
         }
