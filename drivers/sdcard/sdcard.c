@@ -538,7 +538,7 @@ void sdcard_ff_qspi_cache_set_floor(sdcard_ff_qspi_owner_t owner, void *floor)
 #ifdef SDCARD_PIO
 pio_spi_inst_t pio_spi = {
 		.pio = pio1,
-		.sm = -1
+		.sm = NUM_PIO_STATE_MACHINES
 };
 #endif
 
@@ -591,6 +591,11 @@ static void CS_LOW(void)
 static
 void init_spi(void)
 {
+#ifdef SDCARD_PIO
+	/* A mount retry reuses the SPI bus, including its pin mux and PIO SM. */
+	if (pio_spi.sm < NUM_PIO_STATE_MACHINES) return;
+#endif
+
 	/* GPIO pin configuration */
 	/* pull up of MISO is MUST (10Kohm external pull up is recommended) */
 	/* Set drive strength and slew rate if needed to meet wire condition */

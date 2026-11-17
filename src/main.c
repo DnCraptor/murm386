@@ -348,8 +348,8 @@ static void show_error_screen(const char *title, const char *message, const char
         osd_print(box_x + 3, msg_y + 2, detail, error_attr);
     }
 
-    // Print hint at bottom
-    osd_print(box_x + 3, box_y + box_h - 2, "Please check hardware and restart.", error_attr);
+    if (phalt_func == halt_func)
+        osd_print(box_x + 3, box_y + box_h - 2, "Please check hardware and restart.", error_attr);
 
     osd_show();
 
@@ -1816,7 +1816,7 @@ static bool init_hardware(void) {
         if (res == FR_NOT_READY) {
             show_error_screen(" SD Card Error ",
                               "SD card not found or not ready.",
-                              "Insert a card and restart.", wait_for_sd_card_func);
+                              "Insert a card for automatic restart.", wait_for_sd_card_func);
             __unreachable();
         }
         if (res == FR_NO_FILESYSTEM) {
@@ -1828,7 +1828,6 @@ static bool init_hardware(void) {
 
         snprintf(detail, sizeof(detail), "FatFS error code: %d", res);
         show_error_screen(" SD Card Error ", "Failed to mount SD card.", detail, halt_func);
-        FRESULT res = f_mount(&fatfs, "", 1);
         __unreachable();
     }
     DBG_PRINT("  SD card mounted\n");
