@@ -17,18 +17,20 @@ enum {
     BUFFER_SIZE = 256 // 5.8 ms
 };
 
-// Written by the sound loop and read by the HSTX IRQ, both on core 1.
+// One producer (boot tone, then the audio timer) and one consumer (HSTX IRQ).
 static uint32_t buffer[BUFFER_SIZE]; // left | right << 16
-static volatile uint32_t buffer_head, buffer_tail; // free-running counts
+static uint32_t buffer_head, buffer_tail; // free-running counts
 
 bool __time_critical_func(hstx_audio_has_room)(void) {
-    return buffer_head - buffer_tail < BUFFER_SIZE;
+    const uint32_t head = __atomic_load_n(&buffer_head, __ATOMIC_RELAXED);
+    const uint32_t tail = __atomic_load_n(&buffer_tail, __ATOMIC_ACQUIRE);
+    return head - tail < BUFFER_SIZE;
 }
 
 void __time_critical_func(hstx_audio_write)(const int16_t left, const int16_t right) {
-    buffer[buffer_head % BUFFER_SIZE] = (uint16_t)left | (uint32_t)(uint16_t)right << 16;
-    __compiler_memory_barrier(); // the sample is in place before the IRQ can see it
-    buffer_head++;
+    const uint32_t head = __atomic_load_n(&buffer_head, __ATOMIC_RELAXED);
+    buffer[head % BUFFER_SIZE] = (uint16_t)left | (uint32_t)(uint16_t)right << 16;
+    __atomic_store_n(&buffer_head, head + 1, __ATOMIC_RELEASE);
 }
 
 static hstx_data_island_t avi_island, audio_infoframe_island, acr_island, acr_vsync_island, audio_island;
@@ -67,9 +69,11 @@ static inline uint32_t parity8(uint32_t v) {
 
 static void __time_critical_func(make_audio_packet)(void) {
     uint8_t sp[SAMPLES_PER_PACKET][8];
+    const uint32_t head = __atomic_load_n(&buffer_head, __ATOMIC_ACQUIRE);
+    uint32_t tail = __atomic_load_n(&buffer_tail, __ATOMIC_RELAXED);
     for (int k = 0; k < SAMPLES_PER_PACKET; k++) {
         // An empty buffer gives silence.
-        const uint32_t sample = buffer_tail != buffer_head ? buffer[buffer_tail++ % BUFFER_SIZE] : 0;
+        const uint32_t sample = tail != head ? buffer[tail++ % BUFFER_SIZE] : 0;
         uint8_t *d = sp[k];
         d[0] = 0;
         d[1] = (uint8_t)sample;
@@ -82,6 +86,7 @@ static void __time_critical_func(make_audio_packet)(void) {
         for (int i = 1; i < 7; i++) v = hstx_bch_table[d[i] ^ v];
         d[7] = v;
     }
+    __atomic_store_n(&buffer_tail, tail, __ATOMIC_RELEASE);
 
     const uint32_t *t = audio_template[packets_in_block == 0];
     if (++packets_in_block == PACKETS_PER_BLOCK) packets_in_block = 0;

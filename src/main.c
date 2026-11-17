@@ -2168,7 +2168,11 @@ tsr_callback_t __not_in_flash_func(set_tsr1_callback)(tsr_callback_t cb)
 }
 
 #ifdef BOARD_HAS_PS2
+#if defined(M2P2_HSTX_AUDIO)
+#define PS2_TIMER_POLL_DIV 44u  /* 44 samples at 44.1 kHz ~= 1.0 ms */
+#else
 #define PS2_TIMER_POLL_DIV 46u  /* 46 * 22 us ~= 1.0 ms */
+#endif
 static uint8_t ps2_timer_poll_div;
 #endif
 

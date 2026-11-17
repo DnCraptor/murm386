@@ -6,8 +6,7 @@
 
 enum { HSTX_AUDIO_SAMPLE_RATE = 44100 };
 
-// For the sound loop on the scanout core. Write a sample while there is room:
-// the HDMI clock then sets the sample rate.
+// Single producer. Write a sample only when the queue has room.
 bool hstx_audio_has_room(void);
 void hstx_audio_write(int16_t left, int16_t right);
 

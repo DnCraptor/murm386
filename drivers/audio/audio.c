@@ -233,7 +233,6 @@ bool audio_is_hway8930(void) {
 }
 
 void audio_init(void) {
-#if !defined(M2P2_HSTX_AUDIO)
 #if HAS_AUDIO_HWAY
     audio_use_hway = (boot_audio_output == AUDIO_OUTPUT_HWAY ||
                       boot_audio_output == AUDIO_OUTPUT_HWAY8930);
@@ -319,7 +318,6 @@ void audio_init(void) {
     pwm_config_set_clkdiv(&pwm, 1.0f);
     pwm_config_set_wrap(&pwm, (1 << 12) - 1);
     pwm_init(pwm_gpio_to_slice_num(PCM_PIN), &pwm, true);
-#endif
 #endif
 }
 
@@ -430,10 +428,17 @@ bool __not_in_flash_func(timer_callback)(repeating_timer_t *rt) {
     static int dss_v = 0;
     PC* pc = (PC*)rt->user_data;
 #if defined(M2P2_HSTX_AUDIO)
-    // The timer fires slightly faster than 44.1 kHz. Let HDMI pace the
-    // emulated audio devices by advancing them only when a sample fits.
-    if (!hstx_audio_has_room())
-        return true;
+    // Alternate 22/23 us periods for an average of exactly 44.1 kHz.
+    // The SDK reads delay_us after this callback. Negative delays are
+    // relative to the previous deadline, so IRQ latency does not accumulate.
+    static unsigned audio_phase;
+    audio_phase += 1000000u % HSTX_AUDIO_SAMPLE_RATE;
+    rt->delay_us = -(1000000 / HSTX_AUDIO_SAMPLE_RATE);
+    if (audio_phase >= HSTX_AUDIO_SAMPLE_RATE) {
+        audio_phase -= HSTX_AUDIO_SAMPLE_RATE;
+        --rt->delay_us;
+    }
+    int16_t hdmi_psg = 0;
 #endif
 
     /* Disney Sound Source owns a fixed 7 kHz playback clock.  This mixer is
@@ -473,17 +478,23 @@ bool __not_in_flash_func(timer_callback)(repeating_timer_t *rt) {
          * timing source, so suppressing csm_psg_sample() here changes device
          * state/timing even if its returned audio sample is not mixed.
          */
-        if (!audio_is_hway()) {
-            int16_t sample = csm_psg_sample();
+        const bool hway = audio_is_hway();
+        const bool expanded = hway && csm_psg_is_expanded();
+#if defined(M2P2_HSTX_AUDIO)
+        const int16_t sample = csm_psg_sample();
+#else
+        const int16_t sample = (!hway || expanded) ? csm_psg_sample() : 0;
+#endif
+        if (!hway || (expanded && !audio_is_hway8930())) {
             r_v += sample;
             l_v += sample;
-        } else if (csm_psg_is_expanded()) {
-            int16_t sample = csm_psg_sample();
-            if (!audio_is_hway8930()) {
-                r_v += sample;
-                l_v += sample;
-            }
         }
+#if defined(M2P2_HSTX_AUDIO)
+        else {
+            // The real PSG is already audible on the local output.
+            hdmi_psg = sample;
+        }
+#endif
     }
     if (pc->tandy_enabled) {
         int16_t sample = sn76489_sample(); // 16-bit
@@ -508,16 +519,19 @@ bool __not_in_flash_func(timer_callback)(repeating_timer_t *rt) {
     // Leave headroom for the other devices on shared audio outputs.
     int speaker_pcm = b_v * 8192;
 #if defined(M2P2_HSTX_AUDIO)
-    r_v += speaker_pcm;
-    l_v += speaker_pcm;
-    if (r_v > 32767) r_v = 32767;
-    if (r_v < -32768) r_v = -32768;
-    if (l_v > 32767) l_v = 32767;
-    if (l_v < -32768) l_v = -32768;
-    int level = volume;
-    hstx_audio_write(level < 16 ? l_v >> level : 0,
-                     level < 16 ? r_v >> level : 0);
-#else
+    // A full or stalled HDMI queue must never stop the physical output.
+    if (hstx_audio_has_room()) {
+        int hdmi_r = r_v + speaker_pcm + hdmi_psg;
+        int hdmi_l = l_v + speaker_pcm + hdmi_psg;
+        if (hdmi_r > 32767) hdmi_r = 32767;
+        if (hdmi_r < -32768) hdmi_r = -32768;
+        if (hdmi_l > 32767) hdmi_l = 32767;
+        if (hdmi_l < -32768) hdmi_l = -32768;
+        int level = volume;
+        hstx_audio_write(level < 16 ? hdmi_l >> level : 0,
+                         level < 16 ? hdmi_r >> level : 0);
+    }
+#endif
 #if HAS_AUDIO_HWAY
     if (audio_use_hway) {
         r_v += speaker_pcm;
@@ -574,7 +588,6 @@ bool __not_in_flash_func(timer_callback)(repeating_timer_t *rt) {
     if (ul_v > 4095) ul_v = 4095;
     pwm_set_gpio_level(PWM_RIGHT_PIN, ur_v);
     pwm_set_gpio_level(PWM_LEFT_PIN, ul_v);
-#endif
 #endif
     return true;
 }
