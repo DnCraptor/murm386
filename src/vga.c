@@ -1588,8 +1588,10 @@ void vbe_write(VGAState *s, uint32_t offset, uint32_t val)
             vbe_update_vgaregs(s);
             /* clear the screen */
             if (!(val & VBE_DISPI_NOCLEARMEM)) {
-                memset(s->vga_ram, 0,
-                       s->vbe_regs[VBE_DISPI_INDEX_YRES] * s->vbe_line_offset);
+                const uint64_t bytes =
+                    (uint64_t)s->vbe_regs[VBE_DISPI_INDEX_YRES] * s->vbe_line_offset;
+                const size_t vram_size = (size_t)s->vga_ram_size;
+                memset(s->vga_ram, 0, bytes < vram_size ? (size_t)bytes : vram_size);
             }
             break;
         case VBE_DISPI_INDEX_XRES:

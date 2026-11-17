@@ -430,17 +430,17 @@ bool __not_in_flash_func(timer_callback)(repeating_timer_t *rt) {
     static uint32_t dss_phase = 0;
     static int dss_v = 0;
     PC* pc = (PC*)rt->user_data;
-#if defined(M2P2_HSTX_AUDIO)
     // Alternate 22/23 us periods for an average of exactly 44.1 kHz.
     // The SDK reads delay_us after this callback. Negative delays are
     // relative to the previous deadline, so IRQ latency does not accumulate.
     static unsigned audio_phase;
-    audio_phase += 1000000u % HSTX_AUDIO_SAMPLE_RATE;
-    rt->delay_us = -(1000000 / HSTX_AUDIO_SAMPLE_RATE);
-    if (audio_phase >= HSTX_AUDIO_SAMPLE_RATE) {
-        audio_phase -= HSTX_AUDIO_SAMPLE_RATE;
+    audio_phase += 1000000u % SOUND_FREQUENCY;
+    rt->delay_us = -(1000000 / SOUND_FREQUENCY);
+    if (audio_phase >= SOUND_FREQUENCY) {
+        audio_phase -= SOUND_FREQUENCY;
         --rt->delay_us;
     }
+#if defined(M2P2_HSTX_AUDIO)
     int16_t hdmi_psg = 0;
 #endif
 
@@ -450,8 +450,8 @@ bool __not_in_flash_func(timer_callback)(repeating_timer_t *rt) {
      * callbacks and therefore does not produce 7 kHz. */
     if (pc->dss_enabled) {
         dss_phase += 7000;
-        if (dss_phase >= 44100) {
-            dss_phase -= 44100;
+        if (dss_phase >= SOUND_FREQUENCY) {
+            dss_phase -= SOUND_FREQUENCY;
             dss_v = dss_sample();
         }
     }

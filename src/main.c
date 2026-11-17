@@ -2192,11 +2192,7 @@ tsr_callback_t __not_in_flash_func(set_tsr1_callback)(tsr_callback_t cb)
 }
 
 #ifdef BOARD_HAS_PS2
-#if defined(M2P2_HSTX_AUDIO)
-#define PS2_TIMER_POLL_DIV 44u  /* 44 samples at 44.1 kHz ~= 1.0 ms */
-#else
-#define PS2_TIMER_POLL_DIV 46u  /* 46 * 22 us ~= 1.0 ms */
-#endif
+#define PS2_TIMER_POLL_DIV (SOUND_FREQUENCY / 1000u)
 static uint8_t ps2_timer_poll_div;
 #endif
 
@@ -2261,8 +2257,7 @@ static void __not_in_flash_func(core1_entry)(void) {
         __dmb();
     }
     static repeating_timer_t m_timer = { 0 };
-    int hz = 44100;
-	add_repeating_timer_us(-1000000 / hz, timer_callback0, pc, &m_timer);
+    add_repeating_timer_us(-1000000 / SOUND_FREQUENCY, timer_callback0, pc, &m_timer);
 
     __dmb();
     audio_timer_ready = true;
