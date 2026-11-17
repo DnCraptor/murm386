@@ -1,7 +1,7 @@
 /*
  * mmsystem.c - MMSYSTEM.DLL, WINN's multimedia system. Win16 waveOut
  * and midiOut use installed native drivers (wave.c / midi.c). Wave input
- * and sndPlaySound/PlaySound remain unsupported; Win16 MCI MIDI lives in
+ * remains unsupported; sndPlaySound/PlaySound are snd.c's; Win16 MCI MIDI lives in
  * mci.c. The multimedia timer (timeGetTime, timeSetEvent: its procedure called as its
  * task takes its messages, as a timer's, as often as its period went by
  * since, ten times at most) and mmio's files (unbuffered: RIFF chunks
@@ -67,13 +67,12 @@ static void wr16(uint8_t *p, unsigned v)
 
 /* ---------------------------------------------------------------- no devices */
 
-static BOOL WINAPI sndPlaySound(LPCSTR s, UINT flags) { (void)s; (void)flags; return FALSE; }
-
-static BOOL WINAPI PlaySound(LPCSTR s, HINSTANCE m, DWORD flags)
-{
-    (void)s; (void)m; (void)flags;
-    return FALSE;
-}
+/* snd.c: sndPlaySound, PlaySound */
+BOOL WINAPI winn_sndPlaySound(LPCSTR name, UINT flags);
+BOOL WINAPI winn_PlaySound(LPCSTR name, HINSTANCE module, DWORD flags);
+int winn_snd_ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *value);
+void winn_snd_task_end(uint16_t task);
+void winn_snd_term(void);
 
 static UINT WINAPI mmsystemGetVersion(void) { return 0x030a; }
 
@@ -563,10 +562,10 @@ static int ne_call(win_dll_call *c, uint16_t o, uint32_t *v)
     wr = winn_mci_ne_call(c, o, v);
     if (wr != WINDLL_NONE)
         return wr;
+    wr = winn_snd_ne_call(c, o, v);
+    if (wr != WINDLL_NONE)
+        return wr;
     switch (o) {
-    case 2: case 3:                     /* sndPlaySound, PlaySound: no sound */
-        *v = 0;
-        return WINDLL_WORD;
     case 5:                             /* mmsystemGetVersion */
         *v = mmsystemGetVersion();
         return WINDLL_WORD;
@@ -815,6 +814,7 @@ static int ne_call(win_dll_call *c, uint16_t o, uint32_t *v)
 /* a task ended: its timers, its mmio handles (its files are closed) */
 static void task_end(uint16_t task)
 {
+    winn_snd_task_end(task);
     winn_mci_task_end(task);
     winn_mixer_task_end(task);
     winn_volume_flush();
@@ -833,6 +833,7 @@ static void task_end(uint16_t task)
 static void term(void)
 {
     winn_volume_flush();
+    winn_snd_term();
     winn_mci_term();
     winn_wave_term();
     winn_midi_term();
@@ -848,8 +849,8 @@ static void term(void)
 
 static const win_dll_export exports[] = {
     { 1, 2, "WEP", NULL },
-    { 2, 6, "sndPlaySound", (const void *)sndPlaySound },
-    { 3, 10, "PlaySound", (const void *)PlaySound },
+    { 2, 6, "sndPlaySound", (const void *)winn_sndPlaySound },
+    { 3, 10, "PlaySound", (const void *)winn_PlaySound },
     { 5, 0, "mmsystemGetVersion", (const void *)mmsystemGetVersion },
     { 6, 16, "DriverProc", NULL },
     { 8, 0, "WMMMidiRunOnce", NULL },

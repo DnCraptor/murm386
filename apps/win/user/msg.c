@@ -1023,6 +1023,7 @@ BOOL WINAPI ExitWindows(DWORD reserved, UINT code)
             cursor_wait_end();
             return FALSE;
         }
+    user_event_sound("SystemExit", 1);  /* Windows' exit sound, to its end */
     /* Keep the last complete frame (including a confirmation dialog) until
      * the display is shut down; no half-painted desktop underneath it. */
     U.shutting_down = 1;

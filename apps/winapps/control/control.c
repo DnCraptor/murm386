@@ -14,6 +14,9 @@
  *              device=): added from the native printer drivers' models,
  *              their ports, the default one, removed
  *   Volume     the master, wave and MIDI volumes (MMSYSTEM's)
+ *   Sound      the system events' sounds (WIN.INI [sounds]: a WAV file of
+ *              the Windows directory for each, tried with Test), the
+ *              sounds on or off ([windows] Beep)
  *
  * The colours offered are the 16 of the VGA, which every display driver
  * shows as they are.
@@ -25,7 +28,7 @@
 #define INI         "CONTROL.INI"
 
 enum { APP_COLOR, APP_DESKTOP, APP_MOUSE, APP_DATETIME, APP_SYSTEM, APP_PRINTERS, APP_SOUND,
-       APP_COUNT };
+       APP_EVENTS, APP_COUNT };
 
 #define IDM_COLOR    100
 #define IDM_EXIT     110
@@ -35,7 +38,7 @@ static HINSTANCE hinst;
 static HWND      hmain;
 static int       sel;               /* the applet selected */
 static const char *const app_names[APP_COUNT] = {
-    "Color", "Desktop", "Mouse", "Date/Time", "System", "Printers", "Volume"
+    "Color", "Desktop", "Mouse", "Date/Time", "System", "Printers", "Volume", "Sound"
 };
 
 /* ---------------------------------------------------------------- shared */
@@ -1454,6 +1457,197 @@ static const DLGITEM_N sound_items[] = {
     { 186, 64, 56, 14, IDCANCEL, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "Cancel" },
 };
 
+/* ---------------------------------------------------------------- Sound (the events) */
+
+/* WIN.INI [sounds]: event=file,description for each of the system's
+ * events (Windows 3.1's, as its Setup writes them, when there are none),
+ * the file one of the Windows directory's WAV files or none; played with
+ * MMSYSTEM's sndPlaySound */
+#define IDC_SND_EVENTS 700
+#define IDC_SND_FILES  701
+#define IDC_SND_TEST   702
+#define IDC_SND_ENABLE 703
+#define SNDS           24
+#define NONE_TEXT      "<none>"
+
+typedef BOOL (WINAPI *SNDPLAY)(LPCSTR, UINT);
+static struct { char key[32], file[80], desc[48]; } snds[SNDS];
+static int nsnds, snd_cur;
+static HINSTANCE snd_mm;
+static SNDPLAY snd_play;
+
+static const char *const snd_defaults[7][3] = {
+    { "SystemAsterisk", "chord.wav", "Asterisk" },
+    { "SystemDefault", "ding.wav", "Default Beep" },
+    { "SystemExclamation", "chord.wav", "Exclamation" },
+    { "SystemExit", "chimes.wav", "Windows Exit" },
+    { "SystemHand", "chord.wav", "Critical Stop" },
+    { "SystemQuestion", "chord.wav", "Question" },
+    { "SystemStart", "tada.wav", "Windows Start" },
+};
+
+static int snd_find(const char *key)
+{
+    for (int i = 0; i < nsnds; i++)
+        if (!lstrcmpi(snds[i].key, key))
+            return i;
+    return -1;
+}
+
+/* [sounds]' events as they are, then the defaults it lacks */
+static void snd_load(void)
+{
+    static char keys[1024];
+    nsnds = 0;
+    GetProfileString("sounds", NULL, "", keys, sizeof(keys));
+    for (const char *k = keys; *k && nsnds < SNDS; k += lstrlen(k) + 1) {
+        char v[132];
+        GetProfileString("sounds", k, "", v, sizeof(v));
+        char *comma = strchr(v, ',');
+        if (comma)
+            *comma = 0;
+        lstrcpyn(snds[nsnds].key, k, sizeof(snds[0].key));
+        lstrcpyn(snds[nsnds].file, lstrcmpi(v, NONE_TEXT) ? v : "", sizeof(snds[0].file));
+        lstrcpyn(snds[nsnds].desc, comma && comma[1] ? comma + 1 : k, sizeof(snds[0].desc));
+        nsnds++;
+    }
+    for (int d = 0; d < 7 && nsnds < SNDS; d++)
+        if (snd_find(snd_defaults[d][0]) < 0) {
+            lstrcpy(snds[nsnds].key, snd_defaults[d][0]);
+            lstrcpy(snds[nsnds].file, snd_defaults[d][1]);
+            lstrcpy(snds[nsnds].desc, snd_defaults[d][2]);
+            nsnds++;
+        }
+}
+
+/* the event's file selected in the list of files (added when it is not
+ * there: a file elsewhere) */
+static void snd_show(HWND dlg)
+{
+    HWND files = GetDlgItem(dlg, IDC_SND_FILES);
+    const char *f = snd_cur >= 0 ? snds[snd_cur].file : "";
+    const char *name = f;
+    for (const char *p = f; *p; p++)
+        if (*p == '\\' || *p == ':')
+            name = p + 1;
+    if (!f[0])
+        name = NONE_TEXT;
+    int i = (int)SendMessage(files, LB_FINDSTRINGEXACT, (WPARAM)-1, (LPARAM)name);
+    if (i < 0 && f[0])
+        i = (int)SendMessage(files, LB_ADDSTRING, 0, (LPARAM)f);
+    SendMessage(files, LB_SETCURSEL, (WPARAM)(i < 0 ? 0 : i), 0);
+}
+
+static void snd_test(HWND dlg)
+{
+    char f[80];
+    HWND files = GetDlgItem(dlg, IDC_SND_FILES);
+    int i = (int)SendMessage(files, LB_GETCURSEL, 0, 0);
+    if (i < 0 || !snd_play)
+        return;
+    SendMessage(files, LB_GETTEXT, (WPARAM)i, (LPARAM)(LPSTR)f);
+    if (lstrcmpi(f, NONE_TEXT) && !snd_play(f, 0x0001u | 0x0002u))     /* SND_ASYNC, NODEFAULT */
+        MessageBox(dlg, "The sound could not be played: no wave output, or not a PCM WAV file.",
+                   "Sound", MB_OK | MB_ICONEXCLAMATION);
+}
+
+static BOOL CALLBACK EventsProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_INITDIALOG: {
+        snd_mm = LoadLibrary("MMSYSTEM.DLL");
+        snd_play = (UINT)snd_mm >= 32 ?
+                   (SNDPLAY)(void (*)(void))GetProcAddress(snd_mm, "sndPlaySound") : NULL;
+        EnableWindow(GetDlgItem(dlg, IDC_SND_TEST), snd_play != NULL);
+        snd_load();
+        HWND events = GetDlgItem(dlg, IDC_SND_EVENTS);
+        for (int i = 0; i < nsnds; i++)
+            SendMessage(events, LB_ADDSTRING, 0, (LPARAM)(LPCSTR)snds[i].desc);
+        char spec[160];                 /* the Windows directory's WAV files */
+        UINT n = GetWindowsDirectory(spec, sizeof(spec) - 8);
+        if (n && spec[n - 1] != '\\')
+            spec[n++] = '\\';
+        lstrcpy(spec + n, "*.WAV");
+        DlgDirList(dlg, spec, IDC_SND_FILES, 0, DDL_READWRITE);
+        SendDlgItemMessage(dlg, IDC_SND_FILES, LB_INSERTSTRING, 0, (LPARAM)(LPCSTR)NONE_TEXT);
+        BOOL beep = TRUE;
+        SystemParametersInfo(SPI_GETBEEP, 0, &beep, 0);
+        CheckDlgButton(dlg, IDC_SND_ENABLE, beep != 0);
+        snd_cur = nsnds ? 0 : -1;
+        SendMessage(events, LB_SETCURSEL, 0, 0);
+        snd_show(dlg);
+        return TRUE;
+    }
+    case WM_COMMAND:
+        if (wp == IDC_SND_EVENTS && HIWORD(lp) == LBN_SELCHANGE) {
+            HWND events = GetDlgItem(dlg, IDC_SND_EVENTS);
+            char d[48];
+            int i = (int)SendMessage(events, LB_GETCURSEL, 0, 0);
+            snd_cur = -1;
+            if (i >= 0) {
+                SendMessage(events, LB_GETTEXT, (WPARAM)i, (LPARAM)(LPSTR)d);
+                for (int k = 0; k < nsnds; k++)
+                    if (!lstrcmp(snds[k].desc, d))
+                        snd_cur = k;
+            }
+            snd_show(dlg);
+            return TRUE;
+        }
+        if (wp == IDC_SND_FILES && (HIWORD(lp) == LBN_SELCHANGE || HIWORD(lp) == LBN_DBLCLK)) {
+            HWND files = GetDlgItem(dlg, IDC_SND_FILES);
+            int i = (int)SendMessage(files, LB_GETCURSEL, 0, 0);
+            if (i >= 0 && snd_cur >= 0) {
+                char f[80];
+                SendMessage(files, LB_GETTEXT, (WPARAM)i, (LPARAM)(LPSTR)f);
+                lstrcpyn(snds[snd_cur].file, lstrcmpi(f, NONE_TEXT) ? f : "", sizeof(snds[0].file));
+            }
+            if (HIWORD(lp) == LBN_DBLCLK)
+                snd_test(dlg);
+            return TRUE;
+        }
+        if (wp == IDC_SND_TEST) {
+            snd_test(dlg);
+            return TRUE;
+        }
+        if (wp == IDOK || wp == IDCANCEL) {
+            if (snd_play)
+                snd_play(NULL, 0);      /* a sound tried: stopped */
+            if (wp == IDOK) {
+                for (int i = 0; i < nsnds; i++) {
+                    char v[132];
+                    wsprintf(v, "%s,%s", snds[i].file[0] ? snds[i].file : NONE_TEXT, snds[i].desc);
+                    WriteProfileString("sounds", snds[i].key, v);
+                }
+                SystemParametersInfo(SPI_SETBEEP, IsDlgButtonChecked(dlg, IDC_SND_ENABLE) != 0,
+                                     NULL, SPIF_UPDATEINIFILE);
+            }
+            if ((UINT)snd_mm >= 32)
+                FreeLibrary(snd_mm);
+            snd_mm = 0;
+            snd_play = NULL;
+            EndDialog(dlg, (int)wp);
+            return TRUE;
+        }
+        break;
+    }
+    return FALSE;
+}
+
+static const DLGTEMPLATE_N events_tpl = {
+    WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME,
+    8, 24, 24, 270, 118, NULL, NULL, "Sound", 0, NULL
+};
+static const DLGITEM_N events_items[] = {
+    { 8, 6, 100, 10, -1, SS_LEFT | WS_VISIBLE, "STATIC", "&Events:" },
+    { 8, 18, 100, 76, IDC_SND_EVENTS, LBS_NOTIFY | WS_VSCROLL | WS_BORDER | WS_TABSTOP | WS_VISIBLE, "LISTBOX", "" },
+    { 116, 6, 100, 10, -1, SS_LEFT | WS_VISIBLE, "STATIC", "&Files:" },
+    { 116, 18, 100, 76, IDC_SND_FILES, LBS_NOTIFY | LBS_SORT | WS_VSCROLL | WS_BORDER | WS_TABSTOP | WS_VISIBLE, "LISTBOX", "" },
+    { 8, 100, 140, 10, IDC_SND_ENABLE, BS_AUTOCHECKBOX | WS_TABSTOP | WS_VISIBLE, "BUTTON", "E&nable System Sounds" },
+    { 224, 18, 40, 14, IDOK, BS_DEFPUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "OK" },
+    { 224, 36, 40, 14, IDCANCEL, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "Cancel" },
+    { 224, 60, 40, 14, IDC_SND_TEST, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "&Test" },
+};
+
 /* ---------------------------------------------------------------- main window */
 
 static void run_applet(int i)
@@ -1470,6 +1664,7 @@ static void run_applet(int i)
         break;
     case APP_PRINTERS: DialogBoxIndirectN(hinst, &printers_tpl, printers_items, hmain, PrintersProc); break;
     case APP_SOUND:    DialogBoxIndirectN(hinst, &sound_tpl, sound_items, hmain, SoundProc); break;
+    case APP_EVENTS:   DialogBoxIndirectN(hinst, &events_tpl, events_items, hmain, EventsProc); break;
     }
 }
 
@@ -1498,7 +1693,7 @@ static void paint_main(HDC dc)
     SetBkMode(dc, TRANSPARENT);
     for (int i = 0; i < APP_COUNT; i++) {
         int x = (i % cols) * CELL_W, y = 4 + (i / cols) * CELL_H;
-        /* the applets' icons follow the program's: 2 Color ... 8 Volume */
+        /* the applets' icons follow the program's: 2 Color ... 8 Volume, 9 Sound */
         DrawIcon(dc, x + (CELL_W - 32) / 2, y + 4, LoadIcon(hinst, MAKEINTRESOURCE(2 + i)));
         RECT t = { x + 2, y + 40, x + CELL_W - 2, y + CELL_H };
         RECT m = t;
@@ -1610,6 +1805,7 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     AppendMenu(settings, MF_STRING, IDM_COLOR + APP_SYSTEM, "&System...");
     AppendMenu(settings, MF_STRING, IDM_COLOR + APP_PRINTERS, "&Printers...");
     AppendMenu(settings, MF_STRING, IDM_COLOR + APP_SOUND, "&Volume...");
+    AppendMenu(settings, MF_STRING, IDM_COLOR + APP_EVENTS, "S&ound...");
     AppendMenu(settings, MF_SEPARATOR, 0, NULL);
     AppendMenu(settings, MF_STRING, IDM_EXIT, "E&xit");
     HMENU help = CreatePopupMenu();
@@ -1617,9 +1813,16 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     HMENU bar = CreateMenu();
     AppendMenu(bar, MF_POPUP, (UINT)settings, "&Settings");
     AppendMenu(bar, MF_POPUP, (UINT)help, "&Help");
+    /* the applets in a row, or as many rows as the screen's width needs */
+    int cols = (GetSystemMetrics(SM_CXSCREEN) - 48) / CELL_W;
+    if (cols < 1)
+        cols = 1;
+    if (cols > APP_COUNT)
+        cols = APP_COUNT;
+    int rows = (APP_COUNT + cols - 1) / cols;
     HWND h = CreateWindow("CtlPanelClass", "Control Panel", WS_OVERLAPPEDWINDOW,
-                          CW_USEDEFAULT, CW_USEDEFAULT, CELL_W * APP_COUNT + 16, 120,
-                          0, bar, inst, NULL);
+                          CW_USEDEFAULT, CW_USEDEFAULT, CELL_W * cols + 16,
+                          120 + (rows - 1) * CELL_H, 0, bar, inst, NULL);
     if (!h)
         return 1;
     ShowWindow(h, show);

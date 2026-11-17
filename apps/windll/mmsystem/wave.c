@@ -18,6 +18,7 @@
 #include "wave_driver.h"
 
 void winn_volume_pcm(uint8_t *p, unsigned n, unsigned bits, unsigned channels);   /* volume.c */
+void winn_snd_release(void);                                                       /* snd.c */
 
 #define NE (__win_dll_ne)
 #define WAVE_HANDLE    0x6e01u
@@ -288,6 +289,7 @@ static MMRESULT wave_open(win_dll_call *c)
     unsigned cb = (unsigned)(flags & CALLBACK_TYPEMASK);
     if (cb != 0 && cb != CALLBACK_WINDOW && cb != CALLBACK_FUNCTION)
         return MMSYSERR_INVALPARAM;
+    winn_snd_release();                 /* a sound playing: the device the program's */
     HMODULE h;
     const win_wave_driver *d = wave_load(&h);
     if (!d)

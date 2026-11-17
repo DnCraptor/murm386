@@ -12,6 +12,7 @@
 #include "wave_driver.h"
 
 void winn_volume_pcm(uint8_t *p, unsigned n, unsigned bits, unsigned channels);   /* volume.c */
+void winn_snd_release(void);                                                       /* snd.c */
 
 #define NE (__win_dll_ne)
 #define WAVE_MCI_ID   2u
@@ -189,6 +190,7 @@ uint32_t winn_mci_wave_open(const char *filename, const char *alias) {
         if (err) { _lclose(file); return err; }
     }
     HMODULE module;
+    winn_snd_release();
     const win_wave_driver *driver = winn_wave_driver_load(&module);
     if (!driver) {
         if (file != HFILE_ERROR) _lclose(file);

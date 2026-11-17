@@ -465,11 +465,59 @@ int WINAPI GetSystemMetrics(int i)
     }
 }
 
-/* the speaker's beep, whatever the type (WINN has no sounds of its own) */
+/* A system event's sound, WIN.INI [sounds] (SystemAsterisk=chord.wav,
+ * Asterisk: the file before the comma), played by MMSYSTEM's sndPlaySound
+ * on the wave driver: 1 if it plays. Not when [windows] Beep=no (SPI_SETBEEP), nor
+ * without a file there (MMSYSTEM is not loaded for nothing). Async when
+ * MMSYSTEM is loaded already: else its use stays this task's (it plays
+ * on; it is unloaded at the task's end), wait: until the sound ends. */
+typedef BOOL (WINAPI *SNDPLAYSOUND)(LPCSTR, UINT);
+
+int user_event_sound(const char *event, int wait)
+{
+    char s[160];
+    if (!spi.beep)
+        return 0;
+    GetProfileString("sounds", event, "", s, sizeof(s));
+    char *comma = strchr(s, ',');
+    if (comma)
+        *comma = 0;
+    if (!s[0] || !lstrcmpi(s, "<none>"))
+        return 0;
+    OFSTRUCT of;                        /* as it is, or in the Windows directory */
+    char path[200];
+    if (OpenFile(s, &of, OF_EXIST) == HFILE_ERROR) {
+        UINT n = GetWindowsDirectory(path, sizeof(path) - 2);
+        if (!n || n + strlen(s) + 2 > sizeof(path))
+            return 0;
+        if (path[n - 1] != '\\')
+            path[n++] = '\\';
+        lstrcpy(path + n, s);
+        if (OpenFile(path, &of, OF_EXIST) == HFILE_ERROR)
+            return 0;
+    }
+    int loaded = GetModuleHandle("MMSYSTEM") != 0;
+    HINSTANCE mm = LoadLibrary("MMSYSTEM.DLL");
+    if ((UINT)mm < 32)
+        return 0;
+    SNDPLAYSOUND play = (SNDPLAYSOUND)(void (*)(void))GetProcAddress(mm, "sndPlaySound");
+    int ok = play && play(event, (wait ? 0x0000u : 0x0001u) | 0x0002u);  /* SND_ASYNC, SND_NODEFAULT */
+    if (loaded || wait || !ok)
+        FreeLibrary(mm);
+    return ok;
+}
+
+/* the event's sound for the type (MB_ICONHAND ...), else the speaker's beep */
 void WINAPI MessageBeep(UINT type)
 {
-    (void)type;
-    sound_beep();
+    const char *event = (type & 0xF0) == MB_ICONHAND ? "SystemHand" :
+                        (type & 0xF0) == MB_ICONQUESTION ? "SystemQuestion" :
+                        (type & 0xF0) == MB_ICONEXCLAMATION ? "SystemExclamation" :
+                        (type & 0xF0) == MB_ICONASTERISK ? "SystemAsterisk" : "SystemDefault";
+    if (!spi.beep)
+        return;                         /* the Control Panel's sounds off (SPI_SETBEEP) */
+    if (!user_event_sound(event, 0))
+        sound_beep();
 }
 
 /* ---------------------------------------------------------------- DrawText */

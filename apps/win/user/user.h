@@ -111,6 +111,8 @@ wwnd   *user_window_from_point(int x, int y, int *hit);
 void    user_set_window_rect(wwnd *w, const RECT *rc, UINT flags);
 void    user_dlg_focus_changed(wwnd *w);
 int     user_buttons_swapped(void);
+/* a system event's sound ([sounds]: SystemHand ...) played: 1 if it plays (sysmet.c) */
+int     user_event_sound(const char *event, int wait);
 
 /* msg.c */
 void    user_post(HWND h, UINT m, WPARAM wp, LPARAM lp);

@@ -25,6 +25,7 @@
 
 void winn_volume_pcm(uint8_t *p, unsigned n, unsigned bits, unsigned channels);   /* volume.c */
 const win_wave_driver *winn_wave_driver_load(HMODULE *module);                    /* mci_wave.c */
+void winn_snd_release(void);                                                       /* snd.c */
 
 #define NE (__win_dll_ne)
 #define AVI_MCI_ID      3u
@@ -739,6 +740,7 @@ static uint32_t audio_byte(uint32_t frame) {
 static void audio_start(uint32_t frame) {
     if (!avi.audio_bytes || !avi.audio_on) return;
     if (!avi.driver) {
+        winn_snd_release();
         avi.driver = winn_wave_driver_load(&avi.module);
         if (!avi.driver) return;
         if (!avi.driver->open()) { FreeLibrary(avi.module); avi.driver = NULL; avi.module = 0; return; }

@@ -175,7 +175,10 @@ and templates are left out. Native applications call them as they are
 (`include/commdlg.h`): WINN loads the DLL for the task at its first call
 of one. MMSYSTEM's devices
 are its drivers' (Volume below: wave output, MIDI, the master volume, a
-mixer; no inputs, no joysticks; sndPlaySound and PlaySound play nothing), the
+mixer; no inputs, no joysticks), sndPlaySound and PlaySound (`snd.c`: a
+WAV file, a [sounds] event's, an image in memory; synchronous,
+asynchronous, looped; on the wave driver, the device a program opens
+stopping it), the
 multimedia timer (timeGetTime, timeGetSystemTime, timeGetDevCaps,
 timeSetEvent: its procedure is called as the program takes its messages,
 as a timer's, as often as its period went by since, ten times at most),
@@ -773,7 +776,7 @@ in `__ez_start`. `GetAppInfoN`, `ExtractIconN` and `ExtractIconExN` (the
 n-th, or the count) read it from a file without loading the program (the
 Program Manager's names and icons); `LoadIcon(hInstance,
 MAKEINTRESOURCE(n))` gives a running program its n-th icon: 1 for its class
-(minimized windows, Alt+Tab), the Control Panel's applets 2 to 5.
+(minimized windows, Alt+Tab), the Control Panel's applets 2 to 9.
 `DestroyIcon` frees one that `ExtractIcon*N` made.
 
 Tasks switch only in `GetMessage`, `PeekMessage`, `Yield` and `WinExec`.
@@ -864,7 +867,15 @@ them at once through `SetSysColors` and `SystemParametersInfo`
 `SPIF_UPDATEINIFILE`); its own `CONTROL.INI` keeps the colour schemes
 (`[color schemes]`, 21 colours as hex `RRGGBB` in `COLOR_` order) and the
 patterns (`[Patterns]`, the twelve of Windows 3.1 written on first use).
-Date/Time sets the DOS clock with `SetLocalTimeN`.
+Date/Time sets the DOS clock with `SetLocalTimeN`. Sound keeps the system
+events' sounds, `[sounds]` (`SystemAsterisk=chord.wav,Asterisk`: a WAV
+file of the Windows directory, `<none>`; Windows 3.1's events and files
+when there are none), tried with Test, and `[windows] Beep`: MessageBeep
+plays the event of its type (SystemHand, SystemQuestion,
+SystemExclamation, SystemAsterisk, SystemDefault), MessageBox its icon's,
+ExitWindows SystemExit, through MMSYSTEM when there is a file for it
+(else MessageBeep beeps the speaker; MessageBox stays silent as before);
+Beep=no silences them all.
 
 In a dialog, Enter presses the button drawn as the default one: the
 focused push button, or else the dialog's default (`DM_GETDEFID`, `IDOK`

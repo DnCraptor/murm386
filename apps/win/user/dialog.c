@@ -769,6 +769,10 @@ int WINAPI MessageBox(HWND owner, LPCSTR text, LPCSTR caption, UINT type)
     int def = (int)(type & 0x0F00) >> 8;
     if (def >= sets[set].n)
         def = 0;
+    /* the icon's sound, as Windows' (a wave one only: no speaker beep added) */
+    user_event_sound(icon == 1 ? "SystemHand" : icon == 2 ? "SystemQuestion" :
+                     icon == 3 ? "SystemExclamation" : icon == 4 ? "SystemAsterisk" :
+                     "SystemDefault", 0);
     int r = text_box(owner, text, caption, icon, sets[set].n, sets[set].ids, sets[set].names, def);
     if (r == IDCANCEL && !(set == 1 || set == 3 || set == 5))
         r = sets[set].ids[0];
