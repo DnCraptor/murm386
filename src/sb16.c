@@ -181,6 +181,36 @@ static int irq_of_magic (int magic)
     }
 }
 
+enum {
+    SB16_IRQ_8BIT = 1,
+    SB16_IRQ_16BIT = 2,
+    SB16_IRQ_DMA_MASK = SB16_IRQ_8BIT | SB16_IRQ_16BIT,
+};
+
+static bool sb16_irq_pending(const SB16State *s)
+{
+    return (s->mixer_regs[0x82] & SB16_IRQ_DMA_MASK) != 0;
+}
+
+static void sb16_raise_irq(SB16State *s, uint8_t source)
+{
+    const bool pending = sb16_irq_pending(s);
+    s->mixer_regs[0x82] |= source;
+    if (!pending)
+        s->set_irq(s->pic, s->irq, 1);
+}
+
+static bool sb16_ack_irq(SB16State *s, uint8_t source)
+{
+    if (!(s->mixer_regs[0x82] & source))
+        return false;
+
+    s->mixer_regs[0x82] &= ~source;
+    if (!sb16_irq_pending(s))
+        s->set_irq(s->pic, s->irq, 0);
+    return true;
+}
+
 #if 0
 static void log_dsp (SB16State *dsp)
 {
@@ -626,8 +656,7 @@ static void command (SB16State *s, uint8_t cmd)
         case 0xf2:
         case 0xf3:
             dsp_out_data (s, 0xaa);
-            s->mixer_regs[0x82] |= (cmd == 0xf2) ? 1 : 2;
-            s->set_irq(s->pic, s->irq, 1);
+            sb16_raise_irq(s, cmd == 0xf2 ? SB16_IRQ_8BIT : SB16_IRQ_16BIT);
             break;
 
         case 0xf9:
@@ -691,8 +720,7 @@ void sb16_service(SB16State *s, uint32_t now_us)
         return;
 
     s->silence_pending = false;
-    s->mixer_regs[0x82] |= 1;
-    s->set_irq(s->pic, s->irq, 1);
+    sb16_raise_irq(s, SB16_IRQ_8BIT);
 }
 
 static void complete (SB16State *s)
@@ -1045,22 +1073,14 @@ uint32_t sb16_dsp_read(void *opaque, uint32_t nport)
         /* Bit 7: on real SB hardware this indicates an 8-bit IRQ is
          * pending.  Games poll this port to detect DMA completion.
          * Also set when DSP has output data available. */
-        retval = (s->mixer_regs[0x82] & 1) ? 0x80
+        retval = (s->mixer_regs[0x82] & SB16_IRQ_8BIT) ? 0x80
                : (!s->out_data_len || s->highspeed) ? 0 : 0x80;
-        if (s->mixer_regs[0x82] & 1) {
-            ack = 1;
-            s->mixer_regs[0x82] &= ~1;
-            s->set_irq(s->pic, s->irq, 0);
-        }
+        ack = sb16_ack_irq(s, SB16_IRQ_8BIT);
         break;
 
     case 0x0f:                  /* irq 16 ack */
         retval = 0xff;
-        if (s->mixer_regs[0x82] & 2) {
-            ack = 1;
-            s->mixer_regs[0x82] &= ~2;
-            s->set_irq(s->pic, s->irq, 0);
-        }
+        ack = sb16_ack_irq(s, SB16_IRQ_16BIT);
         break;
 
     default:
@@ -1131,8 +1151,13 @@ void sb16_mixer_write_datab(void *opaque, uint32_t nport, uint32_t val)
         {
             int irq = irq_of_magic (val);
             ldebug ("setting irq to %d (val=%#x)\n", irq, val);
-            if (irq > 0) {
+            if (irq > 0 && irq != s->irq) {
+                const bool pending = sb16_irq_pending(s);
+                if (pending)
+                    s->set_irq(s->pic, s->irq, 0);
                 s->irq = irq;
+                if (pending)
+                    s->set_irq(s->pic, s->irq, 1);
             }
         }
         break;
@@ -1300,8 +1325,7 @@ static int SB_read_DMA (void *opaque, int nchan, int dma_pos, int dma_len)
     s->left_till_irq -= written;
 
     if (s->left_till_irq <= 0) {
-        s->mixer_regs[0x82] |= (nchan & 4) ? 2 : 1;
-        s->set_irq(s->pic, s->irq, 1);
+        sb16_raise_irq(s, nchan & 4 ? SB16_IRQ_16BIT : SB16_IRQ_8BIT);
         /* Signal DSP busy on port 0x22C so polling loops detect the
          * block completion.  Cleared on next read of port 0x22C. */
         if (s->dma_auto == 0) {
