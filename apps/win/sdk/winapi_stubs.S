@@ -4767,6 +4767,23 @@ GetSystemPaletteEntries:
     .ltorg
     .size GetSystemPaletteEntries, .-GetSystemPaletteEntries
 
+    .section .text.winapi.ResetDC,"ax",%progbits
+    .global ResetDC
+    .type ResetDC, %function
+    .thumb_func
+ResetDC:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =1504
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size ResetDC, .-ResetDC
+
     .section .text.winapi.StartDoc,"ax",%progbits
     .global StartDoc
     .type StartDoc, %function
@@ -11719,6 +11736,57 @@ GetPrinterModelsN:
     bx   r12
     .ltorg
     .size GetPrinterModelsN, .-GetPrinterModelsN
+
+    .section .text.winapi.PrinterDeviceModeN,"ax",%progbits
+    .global PrinterDeviceModeN
+    .type PrinterDeviceModeN, %function
+    .thumb_func
+PrinterDeviceModeN:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #12]
+    ldr  r1, =128
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size PrinterDeviceModeN, .-PrinterDeviceModeN
+
+    .section .text.winapi.PrinterCapabilitiesN,"ax",%progbits
+    .global PrinterCapabilitiesN
+    .type PrinterCapabilitiesN, %function
+    .thumb_func
+PrinterCapabilitiesN:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #12]
+    ldr  r1, =132
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size PrinterCapabilitiesN, .-PrinterCapabilitiesN
+
+    .section .text.winapi.PrinterNeCallN,"ax",%progbits
+    .global PrinterNeCallN
+    .type PrinterNeCallN, %function
+    .thumb_func
+PrinterNeCallN:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #12]
+    ldr  r1, =136
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size PrinterNeCallN, .-PrinterNeCallN
 
     .section .text.winapi.GetOpenFileName,"ax",%progbits
     .global GetOpenFileName

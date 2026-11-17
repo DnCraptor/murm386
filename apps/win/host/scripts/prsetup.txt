@@ -1,0 +1,33 @@
+# COMMDLG's Print Setup from the Print dialog (OWPRINT d): the printer's
+# orientation and paper (the driver's papers), landscape A4 chosen; the
+# DC PrintDlg gives is of those settings, its pages printed across:
+#     ./winhost scripts/prsetup.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OWPRINT d
+key RETURN
+wait 200
+keydown ALT
+key S
+keyup ALT
+wait 50
+keydown ALT
+key L
+keyup ALT
+keydown ALT
+key Z
+keyup ALT
+key DOWN
+wait 20
+snap psetup_dialog.ppm
+key RETURN
+wait 50
+snap psetup_print.ppm
+click 513 66
+wait 300
+snap psetup_page.ppm
+exit

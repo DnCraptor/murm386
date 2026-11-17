@@ -182,11 +182,16 @@ __attribute__((noinline)) int ne_format(args *a, uint32_t dst, uint32_t fmtp, ui
             continue;
         }
         f++;
-        int left = 0, zero = 0, width = 0, lng = 0;
+        int left = 0, zero = 0, width = 0, lng = 0, alt = 0, prec = -1, head = 0;
         for (; *f == '-' || *f == '0' || *f == '#'; f++)
-            if (*f == '-') left = 1; else if (*f == '0') zero = 1;
+            if (*f == '-') left = 1; else if (*f == '0') zero = 1; else alt = 1;
         while (*f >= '0' && *f <= '9')
             width = width * 10 + (*f++ - '0');
+        if (*f == '.') {                /* the precision: a string's most, a number's digits */
+            prec = 0;
+            for (f++; *f >= '0' && *f <= '9'; f++)
+                prec = prec * 10 + (*f - '0');
+        }
         if (*f == 'l' || *f == 'L') {
             lng = 1;
             f++;
@@ -213,6 +218,13 @@ __attribute__((noinline)) int ne_format(args *a, uint32_t dst, uint32_t fmtp, ui
             } while (v);
             if (neg)
                 tmp[len++] = '-';
+            if (alt && base == 16) {    /* %#x: 0x */
+                tmp[len++] = '0';
+                tmp[len++] = *f;
+            }
+            head = len;                 /* the zeros of padding after the sign, 0x */
+            for (int z = k; z < prec && z < 64; z++)
+                tmp[len++] = '0';
             while (k)
                 tmp[len++] = rev[--k];
             break;
@@ -227,6 +239,8 @@ __attribute__((noinline)) int ne_format(args *a, uint32_t dst, uint32_t fmtp, ui
             if (!win_ne_string(a->ctx, (uint16_t)(p >> 16), (uint16_t)p, tmp, sizeof(tmp)))
                 tmp[0] = 0;
             len = (int)strlen(tmp);
+            if (prec >= 0 && len > prec)
+                len = prec;
             break;
         }
         case 0:
@@ -236,11 +250,15 @@ __attribute__((noinline)) int ne_format(args *a, uint32_t dst, uint32_t fmtp, ui
             tmp[len++] = *f;
             break;
         }
-        int pad = width > len ? width - len : 0;
+        int pad = width > len ? width - len : 0, i = 0;
+        int zeros = zero && !left && prec < 0 && *f != 's' && *f != 'c';
+        if (zeros)                      /* the sign, 0x, before the zeros */
+            for (; i < head && n < cap - 1; i++)
+                out[n++] = s[i];
         if (!left)
             for (; pad > 0 && n < cap - 1; pad--)
-                out[n++] = zero && *f != 's' ? '0' : ' ';
-        for (int i = 0; i < len && n < cap - 1; i++)
+                out[n++] = zeros ? '0' : ' ';
+        for (; i < len && n < cap - 1; i++)
             out[n++] = s[i];
         for (; pad > 0 && n < cap - 1; pad--)
             out[n++] = ' ';

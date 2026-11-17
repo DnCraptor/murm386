@@ -31,3 +31,6 @@
 29 TileWindowsN
 30 GetPrintersN
 31 GetPrinterModelsN
+32 PrinterDeviceModeN
+33 PrinterCapabilitiesN
+34 PrinterNeCallN

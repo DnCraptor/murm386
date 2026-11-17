@@ -237,6 +237,24 @@ OWPRINT: printing on the Epson 9-pin driver (EPSON9.DLL): the printer put
     dpi, tech 2; doc 1 page 1 frame 1 end 1 band 1", "OWPRINT.PRN: 11608
     bytes, 2 pages, 31 bands, the first 145 dots wide", the first page as
     the printer prints it
+OWLAND: a printer's settings through its driver, as Windows 3.1's programs
+    ask: LoadLibrary("EPSON9.DRV"), ExtDeviceMode (its size, the defaults,
+    landscape A4 kept in WIN.INI), DeviceCapabilities (papers, names,
+    sizes, copies, orientation), PrintDlg's hDevMode, a DC of the DEVMODE
+    (its size, the sheet, the offset), a landscape page, ResetDC to
+    portrait Letter, a second page; the file read back: "size 68 rc 1:
+    Epson LX-350, orient 1 paper 1 2159x2794, copies 1, v30a", "4 papers:
+    1 Letter ... 9 A4 ...; copies 99, 90", "update 1 PrintDlg 209;
+    landscape 841x576 of 841x595 at 0,9; then 576x792", "OWLAND.PRN: ...
+    2 pages ...; lengths 70 111", the pages a third of their size
+
+OWMIXER: Windows 95's mixer API: the device, its destination and sources
+    (by index, by target type), the controls (all, by type), the master
+    volume set through the mixer and read back by auxGetVolume, the
+    master's mute, auxSetVolume's change told the window
+    (MM_MIXM_CONTROL_CHANGE): "1 mixer: 0 "SB16 Mixer (murm386)" 1
+    destination; open 0", ..., "set 0: auxGetVolume 0 20004000 ...; mute
+    0: 1", "5 changes told, the last control 1; master read 8000"
 """
 import sys
 
@@ -10023,6 +10041,654 @@ PROGRAMS = {
             '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
             '0000000000000000000000000000000000000000d508d5080000000000000000000000000000000000000000'
             '000000000000000000000000000000000020cc060000'
+        )),
+    'OWLAND': (
+        # wcc -bt=windows -ms owland.c; wlink @owland.lnk
+        # ---- owland.c
+        #     /*
+        #      * owland.c - a printer's settings through its driver, as Windows 3.1's
+        #      * programs ask for them: LoadLibrary("EPSON9.DRV"), ExtDeviceMode (its
+        #      * size, the defaults, landscape A4 kept in WIN.INI), DeviceCapabilities
+        #      * (the papers, their names and sizes, the copies), PrintDlg's hDevMode;
+        #      * a DC of that DEVMODE (its size, the sheet, the offset), a landscape
+        #      * page, ResetDC to portrait Letter, a second page; the file read back:
+        #      * its pages drawn a third of their size, as printed.
+        #      */
+        #     #include <windows.h>
+        #     #include <string.h>
+        #     #include <drivinit.h>
+        #     #include <commdlg.h>
+        #
+        #     #ifndef DC_PAPERS
+        #     #define DC_PAPERS 2
+        #     #define DC_PAPERSIZE 3
+        #     #define DC_COPIES 18
+        #     #define DC_ORIENTATION 17
+        #     #define DC_PAPERNAMES 16
+        #     #endif
+        #     #ifndef DM_ORIENTATION
+        #     #define DM_ORIENTATION 0x0001L
+        #     #define DM_PAPERSIZE 0x0002L
+        #     #define DMORIENT_PORTRAIT 1
+        #     #define DMORIENT_LANDSCAPE 2
+        #     #define DMPAPER_LETTER 1
+        #     #define DMPAPER_A4 9
+        #     #endif
+        #     extern HDC FAR PASCAL ResetDC(HDC, const DEVMODE FAR *);
+        #
+        #     typedef int (FAR PASCAL *EXTDM)(HWND, HANDLE, LPDEVMODE, LPSTR, LPSTR, LPDEVMODE, LPSTR, WORD);
+        #     typedef DWORD (FAR PASCAL *DEVCAPS)(LPSTR, LPSTR, WORD, LPSTR, LPDEVMODE);
+        #
+        #     static char text[5][160];
+        #     static HBITMAP shown;
+        #     static char dev[] = "Epson LX-350", port[] = "OWLAND.PRN";
+        #
+        #     static void settings(HWND h)
+        #     {
+        #         HINSTANCE lib = LoadLibrary("EPSON9.DRV");
+        #         EXTDM ext;
+        #         DEVCAPS caps;
+        #         HGLOBAL g;
+        #         LPDEVMODE dm;
+        #         int size, rc, rc2;
+        #         DWORD n, copies, orient;
+        #         static char names[8][64];
+        #         static WORD ids[8];
+        #         static POINT sz[8];
+        #         PRINTDLG pd;
+        #         HDC dc;
+        #         DOCINFO di;
+        #         POINT phys, off;
+        #         int w1, h1, w2, h2;
+        #
+        #         WriteProfileString("devices", dev, "EPSON9,OWLAND.PRN");
+        #         WriteProfileString("windows", "device", "Epson LX-350,EPSON9,OWLAND.PRN");
+        #         if (lib < HINSTANCE_ERROR) {
+        #             wsprintf(text[0], "LoadLibrary EPSON9.DRV: %d", lib);
+        #             return;
+        #         }
+        #         ext = (EXTDM)GetProcAddress(lib, "EXTDEVICEMODE");
+        #         caps = (DEVCAPS)GetProcAddress(lib, MAKEINTRESOURCE(91));
+        #         if (!ext || !caps) {
+        #             lstrcpy(text[0], "no ExtDeviceMode / DeviceCapabilities");
+        #             return;
+        #         }
+        #         size = ext(h, lib, NULL, dev, port, NULL, NULL, 0);
+        #         g = GlobalAlloc(GHND, size);
+        #         dm = (LPDEVMODE)GlobalLock(g);
+        #         rc = ext(h, lib, dm, dev, port, NULL, NULL, DM_COPY);
+        #         wsprintf(text[0], "size %d rc %d: %s, orient %d paper %d %dx%d, copies %d, v%x",
+        #                  size, rc, (LPSTR)dm->dmDeviceName, dm->dmOrientation, dm->dmPaperSize,
+        #                  dm->dmPaperWidth, dm->dmPaperLength, dm->dmCopies, dm->dmSpecVersion);
+        #         n = caps(dev, port, DC_PAPERS, NULL, NULL);
+        #         if (n > 8) n = 8;
+        #         caps(dev, port, DC_PAPERS, (LPSTR)ids, NULL);
+        #         caps(dev, port, DC_PAPERNAMES, (LPSTR)names, NULL);
+        #         caps(dev, port, DC_PAPERSIZE, (LPSTR)sz, NULL);
+        #         copies = caps(dev, port, DC_COPIES, NULL, NULL);
+        #         orient = caps(dev, port, DC_ORIENTATION, NULL, NULL);
+        #         wsprintf(text[1], "%lu papers: %d %s %dx%d, %d %s %dx%d; copies %lu, %lu",
+        #                  n, ids[0], (LPSTR)names[0], sz[0].x, sz[0].y, ids[1], (LPSTR)names[1], sz[1].x,
+        #                  sz[1].y, copies, orient);
+        #         /* landscape A4, kept */
+        #         dm->dmFields = DM_ORIENTATION | DM_PAPERSIZE;
+        #         dm->dmOrientation = DMORIENT_LANDSCAPE;
+        #         dm->dmPaperSize = DMPAPER_A4;
+        #         rc = ext(h, lib, dm, dev, port, dm, NULL, DM_COPY | DM_MODIFY | DM_UPDATE);
+        #         /* COMMDLG's default: WIN.INI's settings */
+        #         _fmemset(&pd, 0, sizeof(pd));
+        #         pd.lStructSize = sizeof(pd);
+        #         pd.Flags = PD_RETURNDEFAULT;
+        #         rc2 = PrintDlg(&pd);
+        #         if (rc2 && pd.hDevMode) {
+        #             LPDEVMODE m = (LPDEVMODE)GlobalLock(pd.hDevMode);
+        #             rc2 = m ? m->dmOrientation * 100 + m->dmPaperSize : -1;
+        #             GlobalUnlock(pd.hDevMode);
+        #         }
+        #         dc = CreateDC("EPSON9", dev, port, dm);
+        #         Escape(dc, GETPHYSPAGESIZE, 0, NULL, &phys);
+        #         Escape(dc, GETPRINTINGOFFSET, 0, NULL, &off);
+        #         w1 = GetDeviceCaps(dc, HORZRES);
+        #         h1 = GetDeviceCaps(dc, VERTRES);
+        #         di.cbSize = sizeof(di);
+        #         di.lpszDocName = "OWLAND";
+        #         di.lpszOutput = NULL;
+        #         StartDoc(dc, &di);
+        #         StartPage(dc);
+        #         Rectangle(dc, 0, 0, w1, h1);
+        #         SelectObject(dc, GetStockObject(BLACK_BRUSH));
+        #         Rectangle(dc, 20, 20, 120, 60);             /* the top left corner */
+        #         TextOut(dc, 140, 30, "Landscape A4", 12);
+        #         MoveTo(dc, 0, 0);
+        #         LineTo(dc, w1, h1);
+        #         EndPage(dc);
+        #         dm->dmFields = DM_ORIENTATION | DM_PAPERSIZE;
+        #         dm->dmOrientation = DMORIENT_PORTRAIT;
+        #         dm->dmPaperSize = DMPAPER_LETTER;
+        #         ResetDC(dc, dm);
+        #         w2 = GetDeviceCaps(dc, HORZRES);
+        #         h2 = GetDeviceCaps(dc, VERTRES);
+        #         StartPage(dc);
+        #         Rectangle(dc, 20, 20, 120, 60);
+        #         TextOut(dc, 140, 30, "Portrait Letter", 15);
+        #         MoveTo(dc, 0, h2);
+        #         LineTo(dc, w2, 0);
+        #         EndPage(dc);
+        #         EndDoc(dc);
+        #         DeleteDC(dc);
+        #         wsprintf(text[2], "update %d PrintDlg %d; landscape %dx%d of %dx%d at %d,%d; then %dx%d",
+        #                  rc, rc2, w1, h1, phys.x, phys.y, off.x, off.y, w2, h2);
+        #         GlobalUnlock(g);
+        #         GlobalFree(g);
+        #         FreeLibrary(lib);
+        #     }
+        #
+        #     /* OWLAND.PRN's ESC/P: ESC C (the length), ESC * 5 bands, LF, FF; its pages
+        #      * a third of their size side by side */
+        #     static void read_back(HWND h)
+        #     {
+        #         static BYTE buf[2048];
+        #         HFILE f = _lopen("OWLAND.PRN", OF_READ);
+        #         HDC wdc = GetDC(h), mem = CreateCompatibleDC(wdc);
+        #         int y = 0, n, i, k, state = 0, x = 0, cols = 0, page = 0, bands = 0, len[4], lens = 0;
+        #         long size = 0;
+        #         BYTE hdr[3];
+        #         shown = CreateBitmap(400, 290, 1, 1, NULL);
+        #         SelectObject(mem, shown);
+        #         PatBlt(mem, 0, 0, 400, 290, WHITENESS);
+        #         while (f != HFILE_ERROR && (n = _lread(f, buf, sizeof(buf))) > 0) {
+        #             size += n;
+        #             for (i = 0; i < n; i++) {
+        #                 BYTE c = buf[i];
+        #                 switch (state) {
+        #                 case 0:
+        #                     if (c == 0x1b) state = 1;
+        #                     else if (c == '\n') y += 8;
+        #                     else if (c == '\f') { page++; y = 0; }
+        #                     break;
+        #                 case 1:
+        #                     state = c == '*' ? 2 : c == '3' ? 7 : c == 'C' ? 8 : 0;
+        #                     break;
+        #                 case 2: case 3: case 4:
+        #                     hdr[state - 2] = c;
+        #                     if (++state == 5) {
+        #                         cols = hdr[1] | hdr[2] << 8;
+        #                         x = 0;
+        #                         bands++;
+        #                         if (!cols) state = 0;
+        #                     }
+        #                     break;
+        #                 case 5:
+        #                     for (k = 0; k < 8 && page < 2; k++)
+        #                         if ((c & (0x80 >> k)) && (y + k) % 3 == 0 && x % 3 == 0)
+        #                             SetPixel(mem, page * 210 + x / 3, (y + k) / 3, RGB(0, 0, 0));
+        #                     if (++x >= cols) state = 0;
+        #                     break;
+        #                 case 7: state = 0; break;
+        #                 case 8:                         /* ESC C n lines, ESC C 0 n inches */
+        #                     if (c) { if (lens < 4) len[lens++] = c; state = 0; }
+        #                     else state = 9;
+        #                     break;
+        #                 case 9: if (lens < 4) len[lens++] = 100 + c; state = 0; break;
+        #                 }
+        #             }
+        #         }
+        #         if (f != HFILE_ERROR)
+        #             _lclose(f);
+        #         DeleteDC(mem);
+        #         ReleaseDC(h, wdc);
+        #         wsprintf(text[3], "OWLAND.PRN: %ld bytes, %d pages, %d bands; lengths %d %d (100+: inches)",
+        #                  size, page, bands, lens > 0 ? len[0] : -1, lens > 1 ? len[1] : -1);
+        #     }
+        #
+        #     LRESULT FAR PASCAL _export WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+        #     {
+        #         PAINTSTRUCT ps;
+        #         HDC dc, mem;
+        #         int i;
+        #         if (msg == WM_PAINT) {
+        #             dc = BeginPaint(h, &ps);
+        #             for (i = 0; i < 4; i++)
+        #                 TextOut(dc, 4, 4 + 16 * i, text[i], lstrlen(text[i]));
+        #             if (shown) {
+        #                 mem = CreateCompatibleDC(dc);
+        #                 SelectObject(mem, shown);
+        #                 BitBlt(dc, 4, 72, 400, 290, mem, 0, 0, SRCCOPY);
+        #                 DeleteDC(mem);
+        #             }
+        #             EndPaint(h, &ps);
+        #             return 0;
+        #         }
+        #         if (msg == WM_DESTROY) {
+        #             PostQuitMessage(0);
+        #             return 0;
+        #         }
+        #         return DefWindowProc(h, msg, wp, lp);
+        #     }
+        #
+        #     int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
+        #     {
+        #         WNDCLASS wc;
+        #         MSG m;
+        #         HWND h;
+        #         _fmemset(&wc, 0, sizeof(wc));
+        #         wc.lpfnWndProc = WndProc;
+        #         wc.hInstance = inst;
+        #         wc.hbrBackground = GetStockObject(WHITE_BRUSH);
+        #         wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        #         wc.lpszClassName = "OWLAND";
+        #         RegisterClass(&wc);
+        #         h = CreateWindow("OWLAND", "OWLAND", WS_OVERLAPPEDWINDOW, 0, 0, 636, 400, NULL, NULL, inst, NULL);
+        #         settings(h);
+        #         read_back(h);
+        #         ShowWindow(h, show);
+        #         UpdateWindow(h);
+        #         while (GetMessage(&m, NULL, 0, 0)) {
+        #             TranslateMessage(&m);
+        #             DispatchMessage(&m);
+        #         }
+        #         return m.wParam;
+        #     }
+        # ---- owland.lnk
+        #     system windows
+        #     name owland.exe
+        #     file owland.o
+        #     library commdlg.lib
+        #     import RESETDC GDI.376
+        bytes.fromhex(
+            '4d5a80000100000004000000ffff0000b8000000000000004000000000000000000000000000000000000000'
+            '00000000000000000000000000000000800000000e1fba0e00b409cd21b8014ccd2154686973206973206120'
+            '57696e646f77732031362d6269742065786563757461626c650d0a240000000000000000000000004e450501'
+            '850007000000000002030200000400205009010000000200020004000e0040005000500064006c000c010000'
+            '000001000000020000000000000000038d004a0c400d4a0c0308f402410c5010064f574c414e44000007574e'
+            '4450524f43010000010005000c0011000003474449064b45524e454c045553455207434f4d4d444c47010129'
+            '530700000a6f776c616e642e657865000000ccebfd90909090005589e550b89c00e8f50858535152565783ec'
+            '64501eb81000509affff00008946f28946ea1eb82d00501eb8f401501eb81b00509affff00001eb85b00501e'
+            'b85400501eb83500509affff00008b46f23d20007316501eb86300501eb8f402509affff000083c40ae94304'
+            '501eb87e00509affff000089c789d68946d48956d6ff76f231c050b85b00509affff00008946d88956da85f6'
+            '750485ff740885d2751685c075121eb8f402501eb88c00509affff0000e9f703ff7690ff76f231c050501eb8'
+            'f401501eb801025031c05050505050ff5ed48946e2b84200508b46e29952509affff00008946ec509affff00'
+            '0089c68956e089c78956f4ff7690ff76f252501eb8f401501eb801025031c050505050b8020050ff5ed48e46'
+            'e026ff742026ff743626ff743026ff743226ff742e26ff742c065650ff76e21eb8b200501eb8f402509affff'
+            '000083c41c1eb8f401501eb8010250b802005031c050505050ff5ed88946e689d685d275053d08007607c746'
+            'e6080031d61eb8f401501eb8010250b80200501eb816085031c05050ff5ed81eb8f401501eb8010250b81000'
+            '501eb816065031c05050ff5ed81eb8f401501eb8010250b80300501eb826085031c05050ff5ed81eb8f40150'
+            '1eb8010250b812005031c050505050ff5ed88946e08956e21eb8f401501eb8010250b811005031c050505050'
+            'ff5ed85250ff76e2ff76e0ff362c08ff362a081eb8560650ff361808ff362808ff3626081eb8160650ff3616'
+            '0856ff76e61eb8ee00501eb89403509affff000083c4288e46f426c74528030026c7452a000026c7452c0200'
+            '26c7452e0900ff7690ff76ea06571eb8f401501eb8010250065731c05050b80b0050ff5ed48946e4b9340031'
+            'db8cda8d4692e8ae06c746923400c746940000c7469e0004c746a000008d56921e529affff00008946e885c0'
+            '74438b469885c0743c509affff000089c385d2750485c0741e8ec2268b472c89c6d1e6d1e629c6b103d3e601'
+            'c6d1e6d1e62603772eeb03beffff8976e8ff76989affff00001eb82401501eb8f401501eb8010250ff76f457'
+            '9affff000089c650b80c005031c05050508d56d01e529affff000056b80d005031c05050508d56dc1e529aff'
+            'ff000056b80800509affff00008946ee56b80a00509affff00008946f0c746c60a00c746c82b018c5eca31c0'
+            '8946cc8946ce568d56c61e529affff0000569affff00005631c05050ff76eeff76f09affff000056b8040050'
+            '9affff0000509affff000056b814005050b8780050b83c00509affff000056b88c0050b81e00501eb8320150'
+            'b80c00509affff00005631c050509affff000056ff76eeff76f09affff0000569affff00008e46f426c74528'
+            '030026c7452a000026c7452c010026c7452e01005606579affff000056b80800509affff00008946e056b80a'
+            '00509affff000089c7569affff000056b814005050b8780050b83c00509affff000056b88c0050b81e00501e'
+            'b83f0150b80f00509affff00005631c050579affff000056ff76e031c0509affff0000569affff0000569aff'
+            'ff0000569affff000057ff76e0ff76deff76dcff76d2ff76d0ff76f0ff76eeff76e8ff76e41eb84f01501eb8'
+            '3404509affff000083c41cff76ec9affff0000ff76ec9affff0000ff76ea9affff00008d66f65f5e5a595b5d'
+            'c3fcae05d805fe05fe05fe052806ef06ea06ac06d1065589e550b85000e8290458535152565783ec2c501eb8'
+            '94015031c0509affff00008946e0ff76c89affff00008946dc509affff000089c68946da31c08946ea8946ec'
+            '8946ee8946e431ff8946e28946e88946de8946d6b8900150b8220150b80100505031c050509affff0000a314'
+            '0656509affff00005631c05050b8900150b8220150b8ff0050b86200509affff00008b46e03dffff7469501e'
+            'b8460850b80008509affff00008946d885c07e53990146de1156d6c746e600008b5ee63b5ed87dce8a874608'
+            '8846f48b46ec3d0900775689c3d1e32effa7c0048a46f43c1b7508c746ec0100e932013c0a75078346ea08e9'
+            '27013c0c752fc746ea000047e91a01e91d018a46f43c2a7505b80200eb143c337505b80700eb0b3c437505b8'
+            '0800eb0231c08946ece9f1008a46f48b76ec8842d0ff46ec837eec0575eb8a66d48a46d38946e4c746ee0000'
+            'ff46e285c074d3e9c700c746f20000eb09ff46f2837ef2087d6783ff027d628a4ef2b88000d3f88a5ef430ff'
+            '85c374e18b46ea0346f28946f099bb0300f7fb85d275ce8b46ee99f7fb85d275c4ff76da89fed1e6d1e629fe'
+            'd1e6d1e601feb103d3e601fed1e68b46ee99f7fb01f0508b46f099f7fb5031c050509affff0000eb90ff46ee'
+            '8b46ee3b46e47c45eb3e807ef4007418837ee8047d328a46f430e48b76e8d1e68942caff46e8eb20c746ec09'
+            '00eb1e837ee8047d138a46f430e48b76e8d1e6ff46e80564008942cac746ec0000ff46e6e999fe8b46e03dff'
+            'ff7406509affff0000ff76da9affff0000ff76c8ff76dc9affff0000837ee8017e058b46cceb03b8ffff5083'
+            '7ee8007e058b46caeb03b8ffff50ff76e257ff76d6ff76de1eb89f01501eb8d404509affff000083c414e962'
+            'fd1e5890455589e51e8ed8b84000e8a401565783ec208b460c3d0f007403e99b00ff760e8d56da1e529affff'
+            '000089c731f657b8040050b10489f0d3e00504005089f0d1e0d1e001f0b105d3e0baf40201c21e521e529aff'
+            'ff0000509affff00004683fe047ccb833e140600743b579affff000089c650ff3614069affff000057b80400'
+            '50b8480050b8900150b82201505631c05050b8cc0050b82000509affff0000569affff0000ff760e8d56da1e'
+            '529affff000031c031d2eb213d0200750a31c0509affff0000ebebff760e50ff760aff7608ff76069affff00'
+            '008d66fa5f5e1f5d4dca0a005589e5b85000e8c4005683ec2c8b760cb91a0031db8cda8d46d2e8e200c746d4'
+            'ffffc746d6ffff8976dc31c0509affff00008946e231c05050b8007f509affff00008946e0c746e82b018c5e'
+            'ea8d56d21e529affff00001eb82b01501e50b8cf005031c0505050b87c0250b890015031c050505650509aff'
+            'ff000089c6e84ef789f0e815fc56ff76049affff0000569affff00008d56ec1e5231c05050509affff000085'
+            'c074168d56ec1e529affff00008d56ec1e529affff0000ebd78b46f08d66fe5e5dc20a008c160c02c33bc473'
+            '132bc4f7d83b060a0077068cd03b060c027401c30e5ab82909bb0100e9c801537461636b204f766572666c6f'
+            '7721005789c788d88ec2578ae0d1e9f3ab13c9f3aa5f89f85fc3eb0203009affff00000bc0750e5033c0ba0f'
+            '00e86a0258b44ccd218c061202575606535253be461089362d028c1e2f02268a078804464384c075f589360a'
+            '005b2bc0509affff000057579affff0000fc1e07b94610bff4022bcf32c0f3aab89a0aa32902b8ffffa32b02'
+            'b430cd21a21402882615029affff0000a216028826170286e0a3180254583bc475120f01e0a90100740ab001'
+            'a21a02b003a21b021ebf350257b89000509affff0000b83502893e31028c1e3302b8ff00e86b01e82afee9f9'
+            '004f70656e20576174636f6d20432f432b2b31362052756e2d54696d652073797374656d2e20436f70797269'
+            '67687420286329204f70656e20576174636f6d20436f6e7472696275746f727320323030322d323032362e20'
+            '506f7274696f6e7320436f7079726967687420284329205379626173652c20496e632e20313938382d323030'
+            '322e00c3cb005589e551565781ec800089c689df8d9e7aff8cd98ec2268a0484c074173c0d74138d46f939c3'
+            '730c268a048ec14626880743ebe031c08ec15026c607001e8d9e7aff531eb8e8015031c0509affff000089f8'
+            'e94400515689c189d6e8330185c0750689c889f2eb9889d8e92c0000c3c3535289c3833eec02007404ff16ec'
+            '02ff16c602baff00b81000e8a800ff16c602ff16c80289d8e928fe5289c2ff16c602ff16c80289d0e918fe55'
+            '89e5535289c3833f0075078d66fc5a5b5dc31eff171febf35589e5535289c38b47028b1785c0750485d274df'
+            '1eff1f1febd95589e5535152565789c11ee813ffbff40289fabbee0289fe88c839fb7316803f02750583c306'
+            'ebf23a470172f689de8a4701ebef39fe74158d4402803c007508e88affc60402ebcbe89bffebf61f8d66f65f'
+            '5e5a595b5dc35589e55351565789c11ee8bcfe88d5bff40289fabbf40289fe88c839fb7316803f02750583c3'
+            '06ebf23a470177f689de8a4701ebef39fe741c3a6c017305c60402ebd18d4402803c007505e827ffebeee83b'
+            'ffebe91f8d66f85f5eeb9f803eca0200750331c0c35250cceb0657564944454fb8010083c404c30054000301'
+            '17080300060003012b0803006b0005005a080100530702005f08010053070301680801005700030178080300'
+            'ad0003018d08030039000301b108030029000301c40803002a000301ca0803007c000301d90803006c000301'
+            'e708030071000301f108030072000301550902005b000301940902001e0003019b09030005000200b5090100'
+            '50090301c609020003000301f809020031000301e80a030001000301220002005f0003013c0002003b000301'
+            '500002003b00030168000300a401030179000200320003019200020032000301b700020058000301ea000200'
+            '0f000301f3000200120003014c010300a40103013a020300a4010301a502040014000301b902020012000301'
+            'ef0202001300030107030100350003011d0301002600030131030100260003013b0301005000030148030100'
+            '500003016b03010079010301710301007b010301810301001b0003018b03010057000301910301002d000301'
+            'a40301001b000301bb03010021000301c503010014000301d103010013000301d70301007c010301fa030100'
+            '7801030104040100500003011104010050000301190401007b0103012c0401001b0003014304010021000301'
+            '4d0401001400030159040100130003015f0401007c010301650401007a0103016b0401004400030196040300'
+            'a4010301a104020013000301a904020011000301b104020060000301f104020055000301fc04030042000301'
+            '05050100340003013c05010030000301460501002d000301600501001d000301770502005200030199060100'
+            '1f000301ff060200510003010707010044000301120703004400030149070300a40103017c07030027000301'
+            'a90702005a000301af07010021000301c207010034000301ce0701002d000301f107010022000301f7070100'
+            '44000301040803002800000000000500000000000000000000004550534f4e392e445256004550534f4e392c'
+            '4f574c414e442e50524e0064657669636573004570736f6e204c582d3335302c4550534f4e392c4f574c414e'
+            '442e50524e006465766963650077696e646f7773004c6f61644c696272617279204550534f4e392e4452563a'
+            '202564004558544445564943454d4f4445006e6f204578744465766963654d6f6465202f2044657669636543'
+            '61706162696c69746965730073697a652025642072632025643a2025732c206f7269656e7420256420706170'
+            '65722025642025647825642c20636f706965732025642c2076257800256c75207061706572733a2025642025'
+            '732025647825642c2025642025732025647825643b20636f7069657320256c752c20256c75004550534f4e39'
+            '004f574c414e44004c616e64736361706520413400506f727472616974204c65747465720075706461746520'
+            '2564205072696e74446c672025643b206c616e647363617065202564782564206f6620256478256420617420'
+            '25642c25643b207468656e202564782564004f574c414e442e50524e004f574c414e442e50524e3a20256c64'
+            '2062797465732c2025642070616765732c2025642062616e64733b206c656e67746873202564202564202831'
+            '30302b3a20696e636865732900004f70656e20576174636f6d004570736f6e204c582d333530004f574c414e'
+            '442e50524e000000ffff00000000000000000000000c00000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '000000000000000000000000000000000b0b0b0b000000000000000000000000000000000000000000000000'
+            '000000000000000000000000002002090000'
+        )),
+    'OWMIXER': (
+        # wcc -bt=windows -ms owmixer.c; wlink @owmixer.lnk
+        # ---- owmixer.c
+        #     /*
+        #      * owmixer.c - Windows 95's mixer API from a Win16 program: the device,
+        #      * its destination and sources (by index, by target type), the
+        #      * destination's controls, the synthesizer's volume control (by type); the
+        #      * master volume set through the mixer and read back by auxGetVolume; the master's mute; auxSetVolume's
+        #      * change told the mixer's window (MM_MIXM_CONTROL_CHANGE). The volumes
+        #      * are put back as they were.
+        #      */
+        #     #include <windows.h>
+        #     #include <string.h>
+        #
+        #     #define MM_MIXM_CONTROL_CHANGE 0x3D1
+        #     #define CALLBACK_WINDOW 0x00010000L
+        #
+        #     typedef struct { WORD wMid, wPid, vDriverVersion; char szPname[32]; DWORD fdwSupport, cDestinations; } MXCAPS;
+        #     typedef struct {
+        #         DWORD cbStruct, dwDestination, dwSource, dwLineID, fdwLine, dwUser, dwComponentType;
+        #         DWORD cChannels, cConnections, cControls;
+        #         char szShortName[16], szName[64];
+        #         DWORD dwType, dwDeviceID;
+        #         WORD wMid, wPid, vDriverVersion;
+        #         char szPname[32];
+        #     } MXLINE;
+        #     typedef struct {
+        #         DWORD cbStruct, dwControlID, dwControlType, fdwControl, cMultipleItems;
+        #         char szShortName[16], szName[64];
+        #         DWORD bounds[6], metrics[6];
+        #     } MXCONTROL;
+        #     typedef struct { DWORD cbStruct, dwLineID, dwControl, cControls, cbmxctrl; MXCONTROL FAR *pamxctrl; } MXLC;
+        #     typedef struct { DWORD cbStruct, dwControlID, cChannels, cMultipleItems, cbDetails; LPVOID paDetails; } MXCD;
+        #
+        #     extern UINT FAR PASCAL MIXERGETNUMDEVS(void);
+        #     extern UINT FAR PASCAL MIXERGETDEVCAPS(UINT, MXCAPS FAR *, UINT);
+        #     extern UINT FAR PASCAL MIXEROPEN(UINT FAR *, UINT, DWORD, DWORD, DWORD);
+        #     extern UINT FAR PASCAL MIXERCLOSE(UINT);
+        #     extern UINT FAR PASCAL MIXERGETLINEINFO(UINT, MXLINE FAR *, DWORD);
+        #     extern UINT FAR PASCAL MIXERGETLINECONTROLS(UINT, MXLC FAR *, DWORD);
+        #     extern UINT FAR PASCAL MIXERGETCONTROLDETAILS(UINT, MXCD FAR *, DWORD);
+        #     extern UINT FAR PASCAL MIXERSETCONTROLDETAILS(UINT, MXCD FAR *, DWORD);
+        #     extern UINT FAR PASCAL AUXSETVOLUME(UINT, DWORD);
+        #     extern UINT FAR PASCAL AUXGETVOLUME(UINT, DWORD FAR *);
+        #
+        #     #define HMIXER_F 0x80000000L
+        #
+        #     static char text[6][160];
+        #     static int changes;
+        #     static DWORD changed_id;
+        #     static UINT hmx;
+        #     static DWORD master_vol, master_was;
+        #
+        #     static UINT details(int set, DWORD id, DWORD channels, DWORD FAR *v)
+        #     {
+        #         MXCD cd;
+        #         cd.cbStruct = sizeof(cd);
+        #         cd.dwControlID = id;
+        #         cd.cChannels = channels;
+        #         cd.cMultipleItems = 0;
+        #         cd.cbDetails = 4;
+        #         cd.paDetails = v;
+        #         return set ? MIXERSETCONTROLDETAILS(hmx, &cd, HMIXER_F) : MIXERGETCONTROLDETAILS(hmx, &cd, HMIXER_F);
+        #     }
+        #
+        #     static void run(HWND h)
+        #     {
+        #         MXCAPS caps;
+        #         MXLINE dst, src[2], byt;
+        #         MXCONTROL ctl[2], one;
+        #         MXLC lc;
+        #         UINT r, n = MIXERGETNUMDEVS(), i, ro, rs, rm, rw;
+        #         DWORD v[2], was[2], wave = 0, mute = 0, midi_id = 0;
+        #         r = MIXERGETDEVCAPS(0, &caps, sizeof(caps));
+        #         ro = MIXEROPEN(&hmx, 0, (DWORD)(UINT)h, 0, CALLBACK_WINDOW);
+        #         wsprintf(text[0], "%u mixer: %u \"%s\" %lu destination; open %u", n, r, (LPSTR)caps.szPname,
+        #                  caps.cDestinations, ro);
+        #         _fmemset(&dst, 0, sizeof(dst));
+        #         dst.cbStruct = sizeof(dst);
+        #         r = MIXERGETLINEINFO(hmx, &dst, HMIXER_F | 0);
+        #         for (i = 0; i < 2; i++) {
+        #             _fmemset(&src[i], 0, sizeof(src[i]));
+        #             src[i].cbStruct = sizeof(src[i]);
+        #             src[i].dwSource = i;
+        #             MIXERGETLINEINFO(hmx, &src[i], HMIXER_F | 1);
+        #         }
+        #         _fmemset(&byt, 0, sizeof(byt));
+        #         byt.cbStruct = sizeof(byt);
+        #         byt.dwType = 3;                     /* the MIDI output's line */
+        #         rs = MIXERGETLINEINFO(0, &byt, 4);
+        #         wsprintf(text[1], "%u %s %lx, %lu sources %lu controls; %s %lx, %s %lx; by target %u %s",
+        #                  r, (LPSTR)dst.szName, dst.dwLineID, dst.cConnections, dst.cControls,
+        #                  (LPSTR)src[0].szShortName, src[0].dwComponentType, (LPSTR)src[1].szShortName,
+        #                  src[1].dwComponentType, rs, (LPSTR)byt.szName);
+        #         lc.cbStruct = sizeof(lc);
+        #         lc.dwLineID = dst.dwLineID;
+        #         lc.cControls = 2;
+        #         lc.cbmxctrl = sizeof(MXCONTROL);
+        #         lc.pamxctrl = ctl;
+        #         r = MIXERGETLINECONTROLS(hmx, &lc, HMIXER_F | 0);
+        #         lc.dwLineID = byt.dwLineID;
+        #         lc.dwControl = 0x50030001L;         /* the synthesizer's volume */
+        #         lc.cControls = 1;
+        #         lc.pamxctrl = &one;
+        #         rs = MIXERGETLINECONTROLS(hmx, &lc, HMIXER_F | 2);
+        #         midi_id = one.dwControlID;
+        #         wsprintf(text[2], "%u: %lu %s %lx 0-%lu, %lu %s %lx; MIDI's %u: %lu %s",
+        #                  r, ctl[0].dwControlID, (LPSTR)ctl[0].szName, ctl[0].dwControlType, ctl[0].bounds[1],
+        #                  ctl[1].dwControlID, (LPSTR)ctl[1].szName, ctl[1].dwControlType, rs, midi_id,
+        #                  (LPSTR)one.szName);
+        #         /* the master volume through the mixer, read by auxGetVolume */
+        #         details(0, ctl[0].dwControlID, 2, was);
+        #         v[0] = 0x4000;
+        #         v[1] = 0x2000;
+        #         rs = details(1, ctl[0].dwControlID, 2, v);
+        #         rw = AUXGETVOLUME(0, &wave);
+        #         details(1, ctl[0].dwControlID, 2, was);
+        #         /* the master's mute */
+        #         v[0] = 1;
+        #         rm = details(1, ctl[1].dwControlID, 1, v);
+        #         details(0, ctl[1].dwControlID, 1, &mute);
+        #         v[0] = 0;
+        #         details(1, ctl[1].dwControlID, 1, v);
+        #         wsprintf(text[3], "set %u: auxGetVolume %u %08lx (was %04lx %04lx); mute %u: %lu",
+        #                  rs, rw, wave, was[0], was[1], rm, mute);
+        #         /* another's change: auxSetVolume, told */
+        #         AUXGETVOLUME(0, &master_was);
+        #         AUXSETVOLUME(0, 0x80008000L);
+        #         details(0, ctl[0].dwControlID, 1, &master_vol);
+        #     }
+        #
+        #     LRESULT FAR PASCAL _export WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+        #     {
+        #         PAINTSTRUCT ps;
+        #         HDC dc;
+        #         int i;
+        #         if (msg == MM_MIXM_CONTROL_CHANGE) {
+        #             changes++;
+        #             changed_id = lp;
+        #             if (changes == 5) {             /* the last: the master's (aux) */
+        #                 AUXSETVOLUME(0, master_was);
+        #                 MIXERCLOSE(hmx);
+        #                 wsprintf(text[4], "%d changes told, the last control %lu; master read %lx", changes,
+        #                          changed_id, master_vol);
+        #                 InvalidateRect(h, NULL, TRUE);
+        #             }
+        #             return 0;
+        #         }
+        #         if (msg == WM_PAINT) {
+        #             dc = BeginPaint(h, &ps);
+        #             for (i = 0; i < 6; i++)
+        #                 TextOut(dc, 4, 4 + 16 * i, text[i], lstrlen(text[i]));
+        #             EndPaint(h, &ps);
+        #             return 0;
+        #         }
+        #         if (msg == WM_DESTROY) {
+        #             PostQuitMessage(0);
+        #             return 0;
+        #         }
+        #         return DefWindowProc(h, msg, wp, lp);
+        #     }
+        #
+        #     int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
+        #     {
+        #         WNDCLASS wc;
+        #         MSG m;
+        #         HWND h;
+        #         _fmemset(&wc, 0, sizeof(wc));
+        #         wc.lpfnWndProc = WndProc;
+        #         wc.hInstance = inst;
+        #         wc.hbrBackground = GetStockObject(WHITE_BRUSH);
+        #         wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        #         wc.lpszClassName = "OWMIXER";
+        #         RegisterClass(&wc);
+        #         h = CreateWindow("OWMIXER", "OWMIXER", WS_OVERLAPPEDWINDOW, 0, 0, 636, 140, NULL, NULL, inst, NULL);
+        #         run(h);
+        #         ShowWindow(h, show);
+        #         UpdateWindow(h);
+        #         while (GetMessage(&m, NULL, 0, 0)) {
+        #             TranslateMessage(&m);
+        #             DispatchMessage(&m);
+        #         }
+        #         return m.wParam;
+        #     }
+        # ---- owmixer.lnk
+        #     system windows
+        #     name owmixer.exe
+        #     file owmixer.o
+        #     import MIXERGETNUMDEVS MMSYSTEM.800
+        #     import MIXERGETDEVCAPS MMSYSTEM.801
+        #     import MIXEROPEN MMSYSTEM.802
+        #     import MIXERCLOSE MMSYSTEM.803
+        #     import MIXERGETLINEINFO MMSYSTEM.805
+        #     import MIXERGETLINECONTROLS MMSYSTEM.807
+        #     import MIXERGETCONTROLDETAILS MMSYSTEM.808
+        #     import MIXERSETCONTROLDETAILS MMSYSTEM.809
+        #     import AUXGETVOLUME MMSYSTEM.352
+        #     import AUXSETVOLUME MMSYSTEM.353
+        bytes.fromhex(
+            '4d5a80000100000004000000ffff0000b8000000000000004000000000000000000000000000000000000000'
+            '00000000000000000000000000000000800000000e1fba0e00b409cd21b8014ccd2154686973206973206120'
+            '57696e646f77732031362d6269742065786563757461626c650d0a240000000000000000000000004e450501'
+            '870007000000000002030200000400205806010000000200020004000f0040005000500065006d000e010000'
+            '000001000000020000000000000000038f005209400d5209ed052602410c0006074f574d4958455200000757'
+            '4e4450524f4301000001000a000f00160000084d4d53595354454d0455534552064b45524e454c0347444901'
+            '0129380400000b6f776d697865722e65786500000000ccebfd90909090005589e550b82800e8fd05585283ec'
+            '18c746e61800c746e80000895eea894eec8b5e04895eee8b5e06895ef0c746f20000c746f40000c746f60400'
+            'c746f800008b5e08895efa8b5e0a895efc85c07417ff36f2058d5ee61e53b800805031c0509affff0000eb15'
+            'ff36f2058d5ee61e53b800805031c0509affff00008d66fe5a5dc208005589e550b8f604e87a055853515256'
+            '5781ecb80489c79affff000089c631c08946ec8946ee8946e88946ea508d56921e52b82e00509affff000089'
+            '46f21eb8f2055031c05050575050b801005031c0509affff000050ff76beff76bc8d56981e52ff76f2561eb8'
+            '1000501eb82602509affff000083c416b9a60031db8cda8d86b2fde83105c786b2fda600c786b4fd0000ff36'
+            'f2058d96b2fd1e52b800805031c0509affff00008946f431ff89fed1e6d1e601fed1e6d1e601fed1e6d1e629'
+            'fed1e68d863efb01f08946f08c5ef2b9a60031db8b56f2e8dd04c7823efba60031c0898240fb89ba46fb8982'
+            '48fbff36f205ff76f2ff76f0b8008050b80100509affff00004783ff0272a2b9a60031db8cda8d8658fee89e'
+            '04c78658fea600c7865afe0000c786d0fe030031c08986d2fe508d9658fe1e5250b80400509affff00008d9e'
+            '90fe1e5350ffb6fefbffb6fcfb8d960cfc1e52ffb658fbffb656fb8d9666fb1e52ffb6d8fdffb6d6fdffb6d4'
+            'fdffb6d2fdffb6c0fdffb6befd8d96eafd1e52ff76f41eb83b00501eb8c602509affff000083c430c746c018'
+            '00c746c200008b86befd8946c48b86c0fd8946c6c746cc0200c746ce0000c746d09400c746d200008d968afc'
+            '8956d48c5ed6ff36f2058d56c01e52b800805031c0509affff000089c68b8664fe8946c48b8666fe8946c6c7'
+            '46c80100c746ca0350c746cc0100c746ce00008d96fefe8956d48c5ed6ff36f2058d56c01e52b8008050b802'
+            '00509affff00008d9e22ff1e53ffb604ffffb602ff50ffb628fdffb626fd8d9642fd1e52ffb624fdffb622fd'
+            'ffb6f4fcffb6f2fcffb694fcffb692fc8d96aefc1e52ffb690fcffb68efc561eb88000501eb86603509affff'
+            '000083c4308d56e01e5231c050b80200508b9e8efc8b8e90fc31c0e8e8fcc746d80040c746da0000c746dc00'
+            '2031c08946de8d56d81e5250b80200508b9e8efc8b8e90fcb80100e8bcfc89c631c0508d56ec1e529affff00'
+            '0089c28d5ee01e5331c050b80200508b9e8efc8b8e90fcb80100e891fcc746d8010031c08946da8d5ed81e53'
+            '50b80100508b9e22fd8b8e24fde872fc89c78d5ee81e5331c050b80100508b9e22fd8b8e24fd31c0e857fc31'
+            'c08946d88946da8d5ed81e5350b80100508b9e22fd8b8e24fde83afcff76eaff76e857ff76e6ff76e4ff76e2'
+            'ff76e0ff76eeff76ec52561eb8b400501eb80604509affff000083c41e31c0501eb8e605509affff000031c0'
+            '50b8008050509affff00001eb8ea055031c050b80100508b9e8efc8b8e90fc31c0e8dafb8d66f65f5e5a595b'
+            '5dc31e5890455589e51e8ed8b83e00e8c701565783ec208b56068b76088b460c3dd10375698916ee058936f0'
+            '05ff06f405833ef40505754f31c050ff36e805ff36e6059affff0000ff36f2059affff0000ff36ec05ff36ea'
+            '05ff36f005ff36ee05ff36f4051eb8f200501eb8a604509affff000083c412ff760e31c05050b80100509aff'
+            'ff000031c031d2e977003d0f007555ff760e8d56da1e529affff000089c731f657b8040050b10489f0d3e005'
+            '04005089f0d1e0d1e001f0b105d3e0ba260201c21e521e529affff0000509affff00004683fe067ccbff760e'
+            '8d56da1e529affff0000eb9f3d0200750a31c0509affff0000eb90ff760e50ff760a56529affff00008d66fa'
+            '5f5e1f5d4dca0a005589e5b85000e8c0005683ec2c8b760cb91a0031db8cda8d46d2e8de00c746d4ffffc746'
+            'd6ffff8976dc31c0509affff00008946e231c05050b8007f509affff00008946e0c746e829018c5eea8d56d2'
+            '1e529affff00001eb82901501e50b8cf005031c0505050b87c0250b88c005031c050505650509affff000089'
+            'c6e8c5fa56ff76049affff0000569affff00008d56ec1e5231c05050509affff000085c074168d56ec1e529a'
+            'ffff00008d56ec1e529affff0000ebd78b46f08d66fe5e5dc20a00008c163e01c33bc473132bc4f7d83b060a'
+            '0077068cd03b063e017401c30e5ab83106bb0100e9c801537461636b204f766572666c6f7721005789c788d8'
+            '8ec2578ae0d1e9f3ab13c9f3aa5f89f85fc3eb0203009affff00000bc0750e5033c0ba0f00e86a0258b44ccd'
+            '218c064401575606535253bef60589365f018c1e6101268a078804464384c075f589360a005b2bc0509affff'
+            '000057579affff0000fc1e07b9f605bf26022bcf32c0f3aab8a207a35b01b8ffffa35d01b430cd21a2460188'
+            '2647019affff0000a248018826490186e0a34a0154583bc475120f01e0a90100740ab001a24c01b003a24d01'
+            '1ebf670157b89000509affff0000b86701893e63018c1e6501b8ff00e86b01e82efee9f9004f70656e205761'
+            '74636f6d20432f432b2b31362052756e2d54696d652073797374656d2e20436f707972696768742028632920'
+            '4f70656e20576174636f6d20436f6e7472696275746f727320323030322d323032362e20506f7274696f6e73'
+            '20436f7079726967687420284329205379626173652c20496e632e20313938382d323030322e00c3cb005589'
+            'e551565781ec800089c689df8d9e7aff8cd98ec2268a0484c074173c0d74138d46f939c3730c268a048ec146'
+            '26880743ebe031c08ec15026c607001e8d9e7aff531eb832015031c0509affff000089f8e94400515689c189'
+            'd6e8330185c0750689c889f2eb9889d8e92c0000c3c3535289c3833e1e02007404ff161e02ff16f801baff00'
+            'b81000e8a800ff16f801ff16fa0189d8e928fe5289c2ff16f801ff16fa0189d0e918fe5589e5535289c3833f'
+            '0075078d66fc5a5b5dc31eff171febf35589e5535289c38b47028b1785c0750485d274df1eff1f1febd95589'
+            'e5535152565789c11ee813ffbf260289fabb200289fe88c839fb7316803f02750583c306ebf23a470172f689'
+            'de8a4701ebef39fe74158d4402803c007508e88affc60402ebcbe89bffebf61f8d66f65f5e5a595b5dc35589'
+            'e55351565789c11ee8bcfe88d5bf260289fabb260289fe88c839fb7316803f02750583c306ebf23a470177f6'
+            '89de8a4701ebef39fe741c3a6c017305c60402ebd18d4402803c007505e827ffebeee83bffebe91f8d66f85f'
+            '5eeb9f803efc0100750331c0c35250cceb0657564944454fb8010083c404c3002d0003016800010029030301'
+            '7f00010028030301a200010020030301c100010021030301dc00010022030301fb000200a40103012e010100'
+            '250303018b01010025030301c8010100250303011b020200a40103016902010027030301ad02010027030301'
+            '00030200a40103015703010060010301f4030200a4010301040401006001030111040100610103017a040100'
+            '610103018304010023030301a6040200a4010301b90402007d000301d204020027000301ff0403005a000301'
+            '050504002100030118050200280003012705020006000301370502006b00050066050100380402006b050100'
+            '38040301740504005700030184050200ad0003019905020039000301bd05020029000301cb0502002a000301'
+            'd10502007c000301e00502006c000301ee05020071000301f8050200720003015d0603005b0003019c060300'
+            '1e000301a306020005000200bd06010058060301ce060300030003010007030031000301f007020001000000'
+            '00000500000000000000000000002575206d697865723a202575202225732220256c752064657374696e6174'
+            '696f6e3b206f70656e20257500257520257320256c782c20256c7520736f757263657320256c7520636f6e74'
+            '726f6c733b20257320256c782c20257320256c783b206279207461726765742025752025730025753a20256c'
+            '7520257320256c7820302d256c752c20256c7520257320256c783b204d49444927732025753a20256c752025'
+            '73007365742025753a20617578476574566f6c756d65202575202530386c782028776173202530346c782025'
+            '30346c78293b206d7574652025753a20256c75002564206368616e67657320746f6c642c20746865206c6173'
+            '7420636f6e74726f6c20256c753b206d6173746572207265616420256c78004f574d4958455200004f70656e'
+            '20576174636f6d000000ffff00000000000000000000000c0000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000001308130800000000000000000000000000000000000000000000'
+            '000000000000000000000000000000200a060000'
         )),
 }
 

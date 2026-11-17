@@ -18,7 +18,9 @@
  * The colours offered are the 16 of the VGA, which every display driver
  * shows as they are.
  */
+#include <string.h>
 #include "windows.h"
+#include "mmsystem.h"
 
 #define INI         "CONTROL.INI"
 
@@ -947,6 +949,7 @@ static const DLGITEM_N system_items[] = {
 #define IDC_PRN_CONNECT 704
 #define IDC_PRN_REMOVE  705
 #define IDC_PRN_ADD     706
+#define IDC_PRN_SETUP   707
 #define IDC_PRN_MODELS  711
 #define IDC_PRN_PORT    712
 
@@ -1193,6 +1196,13 @@ static BOOL CALLBACK PrintersProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                 }
             }
             return TRUE;
+        case IDC_PRN_SETUP:             /* the driver's settings: the paper, the orientation */
+            if (printer_selected(dlg, device) && printer_read(device, driver, port) &&
+                PrinterDeviceModeN(dlg, driver, NULL, device, port, NULL, NULL,
+                                   DM_PROMPT | DM_UPDATE) < 0)
+                MessageBox(dlg, "The printer's driver cannot be loaded.", device,
+                           MB_OK | MB_ICONEXCLAMATION);
+            return TRUE;
         case IDC_PRN_REMOVE:
             if (printer_selected(dlg, device) &&
                 MessageBox(dlg, "Remove this printer?", device, MB_YESNO | MB_ICONQUESTION) == IDYES) {
@@ -1222,65 +1232,162 @@ static BOOL CALLBACK PrintersProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 
 static const DLGTEMPLATE_N printers_tpl = {
     WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME,
-    8, 24, 24, 260, 112, NULL, NULL, "Printers", 0, NULL
+    9, 24, 24, 260, 128, NULL, NULL, "Printers", 0, NULL
 };
 static const DLGITEM_N printers_items[] = {
     { 8, 6, 180, 10, IDC_PRN_DEFAULT, SS_LEFT | SS_NOPREFIX | WS_VISIBLE, "STATIC", "" },
     { 8, 20, 180, 10, -1, SS_LEFT | WS_VISIBLE, "STATIC", "&Installed Printers:" },
-    { 8, 32, 180, 72, IDC_PRN_LIST, WS_VSCROLL | WS_BORDER | WS_TABSTOP | WS_VISIBLE, "LISTBOX", "" },
+    { 8, 32, 180, 88, IDC_PRN_LIST, WS_VSCROLL | WS_BORDER | WS_TABSTOP | WS_VISIBLE, "LISTBOX", "" },
     { 196, 6, 56, 14, IDOK, BS_DEFPUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "Close" },
     { 196, 32, 56, 14, IDC_PRN_SETDEF, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "Set As &Default" },
     { 196, 50, 56, 14, IDC_PRN_CONNECT, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "&Connect..." },
-    { 196, 68, 56, 14, IDC_PRN_REMOVE, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "&Remove" },
-    { 196, 90, 56, 14, IDC_PRN_ADD, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "&Add..." },
+    { 196, 68, 56, 14, IDC_PRN_SETUP, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "&Setup..." },
+    { 196, 86, 56, 14, IDC_PRN_REMOVE, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "&Remove" },
+    { 196, 108, 56, 14, IDC_PRN_ADD, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "&Add..." },
 };
 
 /* ---------------------------------------------------------------- Sound */
 
-/* the volumes MMSYSTEM keeps (volume.c): the master's, the wave output's,
- * the MIDI output's, as they are dragged; Cancel puts them back */
+/* MMSYSTEM's mixer (mixer.c): the speakers' (the master) volume and mute,
+ * the wave output's, the synthesizer's, as they are dragged and clicked;
+ * Cancel puts them back. Another program's changes are shown as they come
+ * (MM_MIXM_CONTROL_CHANGE). */
 
-#define IDC_VOL_FIRST 801               /* the scroll bars, then their values */
+#define IDC_VOL_FIRST 801               /* the scroll bars, their values, the mutes */
 #define VOLS 3
 
-typedef UINT (WINAPI *VOLGET)(UINT, DWORD *);
-typedef UINT (WINAPI *VOLSET)(UINT, DWORD);
+typedef MMRESULT (WINAPI *MXOPEN)(HMIXER *, UINT, DWORD, DWORD, DWORD);
+typedef MMRESULT (WINAPI *MXCLOSE)(HMIXER);
+typedef MMRESULT (WINAPI *MXLINE)(HMIXEROBJ, LPMIXERLINE, DWORD);
+typedef MMRESULT (WINAPI *MXCONTROLS)(HMIXEROBJ, LPMIXERLINECONTROLS, DWORD);
+typedef MMRESULT (WINAPI *MXDETAILS)(HMIXEROBJ, LPMIXERCONTROLDETAILS, DWORD);
 static HMODULE mm;
-static VOLGET vget[VOLS];
-static VOLSET vset[VOLS];
-static DWORD vwas[VOLS];
-static const char *const vol_names[VOLS][2] = {
-    { "auxGetVolume", "auxSetVolume" }, { "waveOutGetVolume", "waveOutSetVolume" },
-    { "midiOutGetVolume", "midiOutSetVolume" },
-};
+static HMIXER hmx;
+static MXCLOSE mx_close;
+static MXDETAILS mx_get, mx_set;
+static struct {
+    DWORD vol, mute;                    /* the controls' IDs, 0 none */
+    DWORD was[2];
+    DWORD was_mute;
+} vl[VOLS];
 
-static void vol_show(HWND dlg, int i, int pos)
+static int mx_details(int set, DWORD id, DWORD channels, DWORD *v)
 {
+    MIXERCONTROLDETAILS cd;
+    memset(&cd, 0, sizeof(cd));
+    cd.cbStruct = sizeof(cd);
+    cd.dwControlID = id;
+    cd.cChannels = channels;
+    cd.cbDetails = sizeof(DWORD);
+    cd.paDetails = v;
+    return id && hmx && mx_get && mx_set && !(set ? mx_set : mx_get)((HMIXEROBJ)hmx, &cd,
+                                          MIXER_OBJECTF_HMIXER | MIXER_GETCONTROLDETAILSF_VALUE);
+}
+
+/* a row as the mixer has it */
+static void vol_show(HWND dlg, int i)
+{
+    DWORD v[2] = { 0, 0 }, m = 0;
     char s[8];
+    if (!mx_details(0, vl[i].vol, 2, v))
+        return;
+    DWORD hi = v[0] > v[1] ? v[0] : v[1];
+    int pos = (int)((hi * 100 + 32767) / 65535);
+    SetScrollPos(GetDlgItem(dlg, IDC_VOL_FIRST + i), SB_CTL, pos, TRUE);
     wsprintf(s, "%d%%", pos);
     SetDlgItemText(dlg, IDC_VOL_FIRST + VOLS + i, s);
+    if (mx_details(0, vl[i].mute, 1, &m))
+        CheckDlgButton(dlg, IDC_VOL_FIRST + 2 * VOLS + i, m != 0);
+}
+
+/* the mixer's lines: the destination's, its sources' (wave, synthesizer) */
+static int vol_open(HWND dlg)
+{
+    mm = LoadLibrary("MMSYSTEM.DLL");
+    if ((UINT)mm < 32)
+        return 0;
+    MXOPEN open = (MXOPEN)(void (*)(void))GetProcAddress(mm, "mixerOpen");
+    MXLINE line = (MXLINE)(void (*)(void))GetProcAddress(mm, "mixerGetLineInfo");
+    MXCONTROLS controls = (MXCONTROLS)(void (*)(void))GetProcAddress(mm, "mixerGetLineControls");
+    mx_close = (MXCLOSE)(void (*)(void))GetProcAddress(mm, "mixerClose");
+    mx_get = (MXDETAILS)(void (*)(void))GetProcAddress(mm, "mixerGetControlDetails");
+    mx_set = (MXDETAILS)(void (*)(void))GetProcAddress(mm, "mixerSetControlDetails");
+    if (!open || !line || !controls || !mx_close || !mx_get || !mx_set ||
+        open(&hmx, 0, (DWORD)dlg, 0, CALLBACK_WINDOW))
+        return 0;
+    MIXERLINE ml;
+    memset(&ml, 0, sizeof(ml));
+    ml.cbStruct = sizeof(ml);
+    if (line((HMIXEROBJ)hmx, &ml, MIXER_OBJECTF_HMIXER | MIXER_GETLINEINFOF_DESTINATION))
+        return 0;
+    DWORD sources = ml.cConnections;
+    for (DWORD s = 0; s <= sources; s++) {
+        int row = 0;
+        if (s) {                        /* the sources after the destination */
+            memset(&ml, 0, sizeof(ml));
+            ml.cbStruct = sizeof(ml);
+            ml.dwSource = s - 1;
+            if (line((HMIXEROBJ)hmx, &ml, MIXER_OBJECTF_HMIXER | MIXER_GETLINEINFOF_SOURCE))
+                continue;
+            row = ml.dwComponentType == MIXERLINE_COMPONENTTYPE_SRC_WAVEOUT ? 1 :
+                  ml.dwComponentType == MIXERLINE_COMPONENTTYPE_SRC_SYNTHESIZER ? 2 : -1;
+            if (row < 0)
+                continue;
+        }
+        for (int k = 0; k < 2; k++) {
+            MIXERCONTROL mc;
+            MIXERLINECONTROLS lc;
+            memset(&lc, 0, sizeof(lc));
+            lc.cbStruct = sizeof(lc);
+            lc.dwLineID = ml.dwLineID;
+            lc.dwControlType = k ? MIXERCONTROL_CONTROLTYPE_MUTE : MIXERCONTROL_CONTROLTYPE_VOLUME;
+            lc.cControls = 1;
+            lc.cbmxctrl = sizeof(mc);
+            lc.pamxctrl = &mc;
+            if (!controls((HMIXEROBJ)hmx, &lc,
+                          MIXER_OBJECTF_HMIXER | MIXER_GETLINECONTROLSF_ONEBYTYPE)) {
+                if (k)
+                    vl[row].mute = mc.dwControlID;
+                else
+                    vl[row].vol = mc.dwControlID;
+            }
+        }
+    }
+    return 1;
+}
+
+static void vol_close(void)
+{
+    if (hmx)
+        mx_close(hmx);
+    hmx = 0;
+    if ((UINT)mm >= 32)
+        FreeLibrary(mm);
+    mm = 0;
 }
 
 static BOOL CALLBACK SoundProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
     case WM_INITDIALOG:
-        mm = LoadLibrary("MMSYSTEM.DLL");
+        memset(vl, 0, sizeof(vl));
+        vol_open(dlg);                  /* what it has of the mixer */
         for (int i = 0; i < VOLS; i++) {
-            DWORD v = 0xffffffffUL;
-            vget[i] = (UINT)mm >= 32 ? (VOLGET)(void (*)(void))GetProcAddress(mm, vol_names[i][0]) : NULL;
-            vset[i] = (UINT)mm >= 32 ? (VOLSET)(void (*)(void))GetProcAddress(mm, vol_names[i][1]) : NULL;
-            if (!vget[i] || !vset[i] || vget[i](0, &v)) {
-                vset[i] = NULL;
-                EnableWindow(GetDlgItem(dlg, IDC_VOL_FIRST + i), FALSE);
-            }
-            vwas[i] = v;
-            int pos = (int)(((v & 0xffff) + (v >> 16)) / 2 * 100 / 65535);
             HWND sb = GetDlgItem(dlg, IDC_VOL_FIRST + i);
             SetScrollRange(sb, SB_CTL, 0, 100, FALSE);
-            SetScrollPos(sb, SB_CTL, pos, TRUE);
-            vol_show(dlg, i, pos);
+            if (!mx_details(0, vl[i].vol, 2, vl[i].was))
+                vl[i].vol = 0;
+            if (!mx_details(0, vl[i].mute, 1, &vl[i].was_mute))
+                vl[i].mute = 0;
+            EnableWindow(sb, vl[i].vol != 0);
+            EnableWindow(GetDlgItem(dlg, IDC_VOL_FIRST + 2 * VOLS + i), vl[i].mute != 0);
+            vol_show(dlg, i);
         }
+        return TRUE;
+    case MM_MIXM_CONTROL_CHANGE:        /* ours or another program's */
+        for (int i = 0; i < VOLS; i++)
+            if ((DWORD)lp == vl[i].vol || (DWORD)lp == vl[i].mute)
+                vol_show(dlg, i);
         return TRUE;
     case WM_HSCROLL: {
         HWND sb = (HWND)HIWORD(lp);
@@ -1295,24 +1402,29 @@ static BOOL CALLBACK SoundProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         case SB_THUMBTRACK: case SB_THUMBPOSITION: pos = (short)LOWORD(lp); break;
         case SB_TOP: pos = 0; break;
         case SB_BOTTOM: pos = 100; break;
+        case SB_ENDSCROLL: return TRUE;
         }
         if (pos < 0) pos = 0;
         if (pos > 100) pos = 100;
-        SetScrollPos(sb, SB_CTL, pos, TRUE);
-        vol_show(dlg, i, pos);
-        if (vset[i]) {
-            DWORD v = (DWORD)pos * 65535 / 100;
-            vset[i](0, v | v << 16);
-        }
+        DWORD v[2];
+        v[0] = v[1] = (DWORD)pos * 65535 / 100;
+        if (mx_details(1, vl[i].vol, 2, v))
+            vol_show(dlg, i);
         return TRUE;
     }
     case WM_COMMAND:
+        if (wp >= IDC_VOL_FIRST + 2 * VOLS && wp < IDC_VOL_FIRST + 3 * VOLS) {
+            int i = (int)wp - (IDC_VOL_FIRST + 2 * VOLS);
+            DWORD m = IsDlgButtonChecked(dlg, (int)wp) != 0;
+            mx_details(1, vl[i].mute, 1, &m);
+            return TRUE;
+        }
         if (wp == IDOK || wp == IDCANCEL) {
-            for (int i = 0; wp == IDCANCEL && i < VOLS; i++)
-                if (vset[i])
-                    vset[i](0, vwas[i]);
-            if ((UINT)mm >= 32)
-                FreeLibrary(mm);
+            for (int i = 0; wp == IDCANCEL && i < VOLS; i++) {
+                mx_details(1, vl[i].vol, 2, vl[i].was);
+                mx_details(1, vl[i].mute, 1, &vl[i].was_mute);
+            }
+            vol_close();
             EndDialog(dlg, (int)wp);
             return TRUE;
         }
@@ -1323,20 +1435,23 @@ static BOOL CALLBACK SoundProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 
 static const DLGTEMPLATE_N sound_tpl = {
     WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME,
-    11, 24, 24, 220, 84, NULL, NULL, "Volume", 0, NULL
+    14, 24, 24, 248, 84, NULL, NULL, "Volume", 0, NULL
 };
 static const DLGITEM_N sound_items[] = {
     { 8, 8, 40, 10, -1, SS_LEFT | WS_VISIBLE, "STATIC", "Master" },
     { 50, 7, 130, 10, IDC_VOL_FIRST, SBS_HORZ | WS_TABSTOP | WS_VISIBLE, "SCROLLBAR", "" },
-    { 184, 8, 30, 10, IDC_VOL_FIRST + VOLS, SS_RIGHT | WS_VISIBLE, "STATIC", "" },
+    { 184, 8, 22, 10, IDC_VOL_FIRST + VOLS, SS_RIGHT | WS_VISIBLE, "STATIC", "" },
+    { 210, 7, 34, 10, IDC_VOL_FIRST + 2 * VOLS, BS_AUTOCHECKBOX | WS_TABSTOP | WS_VISIBLE, "BUTTON", "Mute" },
     { 8, 26, 40, 10, -1, SS_LEFT | WS_VISIBLE, "STATIC", "Wave" },
     { 50, 25, 130, 10, IDC_VOL_FIRST + 1, SBS_HORZ | WS_TABSTOP | WS_VISIBLE, "SCROLLBAR", "" },
-    { 184, 26, 30, 10, IDC_VOL_FIRST + VOLS + 1, SS_RIGHT | WS_VISIBLE, "STATIC", "" },
+    { 184, 26, 22, 10, IDC_VOL_FIRST + VOLS + 1, SS_RIGHT | WS_VISIBLE, "STATIC", "" },
+    { 210, 25, 34, 10, IDC_VOL_FIRST + 2 * VOLS + 1, BS_AUTOCHECKBOX | WS_TABSTOP | WS_VISIBLE, "BUTTON", "Mute" },
     { 8, 44, 40, 10, -1, SS_LEFT | WS_VISIBLE, "STATIC", "MIDI" },
     { 50, 43, 130, 10, IDC_VOL_FIRST + 2, SBS_HORZ | WS_TABSTOP | WS_VISIBLE, "SCROLLBAR", "" },
-    { 184, 44, 30, 10, IDC_VOL_FIRST + VOLS + 2, SS_RIGHT | WS_VISIBLE, "STATIC", "" },
-    { 96, 64, 56, 14, IDOK, BS_DEFPUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "OK" },
-    { 158, 64, 56, 14, IDCANCEL, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "Cancel" },
+    { 184, 44, 22, 10, IDC_VOL_FIRST + VOLS + 2, SS_RIGHT | WS_VISIBLE, "STATIC", "" },
+    { 210, 43, 34, 10, IDC_VOL_FIRST + 2 * VOLS + 2, BS_AUTOCHECKBOX | WS_TABSTOP | WS_VISIBLE, "BUTTON", "Mute" },
+    { 124, 64, 56, 14, IDOK, BS_DEFPUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "OK" },
+    { 186, 64, 56, 14, IDCANCEL, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "Cancel" },
 };
 
 /* ---------------------------------------------------------------- main window */

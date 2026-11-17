@@ -5,7 +5,8 @@
  * channel low, the right high, 0 to FFFFh), kept in SYSTEM.INI [volume].
  * The drivers have no volume of their own: the samples are scaled as they
  * go to the wave driver (left and right), MIDI's notes by their velocity
- * (the two sides' mean), each by its volume and the master's.
+ * (the two sides' mean), each by its volume and the master's; a muted
+ * one (the mixer's mute, mixer.c) is silent.
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
@@ -30,8 +31,12 @@ UINT WINAPI winn_midi_num(void);
 
 enum { VOL_MASTER, VOL_WAVE, VOL_MIDI, VOL_COUNT };
 static const char *const keys[VOL_COUNT] = { "Master", "Wave", "MIDI" };
+static const char *const mute_keys[VOL_COUNT] = { "MasterMute", "WaveMute", "MIDIMute" };
 static DWORD vol[VOL_COUNT];
+static int muted[VOL_COUNT];
 static int loaded;
+
+void winn_mixer_changed(int line, int control);     /* mixer.c: its windows told */
 
 static void load(void)
 {
@@ -50,6 +55,7 @@ static void load(void)
             v = v << 4 | (DWORD)d;
         }
         vol[i] = v;
+        muted[i] = GetPrivateProfileInt("volume", mute_keys[i], 0, "SYSTEM.INI") != 0;
     }
 }
 
@@ -62,12 +68,44 @@ static void set(int i, DWORD v)
     vol[i] = v;
     wsprintf(s, "%08lX", (unsigned long)v);
     WritePrivateProfileString("volume", keys[i], s, "SYSTEM.INI");
+    winn_mixer_changed(i, 0);
+}
+
+/* the mixer's (mixer.c): a line's (VOL_*) volume, mute */
+DWORD winn_volume_get(int i)
+{
+    load();
+    return i >= 0 && i < VOL_COUNT ? vol[i] : 0;
+}
+
+void winn_volume_set(int i, DWORD v)
+{
+    if (i >= 0 && i < VOL_COUNT)
+        set(i, v);
+}
+
+int winn_mute_get(int i)
+{
+    load();
+    return i >= 0 && i < VOL_COUNT && muted[i];
+}
+
+void winn_mute_set(int i, int m)
+{
+    load();
+    if (i < 0 || i >= VOL_COUNT || muted[i] == !!m)
+        return;
+    muted[i] = !!m;
+    WritePrivateProfileString("volume", mute_keys[i], m ? "1" : "0", "SYSTEM.INI");
+    winn_mixer_changed(i, 1);
 }
 
 /* a side's (0 left, 1 right) of a volume times the master's: 0 to 65535 */
 static unsigned side(int i, int right)
 {
     load();
+    if (muted[i] || muted[VOL_MASTER])
+        return 0;
     uint32_t a = right ? vol[i] >> 16 : vol[i] & 0xffffu;
     uint32_t m = right ? vol[VOL_MASTER] >> 16 : vol[VOL_MASTER] & 0xffffu;
     return (unsigned)(a * m / 65535u);
@@ -103,8 +141,10 @@ uint32_t winn_volume_midi(uint32_t packed)
     unsigned g = (side(VOL_MIDI, 0) + side(VOL_MIDI, 1)) / 2u;
     if (g == 65535u)
         return packed;
+    if (!g)                             /* silent: as a note off (velocity 0) */
+        return packed & 0xffffu;
     uint32_t v = (packed >> 16 & 0x7fu) * g / 65535u;
-    if (!v)
+    if (!v)                             /* a note on of velocity 0 is a note off */
         v = 1;
     return (packed & 0xffffu) | v << 16;
 }

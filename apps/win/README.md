@@ -474,7 +474,9 @@ the registry enumerated, the environment, a wallpaper), `OW95` (the stack
 switched, the visible area, Windows 95's KERNEL and USER for Win16),
 `OW95X` (old ordinals, priority queues and the spooler, Windows 95's
 structures, DrawEdge, DrawFrameControl, DrawState, Bézier curves),
-`OWMIDI` (Windows 95's MIDI streams), `OWPRINT` (printing on EPSON9)
+`OWMIDI` (Windows 95's MIDI streams), `OWPRINT` (printing on EPSON9),
+`OWLAND` (a printer driver's ExtDeviceMode, DeviceCapabilities, DEVMODE,
+ResetDC), `OWMIXER` (the mixer API)
 (`make NEFIXTURES` in
 `host/`). All have DOS MZ stubs that explain how to launch them under WINN
 when invoked directly from DOS. `host/test_ne_run` runs them on the
@@ -589,22 +591,40 @@ used.
 ## Printers
 
 A printer driver is a native DLL exporting `WinPrinterDriver`
-(`include/printer_driver.h`): its models, its resolution and page, and the
-three calls that turn pages into the printer's language. GDI draws a page
-into a monochrome bitmap at the driver's resolution (`CreateDC(driver,
-device, port)`: GetDeviceCaps gives the printer's size, dots an inch,
+(`include/printer_driver.h`): its models, its resolution, its papers, and
+the three calls that turn pages into the printer's language. GDI draws a
+page into a monochrome bitmap at the driver's resolution (`CreateDC(driver,
+device, port, DEVMODE)`: GetDeviceCaps gives the page's size, dots an inch,
 DT_RASPRINTER; the mapping modes go by its dots an inch), EndPage hands it
-to the driver, which writes it to the port: `FILE:` asks for a file's name
+to the driver (a landscape page turned upright, each page as many times as
+the copies), which writes it to the port: `FILE:` asks for a file's name
 at each printing, `LPTn:`, `COMn:` are DOS's devices, any other name a
-file. WIN.INI keeps the printers as Windows 3.1 does ([devices],
+file.
+
+The printer's settings are Windows 3.1's DEVMODE (the paper, the
+orientation, the copies), GDI's for every driver, kept in WIN.INI's
+`[<device>,<port>]` (Orientation=, PaperSize=). A Win16 program asks the
+driver for them as it does Windows' drivers: `LoadLibrary("EPSON9.DRV")`
+(the native DLL), ExtDeviceMode (its size, DM_COPY, DM_MODIFY, DM_UPDATE,
+DM_PROMPT: the driver's dialog, Paper Size and Orientation),
+DeviceCapabilities (DC_PAPERS, DC_PAPERNAMES, DC_PAPERSIZE,
+DC_ENUMRESOLUTIONS, DC_COPIES, DC_ORIENTATION ...), DeviceMode,
+AdvancedSetUpDialog; native programs call `PrinterDeviceModeN` and
+`PrinterCapabilitiesN`. ResetDC changes them between pages (another paper:
+the driver starts again on it), GETSETPRINTORIENT and SETCOPYCOUNT too.
+COMMDLG's PrintDlg returns hDevMode (and takes the program's), its Print
+Setup has Orientation and Paper Size, PD_USEDEVMODECOPIES leaves the
+copies to the driver. WIN.INI keeps the printers as Windows 3.1 does ([devices],
 [PrinterPorts], [windows] device=, [ports]); the Control Panel's Printers
 adds them from the drivers' models (CONTROL.INI [printer drivers]
 drivers=, EPSON9 when none), connects them to a port, sets the default.
 
 `EPSON9.DLL` (`apps/windll/epson9`) prints on Epson's 9-pin dot matrix
 printers (ESC/P: LX-350, LX-300, LX-800, FX-850, FX-1050): 72 x 72 dots an
-inch, 8 by 11 inches (80 columns of continuous paper), bands of the
-one-to-one bit image (ESC * 5), blank bands as line feeds.
+inch, 8 inches across (80 columns of continuous paper) on Letter, A4,
+Legal and German fanfold (the length set by ESC C), bands of the
+one-to-one bit image (ESC * 5), blank bands as line feeds. The Control
+Panel's Printers has its Setup... (the driver's dialog).
 
 ## Volume
 
@@ -613,7 +633,18 @@ auxiliary device 0, "Master Volume"), the wave output's and the MIDI
 output's (waveOut/midiOut/auxGet/SetVolume, left and right; the
 capabilities say so). The drivers have none of their own: the samples are
 scaled on their way to the wave driver (MCI's too), MIDI notes by their
-velocity. The Control Panel's Volume sets them as they are dragged.
+velocity; each can be muted.
+
+The mixer (Windows 95's API, `mixer.c`; Win16 and native) is one device:
+its destination, the speakers, is the master volume, its sources the wave
+output and the synthesizer, each line a volume (left, right) and a mute
+control (mixerGetLineInfo by destination, source, line ID, component
+type, target type; mixerGetLineControls all, one by ID, one by type;
+mixerGet/SetControlDetails). They are the same volumes, so whoever
+changes one (waveOutSetVolume, auxSetVolume, the Control Panel), the
+mixer's windows are told MM_MIXM_CONTROL_CHANGE. The Control Panel's
+Volume is on the mixer: it sets the volumes as they are dragged, the
+mutes, and shows other programs' changes.
 
 ## Native DLLs
 
@@ -874,7 +905,10 @@ list the links.
     ./winhost scripts/ow95x.txt PROGMAN      # old ordinals, the spooler, Win95's structures and 3D drawing
     ./winhost scripts/owmidi.txt PROGMAN     # MIDI streams on HOSTMIDI.DLL (host_midi.c, notes on stderr)
     ./winhost scripts/owprint.txt PROGMAN    # printing: PrintDlg, two pages on EPSON9 to OWPRINT.PRN
-    ./winhost scripts/printers.txt CONTROL   # Control Panel's Printers (add, connect) and Volume
+    ./winhost scripts/printers.txt CONTROL   # Control Panel's Printers (add, connect, setup) and Volume
+    ./winhost scripts/prsetup.txt PROGMAN    # COMMDLG's Print Setup: landscape A4, printed across
+    ./winhost scripts/owland.txt PROGMAN     # ExtDeviceMode, DeviceCapabilities, DEVMODE DCs, ResetDC
+    ./winhost scripts/owmixer.txt PROGMAN    # the mixer API: lines, controls, details, notifications
     ./winhost scripts/logo.txt PROGMAN       # the logo (copy the BMPs into HOSTWIN first)
     ./winhost800 scripts/vga800.txt  # the VGA800 driver, built in
     ./winhostvga scripts/vga.txt     # the built-in VGA driver (640x480x16), Win16 programs too
@@ -929,8 +963,8 @@ raised ends the program), the Unicode (W) functions, what GDI draws into a
 DIB section (its bits are not brought back), ADVAPI32, WINMM's devices
 (waveOut, midiOut) and mciSendCommand, COMDLG32, SHELL32, COMCTL32; VxDs.
 A spooler and Print Manager's queues (printing goes straight to the port),
-printer drivers of Windows' own (.DRV: ExtDeviceMode, DeviceCapabilities),
-DEVMODE, `.GRP` files (`PROGMAN.INI` holds the groups as text), DLLs (`LoadLibrary`) of native applications;
+printer drivers of Windows' own (.DRV files: WINN's are native DLLs), a
+driver's private DEVMODE data, the mixer's inputs, `.GRP` files (`PROGMAN.INI` holds the groups as text), DLLs (`LoadLibrary`) of native applications;
 Windows 95's and NT's additions to Win16 (WOW, the thunks to Win32,
 paths, enhanced metafiles), BiDi, STRESS.DLL, the
 undocumented CallProcInstance, InitLib and DoSignal (KERNEL's own, whose

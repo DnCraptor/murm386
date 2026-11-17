@@ -1,0 +1,15 @@
+# Windows 95's mixer API from a Win16 program (OWMIXER): the device, its
+# lines and controls, the master volume through the mixer read back by
+# auxGetVolume, the master's mute, auxSetVolume's change told its window:
+#     ./winhost scripts/owmixer.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OWMIXER
+key RETURN
+wait 150
+snap omixer.ppm
+exit

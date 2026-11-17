@@ -1118,6 +1118,7 @@ typedef struct { int cbSize; LPCSTR lpszDocName; LPCSTR lpszOutput; } DOCINFO;
 #define SETCOPYCOUNT        17
 #define PASSTHROUGH         19
 #define GETTECHNOLOGY       20
+#define GETSETPRINTORIENT   30
 #define RC_BITBLT           0x0001
 #define RC_BANDING          0x0002
 #define RC_DI_BITMAP        0x0080
@@ -1130,6 +1131,80 @@ int     WINAPI StartPage(HDC hdc);
 int     WINAPI EndPage(HDC hdc);
 int     WINAPI AbortDoc(HDC hdc);
 int     WINAPI SetAbortProc(HDC hdc, ABORTPROC proc);
+/* A printer's settings (Windows 3.1's DEVMODE, as a Win16 program's: 68
+ * bytes): the paper and the orientation; the copies (GDI gives the driver
+ * each page as many times) */
+#define CCHDEVICENAME       32
+typedef struct {
+    char  dmDeviceName[CCHDEVICENAME];
+    WORD  dmSpecVersion, dmDriverVersion, dmSize, dmDriverExtra;
+    DWORD dmFields;
+    short dmOrientation, dmPaperSize, dmPaperLength, dmPaperWidth, dmScale, dmCopies;
+    short dmDefaultSource, dmPrintQuality, dmColor, dmDuplex, dmYResolution, dmTTOption;
+} DEVMODE, *LPDEVMODE;
+#define DM_SPECVERSION      0x030A
+#define DM_ORIENTATION      0x00000001L
+#define DM_PAPERSIZE        0x00000002L
+#define DM_PAPERLENGTH      0x00000004L
+#define DM_PAPERWIDTH       0x00000008L
+#define DM_SCALE            0x00000010L
+#define DM_COPIES           0x00000100L
+#define DM_DEFAULTSOURCE    0x00000200L
+#define DM_PRINTQUALITY     0x00000400L
+#define DM_COLOR            0x00000800L
+#define DM_DUPLEX           0x00001000L
+#define DM_YRESOLUTION      0x00002000L
+#define DM_TTOPTION         0x00004000L
+#define DMORIENT_PORTRAIT   1
+#define DMORIENT_LANDSCAPE  2
+#define DMPAPER_LETTER      1
+#define DMPAPER_LEGAL       5
+#define DMPAPER_A4          9
+#define DMPAPER_FANFOLD_US  39
+#define DMPAPER_FANFOLD_STD_GERMAN 40
+#define DMBIN_ONLYONE       1
+#define DMBIN_TRACTOR       8
+#define DMCOLOR_MONOCHROME  1
+#define DMDUP_SIMPLEX       1
+#define DMTT_BITMAP         1
+/* ExtDeviceMode's modes */
+#define DM_UPDATE           1
+#define DM_COPY             2
+#define DM_PROMPT           4
+#define DM_MODIFY           8
+/* DeviceCapabilities' questions */
+#define DC_FIELDS           1
+#define DC_PAPERS           2
+#define DC_PAPERSIZE        3
+#define DC_MINEXTENT        4
+#define DC_MAXEXTENT        5
+#define DC_BINS             6
+#define DC_DUPLEX           7
+#define DC_SIZE             8
+#define DC_EXTRA            9
+#define DC_VERSION          10
+#define DC_DRIVER           11
+#define DC_BINNAMES         12
+#define DC_ENUMRESOLUTIONS  13
+#define DC_FILEDEPENDENCIES 14
+#define DC_TRUETYPE         15
+#define DC_PAPERNAMES       16
+#define DC_ORIENTATION      17
+#define DC_COPIES           18
+#define DCTT_BITMAP         1
+/* the settings of a printer DC changed between pages (another DEVMODE): the
+ * DC, 0 if it cannot */
+HDC     WINAPI ResetDC(HDC hdc, const DEVMODE *dm);
+/* Printer drivers' ExtDeviceMode and DeviceCapabilities (a native driver's
+ * pass them on, include/printer_driver.h): of the driver's device on the
+ * port, its settings in WIN.INI (or profile) */
+int     WINAPI PrinterDeviceModeN(HWND owner, LPCSTR driver, DEVMODE *out, LPCSTR device,
+                                  LPCSTR port, const DEVMODE *in, LPCSTR profile, UINT mode);
+DWORD   WINAPI PrinterCapabilitiesN(LPCSTR driver, LPCSTR device, LPCSTR port, UINT index,
+                                    LPSTR out, const DEVMODE *dm);
+/* the same for a Win16 program (a call of the driver's, ddi/windll.h's
+ * win_dll_call): WINDLL_WORD, WINDLL_DWORD, or WINDLL_NONE */
+int     WINAPI PrinterNeCallN(LPCSTR driver, void *call, UINT ordinal, DWORD *value);
 /* Windows 3.0's printer escapes, for them (in and out native: a RECT, a
  * POINT of ints) */
 int     WINAPI Escape(HDC hdc, int esc, int cb, LPCSTR in, void *out);

@@ -1,7 +1,9 @@
 # Control Panel's Printers and Volume: run with "./winhost scripts/printers.txt CONTROL"
 # Printers: Add, the first model (Epson LX-350) on FILE:, installed as the
 # default (WIN.INI [devices], [PrinterPorts], [windows] device=); Connect
-# to a file; Volume: the master's half, the wave's down a step, OK.
+# to a file; Setup: landscape A4 (WIN.INI [Epson LX-350,LX350.PRN]);
+# Volume (the mixer): the master's half, the wave's down a step, the
+# MIDI's muted, OK.
 wait 100
 snap pr_main.ppm
 keydown ALT
@@ -27,6 +29,21 @@ snap pr_connect.ppm
 key RETURN
 wait 50
 snap pr_connected.ppm
+keydown ALT
+key S
+keyup ALT
+wait 50
+keydown ALT
+key L
+keyup ALT
+keydown ALT
+key S
+keyup ALT
+key DOWN
+wait 20
+snap pr_setup.ppm
+key RETURN
+wait 30
 click 515 131
 wait 30
 keydown ALT
@@ -45,6 +62,8 @@ wait 10
 click 250 129
 wait 10
 click 176 165
+wait 10
+click 494 202
 wait 30
 snap pr_volume.ppm
 key RETURN

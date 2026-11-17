@@ -493,6 +493,9 @@ extern void PostEvent(void);
 extern void PostMessage(void);
 extern void PostQuitMessage(void);
 extern void PrintDlg(void);
+extern void PrinterCapabilitiesN(void);
+extern void PrinterDeviceModeN(void);
+extern void PrinterNeCallN(void);
 extern void PtInRect(void);
 extern void PtInRegion(void);
 extern void PtVisible(void);
@@ -516,6 +519,7 @@ extern void RemovePropEx(void);
 extern void RepaintScreen(void);
 extern void ReplaceText(void);
 extern void ReplyMessage(void);
+extern void ResetDC(void);
 extern void ResizePalette(void);
 extern void RestoreDC(void);
 extern void RestoreVisRgn(void);
@@ -984,6 +988,7 @@ static const void *const exports_gdi[1002] = {
     [373] = (const void *)SetSystemPaletteUse,
     [374] = (const void *)GetSystemPaletteUse,
     [375] = (const void *)GetSystemPaletteEntries,
+    [376] = (const void *)ResetDC,
     [377] = (const void *)StartDoc,
     [378] = (const void *)EndDoc,
     [379] = (const void *)StartPage,
@@ -1367,7 +1372,7 @@ static const void *const exports_user[931] = {
     [930] = (const void *)MessageBoxEx,
 };
 
-static const void *const exports_winn[32] = {
+static const void *const exports_winn[35] = {
     [1] = (const void *)DialogBoxIndirectN,
     [2] = (const void *)CreateDialogIndirectN,
     [3] = (const void *)CreateAcceleratorTableN,
@@ -1399,6 +1404,9 @@ static const void *const exports_winn[32] = {
     [29] = (const void *)TileWindowsN,
     [30] = (const void *)GetPrintersN,
     [31] = (const void *)GetPrinterModelsN,
+    [32] = (const void *)PrinterDeviceModeN,
+    [33] = (const void *)PrinterCapabilitiesN,
+    [34] = (const void *)PrinterNeCallN,
 };
 
 static const void *const exports_commdlg[28] = {

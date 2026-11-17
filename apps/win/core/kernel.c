@@ -417,9 +417,11 @@ BOOL WINAPI IsCharAlphaNumeric(char c) { return IsCharAlpha(c) || (c >= '0' && c
 LPSTR WINAPI AnsiNext(LPCSTR s) { return (LPSTR)(*s ? s + 1 : s); }
 LPSTR WINAPI AnsiPrev(LPCSTR start, LPCSTR s) { return (LPSTR)(s > start ? s - 1 : start); }
 
-/* wsprintf: %[-][0][width][l](d|i|u|x|X|s|c|%) - no floats, like Win16. */
+/* wsprintf: %[-][#][0][width][.precision][l](d|i|u|x|X|s|c|%) - no
+ * floats, like Win16: a string's precision its most characters, a
+ * number's its fewest digits; # puts 0x before hexadecimal. */
 static int fmt_num(char *out, unsigned long v, int neg, int base, int upper,
-                   int width, int left, int zero)
+                   int width, int left, int zero, int prec, int alt)
 {
     char tmp[16];
     int n = 0;
@@ -428,15 +430,27 @@ static int fmt_num(char *out, unsigned long v, int neg, int base, int upper,
         tmp[n++] = dig[v % (unsigned)base];
         v /= (unsigned)base;
     } while (v);
-    int len = n + (neg ? 1 : 0);
+    if (prec > 64)
+        prec = 64;
+    int digits = prec > n ? prec : n;
+    int lead = (neg ? 1 : 0) + (alt && base == 16 ? 2 : 0);
+    int len = digits + lead;
     int pad = width > len ? width - len : 0;
     int o = 0;
+    if (prec >= 0)
+        zero = 0;
     if (!left && !zero)
         while (pad-- > 0) out[o++] = ' ';
     if (neg)
         out[o++] = '-';
+    if (alt && base == 16) {
+        out[o++] = '0';
+        out[o++] = upper ? 'X' : 'x';
+    }
     if (!left && zero)
         while (pad-- > 0) out[o++] = '0';
+    for (int z = n; z < digits; z++)
+        out[o++] = '0';
     while (n)
         out[o++] = tmp[--n];
     if (left)
@@ -453,22 +467,27 @@ int WINAPI wvsprintf(LPSTR buf, LPCSTR fmt, va_list ap)
             continue;
         }
         f++;
-        int left = 0, zero = 0, width = 0;
-        if (*f == '-') { left = 1; f++; }
-        if (*f == '0') { zero = 1; f++; }
+        int left = 0, zero = 0, width = 0, alt = 0, prec = -1;
+        for (; *f == '-' || *f == '0' || *f == '#'; f++)
+            if (*f == '-') left = 1; else if (*f == '0') zero = 1; else alt = 1;
         while (*f >= '0' && *f <= '9')
             width = width * 10 + (*f++ - '0');
+        if (*f == '.') {
+            prec = 0;
+            for (f++; *f >= '0' && *f <= '9'; f++)
+                prec = prec * 10 + (*f - '0');
+        }
         if (*f == 'l') f++;
         switch (*f) {
         case 'd': case 'i': {
             long v = va_arg(ap, int);           /* LONG is 32-bit too */
             unsigned long m = v < 0 ? 0ul - (unsigned long)v : (unsigned long)v;
-            o += fmt_num(buf + o, m, v < 0, 10, 0, width, left, zero);
+            o += fmt_num(buf + o, m, v < 0, 10, 0, width, left, zero, prec, 0);
             break;
         }
         case 'u': case 'x': case 'X': {
             unsigned long v = va_arg(ap, unsigned);
-            o += fmt_num(buf + o, v, 0, *f == 'u' ? 10 : 16, *f == 'X', width, left, zero);
+            o += fmt_num(buf + o, v, 0, *f == 'u' ? 10 : 16, *f == 'X', width, left, zero, prec, alt);
             break;
         }
         case 'c':
@@ -477,7 +496,9 @@ int WINAPI wvsprintf(LPSTR buf, LPCSTR fmt, va_list ap)
         case 's': {
             const char *s = va_arg(ap, const char *);
             if (!s) s = "(null)";
-            int len = (int)strlen(s);
+            int len = 0;
+            while (s[len] && (prec < 0 || len < prec))
+                len++;
             int pad = width > len ? width - len : 0;
             if (!left) while (pad-- > 0) buf[o++] = ' ';
             memcpy(buf + o, s, (size_t)len);

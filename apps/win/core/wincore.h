@@ -220,7 +220,7 @@ typedef struct wdc {
 } wdc;
 
 /* print.c: printers' DCs */
-HDC  print_create_dc(LPCSTR driver, LPCSTR device, LPCSTR port, int ic);
+HDC  print_create_dc(LPCSTR driver, LPCSTR device, LPCSTR port, int ic, const DEVMODE *init);
 void print_dc_gone(wdc *dc);
 int  print_caps(const wdc *dc, int index, int *value);
 
@@ -493,6 +493,9 @@ int    win_dll_use(const char *name);    /* ... used by this task (once, until i
 uint32_t win_dll_ne_lparam(uint32_t msg, uint32_t lparam);
 int    win_dll_of(HANDLE h);             /* a module handle's slot; -1 */
 HANDLE win_dll_handle(int slot);
+/* the core's help with Win16 programs' calls of the DLLs (ne_guest_sys.c's;
+ * NULL in a core without them) */
+const struct win_dll_ne *win_dll_ne_glue(void);
 const char *win_dll_path(int slot);
 const struct win_dll_info *win_dll_get(int slot);
 const struct win_dll_export *win_dll_export_of(int slot, uint16_t ordinal, const char *name);

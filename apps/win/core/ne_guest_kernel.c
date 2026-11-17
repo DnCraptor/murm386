@@ -64,6 +64,26 @@ static int str_out(args *a, uint32_t far, const char *s, uint32_t cap)
     return wr_(a, far, s, n) && wr_(a, far + n, &z, 1);
 }
 
+/* a program's DEVMODE (its dmSize of it, the rest zeros): NULL for none,
+ * or one that cannot be read */
+static const DEVMODE *ne_devmode(args *a, uint32_t far, DEVMODE *m)
+{
+    uint8_t b[sizeof(DEVMODE)];
+    uint16_t sel = (uint16_t)(far >> 16), off = (uint16_t)far;
+    if (!sel || !win_ne_read(a->ctx, sel, off, b, 40))
+        return NULL;
+    unsigned n = (unsigned)(b[36] | b[37] << 8);
+    if (n < 40)
+        return NULL;
+    if (n > sizeof(b))
+        n = sizeof(b);
+    memset(b + 40, 0, sizeof(b) - 40);
+    if (!win_ne_read(a->ctx, sel, off, b, n))
+        return NULL;
+    memcpy(m, b, sizeof(*m));
+    return m;
+}
+
 static uint16_t dgroup(win_ne_guest_api_context *c)
 {
     const win_ne_guest_image *g = c->image;
@@ -1009,9 +1029,11 @@ static __attribute__((noinline)) int gdi_more(args *a, uint16_t service, uint32_
     /* TrueType's */
     case 0x3133: case 0x3134: case 0x3135: case 0x3137: case 0x314c:
         return gdi_tt(a, service, v, dword);
-    case 0x3178:                        /* ResetDC(HDC, DEVMODE FAR *): no printer's to change */
-        *v = w(a, 8);
+    case 0x3178: {                      /* ResetDC(HDC, DEVMODE FAR *): a printer's settings */
+        DEVMODE dm;
+        *v = (uint16_t)(uintptr_t)ResetDC(w(a, 8), ne_devmode(a, dw(a, 4), &dm));
         return 1;
+    }
     case 0x316f: {                      /* AnimatePalette(HPALETTE, first, n, PALETTEENTRY FAR *) */
         UINT n = w(a, 8);
         PALETTEENTRY pe[256];
@@ -1108,6 +1130,16 @@ static __attribute__((noinline)) int gdi_more(args *a, uint16_t service, uint32_
             if (out && *v)
                 wr_(a, out, b, 4);
             return 1;
+        case GETSETPRINTORIENT: {       /* ORIENT FAR * (its first DWORD) or NULL */
+            DWORD o;
+            if (in && rd_(a, in, b, 4)) {
+                o = rd32(b);
+                *v = (uint16_t)Escape(dc, esc, 4, (LPCSTR)&o, NULL);
+            } else if (!in) {
+                *v = (uint16_t)Escape(dc, esc, 0, NULL, NULL);
+            }
+            return 1;
+        }
         case GETTECHNOLOGY:
             *v = (uint16_t)Escape(dc, esc, 0, NULL, s);
             if (*v)
@@ -1129,10 +1161,12 @@ static __attribute__((noinline)) int gdi_more(args *a, uint16_t service, uint32_
     }
     case 0x3035: case 0x3099: {         /* CreateDC, CreateIC(driver, device, output, init) */
         char drv[64], dev[64], out[128];
+        DEVMODE dm;
         if (str_(a, dw(a, 16), drv, sizeof(drv)) && str_(a, dw(a, 12), dev, sizeof(dev)) &&
             str_(a, dw(a, 8), out, sizeof(out)))
             *v = (service == 0x3099 ? CreateIC : CreateDC)(drv[0] ? drv : NULL, dev[0] ? dev : NULL,
-                                                          out[0] ? out : NULL, NULL);
+                                                          out[0] ? out : NULL,
+                                                          ne_devmode(a, dw(a, 4), &dm));
         return 1;
     }
     case 0x3168: {                      /* CreatePalette(const LOGPALETTE FAR *) */

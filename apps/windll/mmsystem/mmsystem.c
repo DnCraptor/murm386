@@ -33,6 +33,9 @@ UINT WINAPI winn_midi_num(void);
 int winn_mci_ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *value);
 /* volume.c */
 int winn_volume_ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *value);
+/* mixer.c */
+int winn_mixer_ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *value);
+void winn_mixer_task_end(uint16_t task);
 void winn_mci_task_end(uint16_t task);
 void winn_mci_term(void);
 
@@ -547,6 +550,9 @@ static int ne_call(win_dll_call *c, uint16_t o, uint32_t *v)
     int wr = winn_volume_ne_call(c, o, v);
     if (wr != WINDLL_NONE)
         return wr;
+    wr = winn_mixer_ne_call(c, o, v);
+    if (wr != WINDLL_NONE)
+        return wr;
     wr = winn_wave_ne_call(c, o, v);
     if (wr != WINDLL_NONE)
         return wr;
@@ -566,7 +572,7 @@ static int ne_call(win_dll_call *c, uint16_t o, uint32_t *v)
     case 30:                            /* OutputDebugStr */
         *v = 0;
         return WINDLL_WORD;
-    case 101: case 201: case 301: case 350: case 501: case 800:
+    case 101: case 201: case 301: case 350: case 501:
         *v = 0;                         /* remaining GetNumDevs: none */
         return WINDLL_WORD;
     case 103: case 110: case 106:       /* joyGetPos(Ex), joySetCapture */
@@ -579,10 +585,10 @@ static int ne_call(win_dll_call *c, uint16_t o, uint32_t *v)
         str_back(c, NE->arg32(c, 6), mm_error(NE->arg16(c, 10)), NE->arg16(c, 4));
         *v = 0;
         return WINDLL_WORD;
-    case 202: case 302: case 351: case 502: case 801:  /* the capabilities */
-    case 204: case 304: case 504: case 802:             /* opens */
-    case 216: case 313: case 354: case 514: case 806:   /* by the device */
-        if (o == 204 || o == 304 || o == 504 || o == 802)
+    case 202: case 302: case 351: case 502:     /* the capabilities */
+    case 204: case 304: case 504:               /* opens */
+    case 216: case 313: case 354: case 514:     /* by the device */
+        if (o == 204 || o == 304 || o == 504)
             put16(c, NE->arg32(c, o == 504 ? 22 : 18), 0);    /* no handle */
         *v = MMSYSERR_BADDEVICEID;
         return o == 216 || o == 313 || o == 354 || o == 514 ? WINDLL_DWORD
@@ -809,6 +815,7 @@ static int ne_call(win_dll_call *c, uint16_t o, uint32_t *v)
 static void task_end(uint16_t task)
 {
     winn_mci_task_end(task);
+    winn_mixer_task_end(task);
     winn_wave_task_end(task);
     winn_midi_task_end(task);
     for (int i = 0; i < TIMERS; i++)
@@ -955,16 +962,16 @@ static const win_dll_export exports[] = {
     { 715, 8, "mciGetDeviceIDFromElementID", NULL },
     { 716, 6, "mciGetYieldProc", NULL },
     { 717, 2, "mciGetCreatorTask", NULL },
-    { 800, 0, "mixerGetNumDevs", (const void *)no_devices },
-    { 801, 8, "mixerGetDevCaps", NULL },
-    { 802, 18, "mixerOpen", NULL },
-    { 803, 2, "mixerClose", NULL },
-    { 804, 12, "mixerMessage", NULL },
-    { 805, 10, "mixerGetLineInfo", NULL },
-    { 806, 10, "mixerGetID", NULL },
-    { 807, 10, "mixerGetLineControls", NULL },
-    { 808, 10, "mixerGetControlDetails", NULL },
-    { 809, 10, "mixerSetControlDetails", NULL },
+    { 800, 0, "mixerGetNumDevs", (const void *)mixerGetNumDevs },
+    { 801, 8, "mixerGetDevCaps", (const void *)mixerGetDevCaps },
+    { 802, 18, "mixerOpen", (const void *)mixerOpen },
+    { 803, 2, "mixerClose", (const void *)mixerClose },
+    { 804, 12, "mixerMessage", (const void *)mixerMessage },
+    { 805, 10, "mixerGetLineInfo", (const void *)mixerGetLineInfo },
+    { 806, 10, "mixerGetID", (const void *)mixerGetID },
+    { 807, 10, "mixerGetLineControls", (const void *)mixerGetLineControls },
+    { 808, 10, "mixerGetControlDetails", (const void *)mixerGetControlDetails },
+    { 809, 10, "mixerSetControlDetails", (const void *)mixerSetControlDetails },
     { 900, 12, "mmTaskCreate", NULL },
     { 902, 2, "mmTaskBlock", NULL },
     { 903, 2, "mmTaskSignal", NULL },

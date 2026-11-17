@@ -1,0 +1,15 @@
+# A printer's settings through its driver (OWLAND): ExtDeviceMode,
+# DeviceCapabilities, landscape A4 kept in WIN.INI, PrintDlg's hDevMode,
+# a landscape page, ResetDC to portrait Letter, the file read back:
+#     ./winhost scripts/owland.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OWLAND
+key RETURN
+wait 300
+snap oland.ppm
+exit

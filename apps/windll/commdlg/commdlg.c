@@ -1561,7 +1561,24 @@ typedef struct {
     DWORD flags;
     UINT from, to, minp, maxp, copies;
     prn_sel sel;
+    DEVMODE dm;                         /* the printer's settings (the driver's) */
+    int have_dm;                        /* the program's: dm for its device */
 } print_req;
+
+/* the settings of the printer chosen: the program's DEVMODE over WIN.INI's
+ * when it is the same device's; 0 if its driver gives none */
+static int load_mode(print_req *r)
+{
+    const DEVMODE *in = r->have_dm && !lstrcmpi(r->dm.dmDeviceName, r->sel.device) ? &r->dm : NULL;
+    DEVMODE m;
+    int rc = PrinterDeviceModeN(r->owner, r->sel.driver, &m, r->sel.device, r->sel.port, in, NULL,
+                                in ? DM_COPY | DM_MODIFY : DM_COPY);
+    if (rc != IDOK)
+        return 0;
+    r->dm = m;
+    r->have_dm = 1;
+    return 1;
+}
 
 /* "Epson LX-350,EPSON9,FILE:" (or without the device: [devices]'s value) */
 static int parse_printer(const char *s, int with_device, prn_sel *p)
@@ -1624,8 +1641,74 @@ static void printer_title(const prn_sel *p, char *out, int size)
 #define IDC_PS_SPECIFIC 301
 #define IDC_PS_LIST     302
 #define IDC_PS_CURRENT  303
+#define IDC_PS_PORTRAIT 304
+#define IDC_PS_LAND     305
+#define IDC_PS_PAPER    306
 
 static print_req *setup_req;
+static prn_sel setup_sel;               /* the printer the dialog shows, its settings */
+static DEVMODE setup_dm;
+static WORD setup_papers[32];
+
+/* the printer's papers, its orientation */
+static void setup_show(HWND dlg)
+{
+    static char names[32 * 64];
+    print_req r = *setup_req;
+    r.sel = setup_sel;
+    r.dm = setup_dm;
+    r.have_dm = 1;
+    if (!load_mode(&r))
+        memset(&r.dm, 0, sizeof(r.dm));
+    setup_dm = r.dm;
+    SendDlgItemMessage(dlg, IDC_PS_PAPER, CB_RESETCONTENT, 0, 0);
+    DWORD n = PrinterCapabilitiesN(setup_sel.driver, setup_sel.device, setup_sel.port,
+                                   DC_PAPERS, NULL, NULL);
+    if (n == (DWORD)-1 || n > 32)
+        n = 0;
+    PrinterCapabilitiesN(setup_sel.driver, setup_sel.device, setup_sel.port, DC_PAPERS,
+                         (LPSTR)setup_papers, NULL);
+    PrinterCapabilitiesN(setup_sel.driver, setup_sel.device, setup_sel.port, DC_PAPERNAMES,
+                         names, NULL);
+    for (DWORD i = 0; i < n; i++) {
+        SendDlgItemMessage(dlg, IDC_PS_PAPER, CB_ADDSTRING, 0, (LPARAM)(names + 64 * i));
+        if (setup_papers[i] == (WORD)setup_dm.dmPaperSize)
+            SendDlgItemMessage(dlg, IDC_PS_PAPER, CB_SETCURSEL, i, 0);
+    }
+    CheckRadioButton(dlg, IDC_PS_PORTRAIT, IDC_PS_LAND,
+                     setup_dm.dmOrientation == DMORIENT_LANDSCAPE ? IDC_PS_LAND : IDC_PS_PORTRAIT);
+}
+
+/* the printer the radio buttons and the list say; 0 if none */
+static int setup_pick(HWND dlg, prn_sel *p)
+{
+    char s[200];
+    if (IsDlgButtonChecked(dlg, IDC_PS_DEFAULT))
+        return default_printer(p);
+    int i = (int)SendDlgItemMessage(dlg, IDC_PS_LIST, CB_GETCURSEL, 0, 0);
+    if (i < 0 || SendDlgItemMessage(dlg, IDC_PS_LIST, CB_GETLBTEXT, (WPARAM)i, (LPARAM)s) < 0)
+        return 0;
+    char *on = s;                       /* "Epson LX-350 on FILE:" */
+    while (*on && !(on[0] == ' ' && on[1] == 'o' && on[2] == 'n' && on[3] == ' '))
+        on++;
+    if (*on)
+        *on = 0;
+    else
+        on = NULL;
+    return named_printer(s, on ? on + 4 : NULL, p);
+}
+
+/* another printer chosen: its settings from WIN.INI */
+static void setup_changed(HWND dlg)
+{
+    prn_sel p;
+    if (!setup_pick(dlg, &p) || (!lstrcmpi(p.device, setup_sel.device) &&
+                                 !lstrcmpi(p.port, setup_sel.port)))
+        return;
+    setup_sel = p;
+    memset(&setup_dm, 0, sizeof(setup_dm));
+    setup_show(dlg);
+}
 
 static BOOL CALLBACK setup_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -1655,29 +1738,33 @@ static BOOL CALLBACK setup_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         SendDlgItemMessage(dlg, IDC_PS_LIST, CB_SETCURSEL, (WPARAM)sel, 0);
         CheckRadioButton(dlg, IDC_PS_DEFAULT, IDC_PS_SPECIFIC,
                          setup_req->sel.is_default ? IDC_PS_DEFAULT : IDC_PS_SPECIFIC);
+        setup_sel = setup_req->sel;
+        setup_dm = setup_req->dm;
+        if (!setup_req->have_dm)
+            memset(&setup_dm, 0, sizeof(setup_dm));
+        setup_show(dlg);
         return TRUE;
     }
     case WM_COMMAND:
-        if (wp == IDC_PS_LIST && HIWORD(lp) == CBN_SELCHANGE)
+        if (wp == IDC_PS_LIST && HIWORD(lp) == CBN_SELCHANGE) {
             CheckRadioButton(dlg, IDC_PS_DEFAULT, IDC_PS_SPECIFIC, IDC_PS_SPECIFIC);
+            setup_changed(dlg);
+        }
+        if ((wp == IDC_PS_DEFAULT || wp == IDC_PS_SPECIFIC) && HIWORD(lp) == BN_CLICKED)
+            setup_changed(dlg);
         if (wp == IDOK) {
-            if (IsDlgButtonChecked(dlg, IDC_PS_DEFAULT)) {
-                if (!default_printer(&setup_req->sel))
-                    return TRUE;
-            } else {
-                int i = (int)SendDlgItemMessage(dlg, IDC_PS_LIST, CB_GETCURSEL, 0, 0);
-                if (i < 0 || SendDlgItemMessage(dlg, IDC_PS_LIST, CB_GETLBTEXT, (WPARAM)i,
-                                                (LPARAM)s) < 0)
-                    return TRUE;
-                char *on = s;           /* "Epson LX-350 on FILE:" */
-                while (*on && !(on[0] == ' ' && on[1] == 'o' && on[2] == 'n' && on[3] == ' '))
-                    on++;
-                if (*on)
-                    *on = 0;
-                else
-                    on = NULL;
-                if (!named_printer(s, on ? on + 4 : NULL, &setup_req->sel))
-                    return TRUE;
+            if (!setup_pick(dlg, &setup_req->sel))
+                return TRUE;
+            int i = (int)SendDlgItemMessage(dlg, IDC_PS_PAPER, CB_GETCURSEL, 0, 0);
+            if (setup_dm.dmSize) {
+                if (i >= 0 && i < 32)
+                    setup_dm.dmPaperSize = (short)setup_papers[i];
+                setup_dm.dmOrientation = IsDlgButtonChecked(dlg, IDC_PS_LAND) ?
+                                         DMORIENT_LANDSCAPE : DMORIENT_PORTRAIT;
+                setup_dm.dmFields |= DM_ORIENTATION | DM_PAPERSIZE;
+                lstrcpyn(setup_dm.dmDeviceName, setup_req->sel.device, CCHDEVICENAME);
+                setup_req->dm = setup_dm;
+                setup_req->have_dm = 1;
             }
             EndDialog(dlg, IDOK);
             return TRUE;
@@ -1697,6 +1784,12 @@ static const DLGITEM_N setup_items[] = {
     { 24, 24, 174, 8, IDC_PS_CURRENT, SS_LEFT | WS_VISIBLE, "STATIC", "" },
     { 12, 34, 180, 10, IDC_PS_SPECIFIC, BS_AUTORADIOBUTTON | WS_VISIBLE, "BUTTON", "Specific &Printer:" },
     { 24, 44, 172, 60, IDC_PS_LIST, CBS_DROPDOWNLIST | WS_VSCROLL | WS_GROUP | WS_TABSTOP | WS_VISIBLE, "COMBOBOX", "" },
+    { 6, 60, 76, 40, -1, BS_GROUPBOX | WS_VISIBLE, "BUTTON", "Orientation" },
+    { 12, 72, 66, 10, IDC_PS_PORTRAIT, BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP | WS_VISIBLE, "BUTTON", "P&ortrait" },
+    { 12, 84, 66, 10, IDC_PS_LAND, BS_AUTORADIOBUTTON | WS_VISIBLE, "BUTTON", "&Landscape" },
+    { 88, 60, 114, 40, -1, BS_GROUPBOX | WS_VISIBLE, "BUTTON", "Paper" },
+    { 94, 72, 26, 10, -1, SS_LEFT | WS_VISIBLE, "STATIC", "Si&ze:" },
+    { 120, 70, 78, 70, IDC_PS_PAPER, CBS_DROPDOWNLIST | WS_VSCROLL | WS_GROUP | WS_TABSTOP | WS_VISIBLE, "COMBOBOX", "" },
     { 208, 6, 50, 14, IDOK, BS_DEFPUSHBUTTON | WS_GROUP | WS_TABSTOP | WS_VISIBLE, "BUTTON", "OK" },
     { 208, 24, 50, 14, IDCANCEL, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "Cancel" },
 };
@@ -1705,7 +1798,7 @@ static int run_setup(print_req *r)
 {
     static const DLGTEMPLATE_N tpl = {
         WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME,
-        sizeof(setup_items) / sizeof(setup_items[0]), 20, 20, 264, 64,
+        sizeof(setup_items) / sizeof(setup_items[0]), 20, 20, 264, 106,
         NULL, NULL, "Print Setup", 0, NULL
     };
     print_req *was = setup_req;
@@ -1845,6 +1938,12 @@ static int print_run(print_req *r, int have_sel)
         last_error = PDERR_NODEFAULTPRN;
         return 0;
     }
+    if (!load_mode(r)) {
+        last_error = PDERR_LOADDRVFAILURE;
+        return 0;
+    }
+    if ((r->flags & PD_USEDEVMODECOPIES) && r->dm.dmCopies >= 1)
+        r->copies = (UINT)r->dm.dmCopies;
     if (r->flags & PD_RETURNDEFAULT)
         return 1;
     if (r->flags & PD_PRINTSETUP)
@@ -1860,7 +1959,16 @@ static int print_run(print_req *r, int have_sel)
     print_cur = was;
     if (rc < 0)
         last_error = CDERR_DIALOGFAILURE;
-    return rc == IDOK;
+    if (rc != IDOK)
+        return 0;
+    /* the driver makes the copies (each page as many times): the program
+     * prints once, if it asks for that */
+    r->dm.dmCopies = 1;
+    if (r->flags & PD_USEDEVMODECOPIES) {
+        r->dm.dmCopies = (short)(r->copies > 99 ? 99 : r->copies);
+        r->copies = 1;
+    }
+    return 1;
 }
 
 /* DEVNAMES: the offsets of the driver, the device and the port (in bytes,
@@ -1898,10 +2006,22 @@ static HDC print_dc(const print_req *r)
 {
     const char *port = r->flags & PD_PRINTTOFILE ? "FILE:" : r->sel.port;
     if (r->flags & PD_RETURNDC)
-        return CreateDC(r->sel.driver, r->sel.device, port, NULL);
+        return CreateDC(r->sel.driver, r->sel.device, port, &r->dm);
     if (r->flags & PD_RETURNIC)
-        return CreateIC(r->sel.driver, r->sel.device, port, NULL);
+        return CreateIC(r->sel.driver, r->sel.device, port, &r->dm);
     return 0;
+}
+
+/* a program's DEVMODE (its dmSize of it), into r->dm */
+static void take_mode(print_req *r, const uint8_t *b, unsigned n)
+{
+    unsigned size = n >= 38 ? (unsigned)(b[36] | b[37] << 8) : 0;
+    if (size < 40 || size > n)
+        return;
+    memset(&r->dm, 0, sizeof(r->dm));
+    memcpy(&r->dm, b, size < sizeof(r->dm) ? size : sizeof(r->dm));
+    r->dm.dmDeviceName[CCHDEVICENAME - 1] = 0;
+    r->have_dm = 1;
 }
 
 static BOOL WINAPI cd_print(LPPRINTDLG pd)
@@ -1926,8 +2046,23 @@ static BOOL WINAPI cd_print(LPPRINTDLG pd)
         have = b && from_devnames(b, (unsigned)GlobalSize(pd->hDevNames), &r.sel);
         GlobalUnlock(pd->hDevNames);
     }
+    if (pd->hDevMode) {
+        const uint8_t *b = (const uint8_t *)GlobalLock(pd->hDevMode);
+        if (b)
+            take_mode(&r, b, (unsigned)GlobalSize(pd->hDevMode));
+        GlobalUnlock(pd->hDevMode);
+    }
     if (!print_run(&r, have))
         return FALSE;
+    if (pd->hDevMode)
+        GlobalFree(pd->hDevMode);
+    pd->hDevMode = GlobalAlloc(GMEM_MOVEABLE, sizeof(DEVMODE));
+    if (pd->hDevMode) {
+        void *p = GlobalLock(pd->hDevMode);
+        if (p)
+            memcpy(p, &r.dm, sizeof(DEVMODE));
+        GlobalUnlock(pd->hDevMode);
+    }
     uint8_t b[256];
     unsigned n = devnames(&r.sel, b, sizeof(b));
     if (pd->hDevNames)
@@ -2281,13 +2416,28 @@ static uint16_t ne_print(win_dll_call *c)
     r.minp = rd16(g + 20);
     r.maxp = rd16(g + 22) ? rd16(g + 22) : 0xffffu;
     r.copies = rd16(g + 24);
-    unsigned old = rd16(g + 8);
+    unsigned old = rd16(g + 8), old_mode = rd16(g + 6);
     int have = old && NE->read(c, (uint32_t)old << 16, b, 8) &&
                NE->read(c, (uint32_t)old << 16, b, sizeof(b)) && from_devnames(b, sizeof(b), &r.sel);
+    uint8_t m[sizeof(DEVMODE)];
+    int mode_ok = 0;                    /* the program's DEVMODE block takes ours */
+    if (old_mode && NE->read(c, (uint32_t)old_mode << 16, m, 40)) {
+        unsigned size = (unsigned)(m[36] | m[37] << 8);
+        if (size >= 40 && size <= sizeof(m) && NE->read(c, (uint32_t)old_mode << 16, m, size)) {
+            take_mode(&r, m, size);
+            mode_ok = size == sizeof(m);
+        }
+    }
     if (!print_run(&r, have))
         return 0;
     unsigned n = devnames(&r.sel, b, sizeof(b));
     HTASK task = GetCurrentTask();
+    uint16_t mode = mode_ok ? (uint16_t)old_mode :
+                    NE->size >= sizeof(win_dll_ne) && NE->task_global ?
+                    NE->task_global((uint16_t)task, sizeof(DEVMODE)) : 0;
+    if (mode && !NE->task_write((uint16_t)task, (uint32_t)mode << 16, &r.dm, sizeof(DEVMODE)))
+        mode = 0;
+    wr16(g + 6, mode);
     uint16_t names = n && NE->size >= sizeof(win_dll_ne) && NE->task_global ?
                      NE->task_global((uint16_t)task, n) : 0;
     if (names)

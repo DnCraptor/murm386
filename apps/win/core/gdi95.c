@@ -2,8 +2,9 @@
  * gdi95.c - GDI's functions a Win16 program may call that are no drawing
  * of WINN's own: Windows 95's Bezier curves, charset, layout and halftone
  * palette, Windows 3.1's priority queues (printer drivers sort with them)
- * and the print spooler's calls (WINN has no printer: every job fails as
- * Windows' does with none set up).
+ * and the print spooler's calls (WINN has no spooler, its printers print
+ * straight to the port, print.c: every job fails as Windows' does with
+ * none set up).
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */

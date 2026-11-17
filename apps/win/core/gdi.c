@@ -1086,9 +1086,8 @@ void gdi_reset_dc(HDC h)
 
 HDC WINAPI CreateDC(LPCSTR driver, LPCSTR device, LPCSTR output, const void *init)
 {
-    (void)init;
-    if (driver && lstrcmpi(driver, "DISPLAY"))
-        return print_create_dc(driver, device, output, 0);     /* a printer's */
+    if (driver && lstrcmpi(driver, "DISPLAY"))      /* a printer's */
+        return print_create_dc(driver, device, output, 0, (const DEVMODE *)init);
     return gdi_create_screen_dc(0);
 }
 
@@ -3121,7 +3120,7 @@ BOOL WINAPI UnrealizeObject(HGDIOBJ obj) { return obj != 0; }
 HDC WINAPI CreateIC(LPCSTR driver, LPCSTR device, LPCSTR output, const void *init)
 {
     if (driver && lstrcmpi(driver, "DISPLAY"))
-        return print_create_dc(driver, device, output, 1);
+        return print_create_dc(driver, device, output, 1, (const DEVMODE *)init);
     return CreateDC(driver, device, output, init);
 }
 

@@ -2,10 +2,11 @@
  * epson9.c - EPSON9.DLL, WINN's printer driver for Epson's 9-pin dot
  * matrix printers (ESC/P: LX-350, LX-300, FX-850, FX-1050 ...)
  * (include/printer_driver.h). A page at 72 x 72 dots an inch, 8 inches
- * wide by 11 long (continuous paper, 80 columns), is printed as 8-dot
- * bands of the one-to-one bit image (ESC * 5, 72 dots an inch), 8/72 inch
- * between them; blank bands are line feeds, the white at the end of a band
- * is not sent.
+ * wide (80 columns) by the paper's length (Letter, A4, Legal, German
+ * fanfold: continuous paper, its length set by ESC C), is printed as
+ * 8-dot bands of the one-to-one bit image (ESC * 5, 72 dots an inch),
+ * 8/72 inch between them; blank bands are line feeds, the white at the end
+ * of a band is not sent.
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
@@ -17,11 +18,21 @@
 
 #define DPI     72
 #define WIDTH   (8 * DPI)               /* 576 dots: 80 columns at 10 a inch */
-#define HEIGHT  (11 * DPI)              /* 792 */
 
 static const char *const models[] = {
     "Epson LX-350", "Epson LX-300", "Epson LX-800", "Epson FX-850", "Epson FX-1050",
     "Epson 9-pin (generic)", NULL,
+};
+
+/* the sheets (tenths of a millimetre), what is printed of them: 8 inches
+ * across in the middle, all the length (the paper goes on) */
+static const win_printer_paper papers[] = {
+    { DMPAPER_LETTER, "Letter 8 1/2 x 11 in", 2159, 2794, 18, 0, WIDTH, 11 * DPI },
+    { DMPAPER_A4, "A4 210 x 297 mm", 2100, 2970, 9, 0, WIDTH, 2970 * DPI / 254 },
+    { DMPAPER_LEGAL, "Legal 8 1/2 x 14 in", 2159, 3556, 18, 0, WIDTH, 14 * DPI },
+    { DMPAPER_FANFOLD_STD_GERMAN, "German Std Fanfold 8 1/2 x 12 in", 2159, 3048, 18, 0, WIDTH,
+      12 * DPI },
+    { 0, NULL, 0, 0, 0, 0, 0, 0 },
 };
 
 static int put(const win_printer_out *out, const void *p, unsigned n)
@@ -29,14 +40,18 @@ static int put(const win_printer_out *out, const void *p, unsigned n)
     return out->write(out->ctx, p, n);
 }
 
-static int start_doc(const win_printer_out *out, const char *model)
+static int start_doc(const win_printer_out *out, const win_printer_job *job)
 {
-    (void)model;
-    static const uint8_t init[] = {
-        0x1b, '@',                      /* ESC @: the printer's defaults */
-        0x1b, 'C', 0, 11,               /* ESC C 0 11: pages 11 inches long */
-    };
-    return put(out, init, sizeof(init));
+    int tenths = job->paper->length * 10 / 254;     /* its length, tenths of an inch */
+    uint8_t init[6] = { 0x1b, '@', 0x1b, 'C', 0, 0 };   /* ESC @: the printer's defaults */
+    unsigned n = 6;
+    if (tenths % 10 == 0) {             /* ESC C 0 n: n inches */
+        init[5] = (uint8_t)(tenths / 10);
+    } else {                            /* ESC C n: n lines of a sixth of an inch */
+        init[4] = (uint8_t)((job->paper->length * 60 / 254 + 5) / 10);
+        n = 5;
+    }
+    return put(out, init, n);
 }
 
 /* a dot of the page: black (the bitmap's 0) */
@@ -94,18 +109,15 @@ static int end_doc(const win_printer_out *out, int aborted)
 
 static const win_printer_driver driver = {
     WIN_PRINTER_DRIVER_VERSION, sizeof(win_printer_driver), "Epson 9-pin (ESC/P)", models,
-    DPI, DPI, WIDTH, HEIGHT, start_doc, page, end_doc,
+    DPI, DPI, papers, start_doc, page, end_doc,
 };
 
-static const win_printer_driver *entry(void) { return &driver; }
-
-static const win_dll_export exports[] = {
-    { 1, 0, "WinPrinterDriver", (const void *)entry },
-};
+WIN_PRINTER_DRIVER_EXPORTS(epson9, "EPSON9", driver);
 
 static const win_dll_info info = {
     WINDLL_VERSION, sizeof(win_dll_info), "EPSON9",
-    exports, sizeof(exports) / sizeof(exports[0]), NULL, NULL, NULL, NULL,
+    epson9_exports, sizeof(epson9_exports) / sizeof(epson9_exports[0]), epson9_ne_call,
+    NULL, NULL, NULL,
 };
 
 const win_dll_info *WinDllInit(void) { return &info; }

@@ -111,4 +111,115 @@ MMRESULT WINAPI auxGetDevCaps(UINT id, void *caps, UINT size);
 MMRESULT WINAPI auxGetVolume(UINT id, LPDWORD volume);
 MMRESULT WINAPI auxSetVolume(UINT id, DWORD volume);
 
+/* The mixer (Windows 95's API, mixer.c): one device, its destination the
+ * speakers (the master volume) with two sources, the wave output and the
+ * synthesizer (MIDI); each line a volume and a mute (the volumes above,
+ * the same ones). The structures are Win32's (a Win16 program's are
+ * converted). */
+#define CALLBACK_TYPEMASK 0x00070000ul
+#define CALLBACK_WINDOW 0x00010000ul
+#define CALLBACK_FUNCTION 0x00030000ul
+typedef UINT HMIXER;
+typedef UINT HMIXEROBJ;
+#define MIXER_SHORT_NAME_CHARS  16
+#define MIXER_LONG_NAME_CHARS   64
+typedef struct {
+    WORD wMid, wPid;
+    UINT vDriverVersion;
+    char szPname[32];
+    DWORD fdwSupport, cDestinations;
+} MIXERCAPS, *LPMIXERCAPS;
+typedef struct {
+    DWORD cbStruct, dwDestination, dwSource, dwLineID, fdwLine, dwUser, dwComponentType;
+    DWORD cChannels, cConnections, cControls;
+    char szShortName[MIXER_SHORT_NAME_CHARS], szName[MIXER_LONG_NAME_CHARS];
+    struct {
+        DWORD dwType, dwDeviceID;
+        WORD wMid, wPid;
+        UINT vDriverVersion;
+        char szPname[32];
+    } Target;
+} MIXERLINE, *LPMIXERLINE;
+typedef struct {
+    DWORD cbStruct, dwControlID, dwControlType, fdwControl, cMultipleItems;
+    char szShortName[MIXER_SHORT_NAME_CHARS], szName[MIXER_LONG_NAME_CHARS];
+    union {
+        struct { LONG lMinimum, lMaximum; };
+        struct { DWORD dwMinimum, dwMaximum; };
+        DWORD dwReserved[6];
+    } Bounds;
+    union {
+        DWORD cSteps, cbCustomData;
+        DWORD dwReserved[6];
+    } Metrics;
+} MIXERCONTROL, *LPMIXERCONTROL;
+typedef struct {
+    DWORD cbStruct, dwLineID;
+    union { DWORD dwControlID, dwControlType; };
+    DWORD cControls, cbmxctrl;
+    LPMIXERCONTROL pamxctrl;
+} MIXERLINECONTROLS, *LPMIXERLINECONTROLS;
+typedef struct {
+    DWORD cbStruct, dwControlID, cChannels;
+    union { HWND hwndOwner; DWORD cMultipleItems; };
+    DWORD cbDetails;
+    void *paDetails;
+} MIXERCONTROLDETAILS, *LPMIXERCONTROLDETAILS;
+typedef struct { DWORD dwValue; } MIXERCONTROLDETAILS_UNSIGNED;
+typedef struct { LONG fValue; } MIXERCONTROLDETAILS_BOOLEAN;
+
+#define MIXER_OBJECTF_HANDLE            0x80000000L
+#define MIXER_OBJECTF_MIXER             0x00000000L
+#define MIXER_OBJECTF_HMIXER            0x80000000L
+#define MIXER_OBJECTF_WAVEOUT           0x10000000L
+#define MIXER_OBJECTF_HWAVEOUT          0x90000000L
+#define MIXER_OBJECTF_WAVEIN            0x20000000L
+#define MIXER_OBJECTF_HWAVEIN           0xA0000000L
+#define MIXER_OBJECTF_MIDIOUT           0x30000000L
+#define MIXER_OBJECTF_HMIDIOUT          0xB0000000L
+#define MIXER_OBJECTF_MIDIIN            0x40000000L
+#define MIXER_OBJECTF_HMIDIIN           0xC0000000L
+#define MIXER_OBJECTF_AUX               0x50000000L
+#define MIXER_GETLINEINFOF_DESTINATION  0x00000000L
+#define MIXER_GETLINEINFOF_SOURCE       0x00000001L
+#define MIXER_GETLINEINFOF_LINEID       0x00000002L
+#define MIXER_GETLINEINFOF_COMPONENTTYPE 0x00000003L
+#define MIXER_GETLINEINFOF_TARGETTYPE   0x00000004L
+#define MIXER_GETLINEINFOF_QUERYMASK    0x0000000FL
+#define MIXER_GETLINECONTROLSF_ALL      0x00000000L
+#define MIXER_GETLINECONTROLSF_ONEBYID  0x00000001L
+#define MIXER_GETLINECONTROLSF_ONEBYTYPE 0x00000002L
+#define MIXER_GETLINECONTROLSF_QUERYMASK 0x0000000FL
+#define MIXER_GETCONTROLDETAILSF_VALUE  0x00000000L
+#define MIXER_GETCONTROLDETAILSF_LISTTEXT 0x00000001L
+#define MIXER_GETCONTROLDETAILSF_QUERYMASK 0x0000000FL
+#define MIXER_SETCONTROLDETAILSF_VALUE  0x00000000L
+#define MIXER_SETCONTROLDETAILSF_QUERYMASK 0x0000000FL
+#define MIXERLINE_LINEF_ACTIVE          0x00000001L
+#define MIXERLINE_LINEF_SOURCE          0x80000000L
+#define MIXERLINE_COMPONENTTYPE_DST_SPEAKERS    4
+#define MIXERLINE_COMPONENTTYPE_SRC_SYNTHESIZER 0x1004
+#define MIXERLINE_COMPONENTTYPE_SRC_WAVEOUT     0x1008
+#define MIXERLINE_TARGETTYPE_UNDEFINED  0
+#define MIXERLINE_TARGETTYPE_WAVEOUT    1
+#define MIXERLINE_TARGETTYPE_MIDIOUT    3
+#define MIXERCONTROL_CONTROLF_UNIFORM   0x00000001L
+#define MIXERCONTROL_CONTROLTYPE_MUTE   0x20010002L
+#define MIXERCONTROL_CONTROLTYPE_VOLUME 0x50030001L
+#define MIXERR_INVALLINE                1024
+#define MIXERR_INVALCONTROL             1025
+#define MIXERR_INVALVALUE               1026
+#define MM_MIXM_LINE_CHANGE             0x3D0
+#define MM_MIXM_CONTROL_CHANGE          0x3D1
+UINT     WINAPI mixerGetNumDevs(void);
+MMRESULT WINAPI mixerGetDevCaps(UINT id, LPMIXERCAPS caps, UINT size);
+MMRESULT WINAPI mixerOpen(HMIXER *h, UINT id, DWORD callback, DWORD instance, DWORD flags);
+MMRESULT WINAPI mixerClose(HMIXER h);
+DWORD    WINAPI mixerMessage(HMIXER h, UINT msg, DWORD p1, DWORD p2);
+MMRESULT WINAPI mixerGetLineInfo(HMIXEROBJ h, LPMIXERLINE line, DWORD flags);
+MMRESULT WINAPI mixerGetID(HMIXEROBJ h, UINT *id, DWORD flags);
+MMRESULT WINAPI mixerGetLineControls(HMIXEROBJ h, LPMIXERLINECONTROLS lc, DWORD flags);
+MMRESULT WINAPI mixerGetControlDetails(HMIXEROBJ h, LPMIXERCONTROLDETAILS cd, DWORD flags);
+MMRESULT WINAPI mixerSetControlDetails(HMIXEROBJ h, LPMIXERCONTROLDETAILS cd, DWORD flags);
+
 #endif /* WINN_MMSYSTEM_H */
