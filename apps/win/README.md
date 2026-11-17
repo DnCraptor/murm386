@@ -169,13 +169,13 @@ and TrueType fonts, the screen's and the "printer's" alike, their styles,
 simulated or not, sizes (a TrueType face's Windows' list, 8 to 72), effects
 and colour, a sample), Print (the default printer, all, the selection or
 pages, copies, to a file; Setup...) and Print Setup (the default printer or
-another installed one), their DC or IC and DEVNAMES (hDevMode stays 0;
-with no printer installed "No default printer", PDERR_NODEFAULTPRN), GetFileTitle, CommDlgExtendedError; hooks
+another installed one, its orientation and paper), their DC or IC,
+DEVNAMES and DEVMODE (with no printer installed "No default printer", PDERR_NODEFAULTPRN), GetFileTitle, CommDlgExtendedError; hooks
 and templates are left out. Native applications call them as they are
 (`include/commdlg.h`): WINN loads the DLL for the task at its first call
-of one. MMSYSTEM has no
-devices (none of each kind: wave, MIDI, aux, joysticks, mixers; their
-opens fail, MCI has none, sndPlaySound and PlaySound play nothing), the
+of one. MMSYSTEM's devices
+are its drivers' (Volume below: wave output, MIDI, the master volume, a
+mixer; no inputs, no joysticks; sndPlaySound and PlaySound play nothing), the
 multimedia timer (timeGetTime, timeGetSystemTime, timeGetDevCaps,
 timeSetEvent: its procedure is called as the program takes its messages,
 as a timer's, as often as its period went by since, ten times at most),
@@ -476,7 +476,8 @@ switched, the visible area, Windows 95's KERNEL and USER for Win16),
 structures, DrawEdge, DrawFrameControl, DrawState, Bézier curves),
 `OWMIDI` (Windows 95's MIDI streams), `OWPRINT` (printing on EPSON9),
 `OWLAND` (a printer driver's ExtDeviceMode, DeviceCapabilities, DEVMODE,
-ResetDC), `OWMIXER` (the mixer API)
+ResetDC), `OWMIXER` (the mixer API), `OWWAVE` (waveOut and MCI's
+waveaudio on HOSTWAVE.DLL)
 (`make NEFIXTURES` in
 `host/`). All have DOS MZ stubs that explain how to launch them under WINN
 when invoked directly from DOS. `host/test_ne_run` runs them on the
@@ -625,6 +626,24 @@ inch, 8 inches across (80 columns of continuous paper) on Letter, A4,
 Legal and German fanfold (the length set by ESC C), bands of the
 one-to-one bit image (ESC * 5), blank bands as line feeds. The Control
 Panel's Printers has its Setup... (the driver's dialog).
+
+## Wave output
+
+`SYSTEM.INI` [drivers] wave= names the wave driver, a native DLL exporting
+`WinWaveDriver` (`include/wave_driver.h`): `SBWAVE.DLL` plays on the
+emulator's Sound Blaster 16. The blocks are queued, the next submitted
+while one plays: waveOut fills each from the program's headers in turn
+(a block may end one and begin the next), MCI's waveaudio from the file.
+SBWAVE puts them one after another into a ring the DMA goes round
+(auto-initialised) and gives the DSP all that is there as one transfer
+that ends by itself (auto-init, then DA/D9), the next as soon as it ends,
+while the SB16 still plays what it has buffered: they play without a gap,
+and the SB16, which reads ahead of what it plays, never reads past the
+samples (a single-cycle transfer a block, as before, dropped what the
+SB16 had buffered of the one before). `host/test_sbwave` runs it on a
+model of the emulator's SB16 and DMA. The host's tests use
+`HOSTWAVE.DLL` (`host/host_wave.c`): its blocks on stderr, the samples in
+HOSTWAVE.RAW.
 
 ## Volume
 
@@ -909,6 +928,7 @@ list the links.
     ./winhost scripts/prsetup.txt PROGMAN    # COMMDLG's Print Setup: landscape A4, printed across
     ./winhost scripts/owland.txt PROGMAN     # ExtDeviceMode, DeviceCapabilities, DEVMODE DCs, ResetDC
     ./winhost scripts/owmixer.txt PROGMAN    # the mixer API: lines, controls, details, notifications
+    ./winhost scripts/owwave.txt PROGMAN     # waveOut and MCI on HOSTWAVE.DLL: blocks without gaps
     ./winhost scripts/logo.txt PROGMAN       # the logo (copy the BMPs into HOSTWIN first)
     ./winhost800 scripts/vga800.txt  # the VGA800 driver, built in
     ./winhostvga scripts/vga.txt     # the built-in VGA driver (640x480x16), Win16 programs too

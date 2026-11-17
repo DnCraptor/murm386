@@ -120,7 +120,7 @@ void winn_volume_pcm(uint8_t *p, unsigned n, unsigned bits, unsigned channels)
         for (unsigned i = 0; i + 1 < n; i += 2) {
             unsigned g = channels == 2 && (i / 2) % 2 ? r : l;
             int32_t s = (int16_t)(p[i] | p[i + 1] << 8);
-            s = (int32_t)((int64_t)s * (int64_t)g / 65535);
+            s = s * (int32_t)g >> 16;   /* 32767 * 65535 fits: no 64-bit division */
             p[i] = (uint8_t)s;
             p[i + 1] = (uint8_t)((uint16_t)s >> 8);
         }
@@ -128,7 +128,7 @@ void winn_volume_pcm(uint8_t *p, unsigned n, unsigned bits, unsigned channels)
         for (unsigned i = 0; i < n; i++) {
             unsigned g = channels == 2 && i % 2 ? r : l;
             int32_t s = (int32_t)p[i] - 128;
-            p[i] = (uint8_t)(s * (int32_t)g / 65535 + 128);
+            p[i] = (uint8_t)((s * (int32_t)g >> 16) + 128);
         }
     }
 }

@@ -73,6 +73,8 @@ typedef struct {
     HFILE file;
     const win_wave_driver *driver;
     uint32_t data_offset, data_size, cursor, completed, active;
+    uint32_t queued[4];                 /* the blocks queued after active */
+    uint8_t nqueued;
     uint32_t active_started, rate, avg_rate, end_at, time_format, mode;
     uint16_t bits, channels, block, timer;
     HWND notify;
@@ -167,7 +169,7 @@ static const win_wave_driver *load_driver(HMODULE *module) {
     const win_wave_driver *d = init ? init() : NULL;
     if (!d || d->version != WIN_WAVE_DRIVER_VERSION || d->size < sizeof(*d) ||
         !d->present || !d->open || !d->close || !d->submit || !d->finished ||
-        !d->stop || !d->pause || !d->max_bytes || !d->present()) {
+        !d->stop || !d->pause || !d->max_bytes || !d->room || !d->present()) {
         FreeLibrary(h);
         return NULL;
     }
@@ -234,6 +236,7 @@ static void stop_play(unsigned abort) {
     if (wave.driver) wave.driver->stop();
     if (wave.playing) wave.cursor = wave.completed = position_bytes();
     wave.active = 0;
+    wave.nqueued = 0;
     wave.playing = wave.paused = 0;
     wave.mode = MCI_MODE_STOP;
     if (wave.timer) { KillTimer(0, wave.timer); wave.timer = 0; }
@@ -248,34 +251,46 @@ void winn_mci_wave_close(void) {
     memset(&wave, 0, sizeof(wave));
     FreeLibrary(module);
 }
+/* the blocks played counted; the next read while one plays (the driver
+ * queues it), so they follow without a gap */
 static void pump(void) {
     if (!owned() || !wave.playing || wave.paused) return;
-    if (wave.active) {
-        if (!wave.driver->finished()) return;
+    for (int done = wave.active ? wave.driver->finished() : 0; done > 0 && wave.active; done--) {
         wave.completed += wave.active;
-        wave.active = 0;
+        wave.active = wave.nqueued ? wave.queued[0] : 0;
+        if (wave.nqueued) {
+            wave.nqueued--;
+            memmove(wave.queued, wave.queued + 1, wave.nqueued * sizeof(wave.queued[0]));
+        }
+        wave.active_started = GetTickCount();
     }
-    if (wave.completed >= wave.end_at || wave.cursor >= wave.end_at) {
+    if (!wave.active && (wave.completed >= wave.end_at || wave.cursor >= wave.end_at)) {
         HWND h = wave.notify;
         wave.notify = 0;
         stop_play(0);
         notify(h, MCI_NOTIFY_SUCCESSFUL);
         return;
     }
-    uint32_t n = wave.end_at - wave.cursor;
-    if (n > sizeof(buffer)) n = sizeof(buffer);
-    if (n > wave.driver->max_bytes) n = wave.driver->max_bytes;
-    n -= n % wave.block;
-    int ok = n && read_at(wave.file, wave.data_offset + wave.cursor, buffer, n);
-    if (ok)
-        winn_volume_pcm(buffer, n, wave.bits, wave.channels);  /* volume.c */
-    if (!ok || !wave.driver->submit(buffer, n, wave.rate, wave.bits, wave.channels)) {
-        stop_play(1);
-        return;
+    while (wave.nqueued < 4 && wave.cursor < wave.end_at && wave.driver->room() > 0) {
+        uint32_t n = wave.end_at - wave.cursor;
+        if (n > sizeof(buffer)) n = sizeof(buffer);
+        if (n > wave.driver->max_bytes) n = wave.driver->max_bytes;
+        n -= n % wave.block;
+        int ok = n && read_at(wave.file, wave.data_offset + wave.cursor, buffer, n);
+        if (ok)
+            winn_volume_pcm(buffer, n, wave.bits, wave.channels);  /* volume.c */
+        if (!ok || !wave.driver->submit(buffer, n, wave.rate, wave.bits, wave.channels)) {
+            stop_play(1);
+            return;
+        }
+        if (wave.active) {
+            wave.queued[wave.nqueued++] = n;
+        } else {
+            wave.active = n;
+            wave.active_started = GetTickCount();
+        }
+        wave.cursor += n;
     }
-    wave.active = n;
-    wave.active_started = GetTickCount();
-    wave.cursor += n;
 }
 static void CALLBACK tick(HWND h, UINT m, UINT id, DWORD now) {
     (void)h; (void)m; (void)id; (void)now;
@@ -323,6 +338,7 @@ uint32_t winn_mci_wave_command(win_dll_call *c, uint16_t msg, uint32_t flags, ui
             wave.cursor = wave.completed;
             wave.driver->stop();
             wave.active = 0;
+    wave.nqueued = 0;
             wave.playing = 0;
             wave.paused = 1;
             wave.mode = MCI_MODE_PAUSE;
@@ -467,7 +483,7 @@ uint32_t winn_mci_wave_string(const char *op, const char *rest, char *result,
     if (!lstrcmpi(op, "pause")) {
         if (wave.playing) {
             wave.completed = position_bytes(); wave.cursor = wave.completed;
-            wave.driver->stop(); wave.playing = 0; wave.active = 0;
+            wave.driver->stop(); wave.playing = 0; wave.active = 0; wave.nqueued = 0;
             wave.paused = 1; wave.mode = MCI_MODE_PAUSE;
             if (wave.timer) { KillTimer(0, wave.timer); wave.timer = 0; }
         }

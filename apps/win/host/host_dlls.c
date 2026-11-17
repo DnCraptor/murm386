@@ -18,6 +18,7 @@ const win_dll_info *sound_WinDllInit(void);
 const win_dll_info *system_WinDllInit(void);
 const win_dll_info *mouse_WinDllInit(void);
 const win_dll_info *hostmidi_WinDllInit(void);
+const win_dll_info *hostwave_WinDllInit(void);
 const win_dll_info *epson9_WinDllInit(void);
 
 const win_dll_builtin win_dll_builtins[] = {
@@ -32,6 +33,7 @@ const win_dll_builtin win_dll_builtins[] = {
     { "SYSTEM", system_WinDllInit },
     { "MOUSE", mouse_WinDllInit },
     { "HOSTMIDI", hostmidi_WinDllInit },     /* host_midi.c */
+    { "HOSTWAVE", hostwave_WinDllInit },     /* host_wave.c */
     { "EPSON9", epson9_WinDllInit },
     { NULL, NULL },
 };

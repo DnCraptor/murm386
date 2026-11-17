@@ -17,7 +17,7 @@ GDICORE  = $(filter-out ../core/exports.c ../core/task.c ../core/file.c ../core/
 # the applications, built in; each WinMain gets its own name
 APPS     = demo.o progman.o notepad.o clock.o calc.o control.o winfile.o taskman.o winmine.o winhelp.o hlpfile.o appinfo.o
 # the native DLLs, built in (host_dlls.c names them); each WinDllInit its own
-DLLS     = lzexpand.o ver.o ddeml.o mmsystem.o wave.o midi.o mci.o mci_wave.o volume.o mixer.o commdlg.o olecli.o olesvr.o sound.o system.o mouse.o epson9.o host_dlls.c host_midi.c
+DLLS     = lzexpand.o ver.o ddeml.o mmsystem.o wave.o midi.o mci.o mci_wave.o volume.o mixer.o commdlg.o olecli.o olesvr.o sound.o system.o mouse.o epson9.o host_dlls.c host_midi.c host_wave.c
 
 all: test_gdi test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_launch test_ne_rm_gate test_ne_run NEFIXTURES winhost winhost800 winhostvga HOSTWIN
 
@@ -77,7 +77,7 @@ WINNTEST.TTF: mkttf.py ../core/sysfont.c ../core/gdi_text.c
 	python3 mkttf.py WINNTEST.TTF WINNTEST.FOT
 WINNTEST.FOT: WINNTEST.TTF
 OWHELLO.EXE OWBUSY.EXE OWWIN.EXE OWMENU.EXE OWSEGS.EXE OWDEMO.EXE OWFILE.EXE OWFILEL.EXE OWRES.EXE OWKERN.EXE OWUSE.EXE \
-	OWDLL.DLL OWDLL2.DLL OWFPU.EXE OWAPI.EXE OWGDI.EXE OWAPI2.EXE OWMETA.EXE OWSYS.EXE OWFONT.EXE OWHELP.EXE OWDLG.EXE OWMISC.EXE OWSND.EXE OW31.EXE OWTT.EXE OWMORE.EXE OWDRV.DLL OW95.EXE OW95X.EXE OWMIDI.EXE OWPRINT.EXE OWLAND.EXE OWMIXER.EXE: mkne_watcom.py
+	OWDLL.DLL OWDLL2.DLL OWFPU.EXE OWAPI.EXE OWGDI.EXE OWAPI2.EXE OWMETA.EXE OWSYS.EXE OWFONT.EXE OWHELP.EXE OWDLG.EXE OWMISC.EXE OWSND.EXE OW31.EXE OWTT.EXE OWMORE.EXE OWDRV.DLL OW95.EXE OW95X.EXE OWMIDI.EXE OWPRINT.EXE OWLAND.EXE OWMIXER.EXE OWWAVE.EXE: mkne_watcom.py
 	python3 mkne_watcom.py $(basename $@) $@
 # Win32 programs (PE) built by Open Watcom
 OW32.EXE OW32DLL.DLL: mkpe_watcom.py
@@ -88,7 +88,7 @@ SELFLOAD.EXE: mkne_selfload.py OWSEGS.EXE
 NEFIXTURES: NEAPP-fixture.exe NEDIALOG.EXE NELOOP-fixture.exe NEFAULT.EXE NEHANG.EXE \
 	NESTACK.EXE NECLI.EXE NEOUT.EXE NECR0.EXE NEHLT.EXE NEFPU.EXE NEUNDEF.EXE OWHELLO.EXE OWBUSY.EXE \
 	OWWIN.EXE OWMENU.EXE OWSEGS.EXE OWDEMO.EXE OWFILE.EXE OWFILEL.EXE OWRES.EXE OWKERN.EXE \
-	OWUSE.EXE OWDLL.DLL OWDLL2.DLL OWFPU.EXE OWAPI.EXE OWGDI.EXE OWAPI2.EXE OWMETA.EXE OWSYS.EXE OWFONT.EXE OWHELP.EXE OWDLG.EXE OWMISC.EXE OWSND.EXE OW31.EXE OWTT.EXE OWMORE.EXE OWDRV.DLL OW95.EXE OW95X.EXE OWMIDI.EXE OWPRINT.EXE OWLAND.EXE OWMIXER.EXE WINNTEST.FON WINNTEST.HLP WINNTEST.TTF WINNTEST.FOT \
+	OWUSE.EXE OWDLL.DLL OWDLL2.DLL OWFPU.EXE OWAPI.EXE OWGDI.EXE OWAPI2.EXE OWMETA.EXE OWSYS.EXE OWFONT.EXE OWHELP.EXE OWDLG.EXE OWMISC.EXE OWSND.EXE OW31.EXE OWTT.EXE OWMORE.EXE OWDRV.DLL OW95.EXE OW95X.EXE OWMIDI.EXE OWPRINT.EXE OWLAND.EXE OWMIXER.EXE OWWAVE.EXE WINNTEST.FON WINNTEST.HLP WINNTEST.TTF WINNTEST.FOT \
 	OW32.EXE OW32DLL.DLL SELFLOAD.EXE
 
 test_ne_multi: ../core/ne.c ../core/ne_guest.c test_ne_multi.c NEAPP-fixture.exe
@@ -124,9 +124,13 @@ test_ne_boot: ../core/ne_boot.c test_ne_boot.c
 	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ $^
 
 # Host cursor regression is 64-bit safe and does not need native GDI.
-all check: test_cursor_wait
+all check: test_cursor_wait test_sbwave
 test_cursor_wait: ../core/cursor.c test_cursor_wait.c
 	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined $(INC) -o $@ $^
+# SBWAVE.DLL on a model of the emulator's SB16 and DMA
+test_sbwave: test_sbwave.c ../../windll/sbwave/sbwave.c ../include/wave_driver.h
+	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined $(INC) -I../../api \
+		-DWinDllInit=sbwave_WinDllInit -o $@ test_sbwave.c ../../windll/sbwave/sbwave.c
 
 # The tests that take a file
 check: test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_launch test_ne_rm_gate test_ne_run NEFIXTURES
@@ -136,6 +140,7 @@ check: test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test
 		NESTACK.EXE NECLI.EXE NEOUT.EXE NECR0.EXE NEHLT.EXE NEFPU.EXE NEUNDEF.EXE OWHELLO.EXE OWBUSY.EXE \
 		OWSEGS.EXE
 	./test_cursor_wait
+	./test_sbwave
 
 demo.o: ../../winapps/demo/demo.c
 	$(CC) $(CFLAGS) $(INC) -DWinMain=demo_WinMain -c -o $@ $<
@@ -230,7 +235,7 @@ HOSTWIN: NEFIXTURES
 	mkdir -p HOSTWIN
 	cp NEDIALOG.EXE NEFAULT.EXE NEHANG.EXE OWHELLO.EXE OWBUSY.EXE OWWIN.EXE OWMENU.EXE OWSEGS.EXE \
 		OWDEMO.EXE OWFILE.EXE OWFILEL.EXE OWRES.EXE OWKERN.EXE OWUSE.EXE OWDLL.DLL OWDLL2.DLL OWFPU.EXE \
-		OWAPI.EXE OWGDI.EXE OWAPI2.EXE OWMETA.EXE OWSYS.EXE OWFONT.EXE OWHELP.EXE OWDLG.EXE OWMISC.EXE OWSND.EXE OW31.EXE OWTT.EXE OWMORE.EXE OWDRV.DLL OW95.EXE OW95X.EXE OWMIDI.EXE OWPRINT.EXE OWLAND.EXE OWMIXER.EXE WINNTEST.FON WINNTEST.HLP WINNTEST.TTF WINNTEST.FOT \
+		OWAPI.EXE OWGDI.EXE OWAPI2.EXE OWMETA.EXE OWSYS.EXE OWFONT.EXE OWHELP.EXE OWDLG.EXE OWMISC.EXE OWSND.EXE OW31.EXE OWTT.EXE OWMORE.EXE OWDRV.DLL OW95.EXE OW95X.EXE OWMIDI.EXE OWPRINT.EXE OWLAND.EXE OWMIXER.EXE OWWAVE.EXE WINNTEST.FON WINNTEST.HLP WINNTEST.TTF WINNTEST.FOT \
 		OW32.EXE OW32DLL.DLL SELFLOAD.EXE HOSTWIN/
 	cp ../WIN.INI HOSTWIN/
 	touch HOSTWIN/DEMO.EXE HOSTWIN/PROGMAN.EXE HOSTWIN/NOTEPAD.EXE HOSTWIN/CLOCK.EXE HOSTWIN/CALC.EXE HOSTWIN/CONTROL.EXE HOSTWIN/WINFILE.EXE HOSTWIN/TASKMAN.EXE HOSTWIN/WINMINE.EXE HOSTWIN/WINN.EXE HOSTWIN/NC.EXE
@@ -240,11 +245,11 @@ HOSTWIN: NEFIXTURES
 	cp HOSTWIN/README.TXT HOSTWIN/DOCS/README.TXT
 
 clean:
-	rm -rf test_gdi test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_launch test_ne_rm_gate test_ne_run i386-host.o *-fixture.exe NEDIALOG.EXE NEFAULT.EXE NEHANG.EXE NESTACK.EXE NECLI.EXE NEOUT.EXE NECR0.EXE NEHLT.EXE NEFPU.EXE NEUNDEF.EXE OWHELLO.EXE OWBUSY.EXE OWWIN.EXE OWMENU.EXE OWSEGS.EXE OWDEMO.EXE OWDEMO.TMP OWFILE.EXE OWFILEL.EXE OWRES.EXE OWKERN.EXE OWUSE.EXE OWDLL.DLL OWDLL2.DLL OWFPU.EXE OWAPI.EXE OWGDI.EXE OWAPI2.EXE OWMETA.EXE OWSYS.EXE OWFONT.EXE OWHELP.EXE OWDLG.EXE OWMISC.EXE OWSND.EXE OW31.EXE OWTT.EXE OWMORE.EXE OWDRV.DLL OW95.EXE OW95X.EXE OWMIDI.EXE OWPRINT.EXE OWLAND.EXE OWMIXER.EXE SELFLOAD.EXE WINNTEST.FON WINNTEST.HLP WINNTEST.TTF WINNTEST.FOT winhost winhost800 winhostvga *.o *.ppm *.png appinfo.c HOSTWIN
+	rm -rf test_gdi test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_launch test_ne_rm_gate test_ne_run i386-host.o *-fixture.exe NEDIALOG.EXE NEFAULT.EXE NEHANG.EXE NESTACK.EXE NECLI.EXE NEOUT.EXE NECR0.EXE NEHLT.EXE NEFPU.EXE NEUNDEF.EXE OWHELLO.EXE OWBUSY.EXE OWWIN.EXE OWMENU.EXE OWSEGS.EXE OWDEMO.EXE OWDEMO.TMP OWFILE.EXE OWFILEL.EXE OWRES.EXE OWKERN.EXE OWUSE.EXE OWDLL.DLL OWDLL2.DLL OWFPU.EXE OWAPI.EXE OWGDI.EXE OWAPI2.EXE OWMETA.EXE OWSYS.EXE OWFONT.EXE OWHELP.EXE OWDLG.EXE OWMISC.EXE OWSND.EXE OW31.EXE OWTT.EXE OWMORE.EXE OWDRV.DLL OW95.EXE OW95X.EXE OWMIDI.EXE OWPRINT.EXE OWLAND.EXE OWMIXER.EXE OWWAVE.EXE SELFLOAD.EXE WINNTEST.FON WINNTEST.HLP WINNTEST.TTF WINNTEST.FOT winhost winhost800 winhostvga *.o *.ppm *.png appinfo.c HOSTWIN
 
 .PHONY: all check clean HOSTWIN NEFIXTURES
 
 clean: clean_cursor_wait
 clean_cursor_wait:
-	rm -f test_cursor_wait
+	rm -f test_cursor_wait test_sbwave
 .PHONY: clean_cursor_wait

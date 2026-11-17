@@ -1,0 +1,15 @@
+# Wave output on the host's driver (OWWAVE, HOSTWAVE.DLL): eight headers
+# written at once, a WAV file by MCI; the driver's blocks on stderr, one
+# after another without gaps, HOSTWAVE.RAW all the samples:
+#     ./winhost scripts/owwave.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OWWAVE
+key RETURN
+wait 3500
+snap owave.ppm
+exit

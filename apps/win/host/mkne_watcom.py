@@ -255,6 +255,14 @@ OWMIXER: Windows 95's mixer API: the device, its destination and sources
     (MM_MIXM_CONTROL_CHANGE): "1 mixer: 0 "SB16 Mixer (murm386)" 1
     destination; open 0", ..., "set 0: auxGetVolume 0 20004000 ...; mute
     0: 1", "5 changes told, the last control 1; master read 8000"
+
+OWWAVE: wave output on the host's driver (HOSTWAVE.DLL, host_wave.c, named
+    in SYSTEM.INI by the program): eight headers of 1500 bytes written at
+    once, then a WAV file of 20000 bytes by MCI ("play ... notify"): "8
+    done, in order 1, position 12000 bytes, close 0", "MCI: open 0, play 0,
+    notify 1, at 1814 ms, close 0"; the driver's blocks on stderr ("wave
+    block 4096 at 452, gap 0": a block filled from several headers, queued
+    while the one before plays, none apart), HOSTWAVE.RAW all 32000 bytes
 """
 import sys
 
@@ -10689,6 +10697,240 @@ PROGRAMS = {
             '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
             '0000000000000000000000000000000000001308130800000000000000000000000000000000000000000000'
             '000000000000000000000000000000200a060000'
+        )),
+    'OWWAVE': (
+        # wcc -bt=windows -ms owwave.c; wlink @owwave.lnk
+        # ---- owwave.c
+        #     /*
+        #      * owwave.c - wave output on the host's driver (HOSTWAVE.DLL, named in
+        #      * SYSTEM.INI by the program): eight headers of 1500 bytes (an 11025 Hz
+        #      * tone, 8-bit mono) written at once, MM_WOM_DONE for each in order, the
+        #      * position at the end; then a WAV file of 20000 bytes played by MCI
+        #      * ("play ... notify", its position at the end). The driver's log (stderr) shows the blocks one after
+        #      * another without gaps, HOSTWAVE.RAW holds all 32000 bytes.
+        #      */
+        #     #include <windows.h>
+        #     #include <mmsystem.h>
+        #     #include <string.h>
+        #
+        #     #define HEADERS 8
+        #     #define BYTES 1500
+        #
+        #     static char text[3][128];
+        #     static HWAVEOUT hw;
+        #     static WAVEHDR hdr[HEADERS];
+        #     static HGLOBAL mem;
+        #     static int done, order = 1;
+        #
+        #     static void tone(LPBYTE p, unsigned n, unsigned phase)
+        #     {
+        #         unsigned i;
+        #         for (i = 0; i < n; i++)
+        #             p[i] = (BYTE)(((i + phase) / 10) & 1 ? 0xa0 : 0x60);
+        #     }
+        #
+        #     static DWORD rc1, rc2;
+        #
+        #     static void mci(HWND hwnd)
+        #     {
+        #         HFILE f = _lcreat("OWWAVE.WAV", 0);
+        #         static BYTE h[44];
+        #         LPBYTE data = (LPBYTE)GlobalLock(mem);
+        #         _fmemcpy(h, "RIFF", 4); *(DWORD *)(h + 4) = 36 + 20000L;
+        #         _fmemcpy(h + 8, "WAVEfmt ", 8); *(DWORD *)(h + 16) = 16;
+        #         *(WORD *)(h + 20) = 1; *(WORD *)(h + 22) = 1; *(DWORD *)(h + 24) = 11025;
+        #         *(DWORD *)(h + 28) = 11025; *(WORD *)(h + 32) = 1; *(WORD *)(h + 34) = 8;
+        #         _fmemcpy(h + 36, "data", 4); *(DWORD *)(h + 40) = 20000L;
+        #         _lwrite(f, h, 44);
+        #         tone(data, 10000, 0);
+        #         _lwrite(f, data, 10000);
+        #         _lwrite(f, data, 10000);
+        #         _lclose(f);
+        #         GlobalUnlock(mem);
+        #         rc1 = mciSendString("open OWWAVE.WAV type waveaudio alias w", NULL, 0, NULL);
+        #         rc2 = mciSendString("play w notify", NULL, 0, hwnd);
+        #     }
+        #
+        #     LRESULT FAR PASCAL _export WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+        #     {
+        #         PAINTSTRUCT ps;
+        #         HDC dc;
+        #         int i;
+        #         if (msg == MM_WOM_DONE) {
+        #             if ((LPWAVEHDR)lp != &hdr[done])
+        #                 order = 0;
+        #             done++;
+        #             if (done == HEADERS) {
+        #                 MMTIME t;
+        #                 t.wType = TIME_BYTES;
+        #                 waveOutGetPosition(hw, &t, sizeof(t));
+        #                 for (i = 0; i < HEADERS; i++)
+        #                     waveOutUnprepareHeader(hw, &hdr[i], sizeof(WAVEHDR));
+        #                 wsprintf(text[1], "%d done, in order %d, position %lu bytes, close %u", done, order,
+        #                          t.u.cb, waveOutClose(hw));
+        #                 mci(h);
+        #                 InvalidateRect(h, NULL, TRUE);
+        #             }
+        #             return 0;
+        #         }
+        #         if (msg == MM_MCINOTIFY) {
+        #             char len[32];
+        #             DWORD rc3;
+        #             len[0] = 0;
+        #             mciSendString("status w position", len, sizeof(len), NULL);
+        #             rc3 = mciSendString("close w", NULL, 0, NULL);
+        #             wsprintf(text[2], "MCI: open %lu, play %lu, notify %u, at %s ms, close %lu", rc1, rc2,
+        #                      wp, (LPSTR)len, rc3);
+        #             InvalidateRect(h, NULL, TRUE);
+        #             return 0;
+        #         }
+        #         if (msg == WM_PAINT) {
+        #             dc = BeginPaint(h, &ps);
+        #             for (i = 0; i < 3; i++)
+        #                 TextOut(dc, 4, 4 + 16 * i, text[i], lstrlen(text[i]));
+        #             EndPaint(h, &ps);
+        #             return 0;
+        #         }
+        #         if (msg == WM_DESTROY) {
+        #             PostQuitMessage(0);
+        #             return 0;
+        #         }
+        #         return DefWindowProc(h, msg, wp, lp);
+        #     }
+        #
+        #     static void play(HWND h)
+        #     {
+        #         PCMWAVEFORMAT f;
+        #         LPBYTE data;
+        #         UINT r, w = 0;
+        #         int i;
+        #         WritePrivateProfileString("drivers", "wave", "HOSTWAVE.DLL", "SYSTEM.INI");
+        #         f.wf.wFormatTag = WAVE_FORMAT_PCM;
+        #         f.wf.nChannels = 1;
+        #         f.wf.nSamplesPerSec = 11025;
+        #         f.wf.nAvgBytesPerSec = 11025;
+        #         f.wf.nBlockAlign = 1;
+        #         f.wBitsPerSample = 8;
+        #         mem = GlobalAlloc(GMEM_MOVEABLE, (DWORD)HEADERS * BYTES);
+        #         data = (LPBYTE)GlobalLock(mem);
+        #         tone(data, HEADERS * BYTES, 0);
+        #         r = waveOutOpen(&hw, 0, (LPWAVEFORMAT)&f, (DWORD)(UINT)h, 0, CALLBACK_WINDOW);
+        #         for (i = 0; i < HEADERS && !r; i++) {
+        #             hdr[i].lpData = (LPSTR)data + i * BYTES;
+        #             hdr[i].dwBufferLength = BYTES;
+        #             hdr[i].dwFlags = 0;
+        #             waveOutPrepareHeader(hw, &hdr[i], sizeof(WAVEHDR));
+        #             w |= waveOutWrite(hw, &hdr[i], sizeof(WAVEHDR));
+        #         }
+        #         wsprintf(text[0], "%u devices, open %u, writes %u", waveOutGetNumDevs(), r, w);
+        #     }
+        #
+        #     int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
+        #     {
+        #         WNDCLASS wc;
+        #         MSG m;
+        #         HWND h;
+        #         _fmemset(&wc, 0, sizeof(wc));
+        #         wc.lpfnWndProc = WndProc;
+        #         wc.hInstance = inst;
+        #         wc.hbrBackground = GetStockObject(WHITE_BRUSH);
+        #         wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        #         wc.lpszClassName = "OWWAVE";
+        #         RegisterClass(&wc);
+        #         h = CreateWindow("OWWAVE", "OWWAVE", WS_OVERLAPPEDWINDOW, 0, 0, 636, 100, NULL, NULL, inst, NULL);
+        #         play(h);
+        #         ShowWindow(h, show);
+        #         UpdateWindow(h);
+        #         while (GetMessage(&m, NULL, 0, 0)) {
+        #             TranslateMessage(&m);
+        #             DispatchMessage(&m);
+        #         }
+        #         return m.wParam;
+        #     }
+        # ---- owwave.lnk
+        #     system windows
+        #     name owwave.exe
+        #     file owwave.o
+        #     library mmsystem.lib
+        bytes.fromhex(
+            '4d5a80000100000004000000ffff0000b8000000000000004000000000000000000000000000000000000000'
+            '00000000000000000000000000000000800000000e1fba0e00b409cd21b8014ccd2154686973206973206120'
+            '57696e646f77732031362d6269742065786563757461626c650d0a240000000000000000000000004e450501'
+            '860007000000000002030200000400209405010000000200020004000e0040005000500064006c000d010000'
+            '000001000000020000000000000000038e008e08400d8e089a052a02410cf004064f5757415645000007574e'
+            '4450524f43010000010008001100160000064b45524e454c084d4d53595354454d0455534552034744490101'
+            '29790100000a6f77776176652e65786500000000ccebfd909090900050b80c00e816055856575589e5505289'
+            'df31db8e46fc39fb732289d801c831d2be0a00f7f6a8017405b8a000eb03b860008b76fe01de26880443ebda'
+            '89ec5d5f5ec35589e550b81e00e8d10458535152565783ec02501eb810005031c0509affff000089c6ff36b6'
+            '049affff000089c78956f4b8040050bb1b008cd9b8b8048cdae8cb04c706bc04444e31c0a3be04b8080050bb'
+            '20008cd9b8c0048cdae8af04c706c804100031c0a3ca04b80100a3cc04a3ce04c706d004112b31c0a3d204c7'
+            '06d404112ba3d604c706d8040100c706da040800b8040050bb29008cd9b8dc048cdae86a04c706e004204e31'
+            'c0a3e204561eb8b80450b82c00509affff000031c9bb102789f88b56f4e8f4fe56ff76f457b81027509affff'
+            '000056ff76f457b81027509affff0000569affff0000ff36b6049affff00001eb82e005031c0505050509aff'
+            'ff0000a3ae048916b0041eb855005031c0505050ff76f29affff0000a3aa048916ac048d66f65f5e5a595b5d'
+            'c31e5890455589e51e8ed8b86e00e89c03565783ec488b5e068b76088b7e0a8b460c3dbd037403e9a600b105'
+            'a1b204d3e0baaa0301c28cd839c6750439d3740531c0a34001ff06b204833eb204087579c746f20400ff36b4'
+            '048d56f21e52b80800509affff000031f6ff36b404b10589f0d3e0baaa0301c21e52b82000509affff000046'
+            '83fe087ce0ff36b4049affff000050ff76f6ff76f4ff364001ff36b2041eb86300501eb8aa02509affff0000'
+            '83c4128b460ee819feff760e31c05050b80100509affff000031c031d2e9cb003db9037556c646d2001eb896'
+            '00508d56d21e52b820005031c0509affff00001eb8a8005031c0505050509affff000052508d56d21e5257ff'
+            '36ac04ff36aa04ff36b004ff36ae041eb8b000501eb82a03509affff000083c41aeb8e3d0f00754fff760e8d'
+            '56b21e529affff000089c731f657b8040050b10489f0d3e005040050b10789f2d3e281c22a021e521e529aff'
+            'ff0000509affff00004683fe037cd2ff760e8d56b21e529affff0000e94aff3d0200750b31c0509affff0000'
+            'e93affff760e505756539affff00008d66fa5f5e1f5d4dca0a005589e550b83c00e8fd01585351525683ec1a'
+            '89c6c746f600001eb80501501eb80001501eb8f300501eb8e800509affff0000b801008946de8946e0c746e2'
+            '112bc746e40000c746e6112bc746e800008946eac746ec0800b802005031c050b8e02e509affff0000a3b604'
+            '509affff00008946f08956f231c9bbe02ee86cfc1eb8b4045031c0508d56de1e5250565050b801005031c050'
+            '9affff00008946f431f6eb7389f0d1e0d1e029f0b103d3e001f0d1e0d1e089c3b104d3e029d80346f0b10589'
+            'f3d3e38987aa038b46f28987ac03c787ae03dc0531c08987b0038987ba038987bc03ff36b404b8aa0301d889'
+            '46ee1e50b82000509affff0000ff36b4041eff76eeb82000509affff00000946f64683fe087d06837ef40074'
+            '87ff76f6ff76f49affff0000501eb80d01501eb82a02509affff000083c40e8d66f8e916fd5589e5b85000e8'
+            'bf005683ec2c8b760cb91a0031db8cda8d46d2e80201c746d4ffffc746d6ffff8976dc31c0509affff000089'
+            '46e231c05050b8007f509affff00008946e0c746e82c018c5eea8d56d21e529affff00001eb82c01501e50b8'
+            'cf005031c0505050b87c0250b864005031c050505650509affff000089c6e841fe56ff76049affff0000569a'
+            'ffff00008d56ec1e5231c05050509affff000085c074168d56ec1e529affff00008d56ec1e529affff0000eb'
+            'd78b46f08d66fe5e5dc20a008c164201c33bc473132bc4f7d83b060a0077068cd03b0642017401c30e5ab847'
+            '05bb0100e9ee01537461636b204f766572666c6f7721005589e5565789c78b460489de8ec21e57918ed8d1e9'
+            'f3a513c9f3a45f1f89f85f5e5dc202005789c788d88ec2578ae0d1e9f3ab13c9f3aa5f89f85fc300eb020300'
+            '9affff00000bc0750e5033c0ba0f00e86a0258b44ccd218c064801575606535253bee404893663018c1e6501'
+            '268a078804464384c075f589360a005b2bc0509affff000057579affff0000fc1e07b9e404bf2a022bcf32c0'
+            'f3aab8de06a35f01b8ffffa36101b430cd21a24a0188264b019affff0000a24c0188264d0186e0a34e015458'
+            '3bc475120f01e0a90100740ab001a25001b003a251011ebf6b0157b89000509affff0000b86b01893e67018c'
+            '1e6901b8ff00e86b01e809fee9f9004f70656e20576174636f6d20432f432b2b31362052756e2d54696d6520'
+            '73797374656d2e20436f7079726967687420286329204f70656e20576174636f6d20436f6e7472696275746f'
+            '727320323030322d323032362e20506f7274696f6e7320436f7079726967687420284329205379626173652c'
+            '20496e632e20313938382d323030322e00c3cb005589e551565781ec800089c689df8d9e7aff8cd98ec2268a'
+            '0484c074173c0d74138d46f939c3730c268a048ec14626880743ebe031c08ec15026c607001e8d9e7aff531e'
+            'b834015031c0509affff000089f8e94400515689c189d6e8330185c0750689c889f2eb9889d8e92c0000c3c3'
+            '535289c3833e2202007404ff162202ff16fc01baff00b81000e8a800ff16fc01ff16fe0189d8e928fe5289c2'
+            'ff16fc01ff16fe0189d0e918fe5589e5535289c3833f0075078d66fc5a5b5dc31eff171febf35589e5535289'
+            'c38b47028b1785c0750485d274df1eff1f1febd95589e5535152565789c11ee813ffbf2a0289fabb240289fe'
+            '88c839fb7316803f02750583c306ebf23a470172f689de8a4701ebef39fe74158d4402803c007508e88affc6'
+            '0402ebcbe89bffebf61f8d66f65f5e5a595b5dc35589e55351565789c11ee8bcfe88d5bf2a0289fabb2a0289'
+            'fe88c839fb7316803f02750583c306ebf23a470177f689de8a4701ebef39fe741c3a6c017305c60402ebd18d'
+            '4402803c007505e827ffebeee83bffebe91f8d66f85f5eeb9f803e000200750331c0c35250cceb0657564944'
+            '454fb8010083c404c300310003016700010053000301720001001200030103010100560003011e0101005600'
+            '03012c0101005600030132010100510003013b010100130003014b010200be02030164010200be020301db01'
+            '02009c010301f701020097010301060202009501030124020300a40103013d0203007d00030163020200be02'
+            '030173020200be0203019a020300a4010301b102030027000301d70201005a000301dd02040021000301f002'
+            '03002800030100030300060003010f0303006b0003014c03010081000301810301000f0003018a0301001200'
+            '0301b50302009401030115040200960103012604020098010301400402009101030150040300a40105007d04'
+            '01007901020082040100790103018b040400570003019b040300ad000301b004030039000301d40403002900'
+            '0301e20403002a000301e80403007c000301f70403006c00030105050300710003010f050300720003019905'
+            '01005b000301d80501001e000301df05030005000200f9050100940503010a060100030003013c0601003100'
+            '03012c0703000100000000000500000000000000000000004f57574156452e57415600524946460057415645'
+            '666d74200064617461006f70656e204f57574156452e57415620747970652077617665617564696f20616c69'
+            '6173207700706c61792077206e6f7469667900256420646f6e652c20696e206f726465722025642c20706f73'
+            '6974696f6e20256c752062797465732c20636c6f736520257500737461747573207720706f736974696f6e00'
+            '636c6f73652077004d43493a206f70656e20256c752c20706c617920256c752c206e6f746966792025752c20'
+            '6174202573206d732c20636c6f736520256c750053595354454d2e494e4900484f5354574156452e444c4c00'
+            '77617665006472697665727300257520646576696365732c206f70656e2025752c2077726974657320257500'
+            '4f575741564500004f70656e20576174636f6d0001000000ffff00000000000000000000000c000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '00000000000000000000000000000000000000000000000000000000000000004f074f070000000000000000'
+            '00000000000000000000000000000000000000000000000000000000002020050000'
         )),
 }
 

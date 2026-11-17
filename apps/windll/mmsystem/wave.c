@@ -3,8 +3,9 @@
  * wave-driver dispatcher. SYSTEM.INI [drivers] wave=SBWAVE.DLL selects
  * the module; the module returns a win_wave_driver interface.
  *
- * The Win16 WAVEHDR stays in guest memory. Buffers are read one DMA block
- * at a time (rather than retaining a guest pointer across callbacks).
+ * The Win16 WAVEHDR stays in guest memory. Buffers are read one driver
+ * block at a time (rather than retaining a guest pointer across
+ * callbacks), the next while one plays.
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
@@ -21,6 +22,7 @@ void winn_volume_pcm(uint8_t *p, unsigned n, unsigned bits, unsigned channels); 
 #define WAVE_HANDLE    0x6e01u
 #define WAVE_QUEUE     16
 #define WAVE_BUFSIZE   8192u
+#define WAVE_INFLIGHT  4u               /* blocks the driver may have queued */
 
 #define MMSYSERR_NOMEM         7u
 #define MMSYSERR_NOTSUPPORTED 8u
@@ -48,7 +50,8 @@ typedef struct {
 } pcm_format;
 
 typedef struct {
-    uint32_t header, data, bytes, position;
+    uint32_t header, data, bytes;
+    uint32_t sent, position;            /* given to the driver, played */
 } queued_wave;
 
 typedef struct {
@@ -59,8 +62,9 @@ typedef struct {
     uint32_t played_bytes;
     pcm_format format;
     UINT timer;
-    int paused, playing;
-    uint32_t active_bytes;
+    int paused;
+    uint32_t inflight[WAVE_INFLIGHT];   /* the driver's blocks queued, their bytes */
+    unsigned inflight_head, inflight_count;
     queued_wave queue[WAVE_QUEUE];
     unsigned head, count;
 } wave_state;
@@ -90,7 +94,7 @@ static const win_wave_driver *wave_load(HMODULE *module)
     const win_wave_driver *d = get ? get() : NULL;
     if (!d || d->version != WIN_WAVE_DRIVER_VERSION || d->size < sizeof(*d) ||
         !d->present || !d->open || !d->close || !d->submit || !d->finished ||
-        !d->stop || !d->pause || !d->max_bytes || !d->present()) {
+        !d->stop || !d->pause || !d->max_bytes || !d->room || !d->present()) {
         FreeLibrary(h);
         return NULL;
     }
@@ -98,13 +102,21 @@ static const win_wave_driver *wave_load(HMODULE *module)
     return d;
 }
 
+/* the device's there: known once its driver has loaded (asked again while
+ * it has not: SYSTEM.INI may name one later), not loaded from the card at
+ * every question, nor failing for a moment's want of memory */
+static int wave_present;
+
 UINT WINAPI winn_wave_num(void)
 {
     HMODULE h;
+    if (wave_present || output.driver)
+        return 1;
     const win_wave_driver *d = wave_load(&h);
     if (!d)
         return 0;
     FreeLibrary(h);
+    wave_present = 1;
     return 1;
 }
 
@@ -178,53 +190,67 @@ static void wave_return_head(int notify)
         wave_notify(MM_WOM_DONE, old.header);
 }
 
+/* bytes played (the driver's blocks): the headers they finish go back */
+static void wave_played(uint32_t bytes)
+{
+    output.played_bytes += bytes;
+    while (bytes && output.count) {
+        queued_wave *q = &output.queue[output.head];
+        uint32_t take = q->bytes - q->position;
+        if (take > bytes)
+            take = bytes;
+        q->position += take;
+        bytes -= take;
+        if (q->position >= q->bytes)
+            wave_return_head(1);
+    }
+}
+
+/* The driver's blocks played, the headers they finish returned; then as
+ * many blocks as it takes, each filled from the headers in turn (a block
+ * may hold the end of one and the start of the next): the next is queued
+ * while one plays. */
 static void wave_pump(void)
 {
     if (!output.driver || output.paused)
         return;
-    if (output.playing) {
-        if (!output.driver->finished())
-            return;
-        output.playing = 0;
-        if (output.count) {
-            output.queue[output.head].position += output.active_bytes;
-            output.played_bytes += output.active_bytes;
-        }
-        output.active_bytes = 0;
+    for (int n = output.inflight_count ? output.driver->finished() : 0;
+         n > 0 && output.inflight_count; n--) {
+        uint32_t bytes = output.inflight[output.inflight_head];
+        output.inflight_head = (output.inflight_head + 1u) % WAVE_INFLIGHT;
+        output.inflight_count--;
+        wave_played(bytes);
     }
-    while (output.driver && output.count && !output.playing && !output.paused) {
-        queued_wave *q = &output.queue[output.head];
-        if (q->position >= q->bytes) {
-            wave_return_head(1);
-            continue;
-        }
-        /* Preserve the original PCM (including stereo and 16-bit samples).
-         * The driver decides between 8237 DMA1 and high DMA5. */
-        unsigned bytes = q->bytes - q->position;
-        unsigned max = output.driver->max_bytes;
+    while (output.driver && !output.paused && output.inflight_count < WAVE_INFLIGHT &&
+           output.driver->room() > 0) {
+        unsigned max = output.driver->max_bytes, got = 0;
         if (max > sizeof(raw))
             max = sizeof(raw);
         max -= max % output.format.block;
-        if (bytes > max)
-            bytes = max;
-        if (!bytes)
+        for (unsigned i = 0; i < output.count && got < max; i++) {
+            queued_wave *q = &output.queue[(output.head + i) % WAVE_QUEUE];
+            if (q->sent >= q->bytes)
+                continue;
+            unsigned take = q->bytes - q->sent;
+            if (take > max - got)
+                take = max - got;
+            uint32_t addr = q->data + q->sent;
+            if ((uint32_t)(uint16_t)q->data + q->sent + take > 0x10000u ||
+                !NE->task_read((uint16_t)output.task, addr, raw + got, take))
+                memset(raw + got, output.format.bits == 16 ? 0 : 0x80, take);
+            q->sent += take;
+            got += take;
+        }
+        if (!got)
             break;
-        uint32_t addr = q->data + q->position;
-        if ((uint16_t)addr < (uint16_t)q->data ||
-            !NE->task_read((uint16_t)output.task, addr, raw, bytes)) {
-            output.driver->stop();
-            wave_return_head(1);
-            continue;
-        }
-        winn_volume_pcm(raw, bytes, output.format.bits, output.format.channels);
-        if (!output.driver->submit(raw, bytes, output.format.rate,
+        winn_volume_pcm(raw, got, output.format.bits, output.format.channels);
+        if (!output.driver->submit(raw, got, output.format.rate,
                                    output.format.bits, output.format.channels)) {
-            output.driver->stop();
-            wave_return_head(1);
-            continue;
+            wave_played(got);           /* not playable: as if it were played */
+            break;
         }
-        output.active_bytes = bytes;
-        output.playing = 1;
+        output.inflight[(output.inflight_head + output.inflight_count) % WAVE_INFLIGHT] = got;
+        output.inflight_count++;
     }
 }
 
@@ -293,8 +319,7 @@ static MMRESULT wave_reset(int notify)
     if (!output.driver)
         return MMSYSERR_INVALHANDLE;
     output.driver->stop();
-    output.playing = 0;
-    output.active_bytes = 0;
+    output.inflight_count = 0;
     output.paused = 0;
     while (output.count)
         wave_return_head(notify);
@@ -355,10 +380,11 @@ static MMRESULT wave_header(win_dll_call *c, unsigned ordinal)
     q->header = hdrfar;
     q->data = data;
     q->bytes = bytes;
-    q->position = 0;
+    q->position = q->sent = 0;
     if (!set_header_flags(hdrfar, (f | WHDR_INQUEUE) & ~WHDR_DONE))
         return MMSYSERR_INVALPARAM;
     output.count++;
+    wave_pump();                        /* playing at once, not at the next tick */
     return 0;
 }
 

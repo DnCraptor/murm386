@@ -179,36 +179,62 @@ static char *trim(char *s)
  * Writes go through the same copy. */
 #define PROFILE_MAX 16384
 
-static char  cache_path[128];
-static char *cache_text;            /* NUL-terminated, NULL = no such file */
-static int   cache_len, cache_valid;
+/* The files read last (WIN.INI and SYSTEM.INI, mostly: programs go from
+ * one to the other), each in a block of its own size: no file is read
+ * again while the other is asked, and no large block is needed for one. */
+#define CACHES 2
+
+static struct {
+    char path[128];
+    char *text;                     /* NUL-terminated, NULL = no such file */
+    int len, valid;
+    unsigned used;
+} caches[CACHES];
+static unsigned cache_clock;
+
+/* load()'s file: the slot write_profile changes */
+#define cache_path  (caches[cache_at].path)
+#define cache_text  (caches[cache_at].text)
+#define cache_len   (caches[cache_at].len)
+#define cache_valid (caches[cache_at].valid)
+static int cache_at;
 
 static const char *load(const char *file, int *len)
 {
     char path[128];
     win_path(file, path, sizeof(path));
-    if (cache_valid && !lstrcmpi(path, cache_path)) {
-        *len = cache_len;
-        return cache_text;
+    int at = 0;
+    for (int i = 0; i < CACHES; i++) {
+        if (caches[i].valid && !lstrcmpi(path, caches[i].path)) {
+            cache_at = i;
+            caches[i].used = ++cache_clock;
+            *len = cache_len;
+            return cache_text;
+        }
+        if (!caches[i].valid || (caches[at].valid && caches[i].used < caches[at].used))
+            at = i;                 /* an empty slot, or the one used longest ago */
     }
+    cache_at = at;
+    caches[at].used = ++cache_clock;
     win_free(cache_text);
     cache_text = NULL;
     cache_len = 0;
     cache_valid = 0;
     FILE *f = fopen(path, "rb");
     if (f) {
-        char *t = (char *)win_alloc(PROFILE_MAX + 1);
+        long size = fseek(f, 0, SEEK_END) ? -1 : ftell(f);
+        if (size < 0 || size > PROFILE_MAX)
+            size = PROFILE_MAX;
+        char *t = fseek(f, 0, SEEK_SET) ? NULL : (char *)win_alloc((size_t)size + 1);
         if (!t) {
             fclose(f);
             *len = 0;
             return NULL;            /* not cached: try again next time */
         }
-        size_t n = fread(t, 1, PROFILE_MAX, f);
+        size_t n = fread(t, 1, (size_t)size, f);
         fclose(f);
         t[n] = 0;
-        cache_text = (char *)win_realloc(t, n + 1);
-        if (!cache_text)
-            cache_text = t;
+        cache_text = t;
         cache_len = (int)n;
     }
     lstrcpyn(cache_path, path, sizeof(cache_path));

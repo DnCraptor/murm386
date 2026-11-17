@@ -4,6 +4,16 @@
  * the native DOS I/O port API and conventional guest RAM. No RP2350
  * sound hardware is accessed directly.
  *
+ * The blocks go into a ring, one after another, byte after byte; the DMA
+ * controller goes round it (auto-initialised), the DSP is given all that
+ * is there and not yet given as one transfer, which it ends by itself
+ * (auto-init, then exit auto-init after this block: a single-cycle
+ * command would drop what the SB16 has buffered of the one before). Its
+ * end (the interrupt's status) gives it the next at once, while the SB16
+ * still plays what it buffered: the blocks follow without a gap, and the
+ * transfer never runs past the samples (the SB16 reads ahead of what it
+ * plays). What it has read is silence again.
+ *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
 #include <stdint.h>
@@ -18,13 +28,20 @@
 #define SB_BASE      0x220u
 #define SB_IRQ       5u
 #define SB_DMA       1u
-#define SB_BUFSIZE   8192u
+#define SB_BUFSIZE   8192u              /* the ring */
+#define SB_BLOCK     4096u              /* a block's most */
+#define SB_BLOCKS    4u                 /* blocks in it at the most */
 
 static void *low_block;
 static uint8_t *buffer;
 static uint32_t physical;
 static int opened, running;
-static unsigned running_bits;
+static unsigned running_bits, running_rate, running_channels;
+static uint32_t written, read_;          /* bytes put in the ring, played (given and done) */
+static uint32_t given, given_from;      /* given to the DSP: up to, from (its transfer) */
+static int busy;                        /* a transfer of the DSP's on */
+static uint32_t ends[SB_BLOCKS];        /* the blocks', where each ends (as written) */
+static unsigned blocks, first, played;  /* in it, the first's, played not yet told */
 
 static int sb_present(void)
 {
@@ -87,23 +104,55 @@ static int sb_open(void)
     opened = 1;
     running = 0;
     running_bits = 0;
+    busy = 0;
+    blocks = first = played = 0;
+    written = read_ = given = given_from = 0;
     return 1;
+}
+
+/* the SB16's interrupt (a block read) acknowledged */
+static void ack_irq(void)
+{
+    outp(SB_BASE + 4u, 0x82u);
+    uint8_t irq = inp(SB_BASE + 5u);
+    if (irq & 1u) (void)inp(SB_BASE + 0x0eu);
+    if (irq & 2u) (void)inp(SB_BASE + 0x0fu);
+    if (irq & 3u) outp(0x20u, 0x20u);
+}
+
+static uint8_t quiet(void) { return running_bits == 16u ? 0 : 0x80; }
+
+/* n bytes of the ring from at (wrapping round) */
+static void ring_put(uint32_t at, const uint8_t *data, unsigned n, int silent)
+{
+    while (n) {
+        unsigned off = at % SB_BUFSIZE, k = SB_BUFSIZE - off;
+        if (k > n)
+            k = n;
+        if (silent)
+            memset(buffer + off, quiet(), k);
+        else
+            memcpy(buffer + off, data, k);
+        data += silent ? 0 : k;
+        at += k;
+        n -= k;
+    }
 }
 
 static void sb_stop(void)
 {
     if (!opened)
         return;
-    dsp_byte(running_bits == 16u ? 0xd5u : 0xd0u); /* halt correct channel */
+    if (busy) {
+        dsp_byte(running_bits == 16u ? 0xd9u : 0xdau);  /* auto-init off */
+        dsp_byte(running_bits == 16u ? 0xd5u : 0xd0u);  /* halt the channel */
+    }
     outp(0x0au, 0x04u | SB_DMA);
     outp(0xd4u, 0x05u);            /* mask high-DMA channel 5 */
-    outp(SB_BASE + 4u, 0x82u);
-    uint8_t irq = inp(SB_BASE + 5u);
-    if (irq & 1u) (void)inp(SB_BASE + 0x0eu);
-    if (irq & 2u) (void)inp(SB_BASE + 0x0fu);
-    if (irq & 3u) outp(0x20u, 0x20u);
-    running = 0;
-    running_bits = 0;
+    ack_irq();
+    running = busy = 0;
+    blocks = first = played = 0;
+    written = read_ = given = given_from = 0;
 }
 
 static void sb_close(void)
@@ -119,12 +168,13 @@ static void sb_close(void)
 }
 
 /* The SB16 uses DMA1 (byte channel) for 8-bit samples and DMA5
- * (word channel, second 8237) for 16-bit samples. 8 KiB physical
- * alignment prevents crossing either controller's DMA page boundary. */
-static void program_dma(unsigned n, unsigned bits)
+ * (word channel, second 8237) for 16-bit samples, auto-initialised over
+ * the ring. 8 KiB physical alignment prevents crossing either
+ * controller's DMA page boundary. */
+static void program_dma(unsigned bits)
 {
     if (bits == 16u) {
-        unsigned words = n / 2u;
+        unsigned words = SB_BUFSIZE / 2u;
         outp(0xd4u, 0x05u);           /* mask DMA5 (controller channel 1) */
         outp(0xd8u, 0);               /* high controller flip-flop */
         outp(0xc4u, (uint8_t)(physical >> 1));
@@ -133,7 +183,7 @@ static void program_dma(unsigned n, unsigned bits)
         outp(0xd8u, 0);
         outp(0xc6u, (uint8_t)(words - 1u));
         outp(0xc6u, (uint8_t)((words - 1u) >> 8));
-        outp(0xd6u, 0x49u);           /* single, memory-to-device, channel 1 */
+        outp(0xd6u, 0x59u);           /* single, auto-init, memory-to-device, channel 1 */
         outp(0xd4u, 0x01u);           /* unmask DMA5 */
     } else {
         outp(0x0au, 0x04u | SB_DMA);
@@ -142,64 +192,177 @@ static void program_dma(unsigned n, unsigned bits)
         outp(0x02u, (uint8_t)(physical >> 8));
         outp(0x83u, (uint8_t)(physical >> 16));
         outp(0x0cu, 0);
-        outp(0x03u, (uint8_t)(n - 1u));
-        outp(0x03u, (uint8_t)((n - 1u) >> 8));
-        outp(0x0bu, 0x48u | SB_DMA);
+        outp(0x03u, (uint8_t)(SB_BUFSIZE - 1u));
+        outp(0x03u, (uint8_t)((SB_BUFSIZE - 1u) >> 8));
+        outp(0x0bu, 0x58u | SB_DMA);  /* single, auto-init, memory-to-device */
         outp(0x0au, SB_DMA);
     }
+}
+
+/* where in the ring the DMA reads (its current address), bytes */
+static unsigned dma_offset(void)
+{
+    unsigned lo, hi;
+    if (running_bits == 16u) {        /* words */
+        outp(0xd8u, 0);
+        lo = inp(0xc4u);
+        hi = inp(0xc4u);
+        return (((lo | hi << 8) - (unsigned)(physical >> 1)) & 0xffffu) * 2u % SB_BUFSIZE;
+    }
+    outp(0x0cu, 0);
+    lo = inp(0x02u);
+    hi = inp(0x02u);
+    return (((lo | hi << 8) - (unsigned)physical) & 0xffffu) % SB_BUFSIZE;
+}
+
+static void reverse(unsigned a, unsigned b)    /* the ring's bytes a..b-1 */
+{
+    while (a + 1u < b) {
+        uint8_t t = buffer[a];
+        buffer[a++] = buffer[--b];
+        buffer[b] = t;
+    }
+}
+
+/* The DSP read on past its transfer's end (were it to end before it was
+ * told to stop at its end, the transfer would go round once more):
+ * the DMA is not where the samples not given yet are. Both stop; those
+ * samples go to the ring's start (it turned round), the DMA from there. */
+static void realign(void)
+{
+    dsp_byte(running_bits == 16u ? 0xd9u : 0xdau);
+    dsp_byte(running_bits == 16u ? 0xd5u : 0xd0u);
+    outp(0x0au, 0x04u | SB_DMA);
+    outp(0xd4u, 0x05u);
+    ack_irq();
+    unsigned at = given % SB_BUFSIZE;
+    if (at) {                         /* the ring turned left by at */
+        reverse(0, at);
+        reverse(at, SB_BUFSIZE);
+        reverse(0, SB_BUFSIZE);
+    }
+    for (unsigned i = 0; i < blocks; i++)
+        ends[(first + i) % SB_BLOCKS] -= given;
+    written -= given;
+    read_ = given = given_from = 0;
+    ring_put(written, NULL, SB_BUFSIZE - written, 1);
+    program_dma(running_bits);
+}
+
+/* what is in the ring and not given yet, to the DSP: 41h the rate, B6h/C6h
+ * (16/8-bit, auto-init, FIFO), the mode, its samples less one (auto-init
+ * counts the samples of both channels), D9h/DAh (it ends with them) */
+static void give(void)
+{
+    if (busy || written == given)
+        return;
+    unsigned n = written - given;
+    uint8_t cmd = running_bits == 16u ? 0xb6u : 0xc6u;
+    uint8_t mode = (running_bits == 16u ? 0x10u : 0u) | (running_channels == 2u ? 0x20u : 0u);
+    unsigned count = n / (running_bits / 8u) - 1u;
+    /* the DMA channel masked while the DSP is told: it starts reading only
+     * once it knows to stop at the end (DA/D9 after the command) */
+    if (running_bits == 16u)
+        outp(0xd4u, 0x05u);
+    else
+        outp(0x0au, 0x04u | SB_DMA);
+    if (!dsp_byte(0x41u) || !dsp_byte((uint8_t)(running_rate >> 8)) ||
+        !dsp_byte((uint8_t)running_rate) || !dsp_byte(cmd) || !dsp_byte(mode) ||
+        !dsp_byte((uint8_t)count) || !dsp_byte((uint8_t)(count >> 8)) ||
+        !dsp_byte(running_bits == 16u ? 0xd9u : 0xdau)) {
+        sb_stop();
+        return;
+    }
+    if (running_bits == 16u)
+        outp(0xd4u, 0x01u);
+    else
+        outp(0x0au, SB_DMA);
+    busy = 1;
+    given_from = given;
+    given = written;
+}
+
+/* the DSP's transfer ended (its interrupt's status): its samples played,
+ * the blocks they end told, the ring silent there again; the next given */
+static void advance(void)
+{
+    if (!running)
+        return;
+    if (busy) {
+        outp(SB_BASE + 4u, 0x82u);
+        if (!(inp(SB_BASE + 5u) & (running_bits == 16u ? 2u : 1u)))
+            return;
+        ack_irq();
+        busy = 0;
+        ring_put(given_from, NULL, given - given_from, 1);
+        read_ = given;
+        while (blocks && (int32_t)(read_ - ends[first]) >= 0) {
+            first = (first + 1u) % SB_BLOCKS;
+            blocks--;
+            played++;
+        }
+        if (dma_offset() != given % SB_BUFSIZE)
+            realign();
+    }
+    give();
+    if (!busy && written == read_)    /* none left: what the SB16 has buffered plays out */
+        running = 0;
 }
 
 static int sb_submit(const uint8_t *data, unsigned n, unsigned rate,
                      unsigned bits, unsigned channels)
 {
     unsigned frame_bytes = (bits / 8u) * channels;
-    if (!opened || running || !data || !n || n > SB_BUFSIZE ||
+    if (!opened || !data || !n || n > SB_BLOCK ||
         (bits != 8u && bits != 16u) || (channels != 1u && channels != 2u) ||
         n % frame_bytes || rate < 4000u || rate > 48000u)
         return 0;
-    memcpy(buffer, data, n);
-    /* Clear the previous block's IRQ before arming DMA. */
-    outp(SB_BASE + 4u, 0x82u);
-    uint8_t irq = inp(SB_BASE + 5u);
-    if (irq & 1u) (void)inp(SB_BASE + 0x0eu);
-    if (irq & 2u) (void)inp(SB_BASE + 0x0fu);
-    if (irq & 3u) outp(0x20u, 0x20u);
-    program_dma(n, bits);
-    /* DSP B0h: signed 16-bit; C0h: unsigned 8-bit. Bit 5 of mode
-     * enables stereo. The length register counts frames (not bytes). */
-    unsigned count = n / frame_bytes - 1u;
-    uint8_t cmd = bits == 16u ? 0xb0u : 0xc0u;
-    uint8_t mode = (bits == 16u ? 0x10u : 0u) | (channels == 2u ? 0x20u : 0u);
-    if (!dsp_byte(0x41u) || !dsp_byte((uint8_t)(rate >> 8)) ||
-        !dsp_byte((uint8_t)rate) || !dsp_byte(cmd) || !dsp_byte(mode) ||
-        !dsp_byte((uint8_t)count) || !dsp_byte((uint8_t)(count >> 8))) {
+    advance();
+    if (running && (bits != running_bits || rate != running_rate ||
+                    channels != running_channels))
+        return 0;                     /* another format: once these are played */
+    if (!running) {                   /* the ring anew, silent, the DMA round it */
         running_bits = bits;
-        sb_stop();
-        return 0;
+        running_rate = rate;
+        running_channels = channels;
+        written = read_ = given = given_from = 0;
+        first = blocks = 0;
+        ring_put(0, NULL, SB_BUFSIZE, 1);
+        ack_irq();
+        program_dma(bits);
+        running = 1;
     }
-    running_bits = bits;
-    running = 1;
-    return 1;
+    if (blocks == SB_BLOCKS || n > SB_BUFSIZE - (written - read_))
+        return 0;
+    ring_put(written, data, n, 0);
+    written += n;
+    ends[(first + blocks) % SB_BLOCKS] = written;
+    blocks++;
+    give();
+    return running;
+}
+
+static int sb_room(void)
+{
+    if (!opened)
+        return 0;
+    advance();
+    unsigned free = running ? SB_BUFSIZE - (written - read_) : SB_BUFSIZE;
+    unsigned n = free / SB_BLOCK, left = SB_BLOCKS - (running ? blocks : 0);
+    return (int)(n < left ? n : left);
 }
 
 static int sb_finished(void)
 {
-    if (!opened || !running)
-        return 0;
-    outp(SB_BASE + 4u, 0x82u);
-    uint8_t mask = running_bits == 16u ? 2u : 1u;
-    if (!(inp(SB_BASE + 5u) & mask))
-        return 0;
-    (void)inp(SB_BASE + (running_bits == 16u ? 0x0fu : 0x0eu));
-    outp(0x20u, 0x20u);          /* PIC IRQ5 EOI */
-    running = 0;
-    running_bits = 0;
-    return 1;
+    advance();
+    unsigned n = played;
+    played = 0;
+    return (int)n;
 }
 
 static void sb_pause(int paused)
 {
-    if (opened && running)
+    if (opened && busy)
         dsp_byte(paused ? (running_bits == 16u ? 0xd5u : 0xd0u)
                         : (running_bits == 16u ? 0xd6u : 0xd4u));
 }
@@ -207,7 +370,7 @@ static void sb_pause(int paused)
 static const win_wave_driver device = {
     WIN_WAVE_DRIVER_VERSION, sizeof(win_wave_driver),
     sb_present, sb_open, sb_close, sb_submit, sb_finished,
-    sb_stop, sb_pause, SB_BUFSIZE,
+    sb_stop, sb_pause, SB_BLOCK, sb_room,
 };
 
 static const win_wave_driver *WINAPI wave_entry(void) { return &device; }

@@ -484,7 +484,7 @@ int    win_ez_is_app(const char *path);    /* the file, without loading it */
 
 /* windll.c: native DLLs (ddi/windll.h). A slot while loaded; the
  * current task's uses of one, all of a task's let go at its end */
-#define WIN_DLL_SLOTS 12
+#define WIN_DLL_SLOTS 20                /* 14 of WINN's own, the drivers among them, and others */
 int    win_dll_load(const char *name);   /* its slot, used once more; -1 none */
 void   win_dll_unref(int slot);
 int    win_dll_find(const char *name);   /* loaded: its slot; -1 */
