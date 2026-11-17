@@ -21,6 +21,9 @@
 
 /* Shared SRAM-resident memset from src/dos_api.c. */
 void *nf_memset(void *ptr, int value, size_t len);
+#if defined(M2P2_HSTX_AUDIO)
+void *dos_api_memcpy(void *dst, const void *src, size_t len);
+#endif
 
 //PIO параметры
 static uint offs_prg0 = 0;
@@ -380,9 +383,13 @@ static void __time_critical_func(render_gfx_line_from_sram)(uint32_t line, uint8
         offset &= 0xFFFF;
         // chain4: pixels are stored linearly, addr IS the byte offset
         const uint8_t *src = gfx_buffer + (offset << 2);
+#if defined(M2P2_HSTX_AUDIO)
+        dos_api_memcpy(output_buffer, src, SCREEN_WIDTH);
+#else
         for (int i = 0; i < SCREEN_WIDTH; ++i) {
             ob( *src++ );
         }
+#endif
     }
 }
 
@@ -411,9 +418,13 @@ static void __time_critical_func(render_gfx_line_vga_planar256)(uint32_t line, u
     base &= 0xFFFF;
     // base is in dwords; gfx_buffer is bytes, so byte offset = base * 4
     const uint8_t *src = gfx_buffer + (base << 2);
+#if defined(M2P2_HSTX_AUDIO)
+    dos_api_memcpy(output_buffer, src, SCREEN_WIDTH);
+#else
     for (int i = 0; i < SCREEN_WIDTH; ++i) {
         ob( *src++ );
     }
+#endif
 }
 
 // Render OSD overlay onto a scanline
@@ -1346,6 +1357,8 @@ void __time_critical_func(hdmi_hstx_line_begin)(unsigned line) {
     }
     if (line == V_ACTIVE_START - 4)
         video_latch_frame(HSTX_VIDEO_HEIGHT);
+    if (line == V_ACTIVE_START)
+        frame_update_request = 1;  // Apply VGA mode, palette and cursor in the core 1 timer.
 }
 
 void __time_critical_func(hdmi_hstx_line_end)(void) {

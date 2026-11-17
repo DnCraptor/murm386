@@ -324,7 +324,7 @@ if(M2P2_HSTX_AUDIO)
     target_include_directories(video_driver PUBLIC drivers/hdmi-hstx)
     target_compile_definitions(video_driver PUBLIC M2P2_HSTX_AUDIO=1 PRIVATE HDMI_SOUND=1)
     set_source_files_properties(
-        drivers/hdmi-hstx/hstx_video.c drivers/hdmi-hstx/hstx_audio.c
+        drivers/hdmi/hdmi.c drivers/hdmi-hstx/hstx_video.c drivers/hdmi-hstx/hstx_audio.c
         PROPERTIES COMPILE_OPTIONS "-fno-tree-loop-distribute-patterns"
     )
 endif()
@@ -841,6 +841,11 @@ message(STATUS "  Build Name:     ${BUILD_NAME}")
 message(STATUS "")
 
 # Create UF2 output
+if(M2P2_HSTX_AUDIO)
+    # Pico SDK uses this property for UF2 output, even on an executable.
+    set_property(TARGET ${BUILD_NAME} PROPERTY ARCHIVE_OUTPUT_DIRECTORY
+                 "${CMAKE_CURRENT_SOURCE_DIR}/bin/${CMAKE_BUILD_TYPE}")
+endif()
 pico_add_extra_outputs(${BUILD_NAME})
 
 target_link_options(${BUILD_NAME} PRIVATE -Xlinker --print-memory-usage --data-sections -Wl,--gc-sections)

@@ -201,6 +201,8 @@ static uint32_t __not_in_flash_func(psram_size)(void) {
  * the HDMI driver; memcpy uses word transfers only when source/destination
  * have compatible alignment.
  */
+/* Keep GCC from replacing these SRAM loops with calls to XIP libc. */
+__attribute__((optimize("no-tree-loop-distribute-patterns")))
 void *__not_in_flash_func(nf_memset)(void *ptr, int value, size_t len)
 {
     uint8_t *p = (uint8_t *)ptr;
@@ -246,6 +248,7 @@ const void *__not_in_flash_func(dos_api_memchr)(const void *src,
     return NULL;
 }
 
+__attribute__((optimize("no-tree-loop-distribute-patterns")))
 void *__not_in_flash_func(dos_api_memcpy)(void *dst,
                                           const void *src,
                                           size_t len)
