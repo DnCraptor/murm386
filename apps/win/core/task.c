@@ -320,7 +320,12 @@ wtask *task_create(const char *name, int (*run)(wtask *), uint32_t stack_size)
  * messages runs when it has some. The kernel waits while its loop runs. */
 static int has_work(wtask *t)
 {
-    if (t->state == WTASK_DEAD)
+    /* Another task runs a window procedure of its (SendMessage): its own
+     * stack and its program's (a Win16 one's: the callback's frames below
+     * where it waits) are in use until that returns. Were it to run on, it
+     * would return from its wait into frames the callback is still using
+     * (a callback that yields: PeekMessage, a modal loop). */
+    if (t->state == WTASK_DEAD || t->lent)
         return 0;
     if (t->state == WTASK_NEW || !t->waiting)
         return 1;
@@ -481,6 +486,8 @@ static int run_ne_app(wtask *t)
         else
             wsprintf(msg, "%s caused exception %d in module %s at %s.",
                      t->name, f.vector, file, where);
+        win_trace_event("ne-fault", (uint32_t)f.vector, (uint32_t)f.cs << 16 | f.ip);
+        win_trace_dump();               /* (SYSTEM.INI [debug] trace=1) before the box */
         win_logo_end();
         MessageBox(0, msg, "Application Error", MB_OK | MB_ICONSTOP);
         return 1;
@@ -529,6 +536,8 @@ static int run_ne_app(wtask *t)
     else                            /* an entry that returned (the probes) */
         wsprintf(msg, "NE program %s completed. DX:AX=%08lx", t->name,
                  (unsigned long)r.value);
+    win_trace_event("ne-end", (uint32_t)rc, (uint32_t)r.value);
+    win_trace_dump();                   /* (SYSTEM.INI [debug] trace=1) before the box */
     win_logo_end();
     MessageBox(0, msg, pe ? "WINN Win32" : "WINN Win16",
                MB_OK | (rc ? MB_ICONSTOP : MB_ICONINFORMATION));

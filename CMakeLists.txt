@@ -90,7 +90,7 @@ endif()
 # and the I386_MODE compile definition, so the binary name can no longer
 # disagree with the core actually compiled in (it used to always say
 # "386" while I386_MODE was left commented out - i.e. a 286 build).
-set(CPU_TARGET "286" CACHE STRING "Emulated CPU core: 286 or 386")
+set(CPU_TARGET "386" CACHE STRING "Emulated CPU core: 286 or 386")
 set_property(CACHE CPU_TARGET PROPERTY STRINGS 286 386)
 if(NOT CPU_TARGET STREQUAL "286" AND NOT CPU_TARGET STREQUAL "386")
     message(FATAL_ERROR "CPU_TARGET must be 286 or 386, got '${CPU_TARGET}'")
@@ -127,7 +127,7 @@ option(FORCE_HDMI "Force HDMI output instead of VGA" OFF)
 
 # Force VGA output (skip auto-detection). Takes precedence over FORCE_HDMI.
 option(FORCE_VGA "Force VGA output instead of HDMI" OFF)
-option(M2P2_HSTX_AUDIO "Use 640x480 HDMI with HSTX audio on M2P2" ON)
+option(M2P2_HSTX_AUDIO "Use 640x480 HDMI with HSTX audio on M2P2" OFF)
 if(M2P2_HSTX_AUDIO)
     if(NOT BOARD STREQUAL "M2" OR NOT PICO_BOARD STREQUAL "pico2"
        OR NOT CPU_SPEED STREQUAL "504" OR FORCE_VGA)

@@ -122,6 +122,8 @@ struct SB16State {
 #define AUDIO_BUF_LEN 4096
     uint8_t audio_buf[AUDIO_BUF_LEN];
     unsigned int audio_p, audio_q;
+    uint32_t audio_phase;
+    int16_t audio_last_l, audio_last_r;
     void *voice;
     int active_out;
 
@@ -248,6 +250,8 @@ static void dma_cmd8 (SB16State *s, int mask, int dma_len)
         return;
 
     s->direct_dac_sample = 0;
+    s->audio_phase = 0;
+    s->audio_last_l = s->audio_last_r = 0;
     s->fmt = AUDIO_FORMAT_U8;
     s->use_hdma = 0;
     s->fmt_bits = 8;
@@ -292,6 +296,8 @@ static void dma_cmd8 (SB16State *s, int mask, int dma_len)
 static void dma_cmd (SB16State *s, uint8_t cmd, uint8_t d0, int dma_len)
 {
     s->direct_dac_sample = 0;
+    s->audio_phase = 0;
+    s->audio_last_l = s->audio_last_r = 0;
     s->use_hdma = cmd < 0xc0;
     s->fifo = (cmd >> 1) & 1;
     s->dma_auto = (cmd >> 2) & 1;
@@ -891,6 +897,9 @@ static void reset (SB16State *s)
     dsp_out_data (s, 0xaa);
     speaker (s, 0);
     control (s, 0);
+    s->audio_p = s->audio_q;
+    s->audio_phase = 0;
+    s->audio_last_l = s->audio_last_r = 0;
     legacy_reset (s);
 }
 
@@ -1615,9 +1624,33 @@ void sb16_bind_dma(SB16State *s)
     i8257_dma_register_channel(s->isa_dma, s->dma, SB_read_DMA, s);
 }
 
-// call sb16_getsample 44100 times per second
+static inline __attribute__((always_inline))
+int sb16_pcm_at(const SB16State *s, unsigned int p)
+{
+    const unsigned int lo = s->audio_buf[p % AUDIO_BUF_LEN];
+    switch (s->fmt) {
+    case AUDIO_FORMAT_U8:
+        return ((int)lo - 128) * 256;
+    case AUDIO_FORMAT_S8:
+        return (int8_t)lo * 256;
+    case AUDIO_FORMAT_U16: {
+        const unsigned int hi = s->audio_buf[(p + 1) % AUDIO_BUF_LEN];
+        return (int)(lo | (hi << 8)) - 32768;
+    }
+    case AUDIO_FORMAT_S16: {
+        const unsigned int hi = s->audio_buf[(p + 1) % AUDIO_BUF_LEN];
+        return (int16_t)(lo | (hi << 8));
+    }
+    }
+    return 0;
+}
+
+// Called by the mixer at SOUND_FREQUENCY.
 void __not_in_flash_func(sb16_getsample)(SB16State *s, int* r_v, int* l_v) {
-    if (!s->active_out && s->audio_q == s->audio_p) {
+    const unsigned int p = s->audio_p;
+    const unsigned int q = s->audio_q;
+    const unsigned int len = q - p;
+    if (!s->active_out && len == 0) {
         if (s->speaker && !s->silence_pending) {
             const int16_t sample = s->direct_dac_sample;
             *l_v += sample;
@@ -1626,46 +1659,37 @@ void __not_in_flash_func(sb16_getsample)(SB16State *s, int* r_v, int* l_v) {
         return;
     }
 
-    unsigned int len = s->audio_q - s->audio_p;
-    if (len > AUDIO_BUF_LEN) {
-        s->audio_p = s->audio_q;
-        return;
+    const unsigned int sample_size =
+        (s->fmt == AUDIO_FORMAT_U8 || s->fmt == AUDIO_FORMAT_S8) ? 1 : 2;
+    const unsigned int frame_size = sample_size << s->fmt_stereo;
+    const unsigned int frames = len / frame_size;
+    const bool have_frame = len <= AUDIO_BUF_LEN && frames != 0 && s->freq > 0;
+
+    if (len > AUDIO_BUF_LEN || (!s->active_out && frames == 0)) {
+        // Drop an invalid queue or an incomplete frame at end of playback.
+        s->audio_p = q;
+        s->audio_phase = 0;
+    } else if (frames == 0) {
+        // An active DMA block may still supply the rest of this frame.
+        s->audio_phase = 0;
+    } else if (have_frame) {
+        s->audio_last_l = sb16_pcm_at(s, p);
+        s->audio_last_r = s->fmt_stereo ? sb16_pcm_at(s, p + sample_size)
+                                       : s->audio_last_l;
+
+        // Read the current frame before releasing it to the DMA producer.
+        const uint32_t phase = s->audio_phase + (uint32_t)s->freq;
+        unsigned int advance = phase / SOUND_FREQUENCY;
+        s->audio_phase = phase % SOUND_FREQUENCY;
+        if (advance > frames)
+            advance = frames;
+        s->audio_p = p + advance * frame_size;
     }
 
-    static uint32_t phase = 0;
-    uint32_t step = ((uint32_t)s->freq << 16) / 44100;
-
-    int frame_size = s->fmt_stereo ?
-        (s->fmt == AUDIO_FORMAT_U8 || s->fmt == AUDIO_FORMAT_S8 ? 2 : 4) :
-        (s->fmt == AUDIO_FORMAT_U8 || s->fmt == AUDIO_FORMAT_S8 ? 1 : 2);
-
-    phase += step;
-    int advance = (phase >> 16) * frame_size;
-    phase &= 0xffff;
-
-    if (advance > (int)len) advance = len;
-    s->audio_p += advance;
-
-    unsigned int p = s->audio_p % AUDIO_BUF_LEN;
-    int16_t l = 0, r = 0;
-
-    switch (s->fmt) {
-    case AUDIO_FORMAT_S16:
-        l = *(int16_t *)(s->audio_buf + p);
-        r = s->fmt_stereo ? *(int16_t *)(s->audio_buf + (p + 2) % AUDIO_BUF_LEN) : l;
-        break;
-    case AUDIO_FORMAT_U16:
-        l = *(int16_t *)(s->audio_buf + p) - 32768;
-        r = s->fmt_stereo ? *(int16_t *)(s->audio_buf + (p + 2) % AUDIO_BUF_LEN) - 32768 : l;
-        break;
-    case AUDIO_FORMAT_U8:
-        l = (int16_t)(s->audio_buf[p] - 128) << 8;
-        r = s->fmt_stereo ? (int16_t)(s->audio_buf[(p + 1) % AUDIO_BUF_LEN] - 128) << 8 : l;
-        break;
-    case AUDIO_FORMAT_S8:
-        l = (int16_t)(int8_t)s->audio_buf[p] << 8;
-        r = s->fmt_stereo ? (int16_t)(int8_t)s->audio_buf[(p + 1) % AUDIO_BUF_LEN] << 8 : l;
-        break;
+    // Keep the DAC level during an active DMA underrun.
+    if (have_frame || s->active_out) {
+        *l_v += s->audio_last_l;
+        *r_v += s->audio_last_r;
     }
 
     if (s->dma_running) {
@@ -1673,7 +1697,4 @@ void __not_in_flash_func(sb16_getsample)(SB16State *s, int* r_v, int* l_v) {
         IsaDma *isa_dma = s->use_hdma ? s->isa_hdma : s->isa_dma;
         i8257_dma_hold_DREQ(isa_dma, dma);
     }
-
-    *l_v += l;
-    *r_v += r;
 }

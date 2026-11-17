@@ -30,7 +30,8 @@ static const uint8_t timbres[8][4] = {
     { 0x02, 0xe3, 0x75, 0x02 }, /* brass/reeds */
     { 0x01, 0xb3, 0x96, 0x01 }, /* synths/effects */
 };
-typedef struct { uint8_t on, channel, note; uint32_t age; } voice;
+/* b0: the channel's 0xB0 register as last keyed on (block, high fnum) */
+typedef struct { uint8_t on, channel, note, b0; uint32_t age; } voice;
 static voice voices[9];
 static uint8_t programs[16], volume[16];
 static uint32_t stamp;
@@ -41,9 +42,13 @@ static void reg_write(unsigned reg, unsigned val)
     outp(OPL_ADDR, (uint8_t)reg);
     outp(OPL_DATA, (uint8_t)val);
 }
+/* Only the key-on bit is cleared: the note keeps its pitch while it
+ * releases. Writing 0 would stop the phase of a sounding operator at
+ * whatever its output was, a click at every note end. */
 static void key_off(unsigned i)
 {
-    reg_write(0xb0u + i, 0);
+    reg_write(0xb0u + i, voices[i].b0 & 0x1fu);
+    if (voices[i].on) voices[i].age = ++stamp;
     voices[i].on = 0;
 }
 static void all_off(void)
@@ -74,16 +79,21 @@ static void opl_close(void)
 }
 static void start_note(unsigned channel, unsigned note, unsigned velocity)
 {
-    unsigned i, chosen = 0;
-    uint32_t oldest = UINT32_MAX;
+    /* the same note again; else the voice released longest ago (its
+     * release has died away the most); else the oldest sounding one */
+    unsigned i, chosen = 9, sounding = 0;
+    uint32_t free_age = UINT32_MAX, oldest = UINT32_MAX;
     for (i = 0; i < 9; i++) {
         if (voices[i].on && voices[i].channel == channel && voices[i].note == note) {
-            chosen = i; break;
+            chosen = i; free_age = 0; break;
         }
-        if (!voices[i].on) { chosen = i; break; }
-        if (voices[i].age < oldest) { oldest = voices[i].age; chosen = i; }
+        if (!voices[i].on) {
+            if (voices[i].age < free_age) { free_age = voices[i].age; chosen = i; }
+        } else if (voices[i].age < oldest) {
+            oldest = voices[i].age; sounding = i;
+        }
     }
-    i = chosen;
+    i = chosen < 9 ? chosen : sounding;
     key_off(i);
     unsigned op0 = op[i], op1 = op0 + 3u;
     const uint8_t *t = timbres[(programs[channel] >> 4) & 7u];
@@ -106,7 +116,8 @@ static void start_note(unsigned channel, unsigned note, unsigned velocity)
     if (block > 7) block = 7;
     unsigned fnum = fnums[note % 12u];
     reg_write(0xa0u + i, (uint8_t)fnum);
-    reg_write(0xb0u + i, 0x20u | (unsigned)block << 2 | (fnum >> 8));
+    voices[i].b0 = (uint8_t)((unsigned)block << 2 | (fnum >> 8));
+    reg_write(0xb0u + i, 0x20u | voices[i].b0);
     voices[i].on = 1;
     voices[i].channel = (uint8_t)channel;
     voices[i].note = (uint8_t)note;

@@ -652,7 +652,9 @@ auxiliary device 0, "Master Volume"), the wave output's and the MIDI
 output's (waveOut/midiOut/auxGet/SetVolume, left and right; the
 capabilities say so). The drivers have none of their own: the samples are
 scaled on their way to the wave driver (MCI's too), MIDI notes by their
-velocity; each can be muted.
+velocity; each can be muted. SYSTEM.INI is written when a program ends,
+a mixer is closed or MMSYSTEM is unloaded, not at each change (a program
+fading its sound sets the volume tens of thousands of times).
 
 The mixer (Windows 95's API, `mixer.c`; Win16 and native) is one device:
 its destination, the speakers, is the master volume, its sources the wave

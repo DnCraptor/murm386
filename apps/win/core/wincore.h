@@ -429,6 +429,8 @@ typedef struct wtask {
     int     (*run)(struct wtask *);
     struct wtask_ctx *ctx;
     struct wtask *dispatch_owner;  /* logical owner during cross-task SendMessage */
+    int       lent;             /* its window procedures running on another task's
+                                 * stack (SendMessage): it does not run meanwhile */
     int       starting;         /* WinExec's hourglass is its until it first waits */
     uint32_t  queue_time;       /* when it last looked at its queue (GetTickCount) */
     int       priority;         /* SetPriority's: noted */

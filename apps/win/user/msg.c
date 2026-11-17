@@ -191,8 +191,10 @@ LRESULT WINAPI SendMessage(HWND h, UINT m, WPARAM wp, LPARAM lp)
         return proc ? proc(h, m, wp, lp) : 0;
     }
     wtask *previous = task_set_dispatch_owner(owner);
+    owner->lent++;                      /* it waits until the procedure returns */
     WNDPROC proc = send_hook(h, m, wp, lp, 0);
     LRESULT result = proc ? proc(h, m, wp, lp) : 0;
+    owner->lent--;
     task_set_dispatch_owner(previous);
     return result;
 }

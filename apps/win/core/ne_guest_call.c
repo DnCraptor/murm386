@@ -249,8 +249,12 @@ static __attribute__((noinline)) int generic(args *a, ne_user *u, uint16_t servi
         }
         case 'S': case 'b': case 'B': {     /* a buffer of the next argument's size */
             uint8_t *b = (uint8_t *)take(&p, next + 1u);
-            if (r && codes[i] != 'S')
-                rd(a, r, b, next);          /* in (out: unchanged where not set) */
+            /* in (out: unchanged where not set); _lread's buffer is only
+             * written, as far as the file gives (a program may ask for more
+             * than its buffer holds, knowing the file shorter: Windows
+             * reads what there is) */
+            if (r && codes[i] != 'S' && service != 82u)
+                rd(a, r, b, next);
             x[i] = r ? (uint32_t)(uintptr_t)b : 0;
             break;
         }

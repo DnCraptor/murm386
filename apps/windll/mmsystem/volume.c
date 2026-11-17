@@ -34,7 +34,7 @@ static const char *const keys[VOL_COUNT] = { "Master", "Wave", "MIDI" };
 static const char *const mute_keys[VOL_COUNT] = { "MasterMute", "WaveMute", "MIDIMute" };
 static DWORD vol[VOL_COUNT];
 static int muted[VOL_COUNT];
-static int loaded;
+static int loaded, dirty;               /* changed since SYSTEM.INI was written */
 
 void winn_mixer_changed(int line, int control);     /* mixer.c: its windows told */
 
@@ -61,14 +61,29 @@ static void load(void)
 
 static void set(int i, DWORD v)
 {
-    char s[16];
     load();
     if (vol[i] == v)
         return;
     vol[i] = v;
-    wsprintf(s, "%08lX", (unsigned long)v);
-    WritePrivateProfileString("volume", keys[i], s, "SYSTEM.INI");
+    dirty = 1;
     winn_mixer_changed(i, 0);
+}
+
+/* The volumes into SYSTEM.INI: not at each change (a program fading its
+ * sound in or out sets the volume tens of thousands of times, each a
+ * rewrite of the file on the card), but when a program ends, the mixer is
+ * closed, MMSYSTEM is unloaded. */
+void winn_volume_flush(void)
+{
+    char s[16];
+    if (!dirty)
+        return;
+    dirty = 0;
+    for (int i = 0; i < VOL_COUNT; i++) {
+        wsprintf(s, "%08lX", (unsigned long)vol[i]);
+        WritePrivateProfileString("volume", keys[i], s, "SYSTEM.INI");
+        WritePrivateProfileString("volume", mute_keys[i], muted[i] ? "1" : "0", "SYSTEM.INI");
+    }
 }
 
 /* the mixer's (mixer.c): a line's (VOL_*) volume, mute */
@@ -96,7 +111,7 @@ void winn_mute_set(int i, int m)
     if (i < 0 || i >= VOL_COUNT || muted[i] == !!m)
         return;
     muted[i] = !!m;
-    WritePrivateProfileString("volume", mute_keys[i], m ? "1" : "0", "SYSTEM.INI");
+    dirty = 1;
     winn_mixer_changed(i, 1);
 }
 

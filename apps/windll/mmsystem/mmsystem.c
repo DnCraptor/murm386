@@ -36,6 +36,7 @@ int winn_volume_ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *value);
 /* mixer.c */
 int winn_mixer_ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *value);
 void winn_mixer_task_end(uint16_t task);
+void winn_volume_flush(void);           /* volume.c */
 void winn_mci_task_end(uint16_t task);
 void winn_mci_term(void);
 
@@ -816,6 +817,7 @@ static void task_end(uint16_t task)
 {
     winn_mci_task_end(task);
     winn_mixer_task_end(task);
+    winn_volume_flush();
     winn_wave_task_end(task);
     winn_midi_task_end(task);
     for (int i = 0; i < TIMERS; i++)
@@ -830,6 +832,7 @@ static void task_end(uint16_t task)
 
 static void term(void)
 {
+    winn_volume_flush();
     winn_mci_term();
     winn_wave_term();
     winn_midi_term();

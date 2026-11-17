@@ -40,6 +40,7 @@ DWORD winn_volume_get(int line);
 void winn_volume_set(int line, DWORD v);
 int winn_mute_get(int line);
 void winn_mute_set(int line, int m);
+void winn_volume_flush(void);
 UINT WINAPI winn_wave_num(void);
 UINT WINAPI winn_midi_num(void);
 
@@ -162,6 +163,7 @@ MMRESULT WINAPI mixerClose(HMIXER h)
     if (object(h, MIXER_OBJECTF_HMIXER))
         return MMSYSERR_INVALHANDLE;
     opened[h - MIXER_BASE].used = 0;
+    winn_volume_flush();                /* a mixer's changes kept (volume.c) */
     return 0;
 }
 
