@@ -82,6 +82,7 @@ struct SB16State {
     AudioFormat fmt;
     int dma_auto;
     int block_size;
+    int dma8_block_size;  /* DSP 48h, in bytes, for subsequent legacy DMA starts. */
     int fifo;
     int freq;
     int time_const;
@@ -226,7 +227,6 @@ static void aux_timer (void *opaque)
 #endif
 
 #define DMA8_AUTO 1
-#define DMA8_HIGH 2
 
 static void continue_dma8 (SB16State *s)
 {
@@ -240,12 +240,19 @@ static void continue_dma8 (SB16State *s)
 
 static void dma_cmd8 (SB16State *s, int mask, int dma_len)
 {
+    const int stereo = (s->mixer_regs[0x0e] & 2) != 0;
+    /* Preserve the legacy rounding for odd SB Pro stereo blocks. */
+    const int block_size = dma_len == -1 ? s->dma8_block_size & ~stereo
+                                        : dma_len << stereo;
+    if (block_size <= 0)
+        return;
+
     s->direct_dac_sample = 0;
     s->fmt = AUDIO_FORMAT_U8;
     s->use_hdma = 0;
     s->fmt_bits = 8;
     s->fmt_signed = 0;
-    s->fmt_stereo = (s->mixer_regs[0x0e] & 2) != 0;
+    s->fmt_stereo = stereo;
     if (-1 == s->time_const) {
         if (s->freq <= 0)
             s->freq = 11025;
@@ -257,23 +264,9 @@ static void dma_cmd8 (SB16State *s, int mask, int dma_len)
         s->time_const = -1;
     }
 
-    if (dma_len != -1) {
-        s->block_size = dma_len << s->fmt_stereo;
-    }
-    else {
-        /* This is apparently the only way to make both Act1/PL
-           and SecondReality/FC work
-
-           Act1 sets block size via command 0x48 and it's an odd number
-           SR does the same with even number
-           Both use stereo, and Creatives own documentation states that
-           0x48 sets block size in bytes less one.. go figure */
-        s->block_size &= ~s->fmt_stereo;
-    }
-
-    s->left_till_irq = s->block_size;
+    s->block_size = block_size;
+    s->left_till_irq = block_size;
     s->bytes_per_second = (s->freq << s->fmt_stereo);
-    /* s->highspeed = (mask & DMA8_HIGH) != 0; */
     s->dma_auto = (mask & DMA8_AUTO) != 0;
     s->align = (1 << s->fmt_stereo) - 1;
 
@@ -458,7 +451,6 @@ static void command (SB16State *s, uint8_t cmd)
 
         case 0x14:
             s->needed_bytes = 2;
-            s->block_size = 0;
             break;
 
         case 0x1c:              /* Auto-Initialize DMA DAC, 8-bit */
@@ -543,8 +535,10 @@ static void command (SB16State *s, uint8_t cmd)
             break;
 
         case 0x90:
+            dma_cmd8(s, DMA8_AUTO, -1);
+            break;
         case 0x91:
-            dma_cmd8 (s, ((cmd & 1) == 0) | DMA8_HIGH, -1);
+            dma_cmd8(s, 0, -1);
             break;
 
         case 0xd0:              /* halt DMA operation. 8bit */
@@ -782,8 +776,8 @@ static void complete (SB16State *s)
             break;
 
         case 0x48:
-            s->block_size = dsp_get_lohi (s) + 1;
-            ldebug ("set dma block len %d\n", s->block_size);
+            s->dma8_block_size = dsp_get_lohi(s) + 1;
+            ldebug ("set dma block len %d\n", s->dma8_block_size);
             break;
 
         case 0x74:
@@ -884,6 +878,7 @@ static void reset (SB16State *s)
     s->left_till_irq = 0;
     s->needed_bytes = 0;
     s->block_size = -1;
+    s->dma8_block_size = 0;
     s->nzero = 0;
     s->highspeed = 0;
     s->v2x6 = 0;
