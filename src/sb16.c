@@ -114,6 +114,7 @@ struct SB16State {
     int left_till_irq;
 
     int dma_running;
+    bool dma_paused;
     uint32_t silence_deadline_us;
     bool silence_pending;
     int bytes_per_second;
@@ -290,6 +291,7 @@ static void dma_cmd8 (SB16State *s, int mask, int dma_len)
     }
 
     continue_dma8 (s);
+    s->dma_paused = false;
     speaker (s, 1);
 }
 
@@ -378,6 +380,7 @@ static void dma_cmd (SB16State *s, uint8_t cmd, uint8_t d0, int dma_len)
     }
 
     control (s, 1);
+    s->dma_paused = false;
     speaker (s, 1);
 }
 
@@ -548,7 +551,11 @@ static void command (SB16State *s, uint8_t cmd)
             break;
 
         case 0xd0:              /* halt DMA operation. 8bit */
-            control (s, 0);
+        case 0xd5:              /* halt DMA operation. 16bit */
+            if (s->dma_running && s->fmt_bits == (cmd == 0xd0 ? 8 : 16)) {
+                s->dma_paused = true;
+                control(s, 0);
+            }
             break;
 
         case 0xd1:              /* speaker on */
@@ -562,15 +569,17 @@ static void command (SB16State *s, uint8_t cmd)
         case 0xd4:              /* continue DMA operation. 8bit */
             /* KQ6 (or maybe Sierras audblst.drv in general) resets
                the frequency between halt/continue */
-            continue_dma8 (s);
-            break;
-
-        case 0xd5:              /* halt DMA operation. 16bit */
-            control (s, 0);
+            if (s->dma_paused && s->fmt_bits == 8) {
+                continue_dma8(s);
+                s->dma_paused = false;
+            }
             break;
 
         case 0xd6:              /* continue DMA operation. 16bit */
-            control (s, 1);
+            if (s->dma_paused && s->fmt_bits == 16) {
+                control(s, 1);
+                s->dma_paused = false;
+            }
             break;
 
         case 0xd9:              /* exit auto-init DMA after this block. 16bit */
@@ -900,6 +909,7 @@ static void reset (SB16State *s)
     s->audio_p = s->audio_q;
     s->audio_phase = 0;
     s->audio_last_l = s->audio_last_r = 0;
+    s->dma_paused = false;
     legacy_reset (s);
 }
 
@@ -1244,6 +1254,9 @@ static int SB_read_DMA (void *opaque, int nchan, int dma_pos, int dma_len)
     SB16State *s = opaque;
     int till, copy, written, free;
 
+    if (s->dma_paused)
+        return dma_pos;
+
     if (s->block_size <= 0) {
         qemu_log_mask(LOG_GUEST_ERROR, "invalid block size=%d nchan=%d"
                       " dma_pos=%d dma_len=%d\n", s->block_size, nchan,
@@ -1474,7 +1487,7 @@ void sb16_audio_callback (void *opaque, uint8_t *stream, int free)
     s->audio_free = free;
 
     // Continue playing if buffer has data, even if DMA (active_out) has stopped
-    if (!s->active_out && s->audio_q == s->audio_p)
+    if (s->dma_paused || (!s->active_out && s->audio_q == s->audio_p))
         return;
 
     unsigned int len = s->audio_q - s->audio_p;
@@ -1647,6 +1660,13 @@ int sb16_pcm_at(const SB16State *s, unsigned int p)
 
 // Called by the mixer at SOUND_FREQUENCY.
 void __not_in_flash_func(sb16_getsample)(SB16State *s, int* r_v, int* l_v) {
+    if (s->dma_paused) {
+        // Hold the DAC level without consuming queued PCM or resampling phase.
+        *l_v += s->audio_last_l;
+        *r_v += s->audio_last_r;
+        return;
+    }
+
     const unsigned int p = s->audio_p;
     const unsigned int q = s->audio_q;
     const unsigned int len = q - p;
