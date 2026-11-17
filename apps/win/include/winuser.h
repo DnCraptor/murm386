@@ -813,6 +813,7 @@ typedef struct tagWINDOWPLACEMENT {
     POINT ptMinPosition, ptMaxPosition;
     RECT  rcNormalPosition;
 } WINDOWPLACEMENT, *LPWINDOWPLACEMENT;
+#define WPF_SETMINPOSITION 0x0001
 BOOL    WINAPI GetWindowPlacement(HWND hwnd, WINDOWPLACEMENT *wp);
 BOOL    WINAPI SetWindowPlacement(HWND hwnd, const WINDOWPLACEMENT *wp);
 void    WINAPI SwitchToThisWindow(HWND hwnd, BOOL restore);

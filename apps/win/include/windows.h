@@ -400,6 +400,7 @@ UINT    WINAPI GlobalGetAtomName(ATOM a, LPSTR buf, int size);
 #define FW_NORMAL       400
 #define FW_BOLD         700
 #define ANSI_CHARSET    0
+#define DEFAULT_CHARSET 1
 #define SYMBOL_CHARSET  2
 #define OEM_CHARSET     255
 #define DEFAULT_PITCH   0

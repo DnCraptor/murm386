@@ -827,8 +827,348 @@ static int user95_more(args *a, ne_user *u, uint16_t service, uint32_t *v, int *
     return 0;
 }
 
+/* ---------------------------------------------------------------- the rest */
+
+/* the keyboard layouts WINN has: US English, Russian (HKL: the language
+ * twice) */
+#define HKL_US 0x04090409u
+#define HKL_RU 0x04190419u
+
+extern int user_keyboard_layout(void);
+extern void user_set_keyboard_layout(int russian);
+
+static uint32_t hkl_now(void) { return user_keyboard_layout() ? HKL_RU : HKL_US; }
+
+/* a layout's name ("00000409") as one of WINN's: 1 Russian, 0 US, -1 none */
+static int layout_named(const char *s)
+{
+    uint32_t id = 0;
+    for (int i = 0; s[i] && i < 8; i++) {
+        char c = s[i];
+        id = id << 4 | (uint32_t)(c >= '0' && c <= '9' ? c - '0' :
+                                  c >= 'a' && c <= 'f' ? c - 'a' + 10 :
+                                  c >= 'A' && c <= 'F' ? c - 'A' + 10 : 0);
+    }
+    return (id & 0xffffu) == 0x0419u ? 1 : (id & 0xffffu) == 0x0409u ? 0 : -1;
+}
+
+/* a Win16 RECT */
+static void rect16_put(uint8_t *g, const RECT *r)
+{
+    wr16(g, (uint16_t)r->left); wr16(g + 2, (uint16_t)r->top);
+    wr16(g + 4, (uint16_t)r->right); wr16(g + 6, (uint16_t)r->bottom);
+}
+
+static int win95_extra(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword)
+{
+    (void)u;
+    switch (service) {
+    /* USER */
+    case U16(460): {                    /* GetInternalWindowPos(HWND, LPRECT, LPPOINT): the
+                                         * restored place, the icon's; its show state */
+        WINDOWPLACEMENT wp;
+        uint8_t g[8];
+        memset(&wp, 0, sizeof(wp));
+        wp.length = sizeof(wp);
+        *v = 0;
+        if (!GetWindowPlacement(w(a, 12), &wp))
+            return 1;
+        rect16_put(g, &wp.rcNormalPosition);
+        if (dw(a, 8))
+            put(a, dw(a, 8), g, 8);
+        wr16(g, (uint16_t)wp.ptMinPosition.x);
+        wr16(g + 2, (uint16_t)wp.ptMinPosition.y);
+        if (dw(a, 4))
+            put(a, dw(a, 4), g, 4);
+        *v = wp.showCmd;
+        return 1;
+    }
+    case U16(461): {                    /* SetInternalWindowPos(HWND, UINT show, LPRECT, LPPOINT) */
+        WINDOWPLACEMENT wp;
+        uint8_t g[8];
+        memset(&wp, 0, sizeof(wp));
+        wp.length = sizeof(wp);
+        HWND h = w(a, 14);
+        if (!GetWindowPlacement(h, &wp))
+            return 1;
+        wp.showCmd = w(a, 12);
+        if (dw(a, 8) && get(a, dw(a, 8), g, 8))
+            SetRect(&wp.rcNormalPosition, (int16_t)rd16(g), (int16_t)rd16(g + 2),
+                    (int16_t)rd16(g + 4), (int16_t)rd16(g + 6));
+        if (dw(a, 4) && get(a, dw(a, 4), g, 4)) {
+            wp.ptMinPosition.x = (int16_t)rd16(g);
+            wp.ptMinPosition.y = (int16_t)rd16(g + 2);
+            wp.flags |= WPF_SETMINPOSITION;
+        }
+        SetWindowPlacement(h, &wp);
+        return 1;
+    }
+    case U16(464):                      /* DragObject(HWND, HWND, UINT, DWORD, HCURSOR): the
+                                         * File Manager's drag protocol; nothing dropped */
+        *v = 0;
+        *dword = 1;
+        return 1;
+    case U16(343):                      /* GetFilePortName(LPOFSTRUCT): none */
+        *v = 0;
+        return 1;
+    case U16(499):                      /* WNetErrorText(WORD, LPSTR, WORD): none */
+        *v = 0;
+        return 1;
+    case U16(521): case U16(522): case U16(533):
+        *v = 1;                         /* WNetEnable, Disable, Initialize:
+                                         * WN_NOT_SUPPORTED */
+        return 1;
+    case U16(477): {                    /* GetKeyboardLayoutName(LPSTR): 8 hex digits */
+        char name[12];
+        wsprintf(name, "%08lX", (unsigned long)(hkl_now() & 0xffffu));
+        *v = put(a, dw(a, 4), name, 9);
+        return 1;
+    }
+    case U16(478): {                    /* LoadKeyboardLayout(LPCSTR, UINT flags): WINN's
+                                         * two; KLF_ACTIVATE (1) makes it the layout */
+        char name[16];
+        int k = str_in(a, dw(a, 6), name, sizeof(name)) ? layout_named(name) : -1;
+        *v = 0;
+        if (k >= 0) {
+            if (w(a, 4) & 1u)
+                user_set_keyboard_layout(k);
+            *v = k ? HKL_RU : HKL_US;
+        }
+        *dword = 1;
+        return 1;
+    }
+    case U16(650): {                    /* ActivateKeyboardLayout(HKL, UINT): the one before;
+                                         * HKL_NEXT (1), HKL_PREV (0): the other */
+        uint32_t was = hkl_now(), h = dw(a, 6);
+        int k = h <= 1u ? !user_keyboard_layout() : (h & 0xffffu) == 0x0419u ? 1 :
+                (h & 0xffffu) == 0x0409u ? 0 : -1;
+        *v = 0;
+        if (k >= 0) {
+            user_set_keyboard_layout(k);
+            *v = was;
+        }
+        *dword = 1;
+        return 1;
+    }
+    case U16(651):                      /* GetKeyboardLayout(DWORD thread) */
+        *v = hkl_now();
+        *dword = 1;
+        return 1;
+    case U16(652): {                    /* GetKeyboardLayoutList(int, HKL FAR *): the two */
+        int n = (int16_t)w(a, 8);
+        uint32_t far = dw(a, 4);
+        if (n > 0 && far) {
+            put32(a, far, HKL_US);
+            if (n > 1)
+                put32(a, far + 4, HKL_RU);
+        }
+        *v = n > 0 && n < 2 ? 1 : 2;
+        return 1;
+    }
+    case U16(654):                      /* UnloadKeyboardLayout(HKL): WINN's stay */
+        *v = (dw(a, 4) & 0xffffu) == 0x0409u || (dw(a, 4) & 0xffffu) == 0x0419u;
+        return 1;
+    case U16(604): {                    /* BroadcastSystemMessage(DWORD flags, LPDWORD
+                                         * recipients, UINT, WPARAM, LPARAM): to the top-level
+                                         * windows (sent, BSF_POSTMESSAGE posted) */
+        uint32_t flags = dw(a, 16), lp = dw(a, 4);
+        UINT msg = w(a, 10);
+        WPARAM wp = w(a, 8);
+        if (flags & 0x10u)
+            PostMessage(HWND_BROADCAST, msg, wp, (LPARAM)lp);
+        else
+            SendMessage(HWND_BROADCAST, msg, wp, (LPARAM)lp);
+        *v = 1;
+        *dword = 1;
+        return 1;
+    }
+    case U16(620): {                    /* ChangeDisplaySettings(LPDEVMODE, DWORD): the mode
+                                         * there is; another one: DISP_CHANGE_BADMODE */
+        uint32_t far = dw(a, 8);
+        uint8_t d[124];
+        *v = 0;
+        if (far && get(a, far, d, sizeof(d))) {
+            uint32_t fields = rd32(d + 40);
+            HDC dc = GetDC(0);
+            int bits = GetDeviceCaps(dc, BITSPIXEL) * GetDeviceCaps(dc, PLANES);
+            int cx = GetSystemMetrics(SM_CXSCREEN), cy = GetSystemMetrics(SM_CYSCREEN);
+            ReleaseDC(0, dc);
+            if (((fields & 0x40000u) && rd32(d + 104) != (uint32_t)bits) ||
+                ((fields & 0x80000u) && rd32(d + 108) != (uint32_t)cx) ||
+                ((fields & 0x100000u) && rd32(d + 112) != (uint32_t)cy))
+                *v = (uint32_t)-2;
+        }
+        *dword = 1;
+        return 1;
+    }
+    case U16(621): {                    /* EnumDisplaySettings(LPCSTR, DWORD mode, LPDEVMODE):
+                                         * the one mode */
+        uint32_t mode = dw(a, 8), far = dw(a, 4);
+        uint8_t d[124];
+        *v = 0;
+        if ((mode == 0 || mode == 0xffffffffu) && far) {
+            HDC dc = GetDC(0);
+            int bits = GetDeviceCaps(dc, BITSPIXEL) * GetDeviceCaps(dc, PLANES);
+            ReleaseDC(0, dc);
+            memset(d, 0, sizeof(d));
+            lstrcpyn((char *)d, "DISPLAY", 32);
+            wr16(d + 32, 0x0400);       /* dmSpecVersion */
+            wr16(d + 36, sizeof(d));    /* dmSize */
+            wr32(d + 40, 0x1c0000u | 0x400000u);   /* BITSPERPEL, PELSWIDTH, HEIGHT, FREQUENCY */
+            wr32(d + 104, (uint32_t)bits);
+            wr32(d + 108, (uint32_t)GetSystemMetrics(SM_CXSCREEN));
+            wr32(d + 112, (uint32_t)GetSystemMetrics(SM_CYSCREEN));
+            wr32(d + 120, 60);
+            *v = put(a, far, d, sizeof(d));
+        }
+        return 1;
+    }
+    case U16(640): {                    /* MsgWaitForMultipleObjects(DWORD n, LPHANDLE, BOOL,
+                                         * DWORD ms, DWORD mask): Win16 has no objects to
+                                         * wait for: the input (WAIT_OBJECT_0 + n), or the
+                                         * time out (WAIT_TIMEOUT) */
+        uint32_t n = dw(a, 18), ms = dw(a, 8);
+        UINT mask = (UINT)(dw(a, 4) & 0xffffu);
+        DWORD start = GetTickCount();
+        *dword = 1;
+        for (;;) {
+            if (HIWORD(GetQueueStatus(mask ? mask : 0xff)) || (mask & QS_POSTMESSAGE &&
+                GetQueueStatus(QS_POSTMESSAGE))) {
+                *v = n;
+                return 1;
+            }
+            if (ms != 0xffffffffu && GetTickCount() - start >= ms) {
+                *v = 0x102u;
+                return 1;
+            }
+            Yield();
+        }
+    }
+    case U16(660): {                    /* DrawCaption(HWND, HDC, LPRECT, UINT flags): the
+                                         * window's title on the caption's colour */
+        uint8_t g[8];
+        RECT r;
+        HDC dc = w(a, 10);
+        *v = 0;
+        if (!get(a, dw(a, 6), g, 8))
+            return 1;
+        SetRect(&r, (int16_t)rd16(g), (int16_t)rd16(g + 2), (int16_t)rd16(g + 4),
+                (int16_t)rd16(g + 6));
+        int active = (w(a, 4) & 1u) != 0;     /* DC_ACTIVE */
+        HBRUSH br = CreateSolidBrush(GetSysColor(active ? COLOR_ACTIVECAPTION
+                                                          : COLOR_INACTIVECAPTION));
+        FillRect(dc, &r, br);
+        DeleteObject(br);
+        char title[128];
+        GetWindowText(w(a, 12), title, sizeof(title));
+        int mode = SetBkMode(dc, TRANSPARENT);
+        COLORREF old = SetTextColor(dc, GetSysColor(active ? COLOR_CAPTIONTEXT
+                                                           : COLOR_INACTIVECAPTIONTEXT));
+        r.left += 2;
+        DrawText(dc, title, -1, &r, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        SetTextColor(dc, old);
+        SetBkMode(dc, mode);
+        *v = 1;
+        return 1;
+    }
+    /* GDI */
+    case G16(506): {                    /* SetMetaRgn(HDC): the clip region as it is */
+        RECT r;
+        *v = (uint16_t)GetClipBox(w(a, 4), &r);
+        return 1;
+    }
+    case G16(523): {                    /* ExtCreatePen(DWORD style, DWORD width, LPLOGBRUSH,
+                                         * DWORD, LPDWORD): its style and colour, cosmetic
+                                         * one pixel wide */
+        uint8_t lb[8];
+        uint32_t style = dw(a, 20), width = dw(a, 16);
+        COLORREF c = get(a, dw(a, 12), lb, 8) ? rd32(lb + 2) & 0xffffffu : 0;
+        int ps = (int)(style & 0x0fu);
+        if (ps > PS_INSIDEFRAME)
+            ps = PS_SOLID;
+        *v = (uint16_t)(uintptr_t)CreatePen(ps, (style & 0x10000u) ? (int)width : 1, c);
+        return 1;
+    }
+    case G16(526): case G16(527): {     /* GetMiterLimit(HDC, FLOAT FAR *), SetMiterLimit(HDC,
+                                         * FLOAT, FLOAT FAR *): 10, as Windows' default */
+        static const uint8_t ten[4] = { 0x00, 0x00, 0x20, 0x41 };      /* 10.0f */
+        uint32_t out = dw(a, 4);
+        if (out)
+            put(a, out, ten, 4);
+        *v = 1;
+        return 1;
+    }
+    case G16(611): {                    /* GetRandomRgn(HDC, HRGN, INT which): SYSRGN (4) the
+                                         * DC's visible part, in screen coordinates */
+        RECT r;
+        HDC dc = w(a, 8);
+        HRGN rgn = w(a, 6);
+        *v = 0;
+        if (w(a, 4) != 4 || GetClipBox(dc, &r) == ERROR)
+            return 1;
+        DWORD org = GetDCOrg(dc);
+        LPtoDP(dc, (LPPOINT)&r, 2);
+        SetRectRgn(rgn, r.left + (int16_t)LOWORD(org), r.top + (int16_t)HIWORD(org),
+                   r.right + (int16_t)LOWORD(org), r.bottom + (int16_t)HIWORD(org));
+        *v = 1;
+        return 1;
+    }
+    case G16(615): {                    /* GetCharacterPlacement(HDC, LPCSTR, int, int max,
+                                         * LPGCP_RESULTS, DWORD): left to right, a glyph a
+                                         * character, their widths and carets */
+        HDC dc = w(a, 20);
+        int n = (int16_t)w(a, 14);
+        uint32_t res = dw(a, 8);
+        char text[256];
+        uint8_t r[32];
+        *v = 0;
+        *dword = 1;
+        if (n < 0 || n > 255 || !get(a, dw(a, 16), text, (uint32_t)n) ||
+            (res && !get(a, res, r, sizeof(r))))
+            return 1;
+        int x = 0, height = 0;
+        uint32_t order = res ? rd32(r + 8) : 0, dx = res ? rd32(r + 12) : 0,
+                 caret = res ? rd32(r + 16) : 0, glyphs = res ? rd32(r + 24) : 0;
+        int room = res ? rd16(r + 28) : n;
+        if (n > room)
+            n = room;
+        for (int i = 0; i < n; i++) {
+            SIZE sz;
+            GetTextExtentPoint(dc, text + i, 1, &sz);
+            uint8_t g[2];
+            wr16(g, (uint16_t)i);
+            if (order) put(a, order + 2u * (uint32_t)i, g, 2);
+            if (caret) { wr16(g, (uint16_t)x); put(a, caret + 2u * (uint32_t)i, g, 2); }
+            wr16(g, (uint16_t)sz.cx);
+            if (dx) put(a, dx + 2u * (uint32_t)i, g, 2);
+            wr16(g, (uint8_t)text[i]);
+            if (glyphs) put(a, glyphs + 2u * (uint32_t)i, g, 2);
+            x += sz.cx;
+            if (sz.cy > height) height = sz.cy;
+        }
+        if (res) {
+            uint8_t g[4];
+            wr16(g, (uint16_t)n);       /* nGlyphs, nMaxFit */
+            wr16(g + 2, (uint16_t)n);
+            put(a, res + 28, g, 4);
+            if (rd32(r + 4) && n)       /* lpOutString: the text as it is */
+                put(a, rd32(r + 4), text, (uint32_t)n);
+        }
+        *v = (uint32_t)(uint16_t)x | (uint32_t)(uint16_t)height << 16;
+        return 1;
+    }
+    case G16(616):                      /* GetFontLanguageInfo(HDC): none of its flags */
+        *v = 0;
+        *dword = 1;
+        return 1;
+    }
+    return 0;
+}
+
 int ne_win95_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword)
 {
+    if (win95_extra(a, u, service, v, dword))
+        return 1;
     if (service == SH + 39 || service == SH + 40)
         return extract(a, (uint16_t)(service - SH), v);
     if (service < 0x1000u)

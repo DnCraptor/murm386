@@ -296,18 +296,24 @@ static void cpu_feature_warning_tick(void)
 // Error Display
 //=============================================================================
 
+void halt_func(void) {
+    while (1) { sleep_ms(1000); }
+    __unreachable();
+}
+
 /**
  * Display a fatal error screen (red box on black background).
  * Halts execution after displaying the message.
  * Can only display errors if VGA is initialized.
  */
-static void show_error_screen(const char *title, const char *message, const char *detail) {
+static void show_error_screen(const char *title, const char *message, const char *detail, void (*phalt_func)(void)) {
     if (!vga_initialized) {
         // VGA not ready, just print to serial and halt
         printf("FATAL ERROR: %s\n", title);
         printf("  %s\n", message);
         if (detail) printf("  %s\n", detail);
         while (1) { sleep_ms(1000); }
+        __unreachable();
     }
 
     // Initialize OSD for error display
@@ -352,10 +358,7 @@ static void show_error_screen(const char *title, const char *message, const char
     printf("  %s\n", message);
     if (detail) printf("  %s\n", detail);
 
-    // Halt
-    while (1) {
-        sleep_ms(1000);
-    }
+    (*phalt_func)();
 }
 
 /**
@@ -1595,6 +1598,16 @@ static void detect_boot_video_override(void)
         vga_hw_set_boot_output(false);
 }
 
+static void wait_for_sd_card_func(void) {
+    while (true) {
+        sleep_ms(100);
+        FRESULT res = f_mount(&fatfs, "", 1);
+        if (res == FR_OK)
+            hard_reboot();
+    }
+    __unreachable();
+}
+
 static bool init_hardware(void) {
     // Before the overclock and before PSRAM: on flash shipped with QE=0
     // both fail (see flash_ensure_qe)
@@ -1793,29 +1806,29 @@ static bool init_hardware(void) {
     if (psram_missing) {
         show_error_screen(" PSRAM Error ",
                           "QSPI PSRAM not detected (>= 4 MB is required).",
-                          "Try another build, with swap-file support.");
+                          "Try another build, with swap-file support.", halt_func);
         __unreachable();
     }
 #endif
 
     if (res != FR_OK) { // show sd-card error
         char detail[32];
-
         if (res == FR_NOT_READY) {
             show_error_screen(" SD Card Error ",
                               "SD card not found or not ready.",
-                              "Insert a card and restart.");
+                              "Insert a card and restart.", wait_for_sd_card_func);
             __unreachable();
         }
         if (res == FR_NO_FILESYSTEM) {
             show_error_screen(" SD Card Error ",
                               "SD card has no supported filesystem.",
-                              "Format it as FAT and restart.");
+                              "Format it as FAT and restart.", halt_func);
             __unreachable();
         }
 
         snprintf(detail, sizeof(detail), "FatFS error code: %d", res);
-        show_error_screen(" SD Card Error ", "Failed to mount SD card.", detail);
+        show_error_screen(" SD Card Error ", "Failed to mount SD card.", detail, halt_func);
+        FRESULT res = f_mount(&fatfs, "", 1);
         __unreachable();
     }
     DBG_PRINT("  SD card mounted\n");
@@ -1824,7 +1837,7 @@ static bool init_hardware(void) {
     if (!config_ensure_data_dir()) {
         show_error_screen(" Directory Error ",
                           "Failed to create directory '" SD_DATA_DIR_SLASH "'.",
-                          "Check SD card write protection/filesystem.");
+                          "Check SD card write protection/filesystem.", halt_func);
         __unreachable();
     }
     DBG_PRINT("  " SD_DATA_DIR_SLASH " directory ready\n");
@@ -2137,7 +2150,7 @@ static bool init_emulator(void) {
         if (f_open(&fp, bios_path, FA_READ) != FR_OK) {
             char detail[64];
             snprintf(detail, sizeof(detail), "File: %s", bios_path);
-            show_error_screen(" Missing BIOS ", "BIOS file not found.", detail);
+            show_error_screen(" Missing BIOS ", "BIOS file not found.", detail, halt_func);
             __unreachable();
         }
         f_close(&fp);

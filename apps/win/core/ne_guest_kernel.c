@@ -402,6 +402,8 @@ typedef struct {
     win_ne_guest_api_context *c;
     uint32_t proc, lp;
     int family;
+    int ex, charset;                    /* EnumFontFamiliesEx: ENUMLOGFONTEX, NEWTEXTMETRICEX;
+                                         * the character set (DEFAULT_CHARSET: any) */
 } font_enum;
 
 /* a TEXTMETRIC the Win16 one (31 bytes) */
@@ -422,8 +424,11 @@ static void tm16(uint8_t *g, const TEXTMETRIC *tm)
 static int CALLBACK ne_fontproc(const LOGFONT *lf, const TEXTMETRIC *tm, int type, LPARAM lp)
 {
     const font_enum *e = (const font_enum *)(uintptr_t)lp;
-    uint8_t blob[146 + 42];
-    uint16_t lfn = e->family ? 146 : 50, tmn = e->family ? 42 : 32;   /* even */
+    uint8_t blob[178 + 66];
+    uint16_t lfn = e->ex ? 178 : e->family ? 146 : 50,
+             tmn = e->ex ? 66 : e->family ? 42 : 32;   /* even */
+    if (e->ex && e->charset != DEFAULT_CHARSET && lf->lfCharSet != e->charset)
+        return 1;                       /* another character set's: on */
     memset(blob, 0, sizeof(blob));
     uint8_t *g = blob;
     wr16(g, (uint16_t)lf->lfHeight); wr16(g + 2, (uint16_t)lf->lfWidth);
@@ -435,6 +440,9 @@ static int CALLBACK ne_fontproc(const LOGFONT *lf, const TEXTMETRIC *tm, int typ
     memcpy(g + 18, lf->lfFaceName, LF_FACESIZE);
     if (e->family)                      /* NEWLOGFONT: its full name, its style */
         lstrcpyn((char *)g + 50, lf->lfFaceName, 64);
+    if (e->ex)                          /* ENUMLOGFONTEX's script */
+        lstrcpyn((char *)g + 146, lf->lfCharSet == 204 ? "Cyrillic" : lf->lfCharSet == 2 ?
+                 "Symbol" : lf->lfCharSet == 255 ? "OEM/DOS" : "Western", 32);
     g = blob + lfn;
     tm16(g, tm);
     if (e->family && (type & TRUETYPE_FONTTYPE)) {  /* NEWTEXTMETRIC: regular, bold, italic */
@@ -1012,12 +1020,27 @@ static __attribute__((noinline)) int gdi_more(args *a, uint16_t service, uint32_
     }
     case 0x3046: case 0x314a: {         /* EnumFonts, EnumFontFamilies(HDC, LPCSTR, proc, LPARAM) */
         char face[LF_FACESIZE];
-        font_enum e = { a->ctx, dw(a, 8), dw(a, 4), service == 0x314a };
+        font_enum e = { a->ctx, dw(a, 8), dw(a, 4), service == 0x314a, 0, 0 };
         face[0] = 0;
         if (dw(a, 12) && !str_(a, dw(a, 12), face, sizeof(face)))
             return 1;
         if (e.proc)
             *v = (uint16_t)EnumFonts(w(a, 16), face, ne_fontproc, (LPARAM)(uintptr_t)&e);
+        return 1;
+    }
+    case 0x3265: {                      /* EnumFontFamiliesEx(HDC, LPLOGFONT, proc, LPARAM,
+                                         * DWORD): the face named (none: every family),
+                                         * the character set's */
+        uint8_t lf[50];
+        char face[LF_FACESIZE];
+        font_enum e = { a->ctx, dw(a, 12), dw(a, 8), 1, 1, DEFAULT_CHARSET };
+        if (!rd_(a, dw(a, 16), lf, sizeof(lf)))
+            return 1;
+        e.charset = lf[13];
+        memcpy(face, lf + 18, LF_FACESIZE);
+        face[LF_FACESIZE - 1] = 0;
+        if (e.proc)
+            *v = (uint16_t)EnumFonts(w(a, 20), face, ne_fontproc, (LPARAM)(uintptr_t)&e);
         return 1;
     }
     case 0x3047: {                      /* EnumObjects(HDC, int, proc, LPARAM) */

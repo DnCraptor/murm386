@@ -318,7 +318,19 @@ and the control classes' procedures (EDITWNDPROC, BUTTONWNDPROC ...);
 MenuItemFromPoint, GetMenuItemRect, Set/GetWindowRgn answer "none"; GDI's
 PolyBezier, PolyBezierTo, Set/GetArcDirection, ExtSelectClipRgn,
 GetRegionData, ExtCreateRegion, GetTextCharset, Set/GetLayout (left to
-right only), CreateHalftonePalette; SHELL's ExtractIconEx (the small icons
+right only), CreateHalftonePalette, EnumFontFamiliesEx (ENUMLOGFONTEX's
+script, the character set chosen), GetCharacterPlacement (left to right,
+a glyph a character), GetFontLanguageInfo (none), ExtCreatePen (a
+cosmetic pen of its style and colour; geometric ones their width),
+Get/SetMiterLimit (10), SetMetaRgn (the clip region as it is),
+GetRandomRgn (SYSRGN: the DC's visible box); USER's keyboard layouts
+(GetKeyboardLayout(List/Name), Load/Activate/UnloadKeyboardLayout: US
+English 04090409 and Russian 04190419, WINN's two), BroadcastSystemMessage
+(to the top-level windows), Change/EnumDisplaySettings (the one mode),
+MsgWaitForMultipleObjects (no objects: the input or the time out),
+DrawCaption, and Windows 3.1's Get/SetInternalWindowPos, DragObject
+(nothing dropped), GetFilePortName, WNetErrorText, WNetEnable, WNetDisable,
+WNetInitialize (WN_NOT_SUPPORTED); SHELL's ExtractIconEx (the small icons
 the same ones) and InternalExtractIcon; the old entry points of functions
 that moved (KERNEL's Reserved5 lstrcmp, GDI's RectInRegionOld,
 GDISelectPalette, GDIRealizePalette, RealizeDefaultPalette, USER's
