@@ -1092,8 +1092,53 @@ int     WINAPI ExtractPQ(HANDLE pq);
 int     WINAPI InsertPQ(HANDLE pq, int tag, int key);
 int     WINAPI SizePQ(HANDLE pq, int more);
 int     WINAPI DeletePQ(HANDLE pq);
-/* the print spooler's: WINN has no printer (SP_ERROR, no job) */
+/* Printing (print.c): a printer DC is CreateDC(driver, device, port) of a
+ * native printer driver (include/printer_driver.h), WIN.INI's [devices]
+ * ones; its pages drawn into a monochrome bitmap, the driver's language
+ * written to the port (FILE: asks for a file's name, LPTn: the DOS device,
+ * anything else a file of that name). */
+typedef BOOL (CALLBACK *ABORTPROC)(HDC hdc, int code);
+typedef struct { int cbSize; LPCSTR lpszDocName; LPCSTR lpszOutput; } DOCINFO;
 #define SP_ERROR            (-1)
+#define SP_APPABORT         (-2)
+#define SP_USERABORT        (-3)
+#define SP_OUTOFDISK        (-4)
+#define NEWFRAME            1
+#define ABORTDOC            2
+#define NEXTBAND            3
+#define FLUSHOUTPUT         6
+#define DRAFTMODE           7
+#define QUERYESCSUPPORT     8
+#define SETABORTPROC        9
+#define STARTDOC            10
+#define ENDDOC              11
+#define GETPHYSPAGESIZE     12
+#define GETPRINTINGOFFSET   13
+#define GETSCALINGFACTOR    14
+#define SETCOPYCOUNT        17
+#define PASSTHROUGH         19
+#define GETTECHNOLOGY       20
+#define RC_BITBLT           0x0001
+#define RC_BANDING          0x0002
+#define RC_DI_BITMAP        0x0080
+#define RC_DIBTODEV         0x0200
+#define RC_STRETCHBLT       0x0800
+#define RC_STRETCHDIB       0x2000
+int     WINAPI StartDoc(HDC hdc, const DOCINFO *di);
+int     WINAPI EndDoc(HDC hdc);
+int     WINAPI StartPage(HDC hdc);
+int     WINAPI EndPage(HDC hdc);
+int     WINAPI AbortDoc(HDC hdc);
+int     WINAPI SetAbortProc(HDC hdc, ABORTPROC proc);
+/* Windows 3.0's printer escapes, for them (in and out native: a RECT, a
+ * POINT of ints) */
+int     WINAPI Escape(HDC hdc, int esc, int cb, LPCSTR in, void *out);
+/* WIN.INI's printers: "Epson LX-350=EPSON9,FILE:" lines, their count;
+ * the default ([windows] device=) in def */
+int     WINAPI GetPrintersN(LPSTR buf, int size, LPSTR def, int defsize);
+/* a printer driver's devices (NUL after each, another at the end) and its
+ * description; 0 if it is no printer driver */
+int     WINAPI GetPrinterModelsN(LPCSTR driver, LPSTR buf, int size, LPSTR desc, int descsize);
 int     WINAPI OpenJob(LPCSTR port, LPCSTR title, HDC hdc);
 int     WINAPI StartSpoolPage(HANDLE job);
 int     WINAPI EndSpoolPage(HANDLE job);

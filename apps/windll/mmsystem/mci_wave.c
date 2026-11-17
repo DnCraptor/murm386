@@ -11,6 +11,8 @@
 #include "windll.h"
 #include "wave_driver.h"
 
+void winn_volume_pcm(uint8_t *p, unsigned n, unsigned bits, unsigned channels);   /* volume.c */
+
 #define NE (__win_dll_ne)
 #define WAVE_MCI_ID   2u
 #define MCI_OPEN      0x0803u
@@ -264,8 +266,10 @@ static void pump(void) {
     if (n > sizeof(buffer)) n = sizeof(buffer);
     if (n > wave.driver->max_bytes) n = wave.driver->max_bytes;
     n -= n % wave.block;
-    if (!n || !read_at(wave.file, wave.data_offset + wave.cursor, buffer, n) ||
-        !wave.driver->submit(buffer, n, wave.rate, wave.bits, wave.channels)) {
+    int ok = n && read_at(wave.file, wave.data_offset + wave.cursor, buffer, n);
+    if (ok)
+        winn_volume_pcm(buffer, n, wave.bits, wave.channels);  /* volume.c */
+    if (!ok || !wave.driver->submit(buffer, n, wave.rate, wave.bits, wave.channels)) {
         stop_play(1);
         return;
     }

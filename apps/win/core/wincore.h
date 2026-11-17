@@ -215,7 +215,14 @@ typedef struct wdc {
     int      relabs;        /* SetRelAbs's (noted) */
     DWORD    mapper;        /* SetMapperFlags's (noted) */
     int      arc_cw;        /* SetArcDirection(AD_CLOCKWISE) */
+    struct wprinter *prn;   /* a printer's DC (print.c) */
+    int      dpi;           /* its dots an inch; 0: the screen's 96 */
 } wdc;
+
+/* print.c: printers' DCs */
+HDC  print_create_dc(LPCSTR driver, LPCSTR device, LPCSTR port, int ic);
+void print_dc_gone(wdc *dc);
+int  print_caps(const wdc *dc, int index, int *value);
 
 /* Screen and system state shared by GDI and USER. */
 typedef struct wsys {

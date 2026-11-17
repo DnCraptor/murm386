@@ -15,6 +15,8 @@
 #include "windll.h"
 #include "wave_driver.h"
 
+void winn_volume_pcm(uint8_t *p, unsigned n, unsigned bits, unsigned channels);   /* volume.c */
+
 #define NE (__win_dll_ne)
 #define WAVE_HANDLE    0x6e01u
 #define WAVE_QUEUE     16
@@ -214,6 +216,7 @@ static void wave_pump(void)
             wave_return_head(1);
             continue;
         }
+        winn_volume_pcm(raw, bytes, output.format.bits, output.format.channels);
         if (!output.driver->submit(raw, bytes, output.format.rate,
                                    output.format.bits, output.format.channels)) {
             output.driver->stop();
@@ -375,7 +378,7 @@ static MMRESULT wave_caps(win_dll_call *c)
     memcpy(b + 6, "SB16 (murm386)", sizeof("SB16 (murm386)"));
     wr32(b + 38, 0x0fffu);            /* 11/22/44 kHz PCM, mono/stereo, 8/16-bit */
     wr16(b + 42, 2);                  /* native stereo channels */
-    /* dwSupport at +44: no per-channel volume/pitch/loop control */
+    b[44] = 0x0c;                     /* dwSupport: WAVECAPS_VOLUME, LRVOLUME (volume.c) */
     if (size > sizeof(b))
         size = sizeof(b);
     return NE->write(c, far, b, size) ? 0 : MMSYSERR_INVALPARAM;

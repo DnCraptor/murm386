@@ -1,0 +1,29 @@
+# Printing from a program on the i386 core (OWPRINT) on the Epson 9-pin
+# driver (EPSON9.DLL): the printer it puts in WIN.INI, COMMDLG's Print
+# dialog (pages 2 to 3, two copies), two pages to OWPRINT.PRN, read back
+# and shown as printed:
+#     ./winhost scripts/owprint.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OWPRINT d
+key RETURN
+wait 200
+keydown ALT
+key P
+keyup ALT
+key TAB
+type 2
+key TAB
+type 3
+key TAB
+type 2
+wait 20
+snap oprint_dialog.ppm
+key RETURN
+wait 300
+snap oprint_page.ppm
+exit

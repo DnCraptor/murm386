@@ -2,6 +2,7 @@
 #include "winmod.h"
 
 extern void A20Proc(void);
+extern void AbortDoc(void);
 extern void AddAtom(void);
 extern void AddFontResource(void);
 extern void AdjustWindowRect(void);
@@ -146,7 +147,9 @@ extern void EnableScrollBar(void);
 extern void EnableWindow(void);
 extern void EndDeferWindowPos(void);
 extern void EndDialog(void);
+extern void EndDoc(void);
 extern void EndMenu(void);
+extern void EndPage(void);
 extern void EndPaint(void);
 extern void EndSpoolPage(void);
 extern void EnumChildWindows(void);
@@ -159,6 +162,7 @@ extern void EnumProps(void);
 extern void EnumWindows(void);
 extern void EqualRect(void);
 extern void EqualRgn(void);
+extern void Escape(void);
 extern void ExcludeClipRect(void);
 extern void ExcludeUpdateRgn(void);
 extern void ExcludeVisRect(void);
@@ -295,6 +299,8 @@ extern void GetParent(void);
 extern void GetPhysicalFontHandle(void);
 extern void GetPixel(void);
 extern void GetPolyFillMode(void);
+extern void GetPrinterModelsN(void);
+extern void GetPrintersN(void);
 extern void GetPriorityClipboardFormat(void);
 extern void GetPrivateProfileInt(void);
 extern void GetPrivateProfileSectionNames(void);
@@ -534,6 +540,7 @@ extern void SelectPalette(void);
 extern void SelectVisRgn(void);
 extern void SendDlgItemMessage(void);
 extern void SendMessage(void);
+extern void SetAbortProc(void);
 extern void SetActiveWindow(void);
 extern void SetArcDirection(void);
 extern void SetBitmapBits(void);
@@ -634,6 +641,8 @@ extern void SoundQueueN(void);
 extern void SoundStopN(void);
 extern void SoundWaitN(void);
 extern void SpoolFile(void);
+extern void StartDoc(void);
+extern void StartPage(void);
 extern void StartSpoolPage(void);
 extern void StretchBlt(void);
 extern void StretchDIBits(void);
@@ -820,6 +829,7 @@ static const void *const exports_gdi[1002] = {
     [35] = (const void *)StretchBlt,
     [36] = (const void *)Polygon,
     [37] = (const void *)Polyline,
+    [38] = (const void *)Escape,
     [39] = (const void *)RestoreDC,
     [40] = (const void *)FillRgn,
     [41] = (const void *)FrameRgn,
@@ -974,6 +984,12 @@ static const void *const exports_gdi[1002] = {
     [373] = (const void *)SetSystemPaletteUse,
     [374] = (const void *)GetSystemPaletteUse,
     [375] = (const void *)GetSystemPaletteEntries,
+    [377] = (const void *)StartDoc,
+    [378] = (const void *)EndDoc,
+    [379] = (const void *)StartPage,
+    [380] = (const void *)EndPage,
+    [381] = (const void *)SetAbortProc,
+    [382] = (const void *)AbortDoc,
     [410] = (const void *)IsValidMetaFile,
     [411] = (const void *)GetCurLogFont,
     [439] = (const void *)StretchDIBits,
@@ -1351,7 +1367,7 @@ static const void *const exports_user[931] = {
     [930] = (const void *)MessageBoxEx,
 };
 
-static const void *const exports_winn[30] = {
+static const void *const exports_winn[32] = {
     [1] = (const void *)DialogBoxIndirectN,
     [2] = (const void *)CreateDialogIndirectN,
     [3] = (const void *)CreateAcceleratorTableN,
@@ -1381,6 +1397,8 @@ static const void *const exports_winn[30] = {
     [27] = (const void *)SetKeyboardLayoutN,
     [28] = (const void *)DrawStateN,
     [29] = (const void *)TileWindowsN,
+    [30] = (const void *)GetPrintersN,
+    [31] = (const void *)GetPrinterModelsN,
 };
 
 static const void *const exports_commdlg[28] = {

@@ -512,6 +512,17 @@ LRESULT CALLBACK user_listbox_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         }
         return LB_ERR;
     }
+    case LB_FINDSTRINGEXACT: {          /* a whole item's text, any case, after wp */
+        if (!l || !l->n || data_items(h))
+            return LB_ERR;
+        int start = (int)(int16_t)wp;
+        for (int k = 1; k <= l->n; k++) {
+            int i = (start + k + l->n) % l->n;
+            if (!lstrcmpi(l->items[i].s, (LPCSTR)(intptr_t)lp))
+                return i;
+        }
+        return LB_ERR;
+    }
     case LB_GETITEMRECT:
         if (!l || (int)wp < 0 || (int)wp >= l->n)
             return LB_ERR;

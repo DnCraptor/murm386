@@ -12,6 +12,8 @@
 #include "windll.h"
 #include "midi_driver.h"
 
+uint32_t winn_volume_midi(uint32_t packed);   /* volume.c: a note's velocity by the volume */
+
 #define NE (__win_dll_ne)
 #define MIDI_SLOTS 4u
 #define MIDI_HANDLE_BASE 0x6f01u
@@ -134,7 +136,7 @@ int winn_midi_mci_open(uint16_t task)
 int winn_midi_mci_send(uint32_t packed)
 {
     return mci_output.driver && mci_output.task == GetCurrentTask() &&
-           mci_output.driver->short_msg(packed);
+           mci_output.driver->short_msg(winn_volume_midi(packed));
 }
 void winn_midi_mci_reset(void)
 {
@@ -213,7 +215,7 @@ static MMRESULT out_caps(win_dll_call *c)
     wr16(caps + 40, d->voices);
     wr16(caps + 42, d->notes);
     wr16(caps + 44, d->channels);
-    wr32(caps + 46, 0);             /* no hardware volume / caching */
+    wr32(caps + 46, 1);             /* MIDICAPS_VOLUME (volume.c: velocities); no caching */
     if (cb > sizeof(caps)) cb = sizeof(caps);
     int ok = NE->write(c, far, caps, cb);
     FreeLibrary(h);
@@ -405,7 +407,7 @@ static void stream_play(unsigned slot)
         unsigned type = (unsigned)(m->event >> 24) & 0x3fu;
         if (!(m->event & MEVT_F_LONG)) {
             if (type == MEVT_SHORTMSG)
-                s->driver->short_msg(m->event & 0x00ffffffu);
+                s->driver->short_msg(winn_volume_midi(m->event & 0x00ffffffu));
             else if (type == MEVT_TEMPO && (m->event & 0x00ffffffu))
                 m->tempo = m->event & 0x00ffffffu;
         }                               /* long ones (SysEx): no such port */
@@ -586,7 +588,7 @@ int winn_midi_ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *value)
     case 208: /* midiOutShortMsg(HMIDIOUT, DWORD) */
         s = state_of(NE->arg16(c, 8));
         res = !s ? MMSYSERR_INVALHANDLE :
-              s->driver->short_msg(NE->arg32(c, 4)) ? 0 : MMSYSERR_NOTSUPPORTED;
+              s->driver->short_msg(winn_volume_midi(NE->arg32(c, 4))) ? 0 : MMSYSERR_NOTSUPPORTED;
         break;
     case 210: /* midiOutReset */
         s = state_of(NE->arg16(c, 4));
@@ -594,8 +596,8 @@ int winn_midi_ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *value)
         else if (s->st.on) { stream_stop(NE->arg16(c, 4) - MIDI_HANDLE_BASE, 1); res = 0; }
         else { s->driver->reset(); res = 0; }
         break;
-    case 211: case 212: case 213: case 214:
-        s = state_of(NE->arg16(c, ordinal == 211 || ordinal == 212 ? 8 : 12));
+    case 213: case 214:                 /* volumes: volume.c */
+        s = state_of(NE->arg16(c, 12));
         res = s ? MMSYSERR_NOTSUPPORTED : MMSYSERR_INVALHANDLE;
         break;
     case 215: /* midiOutGetID(HMIDIOUT, UINT FAR *) */

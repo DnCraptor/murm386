@@ -167,8 +167,10 @@ basic colours, 16 custom ones, a colour defined by hue, saturation and
 luminosity or red, green and blue), Font (the faces of the system's raster
 and TrueType fonts, the screen's and the "printer's" alike, their styles,
 simulated or not, sizes (a TrueType face's Windows' list, 8 to 72), effects
-and colour, a sample), Print and Print Setup (WINN has no printers: "No default
-printer", PDERR_NODEFAULTPRN), GetFileTitle, CommDlgExtendedError; hooks
+and colour, a sample), Print (the default printer, all, the selection or
+pages, copies, to a file; Setup...) and Print Setup (the default printer or
+another installed one), their DC or IC and DEVNAMES (hDevMode stays 0;
+with no printer installed "No default printer", PDERR_NODEFAULTPRN), GetFileTitle, CommDlgExtendedError; hooks
 and templates are left out. Native applications call them as they are
 (`include/commdlg.h`): WINN loads the DLL for the task at its first call
 of one. MMSYSTEM has no
@@ -378,8 +380,9 @@ GetCharWidth, GetRasterizerCaps (TT_AVAILABLE, TT_ENABLED when there is a
 TrueType font), GetOutlineTextMetrics, GetGlyphOutline (GGO_METRICS,
 GGO_BITMAP, GGO_NATIVE's polygons and quadratic splines, through a MAT2),
 GetFontData, GetCharABCWidths, GetKerningPairs (the kern table's),
-CreateScalableFontResource (a .FOT written), LineDDA, SetTextCharacterExtra; no printers
-(StartDoc and the rest fail, Escape does nothing); no serial or parallel
+CreateScalableFontResource (a .FOT written), LineDDA, SetTextCharacterExtra; printing
+(see Printers: StartDoc, StartPage, EndPage, EndDoc, AbortDoc, Windows 3.0's
+escapes); no serial or parallel
 ports (OpenComm fails with IE_HARDWARE, the other comm functions with
 their errors); SHELL's ShellExecute (a program, or a document by WIN.INI's
 [Extensions]), FindExecutable, ShellAbout, ExtractIcon, DragAcceptFiles,
@@ -471,7 +474,7 @@ the registry enumerated, the environment, a wallpaper), `OW95` (the stack
 switched, the visible area, Windows 95's KERNEL and USER for Win16),
 `OW95X` (old ordinals, priority queues and the spooler, Windows 95's
 structures, DrawEdge, DrawFrameControl, DrawState, Bézier curves),
-`OWMIDI` (Windows 95's MIDI streams)
+`OWMIDI` (Windows 95's MIDI streams), `OWPRINT` (printing on EPSON9)
 (`make NEFIXTURES` in
 `host/`). All have DOS MZ stubs that explain how to launch them under WINN
 when invoked directly from DOS. `host/test_ne_run` runs them on the
@@ -549,7 +552,7 @@ nothing leaves the program from the command line in that part (`WINN DEMO`).
 | `../winapps/<name>/` | applications: `progman` (the Program Manager, the default shell), `winfile` (File Manager), `taskman` (Task List), `winmine` (Minesweeper), `winhelp` (Windows Help), `notepad`, `clock`, `calc`, `control` (Control Panel), `demo` (a tour of the API) |
 | `../windrv/<name>/` | driver modules; `vga800` is VBE 102h 800x600 in 16 colours |
 | `ddi/windll.h`, `core/windll.c` | native DLLs: the interface, and their loading, uses and unloading |
-| `../windll/<name>/` | native DLLs: `lzexpand` (LZEXPAND.DLL), `ver` (VER.DLL), `ddeml` (DDEML.DLL), `mmsystem` (MMSYSTEM.DLL), `commdlg` (COMMDLG.DLL), `olecli` (OLECLI.DLL), `olesvr` (OLESVR.DLL), `sound` (SOUND.DLL) |
+| `../windll/<name>/` | native DLLs: `lzexpand` (LZEXPAND.DLL), `ver` (VER.DLL), `ddeml` (DDEML.DLL), `mmsystem` (MMSYSTEM.DLL), `commdlg` (COMMDLG.DLL), `olecli` (OLECLI.DLL), `olesvr` (OLESVR.DLL), `sound` (SOUND.DLL), `epson9` (EPSON9.DLL, a printer driver) |
 | `host/` | the same sources on Linux with a snapshot display and scripted input |
 
 ## Drivers
@@ -582,6 +585,35 @@ support involved. `SYSTEM.INI` next to `WINN.EXE` names the modules:
 
 Without the file, or if a module fails to load, the built-in drivers are
 used.
+
+## Printers
+
+A printer driver is a native DLL exporting `WinPrinterDriver`
+(`include/printer_driver.h`): its models, its resolution and page, and the
+three calls that turn pages into the printer's language. GDI draws a page
+into a monochrome bitmap at the driver's resolution (`CreateDC(driver,
+device, port)`: GetDeviceCaps gives the printer's size, dots an inch,
+DT_RASPRINTER; the mapping modes go by its dots an inch), EndPage hands it
+to the driver, which writes it to the port: `FILE:` asks for a file's name
+at each printing, `LPTn:`, `COMn:` are DOS's devices, any other name a
+file. WIN.INI keeps the printers as Windows 3.1 does ([devices],
+[PrinterPorts], [windows] device=, [ports]); the Control Panel's Printers
+adds them from the drivers' models (CONTROL.INI [printer drivers]
+drivers=, EPSON9 when none), connects them to a port, sets the default.
+
+`EPSON9.DLL` (`apps/windll/epson9`) prints on Epson's 9-pin dot matrix
+printers (ESC/P: LX-350, LX-300, LX-800, FX-850, FX-1050): 72 x 72 dots an
+inch, 8 by 11 inches (80 columns of continuous paper), bands of the
+one-to-one bit image (ESC * 5), blank bands as line feeds.
+
+## Volume
+
+MMSYSTEM keeps three volumes in SYSTEM.INI [volume]: the master one (the
+auxiliary device 0, "Master Volume"), the wave output's and the MIDI
+output's (waveOut/midiOut/auxGet/SetVolume, left and right; the
+capabilities say so). The drivers have none of their own: the samples are
+scaled on their way to the wave driver (MCI's too), MIDI notes by their
+velocity. The Control Panel's Volume sets them as they are dragged.
 
 ## Native DLLs
 
@@ -841,6 +873,8 @@ list the links.
     ./winhost scripts/ow95.txt PROGMAN       # SwitchStackTo, the visible area, Win95's KERNEL/USER
     ./winhost scripts/ow95x.txt PROGMAN      # old ordinals, the spooler, Win95's structures and 3D drawing
     ./winhost scripts/owmidi.txt PROGMAN     # MIDI streams on HOSTMIDI.DLL (host_midi.c, notes on stderr)
+    ./winhost scripts/owprint.txt PROGMAN    # printing: PrintDlg, two pages on EPSON9 to OWPRINT.PRN
+    ./winhost scripts/printers.txt CONTROL   # Control Panel's Printers (add, connect) and Volume
     ./winhost scripts/logo.txt PROGMAN       # the logo (copy the BMPs into HOSTWIN first)
     ./winhost800 scripts/vga800.txt  # the VGA800 driver, built in
     ./winhostvga scripts/vga.txt     # the built-in VGA driver (640x480x16), Win16 programs too
@@ -894,7 +928,9 @@ Win32: threads (CreateThread fails), structured exceptions (an exception
 raised ends the program), the Unicode (W) functions, what GDI draws into a
 DIB section (its bits are not brought back), ADVAPI32, WINMM's devices
 (waveOut, midiOut) and mciSendCommand, COMDLG32, SHELL32, COMCTL32; VxDs.
-Printing (there is no printer), `.GRP` files (`PROGMAN.INI` holds the groups as text), DLLs (`LoadLibrary`) of native applications;
+A spooler and Print Manager's queues (printing goes straight to the port),
+printer drivers of Windows' own (.DRV: ExtDeviceMode, DeviceCapabilities),
+DEVMODE, `.GRP` files (`PROGMAN.INI` holds the groups as text), DLLs (`LoadLibrary`) of native applications;
 Windows 95's and NT's additions to Win16 (WOW, the thunks to Win32,
 paths, enhanced metafiles), BiDi, STRESS.DLL, the
 undocumented CallProcInstance, InitLib and DoSignal (KERNEL's own, whose

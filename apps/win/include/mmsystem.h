@@ -92,4 +92,23 @@ typedef MMRESULT (WINAPI *MMIODESCEND)(HMMIO h, LPMMCKINFO ck, const MMCKINFO *p
 typedef MMRESULT (WINAPI *MMIOASCEND)(HMMIO h, LPMMCKINFO ck, UINT flags);
 typedef MMRESULT (WINAPI *MMIOCREATECHUNK)(HMMIO h, LPMMCKINFO ck, UINT flags);
 
+/* the volumes (a DWORD: the left channel low, the right high, 0-FFFFh):
+ * waveOut's, midiOut's and the master's (aux device 0), kept in SYSTEM.INI
+ * [volume]; by device ID (or a handle). GetProcAddress names them. */
+typedef MMRESULT (WINAPI *WAVEOUTGETVOLUME)(UINT id, LPDWORD volume);
+typedef MMRESULT (WINAPI *WAVEOUTSETVOLUME)(UINT id, DWORD volume);
+typedef MMRESULT (WINAPI *MIDIOUTGETVOLUME)(UINT id, LPDWORD volume);
+typedef MMRESULT (WINAPI *MIDIOUTSETVOLUME)(UINT id, DWORD volume);
+typedef UINT (WINAPI *AUXGETNUMDEVS)(void);
+typedef MMRESULT (WINAPI *AUXGETVOLUME)(UINT id, LPDWORD volume);
+typedef MMRESULT (WINAPI *AUXSETVOLUME)(UINT id, DWORD volume);
+MMRESULT WINAPI waveOutGetVolume(UINT id, LPDWORD volume);
+MMRESULT WINAPI waveOutSetVolume(UINT id, DWORD volume);
+MMRESULT WINAPI midiOutGetVolume(UINT id, LPDWORD volume);
+MMRESULT WINAPI midiOutSetVolume(UINT id, DWORD volume);
+UINT     WINAPI auxGetNumDevs(void);
+MMRESULT WINAPI auxGetDevCaps(UINT id, void *caps, UINT size);
+MMRESULT WINAPI auxGetVolume(UINT id, LPDWORD volume);
+MMRESULT WINAPI auxSetVolume(UINT id, DWORD volume);
+
 #endif /* WINN_MMSYSTEM_H */

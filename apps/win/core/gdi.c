@@ -1086,9 +1086,9 @@ void gdi_reset_dc(HDC h)
 
 HDC WINAPI CreateDC(LPCSTR driver, LPCSTR device, LPCSTR output, const void *init)
 {
-    (void)device; (void)output; (void)init;
+    (void)init;
     if (driver && lstrcmpi(driver, "DISPLAY"))
-        return 0;
+        return print_create_dc(driver, device, output, 0);     /* a printer's */
     return gdi_create_screen_dc(0);
 }
 
@@ -1120,6 +1120,8 @@ BOOL WINAPI DeleteDC(HDC h)
         return FALSE;
     mf_dc_gone(dc);
     gdi_reset_dc(h);
+    HBITMAP page = dc->prn ? dc->bitmap : 0;   /* a printer's: its page goes with it */
+    print_dc_gone(dc);
     if (dc->bitmap && dc->bitmap != stock_bitmap) {
         wbitmap *bm = (wbitmap *)win_handle_get(dc->bitmap, WOBJ_BITMAP);
         if (bm)
@@ -1130,6 +1132,8 @@ BOOL WINAPI DeleteDC(HDC h)
     wrgn_free(&dc->eff);
     win_free(dc);
     win_handle_free(h);
+    if (page)
+        DeleteObject(page);
     return TRUE;
 }
 
@@ -1199,6 +1203,9 @@ int WINAPI GetDeviceCaps(HDC h, int index)
     /* the screen of a 16-colour display (VGA): as Windows' VGA.DRV has it,
      * 4 planes of 1 bit, no palette (the 8 bpp copy is WINN's own) */
     int planes4 = dc && dc->is_screen && s->bpp == 8 && GetDisplayDriverInfoN(NULL, 0) <= 16;
+    int pv;
+    if (dc && dc->prn && print_caps(dc, index, &pv))
+        return pv;
     switch (index) {
     case HORZRES: return s->width;
     case VERTRES: return s->height;
@@ -1423,14 +1430,14 @@ int WINAPI SetMapMode(HDC h, int mode)
     dc->mapmode = mode;
     if (mode == MM_TEXT) {
         dc->wex = dc->wey = dc->vex = dc->vey = 1;
-    } else if (mode <= MM_TWIPS) {
+    } else if (mode <= MM_TWIPS) {     /* at the device's dots an inch */
         dc->wex = dc->wey = units[mode];
-        dc->vex = 96;
-        dc->vey = -96;
+        dc->vex = dc->dpi ? dc->dpi : 96;
+        dc->vey = -dc->vex;
     } else if (mode == MM_ISOTROPIC && old != MM_ISOTROPIC && old != MM_ANISOTROPIC) {
         dc->wex = dc->wey = 254;        /* as MM_LOMETRIC, until set */
-        dc->vex = 96;
-        dc->vey = -96;
+        dc->vex = dc->dpi ? dc->dpi : 96;
+        dc->vey = -dc->vex;
     }
     return old;
 }
@@ -3113,6 +3120,8 @@ BOOL WINAPI UnrealizeObject(HGDIOBJ obj) { return obj != 0; }
 
 HDC WINAPI CreateIC(LPCSTR driver, LPCSTR device, LPCSTR output, const void *init)
 {
+    if (driver && lstrcmpi(driver, "DISPLAY"))
+        return print_create_dc(driver, device, output, 1);
     return CreateDC(driver, device, output, init);
 }
 

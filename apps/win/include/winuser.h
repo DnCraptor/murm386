@@ -1143,6 +1143,7 @@ BOOL    WINAPI TranslateMDISysAccel(HWND client, LPMSG msg);
 #define LB_GETSEL           (WM_USER + 8)
 #define LB_GETTOPINDEX      (WM_USER + 15)
 #define LB_FINDSTRING       (WM_USER + 16)
+#define LB_FINDSTRINGEXACT  (WM_USER + 35)
 #define LB_GETSELCOUNT      (WM_USER + 17)
 #define LB_GETITEMRECT      (WM_USER + 25)
 #define LB_ERRSPACE         (-2)

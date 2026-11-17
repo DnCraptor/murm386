@@ -53,6 +53,10 @@ typedef struct win_dll_ne {
      * modeless dialog's structure of its): 0 if it fails */
     int (*task_read)(uint16_t task, uint32_t far, void *dst, uint32_t n);
     int (*task_write)(uint16_t task, uint32_t far, const void *src, uint32_t n);
+    /* a global memory block of the task's program (zeroed, its handle
+     * the selector: far = handle << 16), as GlobalAlloc gives it the
+     * program; 0 if none (size covers it: older cores have none) */
+    uint16_t (*task_global)(uint16_t task, uint32_t size);
 } win_dll_ne;
 
 typedef struct win_dll_export {

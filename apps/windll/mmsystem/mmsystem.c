@@ -31,6 +31,8 @@ void winn_midi_term(void);
 UINT WINAPI winn_midi_num(void);
 /* Win16 MCI sequencer for standard MIDI files. */
 int winn_mci_ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *value);
+/* volume.c */
+int winn_volume_ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *value);
 void winn_mci_task_end(uint16_t task);
 void winn_mci_term(void);
 
@@ -542,7 +544,10 @@ static void task_block(HTASK t)
 static int ne_call(win_dll_call *c, uint16_t o, uint32_t *v)
 {
     char s1[128], s2[128];
-    int wr = winn_wave_ne_call(c, o, v);
+    int wr = winn_volume_ne_call(c, o, v);
+    if (wr != WINDLL_NONE)
+        return wr;
+    wr = winn_wave_ne_call(c, o, v);
     if (wr != WINDLL_NONE)
         return wr;
     wr = winn_midi_ne_call(c, o, v);
@@ -861,8 +866,8 @@ static const win_dll_export exports[] = {
     { 208, 6, "midiOutShortMsg", NULL },
     { 209, 8, "midiOutLongMsg", NULL },
     { 210, 2, "midiOutReset", NULL },
-    { 211, 6, "midiOutGetVolume", NULL },
-    { 212, 6, "midiOutSetVolume", NULL },
+    { 211, 6, "midiOutGetVolume", (const void *)midiOutGetVolume },
+    { 212, 6, "midiOutSetVolume", (const void *)midiOutSetVolume },
     { 213, 10, "midiOutCachePatches", NULL },
     { 214, 10, "midiOutCacheDrumPatches", NULL },
     { 215, 6, "midiOutGetID", NULL },
@@ -888,10 +893,10 @@ static const win_dll_export exports[] = {
     { 311, 2, "midiInReset", NULL },
     { 312, 6, "midiInGetID", NULL },
     { 313, 12, "midiInMessage", NULL },
-    { 350, 0, "auxGetNumDevs", (const void *)no_devices },
-    { 351, 8, "auxGetDevCaps", NULL },
-    { 352, 6, "auxGetVolume", NULL },
-    { 353, 6, "auxSetVolume", NULL },
+    { 350, 0, "auxGetNumDevs", (const void *)auxGetNumDevs },
+    { 351, 8, "auxGetDevCaps", (const void *)auxGetDevCaps },
+    { 352, 6, "auxGetVolume", (const void *)auxGetVolume },
+    { 353, 6, "auxSetVolume", (const void *)auxSetVolume },
     { 354, 12, "auxOutMessage", NULL },
     { 401, 0, "waveOutGetNumDevs", (const void *)winn_wave_num },
     { 402, 8, "waveOutGetDevCaps", NULL },
@@ -907,8 +912,8 @@ static const win_dll_export exports[] = {
     { 412, 8, "waveOutGetPosition", NULL },
     { 413, 6, "waveOutGetPitch", NULL },
     { 414, 6, "waveOutSetPitch", NULL },
-    { 415, 6, "waveOutGetVolume", NULL },
-    { 416, 6, "waveOutSetVolume", NULL },
+    { 415, 6, "waveOutGetVolume", (const void *)waveOutGetVolume },
+    { 416, 6, "waveOutSetVolume", (const void *)waveOutSetVolume },
     { 417, 6, "waveOutGetPlaybackRate", NULL },
     { 418, 6, "waveOutSetPlaybackRate", NULL },
     { 419, 2, "waveOutBreakLoop", NULL },

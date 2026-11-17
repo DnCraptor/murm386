@@ -10,6 +10,10 @@
  *              [windows] DoubleClickSpeed, SwapMouseButtons
  *   Date/Time  the DOS date and time
  *   System     boot display driver, TrueType fonts and default MIDI output
+ *   Printers   the printers (WIN.INI [devices], [PrinterPorts], [windows]
+ *              device=): added from the native printer drivers' models,
+ *              their ports, the default one, removed
+ *   Volume     the master, wave and MIDI volumes (MMSYSTEM's)
  *
  * The colours offered are the 16 of the VGA, which every display driver
  * shows as they are.
@@ -18,7 +22,8 @@
 
 #define INI         "CONTROL.INI"
 
-enum { APP_COLOR, APP_DESKTOP, APP_MOUSE, APP_DATETIME, APP_SYSTEM, APP_COUNT };
+enum { APP_COLOR, APP_DESKTOP, APP_MOUSE, APP_DATETIME, APP_SYSTEM, APP_PRINTERS, APP_SOUND,
+       APP_COUNT };
 
 #define IDM_COLOR    100
 #define IDM_EXIT     110
@@ -28,7 +33,7 @@ static HINSTANCE hinst;
 static HWND      hmain;
 static int       sel;               /* the applet selected */
 static const char *const app_names[APP_COUNT] = {
-    "Color", "Desktop", "Mouse", "Date/Time", "System"
+    "Color", "Desktop", "Mouse", "Date/Time", "System", "Printers", "Volume"
 };
 
 /* ---------------------------------------------------------------- shared */
@@ -929,6 +934,411 @@ static const DLGITEM_N system_items[] = {
     { 182, 138, 62, 14, IDCANCEL, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "Cancel" },
 };
 
+/* ---------------------------------------------------------------- Printers */
+
+/* WIN.INI's printers as Windows 3.1 keeps them: [devices] and
+ * [PrinterPorts] "Epson LX-350=EPSON9,FILE:", [windows] device= the
+ * default; the drivers offered are CONTROL.INI [printer drivers] drivers=
+ * (EPSON9 if none), native printer drivers (include/printer_driver.h) */
+
+#define IDC_PRN_LIST    701
+#define IDC_PRN_DEFAULT 702
+#define IDC_PRN_SETDEF  703
+#define IDC_PRN_CONNECT 704
+#define IDC_PRN_REMOVE  705
+#define IDC_PRN_ADD     706
+#define IDC_PRN_MODELS  711
+#define IDC_PRN_PORT    712
+
+static char prn_device[64], prn_driver[16], prn_port[80];
+
+static void ini_changed(void)
+{
+    SendMessage(HWND_BROADCAST, WM_WININICHANGE, 0, (LPARAM)(LPCSTR)"devices");
+}
+
+/* the default ports, as Windows installs them, when WIN.INI names none */
+static void ports_fill(HWND combo, const char *current)
+{
+    static char keys[512];
+    static const char *const std[] = { "LPT1:", "LPT2:", "LPT3:", "COM1:", "COM2:", "FILE:" };
+    int n = GetProfileString("ports", NULL, "", keys, sizeof(keys));
+    if (n <= 0) {
+        for (unsigned i = 0; i < sizeof(std) / sizeof(std[0]); i++)
+            WriteProfileString("ports", std[i], "");
+        n = GetProfileString("ports", NULL, "", keys, sizeof(keys));
+    }
+    for (const char *k = keys; n > 0 && *k && k < keys + n; k += lstrlen(k) + 1)
+        SendMessage(combo, CB_ADDSTRING, 0, (LPARAM)k);
+    SetWindowText(combo, current && *current ? current : "FILE:");
+}
+
+static void printer_write(const char *device, const char *driver, const char *port, int def)
+{
+    char s[160];
+    wsprintf(s, "%s,%s", driver, port);
+    WriteProfileString("devices", device, s);
+    wsprintf(s, "%s,%s,15,45", driver, port);
+    WriteProfileString("PrinterPorts", device, s);
+    if (def) {
+        wsprintf(s, "%s,%s,%s", device, driver, port);
+        WriteProfileString("windows", "device", s);
+    }
+}
+
+/* a [devices] line: its driver and port */
+static int printer_read(const char *device, char *driver, char *port)
+{
+    char s[160];
+    if (!GetProfileString("devices", device, "", s, sizeof(s)))
+        return 0;
+    char *comma = s;
+    while (*comma && *comma != ',')
+        comma++;
+    if (!*comma)
+        return 0;
+    *comma = 0;
+    lstrcpyn(driver, s, 16);
+    lstrcpyn(port, comma + 1, 80);
+    return 1;
+}
+
+static int is_default(const char *device)
+{
+    char s[160];
+    int n = lstrlen(device);
+    GetProfileString("windows", "device", "", s, sizeof(s));
+    char head[64];
+    if (!n || n >= (int)sizeof(head) || s[n] != ',')
+        return 0;
+    lstrcpyn(head, s, n + 1);
+    return !lstrcmpi(head, device);
+}
+
+static void printers_fill(HWND dlg)
+{
+    static char keys[1024];
+    char line[160], driver[16], port[80], def[160];
+    HWND list = GetDlgItem(dlg, IDC_PRN_LIST);
+    SendMessage(list, LB_RESETCONTENT, 0, 0);
+    int n = GetProfileString("devices", NULL, "", keys, sizeof(keys));
+    def[0] = 0;
+    for (const char *k = keys; n > 0 && *k && k < keys + n; k += lstrlen(k) + 1)
+        if (printer_read(k, driver, port)) {
+            wsprintf(line, "%s on %s", k, port);
+            SendMessage(list, LB_ADDSTRING, 0, (LPARAM)(LPCSTR)line);
+            if (is_default(k))
+                lstrcpy(def, line);
+        }
+    wsprintf(line, "Default Printer:  %s", def[0] ? def : "No Default Printer");
+    SetDlgItemText(dlg, IDC_PRN_DEFAULT, line);
+    int sel = 0, count = (int)SendMessage(list, LB_GETCOUNT, 0, 0);
+    for (int i = 0; def[0] && i < count; i++)
+        if (SendMessage(list, LB_GETTEXT, (WPARAM)i, (LPARAM)(LPSTR)line) >= 0 && !lstrcmpi(line, def))
+            sel = i;
+    SendMessage(list, LB_SETCURSEL, (WPARAM)sel, 0);
+}
+
+/* the selected one: its device name */
+static int printer_selected(HWND dlg, char *device)
+{
+    char line[160];
+    HWND list = GetDlgItem(dlg, IDC_PRN_LIST);
+    int i = (int)SendMessage(list, LB_GETCURSEL, 0, 0);
+    if (i < 0 || SendMessage(list, LB_GETTEXT, (WPARAM)i, (LPARAM)(LPSTR)line) < 0)
+        return 0;
+    for (char *p = line; *p; p++)
+        if (p[0] == ' ' && p[1] == 'o' && p[2] == 'n' && p[3] == ' ')
+            *p = 0;
+    lstrcpyn(device, line, 64);
+    return 1;
+}
+
+/* Connect: the port of prn_device */
+static BOOL CALLBACK ConnectProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    (void)lp;
+    if (msg == WM_INITDIALOG) {
+        SetWindowText(dlg, prn_device);
+        ports_fill(GetDlgItem(dlg, IDC_PRN_PORT), prn_port);
+        SendDlgItemMessage(dlg, IDC_PRN_PORT, CB_SETEDITSEL, 0, MAKELPARAM(0, -1));
+        SetFocus(GetDlgItem(dlg, IDC_PRN_PORT));
+        return FALSE;                   /* typing replaces the port */
+    }
+    if (msg == WM_COMMAND && (wp == IDOK || wp == IDCANCEL)) {
+        if (wp == IDOK)
+            GetDlgItemText(dlg, IDC_PRN_PORT, prn_port, sizeof(prn_port));
+        EndDialog(dlg, (int)wp);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static const DLGTEMPLATE_N connect_tpl = {
+    WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME,
+    5, 30, 30, 200, 60, NULL, NULL, "Connect", 0, NULL
+};
+static const DLGITEM_N connect_items[] = {
+    { 8, 6, 184, 10, -1, SS_LEFT | WS_VISIBLE, "STATIC", "&Port (or a file's name):" },
+    { 8, 18, 184, 70, IDC_PRN_PORT, CBS_DROPDOWN | CBS_AUTOHSCROLL | WS_VSCROLL | WS_TABSTOP | WS_VISIBLE, "COMBOBOX", "" },
+    { 8, 36, 184, 10, -1, SS_LEFT | WS_VISIBLE, "STATIC", "FILE: asks for the file at each printing." },
+    { 76, 46, 56, 13, IDOK, BS_DEFPUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "OK" },
+    { 136, 46, 56, 13, IDCANCEL, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "Cancel" },
+};
+
+/* Add: a model of a driver's, to a port */
+static BOOL CALLBACK AddProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    (void)lp;
+    if (msg == WM_INITDIALOG) {
+        static char drivers[256], models[512];
+        char desc[64], line[128];
+        GetPrivateProfileString("printer drivers", "drivers", "EPSON9", drivers, sizeof(drivers), INI);
+        HWND list = GetDlgItem(dlg, IDC_PRN_MODELS);
+        for (char *d = drivers; *d;) {
+            char *e = d;
+            while (*e && *e != ',' && *e != ' ')
+                e++;
+            char save = *e;
+            *e = 0;
+            if (GetPrinterModelsN(d, models, sizeof(models), desc, sizeof(desc)))
+                for (const char *m = models; *m; m += lstrlen(m) + 1) {
+                    wsprintf(line, "%s  (%s)", m, d);
+                    SendMessage(list, LB_ADDSTRING, 0, (LPARAM)(LPCSTR)line);
+                }
+            *e = save;
+            d = *e ? e + 1 : e;
+        }
+        SendMessage(list, LB_SETCURSEL, 0, 0);
+        ports_fill(GetDlgItem(dlg, IDC_PRN_PORT), "FILE:");
+        return TRUE;
+    }
+    if (msg == WM_COMMAND && (wp == IDOK || wp == IDCANCEL ||
+                              (wp == IDC_PRN_MODELS && HIWORD(lp) == LBN_DBLCLK))) {
+        if (wp != IDCANCEL) {
+            char line[128];
+            HWND list = GetDlgItem(dlg, IDC_PRN_MODELS);
+            int i = (int)SendMessage(list, LB_GETCURSEL, 0, 0);
+            if (i < 0 || SendMessage(list, LB_GETTEXT, (WPARAM)i, (LPARAM)(LPSTR)line) < 0)
+                return TRUE;
+            char *open = line;
+            while (*open && !(open[0] == ' ' && open[1] == ' ' && open[2] == '('))
+                open++;
+            if (!*open)
+                return TRUE;
+            *open = 0;
+            lstrcpyn(prn_device, line, sizeof(prn_device));
+            lstrcpyn(prn_driver, open + 3, sizeof(prn_driver));
+            for (char *p = prn_driver; *p; p++)
+                if (*p == ')')
+                    *p = 0;
+            GetDlgItemText(dlg, IDC_PRN_PORT, prn_port, sizeof(prn_port));
+            if (!prn_port[0])
+                lstrcpy(prn_port, "FILE:");
+        }
+        EndDialog(dlg, wp == IDCANCEL ? IDCANCEL : IDOK);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static const DLGTEMPLATE_N add_tpl = {
+    WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME,
+    6, 30, 20, 220, 120, NULL, NULL, "Add Printer", 0, NULL
+};
+static const DLGITEM_N add_items[] = {
+    { 8, 6, 204, 10, -1, SS_LEFT | WS_VISIBLE, "STATIC", "&List of Printers:" },
+    { 8, 18, 204, 54, IDC_PRN_MODELS, LBS_NOTIFY | WS_VSCROLL | WS_BORDER | WS_TABSTOP | WS_VISIBLE, "LISTBOX", "" },
+    { 8, 76, 204, 10, -1, SS_LEFT | WS_VISIBLE, "STATIC", "&Port (or a file's name):" },
+    { 8, 88, 120, 70, IDC_PRN_PORT, CBS_DROPDOWN | CBS_AUTOHSCROLL | WS_VSCROLL | WS_TABSTOP | WS_VISIBLE, "COMBOBOX", "" },
+    { 136, 104, 36, 13, IDOK, BS_DEFPUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "&Install" },
+    { 176, 104, 36, 13, IDCANCEL, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "Cancel" },
+};
+
+static BOOL CALLBACK PrintersProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    (void)lp;
+    char device[64], driver[16], port[80];
+    switch (msg) {
+    case WM_INITDIALOG:
+        printers_fill(dlg);
+        return TRUE;
+    case WM_COMMAND:
+        switch (wp) {
+        case IDC_PRN_ADD:
+            if (DialogBoxIndirectN(hinst, &add_tpl, add_items, dlg, AddProc) == IDOK) {
+                char s[160];
+                int none = !GetProfileString("windows", "device", "", s, sizeof(s)) || !s[0];
+                printer_write(prn_device, prn_driver, prn_port, none);
+                ini_changed();
+                printers_fill(dlg);
+            }
+            return TRUE;
+        case IDC_PRN_SETDEF:
+            if (printer_selected(dlg, device) && printer_read(device, driver, port)) {
+                printer_write(device, driver, port, 1);
+                ini_changed();
+                printers_fill(dlg);
+            }
+            return TRUE;
+        case IDC_PRN_CONNECT:
+            if (printer_selected(dlg, device) && printer_read(device, driver, port)) {
+                lstrcpy(prn_device, device);
+                lstrcpy(prn_port, port);
+                if (DialogBoxIndirectN(hinst, &connect_tpl, connect_items, dlg, ConnectProc) == IDOK &&
+                    prn_port[0]) {
+                    printer_write(device, driver, prn_port, is_default(device));
+                    ini_changed();
+                    printers_fill(dlg);
+                }
+            }
+            return TRUE;
+        case IDC_PRN_REMOVE:
+            if (printer_selected(dlg, device) &&
+                MessageBox(dlg, "Remove this printer?", device, MB_YESNO | MB_ICONQUESTION) == IDYES) {
+                int def = is_default(device);
+                WriteProfileString("devices", device, NULL);
+                WriteProfileString("PrinterPorts", device, NULL);
+                if (def) {                  /* the next one is the default, or none */
+                    static char keys[1024];
+                    int n = GetProfileString("devices", NULL, "", keys, sizeof(keys));
+                    if (n > 0 && keys[0] && printer_read(keys, driver, port))
+                        printer_write(keys, driver, port, 1);
+                    else
+                        WriteProfileString("windows", "device", NULL);
+                }
+                ini_changed();
+                printers_fill(dlg);
+            }
+            return TRUE;
+        case IDOK: case IDCANCEL:
+            EndDialog(dlg, (int)wp);
+            return TRUE;
+        }
+        break;
+    }
+    return FALSE;
+}
+
+static const DLGTEMPLATE_N printers_tpl = {
+    WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME,
+    8, 24, 24, 260, 112, NULL, NULL, "Printers", 0, NULL
+};
+static const DLGITEM_N printers_items[] = {
+    { 8, 6, 180, 10, IDC_PRN_DEFAULT, SS_LEFT | SS_NOPREFIX | WS_VISIBLE, "STATIC", "" },
+    { 8, 20, 180, 10, -1, SS_LEFT | WS_VISIBLE, "STATIC", "&Installed Printers:" },
+    { 8, 32, 180, 72, IDC_PRN_LIST, WS_VSCROLL | WS_BORDER | WS_TABSTOP | WS_VISIBLE, "LISTBOX", "" },
+    { 196, 6, 56, 14, IDOK, BS_DEFPUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "Close" },
+    { 196, 32, 56, 14, IDC_PRN_SETDEF, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "Set As &Default" },
+    { 196, 50, 56, 14, IDC_PRN_CONNECT, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "&Connect..." },
+    { 196, 68, 56, 14, IDC_PRN_REMOVE, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "&Remove" },
+    { 196, 90, 56, 14, IDC_PRN_ADD, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "&Add..." },
+};
+
+/* ---------------------------------------------------------------- Sound */
+
+/* the volumes MMSYSTEM keeps (volume.c): the master's, the wave output's,
+ * the MIDI output's, as they are dragged; Cancel puts them back */
+
+#define IDC_VOL_FIRST 801               /* the scroll bars, then their values */
+#define VOLS 3
+
+typedef UINT (WINAPI *VOLGET)(UINT, DWORD *);
+typedef UINT (WINAPI *VOLSET)(UINT, DWORD);
+static HMODULE mm;
+static VOLGET vget[VOLS];
+static VOLSET vset[VOLS];
+static DWORD vwas[VOLS];
+static const char *const vol_names[VOLS][2] = {
+    { "auxGetVolume", "auxSetVolume" }, { "waveOutGetVolume", "waveOutSetVolume" },
+    { "midiOutGetVolume", "midiOutSetVolume" },
+};
+
+static void vol_show(HWND dlg, int i, int pos)
+{
+    char s[8];
+    wsprintf(s, "%d%%", pos);
+    SetDlgItemText(dlg, IDC_VOL_FIRST + VOLS + i, s);
+}
+
+static BOOL CALLBACK SoundProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_INITDIALOG:
+        mm = LoadLibrary("MMSYSTEM.DLL");
+        for (int i = 0; i < VOLS; i++) {
+            DWORD v = 0xffffffffUL;
+            vget[i] = (UINT)mm >= 32 ? (VOLGET)(void (*)(void))GetProcAddress(mm, vol_names[i][0]) : NULL;
+            vset[i] = (UINT)mm >= 32 ? (VOLSET)(void (*)(void))GetProcAddress(mm, vol_names[i][1]) : NULL;
+            if (!vget[i] || !vset[i] || vget[i](0, &v)) {
+                vset[i] = NULL;
+                EnableWindow(GetDlgItem(dlg, IDC_VOL_FIRST + i), FALSE);
+            }
+            vwas[i] = v;
+            int pos = (int)(((v & 0xffff) + (v >> 16)) / 2 * 100 / 65535);
+            HWND sb = GetDlgItem(dlg, IDC_VOL_FIRST + i);
+            SetScrollRange(sb, SB_CTL, 0, 100, FALSE);
+            SetScrollPos(sb, SB_CTL, pos, TRUE);
+            vol_show(dlg, i, pos);
+        }
+        return TRUE;
+    case WM_HSCROLL: {
+        HWND sb = (HWND)HIWORD(lp);
+        int i = GetDlgCtrlID(sb) - IDC_VOL_FIRST, pos = GetScrollPos(sb, SB_CTL);
+        if (i < 0 || i >= VOLS)
+            return TRUE;
+        switch (wp) {
+        case SB_LINEUP: pos--; break;
+        case SB_LINEDOWN: pos++; break;
+        case SB_PAGEUP: pos -= 10; break;
+        case SB_PAGEDOWN: pos += 10; break;
+        case SB_THUMBTRACK: case SB_THUMBPOSITION: pos = (short)LOWORD(lp); break;
+        case SB_TOP: pos = 0; break;
+        case SB_BOTTOM: pos = 100; break;
+        }
+        if (pos < 0) pos = 0;
+        if (pos > 100) pos = 100;
+        SetScrollPos(sb, SB_CTL, pos, TRUE);
+        vol_show(dlg, i, pos);
+        if (vset[i]) {
+            DWORD v = (DWORD)pos * 65535 / 100;
+            vset[i](0, v | v << 16);
+        }
+        return TRUE;
+    }
+    case WM_COMMAND:
+        if (wp == IDOK || wp == IDCANCEL) {
+            for (int i = 0; wp == IDCANCEL && i < VOLS; i++)
+                if (vset[i])
+                    vset[i](0, vwas[i]);
+            if ((UINT)mm >= 32)
+                FreeLibrary(mm);
+            EndDialog(dlg, (int)wp);
+            return TRUE;
+        }
+        break;
+    }
+    return FALSE;
+}
+
+static const DLGTEMPLATE_N sound_tpl = {
+    WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME,
+    11, 24, 24, 220, 84, NULL, NULL, "Volume", 0, NULL
+};
+static const DLGITEM_N sound_items[] = {
+    { 8, 8, 40, 10, -1, SS_LEFT | WS_VISIBLE, "STATIC", "Master" },
+    { 50, 7, 130, 10, IDC_VOL_FIRST, SBS_HORZ | WS_TABSTOP | WS_VISIBLE, "SCROLLBAR", "" },
+    { 184, 8, 30, 10, IDC_VOL_FIRST + VOLS, SS_RIGHT | WS_VISIBLE, "STATIC", "" },
+    { 8, 26, 40, 10, -1, SS_LEFT | WS_VISIBLE, "STATIC", "Wave" },
+    { 50, 25, 130, 10, IDC_VOL_FIRST + 1, SBS_HORZ | WS_TABSTOP | WS_VISIBLE, "SCROLLBAR", "" },
+    { 184, 26, 30, 10, IDC_VOL_FIRST + VOLS + 1, SS_RIGHT | WS_VISIBLE, "STATIC", "" },
+    { 8, 44, 40, 10, -1, SS_LEFT | WS_VISIBLE, "STATIC", "MIDI" },
+    { 50, 43, 130, 10, IDC_VOL_FIRST + 2, SBS_HORZ | WS_TABSTOP | WS_VISIBLE, "SCROLLBAR", "" },
+    { 184, 44, 30, 10, IDC_VOL_FIRST + VOLS + 2, SS_RIGHT | WS_VISIBLE, "STATIC", "" },
+    { 96, 64, 56, 14, IDOK, BS_DEFPUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "OK" },
+    { 158, 64, 56, 14, IDCANCEL, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "Cancel" },
+};
+
 /* ---------------------------------------------------------------- main window */
 
 static void run_applet(int i)
@@ -943,6 +1353,8 @@ static void run_applet(int i)
             MessageBox(hmain, "Settings saved. Restart Windows to apply the changes.",
                        "System", MB_OK | MB_ICONINFORMATION);
         break;
+    case APP_PRINTERS: DialogBoxIndirectN(hinst, &printers_tpl, printers_items, hmain, PrintersProc); break;
+    case APP_SOUND:    DialogBoxIndirectN(hinst, &sound_tpl, sound_items, hmain, SoundProc); break;
     }
 }
 
@@ -971,7 +1383,7 @@ static void paint_main(HDC dc)
     SetBkMode(dc, TRANSPARENT);
     for (int i = 0; i < APP_COUNT; i++) {
         int x = (i % cols) * CELL_W, y = 4 + (i / cols) * CELL_H;
-        /* the applets' icons follow the program's: 2 Color ... 6 System */
+        /* the applets' icons follow the program's: 2 Color ... 8 Volume */
         DrawIcon(dc, x + (CELL_W - 32) / 2, y + 4, LoadIcon(hinst, MAKEINTRESOURCE(2 + i)));
         RECT t = { x + 2, y + 40, x + CELL_W - 2, y + CELL_H };
         RECT m = t;
@@ -1081,6 +1493,8 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     AppendMenu(settings, MF_STRING, IDM_COLOR + APP_MOUSE, "&Mouse...");
     AppendMenu(settings, MF_STRING, IDM_COLOR + APP_DATETIME, "Date/&Time...");
     AppendMenu(settings, MF_STRING, IDM_COLOR + APP_SYSTEM, "&System...");
+    AppendMenu(settings, MF_STRING, IDM_COLOR + APP_PRINTERS, "&Printers...");
+    AppendMenu(settings, MF_STRING, IDM_COLOR + APP_SOUND, "&Volume...");
     AppendMenu(settings, MF_SEPARATOR, 0, NULL);
     AppendMenu(settings, MF_STRING, IDM_EXIT, "E&xit");
     HMENU help = CreatePopupMenu();

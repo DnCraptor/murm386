@@ -29,3 +29,5 @@
 27 SetKeyboardLayoutN
 28 DrawStateN
 29 TileWindowsN
+30 GetPrintersN
+31 GetPrinterModelsN

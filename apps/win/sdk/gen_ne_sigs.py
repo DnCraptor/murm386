@@ -85,6 +85,8 @@ SKIP = {
     'MessageBoxEx',
     # a buffer behind a LONG (ne_guest_win95.c)
     'GetSpoolJob',
+    # printing's, with StartDoc's (ne_guest_kernel.c)
+    'EndDoc', 'StartPage', 'EndPage', 'AbortDoc',
 }
 
 COUNTS = re.compile(r'^(n|c|cb|cch|count|len|nCount|cbString|size)$')

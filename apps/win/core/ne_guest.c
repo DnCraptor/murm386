@@ -481,7 +481,7 @@ static const struct {
     { M_USER, 451, "TranslateMDISysAccel", 6 },
     /* GDI: palettes, a DC, Escape, the points of LPtoDP and DPtoLP, the
      * arrays, callbacks and DIBs (ne_guest_kernel.c); no printers */
-    { M_GDI, 38, "Escape", 12 },
+    { M_GDI, 38, "Escape", 14 },
     { M_GDI, 53, "CreateDC", 16 },
     { M_GDI, 67, "DPtoLP", 8 },
     { M_GDI, 70, "EnumFonts", 14 },

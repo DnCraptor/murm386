@@ -282,9 +282,16 @@ static int task_write(uint16_t task, uint32_t far, const void *src, uint32_t n)
     return u && u->ctx && wr_(&a, far, src, n);
 }
 
+static uint16_t task_global(uint16_t task, uint32_t size)
+{
+    ne_user *u = ne_user_of((HTASK)task);
+    return u && u->ctx && size ? win_ne_guest_global_alloc((win_ne_guest_image *)u->ctx->image,
+                                                            size) : 0;
+}
+
 static const win_dll_ne dll_ne = {
     sizeof(win_dll_ne), call_arg16, call_arg32, call_read, call_write, call_string, task_call,
-    task_read, task_write,
+    task_read, task_write, task_global,
 };
 
 const win_dll_ne *win_dll_ne_glue(void) { return &dll_ne; }

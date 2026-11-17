@@ -1549,6 +1549,361 @@ static BOOL WINAPI cd_font(LPCHOOSEFONT cf)
 
 /* ---------------------------------------------------------------- print */
 
+/* a printer: WIN.INI's device name, its driver and port */
+typedef struct {
+    char device[64], driver[16], port[80];
+    int is_default;
+} prn_sel;
+
+/* PrintDlg's question and its answer, the same for native and Win16 callers */
+typedef struct {
+    HWND owner;
+    DWORD flags;
+    UINT from, to, minp, maxp, copies;
+    prn_sel sel;
+} print_req;
+
+/* "Epson LX-350,EPSON9,FILE:" (or without the device: [devices]'s value) */
+static int parse_printer(const char *s, int with_device, prn_sel *p)
+{
+    char buf[200];
+    lstrcpyn(buf, s, sizeof(buf));
+    char *a = buf, *b, *c;
+    if (with_device) {
+        if (!(b = strchr(a, ',')))
+            return 0;
+        *b++ = 0;
+        lstrcpyn(p->device, a, sizeof(p->device));
+        a = b;
+    }
+    if (!(c = strchr(a, ',')))
+        return 0;
+    *c++ = 0;
+    char *d = strchr(c, ',');           /* [PrinterPorts]' timeouts after it */
+    if (d)
+        *d = 0;
+    lstrcpyn(p->driver, a, sizeof(p->driver));
+    lstrcpyn(p->port, c, sizeof(p->port));
+    return p->device[0] && p->driver[0];
+}
+
+static int default_printer(prn_sel *p)
+{
+    char s[200];
+    memset(p, 0, sizeof(*p));
+    if (!GetProfileString("windows", "device", "", s, sizeof(s)) || !parse_printer(s, 1, p))
+        return 0;
+    p->is_default = 1;
+    return 1;
+}
+
+static int named_printer(const char *device, const char *port, prn_sel *p)
+{
+    char s[200];
+    prn_sel def;
+    memset(p, 0, sizeof(*p));
+    lstrcpyn(p->device, device, sizeof(p->device));
+    if (!GetProfileString("devices", device, "", s, sizeof(s)) || !parse_printer(s, 0, p))
+        return 0;
+    if (port && *port)
+        lstrcpyn(p->port, port, sizeof(p->port));
+    p->is_default = default_printer(&def) && !lstrcmpi(def.device, p->device);
+    return 1;
+}
+
+static void printer_title(const prn_sel *p, char *out, int size)
+{
+    char s[200];
+    wsprintf(s, "%s on %s", p->device, p->port);
+    lstrcpyn(out, s, size);
+}
+
+/* ---- Print Setup: the default printer or another installed one */
+
+#define IDC_PS_DEFAULT  300
+#define IDC_PS_SPECIFIC 301
+#define IDC_PS_LIST     302
+#define IDC_PS_CURRENT  303
+
+static print_req *setup_req;
+
+static BOOL CALLBACK setup_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    (void)lp;
+    char s[200], keys[1024], title[160];
+    prn_sel def;
+    switch (msg) {
+    case WM_INITDIALOG: {
+        int have = default_printer(&def);
+        if (have) {
+            printer_title(&def, title, sizeof(title));
+            wsprintf(s, "(currently %s)", title);
+        } else {
+            lstrcpy(s, "(none)");
+        }
+        SetDlgItemText(dlg, IDC_PS_CURRENT, s);
+        int n = GetProfileString("devices", NULL, "", keys, sizeof(keys)), sel = 0, i = 0;
+        for (const char *k = keys; n > 0 && *k && k < keys + n; k += lstrlen(k) + 1, i++) {
+            prn_sel p;
+            if (!named_printer(k, NULL, &p))
+                continue;
+            printer_title(&p, title, sizeof(title));
+            SendDlgItemMessage(dlg, IDC_PS_LIST, CB_ADDSTRING, 0, (LPARAM)title);
+            if (!lstrcmpi(k, setup_req->sel.device))
+                sel = (int)SendDlgItemMessage(dlg, IDC_PS_LIST, CB_GETCOUNT, 0, 0) - 1;
+        }
+        SendDlgItemMessage(dlg, IDC_PS_LIST, CB_SETCURSEL, (WPARAM)sel, 0);
+        CheckRadioButton(dlg, IDC_PS_DEFAULT, IDC_PS_SPECIFIC,
+                         setup_req->sel.is_default ? IDC_PS_DEFAULT : IDC_PS_SPECIFIC);
+        return TRUE;
+    }
+    case WM_COMMAND:
+        if (wp == IDC_PS_LIST && HIWORD(lp) == CBN_SELCHANGE)
+            CheckRadioButton(dlg, IDC_PS_DEFAULT, IDC_PS_SPECIFIC, IDC_PS_SPECIFIC);
+        if (wp == IDOK) {
+            if (IsDlgButtonChecked(dlg, IDC_PS_DEFAULT)) {
+                if (!default_printer(&setup_req->sel))
+                    return TRUE;
+            } else {
+                int i = (int)SendDlgItemMessage(dlg, IDC_PS_LIST, CB_GETCURSEL, 0, 0);
+                if (i < 0 || SendDlgItemMessage(dlg, IDC_PS_LIST, CB_GETLBTEXT, (WPARAM)i,
+                                                (LPARAM)s) < 0)
+                    return TRUE;
+                char *on = s;           /* "Epson LX-350 on FILE:" */
+                while (*on && !(on[0] == ' ' && on[1] == 'o' && on[2] == 'n' && on[3] == ' '))
+                    on++;
+                if (*on)
+                    *on = 0;
+                else
+                    on = NULL;
+                if (!named_printer(s, on ? on + 4 : NULL, &setup_req->sel))
+                    return TRUE;
+            }
+            EndDialog(dlg, IDOK);
+            return TRUE;
+        }
+        if (wp == IDCANCEL) {
+            EndDialog(dlg, IDCANCEL);
+            return TRUE;
+        }
+        break;
+    }
+    return FALSE;
+}
+
+static const DLGITEM_N setup_items[] = {
+    { 6, 4, 196, 52, -1, BS_GROUPBOX | WS_VISIBLE, "BUTTON", "Printer" },
+    { 12, 14, 180, 10, IDC_PS_DEFAULT, BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP | WS_VISIBLE, "BUTTON", "&Default Printer" },
+    { 24, 24, 174, 8, IDC_PS_CURRENT, SS_LEFT | WS_VISIBLE, "STATIC", "" },
+    { 12, 34, 180, 10, IDC_PS_SPECIFIC, BS_AUTORADIOBUTTON | WS_VISIBLE, "BUTTON", "Specific &Printer:" },
+    { 24, 44, 172, 60, IDC_PS_LIST, CBS_DROPDOWNLIST | WS_VSCROLL | WS_GROUP | WS_TABSTOP | WS_VISIBLE, "COMBOBOX", "" },
+    { 208, 6, 50, 14, IDOK, BS_DEFPUSHBUTTON | WS_GROUP | WS_TABSTOP | WS_VISIBLE, "BUTTON", "OK" },
+    { 208, 24, 50, 14, IDCANCEL, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "Cancel" },
+};
+
+static int run_setup(print_req *r)
+{
+    static const DLGTEMPLATE_N tpl = {
+        WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME,
+        sizeof(setup_items) / sizeof(setup_items[0]), 20, 20, 264, 64,
+        NULL, NULL, "Print Setup", 0, NULL
+    };
+    print_req *was = setup_req;
+    setup_req = r;
+    int rc = DialogBoxIndirectN(0, &tpl, setup_items, r->owner, setup_proc);
+    setup_req = was;
+    return rc == IDOK;
+}
+
+/* ---- Print: the range, the copies, to a file */
+
+#define IDC_PR_PRINTER  310
+#define IDC_PR_ALL      311
+#define IDC_PR_SEL      312
+#define IDC_PR_PAGES    313
+#define IDC_PR_FROM     314
+#define IDC_PR_TO       315
+#define IDC_PR_COPIES   316
+#define IDC_PR_FILE     317
+#define IDC_PR_SETUP    318
+
+static print_req *print_cur;
+
+static void show_printer(HWND dlg)
+{
+    char t[160], s[200];
+    printer_title(&print_cur->sel, t, sizeof(t));
+    wsprintf(s, "Printer:  %s%s", print_cur->sel.is_default ? "Default Printer (" : "", t);
+    if (print_cur->sel.is_default)
+        lstrcat(s, ")");
+    SetDlgItemText(dlg, IDC_PR_PRINTER, s);
+}
+
+static BOOL CALLBACK print_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    (void)lp;
+    print_req *r = print_cur;
+    switch (msg) {
+    case WM_INITDIALOG:
+        show_printer(dlg);
+        EnableWindow(GetDlgItem(dlg, IDC_PR_SEL), !(r->flags & PD_NOSELECTION));
+        EnableWindow(GetDlgItem(dlg, IDC_PR_PAGES), !(r->flags & PD_NOPAGENUMS));
+        EnableWindow(GetDlgItem(dlg, IDC_PR_FROM), !(r->flags & PD_NOPAGENUMS));
+        EnableWindow(GetDlgItem(dlg, IDC_PR_TO), !(r->flags & PD_NOPAGENUMS));
+        CheckRadioButton(dlg, IDC_PR_ALL, IDC_PR_PAGES,
+                         r->flags & PD_PAGENUMS ? IDC_PR_PAGES :
+                         r->flags & PD_SELECTION ? IDC_PR_SEL : IDC_PR_ALL);
+        if (!(r->flags & PD_NOPAGENUMS)) {
+            SetDlgItemInt(dlg, IDC_PR_FROM, r->from ? r->from : r->minp, FALSE);
+            SetDlgItemInt(dlg, IDC_PR_TO, r->to ? r->to : r->maxp, FALSE);
+        }
+        SetDlgItemInt(dlg, IDC_PR_COPIES, r->copies ? r->copies : 1, FALSE);
+        CheckDlgButton(dlg, IDC_PR_FILE, (r->flags & PD_PRINTTOFILE) != 0);
+        if (r->flags & PD_HIDEPRINTTOFILE)
+            ShowWindow(GetDlgItem(dlg, IDC_PR_FILE), SW_HIDE);
+        else if (r->flags & PD_DISABLEPRINTTOFILE)
+            EnableWindow(GetDlgItem(dlg, IDC_PR_FILE), FALSE);
+        return TRUE;
+    case WM_COMMAND:
+        switch (wp) {
+        case IDC_PR_FROM: case IDC_PR_TO:
+            if (HIWORD(lp) == EN_CHANGE && GetFocus() == (HWND)LOWORD(lp))
+                CheckRadioButton(dlg, IDC_PR_ALL, IDC_PR_PAGES, IDC_PR_PAGES);
+            return TRUE;
+        case IDC_PR_SETUP:
+            if (run_setup(r))
+                show_printer(dlg);
+            return TRUE;
+        case IDOK: {
+            BOOL ok1, ok2, ok3;
+            UINT from = GetDlgItemInt(dlg, IDC_PR_FROM, &ok1, FALSE);
+            UINT to = GetDlgItemInt(dlg, IDC_PR_TO, &ok2, FALSE);
+            UINT copies = GetDlgItemInt(dlg, IDC_PR_COPIES, &ok3, FALSE);
+            int pages = IsDlgButtonChecked(dlg, IDC_PR_PAGES);
+            if (!ok3 || !copies) {
+                MessageBox(dlg, "The number of copies must be at least 1.", "Print",
+                           MB_OK | MB_ICONEXCLAMATION);
+                return TRUE;
+            }
+            if (pages && (!ok1 || !ok2 || from > to || from < r->minp || to > r->maxp)) {
+                char s[96];
+                wsprintf(s, "The pages must be between %u and %u.", r->minp, r->maxp);
+                MessageBox(dlg, s, "Print", MB_OK | MB_ICONEXCLAMATION);
+                return TRUE;
+            }
+            r->flags &= ~(DWORD)(PD_PAGENUMS | PD_SELECTION | PD_PRINTTOFILE);
+            if (pages)
+                r->flags |= PD_PAGENUMS;
+            else if (IsDlgButtonChecked(dlg, IDC_PR_SEL))
+                r->flags |= PD_SELECTION;
+            if (IsDlgButtonChecked(dlg, IDC_PR_FILE))
+                r->flags |= PD_PRINTTOFILE;
+            if (pages) {
+                r->from = from;
+                r->to = to;
+            }
+            r->copies = copies;
+            EndDialog(dlg, IDOK);
+            return TRUE;
+        }
+        case IDCANCEL:
+            EndDialog(dlg, IDCANCEL);
+            return TRUE;
+        }
+        break;
+    }
+    return FALSE;
+}
+
+static const DLGITEM_N print_items[] = {
+    { 6, 6, 200, 10, IDC_PR_PRINTER, SS_LEFT | SS_NOPREFIX | WS_VISIBLE, "STATIC", "" },
+    { 6, 20, 150, 62, -1, BS_GROUPBOX | WS_VISIBLE, "BUTTON", "Print Range" },
+    { 12, 31, 100, 10, IDC_PR_ALL, BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP | WS_VISIBLE, "BUTTON", "&All" },
+    { 12, 43, 100, 10, IDC_PR_SEL, BS_AUTORADIOBUTTON | WS_VISIBLE, "BUTTON", "S&election" },
+    { 12, 55, 100, 10, IDC_PR_PAGES, BS_AUTORADIOBUTTON | WS_VISIBLE, "BUTTON", "&Pages" },
+    { 22, 68, 20, 8, -1, SS_RIGHT | WS_VISIBLE, "STATIC", "&From:" },
+    { 44, 66, 30, 12, IDC_PR_FROM, ES_AUTOHSCROLL | WS_BORDER | WS_GROUP | WS_TABSTOP | WS_VISIBLE, "EDIT", "" },
+    { 78, 68, 14, 8, -1, SS_RIGHT | WS_VISIBLE, "STATIC", "&To:" },
+    { 94, 66, 30, 12, IDC_PR_TO, ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP | WS_VISIBLE, "EDIT", "" },
+    { 6, 90, 40, 8, -1, SS_LEFT | WS_VISIBLE, "STATIC", "&Copies:" },
+    { 48, 88, 30, 12, IDC_PR_COPIES, ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP | WS_VISIBLE, "EDIT", "" },
+    { 90, 89, 80, 10, IDC_PR_FILE, BS_AUTOCHECKBOX | WS_TABSTOP | WS_VISIBLE, "BUTTON", "Print to Fi&le" },
+    { 212, 6, 50, 14, IDOK, BS_DEFPUSHBUTTON | WS_GROUP | WS_TABSTOP | WS_VISIBLE, "BUTTON", "OK" },
+    { 212, 24, 50, 14, IDCANCEL, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "Cancel" },
+    { 212, 46, 50, 14, IDC_PR_SETUP, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "&Setup..." },
+};
+
+/* the dialog (or none: PD_RETURNDEFAULT); FALSE cancelled, or no printer */
+static int print_run(print_req *r, int have_sel)
+{
+    if (!have_sel && !default_printer(&r->sel)) {
+        if (!(r->flags & (PD_NOWARNING | PD_RETURNDEFAULT)))
+            MessageBox(r->owner, "No default printer.\n"
+                       "Use the Printers option in Control Panel to install and select "
+                       "a default printer.", (r->flags & PD_PRINTSETUP) ? "Print Setup" : "Print",
+                       MB_OK | MB_ICONEXCLAMATION);
+        last_error = PDERR_NODEFAULTPRN;
+        return 0;
+    }
+    if (r->flags & PD_RETURNDEFAULT)
+        return 1;
+    if (r->flags & PD_PRINTSETUP)
+        return run_setup(r);
+    static const DLGTEMPLATE_N tpl = {
+        WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME,
+        sizeof(print_items) / sizeof(print_items[0]), 20, 20, 268, 108,
+        NULL, NULL, "Print", 0, NULL
+    };
+    print_req *was = print_cur;
+    print_cur = r;
+    int rc = DialogBoxIndirectN(0, &tpl, print_items, r->owner, print_proc);
+    print_cur = was;
+    if (rc < 0)
+        last_error = CDERR_DIALOGFAILURE;
+    return rc == IDOK;
+}
+
+/* DEVNAMES: the offsets of the driver, the device and the port (in bytes,
+ * from its start), DN_DEFAULTPRN, the strings: its size */
+static unsigned devnames(const prn_sel *p, uint8_t *b, unsigned cap)
+{
+    unsigned at = 8, need = 8 + (unsigned)lstrlen(p->driver) + (unsigned)lstrlen(p->device) +
+                           (unsigned)lstrlen(p->port) + 3;
+    if (need > cap)
+        return 0;
+    const char *s[3] = { p->driver, p->device, p->port };
+    for (int i = 0; i < 3; i++) {
+        b[2 * i] = (uint8_t)at;
+        b[2 * i + 1] = (uint8_t)(at >> 8);
+        lstrcpy((char *)b + at, s[i]);
+        at += (unsigned)lstrlen(s[i]) + 1;
+    }
+    b[6] = (uint8_t)p->is_default;
+    b[7] = 0;
+    return need;
+}
+
+static int from_devnames(const uint8_t *b, unsigned n, prn_sel *p)
+{
+    unsigned dev = (unsigned)(b[2] | b[3] << 8), port = (unsigned)(b[4] | b[5] << 8);
+    if (n < 8 || dev >= n || port >= n)
+        return 0;
+    char device[64], out[80];
+    lstrcpyn(device, (const char *)b + dev, sizeof(device));
+    lstrcpyn(out, (const char *)b + port, sizeof(out));
+    return named_printer(device, out, p);
+}
+
+static HDC print_dc(const print_req *r)
+{
+    const char *port = r->flags & PD_PRINTTOFILE ? "FILE:" : r->sel.port;
+    if (r->flags & PD_RETURNDC)
+        return CreateDC(r->sel.driver, r->sel.device, port, NULL);
+    if (r->flags & PD_RETURNIC)
+        return CreateIC(r->sel.driver, r->sel.device, port, NULL);
+    return 0;
+}
+
 static BOOL WINAPI cd_print(LPPRINTDLG pd)
 {
     last_error = 0;
@@ -1556,13 +1911,40 @@ static BOOL WINAPI cd_print(LPPRINTDLG pd)
         last_error = pd ? CDERR_STRUCTSIZE : CDERR_INITIALIZATION;
         return FALSE;
     }
-    if (!(pd->Flags & (PD_NOWARNING | PD_RETURNDEFAULT)))
-        MessageBox(pd->hwndOwner, "No default printer.\n"
-                   "Use the Printers option in Control Panel to install and select "
-                   "a default printer.", (pd->Flags & PD_PRINTSETUP) ? "Print Setup" : "Print",
-                   MB_OK | MB_ICONEXCLAMATION);
-    last_error = PDERR_NODEFAULTPRN;
-    return FALSE;
+    print_req r;
+    memset(&r, 0, sizeof(r));
+    r.owner = pd->hwndOwner;
+    r.flags = pd->Flags;
+    r.from = pd->nFromPage;
+    r.to = pd->nToPage;
+    r.minp = pd->nMinPage;
+    r.maxp = pd->nMaxPage ? pd->nMaxPage : 0xffffu;
+    r.copies = pd->nCopies;
+    int have = 0;
+    if (pd->hDevNames) {
+        const uint8_t *b = (const uint8_t *)GlobalLock(pd->hDevNames);
+        have = b && from_devnames(b, (unsigned)GlobalSize(pd->hDevNames), &r.sel);
+        GlobalUnlock(pd->hDevNames);
+    }
+    if (!print_run(&r, have))
+        return FALSE;
+    uint8_t b[256];
+    unsigned n = devnames(&r.sel, b, sizeof(b));
+    if (pd->hDevNames)
+        GlobalFree(pd->hDevNames);
+    pd->hDevNames = n ? GlobalAlloc(GMEM_MOVEABLE, n) : 0;
+    if (pd->hDevNames) {
+        void *p = GlobalLock(pd->hDevNames);
+        if (p)
+            memcpy(p, b, n);
+        GlobalUnlock(pd->hDevNames);
+    }
+    pd->Flags = r.flags;
+    pd->nFromPage = (WORD)r.from;
+    pd->nToPage = (WORD)r.to;
+    pd->nCopies = (WORD)r.copies;
+    pd->hDC = print_dc(&r);
+    return TRUE;
 }
 
 /* ================================================================ Win16 programs */
@@ -1877,22 +2259,46 @@ static uint16_t ne_font(win_dll_call *c)
     return (uint16_t)ok;
 }
 
-/* Win16 PRINTDLG: 52 bytes; no printer, nothing written back */
+/* Win16 PRINTDLG (52 bytes): lStructSize, hwndOwner, hDevMode, hDevNames,
+ * hDC, Flags, nFromPage, nToPage, nMinPage, nMaxPage, nCopies, ... ; its
+ * DEVNAMES a global block of the program's */
 static uint16_t ne_print(win_dll_call *c)
 {
-    uint8_t g[16];
-    if (!NE->read(c, NE->arg32(c, 4), g, sizeof(g)))
+    uint32_t far = NE->arg32(c, 4);
+    uint8_t g[26], b[256];
+    if (!NE->read(c, far, g, sizeof(g)))
         return 0;
     if (rd32(g) != 52) {
         last_error = CDERR_STRUCTSIZE;
         return 0;
     }
-    PRINTDLG pd;
-    memset(&pd, 0, sizeof(pd));
-    pd.lStructSize = sizeof(pd);
-    pd.hwndOwner = rd16(g + 4);
-    pd.Flags = rd32(g + 12);
-    return (uint16_t)cd_print(&pd);
+    print_req r;
+    memset(&r, 0, sizeof(r));
+    r.owner = rd16(g + 4);
+    r.flags = rd32(g + 12);
+    r.from = rd16(g + 16);
+    r.to = rd16(g + 18);
+    r.minp = rd16(g + 20);
+    r.maxp = rd16(g + 22) ? rd16(g + 22) : 0xffffu;
+    r.copies = rd16(g + 24);
+    unsigned old = rd16(g + 8);
+    int have = old && NE->read(c, (uint32_t)old << 16, b, 8) &&
+               NE->read(c, (uint32_t)old << 16, b, sizeof(b)) && from_devnames(b, sizeof(b), &r.sel);
+    if (!print_run(&r, have))
+        return 0;
+    unsigned n = devnames(&r.sel, b, sizeof(b));
+    HTASK task = GetCurrentTask();
+    uint16_t names = n && NE->size >= sizeof(win_dll_ne) && NE->task_global ?
+                     NE->task_global((uint16_t)task, n) : 0;
+    if (names)
+        NE->task_write((uint16_t)task, (uint32_t)names << 16, b, n);
+    wr16(g + 8, names);
+    wr16(g + 10, (uint16_t)(uintptr_t)print_dc(&r));
+    wr32(g + 12, r.flags);
+    wr16(g + 16, r.from);
+    wr16(g + 18, r.to);
+    wr16(g + 24, r.copies);
+    return (uint16_t)NE->write(c, far, g, sizeof(g));
 }
 
 static int ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *v)

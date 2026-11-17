@@ -1044,23 +1044,95 @@ static __attribute__((noinline)) int gdi_more(args *a, uint16_t service, uint32_
         *v = (uint16_t)DragDetect(w(a, 8), pt);
         return 1;
     }
-    /* printing: no printers */
-    case 0x3179: case 0x317d:           /* StartDoc(HDC, DOCINFO FAR *), SetAbortProc */
-    case 0x317a: case 0x317b:           /* EndDoc, StartPage */
-    case 0x317c: case 0x317e:           /* EndPage, AbortDoc */
-        *v = 0xffff;                    /* SP_ERROR */
+    /* printing (print.c) */
+    case 0x3179: {                      /* StartDoc(HDC, DOCINFO FAR *): cbSize, name, output */
+        uint8_t di[10];
+        char name[64], out[128];
+        DOCINFO d = { sizeof(DOCINFO), name, out };
+        *v = 0xffff;
+        if (rd_(a, dw(a, 4), di, sizeof(di)) && str_(a, rd32(di + 2), name, sizeof(name)) &&
+            str_(a, rd32(di + 6), out, sizeof(out)))
+            *v = (uint16_t)StartDoc(w(a, 8), &d);
         return 1;
-    case 0x309b:                        /* QueryAbort(HDC, int): stop */
+    }
+    case 0x317d:                        /* SetAbortProc(HDC, ABORTPROC): never asked */
+        *v = (uint16_t)SetAbortProc(w(a, 8), NULL);
+        return 1;
+    case 0x317a: *v = (uint16_t)EndDoc(w(a, 4)); return 1;
+    case 0x317b: *v = (uint16_t)StartPage(w(a, 4)); return 1;
+    case 0x317c: *v = (uint16_t)EndPage(w(a, 4)); return 1;
+    case 0x317e: *v = (uint16_t)AbortDoc(w(a, 4)); return 1;
+    case 0x309b:                        /* QueryAbort(HDC, int): go on */
+        *v = 1;
+        return 1;
+    case 0x3026: {                      /* Escape(HDC, esc, cb, LPCSTR in, LPVOID out) */
+        HDC dc = w(a, 16);
+        int esc = (int16_t)w(a, 14), cb = (int16_t)w(a, 12);
+        uint32_t in = dw(a, 8), out = dw(a, 4);
+        uint8_t b[8];
+        char s[128];
+        int n = 0;
+        RECT r;
+        POINT pt;
         *v = 0;
-        return 1;
-    case 0x3026:                        /* Escape: no printer escapes */
-        *v = 0;
-        return 1;
+        switch (esc) {
+        case QUERYESCSUPPORT: case SETCOPYCOUNT:
+            if (in && rd_(a, in, b, 2)) {
+                n = (int16_t)rd16(b);
+                *v = (uint16_t)Escape(dc, esc, sizeof(int), (LPCSTR)&n, &n);
+                if (esc == SETCOPYCOUNT && out) {
+                    wr16(b, (uint16_t)n);
+                    wr_(a, out, b, 2);
+                }
+            }
+            return 1;
+        case STARTDOC:
+            if (cb > (int)sizeof(s) - 1)
+                cb = sizeof(s) - 1;
+            if (cb < 0 || !rd_(a, in, s, (uint32_t)cb))
+                return 1;
+            s[cb] = 0;
+            *v = (uint16_t)Escape(dc, esc, lstrlen(s), s, NULL);
+            return 1;
+        case NEXTBAND:
+            *v = (uint16_t)Escape(dc, esc, 0, NULL, &r);
+            wr16(b, (uint16_t)r.left); wr16(b + 2, (uint16_t)r.top);
+            wr16(b + 4, (uint16_t)r.right); wr16(b + 6, (uint16_t)r.bottom);
+            if (out)
+                wr_(a, out, b, 8);
+            return 1;
+        case GETPHYSPAGESIZE: case GETPRINTINGOFFSET: case GETSCALINGFACTOR:
+            *v = (uint16_t)Escape(dc, esc, 0, NULL, &pt);
+            wr16(b, (uint16_t)pt.x);
+            wr16(b + 2, (uint16_t)pt.y);
+            if (out && *v)
+                wr_(a, out, b, 4);
+            return 1;
+        case GETTECHNOLOGY:
+            *v = (uint16_t)Escape(dc, esc, 0, NULL, s);
+            if (*v)
+                str_out(a, out, s, 32);
+            return 1;
+        case PASSTHROUGH: {             /* a word's count, the bytes */
+            if (cb < 2 || cb > 4096 || !in)
+                return 1;
+            char *p = (char *)win_alloc((uint32_t)cb);
+            if (p && rd_(a, in, p, (uint32_t)cb))
+                *v = (uint16_t)Escape(dc, esc, cb, p, NULL);
+            win_free(p);
+            return 1;
+        }
+        default:                        /* NEWFRAME, ENDDOC, ABORTDOC, ...: nothing in or out */
+            *v = (uint16_t)Escape(dc, esc, 0, NULL, NULL);
+            return 1;
+        }
+    }
     case 0x3035: case 0x3099: {         /* CreateDC, CreateIC(driver, device, output, init) */
-        char drv[32], dev[32], out[32];
+        char drv[64], dev[64], out[128];
         if (str_(a, dw(a, 16), drv, sizeof(drv)) && str_(a, dw(a, 12), dev, sizeof(dev)) &&
             str_(a, dw(a, 8), out, sizeof(out)))
-            *v = CreateDC(drv, dev[0] ? dev : NULL, out[0] ? out : NULL, NULL);
+            *v = (service == 0x3099 ? CreateIC : CreateDC)(drv[0] ? drv : NULL, dev[0] ? dev : NULL,
+                                                          out[0] ? out : NULL, NULL);
         return 1;
     }
     case 0x3168: {                      /* CreatePalette(const LOGPALETTE FAR *) */

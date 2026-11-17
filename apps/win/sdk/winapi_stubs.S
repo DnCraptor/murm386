@@ -2132,6 +2132,23 @@ Polyline:
     .ltorg
     .size Polyline, .-Polyline
 
+    .section .text.winapi.Escape,"ax",%progbits
+    .global Escape
+    .type Escape, %function
+    .thumb_func
+Escape:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =152
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size Escape, .-Escape
+
     .section .text.winapi.RestoreDC,"ax",%progbits
     .global RestoreDC
     .type RestoreDC, %function
@@ -4749,6 +4766,108 @@ GetSystemPaletteEntries:
     bx   r12
     .ltorg
     .size GetSystemPaletteEntries, .-GetSystemPaletteEntries
+
+    .section .text.winapi.StartDoc,"ax",%progbits
+    .global StartDoc
+    .type StartDoc, %function
+    .thumb_func
+StartDoc:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =1508
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size StartDoc, .-StartDoc
+
+    .section .text.winapi.EndDoc,"ax",%progbits
+    .global EndDoc
+    .type EndDoc, %function
+    .thumb_func
+EndDoc:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =1512
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size EndDoc, .-EndDoc
+
+    .section .text.winapi.StartPage,"ax",%progbits
+    .global StartPage
+    .type StartPage, %function
+    .thumb_func
+StartPage:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =1516
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size StartPage, .-StartPage
+
+    .section .text.winapi.EndPage,"ax",%progbits
+    .global EndPage
+    .type EndPage, %function
+    .thumb_func
+EndPage:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =1520
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size EndPage, .-EndPage
+
+    .section .text.winapi.SetAbortProc,"ax",%progbits
+    .global SetAbortProc
+    .type SetAbortProc, %function
+    .thumb_func
+SetAbortProc:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =1524
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SetAbortProc, .-SetAbortProc
+
+    .section .text.winapi.AbortDoc,"ax",%progbits
+    .global AbortDoc
+    .type AbortDoc, %function
+    .thumb_func
+AbortDoc:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =1528
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size AbortDoc, .-AbortDoc
 
     .section .text.winapi.IsValidMetaFile,"ax",%progbits
     .global IsValidMetaFile
@@ -11566,6 +11685,40 @@ TileWindowsN:
     bx   r12
     .ltorg
     .size TileWindowsN, .-TileWindowsN
+
+    .section .text.winapi.GetPrintersN,"ax",%progbits
+    .global GetPrintersN
+    .type GetPrintersN, %function
+    .thumb_func
+GetPrintersN:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #12]
+    ldr  r1, =120
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetPrintersN, .-GetPrintersN
+
+    .section .text.winapi.GetPrinterModelsN,"ax",%progbits
+    .global GetPrinterModelsN
+    .type GetPrinterModelsN, %function
+    .thumb_func
+GetPrinterModelsN:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #12]
+    ldr  r1, =124
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetPrinterModelsN, .-GetPrinterModelsN
 
     .section .text.winapi.GetOpenFileName,"ax",%progbits
     .global GetOpenFileName

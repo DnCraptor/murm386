@@ -1177,8 +1177,9 @@ enum {
     EM_GETRECT_ = 0x402, EM_SETRECT_ = 0x403, EM_REPLACESEL_ = 0x412, EM_GETLINE_ = 0x414,
     LB_ADDSTRING_ = 0x401, LB_INSERTSTRING_ = 0x402, LB_GETTEXT_ = 0x40a,
     LB_SELECTSTRING_ = 0x40d, LB_DIR_ = 0x40e, LB_FINDSTRING_ = 0x410, LB_GETITEMRECT_ = 0x419,
+    LB_FINDSTRINGEXACT_ = 0x423,
     CB_ADDSTRING_ = 0x403, CB_DIR_ = 0x405, CB_GETLBTEXT_ = 0x408, CB_INSERTSTRING_ = 0x40a,
-    CB_FINDSTRING_ = 0x40c, CB_SELECTSTRING_ = 0x40d
+    CB_FINDSTRING_ = 0x40c, CB_SELECTSTRING_ = 0x40d, CB_FINDSTRINGEXACT_ = 0x418
 };
 
 /* SendMessage to a window of the program's own: lParam as it is (its
@@ -1221,13 +1222,14 @@ static __attribute__((noinline)) uint32_t send(args *a, ne_user *u, HWND h, UINT
     else if (msg == WM_GETTEXT)
         kind = OUT, size = wp;
     else if (lb && (msg == LB_ADDSTRING_ || msg == LB_INSERTSTRING_ || msg == LB_SELECTSTRING_ ||
-                    msg == LB_DIR_ || msg == LB_FINDSTRING_))
+                    msg == LB_DIR_ || msg == LB_FINDSTRING_ || msg == LB_FINDSTRINGEXACT_))
         kind = IN;
     else if (lb && msg == LB_GETTEXT_)
         kind = OUT, size = (uint32_t)SendMessage(h, LB_GETTEXTLEN, wp, 0) + 1u;
     else if (lb && msg == LB_GETITEMRECT_)
         kind = RECT_OUT;
     else if (cb && (msg == CB_ADDSTRING_ || msg == CB_INSERTSTRING_ || msg == CB_FINDSTRING_ ||
+                    msg == CB_FINDSTRINGEXACT_ ||
                     msg == CB_SELECTSTRING_ || msg == CB_DIR_))
         kind = IN;
     else if (cb && msg == CB_GETLBTEXT_)

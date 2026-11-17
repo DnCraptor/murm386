@@ -998,11 +998,30 @@ LRESULT CALLBACK user_scrollbar_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     case WM_LBUTTONDBLCLK: {
         POINT p = { (int16_t)LOWORD(lp), (int16_t)HIWORD(lp) };
         ClientToScreen(h, &p);
+        if (w->style & WS_TABSTOP)
+            SetFocus(h);                /* the keys are its then */
         scroll_track(w, SB_CTL, p.x, p.y);
         return 0;
     }
     case WM_GETDLGCODE:
+        return DLGC_WANTARROWS;
+    case WM_KEYDOWN: {                  /* the keys as the arrows and the trough */
+        int code;
+        switch (wp) {
+        case VK_LEFT: case VK_UP: code = SB_LINEUP; break;
+        case VK_RIGHT: case VK_DOWN: code = SB_LINEDOWN; break;
+        case VK_PRIOR: code = SB_PAGEUP; break;
+        case VK_NEXT: code = SB_PAGEDOWN; break;
+        case VK_HOME: code = SB_TOP; break;
+        case VK_END: code = SB_BOTTOM; break;
+        default: return 0;
+        }
+        HWND to = w->parent ? w->parent->h : h;
+        UINT m = (w->style & SBS_VERT) ? WM_VSCROLL : WM_HSCROLL;
+        SendMessage(to, m, (WPARAM)code, MAKELPARAM(0, h));
+        SendMessage(to, m, SB_ENDSCROLL, MAKELPARAM(0, h));
         return 0;
+    }
     }
     return DefWindowProc(h, msg, wp, lp);
 }
