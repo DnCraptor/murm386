@@ -154,14 +154,14 @@ static int native_dma_buffer_ensure(void)
      * to the next 64-KiB boundary and therefore allocated 128 KiB just to
      * obtain a 4-KiB ring.
      */
-    native_dma_alloc = (unsigned char *)malloc(NATIVE_FX_RING_SIZE + 0x0fffu);
-#if DMX_DIAG
+    native_dma_alloc = dos_alloc_low(NATIVE_FX_RING_SIZE + 0x0fffu);
     if (!native_dma_alloc) {
+#if DMX_DIAG
         DMX_Diag("SB DMA: allocation of %u bytes failed\n",
                  (unsigned)(NATIVE_FX_RING_SIZE + 0x0fffu));
+#endif
         return -1;
     }
-#endif
     address = (uintptr_t)native_dma_alloc;
     aligned = address;
 
@@ -176,7 +176,7 @@ static int native_dma_buffer_ensure(void)
         DMX_Diag("SB DMA: dos_ptr_linear failed buffer=%p\n",
                  native_dma_buffer);
 #endif
-        free(native_dma_alloc);
+        dos_free_low(native_dma_alloc);
         native_dma_alloc = NULL;
         native_dma_buffer = NULL;
         return -1;
@@ -543,8 +543,7 @@ int FX_Shutdown(void)
 
     native_dma_running = 0;
 
-    if (native_dma_alloc)
-        free(native_dma_alloc);
+    dos_free_low(native_dma_alloc);
     native_dma_alloc = NULL;
     native_dma_buffer = NULL;
     native_dma_linear = 0;

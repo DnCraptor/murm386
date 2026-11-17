@@ -1844,6 +1844,12 @@ void D_DoomMain (void)
 	
 	printf ("M_LoadDefaults: Load system defaults.\n");
 	M_LoadDefaults ();              // load before initing other systems
+
+#ifdef ELF_MODE
+	// Allocate the WAD directory and cache index before sizing the zone.
+	printf ("W_Init: Init WADfiles.\n");
+	W_InitMultipleFiles (wadfiles);
+#endif
 	
 	printf ("Z_Init: Init zone memory allocation daemon. \n");
 #if (APPVER_DOOMREV < AV_DR_DM12)
@@ -1852,8 +1858,10 @@ void D_DoomMain (void)
 	Z_Init ();
 #endif
 	
+#ifndef ELF_MODE
 	printf ("W_Init: Init WADfiles.\n");
 	W_InitMultipleFiles (wadfiles);
+#endif
 	
 
 #if (APPVER_DOOMREV >= AV_DR_DM1666P)

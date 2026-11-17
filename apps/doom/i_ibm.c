@@ -1722,11 +1722,13 @@ int I_GetHeapSize (void)
 byte *I_ZoneBase (int *size)
 {
 #ifdef ELF_MODE
+    const size_t minimum_zone = 0x180000u;
+    const size_t heap_reserve = 1024u * 1024u;
     size_t largest;
+    size_t zone_size;
     byte *zone;
 
-    /* Reserve the software screens first so the zone can consume the largest
-       remaining contiguous block without knowing anything about PSRAM layout. */
+    /* V_Init normally allocates the software screens before Z_Init. */
     if (!native_screens_base)
     {
         native_screens_base = malloc(NATIVE_SCREENS_SIZE);
@@ -1735,14 +1737,20 @@ byte *I_ZoneBase (int *size)
     }
 
     largest = malloc_largest_block();
-    if (largest < 0x180000u)
-        I_Error("Insufficient memory for DOOM zone!");
+    if (largest < minimum_zone)
+        I_Error("Insufficient memory for DOOM zone: largest block %lu bytes, need %lu.",
+                (unsigned long)largest, (unsigned long)minimum_zone);
 
-    zone = (byte *)malloc(largest);
+    /* Leave room for sound and music allocations and the reclaimable FatFs
+       cache. On smaller heaps keep the zone at least as large as its minimum. */
+    zone_size = largest - minimum_zone >= heap_reserve
+              ? largest - heap_reserve : minimum_zone;
+
+    zone = (byte *)malloc(zone_size);
     if (!zone)
         I_Error("Unable to allocate DOOM zone!");
 
-    *size = (int)largest;
+    *size = (int)zone_size;
     printf("Native memory: 0x%x allocated for zone\n", *size);
     return zone;
 #else
