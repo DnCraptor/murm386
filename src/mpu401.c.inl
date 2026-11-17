@@ -16,7 +16,9 @@ uint8_t mpu_rx_data = 0;
 
 static int midi_pos, midi_len;
 static uint32_t midi_command;
-static int midi_lengths[8] = {3, 3, 3, 3, 2, 2, 3, 1};
+static const uint8_t midi_channel_lengths[] = {3, 3, 3, 3, 2, 2, 3};
+static const uint8_t midi_system_lengths[] = {0, 2, 3, 2, 0, 0, 1, 0};
+static uint8_t midi_running_status;
 static int midi_insysex;
 
 
@@ -96,6 +98,22 @@ int16_t midi_sample() { return 0; }
 #endif
 
 
+static INLINE void midi_send_short(uint32_t command) {
+#if defined(EMULATED_MIDI)
+    const uint8_t status = command;
+    if (status < 0xF0) {
+        const midi_command_t message = {
+            .command = status,
+            .note = command >> 8,
+            .velocity = command >> 16,
+        };
+        parse_midi(&message);
+    }
+#else
+    midiOutShortMsg(midi_out_device, command);
+#endif
+}
+
 static INLINE uint8_t mpu401_read(uint16_t portnum) {
     if (portnum & 1) {
         return mpu_status;
@@ -124,7 +142,12 @@ static INLINE void mpu401_write(uint16_t portnum, uint8_t value) {
 #ifdef DEBUG_MPU401
                 printf("[MIDI] Unknown %x %x\n", portnum, value);
 #endif
+                mpu_rx_data = 0xFE;
+                break;
             case 0xFF: // Reset
+                midi_pos = midi_len = midi_insysex = 0;
+                midi_running_status = 0;
+                midi_command = 0;
 #if !defined(EMULATED_MIDI)
                 midi_init_once();
 #endif
@@ -136,36 +159,64 @@ static INLINE void mpu401_write(uint16_t portnum, uint8_t value) {
         return;
     }
 
-    if (value & 0x80 && !(value == 0xF7 && midi_insysex)) {
-        midi_pos = 0;
-        midi_len = midi_lengths[value >> 4 & 7];
-        midi_command = 0;
-
-        if (value == 0xF0) midi_insysex = 1;
+    /* Realtime bytes can occur anywhere, including inside SysEx. */
+    if (value >= 0xF8) {
+        midi_send_short(value);
+        return;
     }
 
     if (midi_insysex) {
+        if (value < 0x80 || value == 0xF7) {
 #if !defined(EMULATED_MIDI)
-        midi_sysex_data[midi_pos++] = value;
-
-        if (value == 0xF7 || midi_pos >= sizeof(midi_sysex_data)) {
-            midi_send_sysex();
-        }
+            if (midi_pos < sizeof(midi_sysex_data))
+                midi_sysex_data[midi_pos++] = value;
+            if (value == 0xF7 && midi_pos < sizeof(midi_sysex_data))
+                midi_send_sysex();
 #endif
-        if (value == 0xF7) {
-            midi_insysex = 0;
+            if (value == 0xF7)
+                midi_insysex = 0;
+            return;
+        }
+        midi_insysex = 0;
+    }
+
+    if (value & 0x80) {
+        midi_pos = 0;
+        midi_command = value;
+        if (value < 0xF0) {
+            midi_running_status = value;
+            midi_len = midi_channel_lengths[(value >> 4) - 8];
+        } else {
+            midi_running_status = 0;
+            midi_len = midi_system_lengths[value - 0xF0];
+            if (value == 0xF0) {
+                midi_insysex = 1;
+#if !defined(EMULATED_MIDI)
+                midi_sysex_data[midi_pos++] = value;
+#endif
+                return;
+            }
+        }
+        if (midi_len == 1) {
+            midi_send_short(midi_command);
+            midi_len = 0;
+        } else if (midi_len > 1) {
+            midi_pos = 1;
         }
         return;
     }
 
-    if (midi_len) {
-        midi_command |= value << midi_pos * 8;
-        if (++midi_pos == midi_len) {
-#if defined(EMULATED_MIDI)
-            parse_midi((void *)&midi_command);
-#else
-            midiOutShortMsg(midi_out_device, midi_command);
-#endif
-        }
+    if (!midi_len) {
+        if (!midi_running_status)
+            return;
+        midi_command = midi_running_status;
+        midi_len = midi_channel_lengths[(midi_running_status >> 4) - 8];
+        midi_pos = 1;
+    }
+
+    midi_command |= (uint32_t)value << (midi_pos * 8);
+    if (++midi_pos == midi_len) {
+        midi_send_short(midi_command);
+        midi_len = 0;
     }
 }

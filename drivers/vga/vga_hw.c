@@ -1825,11 +1825,13 @@ void __not_in_flash_func(vga_hw_process_deferred)(void) {
 #if LOAD_BAR_ENABLE
     uint32_t t0 = timer_hw->timerawl;
 #endif
+#if !defined(M2P2_HSTX_AUDIO)
     if (!SELECT_VGA && required_to_repair_text_pal) {
         required_to_repair_text_pal = false;
         // Restore the text pair palette
         memcpy(conv_color, conv_color2, 1024 * sizeof(uint32_t));
     }
+#endif
     vga_hw_new_frame_deferred();
 #if LOAD_BAR_ENABLE
     uint32_t dt = timer_hw->timerawl - t0;

@@ -29,6 +29,9 @@
 #include "config_save.h"
 #include "csm.h"
 #include "csm_psg.h"
+#if defined(M2P2_HSTX_AUDIO)
+#include "hstx_audio.h"
+#endif
 #if HAS_AUDIO_HWAY
 #include "ay_hw.h"
 #endif
@@ -230,6 +233,7 @@ bool audio_is_hway8930(void) {
 }
 
 void audio_init(void) {
+#if !defined(M2P2_HSTX_AUDIO)
 #if HAS_AUDIO_HWAY
     audio_use_hway = (boot_audio_output == AUDIO_OUTPUT_HWAY ||
                       boot_audio_output == AUDIO_OUTPUT_HWAY8930);
@@ -316,9 +320,34 @@ void audio_init(void) {
     pwm_config_set_wrap(&pwm, (1 << 12) - 1);
     pwm_init(pwm_gpio_to_slice_num(PCM_PIN), &pwm, true);
 #endif
+#endif
 }
 
 void audio_play_tone(unsigned hz, unsigned ms) {
+#if defined(M2P2_HSTX_AUDIO)
+    if (!hz || !ms)
+        return;
+
+    // Boot diagnostics run on core 1, before the mixer timer starts.
+    const uint32_t rate = HSTX_AUDIO_SAMPLE_RATE;
+    const uint32_t frames = (uint64_t)rate * ms / 1000u;
+    const uint32_t step = hz % rate;
+    const int amp = volume < 16 ? 32767 >> volume : 0;
+    const absolute_time_t deadline = make_timeout_time_ms(ms + 100u);
+    uint32_t phase = 0;
+    for (uint32_t i = 0; i < frames; ++i) {
+        while (!hstx_audio_has_room()) {
+            if (time_reached(deadline))
+                return;
+            sleep_us(22);
+        }
+        int16_t sample = phase < rate / 2 ? amp : -amp;
+        hstx_audio_write(sample, sample);
+        phase += step;
+        if (phase >= rate)
+            phase -= rate;
+    }
+#else
     if (!hz || !ms)
         return;
 
@@ -388,6 +417,7 @@ void audio_play_tone(unsigned hz, unsigned ms) {
     }
     pwm_set_gpio_level(PCM_PIN, 2048);
 #endif
+#endif
 }
 
 static int16_t samples[2] = { 0 };
@@ -399,6 +429,12 @@ bool __not_in_flash_func(timer_callback)(repeating_timer_t *rt) {
     static uint32_t dss_phase = 0;
     static int dss_v = 0;
     PC* pc = (PC*)rt->user_data;
+#if defined(M2P2_HSTX_AUDIO)
+    // The timer fires slightly faster than 44.1 kHz. Let HDMI pace the
+    // emulated audio devices by advancing them only when a sample fits.
+    if (!hstx_audio_has_room())
+        return true;
+#endif
 
     /* Disney Sound Source owns a fixed 7 kHz playback clock.  This mixer is
      * called at 44.1 kHz, so use a rational phase accumulator instead of a
@@ -471,6 +507,17 @@ bool __not_in_flash_func(timer_callback)(repeating_timer_t *rt) {
     l_v += dss_v;
     // Leave headroom for the other devices on shared audio outputs.
     int speaker_pcm = b_v * 8192;
+#if defined(M2P2_HSTX_AUDIO)
+    r_v += speaker_pcm;
+    l_v += speaker_pcm;
+    if (r_v > 32767) r_v = 32767;
+    if (r_v < -32768) r_v = -32768;
+    if (l_v > 32767) l_v = 32767;
+    if (l_v < -32768) l_v = -32768;
+    int level = volume;
+    hstx_audio_write(level < 16 ? l_v >> level : 0,
+                     level < 16 ? r_v >> level : 0);
+#else
 #if HAS_AUDIO_HWAY
     if (audio_use_hway) {
         r_v += speaker_pcm;
@@ -527,6 +574,7 @@ bool __not_in_flash_func(timer_callback)(repeating_timer_t *rt) {
     if (ul_v > 4095) ul_v = 4095;
     pwm_set_gpio_level(PWM_RIGHT_PIN, ur_v);
     pwm_set_gpio_level(PWM_LEFT_PIN, ul_v);
+#endif
 #endif
     return true;
 }

@@ -15,6 +15,9 @@
 #include "vga_osd.h"
 #include "hdmi.h"
 #include "font8x16.h"
+#if defined(M2P2_HSTX_AUDIO)
+#include "hstx_video.h"
+#endif
 
 /* Shared SRAM-resident memset from src/dos_api.c. */
 void *nf_memset(void *ptr, int value, size_t len);
@@ -263,7 +266,11 @@ static void pio_set_x(PIO pio, const int sm, uint32_t v) {
 }
 
 #define is_hdmi_sync(c) (c >= HDMI_CTRL_0)
+#if defined(M2P2_HSTX_AUDIO)
+#define ob(x) (*output_buffer++ = (uint8_t)(x))
+#else
 #define ob(x) { register uint8_t c = x; *output_buffer++ = is_hdmi_sync(c) ? (HDMI_CTRL_0 - 1) : c; }
+#endif
 
 /*
  * Pixel-pair palette (text, OSD, EGA 640): one index carries two 16-colour
@@ -280,7 +287,11 @@ static void pio_set_x(PIO pio, const int sm, uint32_t v) {
  */
 #define HDMI_PAIR_MOVE 0x40u
 /* Branchless: (c + 4) >> 8 is 1 exactly for c = 252..255 */
+#if defined(M2P2_HSTX_AUDIO)
+#define obp(x) (*output_buffer++ = (uint8_t)(x))
+#else
 #define obp(x) { register uint32_t c = (uint8_t)(x); *output_buffer++ = (uint8_t)(c ^ (((c + 4u) >> 8) << 6)); }
+#endif
 
 static void __time_critical_func(render_text_line)(uint32_t line, uint8_t *output_buffer) {
     int char_height = vga_get_char_height(vga_state);
@@ -1010,6 +1021,44 @@ void graphics_set_palette_hdmi2(
     uint8_t i
 );
 
+static void hdmi_init_text_palette(void) {
+    // Заполнение палитры — CGA 16 цветов (индексы 0-15)
+    // Формат cga_colors: 6-бит RRGGBB (как в VGA DAC)
+    // const: init-time table, no need to keep it in SRAM (.data)
+    static const uint8_t cga_colors[16][3] = {
+        { 0,  0,  0},  //  0: Black
+        { 0,  0, 42},  //  1: Blue        (0x02 -> b=2/3*63)
+        { 0, 42,  0},  //  2: Green
+        { 0, 42, 42},  //  3: Cyan
+        {42,  0,  0},  //  4: Red
+        {42,  0, 42},  //  5: Magenta
+        {42, 21,  0},  //  6: Brown
+        {42, 42, 42},  //  7: Light Gray
+        {21, 21, 21},  //  8: Dark Gray
+        {21, 21, 63},  //  9: Light Blue
+        {21, 63, 21},  // 10: Light Green
+        {21, 63, 63},  // 11: Light Cyan
+        {63, 21, 21},  // 12: Light Red
+        {63, 21, 63},  // 13: Light Magenta
+        {63, 63, 21},  // 14: Yellow
+        {63, 63, 63},  // 15: White
+    };
+
+    // заполнение палитры (text) 4 старших bit первый пиксел, 4 младших - второй
+    for (int c1 = 0; c1 < 16; ++c1) {
+        const uint8_t* c13 = cga_colors[c1];
+        for (int c2 = 0; c2 < 16; ++c2) {
+            const uint8_t* c23 = cga_colors[c2];
+            int ci = c1 << 4 | c2; // compund index
+            graphics_set_palette_hdmi2(
+                c13[0] << 2, c13[1] << 2, c13[2] << 2,
+                c23[0] << 2, c23[1] << 2, c23[2] << 2,
+                ci
+            );
+        }
+    }
+}
+
 //деинициализация - инициализация ресурсов
 static inline bool hdmi_init() {
     //выключение прерывания DMA
@@ -1051,41 +1100,7 @@ static inline bool hdmi_init() {
     offs_prg0 = pio_add_program(PIO_VIDEO, &program_PIO_HDMI);
     pio_set_x(PIO_VIDEO_ADDR, SM_conv, ((uint32_t)conv_color >> 12));
 
-    // Заполнение палитры — CGA 16 цветов (индексы 0-15)
-    // Формат cga_colors: 6-бит RRGGBB (как в VGA DAC)
-    // const: init-time table, no need to keep it in SRAM (.data)
-    static const uint8_t cga_colors[16][3] = {
-        { 0,  0,  0},  //  0: Black
-        { 0,  0, 42},  //  1: Blue        (0x02 -> b=2/3*63)
-        { 0, 42,  0},  //  2: Green
-        { 0, 42, 42},  //  3: Cyan
-        {42,  0,  0},  //  4: Red
-        {42,  0, 42},  //  5: Magenta
-        {42, 21,  0},  //  6: Brown
-        {42, 42, 42},  //  7: Light Gray
-        {21, 21, 21},  //  8: Dark Gray
-        {21, 21, 63},  //  9: Light Blue
-        {21, 63, 21},  // 10: Light Green
-        {21, 63, 63},  // 11: Light Cyan
-        {63, 21, 21},  // 12: Light Red
-        {63, 21, 63},  // 13: Light Magenta
-        {63, 63, 21},  // 14: Yellow
-        {63, 63, 63},  // 15: White
-    };
-    
-    // заполнение палитры (text) 4 старших bit первый пиксел, 4 младших - второй
-    for (int c1 = 0; c1 < 16; ++c1) {
-        const uint8_t* c13 = cga_colors[c1];
-        for (int c2 = 0; c2 < 16; ++c2) {
-            const uint8_t* c23 = cga_colors[c2];
-            int ci = c1 << 4 | c2; // compund index
-            graphics_set_palette_hdmi2(
-                c13[0] << 2, c13[1] << 2, c13[2] << 2,
-                c23[0] << 2, c23[1] << 2, c23[2] << 2,
-                ci
-            );
-        }
-    }
+    hdmi_init_text_palette();
 
     //BASE_HDMI_CTRL_INX +3 служебные данные(синхра) напрямую вносим в массив -конвертер
     uint64_t* conv_color64 = (uint64_t *)conv_color;
@@ -1282,11 +1297,75 @@ static inline bool hdmi_init() {
 // Flips TMDS bits 0-7 and bit 9 (DC balance flag) but NOT bit 8 (encoding method).
 #define HDMI_DC_BAL_XOR 0x0003ffffffffffffllu
 
+#if defined(M2P2_HSTX_AUDIO)
+static hstx_video_packet_t hstx_lines[4];
+static uint32_t hstx_single_palette[256], hstx_pair_palette[256], hstx_text_palette[256];
+static const uint32_t hstx_mono_palette[4] __not_in_flash("hstx_mono_palette") = {
+    0x00000000, 0x7fff0000, 0x00007fff, 0x7fff7fff,
+};
+
+static inline __attribute__((always_inline)) uint32_t hdmi_bgr555(uint8_t r, uint8_t g, uint8_t b) {
+    return (r >> 3) | ((g >> 3) << 5) | ((b >> 3) << 10);
+}
+
+static hstx_video_packet_t *__time_critical_func(hdmi_hstx_render)(uint32_t line) {
+    alignas(4) uint8_t indices[SCREEN_WIDTH];
+    const uint32_t *palette = hstx_single_palette;
+
+    if (line < (uint32_t)active_start || line >= (uint32_t)active_end) {
+#if DIAG
+        nf_memset(indices, 0, sizeof(indices));
+        render_diag_border_hdmi(line, indices);
+        palette = hstx_text_palette;
+#else
+        return NULL;
+#endif
+    } else {
+        nf_memset(indices, 0, sizeof(indices));
+        if (osd_is_visible() || current_mode == 1)
+            palette = hstx_text_palette;
+        else if (current_mode == 2 && (gfx_submode == 4 || gfx_submode == 8))
+            palette = hstx_mono_palette;
+        else if (current_mode == 2 && gfx_submode == 2)
+            palette = hstx_pair_palette;
+        render_line(line - active_start, indices);
+    }
+
+    hstx_video_packet_t *packet = &hstx_lines[line & 3u];
+    for (unsigned x = 0; x < SCREEN_WIDTH; x++)
+        packet->payload.pairs[x] = palette[indices[x]];
+    return packet;
+}
+
+void __time_critical_func(hdmi_hstx_line_begin)(unsigned line) {
+    if (vga_state) {
+        uint8_t status = vga_state->st01 & ~(ST01_V_RETRACE | ST01_DISP_ENABLE);
+        if (line < V_ACTIVE_START)
+            status |= ST01_V_RETRACE | ST01_DISP_ENABLE;
+        vga_state->st01 = status;
+    }
+    if (line == V_ACTIVE_START - 4)
+        video_latch_frame(HSTX_VIDEO_HEIGHT);
+}
+
+void __time_critical_func(hdmi_hstx_line_end)(void) {
+    if (vga_state)
+        vga_state->st01 |= ST01_DISP_ENABLE;
+    extern void tsr1_dispatch(void);
+    tsr1_dispatch();
+}
+#endif
+
 void __time_critical_func(graphics_set_palette_hdmi)(const uint8_t R, const uint8_t G, const uint8_t B,  uint8_t i) {
+#if defined(M2P2_HSTX_AUDIO)
+    uint32_t color = hdmi_bgr555(R, G, B);
+    hstx_single_palette[i] = color | (color << 16);
+#else
     if is_hdmi_sync(i) return;
     uint64_t* conv_color64 = (uint64_t *)conv_color;
     conv_color64[i * 2] = get_ser_diff_data(tmds_encoder(R), tmds_encoder(G), tmds_encoder(B));
     conv_color64[i * 2 + 1] = conv_color64[i * 2] ^ HDMI_DC_BAL_XOR;
+#endif
 };
 
 void graphics_set_palette_hdmi2(
@@ -1294,6 +1373,9 @@ void graphics_set_palette_hdmi2(
     const uint8_t R2, const uint8_t G2, const uint8_t B2,
     uint8_t i
 ) {
+#if defined(M2P2_HSTX_AUDIO)
+    hstx_pair_palette[i] = hdmi_bgr555(R1, G1, B1) | (hdmi_bgr555(R2, G2, B2) << 16);
+#else
     // Pair palette slots: see obp()
     if (i >= HDMI_CTRL_0 - HDMI_PAIR_MOVE && i < 256 - HDMI_PAIR_MOVE) return;
     if (is_hdmi_sync(i)) i -= HDMI_PAIR_MOVE;
@@ -1302,11 +1384,24 @@ void graphics_set_palette_hdmi2(
     uint64_t c2 = get_ser_diff_data(tmds_encoder(R2), tmds_encoder(G2), tmds_encoder(B2));
     conv_color64[i * 2]     = c1;
     conv_color64[i * 2 + 1] = (c1 == c2) ? (c2 ^ HDMI_DC_BAL_XOR) : c2;
+#endif
 }
 
 #define RGB888(r, g, b) ((r<<16) | (g << 8 ) | b )
 
 void graphics_init_hdmi() {
+#if defined(M2P2_HSTX_AUDIO)
+    hdmi_init_text_palette();
+    memcpy(hstx_text_palette, hstx_pair_palette, sizeof(hstx_text_palette));
+    for (unsigned i = 0; i < 4; i++)
+        hstx_packet_init(&hstx_lines[i], true, false);
+
+    clock_configure_int_divider(clk_hstx, 0, CLOCKS_CLK_HSTX_CTRL_AUXSRC_VALUE_CLK_SYS,
+                                clock_get_hz(clk_sys), 4);
+    hstx_video_set_line_callback(hdmi_hstx_render);
+    if (!hstx_video_init() || !hstx_video_start())
+        panic("M2P2 HSTX video initialization failed");
+#else
     // PIO и DMA
     SM_video = pio_claim_unused_sm(PIO_VIDEO, true);
     SM_conv = pio_claim_unused_sm(PIO_VIDEO_ADDR, true);
@@ -1322,11 +1417,14 @@ void graphics_init_hdmi() {
 
     // DMA starts at normal priority to avoid starving SD/PSRAM during init.
     // Call hdmi_set_dma_high_priority() after BIOS loading is complete.
+#endif
 }
 
 void hdmi_set_dma_high_priority(void) {
+#if !defined(M2P2_HSTX_AUDIO)
     hw_set_bits(&dma_hw->ch[dma_chan].ctrl_trig, DMA_CH0_CTRL_TRIG_HIGH_PRIORITY_BITS);
     hw_set_bits(&dma_hw->ch[dma_chan_ctrl].ctrl_trig, DMA_CH0_CTRL_TRIG_HIGH_PRIORITY_BITS);
     hw_set_bits(&dma_hw->ch[dma_chan_pal_conv].ctrl_trig, DMA_CH0_CTRL_TRIG_HIGH_PRIORITY_BITS);
     hw_set_bits(&dma_hw->ch[dma_chan_pal_conv_ctrl].ctrl_trig, DMA_CH0_CTRL_TRIG_HIGH_PRIORITY_BITS);
+#endif
 }

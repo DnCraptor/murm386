@@ -19,6 +19,7 @@ SB16State *sb16_new(
     void *pic,
     void (*set_irq)(void *pic, int irq, int level));
 
+void sb16_service(SB16State *s, uint32_t now_us);
 void sb16_bind_dma(SB16State *s);
 void sb16_getsample(SB16State *s, int* r_v, int* l_v);
 

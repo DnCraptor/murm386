@@ -240,7 +240,6 @@ void cpu_install_dos_handlers(CPU* cpu) {
 
 //#define CPU_ALLOW_ILLEGAL_OP_EXCEPTION
 //#define CPU_LIMIT_SHIFT_COUNT
-#define CPU_NO_SALC
 //#define CPU_SET_HIGH_FLAGS
 #define CPU_286_STYLE_PUSH_SP
 
@@ -676,14 +675,7 @@ static __not_in_flash() uint8_t op_grp2_8(CPU* cpu, uint8_t cnt, uint8_t oper1b)
                 s = s | cf;
             }
 
-            if (cnt == 1) {
-                // of = cf ^ ( (s >> 7) & 1);
-                if ((s & 0x80) && cf)
-                    of = 1;
-                else
-                    of = 0;
-            } else
-                of = 0;
+            of = cnt == 1 && (cf ^ ((s >> 7) & 1));
             break;
 
         case 1: /* ROR r/m8 */
@@ -2200,17 +2192,15 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 }
                 break;
             }
-            case 0x6C: /* 6E INSB */
+            case 0x6C: /* 6C INSB */
                 if (reptype && (CPU_CX == 0)) {
                     break;
                 }
 
                 putmem8(CPU_ES, CPU_DI, cpu->cb.io_read8(cpu->cb.io, CPU_DX));
                 if (df) {
-                    CPU_SI = CPU_SI - 1;
                     CPU_DI = CPU_DI - 1;
                 } else {
-                    CPU_SI = CPU_SI + 1;
                     CPU_DI = CPU_DI + 1;
                 }
 
@@ -2226,17 +2216,15 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 SET_IP ( firstip );
                 break;
 
-            case 0x6D: /* 6F INSW */
+            case 0x6D: /* 6D INSW */
                 if (reptype && (CPU_CX == 0)) {
                     break;
                 }
 
                 putmem16(CPU_ES, CPU_DI, cpu->cb.io_read16(cpu->cb.io, CPU_DX));
                 if (df) {
-                    CPU_SI = CPU_SI - 2;
                     CPU_DI = CPU_DI - 2;
                 } else {
-                    CPU_SI = CPU_SI + 2;
                     CPU_DI = CPU_DI + 2;
                 }
 
@@ -2259,10 +2247,8 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 cpu->cb.io_write8(cpu->cb.io, CPU_DX, getmem8(useseg, CPU_SI));
                 if (df) {
                     CPU_SI = CPU_SI - 1;
-                    CPU_DI = CPU_DI - 1;
                 } else {
                     CPU_SI = CPU_SI + 1;
-                    CPU_DI = CPU_DI + 1;
                 }
 
                 if (reptype) {
@@ -2284,10 +2270,8 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 cpu->cb.io_write16(cpu->cb.io, CPU_DX, getmem16(useseg, CPU_SI));
                 if (df) {
                     CPU_SI = CPU_SI - 2;
-                    CPU_DI = CPU_DI - 2;
                 } else {
                     CPU_SI = CPU_SI + 2;
-                    CPU_DI = CPU_DI + 2;
                 }
 
                 if (reptype) {
@@ -3205,7 +3189,7 @@ grp1_16_exec:
                 {
                     const uint16_t stacksize = getmem16(CPU_CS, CPU_IP);
                     StepIP(2);
-                    const uint8_t nestlev = getmem8(CPU_CS, CPU_IP);
+                    const uint8_t nestlev = getmem8(CPU_CS, CPU_IP) & 31;
                     StepIP(1);
                     push(cpu, CPU_BP);
                     const uint16_t frametemp = CPU_SP;
@@ -3215,14 +3199,14 @@ grp1_16_exec:
                             temp16 < nestlev;
                             ++temp16) {
                             CPU_BP = CPU_BP - 2;
-                            push(cpu, CPU_BP);
+                            push(cpu, getmem16(CPU_SS, CPU_BP));
                         }
 
-                        push(cpu, frametemp); //CPU_SP);
+                        push(cpu, frametemp);
                     }
 
                     CPU_BP = frametemp;
-                    CPU_SP = CPU_BP - stacksize;
+                    CPU_SP = CPU_SP - stacksize;
                 }
                 break;
 
@@ -3324,11 +3308,9 @@ grp1_16_exec:
                 sf = 0;
                 break;
 
-            case 0xD6: /* D6 XLAT on V20/V30, SALC on 8086/8088 */
-#ifndef CPU_NO_SALC
+            case 0xD6: /* D6 SALC */
                 CPU_AL = CPU_FL_CF ? 0xFF : 0x00;
                 break;
-#endif
 
             case 0xD7: /* D7 XLAT */
                 CPU_AL = read86(useseg * 16 + (CPU_BX) + CPU_AL);

@@ -935,8 +935,10 @@ typedef struct {
 static const Bios10VbeMode bios10_vbe_modes[] = {
     { BIOS10_VBE_MODE_640x400x8,  640, 400, 640, 8,  1, 4, 4,
       0, 0, 0, 0, 0, 0, 0, 0 },
+#if !defined(M2P2_HSTX_AUDIO)
     { BIOS10_VBE_MODE_800x600x4,  800, 600, 100, 4,  4, 1, 3,
       0, 0, 0, 0, 0, 0, 0, 0 },
+#endif
     { BIOS10_VBE_MODE_320x200x15, 320, 200, 640, 15, 1, 2, 6,
       5, 10, 5, 5, 5, 0, 1, 15 },
     { BIOS10_VBE_MODE_320x200x16, 320, 200, 640, 16, 1, 2, 6,

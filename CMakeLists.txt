@@ -90,7 +90,7 @@ endif()
 # and the I386_MODE compile definition, so the binary name can no longer
 # disagree with the core actually compiled in (it used to always say
 # "386" while I386_MODE was left commented out - i.e. a 286 build).
-set(CPU_TARGET "386" CACHE STRING "Emulated CPU core: 286 or 386")
+set(CPU_TARGET "286" CACHE STRING "Emulated CPU core: 286 or 386")
 set_property(CACHE CPU_TARGET PROPERTY STRINGS 286 386)
 if(NOT CPU_TARGET STREQUAL "286" AND NOT CPU_TARGET STREQUAL "386")
     message(FATAL_ERROR "CPU_TARGET must be 286 or 386, got '${CPU_TARGET}'")
@@ -127,6 +127,15 @@ option(FORCE_HDMI "Force HDMI output instead of VGA" OFF)
 
 # Force VGA output (skip auto-detection). Takes precedence over FORCE_HDMI.
 option(FORCE_VGA "Force VGA output instead of HDMI" OFF)
+option(M2P2_HSTX_AUDIO "Use 640x480 HDMI with HSTX audio on M2P2" ON)
+if(M2P2_HSTX_AUDIO)
+    if(NOT BOARD STREQUAL "M2" OR NOT PICO_BOARD STREQUAL "pico2"
+       OR NOT CPU_SPEED STREQUAL "504" OR FORCE_VGA)
+        message(FATAL_ERROR "M2P2_HSTX_AUDIO requires BOARD=M2, PICO_BOARD=pico2, CPU_SPEED=504 and FORCE_VGA=OFF")
+    endif()
+    set(FORCE_HDMI ON)
+    string(APPEND BUILD_NAME "-HSTX")
+endif()
 
 # Debug output (disabled by default for cleaner console)
 option(DEBUG_ENABLED "Enable verbose debug output" OFF)
@@ -168,7 +177,12 @@ message(STATUS "murm-386: Board=${BOARD}, CPU=${CPU_SPEED}MHz, PSRAM=${PSRAM_SPE
 include(pico_sdk_import.cmake)
 
 set(OUTPUT_DIR "${CMAKE_SOURCE_DIR}/bin/${CMAKE_BUILD_TYPE}")
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${OUTPUT_DIR}")
+if(M2P2_HSTX_AUDIO)
+    # A standard build may be configured from the same source tree.
+    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/lib")
+else()
+    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${OUTPUT_DIR}")
+endif()
 
 project(${BUILD_NAME} C CXX ASM)
 set(CMAKE_C_STANDARD 11)
@@ -189,6 +203,9 @@ endif()
 message(STATUS "murm-386 version: ${FIRMWARE_VERSION}")
 
 pico_sdk_init()
+if(M2P2_HSTX_AUDIO AND NOT PICO_PLATFORM STREQUAL "rp2350-arm-s")
+    message(FATAL_ERROR "M2P2_HSTX_AUDIO requires the RP2350 Arm platform")
+endif()
 
 #=============================================================================
 # SRAM reclaim, step 1: drop DWARF/ARM exception-unwinding.
@@ -298,6 +315,20 @@ target_compile_definitions(video_driver PRIVATE
     RP2350_BUILD=1
 )
 target_link_libraries(video_driver pico_stdlib hardware_dma hardware_pio hardware_clocks hardware_sync)
+if(M2P2_HSTX_AUDIO)
+    target_sources(video_driver PRIVATE
+        drivers/hdmi-hstx/hstx_video.c
+        drivers/hdmi-hstx/hstx_audio.c
+        drivers/hdmi-hstx/hstx_data_island.c
+    )
+    target_include_directories(video_driver PUBLIC drivers/hdmi-hstx)
+    target_compile_definitions(video_driver PUBLIC M2P2_HSTX_AUDIO=1 PRIVATE HDMI_SOUND=1)
+    set_source_files_properties(
+        drivers/hdmi-hstx/hstx_video.c drivers/hdmi-hstx/hstx_audio.c
+        PROPERTIES COMPILE_OPTIONS "-fno-tree-loop-distribute-patterns"
+    )
+endif()
+
 
 #=============================================================================
 # Runtime I2S/PWM Audio Driver
@@ -797,7 +828,11 @@ message(STATUS "  CPU Speed:      ${CPU_SPEED} MHz")
 message(STATUS "  CPU Voltage:    ${CPU_VOLTAGE}")
 message(STATUS "  PSRAM Speed:    ${PSRAM_SPEED} MHz")
 message(STATUS "  NO_PAGING:      ${NO_PAGING}")
-message(STATUS "  Audio Output:   runtime AUTO/PWM/I2S/HW AY-3-8910 (board-dependent)")
+if(M2P2_HSTX_AUDIO)
+    message(STATUS "  Audio Output:   HSTX HDMI LPCM stereo 44.1 kHz")
+else()
+    message(STATUS "  Audio Output:   runtime AUTO/PWM/I2S/HW AY-3-8910 (board-dependent)")
+endif()
 message(STATUS "  USB:            runtime HOST/DEVICE")
 message(STATUS "  Debug Output:   ${DEBUG_ENABLED}")
 message(STATUS "  Video Mode:     ${VIDEO_MODE}")

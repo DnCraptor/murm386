@@ -1098,6 +1098,7 @@ static void __not_in_flash_func(pc_service_impl)(PC *pc)
     if (pc->enable_serial)
         u8250_update(pc->serial);
     kbd_step(pc->i8042);
+    sb16_service(pc->sb16, pc_last_device_service);
     i8257_dma_run(pc->isa_dma);
     i8257_dma_run(pc->isa_hdma);
     csm_service();

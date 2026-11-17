@@ -75,10 +75,16 @@ static int pit_get_count(PITChannelState *s)
 	case 5:
 		counter = (s->count - d) & 0xffff;
 		break;
-	case 3:
-		/* XXX: may be incorrect for odd counts */
-		counter = s->count - ((2 * d) % s->count);
+	case 3: {
+		uint32_t phase = d % s->count;
+		uint32_t high_ticks = (s->count + 1u) / 2;
+		/* An odd divisor starts the low half at count - 1. */
+		if (phase < high_ticks)
+			counter = s->count - 2 * phase;
+		else
+			counter = s->count - (s->count & 1u) - 2 * (phase - high_ticks);
 		break;
+	}
 	default:
 		counter = s->count - (d % s->count);
 		break;

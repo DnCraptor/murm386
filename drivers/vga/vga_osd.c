@@ -21,22 +21,29 @@ extern uint8_t gfx_buffer[];
 #define osd_buffer gfx_buffer
 #define OSD_GFX_BACKUP_PATH "tmp/osd.vram"
 
-extern bool SELECT_VGA;
 extern int active_start, active_end;
+#if !defined(M2P2_HSTX_AUDIO)
+extern bool SELECT_VGA;
 extern uint32_t conv_color[1024], conv_color2[1024];
+#endif
 
 /*
  * tmp/osd.vram: the gfx_buffer bytes the OSD overwrites, then the video
  * state the OSD replaces with its own and puts back on exit: the active
- * window, and on HDMI the palette (the first 1024 words of conv_color;
- * the rest are DMA line buffers). Kept on the card, not in RAM.
+ * window and, on PIO HDMI, the shared palette. Kept on the card, not in RAM.
  */
 static const gfx_scratch_seg_t osd_state_segs[] = {
     { &active_start, sizeof(active_start) },
     { &active_end,   sizeof(active_end) },
-    { conv_color,    1024 * sizeof(uint32_t) },   // HDMI only
+#if !defined(M2P2_HSTX_AUDIO)
+    { conv_color,    1024 * sizeof(uint32_t) },   // PIO HDMI only
+#endif
 };
+#if defined(M2P2_HSTX_AUDIO)
+#define OSD_STATE_SEGS 2
+#else
 #define OSD_STATE_SEGS (SELECT_VGA ? 2 : 3)
+#endif
 
 static bool osd_buffer_acquired = false;
 static bool osd_buffer_backup_valid = false;
@@ -130,8 +137,10 @@ void osd_show(void) {
     // the 640x400 text window, and on HDMI the text pair palette, which
     // conv_color2 keeps untouched. The originals are in tmp/osd.vram.
     vga_hw_set_osd_geometry();
+#if !defined(M2P2_HSTX_AUDIO)
     if (!SELECT_VGA)
         memcpy(conv_color, conv_color2, 1024 * sizeof(uint32_t));
+#endif
     osd_visible = true;
 }
 

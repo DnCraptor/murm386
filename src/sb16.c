@@ -112,6 +112,8 @@ struct SB16State {
     int left_till_irq;
 
     int dma_running;
+    uint32_t silence_deadline_us;
+    bool silence_pending;
     int bytes_per_second;
     int align;
     int audio_free;
@@ -669,28 +671,16 @@ static uint16_t dsp_get_hilo (SB16State *s)
     return (hi << 8) | lo;
 }
 
-#define NANOSECONDS_PER_SECOND 1000000000LL
-static inline uint64_t muldiv64(uint64_t a, uint32_t b, uint32_t c)
-{
-    union {
-        uint64_t ll;
-        struct {
-//#ifdef HOST_WORDS_BIGENDIAN
-//            uint32_t high, low;
-//#else
-            uint32_t low, high;
-//#endif
-        } l;
-    } u, res;
-    uint64_t rl, rh;
+extern uint32_t get_uticks(void);
 
-    u.ll = a;
-    rl = (uint64_t)u.l.low * (uint64_t)b;
-    rh = (uint64_t)u.l.high * (uint64_t)b;
-    rh += (rl >> 32);
-    res.l.high = rh / c;
-    res.l.low = (((rh % c) << 32) + (rl & 0xffffffff)) / c;
-    return res.ll;
+void sb16_service(SB16State *s, uint32_t now_us)
+{
+    if (!s->silence_pending || (int32_t)(now_us - s->silence_deadline_us) < 0)
+        return;
+
+    s->silence_pending = false;
+    s->mixer_regs[0x82] |= 1;
+    s->set_irq(s->pic, s->irq, 1);
 }
 
 static void complete (SB16State *s)
@@ -802,27 +792,11 @@ static void complete (SB16State *s)
 
         case 0x80:
             {
-                int freq, samples, bytes;
-                int64_t ticks;
-
-                freq = s->freq > 0 ? s->freq : 11025;
-                samples = dsp_get_lohi (s) + 1;
-                bytes = samples << s->fmt_stereo << (s->fmt_bits == 16);
-                ticks = muldiv64(bytes, NANOSECONDS_PER_SECOND, freq);
-                if (ticks < NANOSECONDS_PER_SECOND / 1024) {
-                    s->set_irq(s->pic, s->irq, 1);
-                } else {
-                    dolog("TODO: aux_ts\n");
-                }
-//                else {
-//                    if (s->aux_ts) {
-//                        timer_mod (
-//                            s->aux_ts,
-//                            qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + ticks
-//                            );
-//                    }
-//                }
-                ldebug ("mix silence %d %d %" PRId64 "\n", samples, bytes, ticks);
+                uint32_t rate = s->freq > 0 ? s->freq : 11025;
+                uint32_t samples = dsp_get_lohi(s) + 1;
+                uint32_t duration_us = ((uint64_t)samples * 1000000 + rate - 1) / rate;
+                s->silence_deadline_us = get_uticks() + duration_us;
+                s->silence_pending = true;
             }
             break;
 
@@ -892,6 +866,7 @@ static void legacy_reset (SB16State *s)
 
 static void reset (SB16State *s)
 {
+    s->silence_pending = false;
     s->set_irq(s->pic, s->irq, 0);
     if (s->dma_auto) {
         s->set_irq(s->pic, s->irq, 1);
@@ -1008,6 +983,9 @@ uint32_t sb16_dsp_read(void *opaque, uint32_t nport)
 {
     SB16State *s = opaque;
     int iport, retval, ack = 0;
+
+    if (s->silence_pending)
+        sb16_service(s, get_uticks());
 
     iport = nport - s->port;
 

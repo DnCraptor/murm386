@@ -1850,7 +1850,12 @@ static bool init_hardware(void) {
         }
 
         // Check if clock reconfiguration is needed
+#if defined(M2P2_HSTX_AUDIO)
+        // HSTX is clocked from clk_sys / 4 at 126 MHz.
+        int cfg_cpu = CPU_CLOCK_MHZ;
+#else
         int cfg_cpu = config_get_cpu_freq();
+#endif
         int cfg_psram = config_get_psram_freq();
         int cfg_flash = config_get_flash_freq();
         // If HDMI boosted the clock (to 504 MHz for jitter-free TMDS),
@@ -2209,13 +2214,17 @@ static void __not_in_flash_func(core1_entry)(void) {
     config_clear_changes();
 
     __dmb();
-#if defined(NO_PAGING)
+#if defined(NO_PAGING) && !defined(M2P2_HSTX_AUDIO)
     if (early_psram_missing)
         audio_play_tone(300u, 500u);
 #endif
     DBG_PRINT("[Core 1] Initializing video...\n");
     DBG_PRINT("  Base pin: GPIO%d\n", VGA_BASE_PIN);
     vga_hw_init();
+#if defined(NO_PAGING) && defined(M2P2_HSTX_AUDIO)
+    if (early_psram_missing)
+        audio_play_tone(300u, 500u);
+#endif
     sleep_ms(100);
     vga_initialized = true;
 

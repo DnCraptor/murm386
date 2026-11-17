@@ -164,12 +164,10 @@ int16_t __not_in_flash_func(pcspk_sample)(PCSpkState *s)
     if (!s || !s->data_on)
         return 0;
 
-  //  return pit_get_out(s->pit, 2) ? (1 << 12) - 1 : 0;
+    if (!pit_get_gate(s->pit, 2))
+        return 1;  /* Direct speaker drive via port 61h bit 1. */
 
     if (pit_get_mode(s->pit, 2) != 3)
-        return 0;
-
-    if (!pit_get_gate(s->pit, 2))
         return 0;
 
     uint32_t count = pit_get_initial_count(s->pit, 2);
