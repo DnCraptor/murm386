@@ -83,6 +83,8 @@ SKIP = {
     'GetTextExtentEx',
     # MessageBox's own frame (ne_guest_api.c)
     'MessageBoxEx',
+    # a buffer behind a LONG (ne_guest_win95.c)
+    'GetSpoolJob',
 }
 
 COUNTS = re.compile(r'^(n|c|cb|cch|count|len|nCount|cbString|size)$')

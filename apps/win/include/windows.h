@@ -1102,7 +1102,7 @@ int     WINAPI DeleteJob(HANDLE job, int flags);
 int     WINAPI WriteSpool(HANDLE job, LPCSTR data, int cb);
 int     WINAPI WriteDialog(HANDLE job, LPCSTR text, int cb);
 int     WINAPI DeleteSpoolPage(HANDLE job);
-int     WINAPI GetSpoolJob(int option, LONG param);
+LONG    WINAPI GetSpoolJob(int option, LONG param);
 int     WINAPI QueryJob(HANDLE job, int what);
 HANDLE  WINAPI SpoolFile(LPCSTR printer, LPCSTR port, LPCSTR job, LPCSTR file);
 /* KERNEL's of Windows 95 (file.c) */

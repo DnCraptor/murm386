@@ -504,6 +504,41 @@ static void ck_out(win_dll_call *c, uint32_t far, const MMCKINFO *ck)
     NE->write(c, far, b, 20);
 }
 
+/* mmTaskSignal's signals, by task: mmTaskBlock waits for one */
+static struct { HTASK task; unsigned n; } signals[8];
+
+static int task_signal(HTASK t)
+{
+    if (!IsTask(t))
+        return 0;
+    for (unsigned i = 0; i < 8; i++)
+        if (signals[i].task == t || !signals[i].task || !IsTask(signals[i].task)) {
+            if (signals[i].task != t) {
+                signals[i].task = t;
+                signals[i].n = 0;
+            }
+            signals[i].n++;
+            PostAppMessage(t, WM_NULL, 0, 0);      /* it wakes */
+            return 1;
+        }
+    return 0;
+}
+
+static void task_block(HTASK t)
+{
+    if (t != GetCurrentTask())
+        return;
+    for (;;) {
+        for (unsigned i = 0; i < 8; i++)
+            if (signals[i].task == t && signals[i].n) {
+                signals[i].n--;
+                return;
+            }
+        WaitMessage();
+        Yield();
+    }
+}
+
 static int ne_call(win_dll_call *c, uint16_t o, uint32_t *v)
 {
     char s1[128], s2[128];
@@ -586,9 +621,69 @@ static int ne_call(win_dll_call *c, uint16_t o, uint32_t *v)
     case 715: case 716: case 717:
         *v = 0;
         return o == 708 || o == 716 ? WINDLL_DWORD : WINDLL_WORD;
-    case 1100: case 1101: case 1102: case 1103: case 1104:   /* installable drivers: none */
+    case 1100: case 1101: case 1102: case 1103:   /* installable drivers: none */
         *v = 0;
-        return o == 1102 || o == 1104 ? WINDLL_DWORD : WINDLL_WORD;
+        return o == 1102 ? WINDLL_DWORD : WINDLL_WORD;
+    case 6: case 1104: {                /* DriverProc, DrvDefDriverProc(DWORD, HDRVR, msg,
+                                         * LPARAM, LPARAM): Windows' defaults */
+        unsigned msg = NE->arg16(c, 12);
+        *v = msg == 1 || msg == 2 || msg == 5 || msg == 6 ? 1u :    /* LOAD, ENABLE, DISABLE, FREE */
+             msg == 9 || msg == 10 ? 2u : 0u;                       /* INSTALL, REMOVE: RESTART */
+        return WINDLL_DWORD;
+    }
+    case 1:                             /* WEP */
+        *v = 1;
+        return WINDLL_WORD;
+    case 8: case 32: case 33:           /* WMMMidiRunOnce, StackEnter, StackLeave */
+        *v = 0;
+        return WINDLL_WORD;
+    case 31: {                          /* DriverCallback(DWORD callback, UINT flags, HDRVR,
+                                         * UINT msg, DWORD user, DWORD p1, DWORD p2) */
+        uint32_t cb = NE->arg32(c, 22), user = NE->arg32(c, 12);
+        uint32_t p1 = NE->arg32(c, 8), p2 = NE->arg32(c, 4);
+        unsigned type = NE->arg16(c, 20) & 7u, drv = NE->arg16(c, 18), msg = NE->arg16(c, 16);
+        *v = 0;
+        if (type == 1 && cb)            /* DCB_WINDOW */
+            *v = PostMessage((HWND)(uint16_t)cb, msg, drv, (LPARAM)p1);
+        else if (type == 2 && cb)       /* DCB_TASK */
+            *v = PostAppMessage((HTASK)(uint16_t)cb, msg, drv, (LPARAM)p1);
+        else if (type == 3 && cb && NE->call) {         /* DCB_FUNCTION */
+            const uint16_t args[8] = { (uint16_t)drv, (uint16_t)msg,
+                                       (uint16_t)(user >> 16), (uint16_t)user,
+                                       (uint16_t)(p1 >> 16), (uint16_t)p1,
+                                       (uint16_t)(p2 >> 16), (uint16_t)p2 };
+            NE->call((uint16_t)GetCurrentTask(), cb, args, 8);
+            *v = 1;
+        }
+        return WINDLL_WORD;
+    }
+    case 705:                           /* mciLoadCommandResource: WINN's devices' tables
+                                         * only, MCI_NO_COMMAND_TABLE */
+        *v = 0xffffu;
+        return WINDLL_WORD;
+    case 900:                           /* mmTaskCreate: TASKERR_NOTASKSUPPORT */
+        *v = 1;
+        return WINDLL_WORD;
+    case 902:                           /* mmTaskBlock(HTASK): until signalled */
+        task_block(NE->arg16(c, 4));
+        *v = 0;
+        return WINDLL_WORD;
+    case 903:                           /* mmTaskSignal(HTASK) */
+        *v = task_signal(NE->arg16(c, 4));
+        return WINDLL_WORD;
+    case 904:                           /* mmGetCurrentTask */
+        *v = GetCurrentTask();
+        return WINDLL_WORD;
+    case 905:                           /* mmTaskYield */
+        Yield();
+        *v = 0;
+        return WINDLL_WORD;
+    case 1120:                          /* mmThreadCreate: no threads, MMSYSERR_NOTSUPPORTED */
+        *v = 8;
+        return WINDLL_WORD;
+    case 1121: case 1122: case 1123: case 1124: case 1125: case 1150:
+        *v = 0;                         /* no such thread; no property sheet */
+        return WINDLL_WORD;
     case 1210: {                        /* mmioOpen(LPSTR, MMIOINFO FAR *, DWORD) */
         uint32_t info_far = NE->arg32(c, 8), name_far = NE->arg32(c, 12);
         MMIOINFO info;
@@ -737,10 +832,16 @@ static void term(void)
 }
 
 static const win_dll_export exports[] = {
+    { 1, 2, "WEP", NULL },
     { 2, 6, "sndPlaySound", (const void *)sndPlaySound },
     { 3, 10, "PlaySound", (const void *)PlaySound },
     { 5, 0, "mmsystemGetVersion", (const void *)mmsystemGetVersion },
+    { 6, 16, "DriverProc", NULL },
+    { 8, 0, "WMMMidiRunOnce", NULL },
     { 30, 4, "OutputDebugStr", (const void *)OutputDebugStr },
+    { 31, 22, "DriverCallback", NULL },
+    { 32, 0, "StackEnter", NULL },
+    { 33, 0, "StackLeave", NULL },
     { 101, 0, "joyGetNumDevs", (const void *)no_devices },
     { 102, 8, "joyGetDevCaps", NULL },
     { 103, 6, "joyGetPos", NULL },
@@ -766,6 +867,14 @@ static const win_dll_export exports[] = {
     { 214, 10, "midiOutCacheDrumPatches", NULL },
     { 215, 6, "midiOutGetID", NULL },
     { 216, 12, "midiOutMessage", NULL },
+    { 250, 10, "midiStreamProperty", NULL },
+    { 251, 24, "midiStreamOpen", NULL },
+    { 252, 2, "midiStreamClose", NULL },
+    { 253, 8, "midiStreamPosition", NULL },
+    { 254, 8, "midiStreamOut", NULL },
+    { 255, 2, "midiStreamPause", NULL },
+    { 256, 2, "midiStreamRestart", NULL },
+    { 257, 2, "midiStreamStop", NULL },
     { 301, 0, "midiInGetNumDevs", (const void *)no_devices },
     { 302, 8, "midiInGetDevCaps", NULL },
     { 303, 8, "midiInGetErrorText", (const void *)error_text },
@@ -829,6 +938,7 @@ static const win_dll_export exports[] = {
     { 701, 12, "mciSendCommand", (const void *)mciSendCommand },
     { 702, 12, "mciSendString", (const void *)mciSendString },
     { 703, 4, "mciGetDeviceID", NULL },
+    { 705, 8, "mciLoadCommandResource", NULL },
     { 706, 10, "mciGetErrorString", (const void *)mciGetErrorString },
     { 707, 6, "mciSetDriverData", NULL },
     { 708, 2, "mciGetDriverData", NULL },
@@ -850,11 +960,23 @@ static const win_dll_export exports[] = {
     { 807, 10, "mixerGetLineControls", NULL },
     { 808, 10, "mixerGetControlDetails", NULL },
     { 809, 10, "mixerSetControlDetails", NULL },
+    { 900, 12, "mmTaskCreate", NULL },
+    { 902, 2, "mmTaskBlock", NULL },
+    { 903, 2, "mmTaskSignal", NULL },
+    { 904, 0, "mmGetCurrentTask", NULL },
+    { 905, 0, "mmTaskYield", NULL },
     { 1100, 12, "DrvOpen", NULL },
     { 1101, 10, "DrvClose", NULL },
     { 1102, 12, "DrvSendMessage", NULL },
     { 1103, 2, "DrvGetModuleHandle", NULL },
     { 1104, 16, "DrvDefDriverProc", NULL },
+    { 1120, 16, "mmThreadCreate", NULL },
+    { 1121, 2, "mmThreadSignal", NULL },
+    { 1122, 2, "mmThreadBlock", NULL },
+    { 1123, 2, "mmThreadIsCurrent", NULL },
+    { 1124, 2, "mmThreadIsValid", NULL },
+    { 1125, 2, "mmThreadGetTask", NULL },
+    { 1150, 14, "mmShowMMCPLPropertySheet", NULL },
     { 1210, 12, "mmioOpen", (const void *)mmioOpen },
     { 1211, 4, "mmioClose", (const void *)mmioClose },
     { 1212, 10, "mmioRead", (const void *)mmioRead },

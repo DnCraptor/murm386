@@ -234,8 +234,11 @@ int WINAPI WriteDialog(HANDLE job, LPCSTR text, int cb)
     return SP_ERROR;
 }
 
-/* no job in the queue */
-int WINAPI GetSpoolJob(int option, LONG param)
+/* Print Manager's questions to the spooler (Windows for Workgroups'
+ * PRINTMAN asks 14h for the queues, 15h, 19h-1Fh for settings, 20h and 21h
+ * for a port's timeouts): no queue, nothing set. A Win16 program's 14h
+ * gets its list empty (ne_guest_win95.c). */
+LONG WINAPI GetSpoolJob(int option, LONG param)
 {
     (void)option; (void)param;
     return 0;

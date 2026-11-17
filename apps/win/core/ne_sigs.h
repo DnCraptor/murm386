@@ -134,7 +134,6 @@
     { M_GDI, 242, "WriteDialog", "i:wci" },
     { M_GDI, 243, "CloseJob", "i:w" },
     { M_GDI, 244, "DeleteJob", "i:wi" },
-    { M_GDI, 245, "GetSpoolJob", "i:id" },
     { M_GDI, 246, "StartSpoolPage", "i:w" },
     { M_GDI, 247, "EndSpoolPage", "i:w" },
     { M_GDI, 248, "QueryJob", "i:wi" },

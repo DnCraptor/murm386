@@ -1,0 +1,16 @@
+# Windows 95's MIDI streams from a program on the i386 core (OWMIDI) on
+# the host's MIDI driver (HOSTMIDI.DLL, the notes on stderr): two notes at
+# two tempos, a position callback, MM_MOM_DONE; its window shows what came
+# back:
+#     ./winhost scripts/owmidi.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OWMIDI
+key RETURN
+wait 1500
+snap omidi_stream.ppm
+exit

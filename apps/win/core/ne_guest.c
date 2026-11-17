@@ -736,6 +736,7 @@ static const struct {
     { M_KERNEL, 419, "GetProfileSection", 10 },
     { M_KERNEL, 422, "GetDiskFreeSpace", 20 },
     { M_KERNEL, 431, "IsPeFormat", 6 },
+    { M_GDI, 245, "GetSpoolJob", 6 },
     { M_GDI, 250, "Copy", 10 },
     { M_GDI, 281, "DrvSetPrinterData", 20 },
     { M_GDI, 282, "DrvGetPrinterData", 22 },

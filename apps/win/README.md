@@ -180,6 +180,13 @@ as a timer's, as often as its period went by since, ten times at most),
 mmio's files (mmioOpen, Read, Write, Seek, Close,
 Descend, Ascend, CreateChunk: RIFF files; unbuffered, no I/O procedures
 or memory files), for native callers too (`include/mmsystem.h`);
+Windows 95's MIDI streams (midiStreamOpen, Out, Property: tempo and time
+division, Position in milliseconds or ticks, Pause, Restart, Stop, Close:
+MIDIEVENTs played on a midiOut device's timer, tempo events, position
+callbacks, SysEx skipped), DriverCallback (a window, a task, a
+procedure), DriverProc's defaults, mmTaskSignal and mmTaskBlock,
+mmGetCurrentTask, mmTaskYield; mmTaskCreate, mmThreadCreate and
+mciLoadCommandResource answer "not supported";
 TOOLHELP's TimerCount, MemManInfo and SystemHeapInfo
 (the memory as GetFreeSpace has it), TaskFirst, TaskNext,
 TaskFindHandle, ModuleFirst, ModuleNext, ModuleFindName and
@@ -313,7 +320,8 @@ GDISelectPalette, GDIRealizePalette, RealizeDefaultPalette, USER's
 OldExitWindows, OldSetDeskPattern); GDI's priority queues (CreatePQ,
 InsertPQ, MinPQ, ExtractPQ, SizePQ, DeletePQ) and Copy; the spooler's
 OpenJob, WriteSpool, CloseJob, GetSpoolJob ... and the printer drivers'
-data answer as Windows does with no printer (SP_ERROR, no job);
+data answer as Windows does with no printer (SP_ERROR, no job; Print
+Manager's GetSpoolJob 14h list of queues empty);
 palettes, CreateDC and CreateIC, SetSysColors;
 the mapping modes (all of them: the metric and English ones and MM_TWIPS
 at 96 pixels an inch, MM_ISOTROPIC keeping the axes alike; pens, rounded
@@ -462,7 +470,8 @@ memory, KEYBOARD, OLECLI, OpenFile's OFSTRUCT: what WRITE.EXE needed),
 the registry enumerated, the environment, a wallpaper), `OW95` (the stack
 switched, the visible area, Windows 95's KERNEL and USER for Win16),
 `OW95X` (old ordinals, priority queues and the spooler, Windows 95's
-structures, DrawEdge, DrawFrameControl, DrawState, Bézier curves)
+structures, DrawEdge, DrawFrameControl, DrawState, Bézier curves),
+`OWMIDI` (Windows 95's MIDI streams)
 (`make NEFIXTURES` in
 `host/`). All have DOS MZ stubs that explain how to launch them under WINN
 when invoked directly from DOS. `host/test_ne_run` runs them on the
@@ -831,6 +840,7 @@ list the links.
     ./winhost scripts/owmore.txt PROGMAN     # a driver (OWDRV.DLL), keybd/mouse_event, SPI, wallpaper
     ./winhost scripts/ow95.txt PROGMAN       # SwitchStackTo, the visible area, Win95's KERNEL/USER
     ./winhost scripts/ow95x.txt PROGMAN      # old ordinals, the spooler, Win95's structures and 3D drawing
+    ./winhost scripts/owmidi.txt PROGMAN     # MIDI streams on HOSTMIDI.DLL (host_midi.c, notes on stderr)
     ./winhost scripts/logo.txt PROGMAN       # the logo (copy the BMPs into HOSTWIN first)
     ./winhost800 scripts/vga800.txt  # the VGA800 driver, built in
     ./winhostvga scripts/vga.txt     # the built-in VGA driver (640x480x16), Win16 programs too

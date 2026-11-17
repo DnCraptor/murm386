@@ -17,6 +17,7 @@ const win_dll_info *olesvr_WinDllInit(void);
 const win_dll_info *sound_WinDllInit(void);
 const win_dll_info *system_WinDllInit(void);
 const win_dll_info *mouse_WinDllInit(void);
+const win_dll_info *hostmidi_WinDllInit(void);
 
 const win_dll_builtin win_dll_builtins[] = {
     { "LZEXPAND", lzexpand_WinDllInit },
@@ -29,5 +30,6 @@ const win_dll_builtin win_dll_builtins[] = {
     { "SOUND", sound_WinDllInit },
     { "SYSTEM", system_WinDllInit },
     { "MOUSE", mouse_WinDllInit },
+    { "HOSTMIDI", hostmidi_WinDllInit },     /* host_midi.c */
     { NULL, NULL },
 };

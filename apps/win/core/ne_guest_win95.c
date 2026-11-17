@@ -346,6 +346,28 @@ static int gdi95(args *a, uint16_t service, uint32_t *v, int *dword)
         *v = 0;
         return 1;
     }
+    case G16(245): {                    /* GetSpoolJob(int, LONG): DWORD. 14h: the queues'
+                                         * list (name, port; pairs of strings, as many as
+                                         * twenty: PRINTMAN reads them all) in a buffer whose
+                                         * first word is its size, empty: zeros */
+        uint32_t far = dw(a, 4);
+        uint8_t b[2], zero[64];
+        *dword = 1;
+        *v = 0;
+        if (w(a, 8) == 0x14 && get(a, far, b, 2)) {
+            uint32_t size = rd16(b);
+            if (size > 4096)
+                size = 4096;
+            memset(zero, 0, sizeof(zero));
+            for (uint32_t done = 0; done < size;) {
+                uint32_t k = size - done < sizeof(zero) ? size - done : sizeof(zero);
+                if (!put(a, far + done, zero, k))
+                    break;
+                done += k;
+            }
+        }
+        return 1;
+    }
     case G16(281): case G16(282):       /* Drv{Set,Get}PrinterData: no such printer */
         *v = 1801;                      /* ERROR_INVALID_PRINTER_NAME */
         *dword = 1;
