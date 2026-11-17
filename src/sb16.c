@@ -86,6 +86,7 @@ struct SB16State {
     int freq;
     int time_const;
     int speaker;
+    int16_t direct_dac_sample;
     int needed_bytes;
     int cmd;
     int use_hdma;
@@ -239,6 +240,7 @@ static void continue_dma8 (SB16State *s)
 
 static void dma_cmd8 (SB16State *s, int mask, int dma_len)
 {
+    s->direct_dac_sample = 0;
     s->fmt = AUDIO_FORMAT_U8;
     s->use_hdma = 0;
     s->fmt_bits = 8;
@@ -296,6 +298,7 @@ static void dma_cmd8 (SB16State *s, int mask, int dma_len)
 
 static void dma_cmd (SB16State *s, uint8_t cmd, uint8_t d0, int dma_len)
 {
+    s->direct_dac_sample = 0;
     s->use_hdma = cmd < 0xc0;
     s->fifo = (cmd >> 1) & 1;
     s->dma_auto = (cmd >> 2) & 1;
@@ -451,7 +454,7 @@ static void command (SB16State *s, uint8_t cmd)
 
         case 0x10:
             s->needed_bytes = 1;
-            goto warn;
+            break;
 
         case 0x14:
             s->needed_bytes = 2;
@@ -752,8 +755,8 @@ static void complete (SB16State *s)
             break;
 
         case 0x10:
-            d0 = dsp_get_data (s);
-            dolog ("cmd 0x10 d0=%#x\n", d0);
+            /* The guest supplies the timing. Hold the last DAC value. */
+            s->direct_dac_sample = (dsp_get_data(s) - 128) * 256;
             break;
 
         case 0x14:
@@ -867,6 +870,7 @@ static void legacy_reset (SB16State *s)
 static void reset (SB16State *s)
 {
     s->silence_pending = false;
+    s->direct_dac_sample = 0;
     s->set_irq(s->pic, s->irq, 0);
     if (s->dma_auto) {
         s->set_irq(s->pic, s->irq, 1);
@@ -1618,8 +1622,14 @@ void sb16_bind_dma(SB16State *s)
 
 // call sb16_getsample 44100 times per second
 void __not_in_flash_func(sb16_getsample)(SB16State *s, int* r_v, int* l_v) {
-    if (!s->active_out && s->audio_q == s->audio_p)
+    if (!s->active_out && s->audio_q == s->audio_p) {
+        if (s->speaker && !s->silence_pending) {
+            const int16_t sample = s->direct_dac_sample;
+            *l_v += sample;
+            *r_v += sample;
+        }
         return;
+    }
 
     unsigned int len = s->audio_q - s->audio_p;
     if (len > AUDIO_BUF_LEN) {
