@@ -1428,6 +1428,21 @@ static uint32_t dde_out(win_ne_guest_api_context *c, ne_user *u, UINT msg, uint3
             win_ne_guest_global_free(g, sel);
             dde[i].native = 0;
             dde[i].sel = 0;
+        } else if (!dde[i].copy && msg != DDE_ACK_) {
+            /* its own block sent again, what it holds now (an installer's
+             * commands one after another in one block, without waiting
+             * for the ACKs) */
+            if (GlobalSize(n) != s->size) {
+                HGLOBAL r = GlobalReAlloc(n, s->size, GMEM_MOVEABLE);
+                if (r)
+                    n = dde[i].native = r;
+            }
+            DWORD size = GlobalSize(n) < s->size ? GlobalSize(n) : s->size;
+            uint8_t *p = (uint8_t *)GlobalLock(n);
+            if (p) {
+                win_ne_read(c, sel, 0, p, size);
+                GlobalUnlock(n);
+            }
         }
         return dde_with(lp, where, n);
     }

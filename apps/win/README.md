@@ -729,7 +729,9 @@ themselves (WM_DDE_INITIATE, EXECUTE, REQUEST, TERMINATE), as setup
 programs do. DDE's global memory goes between programs as copies: a Win16
 program's block (its selector) becomes a native one for the other end and
 back (the ACK that returns an EXECUTE's commands gives the sender its own
-block; DATA and POKE with fRelease are the receiver's).
+block; DATA and POKE with fRelease are the receiver's). A block the
+program sends again goes with what it holds then (an installer writing its
+commands one after another into one block, not waiting for the ACKs).
 
 The core looks for `<NAME>.DLL` in the Windows directory (`WINN.EXE`'s),
 then its `SYSTEM`; a file there that is not a native DLL (Windows' own NE
