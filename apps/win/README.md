@@ -645,6 +645,22 @@ model of the emulator's SB16 and DMA. The host's tests use
 `HOSTWAVE.DLL` (`host/host_wave.c`): its blocks on stderr, the samples in
 HOSTWAVE.RAW.
 
+## Video for Windows
+
+MCI's AVIVideo (`mci_avi.c` in MMSYSTEM; SYSTEM.INI [mci] AVIVideo=,
+[mci extensions] avi=) plays AVI files of the codecs Windows 3.1 came with:
+uncompressed DIBs (8, 16, 24 bits), RLE8 and Microsoft Video 1 (CRAM, 8
+and 16 bits), their sound (PCM) on the wave driver as MCI's waveaudio's.
+A file of another codec (Indeo, Cinepak) plays its sound, the picture
+black, after Windows' warning ("cannot find 'vids:iv32' decompressor").
+16- and 24-bit pictures are drawn in a 6x6x6 colour cube. The frames go
+into the default window (below the program's, shown when it plays, not
+activated) or the program's (MCI_WINDOW), at the destination (MCI_PUT,
+MCI_WHERE, MCI_UPDATE), as their time comes: a late one is decoded, not
+drawn. Frames (the default) or milliseconds; play from, to, repeat,
+notify, wait; pause, resume, seek, step; the device opened without a file
+and MCI_LOAD (Media Player's Device menu); MCI's strings as well.
+
 ## Volume
 
 MMSYSTEM keeps three volumes in SYSTEM.INI [volume]: the master one (the

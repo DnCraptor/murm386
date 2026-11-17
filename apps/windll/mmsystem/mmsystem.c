@@ -97,7 +97,7 @@ static const char *mm_error(DWORD e)
     case 275: return "The specified media file was not found.";
     case 276: return "The MCI device is not ready.";
     case 293: return "The specified MCI time format is not supported.";
-    case 296: return "The MIDI file is invalid or uses an unsupported format.";
+    case 296: return "The media file is invalid or uses an unsupported format.";
     default: return "An unknown error has occurred.";
     }
 }

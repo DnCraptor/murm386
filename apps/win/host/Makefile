@@ -17,7 +17,7 @@ GDICORE  = $(filter-out ../core/exports.c ../core/task.c ../core/file.c ../core/
 # the applications, built in; each WinMain gets its own name
 APPS     = demo.o progman.o notepad.o clock.o calc.o control.o winfile.o taskman.o winmine.o winhelp.o hlpfile.o appinfo.o
 # the native DLLs, built in (host_dlls.c names them); each WinDllInit its own
-DLLS     = lzexpand.o ver.o ddeml.o mmsystem.o wave.o midi.o mci.o mci_wave.o volume.o mixer.o commdlg.o olecli.o olesvr.o sound.o system.o mouse.o epson9.o host_dlls.c host_midi.c host_wave.c
+DLLS     = lzexpand.o ver.o ddeml.o mmsystem.o wave.o midi.o mci.o mci_wave.o mci_avi.o volume.o mixer.o commdlg.o olecli.o olesvr.o sound.o system.o mouse.o epson9.o host_dlls.c host_midi.c host_wave.c
 
 all: test_gdi test_x86bridge test_ne test_ne_image test_ne_guest test_ne_guest_api test_ne_boot test_ne_multi test_ne_launch test_ne_rm_gate test_ne_run NEFIXTURES winhost winhost800 winhostvga HOSTWIN
 
@@ -188,6 +188,8 @@ midi.o: ../../windll/mmsystem/midi.c ../include/midi_driver.h ../ddi/windll.h
 mci.o: ../../windll/mmsystem/mci.c ../include/mmsystem.h ../ddi/windll.h
 	$(CC) $(CFLAGS) $(INC) -c -o $@ $<
 mci_wave.o: ../../windll/mmsystem/mci_wave.c ../include/wave_driver.h ../ddi/windll.h
+	$(CC) $(CFLAGS) $(INC) -c -o $@ $<
+mci_avi.o: ../../windll/mmsystem/mci_avi.c ../include/wave_driver.h ../ddi/windll.h
 	$(CC) $(CFLAGS) $(INC) -c -o $@ $<
 volume.o: ../../windll/mmsystem/volume.c ../include/mmsystem.h ../ddi/windll.h
 	$(CC) $(CFLAGS) $(INC) -c -o $@ $<

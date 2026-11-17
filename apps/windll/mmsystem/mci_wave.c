@@ -157,7 +157,9 @@ static uint32_t read_wave(HFILE f, wave_mci *out) {
         return MCIERR_INVALID_FILE;
     return 0;
 }
-static const win_wave_driver *load_driver(HMODULE *module) {
+/* the installed wave driver (SYSTEM.INI [drivers] wave=), loaded: also
+ * MCI's AVIVideo's (mci_avi.c) */
+const win_wave_driver *winn_wave_driver_load(HMODULE *module) {
     char name[64];
     *module = 0;
     if (!GetPrivateProfileString("drivers", "wave", "", name, sizeof(name), "SYSTEM.INI") ||
@@ -187,7 +189,7 @@ uint32_t winn_mci_wave_open(const char *filename, const char *alias) {
         if (err) { _lclose(file); return err; }
     }
     HMODULE module;
-    const win_wave_driver *driver = load_driver(&module);
+    const win_wave_driver *driver = winn_wave_driver_load(&module);
     if (!driver) {
         if (file != HFILE_ERROR) _lclose(file);
         return MCIERR_DEVICE_NOT_INSTALLED;

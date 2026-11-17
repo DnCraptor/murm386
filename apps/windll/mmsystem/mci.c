@@ -128,6 +128,22 @@ uint32_t winn_mci_wave_string(const char *op, const char *rest, char *result,
                               unsigned cap, HWND hwnd);
 void winn_mci_wave_task_end(uint16_t task);
 void winn_mci_wave_term(void);
+/* mci_avi.c: AVIVideo, device 3 */
+#define MCI_AVI_ID 3u
+#define MCI_DEVTYPE_DIGITAL_VIDEO 520u
+#define MCI_DGV_OPEN_WS 0x00010000ul
+#define MCI_DGV_OPEN_PARENT 0x00020000ul
+int winn_mci_avi_type(const char *type);
+int winn_mci_avi_extension(const char *path);
+int winn_mci_avi_match(const char *name);
+uint32_t winn_mci_avi_open(const char *filename, const char *alias, DWORD style,
+                           int has_style, HWND parent);
+uint32_t winn_mci_avi_command(win_dll_call *c, uint16_t msg, uint32_t flags, uint32_t p);
+uint32_t winn_mci_avi_string(const char *op, const char *rest, char *result,
+                             unsigned cap, HWND hwnd);
+void winn_mci_avi_close(void);
+void winn_mci_avi_task_end(uint16_t task);
+void winn_mci_avi_term(void);
 
 static uint16_t le16(const uint8_t *p) { return (uint16_t)p[0] | (uint16_t)p[1] << 8; }
 static uint32_t le32(const uint8_t *p) { return le16(p) | (uint32_t)le16(p + 2) << 16; }
@@ -551,7 +567,8 @@ static uint32_t do_caps(uint32_t item, uint32_t *value) {
 }
 
 /* Win16 MCI_OPEN_PARMS: dwCallback (4), wDeviceID (2), reserved (2),
- * lpstrDeviceType (4), lpstrElementName (4), lpstrAlias (4). */
+ * lpstrDeviceType (4), lpstrElementName (4), lpstrAlias (4); digital
+ * video's then dwStyle (4), hWndParent (2). */
 static int wave_extension(const char *path) {
     const char *dot = NULL;
     for (const char *p = path; *p; ++p)
@@ -559,9 +576,10 @@ static int wave_extension(const char *path) {
     return dot && !lstrcmpi(dot, ".wav");
 }
 static uint32_t cmd_open(win_dll_call *c, uint32_t flags, uint32_t p) {
-    uint8_t b[20];
+    uint8_t b[26];
     char file[160] = "", alias[64] = "", type[48] = "";
-    if (!read_guest(c, p, b, sizeof(b))) return MCIERR_MISSING_PARAMETER;
+    int dgv = (flags & (MCI_DGV_OPEN_WS | MCI_DGV_OPEN_PARENT)) != 0;
+    if (!read_guest(c, p, b, dgv ? 26u : 20u)) return MCIERR_MISSING_PARAMETER;
     uint32_t t = le32(b + 8), f = le32(b + 12), a = le32(b + 16);
     if (flags & MCI_OPEN_TYPE) {
         if (flags & MCI_OPEN_TYPE_ID) {
@@ -569,6 +587,8 @@ static uint32_t cmd_open(win_dll_call *c, uint32_t flags, uint32_t p) {
                 lstrcpyn(type, "waveaudio", sizeof(type));
             else if ((uint16_t)t == MCI_DEVTYPE_SEQUENCER)
                 lstrcpyn(type, "sequencer", sizeof(type));
+            else if ((uint16_t)t == MCI_DEVTYPE_DIGITAL_VIDEO)
+                lstrcpyn(type, "avivideo", sizeof(type));
             else return MCIERR_DEVICE_NOT_INSTALLED;
         } else if (!text_guest(c, t, type, sizeof(type)))
             return MCIERR_DEVICE_NOT_INSTALLED;
@@ -578,6 +598,20 @@ static uint32_t cmd_open(win_dll_call *c, uint32_t flags, uint32_t p) {
     if ((flags & MCI_OPEN_ALIAS) && !text_guest(c, a, alias, sizeof(alias)))
         return MCIERR_MISSING_PARAMETER;
     if (!file[0] && !(flags & MCI_OPEN_TYPE)) return MCIERR_MISSING_PARAMETER;
+    if (winn_mci_avi_type(type) || (!type[0] && winn_mci_avi_extension(file))) {
+        uint32_t err = winn_mci_avi_open(file, alias, le32(b + 20), (flags & MCI_DGV_OPEN_WS) != 0,
+                                         (flags & MCI_DGV_OPEN_PARENT) ? (HWND)(uintptr_t)le16(b + 24) : 0);
+        if (!err) {
+            uint8_t id[2];
+            put16(id, MCI_AVI_ID);
+            if (!write_guest(c, p + 4u, id, 2)) {
+                winn_mci_avi_close();
+                return MCIERR_MISSING_PARAMETER;
+            }
+            if (flags & MCI_NOTIFY) send_notify((HWND)le16(b), MCI_NOTIFY_SUCCESSFUL);
+        }
+        return err;
+    }
     int wav = wave_extension(file) || !lstrcmpi(type, "waveaudio") ||
               !lstrcmpi(type, "MCIWAVE");
     if (!wav && type[0] && lstrcmpi(type, "sequencer") && lstrcmpi(type, "MCISEQ"))
@@ -605,6 +639,7 @@ static uint32_t cmd_sysinfo(win_dll_call *c, uint32_t flags, uint32_t p) {
         uint32_t n = 0;
         if ((type == 0 || type == MCI_DEVTYPE_SEQUENCER) && winn_midi_num()) ++n;
         if ((type == 0 || type == MCI_DEVTYPE_WAVEFORM_AUDIO) && winn_wave_num()) ++n;
+        if (type == 0 || type == MCI_DEVTYPE_DIGITAL_VIDEO) ++n;
         return write_dword(c, dest, n) ? 0 : MCIERR_MISSING_PARAMETER;
     }
     if (flags & MCI_SYSINFO_NAME) {
@@ -618,6 +653,9 @@ static uint32_t cmd_sysinfo(win_dll_call *c, uint32_t flags, uint32_t p) {
             name = "sequencer";
         else if (type == 0 && number == (winn_midi_num() ? 2u : 1u) && winn_wave_num())
             name = "waveaudio";
+        else if ((type == MCI_DEVTYPE_DIGITAL_VIDEO && number == 1) ||
+                 (type == 0 && number == 1u + !!winn_midi_num() + !!winn_wave_num()))
+            name = "avivideo";
         if (!name) return MCIERR_DEVICE_NOT_INSTALLED;
         return write_string(c, dest, cap, name) ? 0 : MCIERR_MISSING_PARAMETER;
     }
@@ -628,6 +666,7 @@ static uint32_t cmd_other(win_dll_call *c, uint16_t id, uint16_t msg,
     if (msg == MCI_SYSINFO) return cmd_sysinfo(c, flags, p);
     if (msg == MCI_OPEN) return cmd_open(c, flags, p);
     if (id == MCI_WAVE_ID) return winn_mci_wave_command(c, msg, flags, p);
+    if (id == MCI_AVI_ID) return winn_mci_avi_command(c, msg, flags, p);
     if (!owned() || id != MCI_ID) return MCIERR_INVALID_DEVICE_ID;
     uint8_t b[16] = {0};
     if (p && !read_guest(c, p, b, sizeof(uint32_t))) return MCIERR_MISSING_PARAMETER;
@@ -759,7 +798,8 @@ static uint32_t cmd_string(const char *cmd, char *result, unsigned cap, HWND h) 
         if (same(arg, "quantity")) {
             if (result && cap) {
                 unsigned count = (winn_midi_num() && (same(dev,"all") || same(dev,"sequencer"))) +
-                                 (winn_wave_num() && (same(dev,"all") || same(dev,"waveaudio")));
+                                 (winn_wave_num() && (same(dev,"all") || same(dev,"waveaudio"))) +
+                                 (same(dev,"all") || winn_mci_avi_type(dev));
                 char n[2] = { (char)('0' + count), 0 };
                 lstrcpyn(result, n, (int)cap);
             }
@@ -769,13 +809,33 @@ static uint32_t cmd_string(const char *cmd, char *result, unsigned cap, HWND h) 
     }
     if (same(op, "open")) {
         char file[160] = "", alias[64] = "", type[40] = "";
-        if (same(dev, "sequencer") || same(dev, "waveaudio"))
+        DWORD style = 0;
+        int has_style = 0;
+        HWND parent = 0;
+        if (same(dev, "sequencer") || same(dev, "waveaudio") || winn_mci_avi_type(dev))
             lstrcpyn(type, dev, sizeof(type));
         else lstrcpyn(file, dev, sizeof(file));
+        /* "device!element" names both */
+        for (char *bang = file; *bang; ++bang)
+            if (*bang == '!') {
+                *bang = 0;
+                lstrcpyn(type, file, sizeof(type));
+                memmove(file, bang + 1, strlen(bang + 1) + 1);
+                break;
+            }
         while ((word(&p, arg, sizeof(arg)), arg[0])) {
             if (same(arg, "type")) word(&p, type, sizeof(type));
             else if (same(arg, "alias")) word(&p, alias, sizeof(alias));
+            else if (same(arg, "parent")) { word(&p, last, sizeof(last)); parent = (HWND)(uintptr_t)parse_uint(last); }
+            else if (same(arg, "style")) {
+                word(&p, last, sizeof(last));
+                has_style = 1;
+                style = same(last, "child") ? WS_CHILD : same(last, "popup") ? WS_POPUP :
+                        same(last, "overlapped") ? WS_OVERLAPPEDWINDOW : parse_uint(last);
+            }
         }
+        if (winn_mci_avi_type(type) || (!type[0] && winn_mci_avi_extension(file)))
+            return winn_mci_avi_open(file, alias, style, has_style, parent);
         if (wave_extension(file) || same(type, "waveaudio") || same(type, "MCIWAVE"))
             return winn_mci_wave_open(file, alias);
         if (type[0] && !same(type, "sequencer") && !same(type, "MCISEQ"))
@@ -783,6 +843,7 @@ static uint32_t cmd_string(const char *cmd, char *result, unsigned cap, HWND h) 
         return do_open(file, alias);
     }
     if (winn_mci_wave_match(dev)) return winn_mci_wave_string(op, p, result, cap, h);
+    if (winn_mci_avi_match(dev)) return winn_mci_avi_string(op, p, result, cap, h);
     if (!owned() || !match_device(dev)) return MCIERR_INVALID_DEVICE_NAME;
     if (same(op, "close")) { do_close(); return 0; }
     if (same(op, "stop")) { halt(1); return 0; }
@@ -869,6 +930,7 @@ int winn_mci_ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *value) {
         uint32_t ptr = NE->arg32(c, 4);
         *value = text_guest(c, ptr, alias, sizeof(alias)) ?
                  (winn_mci_wave_match(alias) ? MCI_WAVE_ID :
+                  winn_mci_avi_match(alias) ? MCI_AVI_ID :
                   owned() && match_device(alias) ? MCI_ID : 0) : 0;
         return WINDLL_WORD;
     }
@@ -878,5 +940,6 @@ int winn_mci_ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *value) {
 void winn_mci_task_end(uint16_t task) {
     if (seq.opened && seq.task == task) do_close();
     winn_mci_wave_task_end(task);
+    winn_mci_avi_task_end(task);
 }
-void winn_mci_term(void) { do_close(); winn_mci_wave_term(); }
+void winn_mci_term(void) { do_close(); winn_mci_wave_term(); winn_mci_avi_term(); }
