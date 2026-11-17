@@ -10,6 +10,7 @@
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include "windows.h"
 #include "mmsystem.h"
@@ -20,7 +21,7 @@ void winn_volume_pcm(uint8_t *p, unsigned n, unsigned bits, unsigned channels); 
 
 #define NE (__win_dll_ne)
 #define WAVE_HANDLE    0x6e01u
-#define WAVE_QUEUE     16
+#define WAVE_QUEUE     16u              /* headers queued at first: more as written */
 #define WAVE_BUFSIZE   8192u
 #define WAVE_INFLIGHT  4u               /* blocks the driver may have queued */
 
@@ -65,11 +66,14 @@ typedef struct {
     int paused;
     uint32_t inflight[WAVE_INFLIGHT];   /* the driver's blocks queued, their bytes */
     unsigned inflight_head, inflight_count;
-    queued_wave queue[WAVE_QUEUE];
     unsigned head, count;
 } wave_state;
 
 static wave_state output;
+/* the headers written, not yet done: a ring (head, count) of queue_cap,
+ * grown as a program writes more (all of a long sound at once) */
+static queued_wave *queue;
+static unsigned queue_cap;
 static uint8_t raw[WAVE_BUFSIZE];
 
 static uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | (unsigned)p[1] << 8); }
@@ -180,8 +184,8 @@ static void wave_return_head(int notify)
 {
     if (!output.count)
         return;
-    queued_wave old = output.queue[output.head];
-    output.head = (output.head + 1u) % WAVE_QUEUE;
+    queued_wave old = queue[output.head];
+    output.head = (output.head + 1u) % queue_cap;
     output.count--;
     uint32_t flags;
     if (header_flags(old.header, &flags))
@@ -195,7 +199,7 @@ static void wave_played(uint32_t bytes)
 {
     output.played_bytes += bytes;
     while (bytes && output.count) {
-        queued_wave *q = &output.queue[output.head];
+        queued_wave *q = &queue[output.head];
         uint32_t take = q->bytes - q->position;
         if (take > bytes)
             take = bytes;
@@ -228,7 +232,7 @@ static void wave_pump(void)
             max = sizeof(raw);
         max -= max % output.format.block;
         for (unsigned i = 0; i < output.count && got < max; i++) {
-            queued_wave *q = &output.queue[(output.head + i) % WAVE_QUEUE];
+            queued_wave *q = &queue[(output.head + i) % queue_cap];
             if (q->sent >= q->bytes)
                 continue;
             unsigned take = q->bytes - q->sent;
@@ -373,10 +377,21 @@ static MMRESULT wave_header(win_dll_call *c, unsigned ordinal)
     unsigned bytes = rd32(b + 4);
     uint32_t data = rd32(b);
     if (!bytes || !data || !(data >> 16) || bytes % output.format.block ||
-        bytes > 0x10000u - (uint16_t)data || output.count == WAVE_QUEUE ||
-        (f & (0x04u | 0x08u)))
+        bytes > 0x10000u - (uint16_t)data || (f & (0x04u | 0x08u)))
         return MMSYSERR_INVALPARAM;      /* looped WAVEHDRs not yet supported */
-    queued_wave *q = &output.queue[(output.head + output.count) % WAVE_QUEUE];
+    if (output.count == queue_cap) {    /* the ring grown, in order from its head */
+        unsigned cap = queue_cap ? queue_cap * 2u : WAVE_QUEUE;
+        queued_wave *grown = (queued_wave *)malloc(cap * sizeof(queued_wave));
+        if (!grown)
+            return MMSYSERR_NOMEM;
+        for (unsigned i = 0; i < output.count; i++)
+            grown[i] = queue[(output.head + i) % queue_cap];
+        free(queue);
+        queue = grown;
+        queue_cap = cap;
+        output.head = 0;
+    }
+    queued_wave *q = &queue[(output.head + output.count) % queue_cap];
     q->header = hdrfar;
     q->data = data;
     q->bytes = bytes;
@@ -502,4 +517,7 @@ void winn_wave_term(void)
         output.driver->close();
         memset(&output, 0, sizeof(output));
     }
+    free(queue);
+    queue = NULL;
+    queue_cap = 0;
 }

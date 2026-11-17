@@ -1486,7 +1486,11 @@ win_ne_guest_segment *win_ne_guest_global(win_ne_guest_image *g, uint16_t sel)
 
 /* Huge Win16 pointers use consecutive selectors, with __AHINCR = 8.
  * The first entry owns the entire allocation. Following entries are views
- * of successive 64 KiB windows and must never free its memory separately. */
+ * from successive 64 KiB on and must never free its memory separately.
+ * Each reaches to the block's end, as Windows' tiled selectors do (their
+ * limits the rest of the block): a read, a copy of 32K at a time from an
+ * offset not 0 crosses from one 64K into the next (a DIB's bits after its
+ * header). */
 static unsigned global_pages(uint32_t bytes)
 {
     return (unsigned)((bytes + 0xffffu) >> 16);
@@ -1510,7 +1514,7 @@ static int global_descriptors(win_ne_guest_image *g, unsigned index, unsigned ol
         uint32_t offset = (uint32_t)k << 16;
         uint32_t len = bytes - offset;
         descriptor(buf + k * GDT_ENTRY_BYTES, linear + offset,
-                   len > 65536u ? 65536u : len, 0);
+                   len > 0x100000u ? 0x100000u : len, 0);     /* byte granular: 1 MB */
     }
     uint32_t at = global_selector(g, index) & ~7u;
     int ok = g->io.write(g->opaque, g->gdt_linear + at,
@@ -1531,8 +1535,6 @@ static void global_mark(win_ne_guest_image *g, unsigned index, unsigned old_page
         uint32_t off = (uint32_t)k << 16;
         s->linear = linear + off;
         s->size = bytes - off;
-        if (k && s->size > 65536u)
-            s->size = 65536u;
         s->selector = global_selector(g, index + k);
         s->flags = k ? (WIN_NE_GUEST_ALIAS | WIN_NE_GUEST_HUGE_TAIL | 1u) : 1u;
     }

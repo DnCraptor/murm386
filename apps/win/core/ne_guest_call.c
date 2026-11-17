@@ -385,7 +385,8 @@ static void ne_memory_failure_note(win_ne_guest_image *g, const char *api,
     for (unsigned i = 0; i < WIN_NE_GUEST_GLOBALS; i++)
         if (g->globals[i].selector) {
             slots++;
-            global_bytes += g->globals[i].size;
+            if (!(g->globals[i].flags & WIN_NE_GUEST_HUGE_TAIL))    /* a huge block's once */
+                global_bytes += g->globals[i].size;
         }
     win_ne_mem_info mem = { 0 };
 #if defined(__arm__) || defined(__thumb__)
@@ -1930,20 +1931,21 @@ static __attribute__((noinline)) int bitmap_service(args *a, uint16_t service, u
         *v = (uint32_t)HFILE_ERROR;
         if (a->bad)
             return 1;
-        if (n > 0x10000u - (far & 0xffffu))     /* within its block */
-            n = 0x10000u - (far & 0xffffu);
+        /* through the selector's offset on: a huge block's selectors each
+         * reach to its end (as Windows' tiled ones) */
+        uint16_t sel = (uint16_t)(far >> 16);
+        uint32_t off = far & 0xffffu;
         while (done < n) {
             uint32_t k = n - done < sizeof(buf) ? n - done : (uint32_t)sizeof(buf);
-            uint32_t at = (far & 0xffff0000u) | ((far + done) & 0xffffu);
             LONG got;
             if (service == 350) {
-                if (!rd(a, at, buf, k))
-                    return 1;
+                if (!win_ne_read(a->ctx, sel, off + done, buf, k))
+                    return a->bad = 1, 1;
                 got = _hwrite(f, buf, (LONG)k);
             } else {
                 got = _hread(f, buf, (LONG)k);
-                if (got > 0 && !wr(a, at, buf, (uint32_t)got))
-                    return 1;
+                if (got > 0 && !win_ne_write(a->ctx, sel, off + done, buf, (uint32_t)got))
+                    return a->bad = 1, 1;
             }
             if (got < 0)
                 return done ? (*v = done, 1) : 1;

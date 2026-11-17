@@ -250,8 +250,8 @@ US or Russian), Inquire and the driver's others (doing nothing),
 structures (TEXTMETRIC, LOGFONT, LOGPEN, LOGBRUSH, BITMAP), wsprintf,
 ExtTextOut, GetTextExtentPoint, TabbedTextOut, GetTabbedTextExtent,
 GetTextFace, CreateBitmap(Indirect), Get/SetBitmapBits, GetClassInfo,
-_hread/_hwrite (within one block: a huge pointer's segments are not
-tiled); KERNEL's GetModuleHandle, LoadLibrary and GetProcAddress for the
+_hread/_hwrite (a huge block's selectors each reach to its end, as
+Windows' tiled ones: a read crossing 64K goes on into the next); KERNEL's GetModuleHandle, LoadLibrary and GetProcAddress for the
 modules WINN has (KERNEL, USER, GDI, KEYBOARD, SHELL, WIN87EM) and its own
 DLLs (below), FindResource, LoadResource, LockResource, SizeofResource,
 AccessResource (the module's file opened at the resource),
