@@ -29,6 +29,9 @@
 #include "config_save.h"
 #include "csm.h"
 #include "csm_psg.h"
+#if defined(MIDI_GM_DLS)
+#include "midi/gm_bank.h"
+#endif
 #if defined(M2P2_HSTX_AUDIO)
 #include "hstx_audio.h"
 #endif
@@ -502,9 +505,14 @@ bool __not_in_flash_func(timer_callback)(repeating_timer_t *rt) {
         l_v += sample;
     }
     if (pc->mpu401_enabled) {
-        int16_t sample = midi_sample();
-        r_v += sample;
-        l_v += sample;
+#if defined(MIDI_GM_DLS)
+        if (!gm_midi_mix(&l_v, &r_v))
+#endif
+        {
+            int16_t sample = midi_sample();
+            r_v += sample;
+            l_v += sample;
+        }
     }
     if (pc->adlib_enabled) {
         int16_t sample = adlib_getsample(pc->adlib);

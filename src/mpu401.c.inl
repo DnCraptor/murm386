@@ -24,6 +24,9 @@ static int midi_insysex;
 
 #if defined(EMULATED_MIDI)
 #include <general-midi.c.inl>
+#if defined(MIDI_GM_DLS)
+#include "midi/gm_synth.c.inl"
+#endif
 #else
 
 static int midi_id = 0;
@@ -107,6 +110,12 @@ static INLINE void midi_send_short(uint32_t command) {
             .note = command >> 8,
             .velocity = command >> 16,
         };
+#if defined(MIDI_GM_DLS)
+        if (gm_sd_bank.header) {
+            gm_midi_enqueue(&message);
+            return;
+        }
+#endif
         parse_midi(&message);
     }
 #else
@@ -150,6 +159,11 @@ static INLINE void mpu401_write(uint16_t portnum, uint8_t value) {
                 midi_command = 0;
 #if !defined(EMULATED_MIDI)
                 midi_init_once();
+#elif defined(MIDI_GM_DLS)
+                if (gm_sd_bank.header) {
+                    const midi_command_t reset = {.command = 0xff};
+                    gm_midi_enqueue(&reset);
+                }
 #endif
                 mpu_rx_data = 0xFE; // Ack
                 break;

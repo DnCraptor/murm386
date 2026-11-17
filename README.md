@@ -69,6 +69,20 @@ The emulated PC audio devices include PC speaker, AdLib/OPL, Sound Blaster-compa
 
 Backend availability follows the board pinout at runtime: M1/M2/Z2 can select PWM or I2S, `PC` is PWM-only, and `C2` is I2S-only.
 
+### General MIDI wavetable
+
+Build with `-DMIDI_GM_DLS=ON` and enable MPU-401. At boot the firmware looks
+for a packed GMWB v4 bank named `gm_bank_22050.bin`, `gm_bank.bin` or
+`gm_bank_44100.bin`. Search starts in the active board and CPU configuration
+directories, then checks shared `.config`, Speccy and PC-286 directories,
+`/286`, `/xt` and the SD root. The first valid bank that fits wins.
+
+The firmware reuses the packed bank directly and reserves only its rounded
+size in PSRAM. The full 3.06 MiB bank needs at least 8 MiB of PSRAM.
+The built-in synth is the fallback when no usable bank is found. To create a
+bank from a local DLS file, use the [pico-286 packer](https://github.com/xrip/pico-286/blob/efe313e63010df52b478279dae849965607e85a7/BUILDING.md#optional-gmdls-midi-on-rp2350-and-win32).
+The wavetable engine is adapted from pico-286 under its MIT license.
+
 ## Input
 
 Depending on board capabilities:

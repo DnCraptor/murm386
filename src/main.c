@@ -31,6 +31,9 @@
 
 #include "board_config.h"
 #include "psram_init.h"
+#if defined(MIDI_GM_DLS)
+#include "midi/gm_bank.h"
+#endif
 #include "core0_stack.h"
 #if !defined(NO_PAGING)
 #include "ega128_paging.h"
@@ -1158,12 +1161,10 @@ rst:
 // Configuration Loading
 //=============================================================================
 
-static void load_default_config(void) {
-    memset(&config, 0, sizeof(config));
-
-    // Guest RAM follows the physically detected PSRAM.  The optional
+static void configure_guest_ram(void) {
+    // Guest RAM follows the usable PSRAM. The optional
     // Lo-tech EMS board reserves its fixed 2 MiB backing store at the top.
-    size_t detected_psram = psram_detected_size();
+    size_t detected_psram = psram_usable_size();
 #if !defined(NO_PAGING)
     if (guest_ram_base == ram_pages)
         detected_psram = ega128_paging_active() ? EGA128_VIRTUAL_RAM_SIZE : ram_pages_size;
@@ -1187,6 +1188,10 @@ static void load_default_config(void) {
 #else
     config.mem_size = detected_psram;
 #endif
+}
+
+static void load_default_config(void) {
+    memset(&config, 0, sizeof(config));
     config.vga_mem_size = EMU_VGA_MEM_SIZE_KB * 1024;
 
     // CPU configuration
@@ -1952,6 +1957,12 @@ static bool init_emulator(void) {
         DBG_PRINT("Using default configuration\n");
     }
 
+#if defined(MIDI_GM_DLS)
+    if (config_get_mpu401())
+        gm_midi_load_sd();
+#endif
+    configure_guest_ram();
+
     /* USB modem is an optional COM1 mapping and is meaningful only while
      * TinyUSB owns the connector in HOST mode. Resolve it before pc_new() so
      * native POST/BDA/equipment data describe the same hardware the guest sees. */
@@ -1976,6 +1987,7 @@ static bool init_emulator(void) {
     DBG_PRINT("  Floppy B: %s\n", config.fdd[1] ? config.fdd[1] : "(none)");
 
     size_t detected_psram = psram_detected_size();
+    const size_t usable_psram = psram_usable_size();
     DBG_PRINT("  PSRAM detected: %lu KB; guest RAM: %lu KB\n",
               (unsigned long)(detected_psram / 1024),
               (unsigned long)(config.mem_size / 1024));
@@ -1993,11 +2005,11 @@ static bool init_emulator(void) {
     const bool direct_qspi_guest = true;
 #endif
     if (direct_qspi_guest &&
-        detected_psram > FDOS_XMS_EMB_BASE_PHYS +
+        usable_psram > FDOS_XMS_EMB_BASE_PHYS +
                              ARM_ELF_NATIVE_STACK_ARENA_SIZE) {
         uintptr_t low = (uintptr_t)PSRAM_BASE_ADDR + FDOS_XMS_EMB_BASE_PHYS;
         uintptr_t guest_end = (uintptr_t)PSRAM_BASE_ADDR + config.mem_size;
-        uintptr_t stack_begin = (uintptr_t)PSRAM_BASE_ADDR + detected_psram -
+        uintptr_t stack_begin = (uintptr_t)PSRAM_BASE_ADDR + usable_psram -
                                 ARM_ELF_NATIVE_STACK_ARENA_SIZE;
         uintptr_t high = guest_end < stack_begin ? guest_end : stack_begin;
         if (high > low)

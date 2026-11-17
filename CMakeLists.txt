@@ -96,6 +96,10 @@ if(NOT CPU_TARGET STREQUAL "286" AND NOT CPU_TARGET STREQUAL "386")
     message(FATAL_ERROR "CPU_TARGET must be 286 or 386, got '${CPU_TARGET}'")
 endif()
 set(BUILD_NAME "${CPU_TARGET}-${VIDEO_MODE}")
+option(MIDI_GM_DLS "Load a General MIDI wavetable bank from SD into PSRAM" OFF)
+if(MIDI_GM_DLS)
+    string(APPEND BUILD_NAME "-GMDLS")
+endif()
 #
 # NOTE: the tree previously shipped with I386_MODE commented out, so the
 # binary named "386" was in fact a 286-mode core. This switch now makes
@@ -493,6 +497,12 @@ add_executable(${BUILD_NAME}
     src/ps2kbd_wrapper.cpp
     ${EMU_CORE_SOURCES}
 )
+
+if(MIDI_GM_DLS)
+    target_sources(${BUILD_NAME} PRIVATE src/midi/gm_bank.c)
+    target_compile_definitions(${BUILD_NAME} PRIVATE MIDI_GM_DLS=1)
+    target_compile_definitions(audio_driver PRIVATE MIDI_GM_DLS=1)
+endif()
 
 target_sources(${BUILD_NAME} PRIVATE src/ega128_paging.c)
 if(BOARD STREQUAL "M1")

@@ -69,6 +69,7 @@ void psram_set_detected_size(size_t size);
 
 /** Physical capacity available to the emulator. */
 size_t psram_usable_size(void);
+void psram_reserve_top(size_t size);
 
 /** Commit cached PSRAM writes before starting an uncached non-destructive test. */
 void psram_prepare_nondestructive_test(void);

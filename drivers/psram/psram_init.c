@@ -218,6 +218,7 @@ void PSRAM_BOOT_FUNC(psram_reset_init)(uint cs_pin) {
 }
 
 static size_t detected_psram_size;
+static size_t psram_reserved_top;
 
 /* RP2350 XIP M1 (PSRAM) uncached/no-allocate alias.
  * Cached M1 starts at 0x11000000; the equivalent uncached XIP window is
@@ -234,7 +235,12 @@ void psram_set_detected_size(size_t size) {
 }
 
 size_t psram_usable_size(void) {
-    return detected_psram_size;
+    return detected_psram_size >= psram_reserved_top
+        ? detected_psram_size - psram_reserved_top : 0;
+}
+
+void psram_reserve_top(size_t size) {
+    psram_reserved_top = size;
 }
 
 static uint32_t probe_readback;
