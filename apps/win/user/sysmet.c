@@ -42,7 +42,16 @@ void user_init_sysmet(void)
     }
 }
 
-DWORD WINAPI GetSysColor(int i) { return (i >= 0 && i < COLOR_MAX) ? sys_colors[i] : 0; }
+DWORD WINAPI GetSysColor(int i)
+{
+    if (i >= 0 && i < COLOR_MAX)
+        return sys_colors[i];
+    switch (i) {                        /* Windows 95's: from Windows 3.1's */
+    case COLOR_3DLIGHT: return sys_colors[COLOR_BTNFACE];
+    case COLOR_INFOBK:  return RGB(255, 255, 225);
+    default:            return 0;       /* COLOR_3DDKSHADOW, COLOR_INFOTEXT: black */
+    }
+}
 
 HBRUSH user_sys_brush(int i) { return (i >= 0 && i < COLOR_MAX) ? sys_brushes[i] : 0; }
 HBRUSH WINAPI GetSysColorBrush(int i) { return user_sys_brush(i); }

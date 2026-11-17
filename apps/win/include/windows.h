@@ -1070,6 +1070,46 @@ HTASK   WINAPI GetCurrentTask(void);
 BOOL    WINAPI IsTask(HTASK task);
 UINT    WINAPI GetNumTasks(void);
 
+/* Windows 95's GDI for Win16 programs, more of it (gdi95.c) */
+#define AD_COUNTERCLOCKWISE 1
+#define AD_CLOCKWISE        2
+#define LAYOUT_RTL          0x00000001UL
+int     WINAPI SetArcDirection(HDC hdc, int dir);
+int     WINAPI GetArcDirection(HDC hdc);
+BOOL    WINAPI PolyBezier(HDC hdc, const POINT *pts, int count);
+BOOL    WINAPI PolyBezierTo(HDC hdc, const POINT *pts, int count);
+UINT    WINAPI GetTextCharset(HDC hdc);
+int     WINAPI ExtSelectClipRgn(HDC hdc, HRGN rgn, int mode);
+DWORD   WINAPI SetLayout(HDC hdc, DWORD layout);
+DWORD   WINAPI GetLayout(HDC hdc);
+HPALETTE WINAPI CreateHalftonePalette(HDC hdc);
+UINT    WINAPI RealizeDefaultPalette(HDC hdc);
+/* GDI's priority queues (Windows 3.1's, for printer drivers): the
+ * smallest key's tag first */
+HANDLE  WINAPI CreatePQ(int size);
+int     WINAPI MinPQ(HANDLE pq);
+int     WINAPI ExtractPQ(HANDLE pq);
+int     WINAPI InsertPQ(HANDLE pq, int tag, int key);
+int     WINAPI SizePQ(HANDLE pq, int more);
+int     WINAPI DeletePQ(HANDLE pq);
+/* the print spooler's: WINN has no printer (SP_ERROR, no job) */
+#define SP_ERROR            (-1)
+int     WINAPI OpenJob(LPCSTR port, LPCSTR title, HDC hdc);
+int     WINAPI StartSpoolPage(HANDLE job);
+int     WINAPI EndSpoolPage(HANDLE job);
+int     WINAPI CloseJob(HANDLE job);
+int     WINAPI DeleteJob(HANDLE job, int flags);
+int     WINAPI WriteSpool(HANDLE job, LPCSTR data, int cb);
+int     WINAPI WriteDialog(HANDLE job, LPCSTR text, int cb);
+int     WINAPI DeleteSpoolPage(HANDLE job);
+int     WINAPI GetSpoolJob(int option, LONG param);
+int     WINAPI QueryJob(HANDLE job, int what);
+HANDLE  WINAPI SpoolFile(LPCSTR printer, LPCSTR port, LPCSTR job, LPCSTR file);
+/* KERNEL's of Windows 95 (file.c) */
+UINT    WINAPI GetShortPathName(LPCSTR path, LPSTR out, UINT size);
+DWORD   WINAPI GetFileAttributes(LPCSTR path);
+BOOL    WINAPI SetFileAttributes(LPCSTR path, DWORD attr);
+
 /* Native extension: description of the display driver, returns colours. */
 UINT    WINAPI GetDisplayDriverInfoN(LPSTR buf, int size);
 

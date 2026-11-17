@@ -811,6 +811,8 @@ static __attribute__((noinline)) int user_more(args *a, ne_user *u, uint16_t ser
 
 int ne_more_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword)
 {
+    if (ne_win95_service(a, u, service, v, dword))
+        return 1;
     if (service >= SH && service < SH + 0x1000u)
         return shell_more(a, u, service - SH, v, dword);
     if (service >= TH && service < TH + 0x100u) {

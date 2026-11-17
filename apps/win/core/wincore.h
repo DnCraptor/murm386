@@ -214,6 +214,7 @@ typedef struct wdc {
     UINT     bounds_flags;
     int      relabs;        /* SetRelAbs's (noted) */
     DWORD    mapper;        /* SetMapperFlags's (noted) */
+    int      arc_cw;        /* SetArcDirection(AD_CLOCKWISE) */
 } wdc;
 
 /* Screen and system state shared by GDI and USER. */
@@ -439,6 +440,7 @@ int    task_yield(void);                 /* 1 if another task ran */
 void   task_run_now(wtask *t);
 void   task_kernel_loop(void);
 void   task_quit_all(void);              /* WM_QUIT for every application */
+HTASK  task_shell(void);                 /* the first task (SYSTEM.INI shell=) */
 /* sound.c: the notes queued for the speaker, played as time goes on
  * (sound_service, from USER's input pump); a beep (MessageBeep) */
 void   sound_service(uint32_t now);

@@ -1443,6 +1443,99 @@ BOOL    WINAPI DragDetect(HWND h, POINT pt);
 void    WINAPI CalcChildScroll(HWND h, UINT bar);
 void    WINAPI ScrollChildren(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 
+/* Windows 95's USER for Win16 programs, more of it (win95.c) */
+#define COLOR_3DDKSHADOW    21
+#define COLOR_3DLIGHT       22
+#define COLOR_INFOTEXT      23
+#define COLOR_INFOBK        24
+#define BDR_RAISEDOUTER     0x0001
+#define BDR_SUNKENOUTER     0x0002
+#define BDR_RAISEDINNER     0x0004
+#define BDR_SUNKENINNER     0x0008
+#define EDGE_RAISED         (BDR_RAISEDOUTER | BDR_RAISEDINNER)
+#define EDGE_SUNKEN         (BDR_SUNKENOUTER | BDR_SUNKENINNER)
+#define EDGE_ETCHED         (BDR_SUNKENOUTER | BDR_RAISEDINNER)
+#define EDGE_BUMP           (BDR_RAISEDOUTER | BDR_SUNKENINNER)
+#define BF_LEFT             0x0001
+#define BF_TOP              0x0002
+#define BF_RIGHT            0x0004
+#define BF_BOTTOM           0x0008
+#define BF_RECT             0x000F
+#define BF_DIAGONAL         0x0010
+#define BF_MIDDLE           0x0800
+#define BF_SOFT             0x1000
+#define BF_ADJUST           0x2000
+#define BF_FLAT             0x4000
+#define BF_MONO             0x8000
+#define DFC_CAPTION         1
+#define DFC_MENU            2
+#define DFC_SCROLL          3
+#define DFC_BUTTON          4
+#define DFCS_CAPTIONCLOSE   0x0000
+#define DFCS_CAPTIONMIN     0x0001
+#define DFCS_CAPTIONMAX     0x0002
+#define DFCS_CAPTIONRESTORE 0x0003
+#define DFCS_CAPTIONHELP    0x0004
+#define DFCS_MENUARROW      0x0000
+#define DFCS_MENUCHECK      0x0001
+#define DFCS_MENUBULLET     0x0002
+#define DFCS_SCROLLUP       0x0000
+#define DFCS_SCROLLDOWN     0x0001
+#define DFCS_SCROLLLEFT     0x0002
+#define DFCS_SCROLLRIGHT    0x0003
+#define DFCS_SCROLLCOMBOBOX 0x0005
+#define DFCS_SCROLLSIZEGRIP 0x0008
+#define DFCS_BUTTONCHECK    0x0000
+#define DFCS_BUTTONRADIOIMAGE 0x0001
+#define DFCS_BUTTONRADIOMASK 0x0002
+#define DFCS_BUTTONRADIO    0x0004
+#define DFCS_BUTTON3STATE   0x0008
+#define DFCS_BUTTONPUSH     0x0010
+#define DFCS_INACTIVE       0x0100
+#define DFCS_PUSHED         0x0200
+#define DFCS_CHECKED        0x0400
+#define DFCS_ADJUSTRECT     0x2000
+#define DFCS_FLAT           0x4000
+#define DFCS_MONO           0x8000
+#define DST_COMPLEX         0x0000
+#define DST_TEXT            0x0001
+#define DST_PREFIXTEXT      0x0002
+#define DST_ICON            0x0003
+#define DST_BITMAP          0x0004
+#define DSS_NORMAL          0x0000
+#define DSS_UNION           0x0010
+#define DSS_DISABLED        0x0020
+#define DSS_MONO            0x0080
+#define DSS_RIGHT           0x8000
+#define MDITILE_VERTICAL    0x0000
+#define MDITILE_HORIZONTAL  0x0001
+#define MDITILE_SKIPDISABLED 0x0002
+#define MFS_DEFAULT         0x1000
+#define GMDI_USEDISABLED    0x0001
+#define GMDI_GOINTOPOPUPS   0x0002
+HWND    WINAPI FindWindowEx(HWND parent, HWND after, LPCSTR cls, LPCSTR title);
+HWND    WINAPI GetForegroundWindow(void);
+BOOL    WINAPI SetForegroundWindow(HWND h);
+HWND    WINAPI GetShellWindow(void);
+BOOL    WINAPI DrawEdge(HDC dc, LPRECT rc, UINT edge, UINT flags);
+BOOL    WINAPI DrawFrameControl(HDC dc, LPRECT rc, UINT type, UINT state);
+BOOL    WINAPI DrawAnimatedRects(HWND h, int ani, const RECT *from, const RECT *to);
+/* text (n characters, -1 to the NUL; DST_PREFIXTEXT with its & marks), an
+ * icon or a bitmap at x, y (cx, cy 0: its size), disabled as embossed */
+BOOL    WINAPI DrawStateN(HDC dc, HBRUSH br, UINT type, LPCSTR text, int n, HANDLE image,
+                          int x, int y, int cx, int cy, UINT flags);
+/* children of parent (0 the desktop's), or the kids given, side by side
+ * (MDITILE_*) or cascaded, in rc (NULL: the parent's client area): how many */
+UINT    WINAPI TileWindowsN(HWND parent, UINT how, const RECT *rc, UINT count,
+                            const HWND *kids, int cascade);
+BOOL    WINAPI CheckMenuRadioItem(HMENU menu, UINT first, UINT last, UINT check, UINT flags);
+UINT    WINAPI GetMenuDefaultItem(HMENU menu, UINT by_pos, UINT flags);
+BOOL    WINAPI SetMenuDefaultItem(HMENU menu, UINT item, UINT by_pos);
+int     WINAPI MessageBoxEx(HWND h, LPCSTR text, LPCSTR caption, UINT type, WORD lang);
+BOOL    WINAPI OldExitWindows(void);
+void    WINAPI OldSetDeskPattern(void);
+BOOL    WINAPI DestroyIcon32(HICON icon, UINT flags);
+
 /* WINN native extensions: shared keyboard layout, 0=Latin, 1=Russian. */
 int     WINAPI GetKeyboardLayoutN(void);
 void    WINAPI SetKeyboardLayoutN(int russian);

@@ -488,17 +488,18 @@ int win_ne_string(win_ne_guest_api_context *ctx, uint16_t sel, uint16_t off, cha
 /* MessageBox's strings: in a frame of its own, not in the dispatcher's
  * (which a program's nested window procedures stack up on its task) */
 static __attribute__((noinline)) uint32_t message_box(win_ne_guest_api_context *ctx,
-                                                      win_ne_regs *cpu)
+                                                      win_ne_regs *cpu, uint32_t at)
 {
     uint16_t type, title_off, title_sel, text_off, text_sel, owner;
     char title[128], message[512];
-    if (!read_stack_word(ctx, cpu, 4, &type) ||
-        !read_stack_word(ctx, cpu, 6, &title_off) ||
-        !read_stack_word(ctx, cpu, 8, &title_sel) ||
-        !read_stack_word(ctx, cpu, 10, &text_off) ||
-        !read_stack_word(ctx, cpu, 12, &text_sel) ||
-        !read_stack_word(ctx, cpu, 14, &owner) ||
-        !guest_copy_string(ctx, title_sel, title_off, title, sizeof(title)) ||
+    if (!read_stack_word(ctx, cpu, at, &type) ||
+        !read_stack_word(ctx, cpu, at + 2, &title_off) ||
+        !read_stack_word(ctx, cpu, at + 4, &title_sel) ||
+        !read_stack_word(ctx, cpu, at + 6, &text_off) ||
+        !read_stack_word(ctx, cpu, at + 8, &text_sel) ||
+        !read_stack_word(ctx, cpu, at + 10, &owner) ||
+        (title_sel ? !guest_copy_string(ctx, title_sel, title_off, title, sizeof(title)) :
+                     (memcpy(title, "Error", 6), 0)) ||     /* NULL: Windows' caption */
         !guest_copy_string(ctx, text_sel, text_off, message, sizeof(message))) {
         if (ctx) ctx->invalid_args = 1;
         return 0;
@@ -653,7 +654,10 @@ int win_ne_guest_api(void *opaque, win_ne_regs *cpu, uint16_t service)
         }
         break;
     case 0x1001: /* USER.1 MessageBox(HWND, FAR text, FAR caption, UINT) */
-        value = message_box(ctx, cpu);
+        value = message_box(ctx, cpu, 4);
+        break;
+    case 0x13a2: /* USER.930 MessageBoxEx(..., WORD language): the same */
+        value = message_box(ctx, cpu, 6);
         break;
     case 0x10b3:  /* USER.179 GetSystemMetrics(int): Win16 WORD argument */
         if (!read_stack_word(ctx, cpu, 4, &arg)) {

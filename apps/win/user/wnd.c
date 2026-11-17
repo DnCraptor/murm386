@@ -412,6 +412,23 @@ HWND WINAPI FindWindow(LPCSTR klass, LPCSTR title)
     return 0;
 }
 
+/* Windows 95's: among parent's children (0: the desktop's) after the
+ * window after (0: from the first) */
+HWND WINAPI FindWindowEx(HWND parent, HWND after, LPCSTR klass, LPCSTR title)
+{
+    wwnd *p = parent ? user_wnd(parent) : U.desktop, *a = after ? user_wnd(after) : NULL;
+    if (!p || (after && (!a || a->parent != p)))
+        return 0;
+    for (wwnd *w = a ? a->next : p->child; w; w = w->next) {
+        if (klass && (!w->cls || !class_is(w->cls, klass)))
+            continue;
+        if (title && !text_match(w->text, title))
+            continue;
+        return w->h;
+    }
+    return 0;
+}
+
 HWND WINAPI GetNextWindow(HWND h, UINT cmd) { return GetWindow(h, cmd); }
 
 static void rect_to_parent(const wwnd *w, RECT *r);

@@ -401,6 +401,8 @@ void task_kernel_loop(void)
     kernel_task.waiting = WTASK_WAIT_NONE;
 }
 
+HTASK task_shell(void) { return shell_task; }
+
 void task_quit_all(void)
 {
     for (wtask *t = tasks; t; t = t->next)

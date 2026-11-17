@@ -289,7 +289,32 @@ or the system's, or LR_LOADFROMFILE an .ICO, .CUR or .BMP file),
 CopyImage, DrawIconEx, GetIconInfo, RegisterClassEx, GetClassInfoEx,
 ChildWindowFromPointEx, SetPropEx, GetPropEx, RemovePropEx (32 bits: two
 properties), Set/GetWindowContextHelpID, Set/GetMenuContextHelpId,
-SetMessageExtraInfo; palettes, CreateDC and CreateIC, SetSysColors;
+SetMessageExtraInfo; and more of Windows 95's: KERNEL's GetShortPathName
+(DOS names are short already), Get/SetFileAttributes, FindFirstFile,
+FindNextFile, FindClose, Get/SetCurrentDirectory, GetDiskFreeSpace,
+Get/Write(Private)ProfileSection, Get/WritePrivateProfileStruct (hex
+bytes and their sum, as Windows 95 writes them), IsPeFormat; USER's
+FindWindowEx, Get/SetForegroundWindow, GetShellWindow, Get/SetScrollInfo
+(no proportional thumbs: nPage 0), InsertMenuItem, Get/SetMenuItemInfo,
+CheckMenuRadioItem, Get/SetMenuDefaultItem (kept, not drawn bold),
+TrackPopupMenuEx, DrawEdge, DrawFrameControl, DrawState (a DST_COMPLEX
+procedure called), DrawAnimatedRects (no animation), TileWindows,
+CascadeWindows, MessageBoxEx, MessageBoxIndirect,
+CreateIconFromResourceEx, LookupIconIdFromDirectoryEx, GetIconID,
+CreateCursorIconIndirect, the Load*Handler resource handlers, DestroyIcon32
+and the control classes' procedures (EDITWNDPROC, BUTTONWNDPROC ...);
+MenuItemFromPoint, GetMenuItemRect, Set/GetWindowRgn answer "none"; GDI's
+PolyBezier, PolyBezierTo, Set/GetArcDirection, ExtSelectClipRgn,
+GetRegionData, ExtCreateRegion, GetTextCharset, Set/GetLayout (left to
+right only), CreateHalftonePalette; SHELL's ExtractIconEx (the small icons
+the same ones) and InternalExtractIcon; the old entry points of functions
+that moved (KERNEL's Reserved5 lstrcmp, GDI's RectInRegionOld,
+GDISelectPalette, GDIRealizePalette, RealizeDefaultPalette, USER's
+OldExitWindows, OldSetDeskPattern); GDI's priority queues (CreatePQ,
+InsertPQ, MinPQ, ExtractPQ, SizePQ, DeletePQ) and Copy; the spooler's
+OpenJob, WriteSpool, CloseJob, GetSpoolJob ... and the printer drivers'
+data answer as Windows does with no printer (SP_ERROR, no job);
+palettes, CreateDC and CreateIC, SetSysColors;
 the mapping modes (all of them: the metric and English ones and MM_TWIPS
 at 96 pixels an inch, MM_ISOTROPIC keeping the axes alike; pens, rounded
 corners and blits scale, fonts are realized at the height the mapping
@@ -435,7 +460,9 @@ memory, KEYBOARD, OLECLI, OpenFile's OFSTRUCT: what WRITE.EXE needed),
 `OW31` (the rest of 3.1's USER, GDI, KERNEL), `OWMORE` with `OWDRV.DLL`
 (an installable driver, keybd_event and mouse_event, SystemParametersInfo,
 the registry enumerated, the environment, a wallpaper), `OW95` (the stack
-switched, the visible area, Windows 95's KERNEL and USER for Win16)
+switched, the visible area, Windows 95's KERNEL and USER for Win16),
+`OW95X` (old ordinals, priority queues and the spooler, Windows 95's
+structures, DrawEdge, DrawFrameControl, DrawState, Bézier curves)
 (`make NEFIXTURES` in
 `host/`). All have DOS MZ stubs that explain how to launch them under WINN
 when invoked directly from DOS. `host/test_ne_run` runs them on the
@@ -803,6 +830,7 @@ list the links.
     ./winhost scripts/owtt.txt PROGMAN       # TrueType: WINNTEST.FOT/.TTF (mkttf.py), outlines, metrics
     ./winhost scripts/owmore.txt PROGMAN     # a driver (OWDRV.DLL), keybd/mouse_event, SPI, wallpaper
     ./winhost scripts/ow95.txt PROGMAN       # SwitchStackTo, the visible area, Win95's KERNEL/USER
+    ./winhost scripts/ow95x.txt PROGMAN      # old ordinals, the spooler, Win95's structures and 3D drawing
     ./winhost scripts/logo.txt PROGMAN       # the logo (copy the BMPs into HOSTWIN first)
     ./winhost800 scripts/vga800.txt  # the VGA800 driver, built in
     ./winhostvga scripts/vga.txt     # the built-in VGA driver (640x480x16), Win16 programs too
@@ -858,6 +886,6 @@ DIB section (its bits are not brought back), ADVAPI32, WINMM's devices
 (waveOut, midiOut) and mciSendCommand, COMDLG32, SHELL32, COMCTL32; VxDs.
 Printing (there is no printer), `.GRP` files (`PROGMAN.INI` holds the groups as text), DLLs (`LoadLibrary`) of native applications;
 Windows 95's and NT's additions to Win16 (WOW, the thunks to Win32,
-paths, Bézier curves, enhanced metafiles), BiDi, STRESS.DLL, the
+paths, enhanced metafiles), BiDi, STRESS.DLL, the
 undocumented CallProcInstance, InitLib and DoSignal (KERNEL's own, whose
 arguments nothing tells) and Windows 2's GetContinuingTextExtent.

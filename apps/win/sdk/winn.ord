@@ -27,3 +27,5 @@
 25 SoundWaitN
 26 GetKeyboardLayoutN
 27 SetKeyboardLayoutN
+28 DrawStateN
+29 TileWindowsN

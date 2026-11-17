@@ -206,6 +206,8 @@ uint16_t win_ne_dll_service(int slot, const struct win_dll_export *e);
  * drivers, the input injected, SystemParametersInfo, the network's: none),
  * SHELL and TOOLHELP; 1 if it is one of them */
 int ne_more_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword);
+/* ne_guest_win95.c: structures, buffers and memory of Windows 95's entry points */
+int ne_win95_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword);
 /* RegisterClass's, GetClassInfo's and LoadCursor/LoadIcon/LoadBitmap's
  * (service 0x10ad, 0x10ae, 0x10af) work, their arguments given (the Ex
  * ones too) */

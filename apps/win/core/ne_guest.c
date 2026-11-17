@@ -720,6 +720,60 @@ static const struct {
     { M_TOOLHELP, 81, "TaskSetCSIP", 6 },
     { M_TOOLHELP, 82, "TaskGetCSIP", 2 },
     { M_TOOLHELP, 83, "TaskSwitch", 6 },
+    /* Windows 95's with structures, buffers and memory; the control classes'
+     * procedures; SHELL's icons (ne_guest_win95.c, MessageBoxEx:
+     * ne_guest_api.c) */
+    { M_KERNEL, 406, "WritePrivateProfileStruct", 18 },
+    { M_KERNEL, 407, "GetPrivateProfileStruct", 18 },
+    { M_KERNEL, 411, "GetCurrentDirectory", 8 },
+    { M_KERNEL, 412, "SetCurrentDirectory", 4 },
+    { M_KERNEL, 413, "FindFirstFile", 8 },
+    { M_KERNEL, 414, "FindNextFile", 6 },
+    { M_KERNEL, 415, "FindClose", 2 },
+    { M_KERNEL, 416, "WritePrivateProfileSection", 12 },
+    { M_KERNEL, 417, "WriteProfileSection", 8 },
+    { M_KERNEL, 418, "GetPrivateProfileSection", 14 },
+    { M_KERNEL, 419, "GetProfileSection", 10 },
+    { M_KERNEL, 422, "GetDiskFreeSpace", 20 },
+    { M_KERNEL, 431, "IsPeFormat", 6 },
+    { M_GDI, 250, "Copy", 10 },
+    { M_GDI, 281, "DrvSetPrinterData", 20 },
+    { M_GDI, 282, "DrvGetPrinterData", 22 },
+    { M_GDI, 607, "GetRegionData", 10 },
+    { M_GDI, 608, "ExtCreateRegion", 12 },
+    { M_USER, 301, "EDITWNDPROC", 10 },
+    { M_USER, 302, "STATICWNDPROC", 10 },
+    { M_USER, 303, "BUTTONWNDPROC", 10 },
+    { M_USER, 304, "SBWNDPROC", 10 },
+    { M_USER, 305, "DESKTOPWNDPROC", 10 },
+    { M_USER, 306, "MENUWNDPROC", 10 },
+    { M_USER, 307, "LBOXCTLWNDPROC", 10 },
+    { M_USER, 344, "COMBOBOXCTLWNDPROC", 10 },
+    { M_USER, 336, "LoadCursorIconHandler", 6 },
+    { M_USER, 356, "LoadDIBCursorHandler", 6 },
+    { M_USER, 357, "LoadDIBIconHandler", 6 },
+    { M_USER, 364, "LookupIconIdFromDirectoryEx", 12 },
+    { M_USER, 408, "CreateCursorIconIndirect", 14 },
+    { M_USER, 428, "TileWindows", 14 },
+    { M_USER, 429, "CascadeWindows", 14 },
+    { M_USER, 441, "InsertMenuItem", 10 },
+    { M_USER, 443, "GetMenuItemInfo", 10 },
+    { M_USER, 446, "SetMenuItemInfo", 10 },
+    { M_USER, 449, "DrawState", 24 },
+    { M_USER, 450, "CreateIconFromResourceEx", 18 },
+    { M_USER, 455, "GetIconID", 6 },
+    { M_USER, 456, "LoadIconHandler", 4 },
+    { M_USER, 475, "SetScrollInfo", 10 },
+    { M_USER, 476, "GetScrollInfo", 8 },
+    { M_USER, 479, "MenuItemFromPoint", 8 },
+    { M_USER, 665, "GetMenuItemRect", 10 },
+    { M_USER, 667, "TrackPopupMenuEx", 14 },
+    { M_USER, 668, "SetWindowRgn", 6 },
+    { M_USER, 669, "GetWindowRgn", 4 },
+    { M_USER, 827, "MessageBoxIndirect", 4 },
+    { M_USER, 930, "MessageBoxEx", 14 },
+    { M_SHELL, 39, "InternalExtractIcon", 10 },
+    { M_SHELL, 40, "ExtractIconEx", 16 },
 };
 
 /* the generic ones (sdk/gen_ne_sigs.py) */
@@ -890,14 +944,25 @@ static int service_id_args(const win_ne_import *imp, uint16_t *id, uint16_t *arg
 {
     /* KERNEL's Reserved1 to 4: Windows 2.x's AnsiNext, AnsiPrev, AnsiUpper,
      * AnsiLower there, USER's */
-    static const uint16_t ansi[4] = { 472, 473, 431, 432 };
-    if (module_of(imp) == M_KERNEL && !imp->procedure[0] && imp->ordinal >= 77 &&
-        imp->ordinal <= 80) {
-        win_ne_import u = *imp;
-        lstrcpy_n(u.module, "USER", sizeof(u.module));
-        u.ordinal = ansi[imp->ordinal - 77];
-        return service_id_args(&u, id, args);
-    }
+    /* and the other old entry points of functions that moved on: KERNEL's
+     * Reserved5 lstrcmp (USER's), GDI's RectInRegionOld, GDISelectPalette
+     * and GDIRealizePalette (USER's SelectPalette, RealizePalette), USER's
+     * OLDEXITWINDOWS (OldExitWindows) */
+    static const struct { uint8_t m; uint16_t o; uint8_t to_m; uint16_t to_o; } old[] = {
+        { M_KERNEL, 77, M_USER, 472 }, { M_KERNEL, 78, M_USER, 473 },
+        { M_KERNEL, 79, M_USER, 431 }, { M_KERNEL, 80, M_USER, 432 },
+        { M_KERNEL, 87, M_USER, 430 }, { M_GDI, 181, M_GDI, 466 },
+        { M_GDI, 361, M_USER, 282 }, { M_GDI, 362, M_USER, 283 },
+        { M_USER, 595, M_USER, 2 },
+    };
+    int mod = module_of(imp);
+    for (unsigned k = 0; !imp->procedure[0] && k < sizeof(old) / sizeof(old[0]); k++)
+        if (old[k].m == mod && old[k].o == imp->ordinal) {
+            win_ne_import u = *imp;
+            lstrcpy_n(u.module, module_names[old[k].to_m], sizeof(u.module));
+            u.ordinal = old[k].to_o;
+            return service_id_args(&u, id, args);
+        }
     int i = service_index(imp), module = module_of(imp);
     if (i >= 0) {
         *id = (uint16_t)(module_base[services[i].module] + services[i].ordinal);

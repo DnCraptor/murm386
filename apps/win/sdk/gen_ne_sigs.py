@@ -81,6 +81,8 @@ SKIP = {
     # the program's resources, structures of words (ne_guest_more.c)
     'LoadImage', 'GetIconInfo', 'DrawTextEx', 'ChildWindowFromPointEx', 'GetDCHook',
     'GetTextExtentEx',
+    # MessageBox's own frame (ne_guest_api.c)
+    'MessageBoxEx',
 }
 
 COUNTS = re.compile(r'^(n|c|cb|cch|count|len|nCount|cbString|size)$')

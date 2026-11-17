@@ -206,6 +206,20 @@ OW95: the rest of Win16's KERNEL, USER and GDI: SwitchStackTo and
     (its RCDATA read from the file), a dialog's ICON controls of the
     program's own icons (by name and by number): "system: res 54925, drive
     3, timer 1 1 0 1; fpu 94 7F; mouse 16 1 2; atom 1; access hello"
+
+OW95X: entry points WINN added late: old ordinals of functions that moved
+    (KERNEL.87 lstrcmp, GDI.181 RectInRegionOld), GDI's priority queues
+    and spooler (no printer), Windows 95's KERNEL (GetShortPathName,
+    GetFileAttributes, FindFirstFile, profile sections and structures, the
+    current directory, free space), GDI (PolyBezier, SetArcDirection,
+    GetRegionData, GetTextCharset, GetLayout), USER (FindWindowEx, the
+    foreground window, scroll and menu item information, radio and default
+    items, DrawEdge, DrawFrameControl, DrawState, icon directories,
+    EDITWNDPROC) and SHELL (ExtractIconEx, InternalExtractIcon): "kernel:
+    short 7 WIN.INI, attr 0, ini 1, section 1, struct 1, cwd 1, space 1,
+    old 1", "gdi: pq 2331, spool -1 0, rgn 64, old 1, charset 0, layout 0",
+    "user: find 1, fg 1, scroll 0 50 20, menu Three 103 3 8, default 103,
+    dir 12, edit 4", "shell: icons 1 1, internal 1"
 """
 import sys
 
@@ -9059,6 +9073,439 @@ PROGRAMS = {
             '010001002020100001000400e802000001000000010001002020100001000400e802000002000000805002dc'
             '003c003c001e0000000004000400000000000a0003000050824f5749434f4e000028000400000000000b0003'
             '00005082ff020000'
+        )),
+    'OW95X': (
+        # wcc -bt=windows -ms ow95x.c; wlink @ow95x.lnk; wrc -bt=windows ow95x.rc ow95x.exe
+        # (ow95.ico: OW95's mkico.py)
+        # ---- ow95x.c
+        #     /*
+        #      * ow95x.c - Win16 entry points WINN added late: old ordinals of functions
+        #      * that moved (KERNEL's Reserved5 lstrcmp, GDI's RectInRegionOld), GDI's
+        #      * priority queues and spooler (no printer), Windows 95's KERNEL (short
+        #      * names, attributes, FindFirstFile, profile sections and structures, the
+        #      * current directory, free space), GDI (Bezier curves, the arc's direction,
+        #      * region data, charset, layout) and USER (FindWindowEx, the foreground
+        #      * window, scroll and menu item information, radio and default items,
+        #      * DrawEdge, DrawFrameControl, DrawState, icon directories, the control
+        #      * classes' procedures), SHELL's ExtractIconEx and InternalExtractIcon.
+        #      * Its window shows the results, its drawings below them.
+        #      */
+        #     #include <windows.h>
+        #     #include <string.h>
+        #
+        #     typedef struct { UINT cbSize, fMask; int nMin, nMax; UINT nPage; int nPos, nTrackPos; } SI;
+        #     typedef struct { UINT cbSize, fMask, fType, fState, wID; HMENU hSubMenu;
+        #                      HBITMAP hbmpChecked, hbmpUnchecked; DWORD dwItemData; LPSTR dwTypeData;
+        #                      UINT cch; } MII;
+        #     typedef struct { DWORD attr; DWORD t[6]; DWORD hi, lo, r0, r1; char name[260];
+        #                      char alt[14]; } FD;
+        #
+        #     extern int FAR PASCAL RESERVED5(LPCSTR, LPCSTR);
+        #     extern BOOL FAR PASCAL RECTINREGIONOLD(HRGN, const RECT FAR *);
+        #     extern HANDLE FAR PASCAL CREATEPQ(int);
+        #     extern int FAR PASCAL INSERTPQ(HANDLE, int, int);
+        #     extern int FAR PASCAL EXTRACTPQ(HANDLE);
+        #     extern int FAR PASCAL MINPQ(HANDLE);
+        #     extern int FAR PASCAL DELETEPQ(HANDLE);
+        #     extern int FAR PASCAL OPENJOB(LPCSTR, LPCSTR, HDC);
+        #     extern int FAR PASCAL GETSPOOLJOB(int, LONG);
+        #     extern WORD FAR PASCAL GETSHORTPATHNAME(LPCSTR, LPSTR, WORD);
+        #     extern DWORD FAR PASCAL GETFILEATTRIBUTES(LPCSTR);
+        #     extern HANDLE FAR PASCAL FINDFIRSTFILE(LPCSTR, FD FAR *);
+        #     extern BOOL FAR PASCAL FINDNEXTFILE(HANDLE, FD FAR *);
+        #     extern BOOL FAR PASCAL FINDCLOSE(HANDLE);
+        #     extern int FAR PASCAL GETPROFILESECTION(LPCSTR, LPSTR, int);
+        #     extern BOOL FAR PASCAL WRITEPRIVATEPROFILESTRUCT(LPCSTR, LPCSTR, LPVOID, UINT, LPCSTR);
+        #     extern BOOL FAR PASCAL GETPRIVATEPROFILESTRUCT(LPCSTR, LPCSTR, LPVOID, UINT, LPCSTR);
+        #     extern DWORD FAR PASCAL GETCURRENTDIRECTORY(DWORD, LPSTR);
+        #     extern BOOL FAR PASCAL GETDISKFREESPACE(LPCSTR, DWORD FAR *, DWORD FAR *, DWORD FAR *, DWORD FAR *);
+        #     extern BOOL FAR PASCAL POLYBEZIER(HDC, const POINT FAR *, int);
+        #     extern int FAR PASCAL SETARCDIRECTION(HDC, int);
+        #     extern DWORD FAR PASCAL GETREGIONDATA(HRGN, DWORD, LPVOID);
+        #     extern UINT FAR PASCAL GETTEXTCHARSET(HDC);
+        #     extern DWORD FAR PASCAL GETLAYOUT(HDC);
+        #     extern HWND FAR PASCAL FINDWINDOWEX(HWND, HWND, LPCSTR, LPCSTR);
+        #     extern HWND FAR PASCAL GETFOREGROUNDWINDOW(void);
+        #     extern int FAR PASCAL SETSCROLLINFO(HWND, int, SI FAR *, BOOL);
+        #     extern BOOL FAR PASCAL GETSCROLLINFO(HWND, int, SI FAR *);
+        #     extern BOOL FAR PASCAL INSERTMENUITEM(HMENU, UINT, BOOL, MII FAR *);
+        #     extern BOOL FAR PASCAL GETMENUITEMINFO(HMENU, UINT, BOOL, MII FAR *);
+        #     extern BOOL FAR PASCAL CHECKMENURADIOITEM(HMENU, UINT, UINT, UINT, UINT);
+        #     extern BOOL FAR PASCAL SETMENUDEFAULTITEM(HMENU, UINT, UINT);
+        #     extern UINT FAR PASCAL GETMENUDEFAULTITEM(HMENU, UINT, UINT);
+        #     extern BOOL FAR PASCAL DRAWEDGE(HDC, RECT FAR *, UINT, UINT);
+        #     extern BOOL FAR PASCAL DRAWFRAMECONTROL(HDC, RECT FAR *, UINT, UINT);
+        #     extern BOOL FAR PASCAL DRAWSTATE(HDC, HBRUSH, FARPROC, LPARAM, WPARAM, int, int, int, int, UINT);
+        #     extern int FAR PASCAL LOOKUPICONIDFROMDIRECTORYEX(LPVOID, BOOL, int, int, UINT);
+        #     extern LRESULT FAR PASCAL EDITWNDPROC(HWND, UINT, WPARAM, LPARAM);
+        #     extern UINT FAR PASCAL EXTRACTICONEX(LPCSTR, int, HICON FAR *, HICON FAR *, UINT);
+        #     extern HGLOBAL FAR PASCAL INTERNALEXTRACTICON(HINSTANCE, LPCSTR, UINT, WORD);
+        #
+        #     static char line[5][160];
+        #
+        #     static void kernel(void)
+        #     {
+        #         char s[144], cwd[144], sec[512];
+        #         FD fd;
+        #         HANDLE f;
+        #         int n = 0, ok = 0;
+        #         BYTE in[5] = { 1, 2, 3, 250, 7 }, out[5];
+        #         DWORD spc = 0, bps = 0, fr = 0, tot = 0;
+        #         WORD sh = GETSHORTPATHNAME("WIN.INI", s, sizeof(s));
+        #         DWORD attr = GETFILEATTRIBUTES("WIN.INI");
+        #         if ((f = FINDFIRSTFILE("*.INI", &fd)) != (HANDLE)-1) {
+        #             do n++; while (FINDNEXTFILE(f, &fd));
+        #             FINDCLOSE(f);
+        #         }
+        #         if (WRITEPRIVATEPROFILESTRUCT("ow95x", "data", in, 5, "OW95X.INI") &&
+        #             GETPRIVATEPROFILESTRUCT("ow95x", "data", out, 5, "OW95X.INI"))
+        #             ok = !_fmemcmp(in, out, 5);
+        #         GETDISKFREESPACE(NULL, &spc, &bps, &fr, &tot);
+        #         wsprintf(line[0], "kernel: short %u %s, attr %lX, ini %d, section %d, struct %d, "
+        #                  "cwd %d, space %d, old %d",
+        #                  sh, (LPSTR)s, attr & 0x10, n > 1, GETPROFILESECTION("windows", sec, sizeof(sec)) > 0,
+        #                  ok, GETCURRENTDIRECTORY(sizeof(cwd), cwd) > 2, bps == 512 && tot > 0,
+        #                  RESERVED5("abc", "abd") < 0);
+        #     }
+        #
+        #     static void gdi(HWND h)
+        #     {
+        #         HANDLE pq = CREATEPQ(4);
+        #         int a, b, c;
+        #         RECT r = { 5, 5, 8, 8 };
+        #         HRGN rgn = CreateRectRgn(0, 0, 10, 10), two = CreateRectRgn(20, 0, 30, 10);
+        #         HDC dc = GetDC(h);
+        #         INSERTPQ(pq, 1, 30);
+        #         INSERTPQ(pq, 2, 10);
+        #         INSERTPQ(pq, 3, 20);
+        #         a = EXTRACTPQ(pq);
+        #         b = MINPQ(pq);
+        #         c = EXTRACTPQ(pq);
+        #         CombineRgn(rgn, rgn, two, RGN_OR);
+        #         wsprintf(line[1], "gdi: pq %d%d%d%d, spool %d %d, rgn %ld, old %d, charset %u, layout %ld",
+        #                  a, b, c, EXTRACTPQ(pq), OPENJOB("LPT1:", "ow95x", dc), GETSPOOLJOB(1, 0L),
+        #                  GETREGIONDATA(rgn, 0, NULL), RECTINREGIONOLD(rgn, &r), GETTEXTCHARSET(dc),
+        #                  GETLAYOUT(dc));
+        #         DELETEPQ(pq);
+        #         DeleteObject(rgn);
+        #         DeleteObject(two);
+        #         ReleaseDC(h, dc);
+        #     }
+        #
+        #     static void user(HWND h, HINSTANCE inst)
+        #     {
+        #         SI si;
+        #         MII mi;
+        #         char text[32];
+        #         HMENU menu = CreatePopupMenu();
+        #         HWND edit = CreateWindow("EDIT", "four", WS_CHILD, 0, 0, 10, 10, h, (HMENU)7, inst, NULL);
+        #         static BYTE dir[6 + 28] = { 0, 0, 1, 0, 2, 0,
+        #             16, 16, 16, 0, 1, 0, 4, 0, 0, 0, 0, 0, 11, 0,
+        #             32, 32, 16, 0, 1, 0, 4, 0, 0, 0, 0, 0, 12, 0 };
+        #         si.cbSize = sizeof(si);
+        #         si.fMask = 0x0005;
+        #         si.nMin = 0; si.nMax = 50; si.nPos = 20;
+        #         SETSCROLLINFO(h, SB_VERT, &si, FALSE);
+        #         _fmemset(&si, 0, sizeof(si));
+        #         si.cbSize = sizeof(si);
+        #         si.fMask = 0x0005;
+        #         GETSCROLLINFO(h, SB_VERT, &si);
+        #         AppendMenu(menu, MF_STRING, 101, "One");
+        #         AppendMenu(menu, MF_STRING, 102, "Two");
+        #         _fmemset(&mi, 0, sizeof(mi));
+        #         mi.cbSize = sizeof(mi);
+        #         mi.fMask = 0x12;                    /* MIIM_TYPE | MIIM_ID */
+        #         mi.wID = 103;
+        #         mi.dwTypeData = "Three";
+        #         INSERTMENUITEM(menu, 2, TRUE, &mi);
+        #         CHECKMENURADIOITEM(menu, 101, 103, 102, MF_BYCOMMAND);
+        #         SETMENUDEFAULTITEM(menu, 103, FALSE);
+        #         _fmemset(&mi, 0, sizeof(mi));
+        #         mi.cbSize = sizeof(mi);
+        #         mi.fMask = 0x13;                    /* MIIM_TYPE | MIIM_ID | MIIM_STATE */
+        #         mi.dwTypeData = text;
+        #         mi.cch = sizeof(text);
+        #         GETMENUITEMINFO(menu, 2, TRUE, &mi);
+        #         wsprintf(line[2], "user: find %d, fg %d, scroll %d %d %d, menu %s %u %d %X, default %u, "
+        #                  "dir %d, edit %ld",
+        #                  FINDWINDOWEX(NULL, NULL, "OW95X", NULL) == h, GETFOREGROUNDWINDOW() == h,
+        #                  si.nMin, si.nMax, si.nPos, (LPSTR)text, mi.wID, GetMenuItemCount(menu),
+        #                  GetMenuState(menu, 102, MF_BYCOMMAND) & MF_CHECKED,
+        #                  GETMENUDEFAULTITEM(menu, FALSE, 0), LOOKUPICONIDFROMDIRECTORYEX(dir, TRUE, 32, 32, 0),
+        #                  EDITWNDPROC(edit, WM_GETTEXTLENGTH, 0, 0L));
+        #         DestroyMenu(menu);
+        #         DestroyWindow(edit);
+        #     }
+        #
+        #     static void shell(void)
+        #     {
+        #         char path[144];
+        #         HICON big[2];
+        #         HGLOBAL g;
+        #         GetModuleFileName(GetModuleHandle("OW95X"), path, sizeof(path));
+        #         g = INTERNALEXTRACTICON(0, path, 0, 1);
+        #         wsprintf(line[3], "shell: icons %u %u, internal %d", EXTRACTICONEX(path, -1, NULL, NULL, 0),
+        #                  EXTRACTICONEX(path, 0, big, NULL, 1), g != 0);
+        #         if (g)
+        #             GlobalFree(g);
+        #     }
+        #
+        #     static void paint(HWND h)
+        #     {
+        #         PAINTSTRUCT ps;
+        #         HDC dc = BeginPaint(h, &ps);
+        #         RECT r;
+        #         int i;
+        #         static POINT bez[4] = { { 330, 150 }, { 360, 90 }, { 420, 210 }, { 450, 150 } };
+        #         for (i = 0; i < 4; i++)
+        #             TextOut(dc, 4, 4 + 16 * i, line[i], lstrlen(line[i]));
+        #         SetRect(&r, 10, 80, 60, 110);
+        #         DRAWEDGE(dc, &r, 0x05, 0x080F);     /* EDGE_RAISED, BF_RECT | BF_MIDDLE */
+        #         SetRect(&r, 70, 80, 120, 110);
+        #         DRAWEDGE(dc, &r, 0x0A, 0x000F);     /* EDGE_SUNKEN */
+        #         SetRect(&r, 130, 80, 180, 110);
+        #         DRAWEDGE(dc, &r, 0x06, 0x000F);     /* EDGE_ETCHED */
+        #         SetRect(&r, 10, 120, 26, 136);
+        #         DRAWFRAMECONTROL(dc, &r, 4, 0x0400);        /* a check box, checked */
+        #         SetRect(&r, 34, 120, 50, 136);
+        #         DRAWFRAMECONTROL(dc, &r, 4, 0x0404);        /* a radio button, checked */
+        #         SetRect(&r, 58, 120, 74, 136);
+        #         DRAWFRAMECONTROL(dc, &r, 1, 0x0000);        /* caption close */
+        #         SetRect(&r, 82, 120, 98, 136);
+        #         DRAWFRAMECONTROL(dc, &r, 3, 0x0001);        /* scroll down */
+        #         SetRect(&r, 106, 120, 166, 140);
+        #         DRAWFRAMECONTROL(dc, &r, 4, 0x0010);        /* a push button */
+        #         DRAWSTATE(dc, 0, NULL, (LPARAM)(LPSTR)"Disabled", 0, 180, 120, 0, 0, 0x0021);
+        #         DRAWSTATE(dc, 0, NULL, (LPARAM)(LPSTR)"&Normal", 0, 180, 140, 0, 0, 0x0002);
+        #         POLYBEZIER(dc, bez, 4);
+        #         SETARCDIRECTION(dc, 2);             /* AD_CLOCKWISE: the lower half */
+        #         Arc(dc, 470, 100, 530, 160, 530, 130, 470, 130);
+        #         EndPaint(h, &ps);
+        #     }
+        #
+        #     LRESULT FAR PASCAL _export WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+        #     {
+        #         if (msg == WM_PAINT) {
+        #             paint(h);
+        #             return 0;
+        #         }
+        #         if (msg == WM_DESTROY) {
+        #             PostQuitMessage(0);
+        #             return 0;
+        #         }
+        #         return DefWindowProc(h, msg, wp, lp);
+        #     }
+        #
+        #     int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
+        #     {
+        #         WNDCLASS wc;
+        #         MSG m;
+        #         HWND h;
+        #         _fmemset(&wc, 0, sizeof(wc));
+        #         wc.lpfnWndProc = WndProc;
+        #         wc.hInstance = inst;
+        #         wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        #         wc.hbrBackground = GetStockObject(WHITE_BRUSH);
+        #         wc.lpszClassName = "OW95X";
+        #         RegisterClass(&wc);
+        #         h = CreateWindow("OW95X", "OW95X", WS_OVERLAPPEDWINDOW | WS_VSCROLL, 0, 0, 600, 260,
+        #                          NULL, NULL, inst, NULL);
+        #         ShowWindow(h, show);
+        #         kernel();
+        #         gdi(h);
+        #         user(h, inst);
+        #         shell();
+        #         InvalidateRect(h, NULL, TRUE);
+        #         while (GetMessage(&m, NULL, 0, 0)) {
+        #             TranslateMessage(&m);
+        #             DispatchMessage(&m);
+        #         }
+        #         return m.wParam;
+        #     }
+        # ---- ow95x.lnk
+        #     system windows
+        #     name ow95x.exe
+        #     file ow95x.o
+        #     import RESERVED5 KERNEL.87
+        #     import RECTINREGIONOLD GDI.181
+        #     import CREATEPQ GDI.230
+        #     import MINPQ GDI.231
+        #     import EXTRACTPQ GDI.232
+        #     import INSERTPQ GDI.233
+        #     import DELETEPQ GDI.235
+        #     import OPENJOB GDI.240
+        #     import GETSPOOLJOB GDI.245
+        #     import GETSHORTPATHNAME KERNEL.274
+        #     import GETFILEATTRIBUTES KERNEL.420
+        #     import FINDFIRSTFILE KERNEL.413
+        #     import FINDNEXTFILE KERNEL.414
+        #     import FINDCLOSE KERNEL.415
+        #     import GETPROFILESECTION KERNEL.419
+        #     import WRITEPRIVATEPROFILESTRUCT KERNEL.406
+        #     import GETPRIVATEPROFILESTRUCT KERNEL.407
+        #     import GETCURRENTDIRECTORY KERNEL.411
+        #     import GETDISKFREESPACE KERNEL.422
+        #     import POLYBEZIER GDI.502
+        #     import SETARCDIRECTION GDI.525
+        #     import GETREGIONDATA GDI.607
+        #     import GETTEXTCHARSET GDI.612
+        #     import GETLAYOUT GDI.1001
+        #     import FINDWINDOWEX USER.427
+        #     import GETFOREGROUNDWINDOW USER.608
+        #     import SETSCROLLINFO USER.475
+        #     import GETSCROLLINFO USER.476
+        #     import INSERTMENUITEM USER.441
+        #     import GETMENUITEMINFO USER.443
+        #     import CHECKMENURADIOITEM USER.666
+        #     import SETMENUDEFAULTITEM USER.664
+        #     import GETMENUDEFAULTITEM USER.663
+        #     import DRAWEDGE USER.659
+        #     import DRAWFRAMECONTROL USER.656
+        #     import DRAWSTATE USER.449
+        #     import LOOKUPICONIDFROMDIRECTORYEX USER.364
+        #     import EDITWNDPROC USER.301
+        #     import EXTRACTICONEX SHELL.40
+        #     import INTERNALEXTRACTICON SHELL.39
+        # ---- ow95x.rc
+        #     #include <windows.h>
+        #
+        #     OWICON ICON ow95.ico
+        bytes.fromhex(
+            '4d5a80000100000004000000ffff0000b8000000000000004000000000000000000000000000000000000000'
+            '00000000000000000000000000000000800000000e1fba0e00b409cd21b8014ccd2154686973206973206120'
+            '57696e646f77732031362d6269742065786563757461626c650d0a240000000000000000000000004e450501'
+            'b5000700000000000203020000040020b809010000000200020004000d0040005000830096009e003c010000'
+            '0000010002000208a500760900000a03a500b20c400db20cb308c002410ce005010003800100000000001b0a'
+            '740110100180000000000e800100000000008f0b0a0030102c00000000000000064f5749434f4e054f573935'
+            '58000007574e4450524f43010000010008000c00110000064b45524e454c034744490455534552055348454c'
+            '4c0101291d080000096f773935782e65786500000000ccebfd90909090005589e5b8ac04e836095351525657'
+            '81ec800431c08946f48946f28cd88ec08d7ed4be9801a5a5a431c08946e08946e28946e48946e68946e88946'
+            'ea8946ec8946ee1eb81000508d9644ff1e52b89000509affff000089c71eb81000509affff00008946f01eb8'
+            '1800508d9676fd1e529affff000089c63dffff7419568d9676fd1e52ff46f49affff000085c075ed569affff'
+            '00001eb82d00501eb82800508d56d41e52b80500501eb81e00509affff000085c074401eb82d00501eb82800'
+            '508d56da1e52b80500501eb81e00509affff000085c0741fb80500508cd98d5eda8cda8d46d4e88a0885c075'
+            '05b80100eb0231c08946f231c050508d56e01e528d56e41e528d56e81e528d56ec1e529affff00001eb83700'
+            '501eb83300509affff000085c07d05b80100eb0231c050837ee6007516817ee40002750f8b46ee0b46ec85c0'
+            '7605b80100eb0231c05031c050b89000508d96b4fe1e529affff000085d275053d02007605b80100eb0231c0'
+            '50ff76f21eb83b00508d9676fb1e52b80002509affff000085c07e05b80100eb0231c050837ef4017e05b801'
+            '00eb0231c0508b56f083e21031c050528d9644ff1e52571eb84300501eb8c002509affff000083c41e8d66f6'
+            '5f5e5a595b5dc35589e550b84200e8680758535152565783ec1250b80400509affff00008946f48cd88ec08d'
+            '7ee4be9d01a5a5a5a531c05050b80a0050509affff000089c6b814005031c050b81e0050b80a00509affff00'
+            '008946f2ff76e29affff000089c7ff76f4b8010050b81e00509affff0000ff76f4b8020050b80a00509affff'
+            '0000ff76f4b8030050b81400509affff0000ff76f49affff00008946ecff76f49affff00008946eeff76f49a'
+            'ffff00008946f05656ff76f2b80200509affff0000579affff00005250579affff000050568d56e41e529aff'
+            'ff0000505631c0505050509affff00005250b801005031c050509affff0000501eb89a00501eb82d0050579a'
+            'ffff000050ff76f49affff000050ff76f0ff76eeff76ec1eb8a000501eb86003509affff000083c420ff76f4'
+            '9affff0000569affff0000ff76f29affff0000ff76e2579affff0000e9aafe5589e550b88000e81c06585351'
+            '565783ec5089c78956f29affff000089c68946f01eb8ec00501eb8e70050b800405031c0505050b80a005050'
+            '57b8070050ff76f231c050509affff00008946f68946f4c746e20e00c746e40500c746e60000c746e83200c7'
+            '46ec140057b80100508d46e21e5031c0509affff0000b90e0031db8cda8d46e2e8f805c746e20e00c746e405'
+            '0057b80100508d56e21e529affff00005631c050b86500501eb8f100509affff00005631c050b86600501eb8'
+            'f500509affff0000b91a0031db8cda8d46c8e8ae05c746c81a00c746ca1200c746d06700c746dcf9008c5ede'
+            '56b8020050b80100508d56c81e529affff000056b8650050b8670050b866005031c0509affff000056b86700'
+            '5031c0509affff0000b91a0031db8cda8d46c8e85505c746c81a00c746ca13008d46a88946dc8c5edec746e0'
+            '200056b8020050b80100508d56c81e529affff0000ff76f6b80e005031c05050509affff000052501eb8a501'
+            '50b8010050b82000505031c0509affff0000505631c050509affff00005056b866005031c0509affff000025'
+            '080050569affff000050ff76d08d56a81e52ff76ecff76e8ff76e69affff000039f87505ba0100eb0231d252'
+            '31c050501eb8ff005031c050509affff000039f87505ba0100eb0231d2521eb80501501eb80004509affff00'
+            '0083c424ff76f09affff0000ff76f49affff00008d66f85f5ee9a3fc5589e5b8b000e810045351525681ec94'
+            '001eb8ff00509affff0000508d9664ff1e52b89000509affff000031c0508d9664ff1e5250b80100509affff'
+            '000089c685c07403b80100508d9664ff1e5231c0508d56f41e525050b80100509affff0000508d9664ff1e52'
+            'b8ffff5031c050505050509affff0000501eb85b01501eb8a004509affff000083c40e85f67406569affff00'
+            '008d66f8e906fc5589e550b85000e8740358535152565783ec2850508d56ce1e529affff000089c731f657b8'
+            '040050b10489f0d3e00504005089f0d1e0d1e001f0b105d3e0bac00201c21e521e529affff0000509affff00'
+            '004683fe047ccb8d56ee1e52b80a0050b8500050b83c0050b86e00509affff0000578d56ee1e52b8050050b8'
+            '0f08509affff00008d56ee1e52b8460050b8500050b8780050b86e00509affff0000578d56ee1e52b80a0050'
+            'b80f00509affff00008d56ee1e52b8820050b8500050b8b40050b86e00509affff0000578d56ee1e52b80600'
+            '50b80f00509affff00008d56ee1e52b80a0050b8780050b81a0050b88800509affff0000578d56ee1e52b804'
+            '0050b80004509affff00008d56ee1e52b8220050b8780050b8320050b88800509affff0000578d56ee1e52b8'
+            '040050b80404509affff00008d56ee1e52b83a0050b8780050b84a0050b88800509affff0000578d56ee1e52'
+            'b801005031c0509affff00008d56ee1e52b8520050b8780050b8620050b88800509affff0000578d56ee1e52'
+            'b8030050b80100509affff00008d56ee1e52b86a0050b8780050b8a60050b88c00509affff0000578d56ee1e'
+            '52b8040050b81000509affff00005731c05050501eb87b015031c050b8b40050b878005031c05050b8210050'
+            '9affff00005731c05050501eb884015031c050b8b40050b88c005031c05050b80200509affff0000571eb8c7'
+            '0150b80400509affff000057b80200509affff000057b8d60150b8640050b8120250b8a00050b8120250b882'
+            '0050b8d60150b88200509affff0000ff76cc8d56ce1e529affff0000e9aef91e5890455589e51e8ed8b81200'
+            'e81a018b560c8b460e83fa0f7509e88efd31c031d2eb1f83fa02750a31c0509affff0000ebeb5052ff760aff'
+            '7608ff76069affff00001f5d4dca0a005589e5b85200e8d800565783ec2c8b7e0cb91a0031db8cda8d46d0e8'
+            '1d01c746d2ffffc746d4ffff897eda31c05050b8007f509affff00008946de31c0509affff00008946e0c746'
+            'e6ff008c5ee88d56d01e529affff00001eb8ff00501e50b8ef005031c0505050b8580250b804015031c05050'
+            '5750509affff000089c650ff76049affff0000e818f789f0e8e0f889fa89f0e825fae82ffc5631c05050b801'
+            '00509affff00008d56ea1e5231c05050509affff000085c074168d56ea1e529affff00008d56ea1e529affff'
+            '0000ebd78b46ee8d66fc5f5e5dc20a008c16d801c33bc473132bc4f7d83b060a0077068cd03b06d8017401c3'
+            '0e5ab86909bb0100e9f001537461636b204f766572666c6f7721005589e5565789c68b460489df8ec189d11e'
+            '918ed80bc9f3a6740519c983d9ff1f89c85f5e5dc202005789c788d88ec2578ae0d1e9f3ab13c9f3aa5f89f8'
+            '5fc3eb0203009affff00000bc0750e5033c0ba0f00e86a0258b44ccd218c06de01575606535253bee0058936'
+            'f9018c1efb01268a078804464384c075f589360a005b2bc0509affff000057579affff0000fc1e07b9e005bf'
+            'c0022bcf32c0f3aab8020ba3f501b8ffffa3f701b430cd21a2e0018826e1019affff0000a2e2018826e30186'
+            'e0a3e40154583bc475120f01e0a90100740ab001a2e601b003a2e7011ebf010257b89000509affff0000b801'
+            '02893efd018c1eff01b8ff00e86b01e8eefde9f9004f70656e20576174636f6d20432f432b2b31362052756e'
+            '2d54696d652073797374656d2e20436f7079726967687420286329204f70656e20576174636f6d20436f6e74'
+            '72696275746f727320323030322d323032362e20506f7274696f6e7320436f70797269676874202843292053'
+            '79626173652c20496e632e20313938382d323030322e00c3cb005589e551565781ec800089c689df8d9e7aff'
+            '8cd98ec2268a0484c074173c0d74138d46f939c3730c268a048ec14626880743ebe031c08ec15026c607001e'
+            '8d9e7aff531eb88c015031c0509affff000089f8e94400515689c189d6e8330185c0750689c889f2eb9889d8'
+            'e92c0000c3c3535289c3833eb802007404ff16b802ff169202baff00b81000e8a800ff169202ff16940289d8'
+            'e928fe5289c2ff169202ff16940289d0e918fe5589e5535289c3833f0075078d66fc5a5b5dc31eff171febf3'
+            '5589e5535289c38b47028b1785c0750485d274df1eff1f1febd95589e5535152565789c11ee813ffbfc00289'
+            'fabbba0289fe88c839fb7316803f02750583c306ebf23a470172f689de8a4701ebef39fe74158d4402803c00'
+            '7508e88affc60402ebcbe89bffebf61f8d66f65f5e5a595b5dc35589e55351565789c11ee8bcfe88d5bfc002'
+            '89fabbc00289fe88c839fb7316803f02750583c306ebf23a470177f689de8a4701ebef39fe741c3a6c017305'
+            'c60402ebd18d4402803c007505e827ffebeee83bffebe91f8d66f85f5eeb9f803e960200750331c0c35250cc'
+            'eb0657564944454fb8010083c404c3006b000301170602002100030137060300480003014a06030093020301'
+            '640603004800030177060300930203019106030048000301a406030093020301be06030048000301d1060300'
+            '90020301eb06030048000301fe0603009002030118070300480003012a070300900203014407030048000301'
+            '570703009002030171070300480003018407030090020301a7070300c1010301ca070300c1010301d9070200'
+            'f6010301e30702000d020301090802001700030116080300280003014a080300060003015c0803006b000500'
+            '870801001d0802008c0801001d0803019a080300ad000301a508020057000301ba08030039000301de080300'
+            '29000301e90803002a000301090903007d000301180903006c00030126090300710003013009030072000301'
+            'bd0901005b000301fc0901001e000301030a0300050002001d0a0100b80903012e0a010003000301600a0100'
+            '31000301500b030001000301590001001201030165000100a4010301780001009d0103018e0001009e010301'
+            '980001009f010301b500010096010301d60001009701030116010100a6010301250101005700030162010100'
+            '9b0103018a010100a3010301c4010300a4010301ee010200e60003010d020200400003012302020040000301'
+            '2e0203004200030140020200e900030150020200e900030160020200e900030168020200e800030173020200'
+            'e70003017e020200e80003018f0202002f00030195020200e90303019d02020064020301a9020200b5000301'
+            'b60202005f020301c5020200f5000301d6020200f0000301df020200e8000301f8020300a401030103030200'
+            'eb000301090302004500030111030200450003011a03030044000301390303009f0103016703030029000301'
+            '98030300db010301be030300dc010301d00303009b010301e20303009b01030119040300b90103012e040300'
+            '9a0203013b0403009802030173040300bb010301840403002d0103019c0403006c010301a704030097020301'
+            'b5040300fa000301bf04030007010301d604030060020301f4040300ab0103010f050300a40103011a050300'
+            '980003012205030035000301450501002f000301550501003100030168050400270003018b05040028000301'
+            'a205040028000301b2050300a4010301bf05010011000301e405030027000301110601005a00000000000000'
+            '000000000000000000000000000005000000000000000000000057494e2e494e49002a2e494e49004f573935'
+            '582e494e490064617461006f7739357800616264006162630077696e646f7773006b65726e656c3a2073686f'
+            '72742025752025732c206174747220256c582c20696e692025642c2073656374696f6e2025642c2073747275'
+            '63742025642c206377642025642c2073706163652025642c206f6c64202564004c5054313a006764693a2070'
+            '712025642564256425642c2073706f6f6c2025642025642c2072676e20256c642c206f6c642025642c206368'
+            '61727365742025752c206c61796f757420256c6400666f75720045444954004f6e650054776f005468726565'
+            '004f5739355800757365723a2066696e642025642c2066672025642c207363726f6c6c202564202564202564'
+            '2c206d656e752025732025752025642025582c2064656661756c742025752c206469722025642c2065646974'
+            '20256c64007368656c6c3a2069636f6e732025752025752c20696e7465726e616c2025640044697361626c65'
+            '6400264e6f726d616c004f70656e20576174636f6d00010203fa070500050008000800000001000200101010'
+            '0001000400000000000b002020100001000400000000000c004a01960068015a00a401d200c2019600000000'
+            'ffff00000000000000000000000c000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000730b730b0000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000204209000000000000000000000000000000000000280000002000000040000000010004000000'
+            '0000800200000000000000000000000000000000000000000000800000000080000080800000000080008000'
+            '800000808000c0c0c00080808000ff00000000ff0000ffff00000000ff00ff00ff0000ffff00ffffff000000'
+            '0000000000000000000000000000000000000000000990000000000000000000000000000099990000000000'
+            '000000000000000009999990000000000000000000000000999aa99900000000000000000000000999aaaa99'
+            '9000000000000000000000999aaaaaa9990000000000000000000999aaaaaaaa99900000000000000000999a'
+            'aaaaaaaaa999000000000000000999aaaaaaaaaaaa9990000000000000999aaaaaaaaaaaaaa9990000000000'
+            '0999aaaaaaaaaaaaaaaa999000000000999aaaaaaaaaaaaaaaaaa9990000000999aaaaaaaaaaaaaaaaaaaa99'
+            '900000999aaaaaaaaaaaaaaaaaaaaaa999000999aaaaaaaaaaaaaaaaaaaaaaaa99900999aaaaaaaaaaaaaaaa'
+            'aaaaaaaa999000999aaaaaaaaaaaaaaaaaaaaaa99900000999aaaaaaaaaaaaaaaaaaaa9990000000999aaaaa'
+            'aaaaaaaaaaaaa999000000000999aaaaaaaaaaaaaaaa99900000000000999aaaaaaaaaaaaaa9990000000000'
+            '000999aaaaaaaaaaaa999000000000000000999aaaaaaaaaa99900000000000000000999aaaaaaaa99900000'
+            '00000000000000999aaaaaa999000000000000000000000999aaaa99900000000000000000000000999aa999'
+            '0000000000000000000000000999999000000000000000000000000000999900000000000000000000000000'
+            '0009900000000000000000000000000000000000000000000000fffffffffffe7ffffffc3ffffff81ffffff0'
+            '0fffffe007ffffc003ffff8001ffff0000fffe00007ffc00003ff800001ff000000fe0000007c00000038000'
+            '000180000001c0000003e0000007f000000ff800001ffc00003ffe00007fff0000ffff8001ffffc003ffffe0'
+            '07fffff00ffffff81ffffffc3ffffffe7fffffffffff0000010001002020100001000400e80200000100'
         )),
 }
 

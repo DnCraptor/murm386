@@ -871,6 +871,37 @@ int win_file_attr(LPCSTR path, int set, UINT attr)
 #endif
 }
 
+/* Windows 95's KERNEL: DOS's names are short already; the path as given
+ * if it is there (its length; the size it needs when buf is too small) */
+UINT WINAPI GetShortPathName(LPCSTR path, LPSTR out, UINT size)
+{
+    char absolute[256];
+    if (!path || !win_file_resolve(path, absolute, sizeof(absolute)) ||
+        win_file_attr(absolute, 0, 0) < 0)
+        return 0;
+    UINT n = (UINT)lstrlen(path);
+    if (!out || size <= n)
+        return n + 1;
+    lstrcpy(out, path);
+    return n;
+}
+
+/* the DOS attributes; 0xFFFFFFFF: no such file */
+DWORD WINAPI GetFileAttributes(LPCSTR path)
+{
+    char absolute[256];
+    int a = path && win_file_resolve(path, absolute, sizeof(absolute)) ?
+            win_file_attr(absolute, 0, 0) : -1;
+    return a < 0 ? 0xFFFFFFFFUL : (DWORD)a;
+}
+
+BOOL WINAPI SetFileAttributes(LPCSTR path, DWORD attr)
+{
+    char absolute[256];
+    return path && win_file_resolve(path, absolute, sizeof(absolute)) &&
+           win_file_attr(absolute, 1, (UINT)(attr & 0x27)) >= 0;
+}
+
 /* INT 21h 57h: an open file's date and time (set: changed to them) */
 BOOL win_file_time(HFILE f, int set, WORD *date, WORD *time_)
 {

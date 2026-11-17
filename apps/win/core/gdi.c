@@ -1728,6 +1728,37 @@ int WINAPI SelectClipRgn(HDC h, HRGN hr)
     return wrgn_type(dc_eff(dc));
 }
 
+/* Windows 95's: the region combined with the clipping region (none: the
+ * DC's whole visible area) by mode; RGN_COPY with none: no clipping */
+int WINAPI ExtSelectClipRgn(HDC h, HRGN hr, int mode)
+{
+    if (mode == RGN_COPY)
+        return SelectClipRgn(h, hr);
+    DC_OR_RET(h, ERROR);
+    wrgn *g = gdi_region(hr);
+    if (!g || mode < RGN_AND || mode > RGN_DIFF || dc->meta)
+        return ERROR;
+    wrgn add, was;
+    wrgn_init(&add);
+    wrgn_init(&was);
+    wrgn_copy(&add, g);
+    wrgn_offset(&add, dc->org_x, dc->org_y);
+    dc_clip_start(dc);
+    wrgn_copy(&was, &dc->clip);
+    if (mode == RGN_AND)
+        wrgn_and(&dc->clip, &was, &add);
+    else if (mode == RGN_OR)
+        wrgn_or(&dc->clip, &was, &add);
+    else if (mode == RGN_XOR)
+        wrgn_xor(&dc->clip, &was, &add);
+    else
+        wrgn_diff(&dc->clip, &was, &add);
+    wrgn_free(&add);
+    wrgn_free(&was);
+    dc->eff_dirty = 1;
+    return wrgn_type(dc_eff(dc));
+}
+
 int WINAPI IntersectClipRect(HDC h, int l, int t, int r, int b)
 {
     DC_OR_RET(h, ERROR);
@@ -2523,10 +2554,31 @@ static BOOL arc_call(HDC h, int l, int t, int r, int b, int x1, int y1, int x2, 
     if (!shape_box(dc, l, t, r, b, &box))
         return TRUE;
     POINT s = { x1, y1 }, e = { x2, y2 };
+    if (dc->arc_cw) {                   /* clockwise: the other way round */
+        s.x = x2; s.y = y2;
+        e.x = x1; e.y = y1;
+    }
     gdi_lp_to_dp(dc, &s.x, &s.y);
     gdi_lp_to_dp(dc, &e.x, &e.y);
     draw_arc(dc, box, s, e, kind);
     return TRUE;
+}
+
+/* Windows 95's: which way Arc, Chord and Pie go from start to end */
+int WINAPI SetArcDirection(HDC h, int dir)
+{
+    DC_OR_RET(h, 0);
+    if (dir != AD_COUNTERCLOCKWISE && dir != AD_CLOCKWISE)
+        return 0;
+    int was = dc->arc_cw ? AD_CLOCKWISE : AD_COUNTERCLOCKWISE;
+    dc->arc_cw = dir == AD_CLOCKWISE;
+    return was;
+}
+
+int WINAPI GetArcDirection(HDC h)
+{
+    DC_OR_RET(h, 0);
+    return dc->arc_cw ? AD_CLOCKWISE : AD_COUNTERCLOCKWISE;
 }
 
 BOOL WINAPI Arc(HDC h, int l, int t, int r, int b, int x1, int y1, int x2, int y2)
