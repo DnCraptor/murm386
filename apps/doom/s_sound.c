@@ -18,6 +18,10 @@
 #include "DoomDef.h"
 #include "R_local.h"
 #include "soundst.h"
+#ifdef ELF_MODE
+#include "i_sound.h"
+extern int snd_SfxDevice;
+#endif
 
 #if (APPVER_DOOMREV >= AV_DR_DM12)
 static channel_t *channels; // the set of channels available
@@ -65,6 +69,10 @@ void S_ChangeMusic (int musicnum, int looping)
   musicinfo_t *music;
   char namebuf[9];
   extern int snd_MusicDevice;
+#ifdef ELF_MODE
+  if (snd_MusicDevice == snd_none)
+    return;
+#endif
   if (snd_MusicDevice == 2 && musicnum == mus_intro)
     musicnum = mus_introa;
   if ( (musicnum <= mus_None) || (musicnum >= NUMMUSIC) ) {
@@ -88,7 +96,16 @@ void S_ChangeMusic (int musicnum, int looping)
 #endif
   music->handle = I_RegisterSong(music->data);
   // play it
+#ifdef ELF_MODE
+  if (music->handle < 0 || I_PlaySong(music->handle, looping) != 0)
+  {
+    Z_ChangeTag(music->data, PU_CACHE);
+    music->data = NULL;
+    return;
+  }
+#else
   I_PlaySong(music->handle, looping);
+#endif
   mus_playing = music;
 }
 
@@ -265,6 +282,10 @@ void S_StartSoundAtVolume(void *origin_p, int sfx_id, int volume)
   int cnum;
 #if (APPVER_DOOMREV >= AV_DR_DM17)
   mobj_t *origin = (mobj_t *) origin_p;
+#endif
+#ifdef ELF_MODE
+  if (snd_SfxDevice == snd_none || volume <= 0)
+    return;
 #endif
 
   // Debug.

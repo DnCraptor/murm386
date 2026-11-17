@@ -34,6 +34,7 @@
 
 typedef struct
 {
+    const unsigned char *start;
     const unsigned char *ptr;
     const unsigned char *end;
     uint32_t next_tick;
@@ -185,32 +186,24 @@ static int opl_alloc_voice(void)
 
 static uint8_t opl_level(uint8_t original, int channel, int velocity)
 {
-    /*
-     * OPL total-level is attenuation: 0 = loudest, 63 = silent.
-     *
-     * Keep the whole product until the final division.  The previous code
-     * first reduced velocity*channel_volume*music_volume to an integer in
-     * the range 0..1.  For every value below the absolute maximum it became
-     * zero, so the carrier was programmed with TL=63 and nearly all AdLib
-     * notes were completely muted.
-     *
-     * Maximum numerator:
-     *   63 * 127 * 127 * 255 = 259,112,? < UINT32_MAX
-     * so 32-bit unsigned arithmetic is sufficient.
-     */
-    unsigned loudness = 63u - (original & 0x3fu);
-    uint32_t scaled;
+    unsigned gain = (unsigned)velocity * (unsigned)music_channel_volume[channel]
+                  * (unsigned)music_volume / (127u * 127u);
+    unsigned level = original & 0x3fu;
 
-    scaled = (uint32_t)loudness
-           * (uint32_t)(unsigned)velocity
-           * (uint32_t)(unsigned)music_channel_volume[channel]
-           * (uint32_t)(unsigned)music_volume;
-    scaled /= (127u * 127u * 255u);
+    if (gain == 0)
+        return (uint8_t)(original | 0x3fu);
 
-    if (scaled > 63u)
-        scaled = 63u;
-
-    return (uint8_t)((original & 0xc0u) | (63u - (unsigned)scaled));
+    // Each halving is about 6 dB, or eight OPL total-level steps.
+    while (gain < 128u)
+    {
+        gain *= 2;
+        level += 8;
+    }
+    if (gain < 255u)
+        level += ((255u - gain) * 8u + 64u) / 128u;
+    if (level > 63u)
+        level = 63u;
+    return (uint8_t)((original & 0xc0u) | level);
 }
 
 static void opl_program_voice(int voice, int channel, int key, int velocity)
@@ -600,6 +593,26 @@ static int all_tracks_ended(void)
     return 1;
 }
 
+static void midi_rewind_tracks(void)
+{
+    unsigned i;
+
+    music_tempo_us = 500000u;
+    music_tick_fp = 0;
+    music_song_ticks = 0;
+    for (i = 0; i < music_track_count; ++i)
+    {
+        native_midi_track_t *track = &music_tracks[i];
+        track->ptr = track->start;
+        track->next_tick = 0;
+        track->running_status = 0;
+        track->ended = 0;
+        track_read_next_delta(track);
+    }
+    for (i = 0; i < NATIVE_MIDI_CHANNELS; ++i)
+        music_channel_volume[i] = 127;
+}
+
 static int midi_reset_tracks(unsigned char *song)
 {
     const unsigned char *p = song;
@@ -636,9 +649,6 @@ static int midi_reset_tracks(unsigned char *song)
 
     music_track_count = tracks;
     music_division = division;
-    music_tempo_us = 500000u;
-    music_tick_fp = 0;
-    music_song_ticks = 0;
 
     p += 8u + header_len;
 
@@ -652,21 +662,13 @@ static int midi_reset_tracks(unsigned char *song)
         length = be32(p + 4);
         p += 8;
 
-        music_tracks[i].ptr = p;
+        music_tracks[i].start = p;
         music_tracks[i].end = p + length;
-        music_tracks[i].next_tick = 0;
-        music_tracks[i].running_status = 0;
-        music_tracks[i].ended = 0;
-
-        if (track_read_next_delta(&music_tracks[i]) != 0)
-            music_tracks[i].ended = 1;
 
         p += length;
     }
 
-    for (i = 0; i < NATIVE_MIDI_CHANNELS; ++i)
-        music_channel_volume[i] = 127;
-
+    midi_rewind_tracks();
     return MUSIC_Ok;
 }
 
@@ -735,19 +737,9 @@ static int music_service(void)
     {
         if (music_loop)
         {
-            unsigned char *song = NULL;
-
-            /*
-             * Each track pointer has advanced, so recover the owning MIDI
-             * image from a separately retained pointer below.
-             */
-            extern unsigned char *native_music_song_image;
-            song = native_music_song_image;
             midi_all_notes_off();
-            if (midi_reset_tracks(song) != MUSIC_Ok)
-                music_playing = 0;
-            else
-                midi_send_channel_volumes();
+            midi_rewind_tracks();
+            midi_send_channel_volumes();
         }
         else
         {
@@ -758,12 +750,6 @@ static int music_service(void)
 
     return 0;
 }
-
-/*
- * Kept non-static because music_service() needs the original SMF image when a
- * looping song reaches end-of-track after all track cursors have advanced.
- */
-unsigned char *native_music_song_image;
 
 char *MUSIC_ErrorString(int ErrorNumber)
 {
@@ -832,12 +818,19 @@ int MUSIC_Shutdown(void)
         music_service_id = -1;
     }
 
-    if (music_tracks)
+    if (music_device == Adlib)
     {
-        free(music_tracks);
-        music_tracks = NULL;
+        // Silence the release tails before handing the OPL back to DOS.
+        for (int voice = 0; voice < NATIVE_OPL_VOICES; ++voice)
+        {
+            opl_key_off(voice);
+            opl_write(0x40 + opl_operator_offset[voice][0], 0x3f);
+            opl_write(0x40 + opl_operator_offset[voice][1], 0x3f);
+        }
     }
-    music_track_count = 0;
+    music_device = NumSoundCards;
+    free(music_timbre_bank);
+    music_timbre_bank = NULL;
 
     return MUSIC_Ok;
 }
@@ -854,8 +847,10 @@ void MUSIC_SetVolume(int volume)
     if (volume > 255)
         volume = 255;
 
+    TSM_Lock();
     music_volume = volume;
     midi_send_channel_volumes();
+    TSM_Unlock();
 }
 
 void MUSIC_SetMidiChannelVolume(int channel, int volume)
@@ -926,7 +921,6 @@ int MUSIC_StopSong(void)
     music_playing = 0;
     music_paused = 0;
     music_fade_active = 0;
-    native_music_song_image = NULL;
 
     if (music_tracks)
     {
@@ -962,7 +956,6 @@ int MUSIC_PlaySong(unsigned char *song, int loopflag)
                  (unsigned long)music_tempo_us,
                  music_timbre_bank ? "yes" : "NO");
 
-    native_music_song_image = song;
     music_loop = loopflag != 0;
     music_paused = 0;
     music_playing = 1;

@@ -33,6 +33,10 @@ void TSM_Yield(void);
 void TSM_Lock(void);
 void TSM_Unlock(void);
 
+#ifdef ELF_MODE
+void FX_Poll(void);
+#endif
+
 void MUS_PauseSong(int handle);
 void MUS_ResumeSong(int handle);
 void MUS_SetMasterVolume(int volume);

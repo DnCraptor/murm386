@@ -646,6 +646,8 @@ void ST_doPaletteStuff(void)
 
 }
 
+static int arm_icon_index[6];
+
 void ST_drawWidgets(boolean refresh)
 {
   int i;
@@ -670,7 +672,11 @@ void ST_drawWidgets(boolean refresh)
   STlib_updateBinIcon(&w_armsbg, refresh);
 
   for (i=0;i<6;i++)
+  {
+    // The ARM build stores each boolean in one byte.
+    arm_icon_index[i] = plyr->weaponowned[i+1] ? 1 : 0;
     STlib_updateMultIcon(&w_arms[i], refresh);
+  }
 
   STlib_updateMultIcon(&w_faces, refresh);
 
@@ -902,7 +908,7 @@ void ST_createWidgets(void)
   for(i=0;i<6;i++)
   {
     STlib_initMultIcon(&w_arms[i], ST_ARMSX+(i%3)*ST_ARMSXSPACE, ST_ARMSY+(i/3)*ST_ARMSYSPACE,
-      arms[i], (int *) &plyr->weaponowned[i+1],  &st_armson);
+      arms[i], &arm_icon_index[i], &st_armson);
   }
 
 // frags sum

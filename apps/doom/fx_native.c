@@ -43,6 +43,7 @@
 #define NATIVE_FX_BLOCK_SIZE  128u
 #define NATIVE_FX_LEAD        384u
 #define NATIVE_FX_SERVICE_RATE 140
+#define DMA8_MASK_PORT        0x0au
 
 #if (NATIVE_FX_RING_SIZE & (NATIVE_FX_RING_SIZE - 1u)) != 0
 #error NATIVE_FX_RING_SIZE must be a power of two
@@ -78,12 +79,15 @@ static native_fx_voice_t native_voices[NATIVE_FX_VOICES];
 static unsigned char *native_dma_alloc;
 static unsigned char *native_dma_buffer;
 static uint32_t native_dma_linear;
+static uint32_t native_mix_read_pos;
 static uint32_t native_mix_write_pos;
 static uint32_t native_mix_rate = NATIVE_FX_MIX_RATE;
 static int native_fx_volume = 255;
 static int native_fx_next_handle = 1;
 static int native_fx_service_id = -1;
 static int native_dma_running;
+static volatile uint32_t native_fx_ticks;
+static uint32_t native_fx_last_poll;
 
 static int native_dma8_ports(unsigned channel, native_dma8_ports_t *p)
 {
@@ -94,7 +98,7 @@ static int native_dma8_ports(unsigned channel, native_dma8_ports_t *p)
     if (!p || channel > 3 || channel == 2)
         return -1;
 
-    p->mask_port = 0x0a;
+    p->mask_port = DMA8_MASK_PORT;
     p->mode_port = 0x0b;
     p->clear_port = 0x0c;
     p->page_port = page_ports[channel];
@@ -245,7 +249,7 @@ static uint32_t native_dma_read_pos(void)
     uint16_t count = native_dma8_count();
 
     if (count >= NATIVE_FX_RING_SIZE)
-        return native_mix_write_pos & NATIVE_FX_RING_MASK;
+        return native_mix_read_pos;
 
     return (NATIVE_FX_RING_SIZE - 1u - (uint32_t)count)
          & NATIVE_FX_RING_MASK;
@@ -394,19 +398,27 @@ static void native_mix_block(uint32_t start, uint32_t length)
             native_mix_one_sample();
 }
 
-static int native_fx_service(void)
+static void native_fx_fill_ring(void)
 {
     uint32_t read_pos;
+    uint32_t advanced;
     uint32_t ahead;
-
-    if (!native_dma_running || !native_dma_buffer)
-        return 0;
 
     /* Reading the 8-bit status register acknowledges any SB block IRQ. */
     (void)inp((uint16_t)native_sb.Address + SB_DSP_READ_STATUS);
 
     read_pos = native_dma_read_pos();
-    ahead = (native_mix_write_pos - read_pos) & NATIVE_FX_RING_MASK;
+    advanced = (read_pos - native_mix_read_pos) & NATIVE_FX_RING_MASK;
+    ahead = (native_mix_write_pos - native_mix_read_pos) & NATIVE_FX_RING_MASK;
+    native_mix_read_pos = read_pos;
+    if (advanced > ahead)
+    {
+        // DOS I/O can service DMA between polls. Resume at its new position.
+        native_mix_write_pos = read_pos;
+        ahead = 0;
+    }
+    else
+        ahead -= advanced;
 
     while (ahead < NATIVE_FX_LEAD)
     {
@@ -416,8 +428,34 @@ static int native_fx_service(void)
             & NATIVE_FX_RING_MASK;
         ahead += NATIVE_FX_BLOCK_SIZE;
     }
+}
 
+static int native_fx_timer(void)
+{
+    ++native_fx_ticks;
     return 0;
+}
+
+void FX_Poll(void)
+{
+    uint32_t now = native_fx_ticks;
+    uint32_t elapsed = now - native_fx_last_poll;
+
+    if (!native_dma_running || elapsed == 0)
+        return;
+
+    native_fx_last_poll = now;
+    // One device pass can transfer one DSP block. Catch up after rendering,
+    // with a bound on how much time one call can spend servicing devices.
+    if (elapsed > 4u)
+        elapsed = 4u;
+    do
+    {
+        native_fx_fill_ring();
+        // Murm386 services DREQ on a single-mask write. Keep our channel
+        // unmasked and pump DMA without dispatching guest interrupts here.
+        outp(DMA8_MASK_PORT, (uint8_t)native_sb.Dma8);
+    } while (--elapsed != 0);
 }
 
 static int native_fx_start_dma(void)
@@ -450,7 +488,9 @@ static int native_fx_start_dma(void)
         return -1;
     }
 
+    native_mix_read_pos = 0;
     native_mix_write_pos = NATIVE_FX_LEAD;
+    native_fx_last_poll = native_fx_ticks;
     memset(native_dma_buffer, 128, NATIVE_FX_RING_SIZE);
     native_dma_running = 1;
     return 0;
@@ -507,11 +547,12 @@ int FX_Init(int SoundCard, int numvoices, int numchannels,
     DMX_Diag("SB FX init: DMA/DSP playback started\n");
 
     if (native_fx_service_id < 0)
-        native_fx_service_id = TSM_NewService(native_fx_service,
+        native_fx_service_id = TSM_NewService(native_fx_timer,
                                                NATIVE_FX_SERVICE_RATE,
                                                1, 0);
     if (native_fx_service_id < 0) {
         DMX_Diag("SB FX init: TSM service registration FAIL\n");
+        FX_Shutdown();
         return FX_Error;
     }
 
@@ -603,7 +644,6 @@ int FX_PlayRaw(char *ptr, unsigned long length, unsigned rate,
     v->handle = native_fx_next_handle;
     v->active = 1;
 
-    native_fx_service();
     {
         int handle = v->handle;
         TSM_Unlock();

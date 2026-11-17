@@ -434,6 +434,7 @@ void I_StopSong(int handle)
 #ifdef SNDDEBUG
   if (rc < 0) printf("MUS_StopSong() returned %d\n", rc);
 #endif
+#ifndef ELF_MODE
   // Fucking kluge pause
   {
 	int s;
@@ -443,6 +444,7 @@ void I_StopSong(int handle)
 	{
 	}
   }
+#endif
 }
 
 int I_PlaySong(int handle, int looping)
@@ -500,6 +502,8 @@ int I_StartSound (int id, void *data, int vol, int sep, int pitch, int priority)
   else
 #if (APPVER_DOOMREV < AV_DR_DM1666P)
 	return SFX_PlayPatch(data, sep, pitch, vol, priority);
+#elif defined(ELF_MODE)
+	return SFX_PlayPatch(data, pitch, sep, vol, 0, 100);
 #else
 	return SFX_PlayPatch(data, sep, pitch, vol, 0, 100);
 #endif
@@ -908,7 +912,7 @@ void I_ShutdownSound (void)
   if (!i_dmx_started)
 	return;
 
-#if (APPVER_DOOMREV >= AV_DR_DM1666P)
+#if (APPVER_DOOMREV >= AV_DR_DM1666P) && !defined(ELF_MODE)
   S_PauseSound();
   {
 	int start;

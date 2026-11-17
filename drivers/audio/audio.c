@@ -469,9 +469,12 @@ bool __not_in_flash_func(timer_callback)(repeating_timer_t *rt) {
     }
     r_v += dss_v;
     l_v += dss_v;
+    // Leave headroom for the other devices on shared audio outputs.
+    int speaker_pcm = b_v * 8192;
 #if HAS_AUDIO_HWAY
     if (audio_use_hway) {
-        if (b_v) { r_v = l_v = 32767; }
+        r_v += speaker_pcm;
+        l_v += speaker_pcm;
         if (r_v > 32767) r_v = 32767;
         if (r_v < -32768) r_v = -32768;
         if (l_v > 32767) l_v = 32767;
@@ -492,7 +495,8 @@ bool __not_in_flash_func(timer_callback)(repeating_timer_t *rt) {
 #endif
 #if HAS_AUDIO_I2S
     if (audio_use_i2s) {
-        if (b_v) { r_v = l_v = 32767; }
+        r_v += speaker_pcm;
+        l_v += speaker_pcm;
         if (r_v > 32767) r_v = 32767;
         if (r_v < -32768) r_v = -32768;
         if (l_v > 32767) l_v = 32767;
@@ -504,12 +508,17 @@ bool __not_in_flash_func(timer_callback)(repeating_timer_t *rt) {
 #endif
 #if HAS_AUDIO_PWM
 #ifdef BEEPER_PIN
-    b_v = b_v ? (4095 >> volume) : 0;
+    b_v = b_v > 0 ? (4095 >> volume) : 0;
     pwm_set_gpio_level(BEEPER_PIN, b_v);
 #else
     /* No separate beeper output. Mix the PC speaker into both PWM channels before volume scaling/quantization. */
-    if (b_v) { r_v = l_v = 32767; }
+    r_v += speaker_pcm;
+    l_v += speaker_pcm;
 #endif
+    if (r_v > 32767) r_v = 32767;
+    if (r_v < -32768) r_v = -32768;
+    if (l_v > 32767) l_v = 32767;
+    if (l_v < -32768) l_v = -32768;
     r_v >>= volume;
     l_v >>= volume;
     uint16_t ur_v = (r_v + 32768) >> 4;

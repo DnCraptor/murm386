@@ -340,6 +340,9 @@ ticcmd_t *I_BaseTiccmd (void)
 
 int I_GetTime (void)
 {
+#ifdef ELF_MODE
+	FX_Poll();
+#endif
 #ifdef NOTIMER
 	ticcount++;
 #endif
@@ -986,6 +989,7 @@ int I_TimerISR (void)
 void _fini(void *ctx)
 {
 	(void)ctx;
+	I_ShutdownSound();
 	TSM_Remove();
 }
 #endif

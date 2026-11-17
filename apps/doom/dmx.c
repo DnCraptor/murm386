@@ -45,29 +45,18 @@ unsigned short divisors[] = {
 };
 
 typedef struct {
-    unsigned int length;
-    unsigned short priority;
-    unsigned short data[];
-} pcspkmuse_t;
-
-typedef struct {
     unsigned short id;
     unsigned short length;
     unsigned char data[];
 } dmxpcs_t;
 
-static pcspkmuse_t *pcspkmuse;
+static PCSound *pcspkmuse;
 int pcshandle = 0;
 
-static void pcspkmuse_done(unsigned long callbackval)
+static void pcspkmuse_release(void)
 {
-    (void)callbackval;
-
-    if (pcspkmuse)
-    {
-        free(pcspkmuse);
-        pcspkmuse = NULL;
-    }
+    free(pcspkmuse);
+    pcspkmuse = NULL;
 }
 
 fx_blaster_config dmx_blaster;
@@ -139,6 +128,8 @@ int MUS_RegisterSong(void *data) {
     unsigned int midlen;
     unsigned short len;
     char *new_mid = NULL;
+    if (!dmx_music_started)
+        return -1;
     mus_data = NULL;
     len = ((unsigned short*)data)[2]
         + ((unsigned short*)data)[3];
@@ -153,7 +144,7 @@ int MUS_RegisterSong(void *data) {
         new_mid = (char *)malloc(outcap);
         if (!new_mid)
         {
-            return 0;
+            return -1;
         }
         /* MUS->MIDI entirely in RAM: input is the cached MUS lump, output a
            generous malloc buffer.  No SD temp.mus/temp.mid round-trip. */
@@ -164,14 +155,14 @@ int MUS_RegisterSong(void *data) {
             if (mus) fclose(mus);
             if (mid) fclose(mid);
             free(new_mid);
-            return 0;
+            return -1;
         }
         if (mus2mid(mus, mid, mus_rate, dmx_mdev == Adlib || dmx_mdev == SoundBlaster))
         {
             fclose(mid);
             fclose(mus);
             free(new_mid);
-            return 0;
+            return -1;
         }
         fseek(mid, 0, SEEK_END);
         midlen = (unsigned int)ftell(mid);
@@ -304,7 +295,7 @@ int SFX_PlayPatch(void *vdata, int pitch, int sep, int vol, int unk1, int priori
     unsigned int type = (data[1] << 8) | data[0];
     dmxpcs_t *dmxpcs = (dmxpcs_t*)vdata;
     unsigned short i;
-    if (type == 0)
+    if (type == 0 && dmx_pcfx_started)
     {
         size_t bytes;
 
@@ -312,38 +303,43 @@ int SFX_PlayPatch(void *vdata, int pitch, int sep, int vol, int unk1, int priori
          * The old static buffer reserved space for the maximum possible
          * 65536 PC-speaker samples: 131080 bytes of permanent .bss even when
          * PC Speaker was disabled.  Allocate only the current converted lump.
-         * PCFX keeps using the buffer asynchronously, so its completion
-         * callback owns the corresponding free().
+         * Keep the buffer until the next sound or shutdown, so the timer
+         * callback never enters the native heap allocator.
          */
         if (pcspkmuse)
         {
-            if (pcshandle > 0 && PCFX_SoundPlaying(pcshandle))
+            if (pcshandle > 0)
                 PCFX_Stop(pcshandle);
-            else
-                pcspkmuse_done(0);
+            pcspkmuse_release();
         }
 
-        bytes = sizeof(*pcspkmuse)
-              + (size_t)dmxpcs->length * sizeof(pcspkmuse->data[0]);
-        pcspkmuse = (pcspkmuse_t *)malloc(bytes);
+        bytes = sizeof(*pcspkmuse) + (size_t)dmxpcs->length * 2u;
+        pcspkmuse = malloc(bytes);
         if (!pcspkmuse)
             return -1;
 
         pcspkmuse->length = dmxpcs->length * 2;
         pcspkmuse->priority = 100;
         for (i = 0; i < dmxpcs->length; i++)
-            pcspkmuse->data[i] = divisors[dmxpcs->data[i]];
+        {
+            unsigned note = dmxpcs->data[i];
+            unsigned divisor = note < sizeof(divisors) / sizeof(divisors[0])
+                             ? divisors[note] : 0;
+            unsigned char *sample = (unsigned char *)pcspkmuse->data + i * 2u;
+            sample[0] = (unsigned char)divisor;
+            sample[1] = (unsigned char)(divisor >> 8);
+        }
 
-        pcshandle = PCFX_Play((PCSound *)pcspkmuse, 100, 0);
+        pcshandle = PCFX_Play(pcspkmuse, 100, 0);
         if (pcshandle < 0)
         {
-            pcspkmuse_done(0);
+            pcspkmuse_release();
             return pcshandle;
         }
 
         return pcshandle | 0x8000;
     }
-    else if (type == 3)
+    else if (type == 3 && dmx_fx_started)
     {
         rate = (data[3] << 8) | data[2];
         len = (data[7] << 24) | (data[6] << 16) | (data[5] << 8) | data[4];
@@ -353,7 +349,7 @@ int SFX_PlayPatch(void *vdata, int pitch, int sep, int vol, int unk1, int priori
         len -= 32;
         return FX_PlayRaw(data + 24, len, rate, ((pitch - 128) * 2400) / 128, vol * 2, ((254 - sep) * vol) / 63, ((sep)* vol) / 63, 127-priority, 0);
     }
-    return 0;
+    return -1;
 }
 void SFX_StopPatch(int handle) {
     if (handle & 0x8000)
@@ -561,9 +557,9 @@ int DMX_Init(int rate, int maxsng, int mdev, int sdev) {
 
     if (sdev & AHW_PC_SPEAKER)
     {
-        PCFX_Init();
+        if (PCFX_Init() != PCFX_Ok)
+            return mdev;
         dmx_pcfx_started = 1;
-        PCFX_SetCallBack(pcspkmuse_done);
         PCFX_SetTotalVolume(255);
         PCFX_UseLookup(0, 0);
     }
@@ -582,7 +578,7 @@ void DMX_DeInit(void) {
     }
     if (dmx_pcfx_started) {
         PCFX_Shutdown();
-        pcspkmuse_done(0);
+        pcspkmuse_release();
         dmx_pcfx_started = 0;
     }
     remove("ULTRAMID.INI");
