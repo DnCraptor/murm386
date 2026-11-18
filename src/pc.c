@@ -1298,7 +1298,7 @@ bool __not_in_flash_func(iomem_write_string_ptr)(void *iomem, uint32_t addr, con
     if (addr >= vga_addr2) {
         addr -= vga_addr2;
         if (addr + len < pc->vga_mem_size) {
-            memcpy(pc->vga_mem + addr, buf, len);
+            dos_api_memcpy(pc->vga_mem + addr, buf, len);
             return true;
         }
         return false;

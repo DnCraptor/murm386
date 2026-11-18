@@ -114,10 +114,14 @@ static bool backing_write(uint32_t page, const uint8_t *src)
 
 static inline void __not_in_flash_func(hot_page_remember)(uint32_t page, uint32_t slot)
 {
-    for (uint32_t i = HOT_PAGE_COUNT - 1u; i != 0; --i) {
-        hot_page[i] = hot_page[i - 1u];
-        hot_slot[i] = hot_slot[i - 1u];
-    }
+    // These fixed shifts avoid GCC lowering the overlapping loops to memmove.
+    _Static_assert(HOT_PAGE_COUNT == 4u, "hot page shift requires four entries");
+    hot_page[3] = hot_page[2];
+    hot_page[2] = hot_page[1];
+    hot_page[1] = hot_page[0];
+    hot_slot[3] = hot_slot[2];
+    hot_slot[2] = hot_slot[1];
+    hot_slot[1] = hot_slot[0];
     hot_page[0] = (uint16_t)page;
     hot_slot[0] = (uint8_t)slot;
 }

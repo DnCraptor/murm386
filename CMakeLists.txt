@@ -129,7 +129,11 @@ option(FORCE_HDMI "Force HDMI output instead of VGA" OFF)
 
 # Force VGA output (skip auto-detection). Takes precedence over FORCE_HDMI.
 option(FORCE_VGA "Force VGA output instead of HDMI" OFF)
-option(M2P2_HSTX_AUDIO "Use 640x480 HDMI with HSTX audio on M2P2" OFF)
+
+if(BOARD STREQUAL "M2")
+    option(M2P2_HSTX_AUDIO "Use 640x480 HDMI with HSTX audio on M2P2" ON)
+endif()
+
 if(M2P2_HSTX_AUDIO)
     if(NOT BOARD STREQUAL "M2" OR NOT PICO_BOARD STREQUAL "pico2"
        OR NOT CPU_SPEED STREQUAL "504" OR FORCE_VGA)

@@ -163,6 +163,7 @@ static uint32_t* lines_pattern[4];
 uint32_t video_lines[VIDEO_LINES_WORDS] __scratch_y("video_lines");
 
 void *nf_memset(void *ptr, int value, size_t len);
+void *dos_api_memcpy(void *dst, const void *src, size_t len);
 
 // DMA channels
 static int dma_data_chan = -1;
@@ -363,8 +364,7 @@ static void __time_critical_func(render_gfx_line_vga_planar256)(uint32_t line, u
     uint32_t src_line = (gfx_height * 2 <= active_lines) ? (line >> 1) : line;
 
     if (src_line >= (uint32_t)gfx_height) {
-        uint32_t blank = TMPL_LINE | (TMPL_LINE << 8) | (TMPL_LINE << 16) | (TMPL_LINE << 24);
-        for (int i = 0; i < 160; i++) out32[i] = blank;
+        nf_memset(out32, TMPL_LINE, 640);
         return;
     }
 
@@ -416,16 +416,10 @@ static void __time_critical_func(render_gfx_line_from_sram)(uint32_t line, uint3
         src_line = line / 2;
     }
 
-    if (src_line >= gfx_height && gfx_height > 0) {
+    const uint32_t height = gfx_height > 0 ? (uint32_t)gfx_height : 200u;
+    if (src_line >= height) {
         // Blank line below visible area
-        for (int i = 0; i < 160; i++) {
-            *out32++ = (TMPL_LINE) | (TMPL_LINE << 8) | (TMPL_LINE << 16) | (TMPL_LINE << 24);
-        }
-    } else if (src_line >= 200 && gfx_height <= 0) {
-         // Fallback if gfx_height not set
-        for (int i = 0; i < 160; i++) {
-            *out32++ = (TMPL_LINE) | (TMPL_LINE << 8) | (TMPL_LINE << 16) | (TMPL_LINE << 24);
-        }
+        nf_memset(out32, TMPL_LINE, 640);
     } else {
         // Read from VRAM (stable during active video)
         // Stride comes from CRTC Offset (CR13) which is in words for VGA.
@@ -464,10 +458,7 @@ static void __time_critical_func(render_gfx_line_vbe8)(uint32_t line,
     uint32_t *out32 = (uint32_t *)((uint8_t *)output_buffer + SHIFT_PICTURE);
 
     if (line >= (uint32_t)gfx_height || gfx_width != 640) {
-        uint32_t blank = TMPL_LINE | (TMPL_LINE << 8) |
-                         (TMPL_LINE << 16) | (TMPL_LINE << 24);
-        for (int i = 0; i < 160; ++i)
-            out32[i] = blank;
+        nf_memset(out32, TMPL_LINE, 640);
         return;
     }
 
@@ -505,9 +496,7 @@ static void __time_critical_func(render_gfx_line_cga)(uint32_t line, uint32_t *o
     uint32_t src_line = line / 2;
     if (src_line >= 200) {
         // Blank line
-        for (int i = 0; i < 160; i++) {
-            *out32++ = (TMPL_LINE) | (TMPL_LINE << 8) | (TMPL_LINE << 16) | (TMPL_LINE << 24);
-        }
+        nf_memset(out32, TMPL_LINE, 640);
     } else {
         // CGA interleaved scanlines:
         // Even lines (0,2,4,...) at offset 0x0000
@@ -559,9 +548,7 @@ static void __time_critical_func(render_gfx_line_cga2)(uint32_t line, uint32_t *
     uint32_t src_line = line / 2;
     if (src_line >= 200) {
         // Blank line
-        for (int i = 0; i < 160; i++) {
-            *out32++ = (TMPL_LINE) | (TMPL_LINE << 8) | (TMPL_LINE << 16) | (TMPL_LINE << 24);
-        }
+        nf_memset(out32, TMPL_LINE, 640);
     } else {
         // CGA interleaved scanlines:
         // Even lines (0,2,4,...) at offset 0x0000
@@ -616,10 +603,7 @@ static void __time_critical_func(render_gfx_line_mono640)(uint32_t line, uint32_
     uint32_t *out32 = (uint32_t *)((uint8_t *)output_buffer + SHIFT_PICTURE);
 
     if (line >= (uint32_t)gfx_height || gfx_width != 640) {
-        uint32_t blank = TMPL_LINE | (TMPL_LINE << 8) |
-                         (TMPL_LINE << 16) | (TMPL_LINE << 24);
-        for (int i = 0; i < 160; ++i)
-            out32[i] = blank;
+        nf_memset(out32, TMPL_LINE, 640);
         return;
     }
 
@@ -715,10 +699,7 @@ static void __time_critical_func(render_gfx_line_ega)(uint32_t line, uint32_t *o
     // Check if source line is beyond the actual height
     if (src_line >= (uint32_t)height) {
         // Blank line - fast fill
-        uint32_t blank = TMPL_LINE | (TMPL_LINE << 8) | (TMPL_LINE << 16) | (TMPL_LINE << 24);
-        for (int i = 0; i < 160; i++) {
-            out32[i] = blank;
-        }
+        nf_memset(out32, TMPL_LINE, 640);
         return;
     }
     uint32_t stride = gfx_line_offset > 0 ? (gfx_line_offset * 2) : (gfx_width / 8);
@@ -893,10 +874,7 @@ static void __not_in_flash_func(render_line)(uint32_t line, uint32_t *output_buf
     pre_render_line();
     // --- Верхнее поле ---
     if (line < (uint32_t)active_start) {
-        uint32_t blank = TMPL_LINE | (TMPL_LINE<<8) | (TMPL_LINE<<16) | (TMPL_LINE<<24);
-        uint32_t *out32 = (uint32_t *)((uint8_t *)output_buffer + SHIFT_PICTURE);
-        for (int i = 0; i < 160; i++)
-            out32[i] = blank;
+        nf_memset((uint8_t *)output_buffer + SHIFT_PICTURE, TMPL_LINE, 640);
 #if DIAG
         render_diag_border_vga(line, output_buffer);
 #endif
@@ -905,10 +883,7 @@ static void __not_in_flash_func(render_line)(uint32_t line, uint32_t *output_buf
 
     // --- Нижнее поле ---
     if (line >= (uint32_t)active_end) {
-        uint32_t blank = TMPL_LINE | (TMPL_LINE<<8) | (TMPL_LINE<<16) | (TMPL_LINE<<24);
-        uint32_t *out32 = (uint32_t *)((uint8_t *)output_buffer + SHIFT_PICTURE);
-        for (int i = 0; i < 160; i++)
-            out32[i] = blank;
+        nf_memset((uint8_t *)output_buffer + SHIFT_PICTURE, TMPL_LINE, 640);
         return;
     }
 
@@ -967,9 +942,7 @@ static void __not_in_flash_func(render_line)(uint32_t line, uint32_t *output_buf
     }
     // mode 0 = blanked (AR bit5 cleared during BIOS mode transitions).
     // Emit black pixels with sync bits so the monitor sees a valid signal.
-    uint32_t *out32 = (uint32_t *)((uint8_t *)output_buffer + SHIFT_PICTURE);
-    uint32_t blank = TMPL_LINE | (TMPL_LINE << 8) | (TMPL_LINE << 16) | (TMPL_LINE << 24);
-    for (int i = 0; i < 160; i++) out32[i] = blank;
+    nf_memset((uint8_t *)output_buffer + SHIFT_PICTURE, TMPL_LINE, 640);
 }
 
 static inline void vga_hw_set_mode(int mode);
@@ -1829,7 +1802,7 @@ void __not_in_flash_func(vga_hw_process_deferred)(void) {
     if (!SELECT_VGA && required_to_repair_text_pal) {
         required_to_repair_text_pal = false;
         // Restore the text pair palette
-        memcpy(conv_color, conv_color2, 1024 * sizeof(uint32_t));
+        dos_api_memcpy(conv_color, conv_color2, 1024 * sizeof(uint32_t));
     }
 #endif
     vga_hw_new_frame_deferred();

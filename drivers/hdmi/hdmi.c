@@ -290,13 +290,22 @@ static void pio_set_x(PIO pio, const int sm, uint32_t v) {
  */
 #define HDMI_PAIR_MOVE 0x40u
 /* Branchless: (c + 4) >> 8 is 1 exactly for c = 252..255 */
+static inline __attribute__((always_inline)) uint8_t hdmi_pair_index(uint8_t pair) {
 #if defined(M2P2_HSTX_AUDIO)
-#define obp(x) (*output_buffer++ = (uint8_t)(x))
+    return pair;
 #else
-#define obp(x) { register uint32_t c = (uint8_t)(x); *output_buffer++ = (uint8_t)(c ^ (((c + 4u) >> 8) << 6)); }
+    return (uint8_t)(pair ^ (((pair + 4u) >> 8) * HDMI_PAIR_MOVE));
 #endif
+}
+
+#define obp(x) (*output_buffer++ = hdmi_pair_index(x))
+
+typedef uint32_t __attribute__((may_alias)) hdmi_text_word;
 
 static void __time_critical_func(render_text_line)(uint32_t line, uint8_t *output_buffer) {
+    // The PIO payload starts 72 bytes into a word-aligned DMA buffer.
+    // HSTX passes its word-aligned index buffer.
+    hdmi_text_word *out = (hdmi_text_word *)output_buffer;
     int char_height = vga_get_char_height(vga_state);
     if (char_height <= 0 || char_height > 32)
         char_height = 16;
@@ -312,6 +321,11 @@ static void __time_critical_func(render_text_line)(uint32_t line, uint8_t *outpu
         // Use snapped start address for the frame (prevents mid-frame tearing).
         const uint32_t *base = (const uint32_t *)(gfx_buffer + ((uint32_t)frame_vram_offset << 2));
         const uint32_t *text_row = base + (char_row * (uint32_t)text_stride_cells);
+
+        // Cache the four pair indices for runs of cells with the same colors.
+        unsigned cached_attr = 0xffu;
+        uint8_t pairs[4];
+        uint16_t doubled_pairs[4];
 
         for (int col = 0; col < cols; col++) {
             uint16_t cell = text_row[col];
@@ -331,26 +345,37 @@ static void __time_critical_func(render_text_line)(uint32_t line, uint8_t *outpu
                     glyph = font_8x16[ch * 16 + glyph_line];
                 }
             }
-           // uint8_t blink_or_highlite_bg = attr & 0b10000000; // TODO: use it?
-            register uint8_t fg_color0 = attr & 0b00001111;
-            register uint8_t bg_color1 = attr & 0b01110000;
-            register uint8_t bg_color0 = bg_color1 >> 4;
-            register uint8_t fg_color1 = fg_color0 << 4;
+            const unsigned colors = attr & 0x7fu;
+            if (colors != cached_attr) {
+                const unsigned fg = colors & 0x0fu;
+                const unsigned bg = colors >> 4;
+                pairs[0] = hdmi_pair_index((bg << 4) | bg);
+                pairs[1] = hdmi_pair_index((fg << 4) | bg);
+                pairs[2] = hdmi_pair_index((bg << 4) | fg);
+                pairs[3] = hdmi_pair_index((fg << 4) | fg);
+                if (double_h) {
+                    const unsigned b = pairs[0], f = pairs[3];
+                    doubled_pairs[0] = b | (b << 8);
+                    doubled_pairs[1] = f | (b << 8);
+                    doubled_pairs[2] = b | (f << 8);
+                    doubled_pairs[3] = f | (f << 8);
+                }
+                cached_attr = colors;
+            }
+
             if (!double_h) {
-                obp( ((glyph & 0b00000001) ? fg_color1 : bg_color1) | ((glyph & 0b00000010) ? fg_color0 : bg_color0) );
-                obp( ((glyph & 0b00000100) ? fg_color1 : bg_color1) | ((glyph & 0b00001000) ? fg_color0 : bg_color0) );
-                obp( ((glyph & 0b00010000) ? fg_color1 : bg_color1) | ((glyph & 0b00100000) ? fg_color0 : bg_color0) );
-                obp( ((glyph & 0b01000000) ? fg_color1 : bg_color1) | ((glyph & 0b10000000) ? fg_color0 : bg_color0) );
+                const uint32_t indices = pairs[glyph & 3u] |
+                    ((uint32_t)pairs[(glyph >> 2) & 3u] << 8) |
+                    ((uint32_t)pairs[(glyph >> 4) & 3u] << 16) |
+                    ((uint32_t)pairs[glyph >> 6] << 24);
+                *out++ = indices;
             } else {
-                // TODO: optimize it
-                obp( ((glyph & 0b00000001) ? fg_color1 : bg_color1) | ((glyph & 0b00000001) ? fg_color0 : bg_color0) );
-                obp( ((glyph & 0b00000010) ? fg_color1 : bg_color1) | ((glyph & 0b00000010) ? fg_color0 : bg_color0) );
-                obp( ((glyph & 0b00000100) ? fg_color1 : bg_color1) | ((glyph & 0b00000100) ? fg_color0 : bg_color0) );
-                obp( ((glyph & 0b00001000) ? fg_color1 : bg_color1) | ((glyph & 0b00001000) ? fg_color0 : bg_color0) );
-                obp( ((glyph & 0b00010000) ? fg_color1 : bg_color1) | ((glyph & 0b00010000) ? fg_color0 : bg_color0) );
-                obp( ((glyph & 0b00100000) ? fg_color1 : bg_color1) | ((glyph & 0b00100000) ? fg_color0 : bg_color0) );
-                obp( ((glyph & 0b01000000) ? fg_color1 : bg_color1) | ((glyph & 0b01000000) ? fg_color0 : bg_color0) );
-                obp( ((glyph & 0b10000000) ? fg_color1 : bg_color1) | ((glyph & 0b10000000) ? fg_color0 : bg_color0) );
+                const uint32_t lo = doubled_pairs[glyph & 3u] |
+                    ((uint32_t)doubled_pairs[(glyph >> 2) & 3u] << 16);
+                const uint32_t hi = doubled_pairs[(glyph >> 4) & 3u] |
+                    ((uint32_t)doubled_pairs[glyph >> 6] << 16);
+                *out++ = lo;
+                *out++ = hi;
             }
         }
     }
