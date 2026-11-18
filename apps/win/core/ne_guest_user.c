@@ -522,24 +522,14 @@ enum { TPL_RESOURCE, TPL_FAR, TPL_GLOBAL };
 static uint16_t load_shape(args *a, ne_user *u, uint16_t service, uint16_t inst, uint16_t id,
                            const char *nm);
 
-static __attribute__((noinline)) int dialog_box(args *a, ne_user *u, int modeless, int how,
-                                                int param)
+/* the dialog of a template's n bytes at d (malloc'd: freed), its procedure
+ * the program's (proc, init its WM_INITDIALOG's lParam) or a native one */
+static __attribute__((noinline)) int dialog_make(args *a, ne_user *u, uint8_t *d, uint32_t n,
+                                                 HWND owner, int modeless, uint32_t proc,
+                                                 uint32_t init, DLGPROC native)
 {
     static const char *const builtin[] = { "BUTTON", "EDIT", "STATIC", "LISTBOX",
                                            "SCROLLBAR", "COMBOBOX" };
-    uint32_t at = param ? 8 : 4;
-    uint32_t init = param ? dw(a, 4) : 0;
-    uint32_t proc = dw(a, at);
-    HWND owner = w(a, at + 4);
-    uint32_t name = how == TPL_GLOBAL ? w(a, at + 6) : dw(a, at + 6);
-    a->inst = w(a, at + (how == TPL_GLOBAL ? 8 : 10));
-    if (a->bad)
-        return -1;
-    uint32_t n;
-    uint8_t *d = how == TPL_RESOURCE ? resource(a, RT_DIALOG_, name, &n)
-                                     : template_at(a, name, how == TPL_GLOBAL, &n);
-    if (!d)
-        return -1;
     const uint8_t *p = d, *end = d + n;
     DLGTEMPLATE_N t;
     DLGITEM_N items[64];
@@ -637,7 +627,12 @@ static __attribute__((noinline)) int dialog_box(args *a, ne_user *u, int modeles
         p += 1 + *p;                            /* extra bytes */
     }
     t.cdit = (BYTE)k;
-    {
+    if (native) {                               /* COMMDLG's, the program's template */
+        user_dialog_menu(hmenu);
+        r = modeless ? (int)CreateDialogIndirectN(instance(u, 1), &t, items, owner, native)
+                     : DialogBoxIndirectN(instance(u, 1), &t, items, owner, native);
+        hmenu = 0;
+    } else {
         uint32_t outer = u->pending, outer_param = u->pending_param;
         u->pending = proc;
         u->pending_param = init;
@@ -653,6 +648,38 @@ done:
         DestroyMenu(hmenu);
     free(d);
     return r;
+}
+
+static __attribute__((noinline)) int dialog_box(args *a, ne_user *u, int modeless, int how,
+                                                int param)
+{
+    uint32_t at = param ? 8 : 4;
+    uint32_t init = param ? dw(a, 4) : 0;
+    uint32_t proc = dw(a, at);
+    HWND owner = w(a, at + 4);
+    uint32_t name = how == TPL_GLOBAL ? w(a, at + 6) : dw(a, at + 6);
+    a->inst = w(a, at + (how == TPL_GLOBAL ? 8 : 10));
+    if (a->bad)
+        return -1;
+    uint32_t n;
+    uint8_t *d = how == TPL_RESOURCE ? resource(a, RT_DIALOG_, name, &n)
+                                     : template_at(a, name, how == TPL_GLOBAL, &n);
+    if (!d)
+        return -1;
+    return dialog_make(a, u, d, n, owner, modeless, proc, init, NULL);
+}
+
+/* a native DLL's dialog (COMMDLG's) of a template of the program's: its
+ * module's (inst) resource tpl, or the global block tpl */
+int ne_dialog_native(ne_user *u, uint16_t inst, uint32_t tpl, int global, HWND owner,
+                     DLGPROC proc, int modeless)
+{
+    args a = { u->ctx, NULL, 0, inst };
+    uint32_t n;
+    uint8_t *d = global ? template_at(&a, tpl, 1, &n) : resource(&a, RT_DIALOG_, tpl, &n);
+    if (!d)
+        return -1;
+    return dialog_make(&a, u, d, n, owner, modeless, 0, 0, proc);
 }
 
 /* RegisterClass's WNDCLASS (26 bytes at p; RegisterClassEx's past its

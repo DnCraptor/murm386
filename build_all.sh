@@ -4,12 +4,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-CPU_TARGETS=(286 386)
+CPU_TARGETS=(286 386 386_XRIP)
 if [[ $# -gt 0 && "$1" != -* ]]; then
     case "${1,,}" in
-        286|386) CPU_TARGETS=("${1,,}") ;;
+        286|386|386_xrip) CPU_TARGETS=("${1^^}") ;;
         all) ;;
-        *) echo "Invalid CPU target '$1'. Use 286, 386 or all." >&2; exit 2 ;;
+        *) echo "Invalid CPU target '$1'. Use 286, 386, 386_XRIP or all." >&2; exit 2 ;;
     esac
     shift
 fi
@@ -21,8 +21,8 @@ for arg in "${EXTRA_ARGS[@]}"; do
         --emm)
             echo "build_all controls EMM itself and builds both OFF and ON variants; do not pass --emm." >&2
             exit 2 ;;
-        --cpu|-286|-386)
-            echo "Select the CPU target with the first positional argument: 286, 386 or all." >&2
+        --cpu|-286|-386|-386_XRIP|-386_xrip)
+            echo "Select the CPU target with the first positional argument: 286, 386, 386_XRIP or all." >&2
             exit 2 ;;
     esac
 done

@@ -60,6 +60,17 @@ typedef struct win_dll_ne {
     /* the task's program a Win32 one: its "far" pointers flat addresses
      * (no segment's 64K bounds); size covers it */
     int (*task_flat)(uint16_t task);
+    /* a window procedure of the Win16 program of the task (a dialog's hook)
+     * called with a message as USER sends it: lParam's native structures
+     * the program's while it runs; its DX:AX (size covers it) */
+    uint32_t (*task_message)(uint16_t task, uint32_t proc, uint16_t hwnd, uint16_t msg,
+                             uint16_t wp, uint32_t lp);
+    /* a dialog of the task's Win16 program's template (inst's resource
+     * named tpl, a far pointer or a number; global: the global block tpl)
+     * made with a native dialog procedure: as DialogBoxIndirectN (its
+     * window, modeless); -1 if it fails (size covers it) */
+    int (*task_dialog)(uint16_t task, uint16_t inst, uint32_t tpl, int global, uint16_t owner,
+                       void *proc, int modeless);
 } win_dll_ne;
 
 typedef struct win_dll_export {

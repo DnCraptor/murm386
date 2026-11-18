@@ -1123,8 +1123,10 @@ bool rp2350_bios_handler(CPU* cpu, uint8_t intnum) {
  */
 static bool pending_ss_trap;
 
+#ifndef XRIP386_CORE
 bool __not_in_flash_func(cpu_pending_trap)(void)        { return pending_ss_trap; }
 void __not_in_flash_func(cpu_pending_trap_set)(bool v)  { pending_ss_trap = v; }
+#endif
 
 bool __not_in_flash_func(cpu_irq_shadow)(const CPU* cpu) { return cpu->i286_irq_shadow; }
 void __not_in_flash_func(cpu_irq_shadow_set)(CPU* cpu, bool v) { cpu->i286_irq_shadow = v; }

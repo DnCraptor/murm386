@@ -11,6 +11,7 @@
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
 #include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -872,5 +873,13 @@ void win_pe_release(win_pe_image *img)
     if (img->gdt_linear)
         img->io.free(img->opaque, img->gdt_linear);
     img->thunk_linear = img->gdt_linear = 0;
+}
+#else
+/* without the Win32 layer (a build of the core alone): no Win32 files */
+int win_pe_file_resource(const char *path, uint16_t type, uint16_t id, uint8_t **data,
+                         uint32_t *size)
+{
+    (void)path; (void)type; (void)id; (void)data; (void)size;
+    return 0;
 }
 #endif

@@ -18,7 +18,7 @@ The authoritative GPIO map is `src/board_config.h`. Board-specific Pico SDK head
 
 ## CPU and DOS
 
-- Supported CPU targets: **286** (`CPU_TARGET=286`) and **386** (`CPU_TARGET=386`, `I386_MODE=1`).
+- Supported CPU targets: **286** (`CPU_TARGET=286`), **386** (`CPU_TARGET=386`, i386/486/586), and **386_XRIP** (`CPU_TARGET=386_XRIP`, pico-286 386). Both 386 builds use `386/` on the SD card.
 - Both Windows and Unix build wrappers support 286 and 386 CPU targets.
 - The DOS environment uses the RP2350 port of the FreeDOS kernel in `src/fdos/`.
 - The native command shell is FCOM (`src/fdos/fcom/`).

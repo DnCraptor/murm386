@@ -85,15 +85,11 @@ else()
     set(PICO_BOARD pico2 CACHE STRING "Pico board type")
 endif()
 
-# CPU target: "386" (full i386/486/586 core, I386_MODE=1) or "286"
-# (8086/186/286 core). This single switch sets BOTH the output base name
-# and the I386_MODE compile definition, so the binary name can no longer
-# disagree with the core actually compiled in (it used to always say
-# "386" while I386_MODE was left commented out - i.e. a 286 build).
-set(CPU_TARGET "386" CACHE STRING "Emulated CPU core: 286 or 386")
-set_property(CACHE CPU_TARGET PROPERTY STRINGS 286 386)
-if(NOT CPU_TARGET STREQUAL "286" AND NOT CPU_TARGET STREQUAL "386")
-    message(FATAL_ERROR "CPU_TARGET must be 286 or 386, got '${CPU_TARGET}'")
+# CPU target selects the interpreter and the firmware name.
+set(CPU_TARGET "286" CACHE STRING "Emulated CPU core: 286, 386 or 386_XRIP")
+set_property(CACHE CPU_TARGET PROPERTY STRINGS 286 386 386_XRIP)
+if(NOT CPU_TARGET STREQUAL "286" AND NOT CPU_TARGET STREQUAL "386" AND NOT CPU_TARGET STREQUAL "386_XRIP")
+    message(FATAL_ERROR "CPU_TARGET must be 286, 386 or 386_XRIP, got '${CPU_TARGET}'")
 endif()
 set(BUILD_NAME "${CPU_TARGET}-${VIDEO_MODE}")
 option(MIDI_GM_DLS "Load a General MIDI wavetable bank from SD into PSRAM" OFF)
@@ -107,7 +103,9 @@ endif()
 # i386 core - a behavioural change from the old default. Configure with
 #   -DCPU_TARGET=286
 # to reproduce the previous (286-mode) build exactly.
-if(CPU_TARGET STREQUAL "386")
+if(CPU_TARGET STREQUAL "386_XRIP")
+    message(STATUS "CPU target: 386_XRIP (pico-286 i386 core)")
+elseif(CPU_TARGET STREQUAL "386")
     message(STATUS "CPU target: 386 (I386_MODE=1, full i386 core)")
 else()
     message(STATUS "CPU target: 286 (I386_MODE off, 8086/186/286 core)")
@@ -368,10 +366,15 @@ endif()
 #=============================================================================
 # Core 386 Emulator Sources
 #=============================================================================
+if(CPU_TARGET STREQUAL "386_XRIP")
+    set(CPU_SOURCES src/xrip386/cpu.c)
+    set_source_files_properties(src/xrip386/cpu.c PROPERTIES COMPILE_OPTIONS "-O2;-fno-strict-aliasing")
+else()
+    set(CPU_SOURCES src/i386.c src/i386_arm.S)
+endif()
 set(EMU_CORE_SOURCES
     # CPU and core
-    src/i386.c
-    src/i386_arm.S   # ARM assembly optimizations for hot paths
+    ${CPU_SOURCES}
     src/pc.c
     src/video_profile.c
 
@@ -549,7 +552,9 @@ if(EMM)
         EMS_END=0xE0000ul
     )
 endif()
-if(CPU_TARGET STREQUAL "386")
+if(CPU_TARGET STREQUAL "386_XRIP")
+    target_compile_definitions(${BUILD_NAME} PRIVATE I386_MODE=1 XRIP386_CORE=1 EMU_CPU_GEN=3)
+elseif(CPU_TARGET STREQUAL "386")
     target_compile_definitions(${BUILD_NAME} PRIVATE I386_MODE=1 EMU_CPU_GEN=3)
 else()
     target_compile_definitions(${BUILD_NAME} PRIVATE EMU_CPU_GEN=2)
@@ -565,14 +570,15 @@ target_compile_definitions(${BUILD_NAME} PRIVATE
 # ARM-тулчейна (build/**/*.su после сборки).
 target_compile_options(${BUILD_NAME} PRIVATE -fstack-usage)
 
-# SD-card data directory. It holds the BIOS images, config.ini and disk
-# images, which DIFFER between a 286 and a 386 build - so it is tied to
-# CPU_TARGET and can never disagree with the binary. Previously "386" was
-# hardcoded in ~19 places and had to be hand-edited per build.
-# SD_DATA_DIR is the bare name ("386"); SD_DATA_DIR_SLASH adds the "/".
+# Both 386 cores share the BIOS, disk images and config on the SD card.
+if(CPU_TARGET STREQUAL "286")
+    set(SD_CPU_DIR 286)
+else()
+    set(SD_CPU_DIR 386)
+endif()
 target_compile_definitions(${BUILD_NAME} PRIVATE
-    SD_DATA_DIR="${CPU_TARGET}"
-    SD_DATA_DIR_SLASH="${CPU_TARGET}/")
+    SD_DATA_DIR="${SD_CPU_DIR}"
+    SD_DATA_DIR_SLASH="${SD_CPU_DIR}/")
 target_compile_definitions(${BUILD_NAME} PRIVATE
     # Version information
     FRANK_386_VERSION_MAJOR=${FRANK_386_VERSION_MAJOR}
@@ -650,7 +656,11 @@ endif()
 
 # Add I386_PROFILE if profiling enabled
 if(PROFILE_ENABLED)
-    target_compile_definitions(${BUILD_NAME} PRIVATE I386_PROFILE=1)
+    if(CPU_TARGET STREQUAL "386_XRIP")
+        message(STATUS "Instruction profiling is only available with the original 386 core")
+    else()
+        target_compile_definitions(${BUILD_NAME} PRIVATE I386_PROFILE=1)
+    endif()
 endif()
 
 # On-device diagnostics: core0 hardfault/stack-overflow/hang catcher.

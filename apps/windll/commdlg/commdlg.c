@@ -6,16 +6,23 @@
  * Find and Replace (modeless: the owner gets FINDMSGSTRING's message),
  * Color (the 48 basic colours, 16 custom ones, defined by red, green, blue
  * or hue, saturation, luminosity), Font (the faces of the system's fonts,
- * their styles and sizes, the effects, a sample), Print (WINN has no
- * printers: no default printer, as Windows without one says), GetFileTitle
- * and CommDlgExtendedError. Hooks and templates are not supported (their
- * flags are left out).
+ * their styles and sizes, the effects, a sample), Print and Print Setup
+ * (WIN.INI's printers), GetFileTitle and CommDlgExtendedError.
+ *
+ * Hooks: a caller's hook gets each message of the dialog before it does
+ * (nonzero: the dialog does nothing more), WM_INITDIALOG after it (lParam
+ * the caller's structure; its answer the dialog's), and the registered
+ * messages (FILEOKSTRING, LBSELCHSTRING, COLOROKSTRING); the owner gets
+ * HELPMSGSTRING's. Templates: a Win16 or Win32 program's (its module's
+ * resource or a block of its memory), the core making the dialog of it
+ * (CDHOSTN); its controls Windows' ids, as the dialogs' own are.
  *
  * A native DLL (ddi/windll.h): its functions for native callers (WINN's
  * user/commdlg.c loads it for them) and Win16 programs' calls of them, the
  * program's structures read before and written back after. The Find
  * dialog of a Win16 program keeps a native FINDREPLACE of its own; the
- * messages it sends bring the program's own up to date (ne_lparam).
+ * messages it sends bring the program's own up to date (ne_lparam), as
+ * the registered messages to a hook or the owner do the others'.
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
@@ -23,22 +30,203 @@
 #include <string.h>
 #include "windows.h"
 #include "commdlg.h"
+#include "dlgs.h"
 #include "windll.h"
 
 #define NE (__win_dll_ne)
 
 static DWORD last_error;
 
-/* the data of the dialog being made, until its WM_INITDIALOG keeps it
- * (DWL_USER): each dialog has its own, though several tasks have theirs */
+/* the data of the dialog being made, until its WM_INITDIALOG keeps it (in
+ * the DLL's table: DWL_USER is a hook's): each dialog has its own, though
+ * several tasks have theirs */
 static void *pending;
 
-static void *dlg_data(HWND dlg) { return (void *)(intptr_t)GetWindowLong(dlg, DWL_USER); }
+#define OPEN_DIALOGS 16
+
+static struct { HWND dlg; void *data; } kept[OPEN_DIALOGS];
+
+static void *dlg_data(HWND dlg)
+{
+    for (int i = 0; dlg && i < OPEN_DIALOGS; i++)
+        if (kept[i].dlg == dlg)
+            return kept[i].data;
+    return NULL;
+}
 
 static void dlg_keep(HWND dlg)
 {
-    SetWindowLong(dlg, DWL_USER, (LONG)(intptr_t)pending);
+    for (int i = 0; pending && i < OPEN_DIALOGS; i++)
+        if (!kept[i].dlg || !IsWindow(kept[i].dlg)) {
+            kept[i].dlg = dlg;
+            kept[i].data = pending;
+            break;
+        }
     pending = NULL;
+}
+
+static void dlg_drop(HWND dlg)
+{
+    for (int i = 0; dlg && i < OPEN_DIALOGS; i++)
+        if (kept[i].dlg == dlg)
+            kept[i].dlg = 0;
+}
+
+/* an owner-drawn list's item (Windows' own templates have them: the file
+ * dialogs'): its text and its focus, the list having painted its ground */
+static BOOL owner_draw(UINT msg, LPARAM lp)
+{
+    const DRAWITEMSTRUCT *d = (const DRAWITEMSTRUCT *)(intptr_t)lp;
+    if (msg != WM_DRAWITEM || !d || d->CtlType != ODT_LISTBOX)
+        return FALSE;
+    char text[128];
+    if ((int)d->itemID >= 0 &&
+        SendMessage(d->hwndItem, LB_GETTEXTLEN, d->itemID, 0) < (LRESULT)sizeof(text) &&
+        SendMessage(d->hwndItem, LB_GETTEXT, d->itemID, (LPARAM)(intptr_t)text) > 0) {
+        HGDIOBJ old = SelectObject(d->hDC, (HGDIOBJ)SendMessage(d->hwndItem, WM_GETFONT, 0, 0));
+        SetBkMode(d->hDC, TRANSPARENT);
+        TextOut(d->hDC, d->rcItem.left + 2, d->rcItem.top, text, lstrlen(text));
+        SelectObject(d->hDC, old);
+    }
+    if (d->itemState & ODS_FOCUS)
+        DrawFocusRect(d->hDC, &d->rcItem);
+    return TRUE;
+}
+
+/* ---------------------------------------------------------------- hooks */
+
+/* a dialog's caller: a native caller's hooks, or a program's hooks and
+ * templates through its host (CDHOSTN); each dialog's data starts with it */
+typedef struct cdbase {
+    const void *self;               /* the native structure: WM_INITDIALOG's lParam */
+    LPOFNHOOKPROC fn[2];            /* a native caller's hooks */
+    CDHOSTN host;
+    int has_host;
+    DWORD hooks, templates, live;   /* bit 0 the dialog's, bit 1 Print Setup's */
+    HWND owner;                     /* gets HELPMSGSTRING */
+    struct cdbase *next;            /* the open dialogs */
+} cdbase;
+
+static CDHOSTN next_host;           /* CommDlgHostN's, for the next call */
+static int next_has;
+static cdbase *open_dialogs;
+static UINT fileok_msg, lbselch_msg, help_msg, colorok_msg, setrgb_msg;
+
+static void WINAPI cd_host(const CDHOSTN *h)
+{
+    next_has = h != NULL;
+    if (h)
+        next_host = *h;
+}
+
+/* this call's host (a program's): 0 for none (a native caller) */
+static int take_host(CDHOSTN *h)
+{
+    int had = next_has;
+    if (had)
+        *h = next_host;
+    next_has = 0;
+    return had;
+}
+
+static void base_end(cdbase *b)
+{
+    for (cdbase **p = &open_dialogs; *p; p = &(*p)->next)
+        if (*p == b) {
+            *p = b->next;
+            break;
+        }
+}
+
+static void base_begin(cdbase *b, const CDHOSTN *h, const void *self, HWND owner,
+                       LPOFNHOOKPROC f0, LPOFNHOOKPROC f1)
+{
+    if (!fileok_msg) {
+        fileok_msg = RegisterWindowMessage(FILEOKSTRING);
+        lbselch_msg = RegisterWindowMessage(LBSELCHSTRING);
+        help_msg = RegisterWindowMessage(HELPMSGSTRING);
+        colorok_msg = RegisterWindowMessage(COLOROKSTRING);
+        setrgb_msg = RegisterWindowMessage(SETRGBSTRING);
+    }
+    base_end(b);                    /* (a Find dialog's slot again) */
+    memset(b, 0, sizeof(*b));
+    b->self = self;
+    b->owner = owner;
+    if (h) {
+        b->host = *h;
+        b->host.native = self;
+        b->has_host = 1;
+        b->hooks = h->hook ? h->hooks & 3u : 0;
+        b->templates = h->dialog ? h->templates & 3u : 0;
+    } else {
+        b->fn[0] = f0;
+        b->fn[1] = f1;
+        b->hooks = (f0 ? 1u : 0) | (f1 ? 2u : 0);
+    }
+    b->next = open_dialogs;
+    open_dialogs = b;
+}
+
+static UINT hook_call(cdbase *b, int which, HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (!b || !(b->hooks & b->live & (1u << which)))
+        return 0;
+    if (b->has_host)
+        return b->host.hook(&b->host, which, dlg, msg, wp, lp);
+    return b->fn[which](dlg, msg, wp, lp);
+}
+
+/* a dialog procedure's first: the hook's answer to the message, before the
+ * dialog's (1: *r is the dialog's); Help pressed: HELPMSGSTRING to the owner */
+static int pre_hook(cdbase *b, int which, HWND dlg, UINT msg, WPARAM wp, LPARAM lp, BOOL *r)
+{
+    if (msg == WM_NCDESTROY)
+        dlg_drop(dlg);
+    if (!b || msg == WM_INITDIALOG)
+        return 0;
+    UINT h = hook_call(b, which, dlg, msg, wp, lp);
+    if (msg == WM_NCDESTROY)
+        b->live &= ~(1u << which);
+    if (h) {
+        *r = (BOOL)h;
+        return 1;
+    }
+    if (msg == WM_COMMAND && wp == pshHelp) {
+        if (b->owner)
+            SendMessage(b->owner, help_msg, (WPARAM)dlg, (LPARAM)(intptr_t)b->self);
+        *r = TRUE;
+        return 1;
+    }
+    return 0;
+}
+
+/* WM_INITDIALOG done (ours its answer): the hook's, with the structure */
+static BOOL init_hook(cdbase *b, int which, HWND dlg, WPARAM wp, BOOL ours)
+{
+    b->live |= 1u << which;
+    if (!(b->hooks & (1u << which)))
+        return ours;
+    return (BOOL)hook_call(b, which, dlg, WM_INITDIALOG, wp, (LPARAM)(intptr_t)b->self);
+}
+
+/* the dialog: the program's template, or ours */
+static int cd_dialog(cdbase *b, int which, HINSTANCE inst, const DLGTEMPLATE_N *t,
+                     const DLGITEM_N *items, HWND owner, DLGPROC proc, int modeless)
+{
+    if (b->templates & (1u << which))
+        return b->host.dialog(&b->host, which, owner, proc, modeless);
+    return modeless ? (int)CreateDialogIndirectN(inst, t, items, owner, proc)
+                    : DialogBoxIndirectN(inst, t, items, owner, proc);
+}
+
+/* a native structure of an open dialog's: the program's (brought up to
+ * date), 0 for none */
+static DWORD cd_guest(LPARAM native)
+{
+    for (cdbase *b = open_dialogs; native && b; b = b->next)
+        if (b->has_host && (LPARAM)(intptr_t)b->self == native && b->host.guest)
+            return b->host.guest(&b->host, native);
+    return 0;
 }
 
 static const char *name_part(const char *p)
@@ -68,21 +256,25 @@ static short WINAPI cd_file_title(LPCSTR file, LPSTR title, UINT size)
 
 /* ---------------------------------------------------------------- file dialog */
 
-#define IDC_FILE    1152
-#define IDC_FILES   1120
-#define IDC_PATH    1088
-#define IDC_DIRS    1121
-#define IDC_TYPES   1136
+#define IDC_FILE    edt1
+#define IDC_FILES   lst1
+#define IDC_PATH    stc1
+#define IDC_DIRS    lst2
+#define IDC_TYPES   cmb1
+#define IDC_DRIVES  cmb2
+#define IDC_RO      chx1
 
 #define LIST_BYTES  4096
 
 static char last_dir[128];
 
 typedef struct {
+    cdbase b;
     OPENFILENAME *ofn;
     int   save;
     char  dir[128];                 /* no trailing backslash, except "C:\" */
     char  pattern[64];              /* "*.txt;*.ini" */
+    DWORD drives;                   /* bit n: drive n there (0: not looked at yet) */
 } fdlg;
 
 static int has_wild(const char *s)
@@ -241,6 +433,25 @@ static void fill(HWND dlg, fdlg *F)
     lstrcpyn(shown, F->dir, sizeof(shown));
     AnsiLower(shown);
     SetDlgItemText(dlg, IDC_PATH, shown);
+    /* the drives, the directory's chosen */
+    HWND drives = GetDlgItem(dlg, IDC_DRIVES);
+    if (drives) {
+        int sel = -1;
+        if (!F->drives)
+            for (int i = 0; i < 26; i++)
+                if (GetDriveType(i))
+                    F->drives |= 1ul << i;
+        SendMessage(drives, CB_RESETCONTENT, 0, 0);
+        for (int i = 0; i < 26; i++) {
+            char d[4] = { (char)('a' + i), ':', 0, 0 };
+            if (!(F->drives & (1ul << i)) && (F->dir[0] | 0x20) != 'a' + i)
+                continue;
+            int k = (int)SendMessage(drives, CB_ADDSTRING, 0, (LPARAM)(intptr_t)d);
+            if ((F->dir[0] | 0x20) == 'a' + i)
+                sel = k;
+        }
+        SendMessage(drives, CB_SETCURSEL, (WPARAM)sel, 0);
+    }
 }
 
 static void change_dir(HWND dlg, fdlg *F, const char *item)
@@ -345,6 +556,13 @@ static int accept(HWND dlg, fdlg *F)
                        MB_YESNO | MB_ICONEXCLAMATION) != IDYES)
             return 0;
     }
+    HWND ro = GetDlgItem(dlg, IDC_RO);
+    if (ro && !(o->Flags & OFN_HIDEREADONLY)) {
+        if (IsDlgButtonChecked(dlg, IDC_RO))
+            o->Flags |= OFN_READONLY;
+        else
+            o->Flags &= ~(DWORD)OFN_READONLY;
+    }
     if ((DWORD)lstrlen(full) + 1 > o->nMaxFile) {
         last_error = FNERR_BUFFERTOOSMALL;
         if (o->lpstrFile && o->nMaxFile >= 2) {
@@ -362,6 +580,8 @@ static int accept(HWND dlg, fdlg *F)
     o->nFileExtension = (UINT)(dot ? dot + 1 - o->lpstrFile : lstrlen(o->lpstrFile));
     if (o->lpstrFileTitle && o->nMaxFileTitle)
         lstrcpyn(o->lpstrFileTitle, nm, (int)o->nMaxFileTitle);
+    if (hook_call(&F->b, 0, dlg, fileok_msg, 0, (LPARAM)(intptr_t)o))
+        return 0;                       /* the hook's: not this one */
     lstrcpyn(last_dir, F->dir, sizeof(last_dir));
     EndDialog(dlg, IDOK);
     return 1;
@@ -372,8 +592,13 @@ static BOOL CALLBACK file_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
     if (msg == WM_INITDIALOG)
         dlg_keep(dlg);
     fdlg *F = (fdlg *)dlg_data(dlg);
+    BOOL hr;
     if (!F)
         return FALSE;
+    if (pre_hook(&F->b, 0, dlg, msg, wp, lp, &hr))
+        return hr;
+    if (owner_draw(msg, lp))
+        return TRUE;
     OPENFILENAME *o = F->ofn;
     switch (msg) {
     case WM_INITDIALOG: {
@@ -398,8 +623,14 @@ static BOOL CALLBACK file_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         SetDlgItemText(dlg, IDC_FILE, init && !has_wild(name_part(init)) ? name_part(init) : F->pattern);
         SendDlgItemMessage(dlg, IDC_FILE, EM_LIMITTEXT, 127, 0);
         SendDlgItemMessage(dlg, IDC_FILE, EM_SETSEL, 0, MAKELPARAM(0, -1));
+        if (o->Flags & OFN_HIDEREADONLY)
+            ShowWindow(GetDlgItem(dlg, IDC_RO), SW_HIDE);
+        else
+            CheckDlgButton(dlg, IDC_RO, (o->Flags & OFN_READONLY) != 0);
+        if (!(o->Flags & OFN_SHOWHELP))
+            ShowWindow(GetDlgItem(dlg, pshHelp), SW_HIDE);
         fill(dlg, F);
-        return TRUE;
+        return init_hook(&F->b, 0, dlg, wp, TRUE);
     }
     case WM_COMMAND:
         switch (wp) {
@@ -416,9 +647,10 @@ static BOOL CALLBACK file_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                 break;
             char name[20];
             SendMessage(l, LB_GETTEXT, (WPARAM)i, (LPARAM)(intptr_t)name);
-            if (HIWORD(lp) == LBN_SELCHANGE)
+            if (HIWORD(lp) == LBN_SELCHANGE) {
                 SetDlgItemText(dlg, IDC_FILE, name);
-            else if (HIWORD(lp) == LBN_DBLCLK) {
+                hook_call(&F->b, 0, dlg, lbselch_msg, IDC_FILES, MAKELPARAM(i, CD_LBSELCHANGE));
+            } else if (HIWORD(lp) == LBN_DBLCLK) {
                 SetDlgItemText(dlg, IDC_FILE, name);
                 accept(dlg, F);
             }
@@ -452,6 +684,19 @@ static BOOL CALLBACK file_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                 fill(dlg, F);
             }
             return TRUE;
+        case IDC_DRIVES:
+            if (HIWORD(lp) == CBN_SELCHANGE) {
+                char d[8];
+                int i = (int)SendDlgItemMessage(dlg, IDC_DRIVES, CB_GETCURSEL, 0, 0);
+                if (i >= 0 && SendDlgItemMessage(dlg, IDC_DRIVES, CB_GETLBTEXT, (WPARAM)i,
+                                                 (LPARAM)(intptr_t)d) >= 2) {
+                    d[2] = 0;           /* its current directory (the current drive's) */
+                    lstrcpyn(F->dir, d, sizeof(F->dir));
+                    full_path(F->dir, sizeof(F->dir));
+                    fill(dlg, F);
+                }
+            }
+            return TRUE;
         }
         break;
     }
@@ -467,12 +712,18 @@ static const DLGITEM_N file_items[] = {
     { 110, 32, 92, 68, IDC_DIRS, LBS_NOTIFY | WS_VSCROLL | WS_BORDER | WS_TABSTOP | WS_VISIBLE, "LISTBOX", "" },
     { 6, 104, 90, 9, -1, SS_LEFT | WS_VISIBLE, "STATIC", "List Files of &Type:" },
     { 6, 114, 90, 60, IDC_TYPES, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP | WS_VISIBLE, "COMBOBOX", "" },
+    { 110, 104, 92, 9, stc4, SS_LEFT | WS_VISIBLE, "STATIC", "Dri&ves:" },
+    { 110, 114, 92, 68, IDC_DRIVES, CBS_DROPDOWNLIST | CBS_SORT | WS_VSCROLL | WS_TABSTOP | WS_VISIBLE, "COMBOBOX", "" },
     { 208, 6, 50, 14, IDOK, BS_DEFPUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "OK" },
     { 208, 24, 50, 14, IDCANCEL, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "Cancel" },
+    { 208, 46, 50, 14, pshHelp, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "&Help" },
+    { 208, 68, 50, 12, IDC_RO, BS_AUTOCHECKBOX | WS_TABSTOP | WS_VISIBLE, "BUTTON", "&Read Only" },
 };
 
 static BOOL file_dialog(OPENFILENAME *o, int save)
 {
+    CDHOSTN host;
+    int had = take_host(&host);
     last_error = 0;
     if (!o || o->lStructSize < sizeof(OPENFILENAME) || !o->lpstrFile || !o->nMaxFile) {
         last_error = o ? CDERR_STRUCTSIZE : CDERR_INITIALIZATION;
@@ -499,19 +750,25 @@ static BOOL file_dialog(OPENFILENAME *o, int save)
     else
         GetWindowsDirectory(d->dir, sizeof(d->dir));
     full_path(d->dir, sizeof(d->dir));
+#define FILE_ITEMS (sizeof(file_items) / sizeof(file_items[0]))
     static const DLGTEMPLATE_N tpl_open = {
-        WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME, 10, 20, 20, 264, 134,
+        WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME, FILE_ITEMS, 20, 20, 264, 134,
         NULL, NULL, "Open", 0, NULL
     };
     static const DLGTEMPLATE_N tpl_save = {
-        WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME, 10, 20, 20, 264, 134,
+        WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME, FILE_ITEMS, 20, 20, 264, 134,
         NULL, NULL, "Save As", 0, NULL
     };
+    base_begin(&d->b, had ? &host : NULL, o, o->hwndOwner,
+               (o->Flags & OFN_ENABLEHOOK) ? o->lpfnHook : NULL, NULL);
     pending = d;
-    int r = DialogBoxIndirectN(o->hInstance, save ? &tpl_save : &tpl_open, file_items,
-                               o->hwndOwner, file_proc);
+    int r = cd_dialog(&d->b, 0, o->hInstance, save ? &tpl_save : &tpl_open, file_items,
+                      o->hwndOwner, file_proc, 0);
     pending = NULL;
+    base_end(&d->b);
     free(d);
+    if (r < 0 && !last_error)
+        last_error = CDERR_DIALOGFAILURE;
     return r == IDOK;
 }
 
@@ -520,20 +777,21 @@ static BOOL WINAPI cd_save(LPOPENFILENAME ofn) { return file_dialog(ofn, 1); }
 
 /* ---------------------------------------------------------------- find / replace */
 
-#define IDC_WHAT    1152
-#define IDC_WITH    1153
-#define IDC_WHOLE   1040
-#define IDC_CASE    1041
-#define IDC_UP      1056
-#define IDC_DOWN    1057
-#define IDC_REPLACE 1024
-#define IDC_REPALL  1025
+#define IDC_WHAT    edt1
+#define IDC_WITH    edt2
+#define IDC_WHOLE   chx1
+#define IDC_CASE    chx2
+#define IDC_UP      rad1
+#define IDC_DOWN    rad2
+#define IDC_REPLACE psh1
+#define IDC_REPALL  psh2
 
 #define FINDS 4
 
 static UINT find_msg;
 
 typedef struct {
+    cdbase b;
     HWND dlg;                       /* 0: free; -1 being made */
     FINDREPLACE *fr;
     int replace;
@@ -541,12 +799,38 @@ typedef struct {
 
 static fdata finds[FINDS];          /* modeless: one per open dialog */
 
-static fdata *find_of(HWND dlg)
+static void find_init(HWND dlg, fdata *f)
 {
-    for (int i = 0; i < FINDS; i++)
-        if (finds[i].dlg == dlg)
-            return &finds[i];
-    return NULL;
+    FINDREPLACE *fr = f->fr;
+    int replace = f->replace;
+    SetDlgItemText(dlg, IDC_WHAT, fr->lpstrFindWhat);
+    if (replace)
+        SetDlgItemText(dlg, IDC_WITH, fr->lpstrReplaceWith);
+    else
+        CheckRadioButton(dlg, IDC_UP, IDC_DOWN, (fr->Flags & FR_DOWN) ? IDC_DOWN : IDC_UP);
+    CheckDlgButton(dlg, IDC_WHOLE, (fr->Flags & FR_WHOLEWORD) != 0);
+    CheckDlgButton(dlg, IDC_CASE, (fr->Flags & FR_MATCHCASE) != 0);
+    if (fr->Flags & FR_HIDEWHOLEWORD) ShowWindow(GetDlgItem(dlg, IDC_WHOLE), SW_HIDE);
+    if (fr->Flags & FR_NOWHOLEWORD) EnableWindow(GetDlgItem(dlg, IDC_WHOLE), FALSE);
+    if (fr->Flags & FR_HIDEMATCHCASE) ShowWindow(GetDlgItem(dlg, IDC_CASE), SW_HIDE);
+    if (fr->Flags & FR_NOMATCHCASE) EnableWindow(GetDlgItem(dlg, IDC_CASE), FALSE);
+    if (!replace && (fr->Flags & FR_HIDEUPDOWN)) {
+        ShowWindow(GetDlgItem(dlg, IDC_UP), SW_HIDE);
+        ShowWindow(GetDlgItem(dlg, IDC_DOWN), SW_HIDE);
+    }
+    if (!replace && (fr->Flags & FR_NOUPDOWN)) {
+        EnableWindow(GetDlgItem(dlg, IDC_UP), FALSE);
+        EnableWindow(GetDlgItem(dlg, IDC_DOWN), FALSE);
+    }
+    if (!(fr->Flags & FR_SHOWHELP))
+        ShowWindow(GetDlgItem(dlg, pshHelp), SW_HIDE);
+    EnableWindow(GetDlgItem(dlg, IDOK), fr->lpstrFindWhat[0] != 0);
+    if (replace) {
+        EnableWindow(GetDlgItem(dlg, IDC_REPLACE), fr->lpstrFindWhat[0] != 0);
+        EnableWindow(GetDlgItem(dlg, IDC_REPALL), fr->lpstrFindWhat[0] != 0);
+    }
+    SendDlgItemMessage(dlg, IDC_WHAT, EM_SETSEL, 0, MAKELPARAM(0, -1));
+    SetFocus(GetDlgItem(dlg, IDC_WHAT));
 }
 
 static void find_notify(HWND dlg, fdata *f, DWORD what)
@@ -566,11 +850,24 @@ static void find_notify(HWND dlg, fdata *f, DWORD what)
 
 static BOOL CALLBACK find_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 {
-    (void)lp;
-    fdata *f = find_of(dlg);
+    if (msg == WM_INITDIALOG)
+        dlg_keep(dlg);
+    fdata *f = (fdata *)dlg_data(dlg);
+    BOOL hr;
+    if (f && pre_hook(&f->b, 0, dlg, msg, wp, lp, &hr)) {
+        if (msg == WM_NCDESTROY) {
+            f->dlg = 0;
+            base_end(&f->b);
+        }
+        return hr;
+    }
     switch (msg) {
     case WM_INITDIALOG:
-        return TRUE;
+        if (!f)
+            return TRUE;
+        f->dlg = dlg;
+        find_init(dlg, f);
+        return init_hook(&f->b, 0, dlg, wp, FALSE);
     case WM_COMMAND:
         if (!f)
             break;
@@ -601,9 +898,11 @@ static BOOL CALLBACK find_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         }
         }
         break;
-    case WM_DESTROY:
-        if (f)
+    case WM_NCDESTROY:
+        if (f) {
             f->dlg = 0;
+            base_end(&f->b);
+        }
         return FALSE;
     }
     return FALSE;
@@ -636,6 +935,8 @@ static const DLGITEM_N replace_items[] = {
 
 static HWND find_dialog(FINDREPLACE *fr, int replace)
 {
+    CDHOSTN host;
+    int had = take_host(&host);
     last_error = 0;
     if (!fr || fr->lStructSize < sizeof(FINDREPLACE) || !fr->hwndOwner || !fr->lpstrFindWhat ||
         !fr->wFindWhatLen || (replace && (!fr->lpstrReplaceWith || !fr->wReplaceWithLen))) {
@@ -665,39 +966,19 @@ static HWND find_dialog(FINDREPLACE *fr, int replace)
         NULL, NULL, "Replace", 0, NULL
     };
     f->dlg = (HWND)-1;              /* reserved while it is being made */
-    HWND dlg = CreateDialogIndirectN(fr->hInstance, replace ? &tpl_replace : &tpl_find,
-                                     replace ? replace_items : find_items, fr->hwndOwner, find_proc);
-    f->dlg = dlg;
-    if (!dlg) {
+    base_begin(&f->b, had ? &host : NULL, fr, fr->hwndOwner,
+               (fr->Flags & FR_ENABLEHOOK) ? fr->lpfnHook : NULL, NULL);
+    pending = f;
+    HWND dlg = (HWND)cd_dialog(&f->b, 0, fr->hInstance, replace ? &tpl_replace : &tpl_find,
+                               replace ? replace_items : find_items, fr->hwndOwner, find_proc, 1);
+    pending = NULL;
+    if (!dlg || dlg == (HWND)-1) {
+        f->dlg = 0;
+        base_end(&f->b);
         last_error = CDERR_DIALOGFAILURE;
         return 0;
     }
-    SetDlgItemText(dlg, IDC_WHAT, fr->lpstrFindWhat);
-    if (replace)
-        SetDlgItemText(dlg, IDC_WITH, fr->lpstrReplaceWith);
-    else
-        CheckRadioButton(dlg, IDC_UP, IDC_DOWN, (fr->Flags & FR_DOWN) ? IDC_DOWN : IDC_UP);
-    CheckDlgButton(dlg, IDC_WHOLE, (fr->Flags & FR_WHOLEWORD) != 0);
-    CheckDlgButton(dlg, IDC_CASE, (fr->Flags & FR_MATCHCASE) != 0);
-    if (fr->Flags & FR_HIDEWHOLEWORD) ShowWindow(GetDlgItem(dlg, IDC_WHOLE), SW_HIDE);
-    if (fr->Flags & FR_NOWHOLEWORD) EnableWindow(GetDlgItem(dlg, IDC_WHOLE), FALSE);
-    if (fr->Flags & FR_HIDEMATCHCASE) ShowWindow(GetDlgItem(dlg, IDC_CASE), SW_HIDE);
-    if (fr->Flags & FR_NOMATCHCASE) EnableWindow(GetDlgItem(dlg, IDC_CASE), FALSE);
-    if (!replace && (fr->Flags & FR_HIDEUPDOWN)) {
-        ShowWindow(GetDlgItem(dlg, IDC_UP), SW_HIDE);
-        ShowWindow(GetDlgItem(dlg, IDC_DOWN), SW_HIDE);
-    }
-    if (!replace && (fr->Flags & FR_NOUPDOWN)) {
-        EnableWindow(GetDlgItem(dlg, IDC_UP), FALSE);
-        EnableWindow(GetDlgItem(dlg, IDC_DOWN), FALSE);
-    }
-    EnableWindow(GetDlgItem(dlg, IDOK), fr->lpstrFindWhat[0] != 0);
-    if (replace) {
-        EnableWindow(GetDlgItem(dlg, IDC_REPLACE), fr->lpstrFindWhat[0] != 0);
-        EnableWindow(GetDlgItem(dlg, IDC_REPALL), fr->lpstrFindWhat[0] != 0);
-    }
-    SendDlgItemMessage(dlg, IDC_WHAT, EM_SETSEL, 0, MAKELPARAM(0, -1));
-    SetFocus(GetDlgItem(dlg, IDC_WHAT));
+    f->dlg = dlg;
     return dlg;
 }
 
@@ -729,6 +1010,7 @@ static const COLORREF basic[48] = {
 };
 
 typedef struct {
+    cdbase b;
     CHOOSECOLOR *cc;
     COLORREF color, custom[16];
     int sel;                        /* 0..47 basic, 48..63 custom, -1 none */
@@ -959,40 +1241,68 @@ static void color_edited(HWND dlg, cdlg *d, int id)
     color_redraw(dlg);
 }
 
+/* the colour (SETRGBSTRING's): its cell, if it has one */
+static void color_set(HWND dlg, cdlg *d, COLORREF c)
+{
+    d->color = c & 0xFFFFFFul;
+    d->sel = -1;
+    for (int i = 0; i < 48; i++)
+        if (basic[i] == d->color && d->sel < 0)
+            d->sel = i;
+    for (int i = 0; i < 16; i++)
+        if (d->custom[i] == d->color && d->sel < 0)
+            d->sel = 48 + i;
+    color_fields(dlg, d);
+    color_redraw(dlg);
+}
+
+static BOOL color_init(HWND dlg, cdlg *d)
+{
+    for (int i = 0; i < 48; i++)
+        if (basic[i] == d->color && d->sel < 0)
+            d->sel = i;
+    for (int i = 0; i < 16; i++)
+        if (d->custom[i] == d->color && d->sel < 0)
+            d->sel = 48 + i;
+    for (unsigned i = 0; i < 6; i++)
+        SendDlgItemMessage(dlg, full_ids[i], EM_LIMITTEXT, 3, 0);
+    if ((d->cc->Flags & CC_FULLOPEN) && !(d->cc->Flags & CC_PREVENTFULLOPEN)) {
+        color_open_full(dlg, d);
+        return FALSE;           /* the focus set */
+    }
+    /* the basic part: as wide as its left half */
+    RECT w, cl, du = { 0, 0, 148, 0 };
+    GetWindowRect(dlg, &w);
+    GetClientRect(dlg, &cl);
+    MapDialogRect(dlg, &du);
+    SetWindowPos(dlg, 0, 0, 0, (w.right - w.left) - (cl.right - cl.left) + du.right,
+                 w.bottom - w.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    for (unsigned i = 0; i < sizeof(full_ids) / sizeof(full_ids[0]); i++)
+        EnableWindow(GetDlgItem(dlg, full_ids[i]), FALSE);
+    if (d->cc->Flags & CC_PREVENTFULLOPEN)
+        EnableWindow(GetDlgItem(dlg, IDC_DEFINE), FALSE);
+    return TRUE;
+}
+
 static BOOL CALLBACK color_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 {
     if (msg == WM_INITDIALOG)
         dlg_keep(dlg);
     cdlg *d = (cdlg *)dlg_data(dlg);
+    BOOL hr;
     if (!d)
         return FALSE;
-    switch (msg) {
-    case WM_INITDIALOG: {
-        for (int i = 0; i < 48; i++)
-            if (basic[i] == d->color && d->sel < 0)
-                d->sel = i;
-        for (int i = 0; i < 16; i++)
-            if (d->custom[i] == d->color && d->sel < 0)
-                d->sel = 48 + i;
-        for (unsigned i = 0; i < 6; i++)
-            SendDlgItemMessage(dlg, full_ids[i], EM_LIMITTEXT, 3, 0);
-        if ((d->cc->Flags & CC_FULLOPEN) && !(d->cc->Flags & CC_PREVENTFULLOPEN)) {
-            color_open_full(dlg, d);
-            return FALSE;           /* the focus set */
-        }
-        /* the basic part: as wide as its left half */
-        RECT w, cl, du = { 0, 0, 148, 0 };
-        GetWindowRect(dlg, &w);
-        GetClientRect(dlg, &cl);
-        MapDialogRect(dlg, &du);
-        SetWindowPos(dlg, 0, 0, 0, (w.right - w.left) - (cl.right - cl.left) + du.right,
-                     w.bottom - w.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-        for (unsigned i = 0; i < sizeof(full_ids) / sizeof(full_ids[0]); i++)
-            EnableWindow(GetDlgItem(dlg, full_ids[i]), FALSE);
-        if (d->cc->Flags & CC_PREVENTFULLOPEN)
-            EnableWindow(GetDlgItem(dlg, IDC_DEFINE), FALSE);
+    if (pre_hook(&d->b, 0, dlg, msg, wp, lp, &hr))
+        return hr;
+    if (msg == setrgb_msg && setrgb_msg) {
+        color_set(dlg, d, (COLORREF)lp);
         return TRUE;
     }
+    switch (msg) {
+    case WM_INITDIALOG:
+        if (!(d->cc->Flags & CC_SHOWHELP))
+            ShowWindow(GetDlgItem(dlg, pshHelp), SW_HIDE);
+        return init_hook(&d->b, 0, dlg, wp, color_init(dlg, d));
     case WM_PAINT:
         color_paint(dlg, d);
         return TRUE;
@@ -1021,6 +1331,8 @@ static BOOL CALLBACK color_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         case IDOK:
             memcpy(d->cc->lpCustColors, d->custom, sizeof(d->custom));
             d->cc->rgbResult = d->color;
+            if (hook_call(&d->b, 0, dlg, colorok_msg, 0, (LPARAM)(intptr_t)d->cc))
+                return TRUE;            /* the hook's: not this one */
             EndDialog(dlg, IDOK);
             return TRUE;
         case IDCANCEL:
@@ -1049,9 +1361,10 @@ static BOOL CALLBACK color_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 static const DLGITEM_N color_items[] = {
     { 4, 4, 140, 9, -1, SS_LEFT | WS_VISIBLE, "STATIC", "&Basic Colors:" },
     { 4, 102, 140, 9, -1, SS_LEFT | WS_VISIBLE, "STATIC", "&Custom Colors:" },
-    { 4, 146, 140, 14, IDC_DEFINE, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "&Define Custom Colors..." },
+    /* OK first: the focus (Windows' grids, which take it first, are painted) */
     { 4, 166, 44, 14, IDOK, BS_DEFPUSHBUTTON | WS_TABSTOP | WS_GROUP | WS_VISIBLE, "BUTTON", "OK" },
     { 52, 166, 44, 14, IDCANCEL, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "Cancel" },
+    { 4, 146, 140, 14, IDC_DEFINE, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "&Define Custom Colors..." },
     { 152, 66, 144, 9, IDC_SOLID, SS_CENTER | WS_VISIBLE, "STATIC", "Color|Solid" },
     { 152, 84, 24, 9, -1, SS_RIGHT | WS_VISIBLE, "STATIC", "Hu&e:" },
     { 180, 82, 22, 12, IDC_HUE, EDIT_N | WS_GROUP, "EDIT", "" },
@@ -1070,6 +1383,8 @@ static const DLGITEM_N color_items[] = {
 
 static BOOL WINAPI cd_color(LPCHOOSECOLOR cc)
 {
+    CDHOSTN host;
+    int had = take_host(&host);
     last_error = 0;
     if (!cc || cc->lStructSize != sizeof(CHOOSECOLOR)) {
         last_error = cc ? CDERR_STRUCTSIZE : CDERR_INITIALIZATION;
@@ -1093,9 +1408,12 @@ static BOOL WINAPI cd_color(LPCHOOSECOLOR cc)
         sizeof(color_items) / sizeof(color_items[0]), 4, 12, 300, 184,
         NULL, NULL, "Color", 0, NULL
     };
+    base_begin(&d->b, had ? &host : NULL, cc, cc->hwndOwner,
+               (cc->Flags & CC_ENABLEHOOK) ? cc->lpfnHook : NULL, NULL);
     pending = d;
-    int r = DialogBoxIndirectN(0, &tpl, color_items, cc->hwndOwner, color_proc);
+    int r = cd_dialog(&d->b, 0, 0, &tpl, color_items, cc->hwndOwner, color_proc, 0);
     pending = NULL;
+    base_end(&d->b);
     free(d);
     if (r < 0)
         last_error = CDERR_DIALOGFAILURE;
@@ -1129,6 +1447,7 @@ static const char *const style_names[4] = { "Regular", "Italic", "Bold", "Bold I
 #define FACES 32
 
 typedef struct {
+    cdbase b;
     CHOOSEFONT *cf;
     int nfaces;
     struct { char name[LF_FACESIZE]; BYTE charset, pitch; BYTE styles, tt; } face[FACES];
@@ -1346,10 +1665,24 @@ static BOOL CALLBACK font_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
     if (msg == WM_INITDIALOG)
         dlg_keep(dlg);
     fntdlg *d = (fntdlg *)dlg_data(dlg);
+    BOOL hr;
     if (!d)
         return FALSE;
+    if (pre_hook(&d->b, 0, dlg, msg, wp, lp, &hr))
+        return hr;
     CHOOSEFONT *cf = d->cf;
     switch (msg) {
+    case WM_CHOOSEFONT_GETLOGFONT: {    /* the font the dialog has now */
+        LOGFONT lf;
+        int pt;
+        BOOL ok = lp && font_of(dlg, d, &lf, &pt);
+        if (ok && d->b.has_host)
+            ok = d->b.host.logfont && d->b.host.logfont(&d->b.host, (DWORD)lp, &lf);
+        else if (ok)
+            *(LOGFONT *)(intptr_t)lp = lf;
+        SetWindowLong(dlg, DWL_MSGRESULT, ok);
+        return TRUE;
+    }
     case WM_INITDIALOG: {
         HWND faces = GetDlgItem(dlg, IDC_FACE);
         for (int i = 0; i < d->nfaces; i++)
@@ -1397,8 +1730,10 @@ static BOOL CALLBACK font_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         if (cf->Flags & CF_NOFACESEL) SetDlgItemText(dlg, IDC_FACE, "");
         if (cf->Flags & CF_NOSTYLESEL) SetDlgItemText(dlg, IDC_STYLE, "");
         if (cf->Flags & CF_NOSIZESEL) SetDlgItemText(dlg, IDC_PTSIZE, "");
+        if (!(cf->Flags & CF_SHOWHELP))
+            ShowWindow(GetDlgItem(dlg, pshHelp), SW_HIDE);
         font_sample(dlg, d);
-        return TRUE;
+        return init_hook(&d->b, 0, dlg, wp, TRUE);
     }
     case WM_PAINT: {
         PAINTSTRUCT ps;
@@ -1424,7 +1759,7 @@ static BOOL CALLBACK font_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         case IDCANCEL:
             EndDialog(dlg, IDCANCEL);
             return TRUE;
-        case IDC_APPLY:                 /* a hook's to apply: none */
+        case IDC_APPLY:                 /* the hook's to apply (it had it first) */
             return TRUE;
         case IDC_FACE:
             if (HIWORD(lp) == CBN_SELCHANGE || HIWORD(lp) == CBN_EDITCHANGE) {
@@ -1499,6 +1834,8 @@ static const DLGITEM_N font_items[] = {
 
 static BOOL WINAPI cd_font(LPCHOOSEFONT cf)
 {
+    CDHOSTN host;
+    int had = take_host(&host);
     last_error = 0;
     if (!cf || cf->lStructSize != sizeof(CHOOSEFONT)) {
         last_error = cf ? CDERR_STRUCTSIZE : CDERR_INITIALIZATION;
@@ -1538,9 +1875,12 @@ static BOOL WINAPI cd_font(LPCHOOSEFONT cf)
         sizeof(font_items) / sizeof(font_items[0]), 13, 54, 264, 140,
         NULL, NULL, "Font", 0, NULL
     };
+    base_begin(&d->b, had ? &host : NULL, cf, cf->hwndOwner,
+               (cf->Flags & CF_ENABLEHOOK) ? cf->lpfnHook : NULL, NULL);
     pending = d;
-    int r = DialogBoxIndirectN(0, &tpl, font_items, cf->hwndOwner, font_proc);
+    int r = cd_dialog(&d->b, 0, cf->hInstance, &tpl, font_items, cf->hwndOwner, font_proc, 0);
     pending = NULL;
+    base_end(&d->b);
     free(d);
     if (r < 0)
         last_error = CDERR_DIALOGFAILURE;
@@ -1557,6 +1897,7 @@ typedef struct {
 
 /* PrintDlg's question and its answer, the same for native and Win16 callers */
 typedef struct {
+    cdbase b;                           /* hook 0 Print's, 1 Print Setup's */
     HWND owner;
     DWORD flags;
     UINT from, to, minp, maxp, copies;
@@ -1637,13 +1978,13 @@ static void printer_title(const prn_sel *p, char *out, int size)
 
 /* ---- Print Setup: the default printer or another installed one */
 
-#define IDC_PS_DEFAULT  300
-#define IDC_PS_SPECIFIC 301
-#define IDC_PS_LIST     302
-#define IDC_PS_CURRENT  303
-#define IDC_PS_PORTRAIT 304
-#define IDC_PS_LAND     305
-#define IDC_PS_PAPER    306
+#define IDC_PS_DEFAULT  rad3            /* Windows' ids */
+#define IDC_PS_SPECIFIC rad4
+#define IDC_PS_LIST     cmb1
+#define IDC_PS_CURRENT  stc1
+#define IDC_PS_PORTRAIT rad1
+#define IDC_PS_LAND     rad2
+#define IDC_PS_PAPER    cmb2
 
 static print_req *setup_req;
 static prn_sel setup_sel;               /* the printer the dialog shows, its settings */
@@ -1712,9 +2053,11 @@ static void setup_changed(HWND dlg)
 
 static BOOL CALLBACK setup_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 {
-    (void)lp;
     char s[200], keys[1024], title[160];
     prn_sel def;
+    BOOL hr;
+    if (setup_req && pre_hook(&setup_req->b, 1, dlg, msg, wp, lp, &hr))
+        return hr;
     switch (msg) {
     case WM_INITDIALOG: {
         int have = default_printer(&def);
@@ -1743,7 +2086,9 @@ static BOOL CALLBACK setup_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         if (!setup_req->have_dm)
             memset(&setup_dm, 0, sizeof(setup_dm));
         setup_show(dlg);
-        return TRUE;
+        if (!(setup_req->flags & PD_SHOWHELP))
+            ShowWindow(GetDlgItem(dlg, pshHelp), SW_HIDE);
+        return init_hook(&setup_req->b, 1, dlg, wp, TRUE);
     }
     case WM_COMMAND:
         if (wp == IDC_PS_LIST && HIWORD(lp) == CBN_SELCHANGE) {
@@ -1794,7 +2139,8 @@ static const DLGITEM_N setup_items[] = {
     { 208, 24, 50, 14, IDCANCEL, BS_PUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "Cancel" },
 };
 
-static int run_setup(print_req *r)
+/* owner: the Print dialog's (its Setup button), or the program's window */
+static int run_setup(print_req *r, HWND owner)
 {
     static const DLGTEMPLATE_N tpl = {
         WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME,
@@ -1803,22 +2149,25 @@ static int run_setup(print_req *r)
     };
     print_req *was = setup_req;
     setup_req = r;
-    int rc = DialogBoxIndirectN(0, &tpl, setup_items, r->owner, setup_proc);
+    int rc = cd_dialog(&r->b, 1, 0, &tpl, setup_items, owner, setup_proc, 0);
+    r->b.live &= ~2u;
     setup_req = was;
+    if (rc < 0)
+        last_error = CDERR_DIALOGFAILURE;
     return rc == IDOK;
 }
 
 /* ---- Print: the range, the copies, to a file */
 
-#define IDC_PR_PRINTER  310
-#define IDC_PR_ALL      311
-#define IDC_PR_SEL      312
-#define IDC_PR_PAGES    313
-#define IDC_PR_FROM     314
-#define IDC_PR_TO       315
-#define IDC_PR_COPIES   316
-#define IDC_PR_FILE     317
-#define IDC_PR_SETUP    318
+#define IDC_PR_PRINTER  stc1            /* Windows' ids */
+#define IDC_PR_ALL      rad1
+#define IDC_PR_SEL      rad2
+#define IDC_PR_PAGES    rad3
+#define IDC_PR_FROM     edt1
+#define IDC_PR_TO       edt2
+#define IDC_PR_COPIES   edt3
+#define IDC_PR_FILE     chx1
+#define IDC_PR_SETUP    psh1
 
 static print_req *print_cur;
 
@@ -1834,8 +2183,12 @@ static void show_printer(HWND dlg)
 
 static BOOL CALLBACK print_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 {
-    (void)lp;
     print_req *r = print_cur;
+    BOOL hr;
+    if (!r)
+        return FALSE;
+    if (pre_hook(&r->b, 0, dlg, msg, wp, lp, &hr))
+        return hr;
     switch (msg) {
     case WM_INITDIALOG:
         show_printer(dlg);
@@ -1856,7 +2209,9 @@ static BOOL CALLBACK print_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             ShowWindow(GetDlgItem(dlg, IDC_PR_FILE), SW_HIDE);
         else if (r->flags & PD_DISABLEPRINTTOFILE)
             EnableWindow(GetDlgItem(dlg, IDC_PR_FILE), FALSE);
-        return TRUE;
+        if (!(r->flags & PD_SHOWHELP))
+            ShowWindow(GetDlgItem(dlg, pshHelp), SW_HIDE);
+        return init_hook(&r->b, 0, dlg, wp, TRUE);
     case WM_COMMAND:
         switch (wp) {
         case IDC_PR_FROM: case IDC_PR_TO:
@@ -1864,7 +2219,7 @@ static BOOL CALLBACK print_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                 CheckRadioButton(dlg, IDC_PR_ALL, IDC_PR_PAGES, IDC_PR_PAGES);
             return TRUE;
         case IDC_PR_SETUP:
-            if (run_setup(r))
+            if (run_setup(r, dlg))
                 show_printer(dlg);
             return TRUE;
         case IDOK: {
@@ -1947,7 +2302,7 @@ static int print_run(print_req *r, int have_sel)
     if (r->flags & PD_RETURNDEFAULT)
         return 1;
     if (r->flags & PD_PRINTSETUP)
-        return run_setup(r);
+        return run_setup(r, r->owner);
     static const DLGTEMPLATE_N tpl = {
         WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME,
         sizeof(print_items) / sizeof(print_items[0]), 20, 20, 268, 108,
@@ -1955,7 +2310,8 @@ static int print_run(print_req *r, int have_sel)
     };
     print_req *was = print_cur;
     print_cur = r;
-    int rc = DialogBoxIndirectN(0, &tpl, print_items, r->owner, print_proc);
+    int rc = cd_dialog(&r->b, 0, 0, &tpl, print_items, r->owner, print_proc, 0);
+    r->b.live &= ~1u;
     print_cur = was;
     if (rc < 0)
         last_error = CDERR_DIALOGFAILURE;
@@ -2026,6 +2382,8 @@ static void take_mode(print_req *r, const uint8_t *b, unsigned n)
 
 static BOOL WINAPI cd_print(LPPRINTDLG pd)
 {
+    CDHOSTN host;
+    int had = take_host(&host);
     last_error = 0;
     if (!pd || pd->lStructSize != sizeof(PRINTDLG)) {
         last_error = pd ? CDERR_STRUCTSIZE : CDERR_INITIALIZATION;
@@ -2052,7 +2410,12 @@ static BOOL WINAPI cd_print(LPPRINTDLG pd)
             take_mode(&r, b, (unsigned)GlobalSize(pd->hDevMode));
         GlobalUnlock(pd->hDevMode);
     }
-    if (!print_run(&r, have))
+    base_begin(&r.b, had ? &host : NULL, pd, pd->hwndOwner,
+               (pd->Flags & PD_ENABLEPRINTHOOK) ? pd->lpfnPrintHook : NULL,
+               (pd->Flags & PD_ENABLESETUPHOOK) ? pd->lpfnSetupHook : NULL);
+    int ok = print_run(&r, have);
+    base_end(&r.b);
+    if (!ok)
         return FALSE;
     if (pd->hDevMode)
         GlobalFree(pd->hDevMode);
@@ -2128,15 +2491,27 @@ static int g_out(win_dll_call *c, uint32_t far, const char *s, uint32_t cap)
     return NE->write(c, far + n - 1, "", 1);
 }
 
+/* ---- a Win16 program's hooks and templates: its host (CDHOSTN), the
+ * structure's kind, its far pointer, the hooks' procedures, the templates
+ * (its module's resource, or a global block's: handles) */
+enum { H_TASK, H_GUEST, H_KIND, H_HOOK0, H_HOOK1, H_INST, H_TPL0, H_TPL1, H_HANDLES, H_FIND };
+enum { K_FILE, K_COLOR, K_FONT, K_FIND, K_PRINT };
+
+static void ne_host(CDHOSTN *h, int kind, uint32_t far, DWORD hooks, uint32_t hook0,
+                    uint32_t hook1, DWORD templates, DWORD handles, uint16_t inst,
+                    uint32_t tpl0, uint32_t tpl1);
+
 /* Win16 OPENFILENAME: lStructSize, hwndOwner, hInstance, lpstrFilter,
  * lpstrCustomFilter, nMaxCustFilter, nFilterIndex, lpstrFile, nMaxFile,
  * lpstrFileTitle, nMaxFileTitle, lpstrInitialDir, lpstrTitle, Flags,
  * nFileOffset, nFileExtension, lpstrDefExt, lCustData, lpfnHook,
- * lpTemplateName: 72 bytes (as much as WINN reads: 60) */
+ * lpTemplateName: 72 bytes (WINN writes back the first 60) */
+#define OFN_HOOKS (OFN_ENABLEHOOK | OFN_ENABLETEMPLATE | OFN_ENABLETEMPLATEHANDLE)
+
 static uint16_t ne_file(win_dll_call *c, int save)
 {
     uint32_t far = NE->arg32(c, 4);
-    uint8_t g[60];
+    uint8_t g[72];
     char filter[512], file[260], title_buf[64], dir[128], caption[64], defext[8];
     if (!NE->read(c, far, g, sizeof(g)))
         return 0;
@@ -2170,14 +2545,24 @@ static uint16_t ne_file(win_dll_call *c, int save)
     ofn.nMaxFileTitle = max_title < sizeof(title_buf) ? max_title : sizeof(title_buf);
     ofn.lpstrInitialDir = dir[0] ? dir : NULL;
     ofn.lpstrTitle = caption[0] ? caption : NULL;
-    ofn.Flags = rd32(g + 48) & ~(DWORD)(OFN_ENABLEHOOK | OFN_ENABLETEMPLATE);
+    DWORD flags = rd32(g + 48);
+    ofn.Flags = flags & ~(DWORD)OFN_HOOKS;
     ofn.lpstrDefExt = defext[0] ? defext : NULL;
+    ofn.lCustData = (LPARAM)rd32(g + 60);
+    CDHOSTN h;
+    int handle = (flags & OFN_ENABLETEMPLATEHANDLE) != 0;
+    ne_host(&h, K_FILE, far, (flags & OFN_ENABLEHOOK) ? 1u : 0, rd32(g + 64), 0,
+            (flags & (OFN_ENABLETEMPLATE | OFN_ENABLETEMPLATEHANDLE)) ? 1u : 0, handle,
+            rd16(g + 6), handle ? rd16(g + 6) : rd32(g + 68), 0);
+    cd_host(&h);
     BOOL ok = save ? cd_save(&ofn) : cd_open(&ofn);
+    if (!NE->read(c, far, g, 60))     /* the hook may have changed it meanwhile */
+        return 0;
     wr32(g + 20, ofn.nFilterIndex);
-    wr32(g + 48, ofn.Flags);
+    wr32(g + 48, (rd32(g + 48) & OFN_HOOKS) | ofn.Flags);
     wr16(g + 52, (uint16_t)ofn.nFileOffset);
     wr16(g + 54, (uint16_t)ofn.nFileExtension);
-    if (!NE->write(c, far, g, sizeof(g)))
+    if (!NE->write(c, far, g, 60))
         return 0;
     if (ok) {
         g_out(c, file_far, file, max_file);
@@ -2224,41 +2609,58 @@ static uint16_t ne_find_dialog(win_dll_call *c, int replace)
     FINDREPLACE *fr = &nf->fr;
     fr->lStructSize = sizeof(*fr);
     fr->hwndOwner = rd16(g + 4);
-    fr->Flags = rd32(g + 8) & ~(DWORD)(FR_ENABLEHOOK | FR_ENABLETEMPLATE |
-                                       FR_ENABLETEMPLATEHANDLE);
+    DWORD flags = rd32(g + 8);
+    fr->Flags = flags & ~(DWORD)(FR_ENABLEHOOK | FR_ENABLETEMPLATE | FR_ENABLETEMPLATEHANDLE);
     fr->lpstrFindWhat = nf->what;
     fr->lpstrReplaceWith = replace ? nf->with : NULL;
     fr->wFindWhatLen = nf->what_len;
     fr->wReplaceWithLen = nf->with_len;
+    fr->lCustData = (LPARAM)rd32(g + 24);
     nf->task = (uint16_t)GetCurrentTask();
+    CDHOSTN hs;
+    int handle = (flags & FR_ENABLETEMPLATEHANDLE) != 0;
+    ne_host(&hs, K_FIND, far, (flags & FR_ENABLEHOOK) ? 1u : 0, rd32(g + 28), 0,
+            (flags & (FR_ENABLETEMPLATE | FR_ENABLETEMPLATEHANDLE)) ? 1u : 0, handle,
+            rd16(g + 6), handle ? rd16(g + 6) : rd32(g + 32), 0);
+    hs.data[H_FIND] = (DWORD)(nf - ne_finds);
+    cd_host(&hs);
     HWND h = find_dialog(fr, replace);
     if (!h)
         nf->task = 0;
     return (uint16_t)h;
 }
 
-/* the Find dialog's message to a Win16 window: the program's FINDREPLACE */
+/* the program's FINDREPLACE brought up to date */
+static void ne_find_sync(ne_find *nf)
+{
+    uint8_t g[36];
+    if (NE->task_read(nf->task, nf->guest, g, sizeof(g))) {
+        wr32(g + 8, (rd32(g + 8) & (FR_ENABLEHOOK | FR_ENABLETEMPLATE | FR_ENABLETEMPLATEHANDLE)) |
+                    nf->fr.Flags);
+        NE->task_write(nf->task, nf->guest, g, sizeof(g));
+        uint32_t at = rd32(g + 12);
+        uint32_t n = (uint32_t)lstrlen(nf->what) + 1;
+        if (at && nf->what_len)
+            NE->task_write(nf->task, at, nf->what, n < nf->what_len ? n : nf->what_len);
+        at = rd32(g + 16);
+        n = (uint32_t)lstrlen(nf->with) + 1;
+        if (at && nf->fr.lpstrReplaceWith && nf->with_len)
+            NE->task_write(nf->task, at, nf->with, n < nf->with_len ? n : nf->with_len);
+    }
+}
+
+/* the Find dialog's message to a Win16 window: the program's FINDREPLACE;
+ * a registered message's structure of another dialog's (a hook's, the
+ * owner's): the program's */
 static uint32_t ne_lparam(uint32_t msg, uint32_t lparam)
 {
     if (!find_msg || msg != find_msg)
-        return 0;
+        return cd_guest((LPARAM)lparam);
     for (int i = 0; i < FINDS; i++) {
         ne_find *nf = &ne_finds[i];
         if (!nf->task || (uint32_t)(uintptr_t)&nf->fr != lparam)
             continue;
-        uint8_t g[36];
-        if (NE->task_read(nf->task, nf->guest, g, sizeof(g))) {
-            wr32(g + 8, nf->fr.Flags);
-            NE->task_write(nf->task, nf->guest, g, sizeof(g));
-            uint32_t at = rd32(g + 12);
-            uint32_t n = (uint32_t)lstrlen(nf->what) + 1;
-            if (at && nf->what_len)
-                NE->task_write(nf->task, at, nf->what, n < nf->what_len ? n : nf->what_len);
-            at = rd32(g + 16);
-            n = (uint32_t)lstrlen(nf->with) + 1;
-            if (at && nf->fr.lpstrReplaceWith && nf->with_len)
-                NE->task_write(nf->task, at, nf->with, n < nf->with_len ? n : nf->with_len);
-        }
+        ne_find_sync(nf);
         if (nf->fr.Flags & FR_DIALOGTERM)      /* the dialog's last: its end */
             nf->task = 0;
         return nf->guest;
@@ -2292,9 +2694,17 @@ static uint16_t ne_color(win_dll_call *c)
     cc.hwndOwner = rd16(g + 4);
     cc.rgbResult = rd32(g + 8);
     cc.lpCustColors = custom;
-    cc.Flags = rd32(g + 16) & ~(DWORD)(CC_ENABLEHOOK | CC_ENABLETEMPLATE | CC_ENABLETEMPLATEHANDLE);
+    DWORD flags = rd32(g + 16);
+    cc.Flags = flags & ~(DWORD)(CC_ENABLEHOOK | CC_ENABLETEMPLATE | CC_ENABLETEMPLATEHANDLE);
+    cc.lCustData = (LPARAM)rd32(g + 20);
+    CDHOSTN h;
+    int handle = (flags & CC_ENABLETEMPLATEHANDLE) != 0;
+    ne_host(&h, K_COLOR, far, (flags & CC_ENABLEHOOK) ? 1u : 0, rd32(g + 24), 0,
+            (flags & (CC_ENABLETEMPLATE | CC_ENABLETEMPLATEHANDLE)) ? 1u : 0, handle,
+            rd16(g + 6), handle ? rd16(g + 6) : rd32(g + 28), 0);
+    cd_host(&h);
     BOOL ok = cd_color(&cc);
-    if (ok) {
+    if (ok && NE->read(c, far, g, sizeof(g))) {
         wr32(g + 8, cc.rgbResult);
         for (int i = 0; i < 16; i++)
             wr32(cust + 4 * i, custom[i]);
@@ -2344,6 +2754,144 @@ static void logfont_out(const LOGFONT *lf, uint8_t *g)
     lstrcpyn((char *)g + 18, lf->lfFaceName, LF_FACESIZE);
 }
 
+/* a string to a task's memory, cut to cap bytes with its zero */
+static void task_str(uint16_t task, uint32_t far, const char *s, uint32_t cap)
+{
+    uint32_t n = (uint32_t)lstrlen(s) + 1;
+    if (!far || !cap)
+        return;
+    if (n > cap)
+        n = cap;
+    NE->task_write(task, far, s, n - 1);
+    NE->task_write(task, far + n - 1, "", 1);
+}
+
+/* the program's structure brought up to date from the native one the
+ * dialog has (its hook or owner gets it): its far pointer */
+static DWORD ne_guest(const CDHOSTN *h, LPARAM native)
+{
+    uint16_t task = (uint16_t)h->data[H_TASK];
+    uint32_t far = h->data[H_GUEST];
+    uint8_t g[60];
+    switch (h->data[H_KIND]) {
+    case K_FILE: {
+        const OPENFILENAME *o = (const OPENFILENAME *)(intptr_t)native;
+        if (!NE->task_read(task, far, g, 60))
+            break;
+        wr32(g + 20, o->nFilterIndex);
+        wr32(g + 48, (rd32(g + 48) & OFN_HOOKS) | o->Flags);
+        wr16(g + 52, (uint16_t)o->nFileOffset);
+        wr16(g + 54, (uint16_t)o->nFileExtension);
+        NE->task_write(task, far, g, 60);
+        task_str(task, rd32(g + 24), o->lpstrFile, rd32(g + 28));
+        if (o->lpstrFileTitle)
+            task_str(task, rd32(g + 32), o->lpstrFileTitle, rd32(g + 36));
+        break;
+    }
+    case K_COLOR: {
+        const CHOOSECOLOR *cc = (const CHOOSECOLOR *)(intptr_t)native;
+        uint8_t cust[64];
+        if (!NE->task_read(task, far, g, 32))
+            break;
+        wr32(g + 8, cc->rgbResult);
+        NE->task_write(task, far, g, 32);
+        for (int i = 0; i < 16; i++)
+            wr32(cust + 4 * i, cc->lpCustColors[i]);
+        if (rd32(g + 12))
+            NE->task_write(task, rd32(g + 12), cust, sizeof(cust));
+        break;
+    }
+    case K_FONT: {
+        const CHOOSEFONT *cf = (const CHOOSEFONT *)(intptr_t)native;
+        uint8_t lg[50];
+        if (!NE->task_read(task, far, g, 46))
+            break;
+        wr16(g + 12, (uint16_t)cf->iPointSize);
+        wr32(g + 14, (rd32(g + 14) & (CF_ENABLEHOOK | CF_ENABLETEMPLATE |
+                                      CF_ENABLETEMPLATEHANDLE)) | cf->Flags);
+        wr32(g + 18, cf->rgbColors);
+        wr16(g + 40, (uint16_t)cf->nFontType);
+        NE->task_write(task, far, g, 46);
+        logfont_out(cf->lpLogFont, lg);
+        if (rd32(g + 8))
+            NE->task_write(task, rd32(g + 8), lg, sizeof(lg));
+        break;
+    }
+    case K_FIND:
+        if (h->data[H_FIND] < FINDS && ne_finds[h->data[H_FIND]].task)
+            ne_find_sync(&ne_finds[h->data[H_FIND]]);
+        break;
+    case K_PRINT: {
+        const print_req *r = (const print_req *)(intptr_t)native;
+        if (!NE->task_read(task, far, g, 26))
+            break;
+        wr32(g + 12, r->flags);
+        wr16(g + 16, (uint16_t)r->from);
+        wr16(g + 18, (uint16_t)r->to);
+        wr16(g + 24, (uint16_t)r->copies);
+        NE->task_write(task, far, g, 26);
+        break;
+    }
+    }
+    return far;
+}
+
+static UINT ne_hook(const CDHOSTN *h, int which, HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    uint16_t task = (uint16_t)h->data[H_TASK];
+    uint32_t proc = h->data[H_HOOK0 + which];
+#if 1
+    { extern int printf(const char *, ...);
+      printf( "HOOK msg %04x wp %04x lp %08lx\n", msg, (unsigned)wp, (unsigned long)lp); }
+#endif
+    if (msg != WM_INITDIALOG && NE->size >= sizeof(win_dll_ne) && NE->task_message)
+        return (uint16_t)NE->task_message(task, proc, (uint16_t)dlg, (uint16_t)msg,
+                                          (uint16_t)wp, (uint32_t)lp);
+    uint32_t l = lp && lp == (LPARAM)(intptr_t)h->native ? ne_guest(h, lp) : (uint32_t)lp;
+    uint16_t w[5] = { (uint16_t)dlg, (uint16_t)msg, (uint16_t)wp, (uint16_t)(l >> 16),
+                      (uint16_t)l };
+    return (uint16_t)NE->call(task, proc, w, 5);
+}
+
+static int ne_dialog(const CDHOSTN *h, int which, HWND owner, DLGPROC proc, int modeless)
+{
+    if (NE->size < sizeof(win_dll_ne) || !NE->task_dialog)
+        return -1;
+    return NE->task_dialog((uint16_t)h->data[H_TASK], (uint16_t)h->data[H_INST],
+                           h->data[H_TPL0 + which], (int)((h->data[H_HANDLES] >> which) & 1u),
+                           (uint16_t)owner, (void *)proc, modeless);
+}
+
+static BOOL ne_logfont(const CDHOSTN *h, DWORD at, const LOGFONT *lf)
+{
+    uint8_t g[50];
+    logfont_out(lf, g);
+    return NE->task_write((uint16_t)h->data[H_TASK], at, g, sizeof(g));
+}
+
+static void ne_host(CDHOSTN *h, int kind, uint32_t far, DWORD hooks, uint32_t hook0,
+                    uint32_t hook1, DWORD templates, DWORD handles, uint16_t inst,
+                    uint32_t tpl0, uint32_t tpl1)
+{
+    memset(h, 0, sizeof(*h));
+    h->hook = ne_hook;
+    h->dialog = ne_dialog;
+    h->guest = ne_guest;
+    h->logfont = ne_logfont;
+    h->hooks = hooks & ((hook0 ? 1u : 0) | (hook1 ? 2u : 0));   /* (none given: none) */
+    h->templates = NE->size >= sizeof(win_dll_ne) && NE->task_dialog ?
+                   templates & ((tpl0 ? 1u : 0) | (tpl1 ? 2u : 0)) : 0;
+    h->data[H_TASK] = (DWORD)GetCurrentTask();
+    h->data[H_GUEST] = far;
+    h->data[H_KIND] = (DWORD)kind;
+    h->data[H_HOOK0] = hook0;
+    h->data[H_HOOK1] = hook1;
+    h->data[H_INST] = inst;
+    h->data[H_TPL0] = tpl0;
+    h->data[H_TPL1] = tpl1;
+    h->data[H_HANDLES] = handles;
+}
+
 /* Win16 CHOOSEFONT: lStructSize, hwndOwner, hDC, lpLogFont, iPointSize,
  * Flags, rgbColors, lCustData, lpfnHook, lpTemplateName, hInstance,
  * lpszStyle, nFontType, nSizeMin, nSizeMax: 46 bytes */
@@ -2359,8 +2907,8 @@ static uint16_t ne_font(win_dll_call *c)
         return 0;
     }
     uint32_t lf_far = rd32(g + 8), style_far = rd32(g + 36);
-    DWORD flags = rd32(g + 14) & ~(DWORD)(CF_ENABLEHOOK | CF_ENABLETEMPLATE |
-                                          CF_ENABLETEMPLATEHANDLE);
+    DWORD all = rd32(g + 14);
+    DWORD flags = all & ~(DWORD)(CF_ENABLEHOOK | CF_ENABLETEMPLATE | CF_ENABLETEMPLATEHANDLE);
     if (!lf_far || !NE->read(c, lf_far, lg, sizeof(lg))) {
         last_error = CDERR_INITIALIZATION;
         return 0;
@@ -2380,8 +2928,15 @@ static uint16_t ne_font(win_dll_call *c)
     cf.lpszStyle = style_far ? style : NULL;
     cf.nSizeMin = (int16_t)rd16(g + 42);
     cf.nSizeMax = (int16_t)rd16(g + 44);
+    cf.lCustData = (LPARAM)rd32(g + 22);
+    CDHOSTN h;
+    int handle = (all & CF_ENABLETEMPLATEHANDLE) != 0;
+    ne_host(&h, K_FONT, far, (all & CF_ENABLEHOOK) ? 1u : 0, rd32(g + 26), 0,
+            (all & (CF_ENABLETEMPLATE | CF_ENABLETEMPLATEHANDLE)) ? 1u : 0, handle,
+            rd16(g + 34), handle ? rd16(g + 34) : rd32(g + 30), 0);
+    cd_host(&h);
     BOOL ok = cd_font(&cf);
-    if (ok) {
+    if (ok && NE->read(c, far, g, sizeof(g))) {
         logfont_out(&lf, lg);
         NE->write(c, lf_far, lg, sizeof(lg));
         wr16(g + 12, (uint16_t)cf.iPointSize);
@@ -2400,7 +2955,7 @@ static uint16_t ne_font(win_dll_call *c)
 static uint16_t ne_print(win_dll_call *c)
 {
     uint32_t far = NE->arg32(c, 4);
-    uint8_t g[26], b[256];
+    uint8_t g[52], b[256];
     if (!NE->read(c, far, g, sizeof(g)))
         return 0;
     if (rd32(g) != 52) {
@@ -2428,7 +2983,20 @@ static uint16_t ne_print(win_dll_call *c)
             mode_ok = size == sizeof(m);
         }
     }
-    if (!print_run(&r, have))
+    CDHOSTN h;
+    DWORD f = r.flags;
+    DWORD handles = ((f & PD_ENABLEPRINTTEMPLATEHANDLE) ? 1u : 0) |
+                    ((f & PD_ENABLESETUPTEMPLATEHANDLE) ? 2u : 0);
+    ne_host(&h, K_PRINT, far, ((f & PD_ENABLEPRINTHOOK) ? 1u : 0) | ((f & PD_ENABLESETUPHOOK) ? 2u : 0),
+            rd32(g + 32), rd32(g + 36),
+            ((f & (PD_ENABLEPRINTTEMPLATE | PD_ENABLEPRINTTEMPLATEHANDLE)) ? 1u : 0) |
+            ((f & (PD_ENABLESETUPTEMPLATE | PD_ENABLESETUPTEMPLATEHANDLE)) ? 2u : 0), handles,
+            rd16(g + 26), (handles & 1u) ? rd16(g + 48) : rd32(g + 40),
+            (handles & 2u) ? rd16(g + 50) : rd32(g + 44));
+    base_begin(&r.b, &h, &r, r.owner, NULL, NULL);
+    int ran = print_run(&r, have);
+    base_end(&r.b);
+    if (!ran || !NE->read(c, far, g, 26))
         return 0;
     unsigned n = devnames(&r.sel, b, sizeof(b));
     HTASK task = GetCurrentTask();
@@ -2448,7 +3016,7 @@ static uint16_t ne_print(win_dll_call *c)
     wr16(g + 16, r.from);
     wr16(g + 18, r.to);
     wr16(g + 24, r.copies);
-    return (uint16_t)NE->write(c, far, g, sizeof(g));
+    return (uint16_t)NE->write(c, far, g, 26);
 }
 
 static int ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *v)
@@ -2520,6 +3088,7 @@ static const win_dll_export exports[] = {
     { 22, 10, "PrintSetupDlgProc", NULL },
     { 26, 0, "CommDlgExtendedError", (const void *)cd_error },
     { 27, 10, "GetFileTitle", (const void *)cd_file_title },
+    { 900, 0, "CommDlgHostN", (const void *)cd_host },      /* WINN's (CDHOSTN) */
 };
 
 static const win_dll_info info = {

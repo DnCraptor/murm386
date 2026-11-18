@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Build one supported murm386/FRANK RP2350 firmware variant.
-# Both 286 and 386 CPU targets are supported.
+# The CPU target selects the guest interpreter.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -27,10 +27,10 @@ usage() {
     cat <<'USAGE'
 Usage: ./build.sh [options]
 
-Supported CPU targets: 286, 386 (default: 286)
+Supported CPU targets: 286, 386, 386_XRIP (default: 286)
 
 Main options:
-      --cpu 286|386                 Emulated CPU target (default: 286)
+      --cpu 286|386|386_XRIP        Emulated CPU target (default: 286)
   -b, --board M1|M2|PC|Z2|C2       Board variant (default: M1)
   -v, --video RUNTIME|MCGA|EGA128|VGA128|VGA256
                                       Video profile (default: RUNTIME)
@@ -49,7 +49,7 @@ Main options:
   -h, --help                        Show this help
 
 Short forms:
-  -286 -386
+  -286 -386 -386_XRIP
   -M1 -M2 -PC -Z2 -C2
   -RUNTIME -MCGA -EGA128 -VGA128 -VGA256
   -252 -378 -504
@@ -79,7 +79,7 @@ while [[ $# -gt 0 ]]; do
         --build-dir) need_arg "$@"; BUILD_DIR="$2"; shift 2 ;;
         -j|--jobs) need_arg "$@"; JOBS="$2"; shift 2 ;;
 
-        -286|-386) CPU_TARGET="${1#-}"; shift ;;
+        -286|-386|-386_XRIP|-386_xrip) CPU_TARGET="${1#-}"; shift ;;
         -M1|-M2|-PC|-Z2|-C2) BOARD="${1#-}"; shift ;;
         -RUNTIME|-MCGA|-EGA128|-VGA128|-VGA256) VIDEO_MODE="${1#-}"; shift ;;
         -252|-378|-504) CPU_SPEED="${1#-}"; shift ;;
@@ -96,7 +96,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-case "$CPU_TARGET" in 286|386) ;; *) echo "Invalid CPU target: $CPU_TARGET" >&2; exit 2 ;; esac
+CPU_TARGET="${CPU_TARGET^^}"
+case "$CPU_TARGET" in 286|386|386_XRIP) ;; *) echo "Invalid CPU target: $CPU_TARGET" >&2; exit 2 ;; esac
 case "$BOARD" in M1|M2|PC|Z2|C2) ;; *) echo "Invalid board: $BOARD" >&2; exit 2 ;; esac
 case "$VIDEO_MODE" in RUNTIME|MCGA|EGA128|VGA128|VGA256) ;; *) echo "Invalid video mode: $VIDEO_MODE" >&2; exit 2 ;; esac
 if [[ "$VIDEO_MODE" == "RUNTIME" && "$NO_PAGING" == "ON" ]]; then

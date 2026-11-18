@@ -4,14 +4,15 @@ This document describes the current supported host-side build workflow for murm3
 
 ## Supported CPU targets
 
-CMake supports both CPU cores:
+CMake accepts the following CPU targets:
 
 ```text
 CPU_TARGET=286
 CPU_TARGET=386
+CPU_TARGET=386_XRIP
 ```
 
-Both Windows (`build.bat`, `build_all.bat`) and Unix (`build.sh`, `build_all.sh`) wrappers support 286 and 386 targets. `CPU_TARGET=386` enables the full i386 core with `I386_MODE=1`.
+Both Windows (`build.bat`, `build_all.bat`) and Unix (`build.sh`, `build_all.sh`) wrappers support all three targets. `CPU_TARGET=386` selects the i386/486/586 core. `CPU_TARGET=386_XRIP` selects the pico-286 interpreter from `572890a`, with the guest CPU fixed to 386.
 
 ## Toolchain
 
@@ -78,7 +79,7 @@ Defaults:
 
 | Option | Values / meaning |
 |---|---|
-| `--cpu` | `286` or `386` (both wrappers) |
+| `--cpu` | `286`, `386` or `386_XRIP` (both wrappers) |
 | `-b`, `--board` | `M1`, `M2`, `PC`, `Z2`, `C2` |
 | `-v`, `--video` | `RUNTIME`, `MCGA`, `EGA128`, `VGA128`, `VGA256` |
 | `-c`, `--clock` | RP2350 clock in MHz |
@@ -97,7 +98,7 @@ Defaults:
 Short forms are also accepted:
 
 ```text
--286 -386
+-286 -386 -386_XRIP
 -M1 -M2 -PC -Z2 -C2
 -RUNTIME -MCGA -EGA128 -VGA128 -VGA256
 -252 -378 -504
@@ -137,7 +138,7 @@ Windows:
 build_all.bat all
 ```
 
-On both hosts the CPU argument is optional and defaults to `all` (both 286 and 386). Pass `286` or `386` to build only that CPU target, e.g. `./build_all.sh 386`.
+On both hosts the CPU argument is optional and defaults to `all` (all three targets). Pass `286`, `386` or `386_XRIP` to build only that CPU target, e.g. `./build_all.sh 386`.
 
 Additional options are forwarded to every `build.sh` / `build.bat` invocation. `--emm` is intentionally rejected here because `build_all` controls EMM itself and builds both states. Use the first positional argument instead of `--cpu` in `build_all.sh`. For example:
 
@@ -223,7 +224,7 @@ They are intentionally not part of the normal build-script interface. Use direct
 
 ## SD data directory
 
-The data directory is tied to `CPU_TARGET` by CMake. Each CPU target uses its matching data/config namespace, for example `286/` + `.config/286/` or `386/` + `.config/386/`; `tmp/` is used for `pagefile.sys` when SD-backed paging is active.
+The data directory is tied to `CPU_TARGET` by CMake. The 286 build uses `286/` and `.config/286/`. Both 386 builds use `386/` and `.config/386/`. The `tmp/` directory is used for `pagefile.sys` when SD-backed paging is active.
 
 ## Clean/reconfigure behaviour
 

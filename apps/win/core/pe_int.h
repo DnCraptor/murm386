@@ -307,6 +307,13 @@ int win_pe_dll_api(pe_args *a, uint16_t service, uint32_t *eax);
 const char *win_pe_dll_name(uint16_t service);
 uint32_t win_pe_dll_lparam(win_pe_ctx *ctx, uint32_t msg, uint32_t lp);
 void win_pe_dlls_end(win_pe_ctx *ctx);
+/* pe_user.c: COMMDLG's dialog of the program's template (inst's resource
+ * tpl, or the template at tpl: handle), its procedure native; a window
+ * procedure of the program's (a hook) called with a message as USER sends
+ * it */
+int win_pe_dialog_native(pe_args *a, uint32_t inst, uint32_t tpl, int handle, HWND owner,
+                         DLGPROC proc, int modeless);
+uint32_t win_pe_message(win_pe_ctx *ctx, uint32_t proc, HWND h, UINT msg, WPARAM wp, LPARAM lp);
 void pe_user_start(win_pe_ctx *ctx);
 void pe_user_end(win_pe_ctx *ctx);
 /* the instance of the program's task for native functions */

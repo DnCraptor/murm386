@@ -36,6 +36,7 @@ if /I "%~1"=="--emm" set "EMM=ON"& shift& goto parse
 if /I "%~1"=="--no-paging" set "NO_PAGING=ON"& shift& goto parse
 if /I "%~1"=="-286" set "CPU_TARGET=286"& shift& goto parse
 if /I "%~1"=="-386" set "CPU_TARGET=386"& shift& goto parse
+if /I "%~1"=="-386_XRIP" set "CPU_TARGET=386_XRIP"& shift& goto parse
 
 if /I "%~1"=="-M1" set "BOARD=M1"& shift& goto parse
 if /I "%~1"=="-M2" set "BOARD=M2"& shift& goto parse
@@ -98,7 +99,7 @@ echo Missing argument for %~1 1>&2
 goto usage_error
 
 :validate
-for %%C in (286 386) do if /I "!CPU_TARGET!"=="%%C" set "CPU_TARGET=%%C"& set "CPU_OK=1"
+for %%C in (286 386 386_XRIP) do if /I "!CPU_TARGET!"=="%%C" set "CPU_TARGET=%%C"& set "CPU_OK=1"
 if not defined CPU_OK echo Invalid CPU target: !CPU_TARGET! 1>&2& exit /b 2
 for %%B in (M1 M2 PC Z2 C2) do if /I "!BOARD!"=="%%B" set "BOARD=%%B"& set "BOARD_OK=1"
 if not defined BOARD_OK echo Invalid board: !BOARD! 1>&2& exit /b 2
@@ -164,9 +165,9 @@ exit /b 2
 :usage
 echo Usage: build.bat [options]
 echo.
-echo Supported CPU targets: 286, 386
+echo Supported CPU targets: 286, 386, 386_XRIP
 echo.
-echo       --cpu 286^|386  ^(short forms: -286, -386^)
+echo       --cpu 286^|386^|386_XRIP  ^(short forms: -286, -386, -386_XRIP^)
 echo   -b, --board M1^|M2^|PC^|Z2^|C2
 echo   -v, --video RUNTIME^|MCGA^|EGA128^|VGA128^|VGA256
 echo   -c, --clock MHz

@@ -263,6 +263,17 @@ OWWAVE: wave output on the host's driver (HOSTWAVE.DLL, host_wave.c, named
     notify 1, at 1814 ms, close 0"; the driver's blocks on stderr ("wave
     block 4096 at 452, gap 0": a block filled from several headers, queued
     while the one before plays, none apart), HOSTWAVE.RAW all 32000 bytes
+OWHOOK: COMMDLG's hooks and templates (owhook.rc's FILEHOOK, FINDHOOK,
+    PRINTHOOK of Windows' control ids; FILEHOOK's lists owner-drawn, as in
+    Windows' own): Open with its template and hook
+    (WM_INITDIALOG's lCustData, LBSELCHSTRING, FILEOKSTRING refused once,
+    its check box's WM_COMMAND), Help's HELPMSGSTRING to the owner; Color
+    (SETRGBSTRING, COLOROKSTRING), Font (WM_CHOOSEFONT_GETLOGFONT), Find
+    (its template, the text its hook sets, FINDMSGSTRING), Print (its
+    template and hook) and Print Setup (its hook): "open: 1 cust 1234 init 1
+    ok 2 sel 1 preview 1 help 1 'C:\\HOSTWIN\\README.TXT'", "color: 1 FF0000
+    ok FF0000", "font: 1 'System', got 1 'System'", "find: 'hooked' next
+    cust 5678, closed", "print: 1 init 1 setup 1 copies 2"
 """
 import sys
 
@@ -10931,6 +10942,526 @@ PROGRAMS = {
             '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
             '00000000000000000000000000000000000000000000000000000000000000004f074f070000000000000000'
             '00000000000000000000000000000000000000000000000000000000002020050000'
+        )),
+    'OWHOOK': (
+        # wcc -bt=windows -ms -zW -od owhook.c; wrc -r -bt=windows owhook.rc; wlink @owhook.lnk
+        # (-od: Watcom's optimiser loads lParam's selector before the message is known)
+        # ---- owhook.c
+        #     /*
+        #      * owhook.c - COMMDLG's hooks and templates from a Win16 program: Open with
+        #      * its own template (an extra check box and text) and a hook (WM_INITDIALOG
+        #      * and its lCustData, LBSELCHSTRING, FILEOKSTRING refused once, the check
+        #      * box's WM_COMMAND), Help (HELPMSGSTRING to the owner with its structure);
+        #      * Color with a hook (SETRGBSTRING at WM_INITDIALOG, COLOROKSTRING); Font
+        #      * with a hook (WM_CHOOSEFONT_GETLOGFONT); Find with its own template and a
+        #      * hook (the text set at WM_INITDIALOG, FINDMSGSTRING to the owner); Print
+        #      * with its own template and a hook, Print Setup (its button) with a hook.
+        #      */
+        #     #include <windows.h>
+        #     #include <commdlg.h>
+        #     #include <dlgs.h>
+        #     #include <string.h>
+        #
+        #     /* Windows 3.1's registered messages (not in Watcom's Win16 commdlg.h) */
+        #     #define FILEOKSTRING  "commdlg_FileNameOK"
+        #     #define LBSELCHSTRING "commdlg_LBSelChangedNotify"
+        #     #define HELPMSGSTRING "commdlg_help"
+        #     #define COLOROKSTRING "commdlg_ColorOK"
+        #     #define SETRGBSTRING  "commdlg_SetRGBColor"
+        #     #define FINDMSGSTRING "commdlg_FindReplace"
+        #
+        #     #define ID_PREVIEW 200
+        #     #define ID_NOTE    201
+        #
+        #     static char line[6][120];
+        #     static HINSTANCE inst;
+        #     static UINT fileok, lbselch, help, colorok, setrgb, findmsg;
+        #     static OPENFILENAME ofn;
+        #     static char file[128];
+        #     static int inits, oks, sels, previews, helps;
+        #     static DWORD cust;
+        #     static DWORD rgb_ok;
+        #     static LOGFONT got;
+        #     static int got_ok;
+        #     static FINDREPLACE fr;
+        #     static char what[64];
+        #     static DWORD find_cust;
+        #     static int pinit, psetup;
+        #
+        #     UINT CALLBACK _export FileHook(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+        #     {
+        #         if (msg == WM_INITDIALOG) {
+        #             inits++;
+        #             cust = ((LPOPENFILENAME)lp)->lCustData;
+        #             SetDlgItemText(dlg, ID_NOTE, "hooked");
+        #             return TRUE;
+        #         }
+        #         if (msg == fileok) {
+        #             oks++;
+        #             lstrcpy(file, ((LPOPENFILENAME)lp)->lpstrFile);
+        #             if (oks == 1) {
+        #                 SetDlgItemText(dlg, ID_NOTE, "again");
+        #                 return TRUE;
+        #             }
+        #             return FALSE;
+        #         }
+        #         if (msg == lbselch && wp == lst1)
+        #             sels++;
+        #         if (msg == WM_COMMAND && wp == ID_PREVIEW)
+        #             previews++;
+        #         return FALSE;
+        #     }
+        #
+        #     UINT CALLBACK _export ColorHook(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+        #     {
+        #         if (msg == WM_INITDIALOG) {
+        #             SendMessage(dlg, setrgb, 0, RGB(0, 0, 255));
+        #             return TRUE;
+        #         }
+        #         if (msg == colorok)
+        #             rgb_ok = ((LPCHOOSECOLOR)lp)->rgbResult;
+        #         return FALSE;
+        #     }
+        #
+        #     UINT CALLBACK _export FontHook(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+        #     {
+        #         if (msg == WM_INITDIALOG) {
+        #             got_ok = (int)SendMessage(dlg, WM_CHOOSEFONT_GETLOGFONT, 0, (LPARAM)(LPLOGFONT)&got);
+        #             return TRUE;
+        #         }
+        #         return FALSE;
+        #     }
+        #
+        #     UINT CALLBACK _export FindHook(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+        #     {
+        #         if (msg == WM_INITDIALOG) {
+        #             find_cust = ((LPFINDREPLACE)lp)->lCustData;
+        #             SetDlgItemText(dlg, edt1, "hooked");
+        #             return TRUE;
+        #         }
+        #         return FALSE;
+        #     }
+        #
+        #     UINT CALLBACK _export PrintHook(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+        #     {
+        #         if (msg == WM_INITDIALOG) {
+        #             pinit += ((LPPRINTDLG)lp)->lCustData == 0x4321;
+        #             SetDlgItemText(dlg, ID_NOTE, "hooked");
+        #             return TRUE;
+        #         }
+        #         return FALSE;
+        #     }
+        #
+        #     UINT CALLBACK _export SetupHook(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+        #     {
+        #         if (msg == WM_INITDIALOG) {
+        #             psetup++;
+        #             return TRUE;
+        #         }
+        #         return FALSE;
+        #     }
+        #
+        #     static void print(HWND h)
+        #     {
+        #         PRINTDLG pd;
+        #         BOOL ok;
+        #         WriteProfileString("devices", "Epson LX-350", "EPSON9,OWHOOK.PRN");
+        #         WriteProfileString("windows", "device", "Epson LX-350,EPSON9,OWHOOK.PRN");
+        #         memset(&pd, 0, sizeof(pd));
+        #         pd.lStructSize = sizeof(pd);
+        #         pd.hwndOwner = h;
+        #         pd.hInstance = inst;
+        #         pd.Flags = PD_ENABLEPRINTHOOK | PD_ENABLESETUPHOOK | PD_ENABLEPRINTTEMPLATE |
+        #                    PD_NOSELECTION;
+        #         pd.nFromPage = 1;
+        #         pd.nToPage = 1;
+        #         pd.nMinPage = 1;
+        #         pd.nMaxPage = 9;
+        #         pd.nCopies = 1;
+        #         pd.lCustData = 0x4321;
+        #         pd.lpfnPrintHook = (UINT (CALLBACK *)(HWND, UINT, WPARAM, LPARAM))
+        #                            MakeProcInstance((FARPROC)PrintHook, inst);
+        #         pd.lpfnSetupHook = (UINT (CALLBACK *)(HWND, UINT, WPARAM, LPARAM))
+        #                            MakeProcInstance((FARPROC)SetupHook, inst);
+        #         pd.lpPrintTemplateName = "PRINTHOOK";
+        #         ok = PrintDlg(&pd);
+        #         wsprintf(line[4], "print: %d init %d setup %d copies %d", ok, pinit, psetup, pd.nCopies);
+        #     }
+        #
+        #     static void open_file(HWND h)
+        #     {
+        #         BOOL ok;
+        #         memset(&ofn, 0, sizeof(ofn));
+        #         lstrcpy(file, "*.txt");
+        #         ofn.lStructSize = sizeof(ofn);
+        #         ofn.hwndOwner = h;
+        #         ofn.hInstance = inst;
+        #         ofn.lpstrFilter = "Text (*.TXT)\0*.txt\0All (*.*)\0*.*\0";
+        #         ofn.nFilterIndex = 1;
+        #         ofn.lpstrFile = file;
+        #         ofn.nMaxFile = sizeof(file);
+        #         ofn.Flags = OFN_ENABLEHOOK | OFN_ENABLETEMPLATE | OFN_SHOWHELP | OFN_HIDEREADONLY;
+        #         ofn.lCustData = 0x1234;
+        #         ofn.lpfnHook = (UINT (CALLBACK *)(HWND, UINT, WPARAM, LPARAM))
+        #                        MakeProcInstance((FARPROC)FileHook, inst);
+        #         ofn.lpTemplateName = "FILEHOOK";
+        #         ok = GetOpenFileName(&ofn);
+        #         wsprintf(line[0], "open: %d cust %lx init %d ok %d sel %d preview %d help %d '%s'", ok,
+        #                  cust, inits, oks, sels, previews, helps, (LPSTR)file);
+        #     }
+        #
+        #     static void color(HWND h)
+        #     {
+        #         static COLORREF custom[16];
+        #         CHOOSECOLOR cc;
+        #         BOOL ok;
+        #         memset(&cc, 0, sizeof(cc));
+        #         cc.lStructSize = sizeof(cc);
+        #         cc.hwndOwner = h;
+        #         cc.lpCustColors = custom;
+        #         cc.Flags = CC_ENABLEHOOK | CC_RGBINIT;
+        #         cc.lpfnHook = (UINT (CALLBACK *)(HWND, UINT, WPARAM, LPARAM))
+        #                       MakeProcInstance((FARPROC)ColorHook, inst);
+        #         ok = ChooseColor(&cc);
+        #         wsprintf(line[1], "color: %d %06lX ok %06lX", ok, cc.rgbResult, rgb_ok);
+        #     }
+        #
+        #     static void font(HWND h)
+        #     {
+        #         LOGFONT lf;
+        #         CHOOSEFONT cf;
+        #         BOOL ok;
+        #         memset(&lf, 0, sizeof(lf));
+        #         lstrcpy(lf.lfFaceName, "System");
+        #         memset(&cf, 0, sizeof(cf));
+        #         cf.lStructSize = sizeof(cf);
+        #         cf.hwndOwner = h;
+        #         cf.lpLogFont = &lf;
+        #         cf.Flags = CF_SCREENFONTS | CF_INITTOLOGFONTSTRUCT | CF_ENABLEHOOK;
+        #         cf.lpfnHook = (UINT (CALLBACK *)(HWND, UINT, WPARAM, LPARAM))
+        #                       MakeProcInstance((FARPROC)FontHook, inst);
+        #         ok = ChooseFont(&cf);
+        #         wsprintf(line[2], "font: %d '%s', got %d '%s'", ok, (LPSTR)lf.lfFaceName, got_ok,
+        #                  (LPSTR)got.lfFaceName);
+        #     }
+        #
+        #     static void find(HWND h)
+        #     {
+        #         memset(&fr, 0, sizeof(fr));
+        #         lstrcpy(what, "abc");
+        #         fr.lStructSize = sizeof(fr);
+        #         fr.hwndOwner = h;
+        #         fr.hInstance = inst;
+        #         fr.Flags = FR_DOWN | FR_ENABLEHOOK | FR_ENABLETEMPLATE;
+        #         fr.lpstrFindWhat = what;
+        #         fr.wFindWhatLen = sizeof(what);
+        #         fr.lCustData = 0x5678;
+        #         fr.lpfnHook = (UINT (CALLBACK *)(HWND, UINT, WPARAM, LPARAM))
+        #                       MakeProcInstance((FARPROC)FindHook, inst);
+        #         fr.lpTemplateName = "FINDHOOK";
+        #         if (!FindText(&fr))
+        #             lstrcpy(line[3], "find: none");
+        #     }
+        #
+        #     LRESULT CALLBACK _export WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+        #     {
+        #         if (msg == help && help) {
+        #             helps += (LPOPENFILENAME)lp == &ofn;
+        #             return 0;
+        #         }
+        #         if (msg == findmsg && findmsg) {
+        #             LPFINDREPLACE f = (LPFINDREPLACE)lp;
+        #             if (f->Flags & FR_DIALOGTERM)
+        #                 lstrcat(line[3], ", closed");
+        #             else
+        #                 wsprintf(line[3], "find: '%s' %s cust %lx", f->lpstrFindWhat,
+        #                          (LPSTR)(f == &fr && (f->Flags & FR_FINDNEXT) ? "next" : "?"), find_cust);
+        #             InvalidateRect(h, NULL, TRUE);
+        #             return 0;
+        #         }
+        #         switch (msg) {
+        #         case WM_CHAR:
+        #             if (wp == 'o') open_file(h);
+        #             else if (wp == 'c') color(h);
+        #             else if (wp == 'f') font(h);
+        #             else if (wp == 'r') find(h);
+        #             else if (wp == 'p') print(h);
+        #             InvalidateRect(h, NULL, TRUE);
+        #             return 0;
+        #         case WM_PAINT: {
+        #             PAINTSTRUCT ps;
+        #             HDC dc = BeginPaint(h, &ps);
+        #             int i;
+        #             for (i = 0; i < 6; i++)
+        #                 TextOut(dc, 4, 4 + 16 * i, line[i], lstrlen(line[i]));
+        #             EndPaint(h, &ps);
+        #             return 0;
+        #         }
+        #         case WM_DESTROY:
+        #             PostQuitMessage(0);
+        #             return 0;
+        #         }
+        #         return DefWindowProc(h, msg, wp, lp);
+        #     }
+        #
+        #     int PASCAL WinMain(HINSTANCE hinst, HINSTANCE prev, LPSTR cmd, int show)
+        #     {
+        #         WNDCLASS wc;
+        #         MSG m;
+        #         HWND h;
+        #         inst = hinst;
+        #         fileok = RegisterWindowMessage(FILEOKSTRING);
+        #         lbselch = RegisterWindowMessage(LBSELCHSTRING);
+        #         help = RegisterWindowMessage(HELPMSGSTRING);
+        #         colorok = RegisterWindowMessage(COLOROKSTRING);
+        #         setrgb = RegisterWindowMessage(SETRGBSTRING);
+        #         findmsg = RegisterWindowMessage(FINDMSGSTRING);
+        #         memset(&wc, 0, sizeof(wc));
+        #         wc.lpfnWndProc = WndProc;
+        #         wc.hInstance = hinst;
+        #         wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        #         wc.hbrBackground = GetStockObject(WHITE_BRUSH);
+        #         wc.lpszClassName = "OwHook";
+        #         RegisterClass(&wc);
+        #         h = CreateWindow("OwHook", "OWHOOK - hooks and templates", WS_OVERLAPPEDWINDOW, 0, 0, 600,
+        #                          140, NULL, NULL, hinst, NULL);
+        #         ShowWindow(h, show);
+        #         UpdateWindow(h);
+        #         while (GetMessage(&m, NULL, 0, 0)) {
+        #             if (fr.lStructSize && IsWindow(FindWindow(NULL, "Find (hooked)")) &&
+        #                 IsDialogMessage(FindWindow(NULL, "Find (hooked)"), &m))
+        #                 continue;
+        #             TranslateMessage(&m);
+        #             DispatchMessage(&m);
+        #         }
+        #         return m.wParam;
+        #     }
+        # ---- owhook.rc
+        #     #include <windows.h>
+        #     #include <dlgs.h>
+        #
+        #     FILEHOOK DIALOG 20, 20, 264, 150
+        #     STYLE WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME
+        #     CAPTION "Open (hooked)"
+        #     FONT 8, "Helv"
+        #     BEGIN
+        #         LTEXT "File &Name:", stc3, 6, 6, 76, 9
+        #         EDITTEXT edt1, 6, 16, 90, 12, ES_AUTOHSCROLL
+        #         LISTBOX lst1, 6, 32, 90, 68, LBS_SORT | LBS_NOTIFY | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | WS_VSCROLL | WS_TABSTOP
+        #         LTEXT "&Directories:", -1, 110, 6, 92, 9
+        #         LTEXT "", stc1, 110, 16, 92, 9, SS_NOPREFIX
+        #         LISTBOX lst2, 110, 32, 92, 68, LBS_NOTIFY | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | WS_VSCROLL | WS_TABSTOP
+        #         LTEXT "List Files of &Type:", stc2, 6, 104, 90, 9
+        #         COMBOBOX cmb1, 6, 114, 90, 36, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+        #         LTEXT "Dri&ves:", stc4, 110, 104, 92, 9
+        #         COMBOBOX cmb2, 110, 114, 92, 68, CBS_DROPDOWNLIST | CBS_SORT | WS_VSCROLL | WS_TABSTOP
+        #         DEFPUSHBUTTON "OK", IDOK, 208, 6, 50, 14
+        #         PUSHBUTTON "Cancel", IDCANCEL, 208, 24, 50, 14
+        #         PUSHBUTTON "&Help", pshHelp, 208, 46, 50, 14
+        #         CHECKBOX "&Read Only", chx1, 208, 68, 50, 12, BS_AUTOCHECKBOX | WS_TABSTOP
+        #         CHECKBOX "&Preview", 200, 6, 134, 60, 12, BS_AUTOCHECKBOX | WS_TABSTOP
+        #         LTEXT "", 201, 110, 136, 92, 9
+        #     END
+        #
+        #     FINDHOOK DIALOG 30, 73, 236, 62
+        #     STYLE WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | WS_VISIBLE
+        #     CAPTION "Find (hooked)"
+        #     FONT 8, "Helv"
+        #     BEGIN
+        #         LTEXT "Fi&nd What:", -1, 4, 8, 42, 8
+        #         EDITTEXT edt1, 47, 7, 128, 12, ES_AUTOHSCROLL | WS_GROUP
+        #         CHECKBOX "Match &Whole Word Only", chx1, 4, 26, 100, 12, BS_AUTOCHECKBOX | WS_GROUP | WS_TABSTOP
+        #         CHECKBOX "Match &Case", chx2, 4, 42, 64, 12, BS_AUTOCHECKBOX | WS_TABSTOP
+        #         GROUPBOX "Direction", -1, 107, 26, 68, 28, WS_GROUP
+        #         CONTROL "&Up", rad1, "BUTTON", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, 111, 38, 25, 12
+        #         CONTROL "&Down", rad2, "BUTTON", BS_AUTORADIOBUTTON, 138, 38, 35, 12
+        #         DEFPUSHBUTTON "&Find Next", IDOK, 182, 5, 50, 14, WS_GROUP
+        #         PUSHBUTTON "Cancel", IDCANCEL, 182, 23, 50, 14
+        #         PUSHBUTTON "&Help", pshHelp, 182, 45, 50, 14
+        #     END
+        #
+        #     PRINTHOOK DIALOG 20, 20, 268, 120
+        #     STYLE WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME
+        #     CAPTION "Print (hooked)"
+        #     FONT 8, "Helv"
+        #     BEGIN
+        #         LTEXT "", stc1, 6, 6, 200, 10, SS_NOPREFIX
+        #         GROUPBOX "Print Range", -1, 6, 20, 150, 62
+        #         CONTROL "&All", rad1, "BUTTON", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, 12, 31, 100, 10
+        #         CONTROL "S&election", rad2, "BUTTON", BS_AUTORADIOBUTTON, 12, 43, 100, 10
+        #         CONTROL "&Pages", rad3, "BUTTON", BS_AUTORADIOBUTTON, 12, 55, 100, 10
+        #         RTEXT "&From:", -1, 22, 68, 20, 8
+        #         EDITTEXT edt1, 44, 66, 30, 12, ES_AUTOHSCROLL | WS_GROUP
+        #         RTEXT "&To:", -1, 78, 68, 14, 8
+        #         EDITTEXT edt2, 94, 66, 30, 12, ES_AUTOHSCROLL
+        #         LTEXT "&Copies:", -1, 6, 90, 40, 8
+        #         EDITTEXT edt3, 48, 88, 30, 12, ES_AUTOHSCROLL
+        #         CHECKBOX "Print to Fi&le", chx1, 90, 89, 80, 10, BS_AUTOCHECKBOX | WS_TABSTOP
+        #         DEFPUSHBUTTON "OK", IDOK, 212, 6, 50, 14, WS_GROUP
+        #         PUSHBUTTON "Cancel", IDCANCEL, 212, 24, 50, 14
+        #         PUSHBUTTON "&Setup...", psh1, 212, 46, 50, 14
+        #         LTEXT "", 201, 6, 106, 100, 9
+        #     END
+        # ---- owhook.lnk
+        #     system windows
+        #     name owhook.exe
+        #     file owhook.o
+        #     library commdlg.lib
+        #     option resource=owhook.res
+        bytes.fromhex(
+            '4d5a80000100000004000000ffff0000b8000000000000004000000000000000000000000000000000000000'
+            '00000000000000000000000000000000800000000e1fba0e00b409cd21b8014ccd2154686973206973206120'
+            '57696e646f77732031362d6269742065786563757461626c650d0a240000000000000000000000004e450501'
+            '16011900000000000203020000040020aa0b010000000200020004000e00400050009c00f500fd00af010000'
+            '00000100030002000000000000000003df00a40e400da40e6a092403410cc00701000580030000000000fc0a'
+            'c4003010300000000000c00b90003010390000000000500cc300301042000000000000000846494c45484f4f'
+            '4b0846494e44484f4f4b095052494e54484f4f4b064f57484f4f4b00000846494c45484f4f4b010009434f4c'
+            '4f52484f4f4b020008464f4e54484f4f4b03000846494e44484f4f4b0400095052494e54484f4f4b05000953'
+            '45545550484f4f4b060007574e4450524f43070000010006000d001500000455534552064b45524e454c0743'
+            '4f4d4d444c4703474449070129080029ef00295e0129bb01291b02298f02291f0700000a6f77686f6f6b2e65'
+            '786500000000ccebfd90909090001e5890455589e51e8ed8b81600e8450b565781ec0200817e0c10017403e9'
+            '3100ff067007c45e06268b573c268b473e89162807a32a07ff760eb8c900508cdbb8100053509affff0000c7'
+            '46f80100e988008b460c3b0674077403e94b00ff0666078cdbb864035350c45e0626ff771a26ff77189affff'
+            '0000833e6607017503e90300e91b00ff760eb8c900508cd8ba170050529affff0000c746f80100e93900c746'
+            'f80000e931008b460c3b0676077507817e0a60047403e90400ff066a07817e0c11017507817e0ac8007403e9'
+            '0400ff066807c746f800008b46f88d66fa5f5e1f5d4dca0a001e5890455589e51e8ed8b81800e85e0a565781'
+            'ec0200817e0c10017403e91e00ff760eff36720731c050b8ff005031c0509affff0000c746f80100e923008b'
+            '460c3b066c077403e91200c45e06268b5708268b470a89162407a32607c746f800008b46f88d66fa5f5e1f5d'
+            '4dca0a001e5890455589e51e8ed8b81800e8ef09565781ec0200817e0c10017403e92a00ff760eb801045031'
+            'c0508cd8ba2c0789d389c252539affff000089c389d0891e6207c746f80100e90500c746f800008b46f88d66'
+            'fa5f5e1f5d4dca0a001e5890455589e51e8ed8b81600e89209565781ec0200817e0c10017403e92d00c45e06'
+            '268b5718268b471a8916fc06a3fe06ff760eb88004508cdbb8100053509affff0000c746f80100e90500c746'
+            'f800008b46f88d66fa5f5e1f5d4dca0a001e5890455589e51e8ed8b81800e83209565781ec0400817e0c1001'
+            '7403e94100c45e0626837f1e00751026817f1c21437508c746f60100e90500c746f600008b46f601065e07ff'
+            '760eb8c900508cd8ba100050529affff0000c746f80100e90500c746f800008b46f88d66fa5f5e1f5d4dca0a'
+            '001e5890455589e51e8ed8b80e00e8be08565781ec0200817e0c10017403e90b00ff066007c746f80100eb05'
+            'c746f800008b46f88d66fa5f5e1f5d4dca0a005589e550b85800e8860858535152565781ec3a008946f08cd8'
+            'bb3c0050538cd8bb2f0050538cd8bb1d0050539affff00008cd8bb6a0050538cd8bb630050538cd8bb440050'
+            '539affff0000bb340031d28d46bce86c08c746bc3400c746be00008b46f08946c0a16e078946d6c746c80470'
+            'c746ca0000c746cc0100c746ce0100c746d00100c746d20900c746d40100c746d82143c746da0000b8ffffbb'
+            'ffff5053ff366e079affff000089c389d0895edc8946deb8ffffbbffff5053ff366e079affff000089c389d0'
+            '895ee08946e28c5ee6c746e472008cd08d5ebc50539affff00008946f4ff76d4ff366007ff365e07ff76f48c'
+            'd8bb7c0050538cd8bb0c0650539affff000083c4108d66f65f5e5a595b5dc35589e550b83000e87207585351'
+            '52565781ec06008946f0bb480031d2b8e403e88c078cd8bb640350538cd8bba10050539affff0000c706e403'
+            '4800c706e60300008b46f0a3e803a16e07a3ea038c1eee03c706ec03a700c706f8030100c706fa0300008c1e'
+            'fe03c706fc036403c70600048000c70602040000c70614047400c70616040000c70620043412c70622040000'
+            'b8ffffbbffff5053ff366e079affff000089c389d0891e2404a326048c1e2a04c7062804c9008cd8bbe40350'
+            '539affff00008946f28cd8bb64035053ff366407ff366807ff366a07ff366607ff367007ff362a07ff362807'
+            'ff76f28cd8bbd20050538cd8bb2c0450539affff000083c41c8d66f65f5e5a595b5dc35589e550b84600e866'
+            '0658535152565781ec26008946f2bb200031d28d46d0e88006c746d02000c746d200008b46f28946d48c5ede'
+            'c746dc7c07c746e01100c746e20000b8ffffbbffff5053ff366e079affff000089c389d0895ee88946ea8cd0'
+            '8d5ed050539affff00008946f4ff362607ff362407ff76daff76d8ff76f48cd8bb110150538cd8bba4045053'
+            '9affff000083c4128d66f65f5e5a595b5dc35589e550b88800e8c70558535152565781ec66008946f0bb3200'
+            '31d28d4690e8e1058cd08d5ea250538cd8bb2a0150539affff0000bb2e0031d28d46c2e8c305c746c22e00c7'
+            '46c400008b46f08946c68c56cc8d46908946cac746d04900c746d20000b8ffffbbffff5053ff366e079affff'
+            '000089c389d0895edc8946de8cd08d5ec250539affff00008946f28cd8bb3e075053ff3662078cd08d5ea250'
+            '53ff76f28cd8bb310150538cd8bb1c0550539affff000083c4148d66f65f5e5a595b5dc35589e550b81a00e8'
+            '050558535152565781ec04008946f2bb240031d2b80007e81f058cd8bb240350538cd8bb4c0150539affff00'
+            '00c70600072400c706020700008b46f2a30407a16e07a30607c70608070103c7060a0700008c1e0e07c7060c'
+            '072403c70614074000c70618077856c7061a070000b8ffffbbffff5053ff366e079affff000089c389d0891e'
+            '1c07a31e078c1e2207c706200750018cd8bb000750539affff000085c07503e90300e916008cd8ba94055052'
+            '8cd8ba590150529affff0000e900008d66f65f5e5a595b5dc31e5890455589e51e8ed8b85000e82e04565781'
+            'ec30008b460c3b067a077503e90200eb07833e7a07007503e93c008b76068b5e088cd8bae40389f189d689c2'
+            '39d37403e90b0039f17507c746f40100eb05c746f400008b46f401066407c746f60000c746f80000e909028b'
+            '460c3b0678077507833e7807007503e9b7008b5e06895ef08b5e08895ef2c45ef026f64708407503e916008c'
+            'd8ba940550528cd8ba640150529affff0000e96900ff36fe06ff36fc068cd8ba00078b76f08b4ef289d389c2'
+            '39d17403e90e0039de750ac45ef026f64708087503e90700c746ee6d01eb05c746ee72018cd88b56ee5052c4'
+            '5ef026ff770ec45ef026ff770c8cd8ba740150528cd8ba940550529affff000083c414e90000ff760e31c050'
+            '31c050b80100509affff0000c746f60000c746f80000e93f01817e0c02017503e91500837e0c0f7503e97300'
+            '837e0c027503e9ed00e9ff00837e0a6f75098b460ee863fbe93900837e0a6375098b460ee860fce92a00837e'
+            '0a6675098b460ee8f0fce91b00837e0a7275098b460ee8a3fde90c00837e0a7075068b460ee813faff760e31'
+            'c05031c050b80100509affff0000c746f60000c746f80000e9b900ff760e8cd08d56ca50529affff00008946'
+            'ecc746ea0000837eea067d03e90300e94400ff76ecb8040050b1048b46ead3e0050400508b46eaba7800f7ea'
+            'ba2c0401c28cd850528b46eaba7800f7eaba2c0401c28cd850529affff0000509affff0000ff46eaebb0ff76'
+            '0e8cd08d56ca50529affff0000c746f60000c746f80000e9360031c0509affff0000c746f60000c746f80000'
+            'e92100ff760eff760cff760aff7608ff76069affff000089c389d0895ef68946f8e900008b46f68b56f88d66'
+            'fa5f5e1f5d4dca0a005589e5b85600e8b101565781ec30008b460ca36e078cd8ba8b0150529affff0000a374'
+            '078cd8ba9e0150529affff0000a376078cd8bab90150529affff0000a37a078cd8bac60150529affff0000a3'
+            '6c078cd8bad60150529affff0000a372078cd8baea0150529affff0000a37807bb1a0031d28d46cce87201c7'
+            '46d0ffffc746ceffff8b460c8946d631c05031c050b8007f509affff00008946da31c0509affff00008946dc'
+            '8c5ee4c746e2fe018cd08d56cc50529affff00008cd8bafe0150528cd8ba05025052b8cf005031c05031c050'
+            '31c050b8580250b88c005031c05031c050ff760c31c05031c0509affff00008946f8e90000ff76f8ff76049a'
+            'ffff0000ff76f89affff00008cd08d56e6505231c05031c05031c0509affff000085c07403e90300e97900a1'
+            '02070b06000785c07503e91f0031c05031c0508cd8ba220250529affff0000509affff000085c07403e90300'
+            'e9260031c05031c0508cd8ba220250529affff0000508cd08d56e650529affff000085c07403e90200eb03e9'
+            '1b008cd08d56e650529affff00008cd08d56e650529affff0000e90000e968ff8b46ea8946fa8b46fa8d66fc'
+            '5f5e5dc20a008c163c02c33bc473132bc4f7d83b060a0077068cd03b063c027401c30e5ab87f0bbb0100e9cc'
+            '01537461636b204f766572666c6f772100515789c789d988d0571e078ae0d1e9f3ab13c9f3aa5f89f85f59c3'
+            'eb0203009affff00000bc0750e5033c0ba0f00e86a0258b44ccd218c064202575606535253bebc0789365d02'
+            '8c1e5f02268a078804464384c075f589360a005b2bc0509affff000057579affff0000fc1e07b9bc07bf2403'
+            '2bcf32c0f3aab8f40ca35902b8ffffa35b02b430cd21a24402882645029affff0000a246028826470286e0a3'
+            '480254583bc475120f01e0a90100740ab001a24a02b003a24b021ebf650257b89000509affff0000b8650289'
+            '3e61028c1e6302b8ff00e86b01e839fde9f9004f70656e20576174636f6d20432f432b2b31362052756e2d54'
+            '696d652073797374656d2e20436f7079726967687420286329204f70656e20576174636f6d20436f6e747269'
+            '6275746f727320323030322d323032362e20506f7274696f6e7320436f707972696768742028432920537962'
+            '6173652c20496e632e20313938382d323030322e00c3cb005589e551565781ec800089c689df8d9e7aff8cd9'
+            '8ec2268a0484c074173c0d74138d46f939c3730c268a048ec14626880743ebe031c08ec15026c607001e8d9e'
+            '7aff531eb830025031c0509affff000089f8e94400515689c189d6e8330185c0750689c889f2eb9889d8e92c'
+            '0000c3c3535289c3833e1c03007404ff161c03ff16f602baff00b81000e8a800ff16f602ff16f80289d8e928'
+            'fe5289c2ff16f602ff16f80289d0e918fe5589e5535289c3833f0075078d66fc5a5b5dc31eff171febf35589'
+            'e5535289c38b47028b1785c0750485d274df1eff1f1febd95589e5535152565789c11ee813ffbf240389fabb'
+            '1e0389fe88c839fb7316803f02750583c306ebf23a470172f689de8a4701ebef39fe74158d4402803c007508'
+            'e88affc60402ebcbe89bffebf61f8d66f65f5e5a595b5dc35589e55351565789c11ee8bcfe88d5bf240389fa'
+            'bb240389fe88c839fb7316803f02750583c306ebf23a470177f689de8a4701ebef39fe741c3a6c017305c604'
+            '02ebd18d4402803c007505e827ffebeee83bffebe91f8d66f85f5eeb9f803efa0200750331c0c35250cceb06'
+            '57564944454fb8010083c404c3004e000301bf0a01006c000301e90a010032000301ef0a01002f0003010b0b'
+            '010032000301180b01005a000301300b0100710003013c0b010072000301af0b02005b000301ee0b02001e00'
+            '0301f50b0100050002000f0c0100aa0b0301200c020003000301520c020031000301420d0100010003014d00'
+            '01005c0003017c000200580003019c0001005c000301210101006f000301940101006f000301fc0101005c00'
+            '0301700201005c000301fa0202003b000301140302003b000200670301001b0205006a0301001b0203017303'
+            '020033000200820301008f020500850301008f0203018e03020033000301ac03030014000301d0030100a401'
+            '03011204020058000200730401000800050076040100080003017f04020033000301a004030001000301dc04'
+            '0100a401020032050100ef00050035050100ef0003013e0502003300030154050300050003017b050100a401'
+            '0301bd05020058000200f00501005e010500f30501005e010301fc05020033000301120603000f0003013d06'
+            '0100a40103017f06020058000200c4060100bb010500c7060100bb010301d006020033000301f10603000b00'
+            '03010e07020058000301c4070200590003012a080100a4010301420801007d000301c80801007d000301e408'
+            '010027000301310902005a00030137090400210003014b090100280003016009010006000301810901006b00'
+            '0301c009010076000301cf09010076000301de09010076000301ed09010076000301fc090100760003010b0a'
+            '010076000200200a01001f070500250a01001f070301380a0100ad000301430a0400570003015a0a01003900'
+            '0301910a010029000301a20a01002a000301aa0a01007c0000000000050000000000000000000000686f6f6b'
+            '656400616761696e004550534f4e392c4f57484f4f4b2e50524e004570736f6e204c582d3335300064657669'
+            '636573004570736f6e204c582d3335302c4550534f4e392c4f57484f4f4b2e50524e00646576696365007769'
+            '6e646f7773005052494e54484f4f4b007072696e743a20256420696e69742025642073657475702025642063'
+            '6f70696573202564002a2e747874005465787420282a2e54585429002a2e74787400416c6c20282a2e2a2900'
+            '2a2e2a000046494c45484f4f4b006f70656e3a202564206375737420256c7820696e6974202564206f6b2025'
+            '642073656c20256420707265766965772025642068656c70202564202725732700636f6c6f723a2025642025'
+            '30366c58206f6b202530366c580053797374656d00666f6e743a20256420272573272c20676f742025642027'
+            '257327006162630046494e44484f4f4b0066696e643a206e6f6e65002c20636c6f736564006e657874003f00'
+            '66696e643a2027257327202573206375737420256c7800636f6d6d646c675f46696c654e616d654f4b00636f'
+            '6d6d646c675f4c4253656c4368616e6765644e6f7469667900636f6d6d646c675f68656c7000636f6d6d646c'
+            '675f436f6c6f724f4b00636f6d6d646c675f536574524742436f6c6f7200636f6d6d646c675f46696e645265'
+            '706c616365004f77486f6f6b004f57484f4f4b202d20686f6f6b7320616e642074656d706c61746573004669'
+            '6e642028686f6f6b656429004f70656e20576174636f6d000000ffff00000000000000000000000c00000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '00000000000000000000000000000000000000000000000000000000000000000000650d650d000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000020580b0000c000c88010140014'
+            '000801960000004f70656e2028686f6f6b65642900080048656c7600060006004c0009004204000002508246'
+            '696c6520264e616d653a0000060010005a000c00800480008150810000060020005a00440060045300a15083'
+            '00006e0006005c000900ffff0000025082264469726563746f726965733a00006e0010005c00090040048000'
+            '02508200006e0020005c00440061045100a150830000060068005a000900410400000250824c697374204669'
+            '6c6573206f662026547970653a0000060072005a0024007004030021508500006e0068005c00090043040000'
+            '025082447269267665733a00006e0072005c004400710403012150850000d000060032000e00010001000150'
+            '804f4b0000d000180032000e000200000001508043616e63656c0000d0002e0032000e000e04000001508026'
+            '48656c700000d000440032000c00100403000150802652656164204f6e6c790000060086003c000c00c80003'
+            '00015080265072657669657700006e0088005c000900c9000000025082000000c000c8900a1e004900ec003e'
+            '00000046696e642028686f6f6b65642900080048656c7600040008002a000800ffff00000250824669266e64'
+            '20576861743a00002f00070080000c0080048000835081000004001a0064000c00100403000350804d617463'
+            '68202657686f6c6520576f7264204f6e6c79000004002a0040000c00110403000150804d6174636820264361'
+            '736500006b001a0044001c00ffff0700025080446972656374696f6e00006f00260019000c00200409000350'
+            '8026557000008a00260023000c002104090000508026446f776e0000b600050032000e000100010003508026'
+            '46696e64204e6578740000b600170032000e000200000001508043616e63656c0000b6002d0032000e000e04'
+            '00000150802648656c700000c000c88010140014000c01780000005072696e742028686f6f6b656429000800'
+            '48656c760006000600c8000a004004800002508200000600140096003e00ffff07000050805072696e742052'
+            '616e676500000c001f0064000a002004090003508026416c6c00000c002b0064000a00210409000050805326'
+            '656c656374696f6e00000c00370064000a002204090000508026506167657300001600440014000800ffff02'
+            '000250822646726f6d3a00002c0042001e000c008004800083508100004e0044000e000800ffff0200025082'
+            '26546f3a00005e0042001e000c0081048000815081000006005a0028000800ffff000002508226436f706965'
+            '733a0000300058001e000c008204800081508100005a00590050000a00100403000150805072696e7420746f'
+            '204669266c650000d400060032000e00010001000350804f4b0000d400180032000e00020000000150804361'
+            '6e63656c0000d4002e0032000e00000400000150802653657475702e2e2e000006006a0064000900c9000000'
+            '025082000000'
         )),
 }
 

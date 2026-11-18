@@ -7,7 +7,9 @@
  *   COMDLG32  COMMDLG.DLL's dialogs (the native DLL): the structures of
  *             Win32's layout converted, the strings and buffers the
  *             program's own; Find and Replace modeless, their message's
- *             lParam the program's FINDREPLACE
+ *             lParam the program's FINDREPLACE; the hooks and templates
+ *             the program's (CDHOSTN), the registered messages' structure
+ *             its own
  *   SHELL32   ShellExecute, FindExecutable (WIN.INI's [Extensions]),
  *             ShellAbout, ExtractIcon; the dropped files' (none come)
  *   LZ32      LZEXPAND.DLL's functions (the native DLL)
@@ -350,6 +352,124 @@ static struct {
     uint32_t guest;
 } finds[FIND_DIALOGS];
 
+/* ---- a Win32 program's hooks and templates (COMMDLG's CDHOSTN): the
+ * structure's kind and address, the hooks' procedures, the templates
+ * (its module's resources, or blocks of its memory: handles) */
+enum { P_GUEST, P_KIND, P_HOOK0, P_HOOK1, P_INST, P_TPL0, P_TPL1, P_HANDLES };
+enum { PK_FILE, PK_COLOR, PK_FONT, PK_FIND, PK_PRINT };
+
+/* the program's structure brought up to date from the native one */
+static DWORD cd_guest(const CDHOSTN *h, LPARAM native)
+{
+    win_pe_ctx *ctx = (win_pe_ctx *)h->opaque;
+    uint32_t at = h->data[P_GUEST];
+    uint8_t *g;
+    switch (h->data[P_KIND]) {
+    case PK_FILE: {
+        const OPENFILENAME *o = (const OPENFILENAME *)(intptr_t)native;
+        if ((g = (uint8_t *)win_pe_ptr(ctx->img, at, 76)) == NULL)
+            break;
+        pe_wr32(g + 24, o->nFilterIndex);
+        pe_wr32(g + 52, (pe_rd32(g + 52) & (OFN_ENABLEHOOK | OFN_ENABLETEMPLATE | 0x80u)) |
+                        o->Flags);
+        pe_wr16(g + 56, (uint16_t)o->nFileOffset);
+        pe_wr16(g + 58, (uint16_t)o->nFileExtension);
+        break;
+    }
+    case PK_COLOR:
+        if ((g = (uint8_t *)win_pe_ptr(ctx->img, at, 36)) != NULL)
+            pe_wr32(g + 12, ((const CHOOSECOLOR *)(intptr_t)native)->rgbResult);
+        break;
+    case PK_FONT: {
+        const CHOOSEFONT *c = (const CHOOSEFONT *)(intptr_t)native;
+        if ((g = (uint8_t *)win_pe_ptr(ctx->img, at, 60)) == NULL)
+            break;
+        pe_wr32(g + 16, (uint32_t)c->iPointSize);
+        pe_wr32(g + 20, (pe_rd32(g + 20) & (CF_ENABLEHOOK | CF_ENABLETEMPLATE |
+                                            CF_ENABLETEMPLATEHANDLE)) | c->Flags);
+        pe_wr32(g + 24, c->rgbColors);
+        pe_wr16(g + 48, (uint16_t)c->nFontType);
+        break;
+    }
+    case PK_FIND:
+        if ((g = (uint8_t *)win_pe_ptr(ctx->img, at, 40)) != NULL)
+            pe_wr32(g + 12, (pe_rd32(g + 12) & (FR_ENABLEHOOK | FR_ENABLETEMPLATE |
+                                                FR_ENABLETEMPLATEHANDLE)) |
+                            ((const FINDREPLACE *)(intptr_t)native)->Flags);
+        break;
+    case PK_PRINT: {
+        const PRINTDLG *p = (const PRINTDLG *)(intptr_t)native;
+        if ((g = (uint8_t *)win_pe_ptr(ctx->img, at, 66)) == NULL)
+            break;
+        pe_wr32(g + 20, (pe_rd32(g + 20) & 0x3f000u) | p->Flags);
+        pe_wr16(g + 24, (uint16_t)p->nFromPage);
+        pe_wr16(g + 26, (uint16_t)p->nToPage);
+        pe_wr16(g + 32, (uint16_t)p->nCopies);
+        break;
+    }
+    }
+    return at;
+}
+
+static UINT cd_hook(const CDHOSTN *h, int which, HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
+{
+    win_pe_ctx *ctx = (win_pe_ctx *)h->opaque;
+    uint32_t proc = h->data[P_HOOK0 + which];
+    if (msg != WM_INITDIALOG)
+        return win_pe_message(ctx, proc, dlg, msg, wp, lp);
+    const uint32_t args[4] = { dlg, msg, wp,
+                               lp && lp == (LPARAM)(intptr_t)h->native ? cd_guest(h, lp) :
+                               (uint32_t)lp };
+    return win_pe_call(ctx, proc, args, 4, NULL, 0, NULL);
+}
+
+/* made while the program's call runs (opaque2 its arguments) */
+static int cd_dialog(const CDHOSTN *h, int which, HWND owner, DLGPROC proc, int modeless)
+{
+    pe_args *a = (pe_args *)h->opaque2;
+    return a ? win_pe_dialog_native(a, h->data[P_INST], h->data[P_TPL0 + which],
+                                    (int)((h->data[P_HANDLES] >> which) & 1u), owner, proc,
+                                    modeless)
+             : -1;
+}
+
+static BOOL cd_logfont(const CDHOSTN *h, DWORD at, const LOGFONT *lf)
+{
+    win_pe_ctx *ctx = (win_pe_ctx *)h->opaque;
+    void *p = win_pe_ptr(ctx->img, at, sizeof(LOGFONT));
+    if (p)
+        memcpy(p, lf, sizeof(LOGFONT));
+    return p != NULL;
+}
+
+/* COMMDLG's next call's: the program's */
+static void cd_host(pe_args *a, int kind, DWORD hooks, uint32_t hook0, uint32_t hook1,
+                    DWORD templates, DWORD handles, uint32_t inst, uint32_t tpl0, uint32_t tpl1)
+{
+    void (WINAPI *fn)(const CDHOSTN *) =
+        (void (WINAPI *)(const CDHOSTN *))native("COMMDLG", "CommDlgHostN");
+    CDHOSTN h;
+    memset(&h, 0, sizeof(h));
+    h.hook = cd_hook;
+    h.dialog = cd_dialog;
+    h.guest = cd_guest;
+    h.logfont = cd_logfont;
+    h.hooks = hooks & ((hook0 ? 1u : 0) | (hook1 ? 2u : 0));    /* (none given: none) */
+    h.templates = templates & ((tpl0 ? 1u : 0) | (tpl1 ? 2u : 0));
+    h.opaque = a->ctx;
+    h.opaque2 = a;
+    h.data[P_GUEST] = ARG(0);
+    h.data[P_KIND] = (DWORD)kind;
+    h.data[P_HOOK0] = hook0;
+    h.data[P_HOOK1] = hook1;
+    h.data[P_INST] = inst;
+    h.data[P_TPL0] = tpl0;
+    h.data[P_TPL1] = tpl1;
+    h.data[P_HANDLES] = handles;
+    if (fn)
+        fn(&h);
+}
+
 /* Win32's OPENFILENAMEA (76 bytes) */
 static uint32_t file_dialog(pe_args *a, int save)
 {
@@ -377,6 +497,11 @@ static uint32_t file_dialog(pe_args *a, int save)
     o.lCustData = (LPARAM)pe_rd32(g + 64);
     if (a->bad || !o.lpstrFile)
         return 0;
+    DWORD flags = pe_rd32(g + 52);
+    int handle = (flags & 0x80u) != 0;          /* OFN_ENABLETEMPLATEHANDLE */
+    cd_host(a, PK_FILE, (flags & OFN_ENABLEHOOK) ? 1u : 0, pe_rd32(g + 68), 0,
+            (flags & (OFN_ENABLETEMPLATE | 0x80u)) ? 1u : 0, handle, pe_rd32(g + 8),
+            handle ? pe_rd32(g + 8) : pe_rd32(g + 72), 0);
     BOOL (WINAPI *fn)(LPOPENFILENAME) =
         (BOOL (WINAPI *)(LPOPENFILENAME))native("COMMDLG", save ? "GetSaveFileName" :
                                                                "GetOpenFileName");
@@ -413,6 +538,11 @@ static uint32_t choose_color(pe_args *a)
                                                                               "ChooseColor");
     if (a->bad || !c.lpCustColors || !fn)
         return 0;
+    DWORD flags = pe_rd32(g + 20);
+    int handle = (flags & CC_ENABLETEMPLATEHANDLE) != 0;
+    cd_host(a, PK_COLOR, (flags & CC_ENABLEHOOK) ? 1u : 0, pe_rd32(g + 28), 0,
+            (flags & (CC_ENABLETEMPLATE | CC_ENABLETEMPLATEHANDLE)) ? 1u : 0, handle,
+            pe_rd32(g + 8), handle ? pe_rd32(g + 8) : pe_rd32(g + 32), 0);
     BOOL ok = fn(&c);
     if ((g = pe_rw(a, ARG(0), 36)) != NULL)
         pe_wr32(g + 12, c.rgbResult);
@@ -442,6 +572,12 @@ static uint32_t choose_font(pe_args *a)
                                                                             "ChooseFont");
     if (a->bad || !c.lpLogFont || !fn)
         return 0;
+    c.hInstance = 0;
+    DWORD flags = pe_rd32(g + 20);
+    int handle = (flags & CF_ENABLETEMPLATEHANDLE) != 0;
+    cd_host(a, PK_FONT, (flags & CF_ENABLEHOOK) ? 1u : 0, pe_rd32(g + 32), 0,
+            (flags & (CF_ENABLETEMPLATE | CF_ENABLETEMPLATEHANDLE)) ? 1u : 0, handle,
+            pe_rd32(g + 40), handle ? pe_rd32(g + 40) : pe_rd32(g + 36), 0);
     BOOL ok = fn(&c);
     if ((g = pe_rw(a, ARG(0), 60)) != NULL) {
         pe_wr32(g + 16, (uint32_t)c.iPointSize);
@@ -502,7 +638,20 @@ static uint32_t print_dialog(pe_args *a)
     p.nMinPage = pe_rd16(g + 28);
     p.nMaxPage = pe_rd16(g + 30);
     p.nCopies = pe_rd16(g + 32);
+    p.lCustData = (LPARAM)pe_rd32(g + 38);
     BOOL (WINAPI *fn)(LPPRINTDLG) = (BOOL (WINAPI *)(LPPRINTDLG))native("COMMDLG", "PrintDlg");
+    DWORD f = pe_rd32(g + 20);
+    DWORD handles = ((f & PD_ENABLEPRINTTEMPLATEHANDLE) ? 1u : 0) |
+                    ((f & PD_ENABLESETUPTEMPLATEHANDLE) ? 2u : 0);
+    if (fn)
+        cd_host(a, PK_PRINT,
+                ((f & PD_ENABLEPRINTHOOK) ? 1u : 0) | ((f & PD_ENABLESETUPHOOK) ? 2u : 0),
+                pe_rd32(g + 42), pe_rd32(g + 46),
+                ((f & (PD_ENABLEPRINTTEMPLATE | PD_ENABLEPRINTTEMPLATEHANDLE)) ? 1u : 0) |
+                ((f & (PD_ENABLESETUPTEMPLATE | PD_ENABLESETUPTEMPLATEHANDLE)) ? 2u : 0),
+                handles, pe_rd32(g + 34),
+                (handles & 1u) ? pe_rd32(g + 58) : pe_rd32(g + 50),
+                (handles & 2u) ? pe_rd32(g + 62) : pe_rd32(g + 54));
     BOOL ok = fn ? fn(&p) : FALSE;
     if (ok) {
         uint32_t m = global_to_guest(ctx, p.hDevMode, 124);
@@ -562,6 +711,11 @@ static uint32_t find_dialog(pe_args *a, int replace)
     finds[i].task = a->ctx->task;
     finds[i].ctx = a->ctx;
     finds[i].guest = ARG(0);
+    DWORD flags = pe_rd32(g + 12);
+    int handle = (flags & FR_ENABLETEMPLATEHANDLE) != 0;
+    cd_host(a, PK_FIND, (flags & FR_ENABLEHOOK) ? 1u : 0, pe_rd32(g + 32), 0,
+            (flags & (FR_ENABLETEMPLATE | FR_ENABLETEMPLATEHANDLE)) ? 1u : 0, handle,
+            pe_rd32(g + 8), handle ? pe_rd32(g + 8) : pe_rd32(g + 36), 0);
     HWND h = fn(fr);
     if (!h)
         finds[i].task = 0;
@@ -575,8 +729,8 @@ uint32_t win_pe_dll_lparam(win_pe_ctx *ctx, uint32_t msg, uint32_t lp)
         return 0;
     if (!find_msg)
         find_msg = RegisterWindowMessage(FINDMSGSTRING);
-    if (msg != find_msg)
-        return 0;
+    if (msg != find_msg)                /* another dialog's (a hook's, its owner's) */
+        return win_dll_ne_lparam(msg, lp);
     for (int i = 0; i < FIND_DIALOGS; i++) {
         if (!finds[i].task || finds[i].ctx != ctx || (uint32_t)(uintptr_t)&finds[i].fr != lp)
             continue;

@@ -1,0 +1,72 @@
+# COMMDLG's hooks and templates from a Win16 program (OWHOOK): o Open with
+# its template and hook (Tab, Down: LBSELCHSTRING; Alt+P its check box; Alt+H
+# Help; Enter twice: FILEOKSTRING refused once), c Color (SETRGBSTRING,
+# COLOROKSTRING), f Font (WM_CHOOSEFONT_GETLOGFONT), r Find (its template,
+# Find Next, Esc), p Print (its template; Setup, its hook; two copies):
+#     ./winhost scripts/owhook.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OWHOOK
+key RETURN
+wait 300
+type o
+wait 50
+key TAB
+key DOWN
+wait 10
+keydown ALT
+key P
+keyup ALT
+wait 10
+keydown ALT
+key H
+keyup ALT
+wait 20
+snap h_open.ppm
+keydown ALT
+key N
+keyup ALT
+key RETURN
+wait 20
+snap h_again.ppm
+key RETURN
+wait 50
+type c
+wait 50
+snap h_color.ppm
+key RETURN
+wait 50
+type f
+wait 50
+snap h_font.ppm
+key RETURN
+wait 50
+type r
+wait 50
+snap h_find.ppm
+key RETURN
+wait 20
+key ESC
+wait 30
+type p
+wait 50
+keydown ALT
+key S
+keyup ALT
+wait 30
+snap h_setup.ppm
+key RETURN
+wait 20
+keydown ALT
+key C
+keyup ALT
+type 2
+snap h_print.ppm
+key RETURN
+wait 30
+snap h_result.ppm
+exit

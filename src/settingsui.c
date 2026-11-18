@@ -67,12 +67,14 @@ typedef enum {
 static const int vol_options[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
 static const int vol_option_count = 17;
 
+#if !defined(XRIP386_CORE)
 #ifndef I386_MODE
 static const int cpu_options[] = { 0, 1, 2 };
 #else
 static const int cpu_options[] = { 3, 4, 5 };
 #endif
 static const int cpu_option_count = 3;
+#endif
 
 static const int cpu_freq_options[] = { 252, 378, 504, 524, 564 };
 static const int cpu_freq_option_count = 5;
@@ -370,11 +372,13 @@ static void cycle_option(int direction) {
             break;
 
         case SETTING_CPU:
+#if !defined(XRIP386_CORE)
             options = cpu_options;
             count = cpu_option_count;
             idx = find_option_index(options, count, config_get_cpu_gen());
             idx = (idx + direction + count) % count;
             config_set_cpu_gen(options[idx]);
+#endif
             break;
 
         case SETTING_FPU:
@@ -616,11 +620,15 @@ static void draw_settings_menu(void) {
                 snprintf(value, sizeof(value), "< %d >", audio_get_volume());
                 break;
             case SETTING_CPU:
+#if defined(XRIP386_CORE)
+                snprintf(value, sizeof(value), "80386 (pico-286)");
+#else
                 if (!config_get_cpu_gen()) {
                     snprintf(value, sizeof(value), "< i8086 >");
                 } else {
                     snprintf(value, sizeof(value), "< 80%d86 >", config_get_cpu_gen());
                 }
+#endif
                 break;
             case SETTING_FPU:
                 snprintf(value, sizeof(value), "< %s >", config_get_fpu() ? "Enabled" : "Disabled");

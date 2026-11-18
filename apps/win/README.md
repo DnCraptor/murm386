@@ -170,10 +170,19 @@ simulated or not, sizes (a TrueType face's Windows' list, 8 to 72), effects
 and colour, a sample), Print (the default printer, all, the selection or
 pages, copies, to a file; Setup...) and Print Setup (the default printer or
 another installed one, its orientation and paper), their DC or IC,
-DEVNAMES and DEVMODE (with no printer installed "No default printer", PDERR_NODEFAULTPRN), GetFileTitle, CommDlgExtendedError; hooks
-and templates are left out. Native applications call them as they are
-(`include/commdlg.h`): WINN loads the DLL for the task at its first call
-of one. MMSYSTEM's devices
+DEVNAMES and DEVMODE (with no printer installed "No default printer", PDERR_NODEFAULTPRN), GetFileTitle, CommDlgExtendedError. The
+Open and Save As dialogs have Windows 3.1's drives, Read Only and Help
+too. A hook gets each message of its dialog before the dialog does,
+WM_INITDIALOG after it (lParam the program's structure), FILEOKSTRING
+(nonzero: the dialog stays), LBSELCHSTRING, COLOROKSTRING; the owner
+gets HELPMSGSTRING as Help is pressed; SETRGBSTRING and
+WM_CHOOSEFONT_GETLOGFONT are the Color's and the Font dialog's. A template
+of the program's (a resource of its module, or a block of its memory)
+is made with the dialog's own procedure, its controls Windows' ids
+(`include/dlgs.h`); Print and Print Setup each have theirs. Native
+applications call them as they are (`include/commdlg.h`; a native
+caller's hooks, not its templates): WINN loads the DLL for the task at
+its first call of one. MMSYSTEM's devices
 are its drivers' (Volume below: wave output, MIDI, the master volume, a
 mixer; no inputs, no joysticks), sndPlaySound and PlaySound (`snd.c`: a
 WAV file, a [sounds] event's, an image in memory; synchronous,
@@ -480,7 +489,8 @@ glyphs larger; a dialog in the font), `OWTT` (TrueType: `WINNTEST.FOT` and
 face "Winn Test TT": its sizes, bold and italic made, Cyrillic, the outline
 metrics, glyph bitmaps as they are, turned and wider, an outline drawn, a
 .FOT made), `OWHELP` (WinHelp), `OWDLG` (COMMDLG's
-Color, Font and Print dialogs, GetFileTitle), `OWMISC` (moveable local
+Color, Font and Print dialogs, GetFileTitle), `OWHOOK` (COMMDLG's hooks
+and templates), `OWMISC` (moveable local
 memory, KEYBOARD, OLECLI, OpenFile's OFSTRUCT: what WRITE.EXE needed),
 `OWSND` (SOUND, OLESVR),
 `OW31` (the rest of 3.1's USER, GDI, KERNEL), `OWMORE` with `OWDRV.DLL`
@@ -557,7 +567,8 @@ too, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE ... keys of their own names
 beside it; values of any type) and GetUserName; COMDLG32, the native
 COMMDLG.DLL's dialogs (Open, Save, Color, Font, Print; Find and Replace
 modeless, their registered message's lParam the program's FINDREPLACE;
-hooks and templates ignored); SHELL32's ShellExecute, FindExecutable
+hooks and templates as Win16 programs', the structures in the hooks'
+messages the program's own); SHELL32's ShellExecute, FindExecutable
 (WIN.INI's [Extensions]), ShellAbout, ExtractIcon; LZ32, LZEXPAND.DLL's;
 VERSION: a file's VERSIONINFO, Win16's and Win32's (Unicode: VerQueryValueA's
 strings ANSI, kept after the block, whose size GetFileVersionInfoSizeA
@@ -576,7 +587,8 @@ before it starts. `host/mkpe_watcom.py` writes `OW32.EXE` and
 `OW32DLL.DLL` (Open Watcom's `nt_win` and `nt_dll`, their sources in the
 script; `scripts/ow32.txt`), and `OW32S.EXE`, Win32s' DLLs and functions
 (`scripts/ow32s.txt`), `OW32X.EXE`, structured exceptions
-(`scripts/ow32x.txt`), `OW32W.EXE`, WINMM's devices (`scripts/ow32w.txt`).
+(`scripts/ow32x.txt`), `OW32W.EXE`, WINMM's devices (`scripts/ow32w.txt`),
+`OW32H.EXE`, COMDLG32's hooks and templates (`scripts/ow32h.txt`).
 
     WINN [:] [program [arguments]]
 
@@ -760,9 +772,12 @@ through the API stubs as an application does, and has Win16 programs'
 calls of its functions with their arguments and memory from the core
 (`win_dll_ne`), which also calls a procedure of a task's Win16 program
 for it (a callback), reads and writes a task's Win16 program's memory
-outside its calls, and asks the DLL for the lParam a Win16 window gets
-with a registered message one of the DLL's windows sends (COMMDLG's
-Find dialog: the program's own FINDREPLACE).
+outside its calls, sends a message to a procedure of a task's Win16
+program as USER would (a dialog's hook), makes a dialog of a template of
+the program's with the DLL's dialog procedure, and asks the DLL for the
+lParam a Win16 window gets with a registered message one of the DLL's
+windows sends (COMMDLG's: the program's own FINDREPLACE, OPENFILENAME
+...).
 
 DDEML (`include/ddeml.h` for native callers) is the DDE Management
 Library between the programs WINN runs, native and Win16 alike:
@@ -997,6 +1012,7 @@ list the links.
     ./winhost scripts/winhelp.txt PROGMAN    # Windows Help on WINNTEST.HLP (mkhlp.py)
     ./winhost scripts/owhelp.txt PROGMAN     # WinHelp from a Win16 program: context, keyword, quit
     ./winhost scripts/owdlg.txt PROGMAN      # COMMDLG: Color (full), Font, Print (no printer), GetFileTitle
+    ./winhost scripts/owhook.txt PROGMAN     # COMMDLG's hooks and templates: Open, Color, Font, Find, Print
     ./winhost scripts/owmisc.txt PROGMAN     # moveable local memory, KEYBOARD, OLECLI
     ./winhost scripts/owsnd.txt PROGMAN      # SOUND (tones on stderr), OLESVR
     ./winhost scripts/ow31.txt PROGMAN       # clipboard viewers, ClipCursor, bounds, EnumObjects...
@@ -1080,7 +1096,7 @@ Win32: threads (CreateThread fails), access violations (no paging: a bad
 pointer reads what is there), the FPU's exceptions' own codes, the Unicode
 (W) functions, what GDI draws into a DIB section (its bits are not brought
 back), ADVAPI32 but the registry, WINMM's CALLBACK_EVENT and wave input,
-the common dialogs' hooks and templates, COMCTL32, OLE32, DDEML's Win32
+COMCTL32, OLE32, DDEML's Win32
 functions; VxDs.
 A spooler and Print Manager's queues (printing goes straight to the port),
 printer drivers of Windows' own (.DRV files: WINN's are native DLLs), a

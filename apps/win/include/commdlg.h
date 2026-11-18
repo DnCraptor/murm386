@@ -1,8 +1,13 @@
 /*
  * commdlg.h - common dialogs (COMMDLG.DLL, a native DLL of WINN's:
  * apps/windll/commdlg): open/save file names, find and replace text,
- * colours, fonts, printing (WINN has no printers). Native callers call
- * them as they are (WINN loads the DLL for them).
+ * colours, fonts, printing. Native callers call them as they are (WINN
+ * loads the DLL for them). A hook (lpfnHook, with its ENABLEHOOK flag) gets
+ * the dialog's messages before the dialog, WM_INITDIALOG after it (lParam
+ * the structure), and the registered messages below; a template of the
+ * caller's (ENABLETEMPLATE, ENABLETEMPLATEHANDLE) is a Win16 or Win32
+ * program's (a native caller's are not supported), its controls Windows'
+ * (dlgs.h's ids).
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
@@ -32,8 +37,8 @@ typedef struct tagOFN {
     UINT      nFileExtension;
     LPCSTR    lpstrDefExt;
     LPARAM    lCustData;
-    LPOFNHOOKPROC lpfnHook;         /* not supported */
-    LPCSTR    lpTemplateName;       /* not supported */
+    LPOFNHOOKPROC lpfnHook;
+    LPCSTR    lpTemplateName;
 } OPENFILENAME, *LPOPENFILENAME;
 
 #define OFN_READONLY            0x00000001
@@ -43,6 +48,7 @@ typedef struct tagOFN {
 #define OFN_SHOWHELP            0x00000010
 #define OFN_ENABLEHOOK          0x00000020
 #define OFN_ENABLETEMPLATE      0x00000040
+#define OFN_ENABLETEMPLATEHANDLE 0x00000080
 #define OFN_NOVALIDATE          0x00000100
 #define OFN_ALLOWMULTISELECT    0x00000200
 #define OFN_EXTENSIONDIFFERENT  0x00000400
@@ -138,8 +144,8 @@ typedef struct tagCHOOSECOLOR {
     COLORREF *lpCustColors;         /* 16 of them, in and out */
     DWORD     Flags;
     LPARAM    lCustData;
-    LPOFNHOOKPROC lpfnHook;         /* not supported */
-    LPCSTR    lpTemplateName;       /* not supported */
+    LPOFNHOOKPROC lpfnHook;
+    LPCSTR    lpTemplateName;
 } CHOOSECOLOR, *LPCHOOSECOLOR;
 
 #define CC_RGBINIT              0x00000001
@@ -157,14 +163,14 @@ BOOL    WINAPI ChooseColor(LPCHOOSECOLOR cc);
 typedef struct tagCHOOSEFONT {
     DWORD     lStructSize;
     HWND      hwndOwner;
-    HDC       hDC;                  /* the printer's: none in WINN */
+    HDC       hDC;                  /* the printer's */
     LOGFONT  *lpLogFont;            /* in with CF_INITTOLOGFONTSTRUCT, out */
     int       iPointSize;           /* out: tenths of a point */
     DWORD     Flags;
     COLORREF  rgbColors;            /* with CF_EFFECTS, in and out */
     LPARAM    lCustData;
-    LPOFNHOOKPROC lpfnHook;         /* not supported */
-    LPCSTR    lpTemplateName;       /* not supported */
+    LPOFNHOOKPROC lpfnHook;
+    LPCSTR    lpTemplateName;
     HINSTANCE hInstance;
     LPSTR     lpszStyle;            /* with CF_USESTYLE: LF_FACESIZE bytes */
     UINT      nFontType;            /* out */
@@ -244,8 +250,55 @@ typedef struct tagPD {
 #define PD_DISABLEPRINTTOFILE   0x00080000
 #define PD_HIDEPRINTTOFILE      0x00100000
 
-/* WINN has no printers: FALSE, CommDlgExtendedError PDERR_NODEFAULTPRN
+/* no default printer: FALSE, CommDlgExtendedError PDERR_NODEFAULTPRN
  * (and Windows' message unless PD_NOWARNING or PD_RETURNDEFAULT) */
 BOOL    WINAPI PrintDlg(LPPRINTDLG pd);
+
+/* ---------------------------------------------------------------- hooks */
+
+/* the registered messages (RegisterWindowMessage) a hook gets: the file
+ * chosen (lParam the OPENFILENAME; nonzero: the dialog stays), a file
+ * list's selection (wParam the list's id, lParam MAKELPARAM(index,
+ * CD_LBSELCHANGE)), the colour chosen (lParam the CHOOSECOLOR; nonzero:
+ * the dialog stays); the owner gets HELPMSGSTRING's as Help is pressed
+ * (wParam the dialog, lParam the structure); SETRGBSTRING's sets the Color
+ * dialog's colour (lParam the RGB), WM_CHOOSEFONT_GETLOGFONT gives the
+ * Font dialog's (lParam a LOGFONT) */
+#define FILEOKSTRING            "commdlg_FileNameOK"
+#define LBSELCHSTRING           "commdlg_LBSelChangedNotify"
+#define SHAREVISTRING           "commdlg_ShareViolation"
+#define HELPMSGSTRING           "commdlg_help"
+#define COLOROKSTRING           "commdlg_ColorOK"
+#define SETRGBSTRING            "commdlg_SetRGBColor"
+#define CD_LBSELNOITEMS         (-1)
+#define CD_LBSELCHANGE          0
+#define CD_LBSELSUB             1
+#define CD_LBSELADD             2
+#define WM_CHOOSEFONT_GETLOGFONT (WM_USER + 1)
+
+/* WINN's: a Win16 or Win32 program's hooks and templates, for COMMDLG's
+ * next call (the core's; the DLL's own for its Win16 callers). The flags
+ * of the structure have none of them then: hooks and templates say which
+ * the program has (bit 0; bit 1 the Print Setup's of PrintDlg). */
+typedef struct CDHOSTN CDHOSTN;
+struct CDHOSTN {
+    /* the hook called: its answer. WM_INITDIALOG's lParam and the
+     * registered messages' are native the structure (native) */
+    UINT (*hook)(const CDHOSTN *h, int which, HWND dlg, UINT msg, WPARAM wp, LPARAM lp);
+    /* the program's template made the dialog with proc: as
+     * DialogBoxIndirectN (CreateDialogIndirectN modeless) */
+    int (*dialog)(const CDHOSTN *h, int which, HWND owner, DLGPROC proc, int modeless);
+    /* the program's structure brought up to date from native's: its
+     * address (a Win16 program's far pointer); a registered message's
+     * lParam (DLL's ne_lparam) to the program's windows */
+    DWORD (*guest)(const CDHOSTN *h, LPARAM native);
+    /* a LOGFONT given the program at its address */
+    BOOL (*logfont)(const CDHOSTN *h, DWORD at, const LOGFONT *lf);
+    DWORD hooks, templates;
+    const void *native;             /* COMMDLG's: the native structure */
+    void *opaque, *opaque2;
+    DWORD data[12];
+};
+void    WINAPI CommDlgHostN(const CDHOSTN *h);
 
 #endif /* MURM_COMMDLG_H */

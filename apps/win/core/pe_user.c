@@ -873,9 +873,11 @@ static __attribute__((noinline)) uint32_t load_string(pe_args *a, int m, uint32_
 /* ---------------------------------------------------------------- dialogs */
 
 /* A Win32 dialog template (DLGTEMPLATE or DLGTEMPLATEEX, Unicode) as
- * WINN's; the dialog made (modeless) or run. */
-static __attribute__((noinline)) int dialog(pe_args *a, pe_user *u, int m, const uint8_t *d, uint32_t n, HWND owner,
-                  uint32_t proc, uint32_t param, int modeless)
+ * WINN's; the dialog made (modeless) or run, its procedure the program's
+ * (proc, param WM_INITDIALOG's lParam) or a native one (COMMDLG's). */
+static __attribute__((noinline)) int dialog(pe_args *a, pe_user *u, int m, const uint8_t *d,
+                                            uint32_t n, HWND owner, uint32_t proc,
+                                            uint32_t param, int modeless, DLGPROC native)
 {
     static const char *const builtin[] = { "BUTTON", "EDIT", "STATIC", "LISTBOX",
                                            "SCROLLBAR", "COMBOBOX" };
@@ -986,7 +988,13 @@ static __attribute__((noinline)) int dialog(pe_args *a, pe_user *u, int m, const
         p += 2 + pe_rd16(p);                /* its creation data */
     }
     t.cdit = (BYTE)k;
-    {
+    if (native) {
+        user_dialog_menu(hmenu);
+        HINSTANCE inst = (HINSTANCE)u->task;
+        r = modeless ? (int)CreateDialogIndirectN(inst, &t, items, owner, native)
+                     : DialogBoxIndirectN(inst, &t, items, owner, native);
+        hmenu = 0;
+    } else {
         uint32_t outer = u->pending, outer_param = u->pending_param;
         u->pending = proc;
         u->pending_param = param;
@@ -1538,6 +1546,41 @@ static uint32_t class_info(pe_args *a, pe_user *u, uint32_t inst, uint32_t name,
 static int res_module(pe_args *a, uint32_t inst)
 {
     return inst ? pe_module_of_instance(a->ctx, inst) : -1;
+}
+
+/* COMMDLG's dialog of a template of the program's (core/pe_dlls.c): inst's
+ * resource tpl (a name's address or a number), or the template at tpl
+ * (handle: a block of its memory) */
+int win_pe_dialog_native(pe_args *a, uint32_t inst, uint32_t tpl, int handle, HWND owner,
+                         DLGPROC proc, int modeless)
+{
+    pe_user *u = user_of(a->ctx->task);
+    if (!alive(u) || !proc)
+        return -1;
+    const uint8_t *d;
+    uint32_t size = 0;
+    int m;
+    if (handle) {
+        d = (const uint8_t *)pe_buf(a, tpl, 18);
+        win_pe_mem *mem = d ? win_pe_mem_of(a->ctx->img, tpl) : NULL;
+        size = mem ? mem->base + mem->size - tpl : 0;
+        if (size > 0x10000u)
+            size = 0x10000u;
+        m = res_module(a, inst);
+    } else {
+        const char *name = tpl < 0x10000u ? (const char *)(uintptr_t)tpl : pe_str(a, tpl);
+        m = res_module(a, inst);
+        d = a->bad || !name ? NULL : resource(a, m, RT_DIALOG_, name, &size);
+    }
+    return dialog(a, u, m, d, d ? size : 0, owner, 0, 0, modeless, proc);
+}
+
+/* a window procedure of the program's (a dialog's hook) called with a
+ * message as USER sends it */
+uint32_t win_pe_message(win_pe_ctx *ctx, uint32_t proc, HWND h, UINT msg, WPARAM wp, LPARAM lp)
+{
+    pe_user *u = ctx ? user_of(ctx->task) : NULL;
+    return alive(u) && proc ? (uint32_t)message(u, proc, h, msg, wp, lp) : 0;
 }
 
 /* ---------------------------------------------------------------- Win32s' more */
@@ -2593,7 +2636,7 @@ int pe_user_api(pe_args *a, uint16_t service, uint32_t *eax)
         int m = res_module(a, pe_arg(a, 0));
         const uint8_t *d = a->bad ? NULL : resource(a, m, RT_DIALOG_, name, &size);
         int r = dialog(a, u, m, d, d ? size : 0, (HWND)pe_arg(a, 2), pe_arg(a, 3),
-                       pe_arg(a, 4), service == PEF_CreateDialogParamA);
+                       pe_arg(a, 4), service == PEF_CreateDialogParamA, NULL);
         v = service == PEF_CreateDialogParamA && r < 0 ? 0 : (uint32_t)r;
         break;
     }
@@ -2605,7 +2648,8 @@ int pe_user_api(pe_args *a, uint16_t service, uint32_t *eax)
         if (size > 0x10000u)
             size = 0x10000u;
         int r = dialog(a, u, res_module(a, pe_arg(a, 0)), d, size, (HWND)pe_arg(a, 2),
-                       pe_arg(a, 3), pe_arg(a, 4), service == PEF_CreateDialogIndirectParamA);
+                       pe_arg(a, 3), pe_arg(a, 4), service == PEF_CreateDialogIndirectParamA,
+                       NULL);
         v = service == PEF_CreateDialogIndirectParamA && r < 0 ? 0 : (uint32_t)r;
         break;
     }

@@ -3,12 +3,13 @@ setlocal EnableExtensions EnableDelayedExpansion
 set "ROOT=%~dp0"
 cd /d "%ROOT%"
 
-set "CPU_TARGETS=286 386"
+set "CPU_TARGETS=286 386 386_XRIP"
 if not "%~1"=="" if not "%~1:~0,1%"=="-" (
     if "%~1"=="286" set "CPU_TARGETS=286"& shift& goto cpu_arg_done
     if "%~1"=="386" set "CPU_TARGETS=386"& shift& goto cpu_arg_done
-    if /I "%~1"=="all" set "CPU_TARGETS=286 386"& shift& goto cpu_arg_done
-    echo Invalid CPU target '%~1'. Use 286, 386 or all. 1>&2
+    if /I "%~1"=="386_XRIP" set "CPU_TARGETS=386_XRIP"& shift& goto cpu_arg_done
+    if /I "%~1"=="all" set "CPU_TARGETS=286 386 386_XRIP"& shift& goto cpu_arg_done
+    echo Invalid CPU target '%~1'. Use 286, 386, 386_XRIP or all. 1>&2
     exit /b 2
 )
 :cpu_arg_done

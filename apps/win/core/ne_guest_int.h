@@ -222,6 +222,10 @@ int ne_kernel_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *d
  * when it points to a structure; a native one (DefWindowProc ...) with
  * lParam from the program, a lent copy given back */
 LRESULT ne_message(ne_user *u, uint32_t proc, HWND h, UINT msg, WPARAM wp, LPARAM lp);
+/* ne_guest_user.c: a native DLL's dialog (COMMDLG's) of the program's
+ * template: its module's (inst) resource tpl, or the global block tpl */
+int ne_dialog_native(ne_user *u, uint16_t inst, uint32_t tpl, int global, HWND owner,
+                     DLGPROC proc, int modeless);
 LRESULT ne_defproc(args *a, ne_user *u, LRESULT (WINAPI *fn)(HWND, UINT, WPARAM, LPARAM),
                    HWND h, UINT msg, WPARAM wp, uint32_t lp);
 /* ne_guest_user.c: wsprintf into dst with fmt; the arguments on the stack

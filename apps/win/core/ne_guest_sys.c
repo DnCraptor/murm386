@@ -366,9 +366,25 @@ static int task_flat(uint16_t task)
     return (!u || !u->ctx) && win_pe_task_ctx(task) != NULL;
 }
 
+static uint32_t task_message(uint16_t task, uint32_t proc, uint16_t hwnd, uint16_t msg,
+                             uint16_t wp, uint32_t lp)
+{
+    ne_user *u = ne_user_of((HTASK)task);
+    return u && u->ctx && proc ? (uint32_t)ne_message(u, proc, hwnd, msg, wp, (LPARAM)lp) : 0;
+}
+
+static int task_dialog(uint16_t task, uint16_t inst, uint32_t tpl, int global, uint16_t owner,
+                       void *proc, int modeless)
+{
+    ne_user *u = ne_user_of((HTASK)task);
+    return u && u->ctx && proc ? ne_dialog_native(u, inst, tpl, global, owner, (DLGPROC)proc,
+                                                  modeless)
+                               : -1;
+}
+
 static const win_dll_ne dll_ne = {
     sizeof(win_dll_ne), call_arg16, call_arg32, call_read, call_write, call_string, task_call,
-    task_read, task_write, task_global, task_flat,
+    task_read, task_write, task_global, task_flat, task_message, task_dialog,
 };
 
 const win_dll_ne *win_dll_ne_glue(void) { return &dll_ne; }

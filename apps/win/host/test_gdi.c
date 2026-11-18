@@ -10,6 +10,26 @@ int win_file_attr(LPCSTR path, int set, UINT attr) { return -1; }   /* no files:
 int win_dll_find(const char *name) { return -1; }                    /* no DLLs */
 HANDLE win_dll_handle(int slot) { return 0; }
 wtask *task_current(void) { static wtask t; return &t; }   /* no tasks either */
+void win_trace_init(void) {}                                          /* no trace */
+const struct win_dll_ne *win_dll_ne_glue(void) { return NULL; }
+/* print.c's: no printer dialogs, files, drivers' DLLs */
+void WINAPI CheckRadioButton(HWND dlg, int first, int last, int check) {}
+int WINAPI DialogBoxIndirectN(HINSTANCE inst, const DLGTEMPLATE_N *tpl, const DLGITEM_N *items,
+                              HWND owner, DLGPROC proc) { return -1; }
+BOOL WINAPI EndDialog(HWND dlg, int result) { return FALSE; }
+HWND WINAPI GetActiveWindow(void) { return 0; }
+int WINAPI GetDlgItemText(HWND dlg, int id, LPSTR buf, int max) { return 0; }
+UINT WINAPI IsDlgButtonChecked(HWND dlg, int id) { return 0; }
+LRESULT WINAPI SendDlgItemMessage(HWND dlg, int id, UINT msg, WPARAM wp, LPARAM lp) { return 0; }
+void WINAPI SetDlgItemText(HWND dlg, int id, LPCSTR text) {}
+void WINAPI SetWindowText(HWND hwnd, LPCSTR text) {}
+HINSTANCE WINAPI LoadLibrary(LPCSTR name) { return 0; }
+void WINAPI FreeLibrary(HINSTANCE h) {}
+FARPROC WINAPI GetProcAddress(HINSTANCE h, LPCSTR name) { return NULL; }
+HFILE WINAPI _lclose(HFILE f) { return HFILE_ERROR; }
+HFILE WINAPI _lcreat(LPCSTR path, int attr) { return HFILE_ERROR; }
+HFILE WINAPI _lopen(LPCSTR path, int mode) { return HFILE_ERROR; }
+UINT WINAPI _lwrite(HFILE f, const void *buf, UINT n) { return 0; }
 
 int main(void)
 {
