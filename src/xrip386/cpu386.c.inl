@@ -536,6 +536,7 @@ static __time_critical_func() bool exec386(uint8_t opcode) {
         case 0x17:
             load_segment(regss, (uint16_t) pop32());
             active_cpu->i286_irq_shadow = true;
+            pending_trap = false;
             return true;
         case 0x1F: load_segment(regds, (uint16_t) pop32()); return true;
 

@@ -967,7 +967,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
     for (uint32_t loopcount = 0; loopcount < execloops; loopcount++) {
         if (active_cpu->native_done)
             break;
-        if (!code32) XRIP_IP &= 0xffffu;
+        if (!protected_mode) XRIP_IP &= 0xffffu;
         if (unlikely(ifl && active_cpu->intr && !active_cpu->i286_irq_shadow)) {
             uint32_t irq_state = save_and_disable_interrupts();
             active_cpu->intr = false;
@@ -1248,6 +1248,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
             case 0x17: /* 17 POP XRIP_SS */
                 load_segment(regss, pop());
                 active_cpu->i286_irq_shadow = true;
+                pending_trap = false;
                 break;
 
             case 0x18: /* 18 SBB Eb Gb */
@@ -1607,11 +1608,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 break;
 
             case 0x54: /* 54 PUSH eSP */
-#ifdef XRIP_286_STYLE_PUSH_SP
                 push(XRIP_SP);
-#else
-                push(XRIP_SP - 2);
-#endif
                 break;
 
             case 0x55: /* 55 PUSH eBP */
@@ -1941,7 +1938,10 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                     break;
                 }
                 load_segment(reg, readrm16(rm));
-                if (reg == regss) active_cpu->i286_irq_shadow = true;
+                if (reg == regss) {
+                    active_cpu->i286_irq_shadow = true;
+                    pending_trap = false;
+                }
                 break;
 
             case 0x8F: /* 8F POP Ev */
@@ -2938,8 +2938,10 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
 #endif
                 break;
         }
-        if (pending_trap && tf && !active_cpu->i286_irq_shadow)
+        if (pending_trap && tf) {
+            active_cpu->i286_irq_shadow = false;
             external_interrupt(1);
+        }
     }
 }
 
