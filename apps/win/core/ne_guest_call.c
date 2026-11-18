@@ -15,6 +15,7 @@
 #include "wincore.h"
 #include "ne_guest_api.h"
 #include "ne_guest_int.h"
+#include "../user/user.h"
 
 #if defined(__arm__) || defined(__thumb__) || defined(WINN_NE_HOST)
 
@@ -1159,19 +1160,26 @@ static void lp_back(args *a, ne_user *u, UINT msg, uint32_t lp, int lent)
         struct_out(a, fmt, lp, u->lent[lent].native);
 }
 
-LRESULT ne_defproc(args *a, ne_user *u, LRESULT (WINAPI *fn)(HWND, UINT, WPARAM, LPARAM),
-                   HWND h, UINT msg, WPARAM wp, uint32_t lp)
+static LPARAM defproc_lparam(args *a, ne_user *u, UINT msg, uint32_t lp,
+                            int *lent, char *text, uint32_t cap)
 {
     if (msg == WM_SETTEXT && (lp >> 16) && lend_find(u, lp) < 0) {
         /* A Win16 caller's own far string also needs converting in the
          * opposite direction when it forwards WM_SETTEXT to USER. */
-        char text[160];
-        if (!str(a, lp, text, sizeof(text)))
-            return 0;
-        return fn(h, msg, wp, (LPARAM)(uintptr_t)text);
+        *lent = -1;
+        return str(a, lp, text, cap) ? (LPARAM)(uintptr_t)text : 0;
     }
+    return lp_native(a, u, msg, lp, lent);
+}
+
+LRESULT ne_defproc(args *a, ne_user *u, LRESULT (WINAPI *fn)(HWND, UINT, WPARAM, LPARAM),
+                   HWND h, UINT msg, WPARAM wp, uint32_t lp)
+{
     int lent;
-    LPARAM l = lp_native(a, u, msg, lp, &lent);
+    char text[160];
+    LPARAM l = defproc_lparam(a, u, msg, lp, &lent, text, sizeof(text));
+    if (a->bad)
+        return 0;
     LRESULT r = fn(h, msg, wp, l);
     lp_back(a, u, msg, lp, lent);
     return r;
@@ -1192,9 +1200,39 @@ enum {
  * buffer out, a rectangle, made native. */
 static uint32_t dde_out(win_ne_guest_api_context *c, ne_user *u, UINT msg, uint32_t lp);
 
+static uint32_t send_mdi_create(args *a, ne_user *u, HWND h, WPARAM wp, uint32_t lp)
+{
+    uint8_t guest[26];
+    if (!lp || !rd(a, lp, guest, sizeof(guest)))
+        return 0;
+    char cls[64], title[128];
+    MDICREATESTRUCT child = {
+        .szClass = name_or_atom(a, rd32(guest), cls, sizeof(cls)),
+        .hOwner = instance(u, rd16(guest + 8)),
+        .x = coord(rd16(guest + 10)),
+        .y = coord(rd16(guest + 12)),
+        .cx = coord(rd16(guest + 14)),
+        .cy = coord(rd16(guest + 16)),
+        .style = rd32(guest + 18),
+        .lParam = (LPARAM)rd32(guest + 22),
+    };
+    uint32_t name = rd32(guest + 4);
+    if (name) {
+        if (!str(a, name, title, sizeof(title)))
+            return 0;
+        child.szTitle = title;
+    }
+    return a->bad ? 0 : (uint32_t)SendMessage(h, WM_MDICREATE, wp, (LPARAM)(uintptr_t)&child);
+}
+
 static __attribute__((noinline)) uint32_t send(args *a, ne_user *u, HWND h, UINT msg, WPARAM wp,
                                                uint32_t lp, int post)
 {
+    if (msg == WM_MDICREATE) {
+        wwnd *wnd = user_wnd(h);
+        if (wnd && wnd->proc == user_mdiclient_proc)
+            return post ? 0 : send_mdi_create(a, u, h, wp, lp);
+    }
     if (msg >= 0x3E0 && msg <= 0x3E8 && h && h != 0xFFFF && GetWindowTask(h) != u->task)
         lp = dde_out(a->ctx, u, msg, lp);   /* DDE's memory: the other one's copy */
     if (!h || ne_own_window(u, h) || !(lp >> 16) || lend_find(u, lp) >= 0) {
@@ -2447,6 +2485,25 @@ int ne_call(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dword)
         *v = send(a, u, w(a, 12), w(a, 10), w(a, 8), dw(a, 4), 0);
         *dword = 1;
         return 1;
+    case 0x11bf:                        /* DefMDIChildProc(HWND, UINT, WPARAM, LPARAM) */
+        *v = (uint32_t)ne_defproc(a, u, DefMDIChildProc, w(a, 12), w(a, 10), w(a, 8), dw(a, 4));
+        *dword = 1;
+        return 1;
+    case 0x11bd: {                      /* DefFrameProc(HWND, HWND, UINT, WPARAM, LPARAM) */
+        HWND frame = w(a, 14), client = w(a, 12);
+        UINT msg = w(a, 10);
+        WPARAM wp = w(a, 8);
+        uint32_t lp = dw(a, 4);
+        int lent;
+        char text[160];
+        LPARAM l = defproc_lparam(a, u, msg, lp, &lent, text, sizeof(text));
+        if (!a->bad) {
+            *v = (uint32_t)DefFrameProc(frame, client, msg, wp, l);
+            lp_back(a, u, msg, lp, lent);
+        }
+        *dword = 1;
+        return 1;
+    }
     case 0x107a: {                      /* CallWindowProc(proc, HWND, UINT, WPARAM, LPARAM) */
         uint32_t proc = dw(a, 14), lp = dw(a, 4);
         HWND h = w(a, 12);

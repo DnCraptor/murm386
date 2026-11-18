@@ -20,6 +20,7 @@
 #include "wincore.h"
 #include "ne_guest_api.h"
 #include "ne_guest_int.h"
+#include "../user/user.h"
 
 #if defined(__arm__) || defined(__thumb__) || defined(WINN_NE_HOST)
 
@@ -318,8 +319,20 @@ static __attribute__((noinline)) uint32_t ne_createwindow(args *a, ne_user *u, i
             else if (u->cls[i].menu[0])
                 menu = load_menu_named(a, u->cls[i].menu);
         }
+    LPVOID create_param = (LPVOID)(uintptr_t)param;
+    CLIENTCREATESTRUCT client;
+    const wclass *wc = user_find_class(c);
+    if (param && wc && wc->wc.lpfnWndProc == user_mdiclient_proc) {
+        uint8_t guest[4];
+        if (!win_ne_read(a->ctx, (uint16_t)(param >> 16), (uint16_t)param,
+                         guest, sizeof(guest)))
+            return a->bad = 1, 0;
+        client.hWindowMenu = rd16(guest);
+        client.idFirstChild = rd16(guest + 2);
+        create_param = &client;
+    }
     return CreateWindowEx(exstyle, c, title, style, x, y, cx, cy, parent, menu, inst,
-                          (LPVOID)(uintptr_t)param);
+                          create_param);
 }
 
 /* ---------------------------------------------------------------- resources */
