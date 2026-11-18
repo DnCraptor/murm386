@@ -131,15 +131,14 @@ option(FORCE_HDMI "Force HDMI output instead of VGA" OFF)
 option(FORCE_VGA "Force VGA output instead of HDMI" OFF)
 
 if(BOARD STREQUAL "M2")
-    option(M2P2_HSTX_AUDIO "Use HDMI video and audio via HSTX on M2P2" ON)
+    option(M2P2_HSTX_AUDIO "Use HSTX VGA or HDMI with audio on M2P2" ON)
 endif()
 
 if(M2P2_HSTX_AUDIO)
     if(NOT BOARD STREQUAL "M2" OR NOT PICO_BOARD STREQUAL "pico2"
-       OR NOT CPU_SPEED STREQUAL "504" OR FORCE_VGA)
-        message(FATAL_ERROR "M2P2_HSTX_AUDIO requires BOARD=M2, PICO_BOARD=pico2, CPU_SPEED=504 and FORCE_VGA=OFF")
+       OR NOT CPU_SPEED STREQUAL "504")
+        message(FATAL_ERROR "M2P2_HSTX_AUDIO requires BOARD=M2, PICO_BOARD=pico2 and CPU_SPEED=504")
     endif()
-    set(FORCE_HDMI ON)
     string(APPEND BUILD_NAME "-HSTX")
 endif()
 

@@ -9,6 +9,7 @@
 
 enum {
     HSTX_PACKET_MAX_PIXELS = 800,
+    HSTX_VGA_PIXELS = 640,
 #if defined(HDMI_SOUND)
     HSTX_PACKET_ISLAND = 7, // commands[] index of the data island
     HSTX_PACKET_HEADER_WORDS = 56,
@@ -48,17 +49,59 @@ typedef struct {
     union {
         uint16_t pixels[HSTX_PACKET_MAX_PIXELS];
         uint32_t pairs[HSTX_PACKET_PIXEL_WORDS];
+        uint32_t vga[HSTX_VGA_PIXELS];
     } payload;
 } hstx_video_packet_t;
 
 _Static_assert(offsetof(hstx_video_packet_t, payload) == HSTX_PACKET_HEADER_WORDS * sizeof(uint32_t),
                "HSTX payload must immediately follow its header");
-_Static_assert(sizeof(hstx_video_packet_t) == HSTX_PACKET_WORDS * sizeof(uint32_t),
+_Static_assert(sizeof(hstx_video_packet_t) == (HSTX_PACKET_HEADER_WORDS + HSTX_VGA_PIXELS) * sizeof(uint32_t),
                "HSTX packet must be contiguous DMA words");
 
 static inline uint32_t hstx_sync_symbol(bool h, bool v) {
     if (v) return h ? HSTX_SYNC_V1_H1 : HSTX_SYNC_V1_H0;
     return h ? HSTX_SYNC_V0_H1 : HSTX_SYNC_V0_H0;
+}
+
+// VGA output: RGB222 in bits 0..5 of each byte, HSYNC in bit 6 and VSYNC in bit 7 (the pins
+// invert the syncs). A word is four time steps of a pixel, so each channel has 13 levels.
+// A narrow frame (320 words a line) has RAW_N_SHIFTS=2: each word is two pixels.
+enum {
+    HSTX_VGA_HEADER_WORDS = 7,
+    HSTX_VGA_BLANK_STEP = 4, // pixels in each RAW_REPEAT at the end of a blank line
+    HSTX_VGA_BLANK_WORDS = 6 + 2 * HSTX_VGA_PIXELS / HSTX_VGA_BLANK_STEP
+};
+#define HSTX_VGA_HSYNC 0x40404040u
+#define HSTX_VGA_VSYNC 0x80808080u
+
+// The VGA header ends commands[], so the pixels follow it. RAW counts pixels.
+static inline void hstx_vga_packet_init(hstx_video_packet_t *packet,
+                                        const hstx_timing_t *timing) {
+    uint32_t *header = packet->commands + HSTX_PACKET_HEADER_WORDS - HSTX_VGA_HEADER_WORDS;
+    header[0] = HSTX_CMD_RAW_REPEAT | timing->h_front;
+    header[1] = 0;
+    header[2] = HSTX_CMD_RAW_REPEAT | timing->h_sync;
+    header[3] = HSTX_VGA_HSYNC;
+    header[4] = HSTX_CMD_RAW_REPEAT | timing->h_back;
+    header[5] = 0;
+    header[6] = HSTX_CMD_RAW | HSTX_VGA_PIXELS;
+}
+
+// A VGA blank line is RAW_REPEAT only, so a RAW_N_SHIFTS change cannot change its length.
+// The short repeats at its end keep its DMA completion near the line end, as on an active line.
+static inline void hstx_vga_blank_init(uint32_t words[HSTX_VGA_BLANK_WORDS],
+                                       const hstx_timing_t *timing, bool vsync) {
+    const uint32_t level = vsync ? HSTX_VGA_VSYNC : 0u;
+    *words++ = HSTX_CMD_RAW_REPEAT | timing->h_front;
+    *words++ = level;
+    *words++ = HSTX_CMD_RAW_REPEAT | timing->h_sync;
+    *words++ = level | HSTX_VGA_HSYNC;
+    *words++ = HSTX_CMD_RAW_REPEAT | timing->h_back;
+    *words++ = level;
+    for (unsigned x = 0; x < HSTX_VGA_PIXELS; x += HSTX_VGA_BLANK_STEP) {
+        *words++ = HSTX_CMD_RAW_REPEAT | HSTX_VGA_BLANK_STEP;
+        *words++ = level;
+    }
 }
 
 #if defined(HDMI_SOUND)

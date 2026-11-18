@@ -1336,6 +1336,8 @@ static inline bool hdmi_init() {
 #if defined(M2P2_HSTX_AUDIO)
 static hstx_video_packet_t hstx_lines[4];
 static uint32_t hstx_single_palette[256], hstx_pair_palette[256], hstx_text_palette[256];
+// A VGA word represents one color; pair indices encode two 4-bit colors.
+static uint32_t hstx_vga_planar_palette[16], hstx_vga_text_palette[16];
 static const uint32_t hstx_mono_palette[4] __not_in_flash("hstx_mono_palette") = {
     0x00000000, 0x7fff0000, 0x00007fff, 0x7fff7fff,
 };
@@ -1344,9 +1346,35 @@ static inline __attribute__((always_inline)) uint32_t hdmi_bgr555(uint8_t r, uin
     return (r >> 3) | ((g >> 3) << 5) | ((b >> 3) << 10);
 }
 
+// VGA: a channel level 0..12 is four 2-bit time steps, the extra steps spread out
+// (from wbcbz7's VGA/DVI/HDMI HSTX driver, MIT). Each byte has blue, green, red in bits 0..5.
+static inline __attribute__((always_inline)) uint32_t hstx_vga_steps(uint32_t value) {
+    const uint32_t level = (value * 13u + 6u) >> 8;
+    return level / 4u * 0x01010101u +
+           (level % 4u == 1u ? 0x1u : level % 4u == 2u ? 0x10001u : level % 4u == 3u ? 0x10101u : 0u);
+}
+
+static inline __attribute__((always_inline)) uint32_t hstx_rgb888_to_vga(uint32_t rgb) {
+    return hstx_vga_steps(rgb & 0xffu) | hstx_vga_steps(rgb >> 8 & 0xffu) << 2 |
+           hstx_vga_steps(rgb >> 16 & 0xffu) << 4;
+}
+
+static inline __attribute__((always_inline)) bool hstx_render_wide(void) {
+#if DIAG
+    return true; // The diagnostic border uses paired text colors.
+#else
+    return osd_is_visible() || current_mode == 1 ||
+        (current_mode == 2 && (gfx_submode == 2 || gfx_submode == 4 || gfx_submode == 8));
+#endif
+}
+
 void __time_critical_func(hdmi_hstx_prepare_lines)(const hstx_timing_t *timing) {
-    for (unsigned i = 0; i < 4; i++)
-        hstx_packet_init(&hstx_lines[i], timing, true, false);
+    for (unsigned i = 0; i < 4; i++) {
+        if (hstx_video_is_vga())
+            hstx_vga_packet_init(&hstx_lines[i], timing);
+        else
+            hstx_packet_init(&hstx_lines[i], timing, true, false);
+    }
 }
 
 static hstx_video_packet_t *__time_critical_func(hdmi_hstx_render_800)(uint32_t line) {
@@ -1395,8 +1423,43 @@ static hstx_video_packet_t *__time_critical_func(hdmi_hstx_render)(uint32_t line
     }
 
     hstx_video_packet_t *packet = &hstx_lines[line & 3u];
-    for (unsigned x = 0; x < SCREEN_WIDTH; x++)
-        packet->payload.pairs[x] = palette[indices[x]];
+    if (hstx_video_is_vga()) {
+        uint32_t *out = packet->payload.vga;
+        const bool wide = hstx_video_vga_is_wide();
+
+        if (palette == hstx_single_palette) {
+            if (wide) {
+                for (unsigned x = 0; x < SCREEN_WIDTH; ++x) {
+                    const uint32_t color = palette[indices[x]];
+                    *out++ = color;
+                    *out++ = color;
+                }
+            } else {
+                for (unsigned x = 0; x < SCREEN_WIDTH; ++x)
+                    *out++ = palette[indices[x]];
+            }
+        } else if (!wide) {
+            // A paired mode took effect after vblank. Switch the shifter next frame.
+            return NULL;
+        } else if (palette == hstx_mono_palette) {
+            for (unsigned x = 0; x < SCREEN_WIDTH; ++x) {
+                const uint8_t pair = indices[x];
+                *out++ = pair & 2u ? 0x3f3f3f3fu : 0u;
+                *out++ = pair & 1u ? 0x3f3f3f3fu : 0u;
+            }
+        } else {
+            const uint32_t *colors = palette == hstx_text_palette ?
+                hstx_vga_text_palette : hstx_vga_planar_palette;
+            for (unsigned x = 0; x < SCREEN_WIDTH; ++x) {
+                const uint8_t pair = indices[x];
+                *out++ = colors[pair >> 4];
+                *out++ = colors[pair & 15u];
+            }
+        }
+    } else {
+        for (unsigned x = 0; x < SCREEN_WIDTH; ++x)
+            packet->payload.pairs[x] = palette[indices[x]];
+    }
     return packet;
 }
 
@@ -1408,8 +1471,11 @@ void __time_critical_func(hdmi_hstx_line_begin)(unsigned line, const hstx_timing
             status |= ST01_V_RETRACE | ST01_DISP_ENABLE;
         vga_state->st01 = status;
     }
-    if (line == active - 4)
+    if (line == active - 4) {
         video_latch_frame(timing->height);
+        if (hstx_video_is_vga())
+            hstx_video_set_vga_wide(hstx_render_wide());
+    }
     if (line == active)
         frame_update_request = 1;  // Apply VGA mode, palette and cursor in the core 1 timer.
 }
@@ -1424,6 +1490,10 @@ void __time_critical_func(hdmi_hstx_line_end)(void) {
 
 void __time_critical_func(graphics_set_palette_hdmi)(const uint8_t R, const uint8_t G, const uint8_t B,  uint8_t i) {
 #if defined(M2P2_HSTX_AUDIO)
+    if (hstx_video_is_vga()) {
+        hstx_single_palette[i] = hstx_rgb888_to_vga((uint32_t)R << 16 | (uint32_t)G << 8 | B);
+        return;
+    }
     uint32_t color = hdmi_bgr555(R, G, B);
     hstx_single_palette[i] = color | (color << 16);
 #else
@@ -1440,6 +1510,13 @@ void graphics_set_palette_hdmi2(
     uint8_t i
 ) {
 #if defined(M2P2_HSTX_AUDIO)
+    if (hstx_video_is_vga()) {
+        // Only the diagonal pairs are needed to cache the 16 colors.
+        if ((i >> 4) == (i & 15u))
+            hstx_vga_planar_palette[i >> 4] =
+                hstx_rgb888_to_vga((uint32_t)R1 << 16 | (uint32_t)G1 << 8 | B1);
+        return;
+    }
     hstx_pair_palette[i] = hdmi_bgr555(R1, G1, B1) | (hdmi_bgr555(R2, G2, B2) << 16);
 #else
     // Pair palette slots: see obp()
@@ -1458,7 +1535,10 @@ void graphics_set_palette_hdmi2(
 void graphics_init_hdmi() {
 #if defined(M2P2_HSTX_AUDIO)
     hdmi_init_text_palette();
-    memcpy(hstx_text_palette, hstx_pair_palette, sizeof(hstx_text_palette));
+    if (hstx_video_is_vga())
+        memcpy(hstx_vga_text_palette, hstx_vga_planar_palette, sizeof(hstx_vga_text_palette));
+    else
+        memcpy(hstx_text_palette, hstx_pair_palette, sizeof(hstx_text_palette));
 
     clock_configure_int_divider(clk_hstx, 0, CLOCKS_CLK_HSTX_CTRL_AUXSRC_VALUE_CLK_SYS,
                                 clock_get_hz(clk_sys), 4);

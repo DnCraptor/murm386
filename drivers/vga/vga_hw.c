@@ -17,6 +17,9 @@
 #include "debug.h"
 #include "board_config.h"
 #include "tsr_callback.h"
+#if defined(M2P2_HSTX_AUDIO)
+#include "hstx_video.h"
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1468,6 +1471,20 @@ void vga_hw_init(void) {
     for(uint32_t i = 0; i < 256; ++i) {
         spread8_lut[i] = spread8(i);
     }
+#if defined(M2P2_HSTX_AUDIO)
+#if defined(FORCE_VGA)
+    const bool hstx_vga = true;
+#elif defined(FORCE_HDMI)
+    const bool hstx_vga = false;
+#else
+    const bool hstx_vga = boot_output_forced ? SELECT_VGA : hstx_video_probe_vga();
+#endif
+    hstx_video_set_vga(hstx_vga);
+    // SELECT_VGA selects the PIO renderer. Both HSTX outputs use the HDMI renderer.
+    SELECT_VGA = false;
+    DBG_PRINT("  Video output: HSTX %s\n", hstx_vga ? "VGA" : "HDMI");
+    graphics_init_hdmi();
+#else
     #if defined(FORCE_VGA)
         /* Skip the pin probe and commit to VGA. Wins over FORCE_HDMI so a
          * board that defaults to HDMI can still be built for VGA without
@@ -1605,6 +1622,7 @@ void vga_hw_init(void) {
     dma_start_channel_mask(1u << dma_data_chan);
     
     DBG_PRINT("  VGA started (640x400 text mode, IRQ priority=0x00)!\n");
+#endif
 }
 
 static inline void vga_hw_set_mode(int mode) {
@@ -1733,6 +1751,9 @@ void __time_critical_func(vga_hw_set_gfx_mode)(int submode, int width, int heigh
 
     // VBE 102h: physical 800x600 at the refresh chosen in the menu
     uint8_t want = (submode == 9 && width == 800 && height == 600) ? video_svga_sel : 0;
+#if defined(M2P2_HSTX_AUDIO)
+    if (hstx_video_is_vga()) want = 0;
+#endif
     if (want != video_phys_target)
         video_phys_request(want);
 }

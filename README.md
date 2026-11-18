@@ -152,10 +152,12 @@ bin/<CMAKE_BUILD_TYPE>/
 
 ## Runtime controls
 
-At power-on, the physical video output can be overridden before video autodetection starts. Hold **V** on a PS/2 or USB keyboard, or **SELECT+B** on the NES/SNES-style gamepad, to force VGA (`SELECT_VGA=true`). Hold **H**, or **SELECT+A**, to force HDMI (`SELECT_VGA=false`). When either override is detected, normal VGA/HDMI pin autodetection is skipped for that boot. Compile-time `--vga` / `--hdmi` forced builds keep their explicit build-time selection.
+At power-on, the physical video output can be overridden before video autodetection starts. Hold **V** on a PS/2 or USB keyboard, or **SELECT+B** on the NES/SNES-style gamepad, to force VGA. Hold **H**, or **SELECT+A**, to force HDMI. When either override is detected, normal VGA/HDMI pin autodetection is skipped for that boot. Compile-time `--vga` / `--hdmi` forced builds keep their explicit build-time selection.
 
 The **VGA/HDMI** item at the bottom of the Win+F11 Hardware setup menu controls the persistent boot selection. **Autodetect** is the default and removes both marker files. **VGA** creates `/.config/286/force_vga`; **HDMI** creates `/.config/286/force_dvi`. Selecting either forced output removes the opposite marker. The marker files are updated immediately when the value is changed; no Apply or restart is requested by this setting itself. The selected physical output is used on the next boot.
 
+
+On M2P2 HSTX builds, VGA and HDMI share GPIO12–19. VGA uses an RGB222 resistor DAC: GPIO12/13 blue, GPIO14/15 green, GPIO16/17 red, GPIO18 HSYNC, GPIO19 VSYNC. Connect the VGA monitor before power-on for autodetection, or force VGA at boot. HSTX VGA runs at 640×480/60 Hz and uses four PWM steps per pixel for 13 intensity levels per color channel. VGA uses the board's local audio output. HSTX HDMI continues to offer VBE 102h (800×600) and LPCM audio.
 
 ### Physical audio output
 

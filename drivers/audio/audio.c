@@ -34,6 +34,7 @@
 #endif
 #if defined(M2P2_HSTX_AUDIO)
 #include "hstx_audio.h"
+#include "hstx_video.h"
 #endif
 #if HAS_AUDIO_HWAY
 #include "ay_hw.h"
@@ -325,32 +326,33 @@ void audio_init(void) {
 }
 
 void audio_play_tone(unsigned hz, unsigned ms) {
-#if defined(M2P2_HSTX_AUDIO)
     if (!hz || !ms)
         return;
 
-    // Boot diagnostics run on core 1, before the mixer timer starts.
-    const uint32_t rate = HSTX_AUDIO_SAMPLE_RATE;
-    const uint32_t frames = (uint64_t)rate * ms / 1000u;
-    const uint32_t step = hz % rate;
-    const int amp = volume < 16 ? 32767 >> volume : 0;
-    const absolute_time_t deadline = make_timeout_time_ms(ms + 100u);
-    uint32_t phase = 0;
-    for (uint32_t i = 0; i < frames; ++i) {
-        while (!hstx_audio_has_room()) {
-            if (time_reached(deadline))
-                return;
-            sleep_us(22);
+#if defined(M2P2_HSTX_AUDIO)
+    if (!hstx_video_is_vga()) {
+        // Boot diagnostics run on core 1, before the mixer timer starts.
+        const uint32_t rate = HSTX_AUDIO_SAMPLE_RATE;
+        const uint32_t frames = (uint64_t)rate * ms / 1000u;
+        const uint32_t step = hz % rate;
+        const int amp = volume < 16 ? 32767 >> volume : 0;
+        const absolute_time_t deadline = make_timeout_time_ms(ms + 100u);
+        uint32_t phase = 0;
+        for (uint32_t i = 0; i < frames; ++i) {
+            while (!hstx_audio_has_room()) {
+                if (time_reached(deadline))
+                    return;
+                sleep_us(22);
+            }
+            int16_t sample = phase < rate / 2 ? amp : -amp;
+            hstx_audio_write(sample, sample);
+            phase += step;
+            if (phase >= rate)
+                phase -= rate;
         }
-        int16_t sample = phase < rate / 2 ? amp : -amp;
-        hstx_audio_write(sample, sample);
-        phase += step;
-        if (phase >= rate)
-            phase -= rate;
-    }
-#else
-    if (!hz || !ms)
         return;
+    }
+#endif
 
 #if HAS_AUDIO_HWAY
     if (audio_use_hway) {
@@ -417,7 +419,6 @@ void audio_play_tone(unsigned hz, unsigned ms) {
         sleep_us(half_period_us);
     }
     pwm_set_gpio_level(PCM_PIN, 2048);
-#endif
 #endif
 }
 
@@ -528,7 +529,7 @@ bool __not_in_flash_func(timer_callback)(repeating_timer_t *rt) {
     int speaker_pcm = b_v * 8192;
 #if defined(M2P2_HSTX_AUDIO)
     // A full or stalled HDMI queue must never stop the physical output.
-    if (hstx_audio_has_room()) {
+    if (!hstx_video_is_vga() && hstx_audio_has_room()) {
         int hdmi_r = r_v + speaker_pcm + hdmi_psg;
         int hdmi_l = l_v + speaker_pcm + hdmi_psg;
         if (hdmi_r > 32767) hdmi_r = 32767;

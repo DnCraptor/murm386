@@ -34,6 +34,15 @@ typedef void (*hstx_video_vsync_callback_t)(void);
 void hstx_video_set_line_callback(hstx_video_line_callback_t callback);
 void hstx_video_set_vsync_callback(hstx_video_vsync_callback_t callback);
 
+/* Select the output before init. The probe uses GPIO12/13 and leaves them
+ * as high-impedance inputs. VGA drives a resistor DAC on GPIO12..19. */
+bool hstx_video_probe_vga(void);
+void hstx_video_set_vga(bool enabled);
+bool hstx_video_is_vga(void);
+bool hstx_video_vga_is_wide(void);
+/* In vertical blank only: output 640 words per line, or repeat 320 words. */
+void hstx_video_set_vga_wide(bool wide);
+
 /* Claims two unused DMA channels and an exclusive DMA_IRQ_1 handler.
  * Rejects any existing shared or exclusive IRQ1 handler. stop/deinit restore
  * the prior IRQ enable state and priority. Does not change PLLs, clocks,

@@ -1,4 +1,7 @@
 #include "video_profile.h"
+#if defined(M2P2_HSTX_AUDIO)
+#include "hstx_video.h"
+#endif
 #include <stdio.h>
 #include "286/cpu.h"
 #include "bios.h"
@@ -945,8 +948,20 @@ static const Bios10VbeMode bios10_vbe_modes[] = {
       8, 16, 8, 8, 8, 0, 0, 0 },
 };
 
+static bool bios10_vbe_mode_available(uint16_t mode)
+{
+#if defined(M2P2_HSTX_AUDIO)
+    return mode != BIOS10_VBE_MODE_800x600x4 || !hstx_video_is_vga();
+#else
+    (void)mode;
+    return true;
+#endif
+}
+
 static const Bios10VbeMode *bios10_vbe_find_mode(uint16_t mode)
 {
+    if (!bios10_vbe_mode_available(mode))
+        return NULL;
     for (uint8_t i = 0; i < sizeof(bios10_vbe_modes) / sizeof(bios10_vbe_modes[0]); i++) {
         if (bios10_vbe_modes[i].mode == mode)
             return &bios10_vbe_modes[i];
@@ -994,12 +1009,14 @@ static bool bios_10h_4F00h(CPU *cpu)
      * persistent far pointer, so the list itself lives in the guest-visible
      * BIOS area rather than in the caller's temporary controller-info block.
      */
-    for (uint8_t i = 0;
-         i < sizeof(bios10_vbe_modes) / sizeof(bios10_vbe_modes[0]); ++i)
-        writew86(modelist + (uint32_t)i * 2u, bios10_vbe_modes[i].mode);
-    writew86(modelist +
-             (uint32_t)(sizeof(bios10_vbe_modes) / sizeof(bios10_vbe_modes[0])) * 2u,
-             0xFFFFu);
+    for (uint8_t i = 0; i < sizeof(bios10_vbe_modes) / sizeof(bios10_vbe_modes[0]); ++i) {
+        const uint16_t mode = bios10_vbe_modes[i].mode;
+        if (bios10_vbe_mode_available(mode)) {
+            writew86(modelist, mode);
+            modelist += 2;
+        }
+    }
+    writew86(modelist, 0xFFFFu);
 
     /* VBE 1.x controller information block is 256 bytes. */
     for (uint16_t i = 0; i < 256; ++i)
@@ -1124,7 +1141,8 @@ static bool bios_10h_4F03h(CPU *cpu)
 
         for (uint8_t i = 0; i < sizeof(bios10_vbe_modes) / sizeof(bios10_vbe_modes[0]); i++) {
             const Bios10VbeMode *m = &bios10_vbe_modes[i];
-            if (m->xres == x && m->yres == y && m->bpp == bpp) {
+            if (m->xres == x && m->yres == y && m->bpp == bpp &&
+                bios10_vbe_mode_available(m->mode)) {
                 found = m;
                 break;
             }

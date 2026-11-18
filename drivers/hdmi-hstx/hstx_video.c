@@ -7,6 +7,7 @@
  * See LICENSE.pico_hdmi. This version keeps the BGR555 TMDS serializer and
  * line pipeline, replaces resource/lifecycle handling, and supports HDMI
  * audio data islands when HDMI_SOUND is enabled.
+ * VGA serializer, probe and RAW packets from xrip/pico-286 (572890a, MIT).
  */
 #include "hstx_video.h"
 #if defined(HDMI_SOUND)
@@ -18,6 +19,7 @@
 
 #include <pico.h>
 #include <pico/platform.h>
+#include <pico/time.h>
 #include <hardware/clocks.h>
 #include <hardware/dma.h>
 #include <hardware/gpio.h>
@@ -26,6 +28,7 @@
 #include <hardware/sync.h>
 #include <hardware/structs/hstx_ctrl.h>
 #include <hardware/structs/hstx_fifo.h>
+#include <hardware/structs/pads_bank0.h>
 #include <hardware/structs/dma_debug.h>
 
 #if !PICO_RP2350
@@ -74,15 +77,69 @@ static hstx_video_packet_t black_packet;
 #define BLACK_PACKET (&black_packet)
 #endif
 
+static bool initialized;
+static bool vga_output;
+static bool vga_wide = true;
+static uint32_t vga_blank[2][HSTX_VGA_BLANK_WORDS];
+
+void hstx_video_set_vga(bool enabled) {
+    assert(!initialized);
+    vga_output = enabled;
+}
+
+bool __time_critical_func(hstx_video_is_vga)(void) {
+    return vga_output;
+}
+
+bool __time_critical_func(hstx_video_vga_is_wide)(void) {
+    return vga_wide;
+}
+
+void __time_critical_func(hstx_video_set_vga_wide)(bool wide) {
+    vga_wide = wide;
+    hstx_ctrl_hw->expand_shift = (wide ? 1u : 2u) << HSTX_CTRL_EXPAND_SHIFT_RAW_N_SHIFTS_LSB;
+}
+
+/* The test of wbcbz7's VGA/DVI/HDMI HSTX driver (MIT). Pins 12 and 13 are the
+ * two blue bits of a VGA DAC, or CLK-/CLK+ of HDMI. If the pulls cannot move them,
+ * they have a load: a VGA monitor (low) or an HDMI sink (high). Then pin 12 is
+ * driven away from that level, and on VGA pin 13 reads low. */
+bool hstx_video_probe_vga(void) {
+    enum { A = HSTX_VIDEO_PIN_BASE, B = HSTX_VIDEO_PIN_BASE + 1 };
+    gpio_init(A);
+    gpio_init(B);
+    unsigned levels[2]; // [pull up]: the two pins as bits
+    for (int up = 0; up < 2; ++up) {
+        gpio_set_pulls(A, up, !up);
+        gpio_set_pulls(B, up, !up);
+        sleep_ms(33);
+        levels[up] = gpio_get(A) | gpio_get(B) << 1;
+    }
+    bool detected = false;
+    if (levels[0] == levels[1] && (levels[0] == 0 || levels[0] == 3)) {
+        const bool load_high = levels[0] == 3;
+        gpio_set_pulls(B, load_high, !load_high);
+        gpio_put(A, !load_high);
+        gpio_set_dir(A, GPIO_OUT);
+        sleep_ms(33);
+        detected = !gpio_get(B);
+    }
+    gpio_deinit(A);
+    gpio_deinit(B);
+    gpio_disable_pulls(A);
+    gpio_disable_pulls(B);
+    return detected;
+}
+
 static int dma_channels[2] = {-1, -1};
 static uint32_t dma_mask;
 static uint32_t dma_ctrl32[2];
 static uint owner_core;
-static bool initialized;
 static volatile bool running;
 static bool irq_was_enabled;
 static uint8_t previous_irq_priority;
 static gpio_function_t previous_pin_functions[8];
+static uint32_t previous_pad_config[8];
 static bool pins_owned;
 
 static uint next_vline;
@@ -119,6 +176,20 @@ static void __time_critical_func(hstx_configure_serializer)(void) {
     reset_block(RESETS_RESET_HSTX_BITS);
     unreset_block_wait(RESETS_RESET_HSTX_BITS);
 
+    if (vga_output) {
+        hstx_video_set_vga_wide(vga_wide);
+        // Each DDR pixel emits PWM steps 0, 1, 2, 3, 0, 1, 2, 3, 0, 1.
+        hstx_ctrl_hw->csr = HSTX_CTRL_CSR_EXPAND_EN_BITS |
+            5u << HSTX_CTRL_CSR_CLKDIV_LSB |
+            5u << HSTX_CTRL_CSR_N_SHIFTS_LSB |
+            16u << HSTX_CTRL_CSR_SHIFT_LSB;
+        for (uint bit = 0; bit < 8; ++bit) {
+            hstx_ctrl_hw->bit[bit] = bit << HSTX_CTRL_BIT0_SEL_P_LSB |
+                (bit + 8u) << HSTX_CTRL_BIT0_SEL_N_LSB |
+                (bit >= 6 ? HSTX_CTRL_BIT0_INV_BITS : 0u);
+        }
+        return;
+    }
     hstx_ctrl_hw->expand_tmds =
         4u << HSTX_CTRL_EXPAND_TMDS_L2_NBITS_LSB |
         29u << HSTX_CTRL_EXPAND_TMDS_L2_ROT_LSB |
@@ -155,13 +226,24 @@ static void __time_critical_func(hstx_configure_serializer)(void) {
 }
 
 static void __time_critical_func(hstx_arm_transfer)(
-        uint slot, const hstx_video_packet_t *packet) {
+        uint slot, const hstx_video_packet_t *packet, bool vsync) {
     dma_channel_hw_t *channel = &dma_hw->ch[dma_channels[slot]];
     /* The channel is disabled while its source and count are published.
      * Enabling through AL1_CTRL does not trigger it; its partner chains to it.
      * In particular, avoid the triggering CTRL_TRIG / READ_ADDR aliases. */
-    channel->read_addr = (uintptr_t)packet;
-    channel->transfer_count = HSTX_PACKET_HEADER_WORDS + timing->width / 2u;
+    const void *words = packet;
+    uint32_t count = HSTX_PACKET_HEADER_WORDS + timing->width / 2u;
+    if (vga_output) {
+        if (packet) {
+            words = packet->commands + HSTX_PACKET_HEADER_WORDS - HSTX_VGA_HEADER_WORDS;
+            count = HSTX_VGA_HEADER_WORDS + (vga_wide ? HSTX_VGA_PIXELS : HSTX_VGA_PIXELS / 2);
+        } else {
+            words = vga_blank[vsync];
+            count = HSTX_VGA_BLANK_WORDS;
+        }
+    }
+    channel->read_addr = (uintptr_t)words;
+    channel->transfer_count = count;
     __dmb();
     channel->al1_ctrl = dma_ctrl32[slot];
 }
@@ -178,20 +260,23 @@ static bool __time_critical_func(hstx_start_pipeline)(void) {
 #endif
     for (uint slot = 0; slot < 2; ++slot) {
         const bool vsync = slot >= timing->v_front && slot < timing->v_front + timing->v_sync;
+        hstx_video_packet_t *packet = NULL;
+        if (!vga_output) {
 #if defined(HDMI_SOUND)
-        hstx_video_packet_t *packet = &spare_packets[slot];
-        hstx_packet_init(packet, timing, false, vsync);
-        hstx_packet_set_island(packet, hstx_audio_island(slot, timing));
+            packet = &spare_packets[slot];
+            hstx_packet_init(packet, timing, false, vsync);
+            hstx_packet_set_island(packet, hstx_audio_island(slot, timing));
 #else
-        const hstx_video_packet_t *packet = BLANK_PACKET(vsync);
+            packet = BLANK_PACKET(vsync);
 #endif
+        }
         dma_channel_hw_t *channel = &dma_hw->ch[dma_channels[slot]];
         channel->al1_ctrl = dma_ctrl32[slot] & ~DMA_CH0_CTRL_TRIG_EN_BITS;
         channel->write_addr = (uintptr_t)&hstx_fifo_hw->fifo;
         // A peripheral reset also resets its DREQ producer. Discard old DMA
         // credits and request a fresh handshake before restarting its FIFO.
         dma_debug_hw->ch[dma_channels[slot]].dbg_ctdreq = 0;
-        hstx_arm_transfer(slot, packet);
+        hstx_arm_transfer(slot, packet, vsync);
     }
     dma_hw->ints1 = dma_mask;
     dma_set_irq1_channel_mask_enabled(dma_mask, true);
@@ -221,24 +306,27 @@ static void __time_critical_func(hstx_queue_next_transfer)(uint slot) {
     const unsigned active_start = hstx_active_start(timing);
     hdmi_hstx_line_begin(next_vline, timing);
     hstx_video_packet_t *packet;
+    bool vsync = false;
     if (next_vline >= active_start) {
         packet = line_callback != NULL ? line_callback(next_vline - active_start) : NULL;
-        if (packet == NULL || ((uintptr_t)packet & 3u)) packet = BLACK_PACKET;
+        if (packet == NULL || ((uintptr_t)packet & 3u))
+            packet = vga_output ? NULL : BLACK_PACKET;
     } else {
-        const bool vsync = next_vline >= timing->v_front && next_vline < timing->v_front + timing->v_sync;
+        vsync = next_vline >= timing->v_front && next_vline < timing->v_front + timing->v_sync;
 #if defined(GRAPHICS_PC_EMULATOR)
         port3DA = 9;
 #endif
-        packet = BLANK_PACKET(vsync);
+        packet = vga_output ? NULL : BLANK_PACKET(vsync);
         if (next_vline == timing->v_front) {
             ++hstx_video_frame_count;
             if (vsync_callback != NULL) vsync_callback();
         }
     }
 #if defined(HDMI_SOUND)
-    hstx_packet_set_island(packet, hstx_audio_island(next_vline, timing));
+    if (!vga_output)
+        hstx_packet_set_island(packet, hstx_audio_island(next_vline, timing));
 #endif
-    hstx_arm_transfer(slot, packet);
+    hstx_arm_transfer(slot, packet, vsync);
     if (++next_vline == active_start + timing->height) next_vline = 0;
     hdmi_hstx_line_end();
 }
@@ -291,7 +379,7 @@ static void __time_critical_func(hstx_dma_irq_handler)(void) {
         running = hstx_start_pipeline();
         return;
     }
-    if (next_vline == 2) {
+    if (!vga_output && next_vline == 2) {
         const unsigned mode = video_phys_target;
         if (mode != video_phys_cur && mode < count_of(timings)) {
             // Both queued lines are in vblank. Drain DMA before rewriting
@@ -372,8 +460,14 @@ bool hstx_video_init(void) {
         channel_config_set_transfer_data_size(&config, DMA_SIZE_32);
         dma_ctrl32[slot] = config.ctrl;
     }
+    if (vga_output) {
+        hstx_vga_blank_init(vga_blank[0], &timings[0], false);
+        hstx_vga_blank_init(vga_blank[1], &timings[0], true);
+    }
 #if defined(HDMI_SOUND)
-    hstx_audio_init();
+    else {
+        hstx_audio_init();
+    }
 #endif
     owner_core = get_core_num();
     previous_irq_priority = irq_get_priority(DMA_IRQ_1);
@@ -396,8 +490,14 @@ bool hstx_video_start(void) {
     }
     const uint32_t interrupts = save_and_disable_interrupts();
     for (uint i = 0; i < 8; ++i) {
-        previous_pin_functions[i] = gpio_get_function(HSTX_VIDEO_PIN_BASE + i);
-        gpio_set_function(HSTX_VIDEO_PIN_BASE + i, GPIO_FUNC_HSTX);
+        const uint pin = HSTX_VIDEO_PIN_BASE + i;
+        previous_pin_functions[i] = gpio_get_function(pin);
+        previous_pad_config[i] = pads_bank0_hw->io[pin];
+        gpio_set_function(pin, GPIO_FUNC_HSTX);
+        if (vga_output) {
+            gpio_set_slew_rate(pin, GPIO_SLEW_RATE_FAST);
+            gpio_set_drive_strength(pin, GPIO_DRIVE_STRENGTH_12MA);
+        }
     }
     pins_owned = true;
     irq_set_priority(DMA_IRQ_1, 0);
@@ -424,7 +524,9 @@ void hstx_video_stop(void) {
     reset_block(RESETS_RESET_HSTX_BITS);
     if (pins_owned) {
         for (uint i = 0; i < 8; ++i) {
-            gpio_set_function(HSTX_VIDEO_PIN_BASE + i, previous_pin_functions[i]);
+            const uint pin = HSTX_VIDEO_PIN_BASE + i;
+            gpio_set_function(pin, previous_pin_functions[i]);
+            pads_bank0_hw->io[pin] = previous_pad_config[i];
         }
         pins_owned = false;
     }

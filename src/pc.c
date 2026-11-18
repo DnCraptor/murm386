@@ -21,6 +21,9 @@
 #include "psram_init.h"
 #include "config_save.h"
 #include "csm_psg.h"
+#if defined(M2P2_HSTX_AUDIO)
+#include "hstx_video.h"
+#endif
 
 extern bool SELECT_VGA;
 
@@ -1842,8 +1845,12 @@ static void bios_post_components(PC *pc, size_t psram_size)
     bios_post_table_rule(pc, 0xDA, 0xC2, 0xBF);
     bios_post_table_row(pc, left, right);
 
-snprintf(left, sizeof(left), "Video    : %s [%s]",
-             video_profile_name(), SELECT_VGA ? "VGA" : "HDMI");
+#if defined(M2P2_HSTX_AUDIO)
+    const char *video_output = "HSTX";
+#else
+    const char *video_output = SELECT_VGA ? "VGA" : "HDMI";
+#endif
+    snprintf(left, sizeof(left), "Video    : %s [%s]", video_profile_name(), video_output);
 #if !defined(NO_PAGING)
     if (ega128_paging_active())
         snprintf(right, sizeof(right), "%s", ega128_paging_post_label());
