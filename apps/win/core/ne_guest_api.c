@@ -554,6 +554,11 @@ void win_ne_vm_return(void *opaque, win_ne_regs *cpu, uint16_t service)
              service == WIN_NE_SERVICE_BIOS ? 6 : service == WIN_NE_SERVICE_NP ? 8 : 0;
     if (at && frame_get(ctx, cpu, at, &v))
         win_ne_guest_present(g, v);
+    /* a call through the gate: the caller's code segment, which the gateway
+     * returns to from ring 0 (a #NP there could not be taken): discarded
+     * meanwhile (memory the call needed), back */
+    if (!at && frame_get(ctx, cpu, -2, &v) && (v & 3u) == 3u)
+        win_ne_guest_present(g, v);
 }
 
 int win_ne_guest_api(void *opaque, win_ne_regs *cpu, uint16_t service)

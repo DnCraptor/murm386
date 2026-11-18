@@ -1,0 +1,31 @@
+# Structured exceptions of a Win32 program (OW32X): a division by zero, RaiseException,
+# __finally, EXCEPTION_CONTINUE_EXECUTION, a privileged instruction, one from a
+# called function; U: its top-level filter (it ends), Z: none (the Application Error):
+#     ./winhost scripts/ow32x.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OW32X
+key RETURN
+wait 1000
+snap o32x_main.ppm
+type u
+wait 300
+snap o32x_top.ppm
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OW32X
+key RETURN
+wait 1000
+type z
+wait 300
+snap o32x_fault.ppm
+key RETURN
+wait 50
+exit

@@ -165,6 +165,9 @@ int win_ne_resource_nth(const char *path, uint16_t type, int n, uint8_t **data,
 int win_ne_entry(const char *path, uint16_t ordinal, uint8_t *flags, uint16_t *segment,
                  uint16_t *offset);
 uint16_t win_ne_ordinal(const char *path, const char *name);
+/* Each entry of the module in a segment (its number): its flags, offset */
+int win_ne_entries(const char *path, unsigned segment,
+                   void (*each)(void *opaque, uint8_t flags, uint16_t offset), void *opaque);
 /* The module's description (the first entry of its non-resident names):
  * 1 with it in buf, 0 if there is none */
 int win_ne_description(const char *path, char *buf, uint32_t cap);

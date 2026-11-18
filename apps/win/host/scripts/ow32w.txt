@@ -1,0 +1,17 @@
+# WINMM's devices for a Win32 program (OW32W, HOSTWAVE.DLL): waveOut with a
+# function's and a window's callback, mmio, MCI's waveaudio by mciSendCommand, a
+# MIDI note; T: a multimedia timer. The driver's blocks on stderr:
+#     ./winhost scripts/ow32w.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OW32W
+key RETURN
+wait 4000
+type t
+wait 1500
+snap o32w_main.ppm
+exit

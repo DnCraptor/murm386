@@ -116,6 +116,13 @@ static int alive(pe_user *u)
     return u && !u->ctx->dead && !u->ctx->exited && !u->ctx->stopped;
 }
 
+void *win_pe_task_ctx(uint16_t task)
+{
+    pe_user *u = user_of((HTASK)task);
+    return u && alive(u) ? u->ctx : NULL;
+}
+
+
 /* ---------------------------------------------------------------- native procedures */
 
 /* a native window procedure as the program holds it: a thunk of its own

@@ -297,6 +297,19 @@ int win_ne_guest_selfloaded(win_ne_guest_image *g, uint16_t k, uint16_t handle,
  * the programs'); discarded until largest bytes are free (GlobalCompact:
  * what is free then, the largest block). */
 #define WIN_NE_SERVICE_NP 0x2500u
+
+/* A Win32 program's call (pe: its win_pe_ctx) of a native DLL's export
+ * (its slot's) that only Win16 callers have: its arguments as a Win16
+ * caller's PASCAL ones (frame, bytes), its far pointers the program's flat
+ * addresses; the DLL's WINDLL_ result (*value). And pe_api.c's, pe_user.c's
+ * help: the program's memory (write 1: to it), a task's program (NULL:
+ * none of them), its procedure called with a DLL's words (n 8: a driver
+ * callback's handle, message, three DWORDs) */
+int win_dll_call_flat(int slot, uint16_t ordinal, const uint8_t *frame, unsigned bytes, void *pe,
+                      uint32_t *value);
+int win_pe_flat_mem(void *pe, uint32_t addr, void *buf, uint32_t n, int write);
+void *win_pe_task_ctx(uint16_t task);
+uint32_t win_pe_task_callback(void *pe, uint32_t proc, const uint16_t *words, int n);
 int win_ne_guest_present(win_ne_guest_image *g, uint16_t sel);
 uint32_t win_ne_guest_discardable(void);
 uint32_t win_ne_guest_compact(uint32_t bytes);

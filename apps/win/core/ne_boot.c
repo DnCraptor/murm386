@@ -291,6 +291,13 @@ int win_ne_fault_make(uint8_t idt[WIN_NE_FAULT_IDT_BYTES],
         if (a->flat) {                          /* all of them faults but the yield */
             gate386(idt, v, v == WIN_NE_YIELD_VECTOR ? (uint16_t)WIN_NE_YIELD32_OFFSET : off,
                     a->pm_segment);
+            if (v < WIN_NE_EXCEPTION_VECTORS) { /* o32 push vector; jmp near exception */
+                code[pos] = 0x66;
+                code[pos + 1u] = 0x6a;
+                code[pos + 2u] = (uint8_t)v;
+                code[pos + 3u] = 0xe9;          /* (its offset below) */
+                continue;
+            }
             code[pos] = 0xbb;
             put16(code + pos + 1u, (uint16_t)v);
             code[pos + 3u] = 0xe9;
@@ -341,17 +348,36 @@ int win_ne_fault_make(uint8_t idt[WIN_NE_FAULT_IDT_BYTES],
     b8(&e, 0xeb); b8(&e, 0xfe);            /* no return */
     /* the BIOS interrupts (PM, ring 0): as INT 21h's, the vector above AX */
     size_t bios = e.n;
-    b8(&e, 0x50);                              /* push ax */
-    b8(&e, 0xb8); b16(&e, WIN_NE_SERVICE_BIOS);  /* mov ax,service */
-    b8(&e, 0x9a); b16(&e, WIN_NE_BOOT_GATEWAY_OFFSET); /* call far gateway */
-    b16(&e, a->pm_segment);
-    b8(&e, 0x83); b8(&e, 0xc4); b8(&e, 0x04);  /* add sp,4 (AX, the vector) */
-    b8(&e, 0xcf);                              /* iret */
+    if (!a->flat) {                            /* (a flat program has none) */
+        b8(&e, 0x50);                          /* push ax */
+        b8(&e, 0xb8); b16(&e, WIN_NE_SERVICE_BIOS);  /* mov ax,service */
+        b8(&e, 0x9a); b16(&e, WIN_NE_BOOT_GATEWAY_OFFSET); /* call far gateway */
+        b16(&e, a->pm_segment);
+        b8(&e, 0x83); b8(&e, 0xc4); b8(&e, 0x04);  /* add sp,4 (AX, the vector) */
+        b8(&e, 0xcf);                          /* iret */
+    }
+    /* a flat program's exceptions (ring 3): WIN_PE_SERVICE_EXCEPTION_ makes
+     * them its own (its handlers', on its stack): the frame then IRETD's
+     * to where the service put it, one dword up (the vector's place, or
+     * the error code's: the service moves the frame) */
+    size_t exc = e.n;
+    if (a->flat) {
+        b8(&e, 0x66); b8(&e, 0x50);           /* push eax */
+        b8(&e, 0xb8); b16(&e, WIN_PE_SERVICE_EXCEPTION_); /* mov ax,service */
+        b8(&e, 0x66); b8(&e, 0x9a);           /* o32 call far gateway */
+        b32(&e, WIN_NE_BOOT_GATEWAY_OFFSET); b16(&e, a->pm_segment);
+        b8(&e, 0x66); b8(&e, 0x58);           /* pop eax */
+        b8(&e, 0x83); b8(&e, 0xc4); b8(&e, 0x04);  /* add sp,4 */
+        b8(&e, 0x66); b8(&e, 0xcf);           /* iretd */
+    }
     if (e.overflow || common + e.n > WIN_NE_FAULT_CODE_BYTES)
         return 0;
     for (unsigned v = 0; v < WIN_NE_IDT_VECTORS && !a->flat; v++)
         if (WIN_NE_BIOS_VECTOR(v))
             put16(code + 6u * v + 3u, (uint16_t)(common + bios - (6u * v + 5u)));
+    for (unsigned v = 0; v < WIN_NE_EXCEPTION_VECTORS && a->flat; v++)
+        if (v != WIN_NE_YIELD_VECTOR)
+            put16(code + 6u * v + 4u, (uint16_t)(common + exc - (6u * v + 6u)));
     patch16(&e, rmref, (uint16_t)(WIN_NE_FAULT_CODE_OFFSET -
                                  WIN_NE_BOOT_OFFSET + common + rm));
     memcpy(code + common, e.bytes, e.n);

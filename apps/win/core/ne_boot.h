@@ -121,6 +121,12 @@
 /* #NP: the segment of the selector its error code has loaded (ne_guest.h's
  * WIN_NE_SERVICE_NP); the frame: AX, DX, the error code, IP, CS, FLAGS */
 #define WIN_NE_SERVICE_NP_       0x2500u
+/* A flat (Win32) program's exceptions (vectors below this): the service
+ * WIN_PE_SERVICE_EXCEPTION_ (pe_int.h's WIN_PE_SERVICE_EXCEPTION); the
+ * ring 0 frame: the gateway's return address, EAX, the vector, the error
+ * code (for those with one), EIP, CS, EFLAGS, ESP, SS */
+#define WIN_PE_SERVICE_EXCEPTION_ 0x2202u
+#define WIN_NE_EXCEPTION_VECTORS 18u
 #define WIN_NE_BIOS_VECTOR(v)    ((v) == 0x10u || (v) == 0x11u || (v) == 0x12u || \
                                   (v) == 0x16u || (v) == 0x1au || \
                                   ((v) >= 0x22u && (v) < WIN_NE_IDT_VECTORS))

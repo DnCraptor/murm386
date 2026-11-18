@@ -245,41 +245,112 @@ static __attribute__((noinline)) int th_service(args *a, ne_user *u, uint16_t se
 
 /* ================================================================ native DLLs */
 
-/* a call of the program's for a DLL: its arguments and memory */
+/* a call of the program's for a DLL: its arguments and memory; a Win32
+ * program's (pe): its arguments as a Win16 caller's, its far pointers
+ * flat addresses */
 struct win_dll_call {
     args *a;
+    void *pe;
+    const uint8_t *frame;
+    uint32_t bytes;
 };
 
-static uint16_t call_arg16(win_dll_call *c, unsigned off) { return w(c->a, off); }
-static uint32_t call_arg32(win_dll_call *c, unsigned off) { return dw(c->a, off); }
-static int call_read(win_dll_call *c, uint32_t far, void *dst, uint32_t n) { return rd_(c->a, far, dst, n); }
+/* pe_api.c's, pe_user.c's (none where they are not linked) */
+__attribute__((weak)) int win_pe_flat_mem(void *pe, uint32_t addr, void *buf, uint32_t n,
+                                          int write)
+{
+    (void)pe; (void)addr; (void)buf; (void)n; (void)write;
+    return 0;
+}
+__attribute__((weak)) void *win_pe_task_ctx(uint16_t task)
+{
+    (void)task;
+    return NULL;
+}
+__attribute__((weak)) uint32_t win_pe_task_callback(void *pe, uint32_t proc,
+                                                    const uint16_t *words, int n)
+{
+    (void)pe; (void)proc; (void)words; (void)n;
+    return 0;
+}
+
+static int flat_string(void *pe, uint32_t far, char *dst, uint32_t cap)
+{
+    if (!far || !cap)
+        return 0;
+    for (uint32_t i = 0; i < cap; i++) {
+        if (!win_pe_flat_mem(pe, far + i, dst + i, 1, 0))
+            return 0;
+        if (!dst[i])
+            return 1;
+    }
+    dst[cap - 1] = 0;
+    return 1;
+}
+
+static uint16_t call_arg16(win_dll_call *c, unsigned off)
+{
+    if (c->pe)
+        return off + 2u <= c->bytes ? (uint16_t)(c->frame[off] | c->frame[off + 1] << 8) : 0;
+    return w(c->a, off);
+}
+static uint32_t call_arg32(win_dll_call *c, unsigned off)
+{
+    if (c->pe)
+        return (uint32_t)call_arg16(c, off) | (uint32_t)call_arg16(c, off + 2u) << 16;
+    return dw(c->a, off);
+}
+static int call_read(win_dll_call *c, uint32_t far, void *dst, uint32_t n)
+{
+    if (c->pe)
+        return far && win_pe_flat_mem(c->pe, far, dst, n, 0);
+    return rd_(c->a, far, dst, n);
+}
 static int call_write(win_dll_call *c, uint32_t far, const void *src, uint32_t n)
 {
+    if (c->pe)
+        return far && win_pe_flat_mem(c->pe, far, (void *)(uintptr_t)src, n, 1);
     return wr_(c->a, far, src, n);
 }
 static int call_string(win_dll_call *c, uint32_t far, char *dst, uint32_t cap)
 {
+    if (c->pe)
+        return flat_string(c->pe, far, dst, cap);
     return str_(c->a, far, dst, cap);
 }
 
 static uint32_t task_call(uint16_t task, uint32_t proc, const uint16_t *words, int n)
 {
     ne_user *u = ne_user_of((HTASK)task);
-    return u && u->ctx && proc ? win_ne_call(u->ctx, proc, words, n, NULL, 0) : 0;
+    if (!u || !u->ctx) {
+        void *pe = win_pe_task_ctx(task);
+        return pe && proc ? win_pe_task_callback(pe, proc, words, n) : 0;
+    }
+    return u->ctx && proc ? win_ne_call(u->ctx, proc, words, n, NULL, 0) : 0;
 }
 
 static int task_read(uint16_t task, uint32_t far, void *dst, uint32_t n)
 {
     ne_user *u = ne_user_of((HTASK)task);
-    args a = { u ? u->ctx : NULL, NULL, 0, 0 };
-    return u && u->ctx && rd_(&a, far, dst, n);
+    if (!u || !u->ctx) {
+        void *pe = win_pe_task_ctx(task);
+        return pe && far && win_pe_flat_mem(pe, far, dst, n, 0);
+    }
+    args a = { u->ctx, NULL, 0, 0 };
+    if ((far & 0xffffu) + n > 0x10000u)
+        return 0;                       /* not past its segment's offsets */
+    return rd_(&a, far, dst, n);
 }
 
 static int task_write(uint16_t task, uint32_t far, const void *src, uint32_t n)
 {
     ne_user *u = ne_user_of((HTASK)task);
-    args a = { u ? u->ctx : NULL, NULL, 0, 0 };
-    return u && u->ctx && wr_(&a, far, src, n);
+    if (!u || !u->ctx) {
+        void *pe = win_pe_task_ctx(task);
+        return pe && far && win_pe_flat_mem(pe, far, (void *)(uintptr_t)src, n, 1);
+    }
+    args a = { u->ctx, NULL, 0, 0 };
+    return u->ctx && wr_(&a, far, src, n);
 }
 
 static uint16_t task_global(uint16_t task, uint32_t size)
@@ -289,9 +360,15 @@ static uint16_t task_global(uint16_t task, uint32_t size)
                                                             size) : 0;
 }
 
+static int task_flat(uint16_t task)
+{
+    ne_user *u = ne_user_of((HTASK)task);
+    return (!u || !u->ctx) && win_pe_task_ctx(task) != NULL;
+}
+
 static const win_dll_ne dll_ne = {
     sizeof(win_dll_ne), call_arg16, call_arg32, call_read, call_write, call_string, task_call,
-    task_read, task_write, task_global,
+    task_read, task_write, task_global, task_flat,
 };
 
 const win_dll_ne *win_dll_ne_glue(void) { return &dll_ne; }
@@ -309,10 +386,19 @@ static __attribute__((noinline)) int dll_service(args *a, uint16_t service, uint
 {
     const win_dll_export *e;
     const win_dll_info *d = win_dll_get(dll_slot_of(service, &e));
-    win_dll_call c = { a };
+    win_dll_call c = { a, NULL, NULL, 0 };
     int r = d && e && d->ne_call ? d->ne_call(&c, e->ordinal, v) : WINDLL_NONE;
     *dword = r == WINDLL_DWORD;
     return r != WINDLL_NONE;
+}
+
+int win_dll_call_flat(int slot, uint16_t ordinal, const uint8_t *frame, unsigned bytes, void *pe,
+                      uint32_t *value)
+{
+    const win_dll_info *d = win_dll_get(slot);
+    win_dll_call c = { NULL, pe, frame, bytes };
+    *value = 0;
+    return d && d->ne_call && pe ? d->ne_call(&c, ordinal, value) : WINDLL_NONE;
 }
 
 /* the service of a native DLL's export (its slot's) */

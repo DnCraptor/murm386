@@ -25,6 +25,7 @@
 #include "dos_guest_ptr.h"
 #include "ne_guest.h"
 #include "ne_exec.h"
+#include "ne_boot.h"
 
 /* WINN's modules: KERNEL32, USER32, GDI32 its own; WINMM the native
  * MMSYSTEM.DLL's (core/pe_api.c's table); WING32 pe_user.c's; Win32s'
@@ -52,6 +53,10 @@ extern const unsigned win_pe_nfns;
  * + its place in the image's list) */
 #define WIN_PE_SERVICE_YIELD     WIN_NE_SERVICE_YIELD
 #define WIN_PE_SERVICE_START     0x2201u
+/* an exception (the fault stubs' service, ne_boot.h), the dispatcher's
+ * (its next handler, pe_api.c) */
+#define WIN_PE_SERVICE_EXCEPTION WIN_PE_SERVICE_EXCEPTION_
+#define WIN_PE_SERVICE_SEH       0x2203u
 #define WIN_PE_SERVICE_UNDEFINED 0x4000u
 
 #define WIN_PE_MODULE_SLOTS 16
@@ -205,6 +210,9 @@ typedef struct win_pe_ctx {
     uint32_t heap;              /* the process's heap (a handle) */
     uint32_t tls_used[2];       /* bits */
     uint32_t exception_filter;  /* SetUnhandledExceptionFilter's */
+    uint32_t seh_code;          /* the exceptions' dispatcher (its code, made
+                                 * at the first one) */
+    int filtering;              /* in UnhandledExceptionFilter */
     struct { uint8_t kind; int32_t fd; uint32_t value; } handle[PE_HANDLES];
     struct pe_user *user;       /* pe_user.c's */
 } win_pe_ctx;
@@ -250,6 +258,24 @@ uint32_t win_pe_call(win_pe_ctx *ctx, uint32_t proc, const uint32_t *args, int n
 /* where the next call's blob of len bytes goes (0: none can be made now) */
 uint32_t win_pe_blob(win_pe_ctx *ctx, uint32_t len);
 
+/* a thread's registers where an exception happened (or RaiseException
+ * returns to) */
+typedef struct {
+    uint32_t eax, ebx, ecx, edx, esi, edi, ebp, esp, eip, eflags;
+} win_pe_regs;
+
+/* pe_api.c: an exception (a fault's vector, -1 RaiseException's; its
+ * code, flags, arguments): its record and CONTEXT on the program's stack
+ * for its dispatcher, where it is to go on (*eip, *esp): 1; else
+ * WINX86_SERVICE_EXIT (it ends: nowhere to put them) */
+int win_pe_exception(win_pe_ctx *ctx, const win_pe_regs *r, int vector, uint32_t code,
+                     uint32_t flags, uint32_t nparams, const uint32_t *params, uint32_t *eip,
+                     uint32_t *esp);
+/* a fault's exception code (vector, error code, the instruction at eip),
+ * its arguments (2) */
+uint32_t win_pe_fault_code(win_pe_ctx *ctx, int vector, uint32_t eip, uint32_t *params,
+                           uint32_t *nparams);
+
 /* pe_api.c: a call of the program's (1 done, result *eax; 0 WINN has not
  * it; WINX86_SERVICE_EXIT it ends there) */
 int win_pe_api(win_pe_ctx *ctx, uint32_t esp, uint16_t service, uint32_t *eax);
@@ -264,6 +290,9 @@ int pe_user_api(pe_args *a, uint16_t service, uint32_t *eax);
 #define WIN_PE_NATIVE_PROCS 64u
 /* WINMM's functions: MMSYSTEM.DLL's (4900h + their place in its table) */
 #define WIN_PE_SERVICE_MM 0x4900u
+#define WIN_PE_SERVICE_MM16 0x4c00u     /* those MMSYSTEM.DLL has for Win16 callers */
+/* a WINMM function's name (NULL: the service is none of them) */
+const char *win_pe_mm_name(uint16_t service);
 uint32_t win_pe_mm_proc(win_pe_image *img, const char *name);
 #define WIN_PE_SERVICE_WING 0x4a00u
 uint32_t win_pe_wing_proc(win_pe_image *img, const char *name);

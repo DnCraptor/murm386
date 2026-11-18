@@ -1016,6 +1016,33 @@ int win_ne_entry(const char *path, uint16_t ordinal, uint8_t *flags, uint16_t *s
     return rc;
 }
 
+int win_ne_entries(const char *path, unsigned segment,
+                   void (*each)(void *opaque, uint8_t flags, uint16_t offset), void *opaque)
+{
+    uint64_t size, base;
+    uint8_t h[NE_HDR_SIZE];
+    FILE *f = open_header(path, &size, &base, h);
+    if (!f)
+        return WIN_NE_NO_FILE;
+    uint64_t at = base + rd16(h + 4), end = at + rd16(h + 6);
+    while (at < end && end <= size) {
+        uint8_t count, type;
+        if (!read_at(f, size, at++, &count, 1) || !count || !read_at(f, size, at++, &type, 1))
+            break;
+        unsigned width = type == 0 ? 0 : type == 0xffu ? 6 : 3;
+        for (unsigned k = 0; k < count && type && type != 0xfeu; k++) {
+            uint8_t e[6];
+            if (!read_at(f, size, at + (uint64_t)k * width, e, width))
+                break;
+            if ((type == 0xffu ? e[3] : type) == segment)
+                each(opaque, e[0], type == 0xffu ? rd16(e + 4) : rd16(e + 1));
+        }
+        at += (uint64_t)count * width;
+    }
+    fclose(f);
+    return WIN_NE_OK;
+}
+
 /* a names table (length-prefixed names, each with its ordinal; a zero
  * length ends it; the first is the module's): the ordinal of name */
 static uint16_t names_ordinal(FILE *f, uint64_t size, uint64_t at, const char *name)

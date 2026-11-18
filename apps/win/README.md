@@ -533,7 +533,24 @@ layout), painting, wsprintf, TEXTMETRIC, GetObject; DIB sections
 (CreateDIBSection: the bits in its memory, given to the bitmap before it is
 blitted), WinG (WING32.DLL: its DCs, top-down 8-bit bitmaps as DIB
 sections, WinGBitBlt and WinGStretchBlt); WINMM, the native MMSYSTEM.DLL's
-functions (the time, MCI's strings, sounds, the devices). Win32s' other
+functions (the time, MCI's strings, sounds, mmio, multimedia timers); its
+devices (waveOut, midiOut, aux, mciSendCommand ...), which MMSYSTEM.DLL has
+for Win16 callers only, by the DLL's own Win16 entry: the program's
+arguments made a Win16 caller's, its far pointers its flat addresses
+(`win_dll_call_flat`; WAVEHDR, MIDIHDR, WAVEFORMAT and MCI's structures
+have the same layout in both; the capabilities, MMTIME and MCI_PUT's,
+MCI_WHERE's RECT converted), its callbacks (a function's, a window's
+MM_WOM_DONE with its own WAVEHDR) and buffers past 64K. Structured
+exceptions: a fault in ring 3 (the vectors below 12h) goes by the fault
+stubs' service, RaiseException by its call, to the program's own
+dispatcher (made at the first one, on its stack: EXCEPTION_RECORD,
+CONTEXT): the handlers of the chain at FS:[0] in turn (asked of WINN one
+by one, so a handler that never returns, an __except block after
+RtlUnwind, leaves nothing of WINN's behind), EXCEPTION_CONTINUE_EXECUTION
+loads the CONTEXT; RtlUnwind calls those above its target frame
+(EXCEPTION_UNWINDING) and goes on at its target IP; none to handle it, the
+program's SetUnhandledExceptionFilter, then the Application Error. INT 3
+has its own address (as NT), a privileged instruction its code. Win32s' other
 DLLs (`core/pe_dlls.c`): ADVAPI32's registry (WINN's, `core/winreg.c`:
 WINNREG.INI, HKEY_CLASSES_ROOT the Win16 programs' registration database
 too, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE ... keys of their own names
@@ -558,7 +575,8 @@ not have ends it as it is called, named; a DLL that is not there is named
 before it starts. `host/mkpe_watcom.py` writes `OW32.EXE` and
 `OW32DLL.DLL` (Open Watcom's `nt_win` and `nt_dll`, their sources in the
 script; `scripts/ow32.txt`), and `OW32S.EXE`, Win32s' DLLs and functions
-(`scripts/ow32s.txt`).
+(`scripts/ow32s.txt`), `OW32X.EXE`, structured exceptions
+(`scripts/ow32x.txt`), `OW32W.EXE`, WINMM's devices (`scripts/ow32w.txt`).
 
     WINN [:] [program [arguments]]
 
@@ -1058,11 +1076,12 @@ Cyrillic; TrueType fonts map the characters to Unicode themselves.
 
 ## Not yet
 
-Win32: threads (CreateThread fails), structured exceptions (an exception
-raised ends the program), the Unicode (W) functions, what GDI draws into a
-DIB section (its bits are not brought back), ADVAPI32 but the registry,
-WINMM's devices (waveOut, midiOut) and mciSendCommand, the common dialogs'
-hooks and templates, COMCTL32, OLE32, DDEML's Win32 functions; VxDs.
+Win32: threads (CreateThread fails), access violations (no paging: a bad
+pointer reads what is there), the FPU's exceptions' own codes, the Unicode
+(W) functions, what GDI draws into a DIB section (its bits are not brought
+back), ADVAPI32 but the registry, WINMM's CALLBACK_EVENT and wave input,
+the common dialogs' hooks and templates, COMCTL32, OLE32, DDEML's Win32
+functions; VxDs.
 A spooler and Print Manager's queues (printing goes straight to the port),
 printer drivers of Windows' own (.DRV files: WINN's are native DLLs), a
 driver's private DEVMODE data, the mixer's inputs, `.GRP` files (`PROGMAN.INI` holds the groups as text), DLLs (`LoadLibrary`) of native applications;

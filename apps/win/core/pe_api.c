@@ -1136,6 +1136,293 @@ static __attribute__((noinline)) int kernel32_more(pe_args *a, uint16_t service,
     return 1;
 }
 
+/* ---------------------------------------------------------------- exceptions */
+
+/* An exception goes to the program's own dispatcher (its code, made at
+ * the first one), on its stack: a block of the exception's record and
+ * CONTEXT and the dispatcher's state. The dispatcher asks WINN for the next
+ * handler of the chain at FS:[0] (WIN_PE_SERVICE_SEH, with the last one's
+ * result), calls it (cdecl: the record, its frame, the CONTEXT, 0), and so
+ * on; WINN's 0: the CONTEXT is loaded, the program goes on there. A
+ * handler that does not return (RtlUnwind, then its __except block) leaves
+ * nothing of WINN's behind. None to handle it: the program's
+ * UnhandledExceptionFilter, then the Application Error. */
+#define SEH_BLOCK   (24u + 80u + 0x2ccu)
+#define SEH_RECORD  24u
+#define SEH_CONTEXT (24u + 80u)
+
+/* the dispatcher: [esp] the record, [esp+4] the CONTEXT, [esp+8] the frame
+ * being called, [esp+12] the vector */
+static uint32_t seh_dispatcher(win_pe_ctx *ctx)
+{
+    if (ctx->seh_code)
+        return ctx->seh_code;
+    win_pe_image *img = ctx->img;
+    uint32_t thunk = win_pe_thunk(img, WIN_PE_SERVICE_SEH, 4);
+    uint32_t code = thunk ? win_pe_alloc(img, 128, 16, PE_MEM_OTHER) : 0;
+    uint8_t *p = code ? (uint8_t *)win_pe_ptr(img, code, 128) : NULL;
+    if (!p)
+        return 0;
+    static const uint8_t body[] = {
+        0x6a, 0xff,                         /* push -1: the first */
+        0xe8, 0, 0, 0, 0,                   /* next: call the service (ret 4) */
+        0x85, 0xc0,                         /* test eax,eax */
+        0x74, 0x16,                         /* jz resume */
+        0x6a, 0x00,                         /* push 0 */
+        0xff, 0x74, 0x24, 0x08,             /* push [esp+8]: the CONTEXT */
+        0xff, 0x74, 0x24, 0x10,             /* push [esp+16]: the frame */
+        0xff, 0x74, 0x24, 0x0c,             /* push [esp+12]: the record */
+        0xff, 0xd0,                         /* call eax */
+        0x83, 0xc4, 0x10,                   /* add esp,16 */
+        0x50,                               /* push eax: its result */
+        0xeb, 0xe1,                         /* jmp next */
+        /* resume: the CONTEXT's registers, EFLAGS, EIP on its stack */
+        0x8b, 0x5c, 0x24, 0x04,             /* mov ebx,[esp+4] */
+        0x8b, 0xa3, 0xc4, 0, 0, 0,          /* mov esp,[ebx+Esp] */
+        0xff, 0xb3, 0xb8, 0, 0, 0,          /* push [ebx+Eip] */
+        0xff, 0xb3, 0xc0, 0, 0, 0,          /* push [ebx+EFlags] */
+        0x8b, 0x83, 0xb0, 0, 0, 0,          /* mov eax,[ebx+Eax] */
+        0x8b, 0x8b, 0xac, 0, 0, 0,          /* mov ecx,[ebx+Ecx] */
+        0x8b, 0x93, 0xa8, 0, 0, 0,          /* mov edx,[ebx+Edx] */
+        0x8b, 0xb3, 0xa0, 0, 0, 0,          /* mov esi,[ebx+Esi] */
+        0x8b, 0xbb, 0x9c, 0, 0, 0,          /* mov edi,[ebx+Edi] */
+        0x8b, 0xab, 0xb4, 0, 0, 0,          /* mov ebp,[ebx+Ebp] */
+        0x8b, 0x9b, 0xa4, 0, 0, 0,          /* mov ebx,[ebx+Ebx] */
+        0x9d,                               /* popfd */
+        0xc3,                               /* ret */
+    };
+    memcpy(p, body, sizeof(body));
+    pe_wr32(p + 3, thunk - (code + 7u));
+    ctx->seh_code = code;
+    return code;
+}
+
+/* the vector a fault's exception code stands for (the Application
+ * Error's words), -1 none */
+static int code_vector(uint32_t code)
+{
+    switch (code) {
+    case 0xc0000094u: return 0;
+    case 0xc000001du: return 6;
+    case 0xc00000fdu: return 12;
+    case 0xc0000005u: case 0xc0000096u: return 13;
+    default: return -1;
+    }
+}
+
+uint32_t win_pe_fault_code(win_pe_ctx *ctx, int vector, uint32_t eip, uint32_t *params,
+                           uint32_t *nparams)
+{
+    *nparams = 0;
+    switch (vector) {
+    case 0: return 0xc0000094u;             /* INTEGER_DIVIDE_BY_ZERO */
+    case 1: return 0x80000004u;             /* SINGLE_STEP */
+    case 3: return 0x80000003u;             /* BREAKPOINT */
+    case 4: return 0xc0000095u;             /* INTEGER_OVERFLOW */
+    case 5: return 0xc000008cu;             /* ARRAY_BOUNDS_EXCEEDED */
+    case 6: case 7: return 0xc000001du;     /* ILLEGAL_INSTRUCTION */
+    case 12: return 0xc00000fdu;            /* STACK_OVERFLOW */
+    case 16: return 0xc0000090u;            /* FLT_INVALID_OPERATION */
+    case 17: return 0x80000002u;            /* DATATYPE_MISALIGNMENT */
+    case 13: {
+        /* a privileged instruction, INT 3 (the gate a ring 0 one), or an
+         * access violation */
+        const uint8_t *p = (const uint8_t *)win_pe_ptr(ctx->img, eip, 2);
+        uint8_t op = p ? p[0] : 0;
+        if (op == 0xcc)
+            return 0x80000003u;
+        if (op == 0xfa || op == 0xfb || op == 0xf4 || (op >= 0xe4 && op <= 0xe7) ||
+            (op >= 0xec && op <= 0xef) || (op >= 0x6c && op <= 0x6f) ||
+            (op == 0x0f && p && (p[1] == 0x20 || p[1] == 0x22 || p[1] == 0x01)))
+            return 0xc0000096u;             /* PRIVILEGED_INSTRUCTION */
+        break;
+    }
+    }
+    params[0] = 0;                          /* ACCESS_VIOLATION: reading, where unknown */
+    params[1] = 0xffffffffu;
+    *nparams = 2;
+    return 0xc0000005u;
+}
+
+int win_pe_exception(win_pe_ctx *ctx, const win_pe_regs *r, int vector, uint32_t code,
+                     uint32_t flags, uint32_t nparams, const uint32_t *params, uint32_t *eip,
+                     uint32_t *esp)
+{
+    win_pe_image *img = ctx->img;
+    uint32_t disp = seh_dispatcher(ctx);
+    uint32_t block = (r->esp - 16u - SEH_BLOCK) & ~15u;
+    uint8_t *b = disp && block - img->stack_lo >= 1024u && block < img->stack_top ?
+                 (uint8_t *)win_pe_ptr(img, block, SEH_BLOCK) : NULL;
+    if (!b) {                               /* no stack left for it: as Windows ends it */
+        ctx->fault.vector = vector;
+        ctx->fault.flat = 1;
+        ctx->fault.eip = r->eip;
+        int m = win_pe_module_of(img, r->eip);
+        if (m >= 0) {
+            memcpy(ctx->fault.module, img->mod[m].name, sizeof(ctx->fault.module));
+            ctx->fault.eip -= img->mod[m].base;
+        }
+        ctx->dead = 1;
+        return WINX86_SERVICE_EXIT;
+    }
+    memset(b, 0, SEH_BLOCK);
+    pe_wr32(b, block + SEH_RECORD);
+    pe_wr32(b + 4, block + SEH_CONTEXT);
+    pe_wr32(b + 8, 0xffffffffu);
+    pe_wr32(b + 12, (uint32_t)vector);
+    pe_wr32(b + 16, block + SEH_RECORD);    /* EXCEPTION_POINTERS */
+    pe_wr32(b + 20, block + SEH_CONTEXT);
+    uint8_t *rec = b + SEH_RECORD;
+    pe_wr32(rec, code);
+    pe_wr32(rec + 4, flags);
+    pe_wr32(rec + 12, r->eip);
+    if (nparams > 15)
+        nparams = 15;
+    pe_wr32(rec + 16, nparams);
+    for (uint32_t i = 0; i < nparams; i++)
+        pe_wr32(rec + 20 + 4 * i, params[i]);
+    uint8_t *c = b + SEH_CONTEXT;
+    pe_wr32(c, 0x10007u);                   /* CONTEXT_FULL */
+    pe_wr32(c + 0x90, img->fs_selector);
+    pe_wr32(c + 0x94, img->data_selector);
+    pe_wr32(c + 0x98, img->data_selector);
+    pe_wr32(c + 0x9c, r->edi);
+    pe_wr32(c + 0xa0, r->esi);
+    pe_wr32(c + 0xa4, r->ebx);
+    pe_wr32(c + 0xa8, r->edx);
+    pe_wr32(c + 0xac, r->ecx);
+    pe_wr32(c + 0xb0, r->eax);
+    pe_wr32(c + 0xb4, r->ebp);
+    pe_wr32(c + 0xb8, r->eip);
+    pe_wr32(c + 0xbc, img->code_selector);
+    pe_wr32(c + 0xc0, r->eflags & ~0x100u);
+    pe_wr32(c + 0xc4, r->esp);
+    pe_wr32(c + 0xc8, img->data_selector);
+    *eip = disp;
+    *esp = block;
+    return 1;
+}
+
+/* none of its handlers took it: the program's filter
+ * (SetUnhandledExceptionFilter's), then the Application Error; 1 its
+ * filter's EXCEPTION_CONTINUE_EXECUTION, 0 it ends (exited, or dead) */
+static int unhandled(win_pe_ctx *ctx, uint32_t pointers, int vector)
+{
+    win_pe_image *img = ctx->img;
+    const uint8_t *ptrs = (const uint8_t *)win_pe_ptr(img, pointers, 8);
+    const uint8_t *rec = ptrs ? (const uint8_t *)win_pe_ptr(img, pe_rd32(ptrs), 20) : NULL;
+    uint32_t code = rec ? pe_rd32(rec) : 0, where = rec ? pe_rd32(rec + 12) : 0;
+    if (ctx->exception_filter && !ctx->filtering) {
+        const uint32_t args[1] = { pointers };
+        ctx->filtering = 1;
+        int32_t f = (int32_t)win_pe_call(ctx, ctx->exception_filter, args, 1, NULL, 0, NULL);
+        ctx->filtering = 0;
+        if (ctx->dead || ctx->exited || ctx->stopped)
+            return 0;
+        if (f == -1)
+            return 1;                       /* EXCEPTION_CONTINUE_EXECUTION */
+        if (f == 1) {                       /* EXCEPTION_EXECUTE_HANDLER: it ends */
+            ctx->exited = 1;
+            ctx->exit_code = code;
+            return 0;
+        }
+    }
+    ctx->fault.vector = vector >= 0 ? vector : code_vector(code);
+    ctx->fault.flat = 1;
+    ctx->fault.eip = where;
+    int m = win_pe_module_of(img, where);
+    if (m >= 0) {
+        memcpy(ctx->fault.module, img->mod[m].name, sizeof(ctx->fault.module));
+        ctx->fault.eip -= img->mod[m].base;
+    }
+    ctx->dead = 1;
+    return 0;
+}
+
+/* the dispatcher's call (its handler's result, -1 the first; the record,
+ * the CONTEXT, the frame called, the vector): the next handler, 0 to go on
+ * with the CONTEXT */
+static int seh_next(pe_args *a, uint32_t *eax)
+{
+    win_pe_ctx *ctx = a->ctx;
+    win_pe_image *img = ctx->img;
+    int32_t result = (int32_t)pe_arg(a, 0);
+    uint32_t rec = pe_arg(a, 1), frame = pe_arg(a, 3);
+    int vector = (int)pe_arg(a, 4);
+    uint8_t *cursor = (uint8_t *)pe_buf(a, a->esp + 16u, 4);
+    const uint8_t *r = (const uint8_t *)pe_buf(a, rec, 8);
+    if (!cursor || !r)
+        return 0;
+    if (result == 0 && !(pe_rd32(r + 4) & 1u)) {   /* ContinueExecution, if it may */
+        *eax = 0;
+        return 1;
+    }
+    if (result == -1) {
+        const uint8_t *tib = (const uint8_t *)win_pe_ptr(img, img->tib, 4);
+        frame = tib ? pe_rd32(tib) : 0xffffffffu;
+    } else {
+        const uint8_t *f = (const uint8_t *)win_pe_ptr(img, frame, 8);
+        frame = f ? pe_rd32(f) : 0xffffffffu;
+    }
+    const uint8_t *f = frame - img->stack_lo < img->stack_top - img->stack_lo ?
+                       (const uint8_t *)win_pe_ptr(img, frame, 8) : NULL;
+    if (!f || !pe_rd32(f + 4)) {
+        if (unhandled(ctx, a->esp + 24u, vector)) {
+            *eax = 0;
+            return 1;
+        }
+        return WINX86_SERVICE_EXIT;
+    }
+    pe_wr32(cursor, frame);
+    *eax = pe_rd32(f + 4);
+    return 1;
+}
+
+/* RtlUnwind(target frame, target IP, record, return value): the handlers
+ * above the target's called to unwind (EXCEPTION_UNWINDING), FS:[0] the
+ * target's */
+static int rtl_unwind(pe_args *a, uint32_t *eax)
+{
+    win_pe_ctx *ctx = a->ctx;
+    win_pe_image *img = ctx->img;
+    uint32_t target = pe_arg(a, 0), rec = pe_arg(a, 2), value = pe_arg(a, 3);
+    uint8_t blob[80 + 0x2cc];
+    memset(blob, 0, sizeof(blob));
+    for (;;) {
+        uint8_t *tib = (uint8_t *)win_pe_ptr(img, img->tib, 4);
+        uint32_t frame = tib ? pe_rd32(tib) : 0xffffffffu;
+        if (!tib || frame == 0xffffffffu || frame == target)
+            break;
+        const uint8_t *f = frame - img->stack_lo < img->stack_top - img->stack_lo ?
+                           (const uint8_t *)win_pe_ptr(img, frame, 8) : NULL;
+        if (!f)
+            break;
+        uint32_t handler = pe_rd32(f + 4), next = pe_rd32(f);
+        uint32_t at = win_pe_blob(ctx, sizeof(blob));
+        uint8_t *r = rec ? (uint8_t *)pe_buf(a, rec, 8) : NULL;
+        if (r) {
+            pe_wr32(r + 4, pe_rd32(r + 4) | 2u | (target ? 0u : 4u));
+        } else {                            /* STATUS_UNWIND, of its own */
+            pe_wr32(blob, 0xc0000027u);
+            pe_wr32(blob + 4, 2u | (target ? 0u : 4u));
+        }
+        const uint32_t args[4] = { r ? rec : at, frame, at + 80u, 0 };
+        if (handler && at)
+            win_pe_call(ctx, handler, args, 4, blob, sizeof(blob), NULL);
+        if (ctx->dead || ctx->exited || ctx->stopped)
+            return WINX86_SERVICE_EXIT;
+        if ((tib = (uint8_t *)win_pe_ptr(img, img->tib, 4)) != NULL)
+            pe_wr32(tib, next);
+    }
+    /* its target IP: there, as if returned to (the thunk's RET drops the
+     * arguments) */
+    uint8_t *ret = pe_arg(a, 1) ? (uint8_t *)pe_buf(a, a->esp, 4) : NULL;
+    if (ret)
+        pe_wr32(ret, pe_arg(a, 1));
+    *eax = value;
+    return 1;
+}
+
 /* ---------------------------------------------------------------- Win32s' more */
 
 /* a handle waited for: 1 signaled (an auto-reset event reset, a
@@ -1209,6 +1496,8 @@ static int wait_for(pe_args *a, const uint32_t *h, uint32_t n, int all, uint32_t
             ctx->stopped = 1;
             return WINX86_SERVICE_EXIT;
         }
+        if (ms && win_sys.input && win_sys.input->idle)
+            win_sys.input->idle();          /* waiting: the system's idle time */
     }
 }
 
@@ -1742,15 +2031,18 @@ static int kernel32(pe_args *a, uint16_t service, uint32_t *eax)
         v = ctx->exception_filter;
         ctx->exception_filter = pe_arg(a, 0);
         break;
-    case PEF_UnhandledExceptionFilter: v = 1; break;     /* EXCEPTION_EXECUTE_HANDLER */
-    case PEF_RaiseException:
-        /* no handlers of its own are looked for yet: as a fault */
-        ctx->fault.vector = -1;
-        ctx->fault.flat = 1;
-        ctx->fault.eip = pe_arg(a, 0);
-        ctx->dead = 1;
-        return WINX86_SERVICE_EXIT;
-    case PEF_RtlUnwind: v = 0; break;
+    case PEF_UnhandledExceptionFilter:
+        /* the program's filter, or the Application Error: it ends */
+        if (!ctx->filtering) {
+            if (unhandled(ctx, pe_arg(a, 0), -1)) {
+                v = 0xffffffffu;            /* EXCEPTION_CONTINUE_EXECUTION */
+                break;
+            }
+            return WINX86_SERVICE_EXIT;
+        }
+        v = 0;                              /* its own filter's call: CONTINUE_SEARCH */
+        break;
+    case PEF_RtlUnwind: return rtl_unwind(a, eax);
     case PEF_Sleep: {
         uint32_t ms = pe_arg(a, 0);
         DWORD start = GetTickCount();
@@ -1759,6 +2051,8 @@ static int kernel32(pe_args *a, uint16_t service, uint32_t *eax)
                 ctx->stopped = 1;
                 return WINX86_SERVICE_EXIT;
             }
+            if (ms && win_sys.input && win_sys.input->idle)
+                win_sys.input->idle();      /* a thread asleep: the system's idle time */
         } while (ms && ms != 0xffffffffu && GetTickCount() - start < ms);
         v = 0;
         break;
@@ -2658,8 +2952,230 @@ static const struct { const char *name, *native, *sig; } mm_fns[] = {
     { "joyGetNumDevs", "joyGetNumDevs", "d:" },
     { "waveOutGetErrorTextA", "waveOutGetErrorText", "d:dSd" },
     { "midiOutGetErrorTextA", "midiOutGetErrorText", "d:dSd" },
+    { "waveInGetErrorTextA", "waveInGetErrorText", "d:dSd" },
+    { "midiInGetErrorTextA", "midiInGetErrorText", "d:dSd" },
+    { "timeKillEvent", "timeKillEvent", "d:d" },
+    { "mmioOpenA", "mmioOpen", "d:sPd" },
+    { "mmioClose", "mmioClose", "d:dd" },
+    { "mmioRead", "mmioRead", "d:dSd" },
+    { "mmioWrite", "mmioWrite", "d:dSd" },
+    { "mmioSeek", "mmioSeek", "d:ddd" },
+    { "mmioFlush", "mmioFlush", "d:dd" },
+    { "mmioDescend", "mmioDescend", "d:dPPd" },
+    { "mmioAscend", "mmioAscend", "d:dPd" },
+    { "mmioCreateChunk", "mmioCreateChunk", "d:dPd" },
+    { "mmioStringToFOURCCA", "mmioStringToFOURCC", "d:sd" },
 };
 #define MM_FNS (sizeof(mm_fns) / sizeof(mm_fns[0]))
+
+/* WINMM's functions MMSYSTEM.DLL has for Win16 callers only (its ne_call):
+ * the program's arguments made a Win16 caller's (PASCAL, its far pointers
+ * flat addresses), as Win32's structures have Win16's layouts (WAVEHDR,
+ * MIDIHDR, WAVEFORMAT, MCI's but those with a RECT); the capabilities
+ * (UINT versions) and MMTIME converted. Their types: w a WORD, d a DWORD,
+ * p a pointer, h a handle's (its DWORD zeroed first: Win16's is a word). */
+enum { MM_PLAIN, MM_WAVECAPS, MM_MIDICAPS, MM_AUXCAPS, MM_TIME, MM_MCI };
+
+static const struct { const char *name; uint16_t ordinal; uint8_t kind; const char *types; }
+mm16_fns[] = {
+    { "waveOutGetDevCapsA", 402, MM_WAVECAPS, "wpw" }, { "waveOutOpen", 404, MM_PLAIN, "hwpddd" },
+    { "waveOutClose", 405, MM_PLAIN, "w" }, { "waveOutPrepareHeader", 406, MM_PLAIN, "wpw" },
+    { "waveOutUnprepareHeader", 407, MM_PLAIN, "wpw" }, { "waveOutWrite", 408, MM_PLAIN, "wpw" },
+    { "waveOutPause", 409, MM_PLAIN, "w" }, { "waveOutRestart", 410, MM_PLAIN, "w" },
+    { "waveOutReset", 411, MM_PLAIN, "w" }, { "waveOutGetPosition", 412, MM_TIME, "wpw" },
+    { "waveOutGetPitch", 413, MM_PLAIN, "wh" }, { "waveOutSetPitch", 414, MM_PLAIN, "wd" },
+    { "waveOutGetVolume", 415, MM_PLAIN, "wp" }, { "waveOutSetVolume", 416, MM_PLAIN, "wd" },
+    { "waveOutGetPlaybackRate", 417, MM_PLAIN, "wh" },
+    { "waveOutSetPlaybackRate", 418, MM_PLAIN, "wd" }, { "waveOutBreakLoop", 419, MM_PLAIN, "w" },
+    { "waveOutGetID", 420, MM_PLAIN, "wh" }, { "waveOutMessage", 421, MM_PLAIN, "wwdd" },
+    { "midiOutGetDevCapsA", 202, MM_MIDICAPS, "wpw" }, { "midiOutOpen", 204, MM_PLAIN, "hwddd" },
+    { "midiOutClose", 205, MM_PLAIN, "w" }, { "midiOutPrepareHeader", 206, MM_PLAIN, "wpw" },
+    { "midiOutUnprepareHeader", 207, MM_PLAIN, "wpw" }, { "midiOutShortMsg", 208, MM_PLAIN, "wd" },
+    { "midiOutLongMsg", 209, MM_PLAIN, "wpw" }, { "midiOutReset", 210, MM_PLAIN, "w" },
+    { "midiOutGetVolume", 211, MM_PLAIN, "wp" }, { "midiOutSetVolume", 212, MM_PLAIN, "wd" },
+    { "midiOutCachePatches", 213, MM_PLAIN, "wwpw" },
+    { "midiOutCacheDrumPatches", 214, MM_PLAIN, "wwpw" }, { "midiOutGetID", 215, MM_PLAIN, "wh" },
+    { "midiOutMessage", 216, MM_PLAIN, "wwdd" },
+    { "waveInGetDevCapsA", 502, MM_WAVECAPS, "wpw" }, { "midiInGetDevCapsA", 302, MM_MIDICAPS, "wpw" },
+    { "auxGetDevCapsA", 351, MM_AUXCAPS, "wpw" }, { "auxGetVolume", 352, MM_PLAIN, "wp" },
+    { "auxSetVolume", 353, MM_PLAIN, "wd" }, { "auxOutMessage", 354, MM_PLAIN, "wwdd" },
+    { "joyGetDevCapsA", 102, MM_PLAIN, "wpw" }, { "joyGetPos", 103, MM_PLAIN, "wp" },
+    { "joyGetThreshold", 104, MM_PLAIN, "wp" }, { "joyReleaseCapture", 105, MM_PLAIN, "w" },
+    { "joySetCapture", 106, MM_PLAIN, "wwww" }, { "joySetThreshold", 107, MM_PLAIN, "ww" },
+    { "joyGetPosEx", 110, MM_PLAIN, "wp" },
+    { "timeSetEvent", 602, MM_PLAIN, "wwpdw" },
+    { "mciSendCommandA", 701, MM_MCI, "wwdd" }, { "mciGetDeviceIDA", 703, MM_PLAIN, "p" },
+    { "mciGetCreatorTask", 717, MM_PLAIN, "w" },
+};
+#define MM16_FNS (sizeof(mm16_fns) / sizeof(mm16_fns[0]))
+
+/* the program's memory for the DLL (ne_guest_sys.c's win_dll_call_flat) */
+int win_pe_flat_mem(void *pe, uint32_t addr, void *buf, uint32_t n, int write)
+{
+    win_pe_ctx *ctx = (win_pe_ctx *)pe;
+    void *p = ctx && n ? win_pe_ptr(ctx->img, addr, n) : NULL;
+    if (!p)
+        return 0;
+    if (write)
+        memcpy(p, buf, n);
+    else
+        memcpy(buf, p, n);
+    return 1;
+}
+
+uint32_t win_pe_task_callback(void *pe, uint32_t proc, const uint16_t *words, int n)
+{
+    uint32_t args[8];
+    int k = 0;
+    if (n == 8) {                           /* a driver callback's: WORD, WORD, 3 DWORDs */
+        args[k++] = words[0];
+        args[k++] = words[1];
+        for (int i = 2; i < 8; i += 2)
+            args[k++] = (uint32_t)words[i] << 16 | words[i + 1];
+    } else {
+        for (int i = 0; i < n && k < 8; i++)
+            args[k++] = words[i];
+    }
+    return win_pe_call((win_pe_ctx *)pe, proc, args, k, NULL, 0, NULL);
+}
+
+/* the call made a Win16 caller's (the arguments args, their types) */
+static uint32_t mm16_call(pe_args *a, unsigned i, const uint32_t *args, int *ok)
+{
+    const char *t = mm16_fns[i].types;
+    uint8_t frame[40];
+    unsigned total = 4, n = (unsigned)strlen(t);      /* the far return address's first */
+    for (unsigned k = 0; k < n; k++)
+        total += t[k] == 'w' ? 2u : 4u;
+    unsigned off = total;
+    memset(frame, 0, 4);
+    for (unsigned k = 0; k < n; k++) {
+        unsigned size = t[k] == 'w' ? 2u : 4u;
+        off -= size;
+        uint8_t *handle = t[k] == 'h' && args[k] ? (uint8_t *)pe_buf(a, args[k], 4) : NULL;
+        if (handle)
+            pe_wr32(handle, 0);
+        if (size == 2)
+            pe_wr16(frame + off, (uint16_t)args[k]);
+        else
+            pe_wr32(frame + off, args[k]);
+    }
+    int slot = win_dll_use("MMSYSTEM");
+    uint32_t v = 0;
+    int r = slot >= 0 ? win_dll_call_flat(slot, mm16_fns[i].ordinal, frame, total, a->ctx, &v) :
+            WINDLL_NONE;
+    *ok = r != WINDLL_NONE;
+    return r == WINDLL_WORD ? v & 0xffffu : v;
+}
+
+/* Win16's capabilities (wMid, wPid, a WORD version, the name, ...) made
+ * Win32's (a UINT version, the rest after it: a WORD then a reserved one
+ * before the last DWORD) */
+static uint32_t mm16_caps(pe_args *a, unsigned i, int *ok)
+{
+    static const uint8_t win16[] = { 0, 48, 50, 44 }, win32[] = { 0, 52, 52, 48 };
+    unsigned kind = mm16_fns[i].kind;
+    uint32_t scratch = win_pe_blob(a->ctx, 64), cap = pe_arg(a, 2);
+    uint8_t *out = cap ? (uint8_t *)pe_buf(a, pe_arg(a, 1), cap) : NULL;
+    if (!scratch || !out) {
+        *ok = 1;
+        return 11;                          /* MMSYSERR_INVALPARAM */
+    }
+    const uint32_t args[3] = { pe_arg(a, 0), scratch, win16[kind] };
+    uint32_t r = mm16_call(a, i, args, ok);
+    const uint8_t *s = (const uint8_t *)win_pe_ptr(a->ctx->img, scratch, 64);
+    if (r || !s)
+        return r;
+    uint8_t d[52];
+    memset(d, 0, sizeof(d));
+    memcpy(d, s, 4);                        /* wMid, wPid */
+    pe_wr32(d + 4, pe_rd16(s + 4));         /* vDriverVersion */
+    memcpy(d + 8, s + 6, 32);               /* szPname */
+    if (kind == MM_WAVECAPS) {              /* dwFormats, wChannels, dwSupport */
+        memcpy(d + 40, s + 38, 6);
+        memcpy(d + 48, s + 44, 4);
+    } else if (kind == MM_MIDICAPS) {       /* four WORDs, dwSupport */
+        memcpy(d + 40, s + 38, 12);
+    } else {                                /* wTechnology, dwSupport */
+        memcpy(d + 40, s + 38, 2);
+        memcpy(d + 44, s + 40, 4);
+    }
+    memcpy(out, d, cap < win32[kind] ? cap : win32[kind]);
+    return 0;
+}
+
+/* MMTIME: Win16's a WORD wType, Win32's a UINT */
+static uint32_t mm16_time(pe_args *a, unsigned i, int *ok)
+{
+    uint32_t scratch = win_pe_blob(a->ctx, 16);
+    uint8_t *t = pe_arg(a, 2) >= 12 ? (uint8_t *)pe_buf(a, pe_arg(a, 1), 12) : NULL;
+    uint8_t *s = scratch ? (uint8_t *)win_pe_ptr(a->ctx->img, scratch, 10) : NULL;
+    if (!t || !s) {
+        *ok = 1;
+        return 11;
+    }
+    pe_wr16(s, (uint16_t)pe_rd32(t));
+    const uint32_t args[3] = { pe_arg(a, 0), scratch, 10 };
+    uint32_t r = mm16_call(a, i, args, ok);
+    if (!r && (s = (uint8_t *)win_pe_ptr(a->ctx->img, scratch, 10)) != NULL) {
+        pe_wr32(t, pe_rd16(s));
+        memcpy(t + 4, s + 2, 8);
+    }
+    return r;
+}
+
+/* mciSendCommand: MCI_PUT's and MCI_WHERE's RECT (Win16's four shorts) */
+static uint32_t mm16_mci(pe_args *a, unsigned i, int *ok)
+{
+    uint32_t msg = pe_arg(a, 1) & 0xffffu, parms = pe_arg(a, 3);
+    uint32_t args[4] = { pe_arg(a, 0), pe_arg(a, 1), pe_arg(a, 2), parms };
+    if ((msg != 0x0842u && msg != 0x0843u) || !parms)       /* MCI_PUT, MCI_WHERE */
+        return mm16_call(a, i, args, ok);
+    uint8_t *p = (uint8_t *)pe_buf(a, parms, 20);
+    uint32_t scratch = win_pe_blob(a->ctx, 16);
+    uint8_t *s = scratch ? (uint8_t *)win_pe_ptr(a->ctx->img, scratch, 12) : NULL;
+    if (!p || !s) {
+        *ok = 1;
+        return 11;
+    }
+    pe_wr32(s, pe_rd32(p));
+    for (int k = 0; k < 4; k++)
+        pe_wr16(s + 4 + 2 * k, (uint16_t)pe_rd32(p + 4 + 4 * k));
+    args[3] = scratch;
+    uint32_t r = mm16_call(a, i, args, ok);
+    if (!r && msg == 0x0843u && (s = (uint8_t *)win_pe_ptr(a->ctx->img, scratch, 12)) != NULL &&
+        (p = (uint8_t *)pe_buf(a, parms, 20)) != NULL)
+        for (int k = 0; k < 4; k++)
+            pe_wr32(p + 4 + 4 * k, (uint32_t)(int32_t)(int16_t)pe_rd16(s + 4 + 2 * k));
+    return r;
+}
+
+const char *win_pe_mm_name(uint16_t service)
+{
+    unsigned i = service - WIN_PE_SERVICE_MM16;
+    if (i < MM16_FNS)
+        return mm16_fns[i].name;
+    i = service - WIN_PE_SERVICE_MM;
+    return i < sizeof(mm_fns) / sizeof(mm_fns[0]) ? mm_fns[i].name : NULL;
+}
+
+static int winmm16(pe_args *a, unsigned i, uint32_t *eax)
+{
+    int ok = 0;
+    switch (mm16_fns[i].kind) {
+    case MM_WAVECAPS: case MM_MIDICAPS: case MM_AUXCAPS: *eax = mm16_caps(a, i, &ok); break;
+    case MM_TIME: *eax = mm16_time(a, i, &ok); break;
+    case MM_MCI: *eax = mm16_mci(a, i, &ok); break;
+    default: {
+        uint32_t args[8];
+        unsigned n = (unsigned)strlen(mm16_fns[i].types);
+        for (unsigned k = 0; k < n; k++)
+            args[k] = pe_arg(a, (int)k);
+        *eax = mm16_call(a, i, args, &ok);
+    }
+    }
+    return ok;
+}
 
 uint32_t win_pe_mm_proc(win_pe_image *img, const char *name)
 {
@@ -2667,6 +3183,10 @@ uint32_t win_pe_mm_proc(win_pe_image *img, const char *name)
         if (!strcmp(mm_fns[i].name, name))
             return win_pe_thunk(img, (uint16_t)(WIN_PE_SERVICE_MM + i),
                                 4 * (int)strlen(strchr(mm_fns[i].sig, ':') + 1));
+    for (unsigned i = 0; i < MM16_FNS; i++)
+        if (!strcmp(mm16_fns[i].name, name))
+            return win_pe_thunk(img, (uint16_t)(WIN_PE_SERVICE_MM16 + i),
+                                4 * (int)strlen(mm16_fns[i].types));
     return 0;
 }
 
@@ -2705,6 +3225,12 @@ int win_pe_api(win_pe_ctx *ctx, uint32_t esp, uint16_t service, uint32_t *eax)
             ctx->invalid_args = 1;
         return r;
     }
+    if (service == WIN_PE_SERVICE_SEH) {
+        r = seh_next(&a, eax);
+        if (a.bad)
+            ctx->invalid_args = 1;
+        return r;
+    }
     if (service >= WIN_PE_SERVICE_DLLS && service < WIN_PE_SERVICE_DLLS + 0x100u) {
         r = win_pe_dll_api(&a, service, eax);
         if (a.bad)
@@ -2712,6 +3238,17 @@ int win_pe_api(win_pe_ctx *ctx, uint32_t esp, uint16_t service, uint32_t *eax)
         if (r <= 0) {
             ctx->unsupported = service;
             win_pe_service_name(service, ctx->undefined, sizeof(ctx->undefined));
+        }
+        return r;
+    }
+    if (service >= WIN_PE_SERVICE_MM16 && service < WIN_PE_SERVICE_MM16 + MM16_FNS) {
+        r = winmm16(&a, service - WIN_PE_SERVICE_MM16, eax);
+        if (a.bad)
+            ctx->invalid_args = 1;
+        if (r <= 0) {
+            ctx->unsupported = service;
+            pe_fmt(ctx->undefined, sizeof(ctx->undefined), "WINMM.%s",
+                   mm16_fns[service - WIN_PE_SERVICE_MM16].name);
         }
         return r;
     }

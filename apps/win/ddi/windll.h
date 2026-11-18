@@ -57,6 +57,9 @@ typedef struct win_dll_ne {
      * the selector: far = handle << 16), as GlobalAlloc gives it the
      * program; 0 if none (size covers it: older cores have none) */
     uint16_t (*task_global)(uint16_t task, uint32_t size);
+    /* the task's program a Win32 one: its "far" pointers flat addresses
+     * (no segment's 64K bounds); size covers it */
+    int (*task_flat)(uint16_t task);
 } win_dll_ne;
 
 typedef struct win_dll_export {

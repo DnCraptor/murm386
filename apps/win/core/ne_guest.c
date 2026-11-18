@@ -1198,6 +1198,8 @@ int win_ne_guest_unresolved(const char *path, win_ne_unresolved *u)
 }
 
 static int load_dll(win_ne_guest_image *g, const char *module, int depth);
+static void patch_exports(win_ne_guest_image *g, int dll, uint16_t seg, uint8_t *data,
+                          uint32_t size, uint16_t flags);
 static int dll_export(win_ne_guest_image *g, int dll, uint16_t ordinal, const char *name,
                       uint16_t *selector, uint16_t *offset);
 
@@ -1692,6 +1694,8 @@ int win_ne_guest_present(win_ne_guest_image *g, uint16_t sel)
         if (win_ne_load_segment(path, &info, segno, segs, data, s->size, resolve_import, &lc) ==
                 WIN_NE_OK &&
             guest_alloc(g, s->size, &linear)) {
+            if (dll >= 0)                   /* a DLL's exported prologues, as at its load */
+                patch_exports(g, dll, segno, data, s->size, s->flags);
             if (g->io.write(g->opaque, linear, data, s->size)) {
                 s->linear = linear;
                 if (vm_descriptor(g, s)) {
@@ -2216,29 +2220,31 @@ static int dll_export(win_ne_guest_image *g, int dll, uint16_t ordinal, const ch
 
 /* An exported procedure of a DLL starts by taking DS for its own (PUSH DS;
  * POP AX or MOV AX,DS; NOP); its caller's is not: as Windows does, its
- * DGROUP goes there (MOV AX,DGROUP) */
-static void patch_exports(win_ne_guest_image *g, int dll, win_ne_image *image)
+ * DGROUP goes there (MOV AX,DGROUP). A segment's, as it is loaded (at the
+ * DLL's load, or when it is used) */
+typedef struct { uint8_t *data; uint32_t size; uint16_t dgroup; } patch_ctx;
+
+static void patch_entry(void *opaque, uint8_t flags, uint16_t off)
+{
+    patch_ctx *pc = (patch_ctx *)opaque;
+    if (!(flags & 1) || (uint32_t)off + 3u > pc->size)
+        return;
+    uint8_t *p = pc->data + off;
+    if ((p[0] == 0x1e && p[1] == 0x58 && p[2] == 0x90) ||
+        (p[0] == 0x8c && p[1] == 0xd8 && p[2] == 0x90)) {
+        p[0] = 0xb8;
+        put16(p + 1, pc->dgroup);
+    }
+}
+
+static void patch_exports(win_ne_guest_image *g, int dll, uint16_t seg, uint8_t *data,
+                          uint32_t size, uint16_t flags)
 {
     const win_ne_guest_dll *d = &g->dlls[dll];
-    if (!d->auto_data)
+    if (!d->auto_data || !data || (flags & 1u))
         return;
-    uint16_t dgroup = g->dll_segments[d->first + d->auto_data - 1u].selector;
-    for (uint16_t o = 1; o < 1024; o++) {
-        uint8_t flags;
-        uint16_t seg, off;
-        int rc = win_ne_entry(d->path, o, &flags, &seg, &off);
-        if (rc == WIN_NE_CANCELLED)
-            break;
-        if (rc != WIN_NE_OK || !(flags & 1) || !seg || seg > d->count ||
-            (image->segments[seg].flags & 1u) || off + 3u > image->segments[seg].size)
-            continue;
-        uint8_t *p = image->segments[seg].data + off;
-        if ((p[0] == 0x1e && p[1] == 0x58 && p[2] == 0x90) ||
-            (p[0] == 0x8c && p[1] == 0xd8 && p[2] == 0x90)) {
-            p[0] = 0xb8;
-            put16(p + 1, dgroup);
-        }
-    }
+    patch_ctx pc = { data, size, g->dll_segments[d->first + d->auto_data - 1u].selector };
+    win_ne_entries(d->path, seg, patch_entry, &pc);
 }
 
 static int load_dll(win_ne_guest_image *g, const char *module, int depth)
@@ -2270,9 +2276,10 @@ static int load_dll(win_ne_guest_image *g, const char *module, int depth)
     load_ctx lc = { g, i, depth + 1, 0 };
     int rc = win_ne_load_image(path, &image, assign_selector, resolve_import, &lc);
     if (!rc) {
-        patch_exports(g, i, &image);
         for (uint16_t k = 1; !rc && k <= d->count; k++) {
             const win_ne_guest_segment *s = &g->dll_segments[d->first + k - 1u];
+            if (s->linear)
+                patch_exports(g, i, k, image.segments[k].data, s->size, image.segments[k].flags);
             if (s->linear && !g->io.write(g->opaque, s->linear, image.segments[k].data, s->size))
                 rc = WIN_NE_IO_ERROR;
         }

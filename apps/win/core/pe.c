@@ -400,6 +400,11 @@ const char *win_pe_service_name(uint16_t service, char *buf, size_t cap)
         pe_fmt(buf, cap, "%s", dll);
         return buf;
     }
+    const char *mm = win_pe_mm_name(service);
+    if (mm) {
+        pe_fmt(buf, cap, "WINMM.%s", mm);
+        return buf;
+    }
     if (service < win_pe_nfns) {
         pe_fmt(buf, cap, "%s.%s", native_names[win_pe_fns[service].module],
                  win_pe_fns[service].name);

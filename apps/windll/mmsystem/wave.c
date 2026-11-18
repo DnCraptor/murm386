@@ -9,6 +9,7 @@
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
+#include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -240,8 +241,7 @@ static void wave_pump(void)
             if (take > max - got)
                 take = max - got;
             uint32_t addr = q->data + q->sent;
-            if ((uint32_t)(uint16_t)q->data + q->sent + take > 0x10000u ||
-                !NE->task_read((uint16_t)output.task, addr, raw + got, take))
+            if (!NE->task_read((uint16_t)output.task, addr, raw + got, take))
                 memset(raw + got, output.format.bits == 16 ? 0 : 0x80, take);
             q->sent += take;
             got += take;
@@ -378,8 +378,10 @@ static MMRESULT wave_header(win_dll_call *c, unsigned ordinal)
         return WAVERR_STILLPLAYING;
     unsigned bytes = rd32(b + 4);
     uint32_t data = rd32(b);
+    int flat = NE->size > offsetof(win_dll_ne, task_flat) && NE->task_flat &&
+               NE->task_flat((uint16_t)output.task);
     if (!bytes || !data || !(data >> 16) || bytes % output.format.block ||
-        bytes > 0x10000u - (uint16_t)data || (f & (0x04u | 0x08u)))
+        (!flat && bytes > 0x10000u - (uint16_t)data) || (f & (0x04u | 0x08u)))
         return MMSYSERR_INVALPARAM;      /* looped WAVEHDRs not yet supported */
     if (output.count == queue_cap) {    /* the ring grown, in order from its head */
         unsigned cap = queue_cap ? queue_cap * 2u : WAVE_QUEUE;

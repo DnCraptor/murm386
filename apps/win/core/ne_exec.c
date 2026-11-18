@@ -243,16 +243,16 @@ static int invoke_native(void *opaque, CPU *cpu, uint16_t service)
                           (uint32_t)guest.gprx[regdx].r16 << 16 | guest.gprx[regax].r16);
     if (gate->api->invalid_args && !bad_before && !gate->api->invalid_call)
         gate->api->invalid_call = service;
-    /* the segments its ring 0 code loads on the way back in memory (those
-     * of a program waiting may have been discarded meanwhile) */
-    if (handled == 1)
-        win_ne_vm_return(gate->api, &guest, service);
     /* Yield only while the shared CPU is in its original DOS context. */
     if (handled == 1 && !gate->api->dead && !gate->api->exited && !gate->api->stopped &&
         turn_due(gate)) {
         if (gate->api->yield && gate->api->yield())
             gate->api->stopped = 1;
     }
+    /* the segments its ring 0 code loads on the way back in memory, after
+     * the other tasks' turn (their memory may have discarded them) */
+    if (handled == 1)
+        win_ne_vm_return(gate->api, &guest, service);
     /* a fault or an exit in a callback this call made ends the program */
     if (handled == 1 && (gate->api->dead || gate->api->exited || gate->api->stopped))
         handled = WINX86_SERVICE_EXIT;
@@ -756,6 +756,12 @@ static uint32_t guest_get32(uint32_t linear)
     return guest_get16(linear) | (uint32_t)guest_get16(linear + 2u) << 16;
 }
 
+static void guest_put32(uint32_t linear, uint32_t v)
+{
+    guest_put16(linear, (uint16_t)v);
+    guest_put16(linear + 2u, (uint16_t)(v >> 16));
+}
+
 /* The ring 0 stack at the gateway's entry, 32-bit: its return address
  * (EIP, CS), then through a 386 call gate from ring 3 (a thunk) the
  * caller's ESP, SS; from the yield stub (ring 0) the guest's EAX, the
@@ -786,15 +792,120 @@ static uint16_t gateway_entry32(const win_ne_native_gate *gate, uint32_t *esp3, 
     return call_sp;
 }
 
+/* the thread's registers at the gateway's entry (the guest's but EAX, the
+ * low word of EDX: the gateway's PUSHA has them, ring 0 SP's) */
+static void pe_regs(const win_ne_native_gate *gate, CPU *cpu, win_pe_regs *r)
+{
+    uint16_t pm_sp = guest_get16(gate->scratch_linear + WIN_NE_BOOT_PM_SP_OFFSET);
+    r->ebx = cpu->gprx[regbx].r32;
+    r->ecx = cpu->gprx[regcx].r32;
+    r->esi = cpu->gprx[regsi].r32;
+    r->edi = cpu->gprx[regdi].r32;
+    r->ebp = cpu->gprx[regbp].r32;
+    /* GS, FS, FLAGS, ES, DS, then PUSHA's DI SI BP SP BX DX CX AX */
+    r->edx = (cpu->gprx[regdx].r32 & 0xffff0000u) |
+             guest_get16(gate->ring0_linear + pm_sp + 20u);
+}
+
+/* an exception of the program's (the fault stubs' service): its handlers
+ * get it, the frame IRETD's to its dispatcher (one dword up, see
+ * win_ne_fault_make); 0 not a ring 3 one */
+static int pe_exception(pe_run *run, CPU *cpu)
+{
+    win_ne_native_gate *gate = &run->gate;
+    uint16_t call_sp = guest_get16(gate->scratch_linear + WIN_NE_BOOT_CALL_SP_OFFSET);
+    /* the gateway's return, EAX, the vector, (the error code,) the frame */
+    if (call_sp < WIN_NE_RING0_FLOOR || call_sp > WIN_NE_RING0_BYTES - 36u)
+        return 0;
+    const uint32_t at = gate->ring0_linear + call_sp;
+    int vector = (int)guest_get32(at + 12u);
+    const unsigned err = is_error_code_vector(vector) ? 4u : 0u;
+    const uint32_t f = at + 16u + err;
+    if (call_sp + 36u + err > WIN_NE_RING0_BYTES || (guest_get16(f + 4u) & 3u) != 3u)
+        return 0;
+    win_pe_regs r;
+    pe_regs(gate, cpu, &r);
+    r.eax = guest_get32(at + 8u);
+    r.eip = guest_get32(f);
+    r.eflags = guest_get32(f + 8u);
+    r.esp = guest_get32(f + 12u);
+    const uint32_t cs = guest_get32(f + 4u), ss = guest_get32(f + 16u);
+    const uint8_t *op = vector == 3 ? (const uint8_t *)win_pe_ptr(run->img, r.eip - 1u, 1) : NULL;
+    if (op && *op == 0xcc)
+        r.eip--;                            /* INT 3 (a trap): its own address, as NT has it */
+    win_trace_event("pe-exception", (uint32_t)vector, r.eip);
+    win_cpu_snapshot transient;
+    save_cpu(cpu, &transient);
+    restore_cpu(cpu, gate->dos_context);
+    uint32_t params[2], n, eip, esp;
+    uint32_t code = win_pe_fault_code(run->ctx, vector, r.eip, params, &n);
+    int rc = win_pe_exception(run->ctx, &r, vector, code, 0, n, params, &eip, &esp);
+    restore_cpu(cpu, &transient);
+    if (rc != 1)
+        return rc;
+    guest_put32(at + 16u, eip);
+    guest_put32(at + 20u, cs);
+    guest_put32(at + 24u, r.eflags & ~0x100u);
+    guest_put32(at + 28u, esp);
+    guest_put32(at + 32u, ss);
+    return 1;
+}
+
+/* RaiseException(code, flags, n, arguments): as an exception where its
+ * call returns to; its return the dispatcher's start */
+static int pe_raise(pe_run *run, CPU *cpu, uint32_t esp3)
+{
+    win_ne_native_gate *gate = &run->gate;
+    uint16_t call_sp = guest_get16(gate->scratch_linear + WIN_NE_BOOT_CALL_SP_OFFSET);
+    const uint32_t at = gate->ring0_linear + call_sp;
+    win_pe_ctx *ctx = run->ctx;
+    const uint8_t *s = (const uint8_t *)win_pe_ptr(run->img, esp3, 20);
+    if (!s)
+        return 0;
+    win_pe_regs r;
+    pe_regs(gate, cpu, &r);
+    r.eax = 0;
+    r.eip = pe_rd32(s);
+    r.eflags = 0x202u;
+    r.esp = esp3 + 20u;
+    uint32_t params[15], n = pe_rd32(s + 12);
+    if (n > 15)
+        n = 15;
+    const uint8_t *p = n ? (const uint8_t *)win_pe_ptr(run->img, pe_rd32(s + 16), 4u * n) : NULL;
+    for (uint32_t i = 0; i < n; i++)
+        params[i] = p ? pe_rd32(p + 4 * i) : 0;
+    win_trace_event("pe-raise", pe_rd32(s + 4), r.eip);
+    win_cpu_snapshot transient;
+    save_cpu(cpu, &transient);
+    restore_cpu(cpu, gate->dos_context);
+    uint32_t eip, esp;
+    int rc = win_pe_exception(ctx, &r, -1, pe_rd32(s + 4), pe_rd32(s + 8) & 1u, n, params, &eip,
+                              &esp);
+    restore_cpu(cpu, &transient);
+    if (rc != 1)
+        return rc;
+    guest_put32(at, eip);                   /* the gate's o32 RETF: EIP, CS, ESP, SS */
+    guest_put32(at + G32_ESP3, esp);
+    return 1;
+}
+
 static int invoke_pe(win_ne_native_gate *gate, CPU *cpu, uint16_t service)
 {
     pe_run *run = (pe_run *)gate->pe;
     if (!gate->dos_context || cpu->ext_accessors->get_seg16(cpu, WIN_CS) != gate->rm_segment)
         return 0;
+    win_pe_ctx *ctx = run->ctx;
+    if (service == WIN_PE_SERVICE_EXCEPTION) {
+        int rc = pe_exception(run, cpu);
+        return rc == 1 && (ctx->dead || ctx->exited || ctx->stopped) ? WINX86_SERVICE_EXIT : rc;
+    }
     uint32_t esp3, flags;
     if (!gateway_entry32(gate, &esp3, &flags))
         return 0;
-    win_pe_ctx *ctx = run->ctx;
+    if (service == PEF_RaiseException && !flags) {
+        int rc = pe_raise(run, cpu, esp3);
+        return rc == 1 && (ctx->dead || ctx->exited || ctx->stopped) ? WINX86_SERVICE_EXIT : rc;
+    }
     if (service == WIN_PE_SERVICE_YIELD) {
         /* the yield vector: the interrupt's EFLAGS without IF (set to take
          * it); EAX the stub keeps */
