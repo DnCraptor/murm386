@@ -357,42 +357,39 @@ static void init_palettes(void) {
 // ============================================================================
 
 #if defined(VIDEO_RUNTIME) || (!defined(EGA128) && !defined(MCGA))
-// Render VGA 256-color planar (Mode X: 320x200x256, unchained)
-// VRAM layout in our emulator: packed planes in dwords.
-// Each dword holds 4 bytes: plane0..plane3, and those bytes are pixels x%4.
+unsigned __time_critical_func(vga_hw_mode_x_line)(unsigned line, unsigned *width) {
+    const unsigned doubled = gfx_height * 2 <= active_end - active_start;
+    unsigned row = line >> doubled;
+    unsigned start = frame_vram_offset;
+    const int compare = frame_line_compare;
+    if (compare >= 0 && line > (unsigned)compare) {
+        // The first line after the compare starts at address zero.
+        row = (line - ((unsigned)compare + 1u)) >> doubled;
+        start = 0;
+    }
+    *width = gfx_width < 320 ? (unsigned)gfx_width : 320u;
+    // CR13 is in words; each address indexes four packed plane bytes.
+    return (start + row * (unsigned)gfx_line_offset * 2u) & (video_vram_mask >> 2);
+}
+
+// One dword of unchained VGA memory holds four adjacent pixels.
 static void __time_critical_func(render_gfx_line_vga_planar256)(uint32_t line, uint32_t *output_buffer) {
-    uint32_t *out32 = (uint32_t *)((uint8_t *)output_buffer + SHIFT_PICTURE);
-
-    int active_lines = active_end - active_start;
-    uint32_t src_line = (gfx_height * 2 <= active_lines) ? (line >> 1) : line;
-
-    if (src_line >= (uint32_t)gfx_height) {
-        nf_memset(out32, TMPL_LINE, 640);
-        return;
+    uint8_t *out = (uint8_t *)output_buffer + SHIFT_PICTURE;
+    unsigned width;
+    const unsigned base = vga_hw_mode_x_line(line, &width);
+    const unsigned border = 320u - width;
+    if (border) {
+        nf_memset(out, TMPL_LINE, border);
+        nf_memset(out + border + width * 2u, TMPL_LINE, border);
     }
 
-    // CRTC Offset (CR13) in words -> dword stride
-    uint32_t stride = (gfx_line_offset > 0) ? ((uint32_t)gfx_line_offset * 2u) : 80u;
-
-    uint32_t base;
-    // frame_line_compare is in display-line units (same as `line` parameter).
-    // Compare against `line` (not src_line) to get the right split point.
-    if (frame_line_compare >= 0 && (int)line >= frame_line_compare) {
-        uint32_t lc_src = (gfx_height * 2 <= active_lines) ? (uint32_t)frame_line_compare >> 1
-                                                           : (uint32_t)frame_line_compare;
-        base = (src_line - lc_src) * stride;
-    } else {
-        base = frame_vram_offset + src_line * stride;
-    }
-    base &= 0xFFFF;
-
-    // base is in dwords; gfx_buffer is bytes, so byte offset = base * 4
-    const uint32_t *src32 = (const uint32_t *)(gfx_buffer + base * 4);
+    uint32_t *out32 = (uint32_t *)(out + border);
+    const uint32_t *src32 = (const uint32_t *)gfx_buffer;
+    const unsigned mask = video_vram_mask >> 2;
     // Select dither phase per scanline
-    bool swap_phase = (src_line & 1u) == 0;
-    // 320 pixels -> 80 dwords -> 160 output dwords (640px doubled)
-    for (int i = 0; i < 80; i++) {
-        uint32_t pixels = src32[i];
+    bool swap_phase = ((line >> (gfx_height * 2 <= active_end - active_start)) & 1u) == 0;
+    for (unsigned i = 0; i < width / 4u; i++) {
+        uint32_t pixels = src32[(base + i) & mask];
         uint16_t p0 = vga_palette_phase((uint8_t)pixels, swap_phase);
         uint16_t p1 = vga_palette_phase((uint8_t)(pixels >> 8), swap_phase);
         uint16_t p2 = vga_palette_phase((uint8_t)(pixels >> 16), swap_phase);
@@ -1186,7 +1183,7 @@ void __not_in_flash_func(video_latch_frame)(int visible) {
     int lc = (int)cr[0x18]
            | (((int)cr[0x07] & 0x10) << 4)
            | (((int)cr[0x09] & 0x40) << 3);
-    frame_line_compare = (lc > 0 && lc < visible) ? lc : -1;
+    frame_line_compare = (lc < visible && (lc > 0 || gfx_submode == 5)) ? lc : -1;
 }
 
 /* 640x480: buffer pointers and sync templates (init, and back from 800). */
@@ -1729,12 +1726,17 @@ void __time_critical_func(vga_hw_set_gfx_mode)(int submode, int width, int heigh
     gfx_submode = submode;
     gfx_width = width;
     gfx_height = height;
-    gfx_line_offset = line_offset > 0 ? line_offset : (width / 8);
+    gfx_line_offset = (submode == 5 || line_offset > 0) ? line_offset : (width / 8);
     gfx_sram_stride = (width / 8) + 1;
 
     // Adjust active display area based on mode requirements
-    if (height > 400 || (submode == 5 && height > 200)) {
-        // 480-line modes: mode 12h (height=480) or Mode X 320×240 (height=240, doubled)
+    if (submode == 5) {
+        const int lines = height <= N_LINES_VISIBLE / 2 ? height * 2 :
+                          (height < N_LINES_VISIBLE ? height : N_LINES_VISIBLE);
+        active_start = (N_LINES_VISIBLE - lines) / 2;
+        active_end = active_start + lines;
+    } else if (height > 400) {
+        // 480-line modes, including VGA mode 12h.
         active_start = 0;
         active_end = N_LINES_VISIBLE;  // 480
     } else if (!vga_stretch_350 && height > 200 && height < 400) {

@@ -97,6 +97,10 @@ void vga_hw_freeze(bool on);
 void vga_hw_set_osd_geometry(void);
 void vga_hw_refresh_all(void);
 
+/* Mode X line address in packed plane words. Width is clipped to the
+ * 320 logical pixels that fit the physical 640-pixel output. */
+unsigned vga_hw_mode_x_line(unsigned line, unsigned *width);
+
 // Give the ISR direct read-only access to VGA register state.
 // Call once after vga_init(). ISR reads cr[], ar[] at the right moment —
 // no volatile intermediates, no synchronisation lag.

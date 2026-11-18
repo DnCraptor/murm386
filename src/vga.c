@@ -2653,8 +2653,10 @@ int __time_critical_func(vga_get_graphics_mode)(VGAState *s, int *width, int *he
     if (!video_profile_is_ega() && !video_profile_is_mcga() &&
         !(s->sr[VGA_SEQ_MEMORY_MODE] & VGA_SR04_CHN_4M) &&   /* chain4 OFF */
          (s->sr[VGA_SEQ_MEMORY_MODE] & VGA_SR04_SEQ_MODE) &&  /* sequential ON */
-         (s->ar[0x10] & 0x40) &&                               /* 8-bit DAC color */
-         w == 320) {
+         (s->ar[0x10] & 0x40)) {                              /* 8-bit DAC color */
+        // Four 8-bit pixels per CRTC character clock, even while GR[5]
+        // is temporarily changed by a guest switching write modes.
+        if (width) *width = (s->cr[0x01] + 1) * 4;
         rv = 5;  // Mode X
     } else
 #endif

@@ -13,6 +13,7 @@
 
 #include "vga.h"
 #include "vga_osd.h"
+#include "vga_hw.h"
 #include "hdmi.h"
 #include "font8x16.h"
 #if defined(M2P2_HSTX_AUDIO)
@@ -302,10 +303,19 @@ static inline __attribute__((always_inline)) uint8_t hdmi_pair_index(uint8_t pai
 
 typedef uint32_t __attribute__((may_alias)) hdmi_text_word;
 
-static void __time_critical_func(render_text_line)(uint32_t line, uint8_t *output_buffer) {
-    // The PIO payload starts 72 bytes into a word-aligned DMA buffer.
-    // HSTX passes its word-aligned index buffer.
-    hdmi_text_word *out = (hdmi_text_word *)output_buffer;
+typedef enum {
+    TEXT_PIO,
+    TEXT_HSTX_HDMI,
+    TEXT_HSTX_VGA,
+} TextOutput;
+
+#if defined(M2P2_HSTX_AUDIO)
+static uint32_t hstx_text_palette[256], hstx_vga_text_palette[16];
+#endif
+
+// The constant output format lets the compiler specialize the hot glyph loop.
+static inline __attribute__((always_inline)) void render_text_line_to(
+        uint32_t line, hdmi_text_word *out, TextOutput output) {
     int char_height = vga_get_char_height(vga_state);
     if (char_height <= 0 || char_height > 32)
         char_height = 16;
@@ -326,6 +336,9 @@ static void __time_critical_func(render_text_line)(uint32_t line, uint8_t *outpu
         unsigned cached_attr = 0xffu;
         uint8_t pairs[4];
         uint16_t doubled_pairs[4];
+#if defined(M2P2_HSTX_AUDIO)
+        uint32_t left[4], right[4];
+#endif
 
         for (int col = 0; col < cols; col++) {
             uint16_t cell = text_row[col];
@@ -342,27 +355,62 @@ static void __time_critical_func(render_text_line)(uint32_t line, uint8_t *outpu
                 if (fp) {
                     glyph = __rbit(fp[glyph_line * 4]) >> 24;
                 } else {
-                    glyph = font_8x16[ch * 16 + glyph_line];
+                    glyph = glyph_line < 16 ? font_8x16[ch * 16 + glyph_line] : 0;
                 }
             }
             const unsigned colors = attr & 0x7fu;
             if (colors != cached_attr) {
                 const unsigned fg = colors & 0x0fu;
                 const unsigned bg = colors >> 4;
-                pairs[0] = hdmi_pair_index((bg << 4) | bg);
-                pairs[1] = hdmi_pair_index((fg << 4) | bg);
-                pairs[2] = hdmi_pair_index((bg << 4) | fg);
-                pairs[3] = hdmi_pair_index((fg << 4) | fg);
-                if (double_h) {
-                    const unsigned b = pairs[0], f = pairs[3];
-                    doubled_pairs[0] = b | (b << 8);
-                    doubled_pairs[1] = f | (b << 8);
-                    doubled_pairs[2] = b | (f << 8);
-                    doubled_pairs[3] = f | (f << 8);
+#if defined(M2P2_HSTX_AUDIO)
+                if (output == TEXT_HSTX_HDMI) {
+                    left[0] = hstx_text_palette[(bg << 4) | bg];
+                    left[1] = hstx_text_palette[(fg << 4) | bg];
+                    left[2] = hstx_text_palette[(bg << 4) | fg];
+                    left[3] = hstx_text_palette[(fg << 4) | fg];
+                } else if (output == TEXT_HSTX_VGA) {
+                    const uint32_t f = hstx_vga_text_palette[fg], b = hstx_vga_text_palette[bg];
+                    left[0] = left[2] = right[0] = right[1] = b;
+                    left[1] = left[3] = right[2] = right[3] = f;
+                } else
+#endif
+                {
+                    pairs[0] = hdmi_pair_index((bg << 4) | bg);
+                    pairs[1] = hdmi_pair_index((fg << 4) | bg);
+                    pairs[2] = hdmi_pair_index((bg << 4) | fg);
+                    pairs[3] = hdmi_pair_index((fg << 4) | fg);
+                    if (double_h) {
+                        const unsigned b = pairs[0], f = pairs[3];
+                        doubled_pairs[0] = b | (b << 8);
+                        doubled_pairs[1] = f | (b << 8);
+                        doubled_pairs[2] = b | (f << 8);
+                        doubled_pairs[3] = f | (f << 8);
+                    }
                 }
                 cached_attr = colors;
             }
 
+#if defined(M2P2_HSTX_AUDIO)
+            if (output != TEXT_PIO) {
+                if (double_h) {
+                    #pragma GCC unroll 8
+                    for (unsigned bit = 0; bit < 8; ++bit) {
+                        const unsigned pair = ((glyph >> bit) & 1u) * 3u;
+                        *out++ = left[pair];
+                        if (output == TEXT_HSTX_VGA)
+                            *out++ = right[pair];
+                    }
+                } else {
+                    #pragma GCC unroll 4
+                    for (unsigned bit = 0; bit < 8; bit += 2) {
+                        const unsigned pair = (glyph >> bit) & 3u;
+                        *out++ = left[pair];
+                        if (output == TEXT_HSTX_VGA)
+                            *out++ = right[pair];
+                    }
+                }
+            } else
+#endif
             if (!double_h) {
                 const uint32_t indices = pairs[glyph & 3u] |
                     ((uint32_t)pairs[(glyph >> 2) & 3u] << 8) |
@@ -379,7 +427,28 @@ static void __time_critical_func(render_text_line)(uint32_t line, uint8_t *outpu
             }
         }
     }
+#if defined(M2P2_HSTX_AUDIO)
+    else if (output != TEXT_PIO) {
+        nf_memset(out, 0, SCREEN_WIDTH * sizeof(uint32_t) *
+                  (output == TEXT_HSTX_VGA ? 2u : 1u));
+    }
+#endif
 }
+
+static void __time_critical_func(render_text_line)(uint32_t line, uint8_t *output_buffer) {
+    // PIO's text payload starts 72 bytes into a word-aligned DMA buffer.
+    render_text_line_to(line, (hdmi_text_word *)output_buffer, TEXT_PIO);
+}
+
+#if defined(M2P2_HSTX_AUDIO)
+static void __time_critical_func(render_text_line_hstx_hdmi)(uint32_t line, uint32_t *out) {
+    render_text_line_to(line, out, TEXT_HSTX_HDMI);
+}
+
+static void __time_critical_func(render_text_line_hstx_vga)(uint32_t line, uint32_t *out) {
+    render_text_line_to(line, out, TEXT_HSTX_VGA);
+}
+#endif
 
 static void __time_critical_func(render_gfx_line_from_sram)(uint32_t line, uint8_t *output_buffer) {
     // Determine source line based on graphics height
@@ -418,37 +487,25 @@ static void __time_critical_func(render_gfx_line_from_sram)(uint32_t line, uint8
     }
 }
 
-// Render VGA 256-color planar (Mode X: 320x200x256, unchained)
-// VRAM layout in our emulator: packed planes in dwords.
-// Each dword holds 4 bytes: plane0..plane3, and those bytes are pixels x%4.
+// One dword of unchained VGA memory holds four adjacent pixels.
 static void __time_critical_func(render_gfx_line_vga_planar256)(uint32_t line, uint8_t *output_buffer) {
-    int active_lines = active_end - active_start;
-    uint32_t src_line = (gfx_height * 2 <= active_lines) ? (line >> 1) : line;
-    if (src_line >= (uint32_t)gfx_height) {
-        nf_memset(output_buffer, 0, SCREEN_WIDTH);
-        return;
+    unsigned width;
+    const unsigned base = vga_hw_mode_x_line(line, &width) * 4u;
+    const unsigned border = (SCREEN_WIDTH - width) / 2u;
+    if (border) {
+        nf_memset(output_buffer, 0, border);
+        nf_memset(output_buffer + border + width, 0, border);
+        output_buffer += border;
     }
-    // CRTC Offset (CR13) in words -> dword stride
-    uint32_t stride = (gfx_line_offset > 0) ? ((uint32_t)gfx_line_offset * 2u) : 80u;
-    uint32_t base;
-    // frame_line_compare is in display-line units (same as `line` parameter).
-    // Compare against `line` (not src_line) to get the right split point.
-    if (frame_line_compare >= 0 && (int)line >= frame_line_compare) {
-        uint32_t lc_src = (gfx_height * 2 <= active_lines) ? (uint32_t)frame_line_compare >> 1
-                                                           : (uint32_t)frame_line_compare;
-        base = (src_line - lc_src) * stride;
-    } else {
-        base = frame_vram_offset + src_line * stride;
-    }
-    base &= 0xFFFF;
-    // base is in dwords; gfx_buffer is bytes, so byte offset = base * 4
-    const uint8_t *src = gfx_buffer + (base << 2);
 #if defined(M2P2_HSTX_AUDIO)
-    dos_api_memcpy(output_buffer, src, SCREEN_WIDTH);
+    unsigned first = video_vram_mask + 1u - base;
+    if (first > width) first = width;
+    dos_api_memcpy(output_buffer, gfx_buffer + base, first);
+    if (first < width)
+        dos_api_memcpy(output_buffer + first, gfx_buffer, width - first);
 #else
-    for (int i = 0; i < SCREEN_WIDTH; ++i) {
-        ob( *src++ );
-    }
+    for (unsigned i = 0; i < width; ++i)
+        ob(gfx_buffer[(base + i) & video_vram_mask]);
 #endif
 }
 
@@ -1335,9 +1392,9 @@ static inline bool hdmi_init() {
 
 #if defined(M2P2_HSTX_AUDIO)
 static hstx_video_packet_t hstx_lines[4];
-static uint32_t hstx_single_palette[256], hstx_pair_palette[256], hstx_text_palette[256];
+static uint32_t hstx_single_palette[256], hstx_pair_palette[256];
 // A VGA word represents one color; pair indices encode two 4-bit colors.
-static uint32_t hstx_vga_planar_palette[16], hstx_vga_text_palette[16];
+static uint32_t hstx_vga_planar_palette[16];
 static const uint32_t hstx_mono_palette[4] __not_in_flash("hstx_mono_palette") = {
     0x00000000, 0x7fff0000, 0x00007fff, 0x7fff7fff,
 };
@@ -1400,6 +1457,20 @@ static hstx_video_packet_t *__time_critical_func(hdmi_hstx_render_800)(uint32_t 
 static hstx_video_packet_t *__time_critical_func(hdmi_hstx_render)(uint32_t line) {
     if (video_phys_cur) return hdmi_hstx_render_800(line);
 
+    hstx_video_packet_t *packet = &hstx_lines[line & 3u];
+    const bool vga_output = hstx_video_is_vga();
+    if (vga_state && current_mode == 1 && !osd_is_visible() &&
+            line >= (uint32_t)active_start && line < (uint32_t)active_end) {
+        if (vga_output && !hstx_video_vga_is_wide())
+            return NULL;  // Switch the shifter at the next vblank.
+        pre_render_line();
+        if (vga_output)
+            render_text_line_hstx_vga(line - active_start, packet->payload.vga);
+        else
+            render_text_line_hstx_hdmi(line - active_start, packet->payload.pairs);
+        return packet;
+    }
+
     alignas(4) uint8_t indices[SCREEN_WIDTH];
     const uint32_t *palette = hstx_single_palette;
 
@@ -1422,8 +1493,7 @@ static hstx_video_packet_t *__time_critical_func(hdmi_hstx_render)(uint32_t line
         render_line(line - active_start, indices);
     }
 
-    hstx_video_packet_t *packet = &hstx_lines[line & 3u];
-    if (hstx_video_is_vga()) {
+    if (vga_output) {
         uint32_t *out = packet->payload.vga;
         const bool wide = hstx_video_vga_is_wide();
 
