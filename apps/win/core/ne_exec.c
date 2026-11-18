@@ -115,11 +115,20 @@ typedef struct {
     win_ne_guest_api_context *api;
     uint32_t scratch_linear;
     uint32_t ring0_linear;      /* the TSS, then the ring 0 stack */
+    uint32_t tss_access_linear; /* access byte of the private TSS descriptor */
     uint16_t rm_segment;
     uint16_t ring0_selector;
     void *pe;                   /* a Win32 program's: its pe_run */
     unsigned api_calls;         /* calls since the last safe scheduler yield */
 } win_ne_native_gate;
+
+/* Each protected-mode entry reloads TR. LTR marks the descriptor busy,
+ * and leaving protected mode does not clear that bit. */
+static void make_tss_available(const win_ne_native_gate *gate)
+{
+    uint8_t *access = dos_guest_linear_ptr(gate->tss_access_linear);
+    *access &= (uint8_t)~0x02u;
+}
 
 /* A broken bridge is not a CPU divide exception. Record the actual
  * execution address while the transient guest CPU state still exists. */
@@ -262,6 +271,14 @@ static int invoke_native(void *opaque, CPU *cpu, uint16_t service)
     return handled;
 }
 
+static int resume_native(void *opaque, CPU *cpu, uint16_t service)
+{
+    int handled = invoke_native(opaque, cpu, service);
+    if (handled == 1)
+        make_tss_available(opaque);
+    return handled;
+}
+
 static int read_guest(void *opaque, uint32_t linear, void *dst, uint32_t bytes)
 {
     (void)opaque;
@@ -328,11 +345,11 @@ static int preempt(CPU *cpu, win_ne_native_gate *gate)
      * stubs, the gateway) runs on to a point where it can be */
     uint16_t cs = cpu->ext_accessors->get_seg16(cpu, WIN_CS);
     if (cs == gate->rm_segment || (cs & 3u) != 3u)
-        return winx86_run(cpu, invoke_native, gate, 1u);
+        return winx86_run(cpu, resume_native, gate, 1u);
     if (win_ne_trace_turn)
         win_ne_trace_turn(cs, (uint16_t)cpu->ip);
     raise_vector(cpu, (int)WIN_NE_YIELD_VECTOR);
-    int rc = winx86_run(cpu, invoke_native, gate, WIN_NE_EXEC_SLICE);
+    int rc = winx86_run(cpu, resume_native, gate, WIN_NE_EXEC_SLICE);
     raise_done(cpu);
     return rc;
 }
@@ -372,9 +389,10 @@ static void fault_where(const win_ne_guest_image *g, const win_ne_native_gate *g
  * mode ends nothing. */
 static int run_guest(CPU *cpu, win_ne_native_gate *gate)
 {
+    make_tss_available(gate);
     uint16_t cs0 = cpu->ext_accessors->get_seg16(cpu, WIN_CS);
     win_trace_event("guest-enter", cs0, (uint16_t)cpu->ip);
-    int rc = winx86_run(cpu, invoke_native, gate, WIN_NE_EXEC_SLICE);
+    int rc = winx86_run(cpu, resume_native, gate, WIN_NE_EXEC_SLICE);
     unsigned privileged_steps = 0;
     while (!back_in_rm(cpu, gate, rc) && rc != WINX86_BAD_CONTEXT) {
         uint16_t cs = cpu->ext_accessors->get_seg16(cpu, WIN_CS);
@@ -688,7 +706,8 @@ static int execute(win_ne_guest_image *gp, const char *path, const char *cmdline
     api.yield = yield;
     ne_run run = {
         .gate = { .dos_context = &old, .api = &api, .scratch_linear = linear,
-                  .ring0_linear = ring0, .rm_segment = args.rm_segment,
+                  .ring0_linear = ring0, .tss_access_linear = gp->gdt_linear + gp->tss_selector + 5u,
+                  .rm_segment = args.rm_segment,
                   .ring0_selector = gp->ring0_selector },
         .g = gp
     };
@@ -1137,6 +1156,7 @@ static int pe_execute(win_pe_image *img, const char *path, const char *cmdline, 
     ctx->task = GetCurrentTask();
     pe_run run = {
         .gate = { .dos_context = &old, .scratch_linear = linear, .ring0_linear = ring0,
+                  .tss_access_linear = img->gdt_linear + img->tss_selector + 5u,
                   .rm_segment = args.rm_segment, .ring0_selector = img->ring0_selector },
         .img = img, .ctx = ctx
     };

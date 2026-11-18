@@ -86,7 +86,7 @@ else()
 endif()
 
 # CPU target selects the interpreter and the firmware name.
-set(CPU_TARGET "286" CACHE STRING "Emulated CPU core: 286, 386 or 386_XRIP")
+set(CPU_TARGET "386_XRIP" CACHE STRING "Emulated CPU core: 286, 386 or 386_XRIP")
 set_property(CACHE CPU_TARGET PROPERTY STRINGS 286 386 386_XRIP)
 if(NOT CPU_TARGET STREQUAL "286" AND NOT CPU_TARGET STREQUAL "386" AND NOT CPU_TARGET STREQUAL "386_XRIP")
     message(FATAL_ERROR "CPU_TARGET must be 286, 386 or 386_XRIP, got '${CPU_TARGET}'")
