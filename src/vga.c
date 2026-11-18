@@ -36,6 +36,7 @@
 #include "video_profile.h"
 #include "codeprofile.h"
 #include "pci.h"
+#include "mem.h"
 
 #ifdef BUILD_ESP32
 #include "esp_attr.h"
@@ -483,10 +484,6 @@ vga_phys_write32(uint8_t *vram, uint32_t addr, uint32_t val)
         vram[vga_phys_offset(addr + 3u)] = (uint8_t)(val >> 24);
     }
 }
-
-void *__not_in_flash_func(dos_api_memcpy)(void *dst,
-                                          const void *src,
-                                          size_t len);
 
 static inline void vga_phys_memcpy(uint8_t *vram, uint32_t addr,
                                    const uint8_t *src, size_t len)
@@ -1591,7 +1588,7 @@ void vbe_write(VGAState *s, uint32_t offset, uint32_t val)
                 const uint64_t bytes =
                     (uint64_t)s->vbe_regs[VBE_DISPI_INDEX_YRES] * s->vbe_line_offset;
                 const size_t vram_size = (size_t)s->vga_ram_size;
-                memset(s->vga_ram, 0, bytes < vram_size ? (size_t)bytes : vram_size);
+                nf_memset(s->vga_ram, 0, bytes < vram_size ? (size_t)bytes : vram_size);
             }
             break;
         case VBE_DISPI_INDEX_XRES:
