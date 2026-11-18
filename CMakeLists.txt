@@ -131,7 +131,7 @@ option(FORCE_HDMI "Force HDMI output instead of VGA" OFF)
 option(FORCE_VGA "Force VGA output instead of HDMI" OFF)
 
 if(BOARD STREQUAL "M2")
-    option(M2P2_HSTX_AUDIO "Use 640x480 HDMI with HSTX audio on M2P2" ON)
+    option(M2P2_HSTX_AUDIO "Use HDMI video and audio via HSTX on M2P2" ON)
 endif()
 
 if(M2P2_HSTX_AUDIO)

@@ -1344,7 +1344,34 @@ static inline __attribute__((always_inline)) uint32_t hdmi_bgr555(uint8_t r, uin
     return (r >> 3) | ((g >> 3) << 5) | ((b >> 3) << 10);
 }
 
+void __time_critical_func(hdmi_hstx_prepare_lines)(const hstx_timing_t *timing) {
+    for (unsigned i = 0; i < 4; i++)
+        hstx_packet_init(&hstx_lines[i], timing, true, false);
+}
+
+static hstx_video_packet_t *__time_critical_func(hdmi_hstx_render_800)(uint32_t line) {
+    if (!vga_state || current_mode != 2 || gfx_submode != 9 || osd_is_visible())
+        return NULL;
+
+    hstx_video_packet_t *packet = &hstx_lines[line & 3u];
+    uint32_t *out = packet->payload.pairs;
+    const uint32_t *src = (const uint32_t *)gfx_buffer;
+    uint32_t off = (uint32_t)frame_vram_offset + line * 100u;
+    // Same four-plane packing and VRAM wrap as the PIO HDMI renderer.
+    // The HSTX palette has all 256 pairs, with no reserved control slots.
+    for (unsigned x = 0; x < 100u; ++x) {
+        const uint32_t pixels = ega_pack8_from_planes(src[(off + x) & 0xffffu]);
+        *out++ = hstx_pair_palette[(uint8_t)(pixels >> 24)];
+        *out++ = hstx_pair_palette[(uint8_t)(pixels >> 16)];
+        *out++ = hstx_pair_palette[(uint8_t)(pixels >> 8)];
+        *out++ = hstx_pair_palette[(uint8_t)pixels];
+    }
+    return packet;
+}
+
 static hstx_video_packet_t *__time_critical_func(hdmi_hstx_render)(uint32_t line) {
+    if (video_phys_cur) return hdmi_hstx_render_800(line);
+
     alignas(4) uint8_t indices[SCREEN_WIDTH];
     const uint32_t *palette = hstx_single_palette;
 
@@ -1373,16 +1400,17 @@ static hstx_video_packet_t *__time_critical_func(hdmi_hstx_render)(uint32_t line
     return packet;
 }
 
-void __time_critical_func(hdmi_hstx_line_begin)(unsigned line) {
+void __time_critical_func(hdmi_hstx_line_begin)(unsigned line, const hstx_timing_t *timing) {
+    const unsigned active = hstx_active_start(timing);
     if (vga_state) {
         uint8_t status = vga_state->st01 & ~(ST01_V_RETRACE | ST01_DISP_ENABLE);
-        if (line < V_ACTIVE_START)
+        if (line < active)
             status |= ST01_V_RETRACE | ST01_DISP_ENABLE;
         vga_state->st01 = status;
     }
-    if (line == V_ACTIVE_START - 4)
-        video_latch_frame(HSTX_VIDEO_HEIGHT);
-    if (line == V_ACTIVE_START)
+    if (line == active - 4)
+        video_latch_frame(timing->height);
+    if (line == active)
         frame_update_request = 1;  // Apply VGA mode, palette and cursor in the core 1 timer.
 }
 
@@ -1431,8 +1459,6 @@ void graphics_init_hdmi() {
 #if defined(M2P2_HSTX_AUDIO)
     hdmi_init_text_palette();
     memcpy(hstx_text_palette, hstx_pair_palette, sizeof(hstx_text_palette));
-    for (unsigned i = 0; i < 4; i++)
-        hstx_packet_init(&hstx_lines[i], true, false);
 
     clock_configure_int_divider(clk_hstx, 0, CLOCKS_CLK_HSTX_CTRL_AUXSRC_VALUE_CLK_SYS,
                                 clock_get_hz(clk_sys), 4);

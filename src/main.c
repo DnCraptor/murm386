@@ -1868,7 +1868,7 @@ static bool init_hardware(void) {
 
         // Check if clock reconfiguration is needed
 #if defined(M2P2_HSTX_AUDIO)
-        // HSTX is clocked from clk_sys / 4 at 126 MHz.
+        // HSTX timing uses the fixed 504 MHz clk_sys (divided by 4 or 2).
         int cfg_cpu = CPU_CLOCK_MHZ;
 #else
         int cfg_cpu = config_get_cpu_freq();

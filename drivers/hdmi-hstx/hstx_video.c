@@ -35,6 +35,20 @@
 extern volatile uint8_t port3DA;
 #endif
 
+extern volatile uint8_t video_phys_target, video_phys_cur;
+
+// The clock slice has only an integer divider. Both VBE 102h timings
+// use 50.4 MHz; the 60 Hz variant extends blanking to get 60 Hz at that
+// clock (1344 x 625), while 72 uses the same geometry as PIO HDMI.
+static const hstx_timing_t timings[] __not_in_flash("hstx_timings") = {
+    { 640, 480, 16,  96,  48, 10, 2, 33, false, 4 },
+    { 800, 600, 56, 120,  64, 37, 6, 23, true,  2 },
+    { 800, 600, 40, 128, 376,  1, 4, 20, true,  2 },
+};
+static const hstx_timing_t *timing = &timings[0];
+
+extern void hdmi_hstx_prepare_lines(const hstx_timing_t *timing);
+
 /* Blank and active packets end with payload words that last to the end of
  * the line. Their DMA completion points therefore agree, including active/blank edges.
  * Nine-word blank lists would reintroduce a sub-line rearm deadline there. */
@@ -48,18 +62,16 @@ static uint spare_slot;
 
 static hstx_video_packet_t *__time_critical_func(spare_packet)(bool active, bool vsync) {
     spare_slot ^= 1u;
-    hstx_packet_init(&spare_packets[spare_slot], active, vsync);
+    hstx_packet_init(&spare_packets[spare_slot], timing, active, vsync);
     return &spare_packets[spare_slot];
 }
 #define BLANK_PACKET(vsync) spare_packet(false, vsync)
 #define BLACK_PACKET spare_packet(true, false)
-#define START_PACKET (&spare_packets[0])
 #else
 static hstx_video_packet_t blank_packets[2];
 static hstx_video_packet_t black_packet;
 #define BLANK_PACKET(vsync) (&blank_packets[(vsync) ? 1u : 0u])
 #define BLACK_PACKET (&black_packet)
-#define START_PACKET (&blank_packets[0])
 #endif
 
 static int dma_channels[2] = {-1, -1};
@@ -149,7 +161,7 @@ static void __time_critical_func(hstx_arm_transfer)(
      * Enabling through AL1_CTRL does not trigger it; its partner chains to it.
      * In particular, avoid the triggering CTRL_TRIG / READ_ADDR aliases. */
     channel->read_addr = (uintptr_t)packet;
-    channel->transfer_count = HSTX_PACKET_WORDS;
+    channel->transfer_count = HSTX_PACKET_HEADER_WORDS + timing->width / 2u;
     __dmb();
     channel->al1_ctrl = dma_ctrl32[slot];
 }
@@ -162,26 +174,31 @@ static bool __time_critical_func(hstx_start_pipeline)(void) {
     next_vline = 2;
     expected_completed_slot = 0;
 #if defined(HDMI_SOUND)
-    /* Lines 0 and 1 both send START_PACKET; the next spare write goes to the other one. */
-    hstx_packet_init(START_PACKET, false, false);
-    hstx_packet_set_island(START_PACKET, hstx_audio_island(0));
-    spare_slot = 0;
+    spare_slot = 1;
 #endif
     for (uint slot = 0; slot < 2; ++slot) {
+        const bool vsync = slot >= timing->v_front && slot < timing->v_front + timing->v_sync;
+#if defined(HDMI_SOUND)
+        hstx_video_packet_t *packet = &spare_packets[slot];
+        hstx_packet_init(packet, timing, false, vsync);
+        hstx_packet_set_island(packet, hstx_audio_island(slot, timing));
+#else
+        const hstx_video_packet_t *packet = BLANK_PACKET(vsync);
+#endif
         dma_channel_hw_t *channel = &dma_hw->ch[dma_channels[slot]];
         channel->al1_ctrl = dma_ctrl32[slot] & ~DMA_CH0_CTRL_TRIG_EN_BITS;
         channel->write_addr = (uintptr_t)&hstx_fifo_hw->fifo;
         // A peripheral reset also resets its DREQ producer. Discard old DMA
         // credits and request a fresh handshake before restarting its FIFO.
         dma_debug_hw->ch[dma_channels[slot]].dbg_ctdreq = 0;
-        hstx_arm_transfer(slot, START_PACKET);
+        hstx_arm_transfer(slot, packet);
     }
     dma_hw->ints1 = dma_mask;
     dma_set_irq1_channel_mask_enabled(dma_mask, true);
     dma_start_channel_mask(1u << dma_channels[0]);
 
     hstx_video_recovery_phase = 3;
-    /* A packet has 329 words and the FIFO holds eight: this DMA cannot
+    /* A packet is larger than the eight-word FIFO: this DMA cannot
      * complete and chain until HSTX is enabled below. Prime at least the first
      * command + operand so the first output symbol starts with valid data.
      * Bound the loop so a bad clock/setup fails instead of hanging boot/IRQ. */
@@ -199,30 +216,46 @@ static bool __time_critical_func(hstx_start_pipeline)(void) {
 }
 
 static void __time_critical_func(hstx_queue_next_transfer)(uint slot) {
-    extern void hdmi_hstx_line_begin(unsigned line);
+    extern void hdmi_hstx_line_begin(unsigned line, const hstx_timing_t *timing);
     extern void hdmi_hstx_line_end(void);
-    hdmi_hstx_line_begin(next_vline);
+    const unsigned active_start = hstx_active_start(timing);
+    hdmi_hstx_line_begin(next_vline, timing);
     hstx_video_packet_t *packet;
-    if (next_vline >= V_ACTIVE_START) {
-        packet = line_callback != NULL ? line_callback(next_vline - V_ACTIVE_START) : NULL;
+    if (next_vline >= active_start) {
+        packet = line_callback != NULL ? line_callback(next_vline - active_start) : NULL;
         if (packet == NULL || ((uintptr_t)packet & 3u)) packet = BLACK_PACKET;
     } else {
-        const bool vsync = next_vline >= V_FRONT && next_vline < V_FRONT + V_SYNC;
+        const bool vsync = next_vline >= timing->v_front && next_vline < timing->v_front + timing->v_sync;
 #if defined(GRAPHICS_PC_EMULATOR)
         port3DA = 9;
 #endif
         packet = BLANK_PACKET(vsync);
-        if (next_vline == V_FRONT) {
+        if (next_vline == timing->v_front) {
             ++hstx_video_frame_count;
             if (vsync_callback != NULL) vsync_callback();
         }
     }
 #if defined(HDMI_SOUND)
-    hstx_packet_set_island(packet, hstx_audio_island(next_vline));
+    hstx_packet_set_island(packet, hstx_audio_island(next_vline, timing));
 #endif
     hstx_arm_transfer(slot, packet);
-    if (++next_vline == V_TOTAL) next_vline = 0;
+    if (++next_vline == active_start + timing->height) next_vline = 0;
     hdmi_hstx_line_end();
+}
+
+static void __time_critical_func(hstx_set_mode)(unsigned mode) {
+    timing = &timings[mode];
+    // clk_hstx is sourced by the fixed 504 MHz clk_sys. Write the divider
+    // with the serializer stopped; the two-bit field encodes /4 as zero.
+    clocks_hw->clk[clk_hstx].div =
+        ((timing->clock_div & 3u) << CLOCKS_CLK_HSTX_DIV_INT_LSB);
+    hdmi_hstx_prepare_lines(timing);
+#if !defined(HDMI_SOUND)
+    hstx_packet_init(&blank_packets[0], timing, false, false);
+    hstx_packet_init(&blank_packets[1], timing, false, true);
+    hstx_packet_init(&black_packet, timing, true, false);
+#endif
+    video_phys_cur = mode;
 }
 
 static void __time_critical_func(hstx_dma_irq_handler)(void) {
@@ -257,6 +290,17 @@ static void __time_critical_func(hstx_dma_irq_handler)(void) {
         hstx_halt_dma();
         running = hstx_start_pipeline();
         return;
+    }
+    if (next_vline == 2) {
+        const unsigned mode = video_phys_target;
+        if (mode != video_phys_cur && mode < count_of(timings)) {
+            // Both queued lines are in vblank. Drain DMA before rewriting
+            // the packets under the new timing. This is a planned resync.
+            hstx_halt_dma();
+            hstx_set_mode(mode);
+            running = hstx_start_pipeline();
+            return;
+        }
     }
     expected_completed_slot ^= 1u;
     hstx_queue_next_transfer(slot);
@@ -330,10 +374,6 @@ bool hstx_video_init(void) {
     }
 #if defined(HDMI_SOUND)
     hstx_audio_init();
-#else
-    hstx_packet_init(&blank_packets[0], false, false);
-    hstx_packet_init(&blank_packets[1], false, true);
-    hstx_packet_init(&black_packet, true, false);
 #endif
     owner_core = get_core_num();
     previous_irq_priority = irq_get_priority(DMA_IRQ_1);
@@ -362,6 +402,7 @@ bool hstx_video_start(void) {
     pins_owned = true;
     irq_set_priority(DMA_IRQ_1, 0);
     irq_set_enabled(DMA_IRQ_1, true);
+    hstx_set_mode(0);
     running = hstx_start_pipeline();
     restore_interrupts(interrupts);
     if (!running) {
