@@ -3023,14 +3023,25 @@ int win_pe_flat_mem(void *pe, uint32_t addr, void *buf, uint32_t n, int write)
     return 1;
 }
 
+uint32_t win_pe_task_alloc(void *pe, uint32_t n, int free_it)
+{
+    win_pe_ctx *ctx = (win_pe_ctx *)pe;
+    if (free_it) {
+        pe_heap_free(ctx, ctx->heap, n);
+        return 0;
+    }
+    return pe_heap_alloc(ctx, ctx->heap, n, 1);
+}
+
 uint32_t win_pe_task_callback(void *pe, uint32_t proc, const uint16_t *words, int n)
 {
     uint32_t args[8];
     int k = 0;
-    if (n == 8) {                           /* a driver callback's: WORD, WORD, 3 DWORDs */
+    if (n == 8 || n == 14) {                /* a driver callback's: WORD, WORD, 3 DWORDs;
+                                             * DDEML's: WORD, WORD, 6 DWORDs */
         args[k++] = words[0];
         args[k++] = words[1];
-        for (int i = 2; i < 8; i += 2)
+        for (int i = 2; i < n; i += 2)
             args[k++] = (uint32_t)words[i] << 16 | words[i + 1];
     } else {
         for (int i = 0; i < n && k < 8; i++)

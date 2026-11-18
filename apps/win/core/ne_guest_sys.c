@@ -267,6 +267,12 @@ __attribute__((weak)) void *win_pe_task_ctx(uint16_t task)
     (void)task;
     return NULL;
 }
+__attribute__((weak)) uint32_t win_pe_task_alloc(void *pe, uint32_t n, int free_it)
+{
+    (void)pe; (void)n; (void)free_it;
+    return 0;
+}
+
 __attribute__((weak)) uint32_t win_pe_task_callback(void *pe, uint32_t proc,
                                                     const uint16_t *words, int n)
 {
@@ -382,9 +388,33 @@ static int task_dialog(uint16_t task, uint16_t inst, uint32_t tpl, int global, u
                                : -1;
 }
 
+static uint32_t task_alloc(uint16_t task, uint32_t n)
+{
+    ne_user *u = ne_user_of((HTASK)task);
+    if (!u || !u->ctx) {
+        void *pe = win_pe_task_ctx(task);
+        return pe && n ? win_pe_task_alloc(pe, n, 0) : 0;
+    }
+    uint16_t sel = n ? win_ne_guest_global_alloc((win_ne_guest_image *)u->ctx->image, n) : 0;
+    return (uint32_t)sel << 16;
+}
+
+static void task_free(uint16_t task, uint32_t far)
+{
+    ne_user *u = ne_user_of((HTASK)task);
+    if (!u || !u->ctx) {
+        void *pe = win_pe_task_ctx(task);
+        if (pe && far)
+            win_pe_task_alloc(pe, far, 1);
+    } else if (far >> 16) {
+        win_ne_guest_global_free((win_ne_guest_image *)u->ctx->image, (uint16_t)(far >> 16));
+    }
+}
+
 static const win_dll_ne dll_ne = {
     sizeof(win_dll_ne), call_arg16, call_arg32, call_read, call_write, call_string, task_call,
-    task_read, task_write, task_global, task_flat, task_message, task_dialog,
+    task_read, task_write, task_global, task_flat, task_message, task_dialog, task_alloc,
+    task_free,
 };
 
 const win_dll_ne *win_dll_ne_glue(void) { return &dll_ne; }

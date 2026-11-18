@@ -14,6 +14,11 @@
  * callback is called through it, so in its task as Windows does
  * (SendMessage).
  *
+ * Win16 programs' and Win32 programs' (USER32's Dde* functions, core/pe_dlls.c)
+ * calls: their callbacks called in their tasks, DdeAccessData a copy of
+ * the handle's bytes in the program's memory (DdeUnaccessData takes it
+ * back).
+ *
  * WINN has no DDE between machines (NetDDE) and no conversations with
  * programs speaking DDE's messages themselves; a callback that blocks
  * (CBR_BLOCK, DdeEnableCallback) is not queued.
@@ -35,6 +40,8 @@
 
 #define CONV_TAG  0x43000000u           /* HCONV: tag | index + 1 */
 #define DATA_TAG  0x44000000u           /* HDDEDATA */
+
+#define NE (__win_dll_ne)
 
 #define WM_DDEML_CALLBACK (WM_USER + 0x0D0)
 #define WM_DDEML_COMPLETE (WM_USER + 0x0D1)
@@ -75,6 +82,8 @@ typedef struct {
     UINT fmt;
     int app_owned;
     int locked;
+    uint16_t at_task;               /* DdeAccessData's copy in a program's memory */
+    uint32_t at;
 } data_handle;
 
 /* an asynchronous transaction done: XTYP_XACT_COMPLETE to the client */
@@ -142,6 +151,8 @@ static void data_free(HDDEDATA h)
 {
     data_handle *d = data_of(h);
     if (d) {
+        if (d->at && NE && NE->size >= sizeof(win_dll_ne) && NE->task_free)
+            NE->task_free(d->at_task, d->at);
         free(d->bytes);
         memset(d, 0, sizeof(*d));
     }
@@ -166,8 +177,6 @@ typedef struct {
     DWORD data1, data2;
     HDDEDATA result;
 } callback_call;
-
-#define NE (__win_dll_ne)
 
 static HDDEDATA invoke(const callback_call *c)
 {
@@ -878,6 +887,13 @@ static HDDEDATA guest_data(win_dll_call *c, int inst, uint32_t far, DWORD n, DWO
     return h;
 }
 
+/* the caller a Win32 program: its "far" pointers flat (no 64K segments) */
+static int flat(void)
+{
+    return NE->size >= sizeof(win_dll_ne) && NE->task_flat &&
+           NE->task_flat((uint16_t)GetCurrentTask());
+}
+
 static void wr16le(uint8_t *b, uint16_t v) { b[0] = (uint8_t)v; b[1] = (uint8_t)(v >> 8); }
 static void wr32le(uint8_t *b, uint32_t v) { wr16le(b, (uint16_t)v); wr16le(b + 2, (uint16_t)(v >> 16)); }
 
@@ -1010,7 +1026,7 @@ static int ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *v)
             *v = d->size;
             return WINDLL_DWORD;
         }
-        if (max > 0x10000u - (uint16_t)dst)
+        if (!flat() && max > 0x10000u - (uint16_t)dst)
             max = 0x10000u - (uint16_t)dst;
         if (off < d->size) {
             DWORD n = d->size - off < max ? d->size - off : max;
@@ -1019,12 +1035,36 @@ static int ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *v)
         }
         return WINDLL_DWORD;
     }
-    case 17:                            /* DdeAccessData: no memory of the program's for it */
+    case 17: {                          /* DdeAccessData(HDDEDATA, LPDWORD): a copy in the
+                                         * program's memory (a Win16 program's 64K of it) */
+        data_handle *d = data_of(NE->arg32(c, 8));
+        uint16_t task = (uint16_t)GetCurrentTask();
+        DWORD n = d ? d->size : 0;
         *v = 0;
+        if (!d || (!flat() && n > 0xfff0u) || NE->size < sizeof(win_dll_ne) || !NE->task_alloc)
+            return WINDLL_DWORD;
+        if (d->at && d->at_task != task) {
+            NE->task_free(d->at_task, d->at);
+            d->at = 0;
+        }
+        if (!d->at) {
+            d->at = NE->task_alloc(task, n ? n : 1);
+            d->at_task = task;
+        }
+        if (!d->at || (n && !NE->task_write(task, d->at, d->bytes, n)))
+            return WINDLL_DWORD;
+        put32(c, NE->arg32(c, 4), n);
+        d->locked++;
+        *v = d->at;
         return WINDLL_DWORD;
-    case 18:                            /* DdeUnaccessData(HDDEDATA) */
+    }
+    case 18: {                          /* DdeUnaccessData(HDDEDATA): the copy's bytes back */
+        data_handle *d = data_of(NE->arg32(c, 4));
+        if (d && d->at && d->locked && d->size)
+            NE->task_read(d->at_task, d->at, d->bytes, d->size);
         *v = DdeUnaccessData(NE->arg32(c, 4));
         return WINDLL_WORD;
+    }
     case 19:                            /* DdeFreeDataHandle(HDDEDATA) */
         *v = DdeFreeDataHandle(NE->arg32(c, 4));
         return WINDLL_WORD;

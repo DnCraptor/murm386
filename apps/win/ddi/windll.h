@@ -71,6 +71,12 @@ typedef struct win_dll_ne {
      * window, modeless); -1 if it fails (size covers it) */
     int (*task_dialog)(uint16_t task, uint16_t inst, uint32_t tpl, int global, uint16_t owner,
                        void *proc, int modeless);
+    /* a block of n bytes of the task's program's memory, zeroed, its "far"
+     * pointer (a Win16 program's global block, offset 0; a Win32
+     * program's heap's): 0 if none; freed with task_free or as the
+     * program ends (size covers them) */
+    uint32_t (*task_alloc)(uint16_t task, uint32_t n);
+    void (*task_free)(uint16_t task, uint32_t far);
 } win_dll_ne;
 
 typedef struct win_dll_export {

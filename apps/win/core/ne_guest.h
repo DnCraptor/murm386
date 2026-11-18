@@ -304,12 +304,16 @@ int win_ne_guest_selfloaded(win_ne_guest_image *g, uint16_t k, uint16_t handle,
  * addresses; the DLL's WINDLL_ result (*value). And pe_api.c's, pe_user.c's
  * help: the program's memory (write 1: to it), a task's program (NULL:
  * none of them), its procedure called with a DLL's words (n 8: a driver
- * callback's handle, message, three DWORDs) */
+ * callback's handle, message, three DWORDs; n 14: DDEML's two WORDs, six
+ * DWORDs) */
 int win_dll_call_flat(int slot, uint16_t ordinal, const uint8_t *frame, unsigned bytes, void *pe,
                       uint32_t *value);
 int win_pe_flat_mem(void *pe, uint32_t addr, void *buf, uint32_t n, int write);
 void *win_pe_task_ctx(uint16_t task);
 uint32_t win_pe_task_callback(void *pe, uint32_t proc, const uint16_t *words, int n);
+/* a block of n bytes of the program's heap (its address), or (free_it)
+ * the one at n freed */
+uint32_t win_pe_task_alloc(void *pe, uint32_t n, int free_it);
 int win_ne_guest_present(win_ne_guest_image *g, uint16_t sel);
 uint32_t win_ne_guest_discardable(void);
 uint32_t win_ne_guest_compact(uint32_t bytes);

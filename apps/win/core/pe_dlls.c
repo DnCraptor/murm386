@@ -16,6 +16,11 @@
  *   VERSION   a file's VERSIONINFO: Win16's (VER.DLL's), and Win32's
  *             (Unicode: VerQueryValueA's strings ANSI, after the block)
  *
+ * and USER32's DDEML functions: DDEML.DLL's (the native DLL) Win16 calls,
+ * made with Win16's PASCAL frame of the program's flat pointers (as
+ * WINMM's of MMSYSTEM, pe_api.c); its callback called in the program's
+ * task with Win32's arguments
+ *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
 #include <stdlib.h>
@@ -26,6 +31,7 @@
 #include "windll.h"
 #include "winreg.h"
 #include "commdlg.h"
+#include "ddeml.h"
 
 
 /* ---------------------------------------------------------------- the table */
@@ -48,6 +54,14 @@ enum {
     /* VERSION */
     D_GetFileVersionInfoSizeA, D_GetFileVersionInfoA, D_VerQueryValueA, D_VerLanguageNameA,
     D_VerFindFileA, D_VerInstallFileA,
+    /* USER32's DDEML */
+    D_DdeInitializeA, D_DdeUninitialize, D_DdeConnectList, D_DdeQueryNextServer,
+    D_DdeDisconnectList, D_DdeConnect, D_DdeDisconnect, D_DdeSetUserHandle,
+    D_DdeClientTransaction, D_DdeAbandonTransaction, D_DdePostAdvise, D_DdeCreateDataHandle,
+    D_DdeAddData, D_DdeGetData, D_DdeAccessData, D_DdeUnaccessData, D_DdeFreeDataHandle,
+    D_DdeGetLastError, D_DdeCreateStringHandleA, D_DdeFreeStringHandle, D_DdeQueryStringA,
+    D_DdeKeepStringHandle, D_DdeEnableCallback, D_DdeNameService, D_DdeCmpStringHandles,
+    D_DdeReconnect, D_DdeQueryConvInfo, D_DdeImpersonateClient, D_DdeSetQualityOfService,
     D_COUNT
 };
 
@@ -77,6 +91,31 @@ static const struct { uint8_t module; uint8_t args; const char *name; } fns[D_CO
     { PE_VERSION, 8, "GetFileVersionInfoSizeA" }, { PE_VERSION, 16, "GetFileVersionInfoA" },
     { PE_VERSION, 16, "VerQueryValueA" }, { PE_VERSION, 12, "VerLanguageNameA" },
     { PE_VERSION, 32, "VerFindFileA" }, { PE_VERSION, 32, "VerInstallFileA" },
+    { PE_USER32, 16, "DdeInitializeA" }, { PE_USER32, 4, "DdeUninitialize" },
+    { PE_USER32, 20, "DdeConnectList" }, { PE_USER32, 8, "DdeQueryNextServer" },
+    { PE_USER32, 4, "DdeDisconnectList" }, { PE_USER32, 16, "DdeConnect" },
+    { PE_USER32, 4, "DdeDisconnect" }, { PE_USER32, 12, "DdeSetUserHandle" },
+    { PE_USER32, 32, "DdeClientTransaction" }, { PE_USER32, 12, "DdeAbandonTransaction" },
+    { PE_USER32, 12, "DdePostAdvise" }, { PE_USER32, 28, "DdeCreateDataHandle" },
+    { PE_USER32, 16, "DdeAddData" }, { PE_USER32, 16, "DdeGetData" },
+    { PE_USER32, 8, "DdeAccessData" }, { PE_USER32, 4, "DdeUnaccessData" },
+    { PE_USER32, 4, "DdeFreeDataHandle" }, { PE_USER32, 4, "DdeGetLastError" },
+    { PE_USER32, 12, "DdeCreateStringHandleA" }, { PE_USER32, 8, "DdeFreeStringHandle" },
+    { PE_USER32, 20, "DdeQueryStringA" }, { PE_USER32, 8, "DdeKeepStringHandle" },
+    { PE_USER32, 12, "DdeEnableCallback" }, { PE_USER32, 16, "DdeNameService" },
+    { PE_USER32, 8, "DdeCmpStringHandles" }, { PE_USER32, 4, "DdeReconnect" },
+    { PE_USER32, 12, "DdeQueryConvInfo" }, { PE_USER32, 4, "DdeImpersonateClient" },
+    { PE_USER32, 12, "DdeSetQualityOfService" },
+};
+
+/* the DDEML functions' Win16 ordinals and arguments (w a WORD, the others
+ * DWORDs; p a pointer) */
+static const struct { uint16_t ordinal; const char *types; } dde16[D_COUNT - D_DdeInitializeA] = {
+    { 2, "pddd" }, { 3, "d" }, { 4, "ddddp" }, { 5, "dd" }, { 6, "d" }, { 7, "dddp" }, { 8, "d" },
+    { 10, "ddd" }, { 11, "pdddwwdp" }, { 12, "ddd" }, { 13, "ddd" }, { 14, "dpdddww" },
+    { 15, "dpdd" }, { 16, "dpdd" }, { 17, "dp" }, { 18, "d" }, { 19, "d" }, { 20, "d" },
+    { 21, "dpw" }, { 22, "dd" }, { 23, "ddpdw" }, { 24, "dd" }, { 26, "ddw" }, { 27, "dddw" },
+    { 36, "dd" }, { 37, "d" }, { 0, "ddd" }, { 0, "d" }, { 0, "ddd" },
 };
 
 uint32_t win_pe_dll_proc(win_pe_image *img, int module, const char *name)
@@ -1095,6 +1134,66 @@ static __attribute__((noinline)) uint32_t version(pe_args *a, unsigned fn)
 
 /* ---------------------------------------------------------------- the dispatcher */
 
+/* ---------------------------------------------------------------- USER32's DDEML */
+
+/* a Win32 CONVINFO (96 bytes) of the native one */
+static uint32_t conv_info(pe_args *a)
+{
+    BOOL (WINAPI *fn)(HCONV, DWORD, PCONVINFO) =
+        (BOOL (WINAPI *)(HCONV, DWORD, PCONVINFO))native("DDEML", "DdeQueryConvInfo");
+    uint8_t *g = pe_rw(a, ARG(2), 4);
+    CONVINFO ci;
+    memset(&ci, 0, sizeof(ci));
+    ci.cb = sizeof(ci);
+    if (!g || !fn || !fn((HCONV)ARG(0), ARG(1), &ci))
+        return 0;
+    uint32_t cb = pe_rd32(g);
+    uint8_t b[96];
+    memset(b, 0, sizeof(b));
+    const uint32_t v[] = { cb, ci.hUser, ci.hConvPartner, ci.hszSvcPartner, ci.hszServiceReq,
+                           ci.hszTopic, ci.hszItem, ci.wFmt, ci.wType, ci.wStatus, ci.wConvst,
+                           ci.wLastError, ci.hConvList, 36 /* its CONVCONTEXT's cb */ };
+    for (unsigned i = 0; i < sizeof(v) / sizeof(v[0]); i++)
+        pe_wr32(b + 4 * i, v[i]);
+    if (!cb || cb > sizeof(b))
+        cb = sizeof(b);
+    uint8_t *out = pe_rw(a, ARG(2), cb);
+    if (!out)
+        return 0;
+    memcpy(out, b, cb);
+    return cb;
+}
+
+static __attribute__((noinline)) uint32_t dde(pe_args *a, unsigned fn)
+{
+    unsigned k = fn - D_DdeInitializeA;
+    switch (fn) {
+    case D_DdeQueryConvInfo: return conv_info(a);
+    case D_DdeImpersonateClient: case D_DdeSetQualityOfService: return 1;
+    }
+    const char *t = dde16[k].types;
+    unsigned n = (unsigned)strlen(t), total = 4;        /* the far return address's first */
+    for (unsigned i = 0; i < n; i++)
+        total += t[i] == 'w' ? 2u : 4u;
+    uint8_t frame[48];
+    unsigned off = total;
+    memset(frame, 0, sizeof(frame));
+    for (unsigned i = 0; i < n; i++) {                  /* PASCAL: the first argument highest */
+        off -= t[i] == 'w' ? 2u : 4u;
+        if (t[i] == 'w')
+            pe_wr16(frame + off, (uint16_t)ARG(i));
+        else
+            pe_wr32(frame + off, ARG(i));
+    }
+    int slot = win_dll_use("DDEML");                    /* the task's until it ends */
+    uint32_t v = 0;
+    int r = slot >= 0 ? win_dll_call_flat(slot, dde16[k].ordinal, frame, total, a->ctx, &v)
+                      : WINDLL_NONE;
+    if (fn == D_DdeCmpStringHandles)
+        return (uint32_t)(int32_t)(int16_t)v;
+    return r == WINDLL_WORD ? v & 0xffffu : r == WINDLL_DWORD ? v : 0;
+}
+
 int win_pe_dll_api(pe_args *a, uint16_t service, uint32_t *eax)
 {
     unsigned fn = service - WIN_PE_SERVICE_DLLS;
@@ -1106,6 +1205,7 @@ int win_pe_dll_api(pe_args *a, uint16_t service, uint32_t *eax)
     case PE_SHELL32: *eax = shell(a, fn); break;
     case PE_LZ32: *eax = lz(a, fn); break;
     case PE_VERSION: *eax = version(a, fn); break;
+    case PE_USER32: *eax = dde(a, fn); break;
     default: return 0;
     }
     return 1;

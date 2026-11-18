@@ -1,0 +1,14 @@
+# DDEML from a Win16 program (OWDDE): a server and a client instance
+# of its own; a request, a poke and an execute; DdeAccessData, DdeQueryConvInfo:
+#     ./winhost scripts/owdde.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OWDDE
+key RETURN
+wait 300
+snap dde_result.ppm
+exit

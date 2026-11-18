@@ -274,6 +274,11 @@ OWHOOK: COMMDLG's hooks and templates (owhook.rc's FILEHOOK, FINDHOOK,
     ok 2 sel 1 preview 1 help 1 'C:\\HOSTWIN\\README.TXT'", "color: 1 FF0000
     ok FF0000", "font: 1 'System', got 1 'System'", "find: 'hooked' next
     cust 5678, closed", "print: 1 init 1 setup 1 copies 2"
+OWDDE: DDEML's, as OW32D's (Win32's): a server and a client instance of
+    its own, a request, a poke, an execute, DdeAccessData (a copy in a
+    global block of its): "request 1: 'hello from the server' 22, access
+    'hello from the server' 22", "poke 1 'poked text', execute 1 '[run(1)]'",
+    "info 58: cb 58, topic 1, status 15, requests 1"
 """
 import sys
 
@@ -11462,6 +11467,287 @@ PROGRAMS = {
             '204669266c650000d400060032000e00010001000350804f4b0000d400180032000e00020000000150804361'
             '6e63656c0000d4002e0032000e00000400000150802653657475702e2e2e000006006a0064000900c9000000'
             '025082000000'
+        )),
+    'OWDDE': (
+        # wcc -za99 -bt=windows -ms -zW -od owdde.c; wlink @owdde.lnk
+        # ---- owdde.c
+        #     /* OWDDE: DDEML from a Win16 program on WINN (OW32D's, Win16's): a server and a
+        #      * client instance of its own: the service registered, a conversation,
+        #      * a request (DdeGetData, DdeAccessData), a poke and an execute (the
+        #      * server reads them with DdeAccessData and DdeGetData), DdeQueryConvInfo,
+        #      * string handles, the end. */
+        #     #include <windows.h>
+        #     #include <ddeml.h>
+        #     #include <string.h>
+        #
+        #     /* Watcom's Win16 ddeml.h has it return a near pointer: Windows' far one */
+        #     #define DdeAccessData(h, n) (((LPBYTE (WINAPI *)(HDDEDATA, LPDWORD))DdeAccessData)(h, n))
+        #
+        #     static char line[8][160];
+        #     static DWORD srv, cli;
+        #     static HSZ svc, topic, item;
+        #     static int connects, confirms, requests;
+        #     static char poked[64], executed[64];
+        #
+        #     HDDEDATA CALLBACK _export server_cb(UINT type, UINT fmt, HCONV conv, HSZ h1, HSZ h2,
+        #                                         HDDEDATA data, DWORD d1, DWORD d2)
+        #     {
+        #         switch (type) {
+        #         case XTYP_CONNECT:
+        #             connects++;
+        #             return (HDDEDATA)(DdeCmpStringHandles(h1, topic) == 0 &&
+        #                               DdeCmpStringHandles(h2, svc) == 0);
+        #         case XTYP_CONNECT_CONFIRM:
+        #             confirms++;
+        #             return 0;
+        #         case XTYP_REQUEST:
+        #             requests++;
+        #             if (!DdeCmpStringHandles(h2, item) && fmt == CF_TEXT)
+        #                 return DdeCreateDataHandle(srv, (LPBYTE)(LPSTR)"hello from the server", 22, 0, item,
+        #                                            CF_TEXT, 0);
+        #             return 0;
+        #         case XTYP_POKE: {
+        #             DWORD n = 0;
+        #             LPBYTE p = DdeAccessData(data, &n);
+        #             if (p && n < sizeof(poked))
+        #                 _fmemcpy(poked, p, (size_t)n);
+        #             DdeUnaccessData(data);
+        #             return (HDDEDATA)DDE_FACK;
+        #         }
+        #         case XTYP_EXECUTE:
+        #             DdeGetData(data, (LPBYTE)executed, sizeof(executed), 0);
+        #             return (HDDEDATA)DDE_FACK;
+        #         }
+        #         return 0;
+        #     }
+        #
+        #     HDDEDATA CALLBACK _export client_cb(UINT type, UINT fmt, HCONV conv, HSZ h1, HSZ h2,
+        #                                         HDDEDATA data, DWORD d1, DWORD d2)
+        #     {
+        #         return 0;
+        #     }
+        #
+        #     static HINSTANCE hinst;
+        #
+        #     static void dde(void)
+        #     {
+        #         UINT r1 = DdeInitialize(&srv, (PFNCALLBACK)MakeProcInstance((FARPROC)server_cb, hinst), APPCLASS_STANDARD, 0);
+        #         UINT r2 = DdeInitialize(&cli, (PFNCALLBACK)MakeProcInstance((FARPROC)client_cb, hinst), APPCMD_CLIENTONLY, 0);
+        #         svc = DdeCreateStringHandle(srv, "OW32D", CP_WINANSI);
+        #         topic = DdeCreateStringHandle(srv, "Topic", CP_WINANSI);
+        #         item = DdeCreateStringHandle(srv, "Item", CP_WINANSI);
+        #         HDDEDATA ns = DdeNameService(srv, svc, 0, DNS_REGISTER);
+        #         char name[32] = "";
+        #         DWORD qn = DdeQueryString(srv, svc, name, sizeof(name), CP_WINANSI);
+        #         wsprintf(line[0], "init %u %u, ids %lu %lu, service %d '%s' %lu", r1, r2, (unsigned long)srv,
+        #                 (unsigned long)cli, ns != 0, (LPSTR)name, (unsigned long)qn);
+        #         HSZ csvc = DdeCreateStringHandle(cli, "OW32D", CP_WINANSI);
+        #         HSZ ctopic = DdeCreateStringHandle(cli, "Topic", CP_WINANSI);
+        #         HSZ citem = DdeCreateStringHandle(cli, "Item", CP_WINANSI);
+        #         HCONV conv = DdeConnect(cli, csvc, ctopic, NULL);
+        #         wsprintf(line[1], "connect %d (asked %d, confirmed %d), same %d", conv != 0, connects,
+        #                 confirms, DdeCmpStringHandles(csvc, svc) == 0);
+        #         if (!conv)
+        #             return;
+        #         DWORD res = 0;
+        #         HDDEDATA got = DdeClientTransaction(NULL, 0, conv, citem, CF_TEXT, XTYP_REQUEST, 5000, &res);
+        #         char text[64] = "";
+        #         DWORD n = got ? DdeGetData(got, (LPBYTE)text, sizeof(text), 0) : 0;
+        #         DWORD size = 0;
+        #         LPBYTE p = got ? DdeAccessData(got, &size) : NULL;
+        #         wsprintf(line[2], "request %d: '%s' %lu, access '%s' %lu", got != 0, (LPSTR)text, (unsigned long)n,
+        #                 p ? (LPSTR)p : (LPSTR)"-", (unsigned long)size);
+        #         if (got) {
+        #             DdeUnaccessData(got);
+        #             DdeFreeDataHandle(got);
+        #         }
+        #         HDDEDATA pk = DdeClientTransaction((LPBYTE)(LPSTR)"poked text", 11, conv, citem, CF_TEXT, XTYP_POKE,
+        #                                            5000, &res);
+        #         HDDEDATA ex = DdeClientTransaction((LPBYTE)(LPSTR)"[run(1)]", 9, conv, 0, 0, XTYP_EXECUTE, 5000,
+        #                                            &res);
+        #         wsprintf(line[3], "poke %d '%s', execute %d '%s'", pk != 0, (LPSTR)poked, ex != 0, (LPSTR)executed);
+        #         CONVINFO ci;
+        #         memset(&ci, 0, sizeof(ci));
+        #         ci.cb = sizeof(ci);
+        #         UINT ic = DdeQueryConvInfo(conv, QID_SYNC, &ci);
+        #         wsprintf(line[4], "info %u: cb %lu, topic %d, status %X, requests %d", ic,
+        #                 (unsigned long)ci.cb, DdeCmpStringHandles(ci.hszTopic, ctopic) == 0, ci.wStatus,
+        #                 requests);
+        #         BOOL d = DdeDisconnect(conv);
+        #         DdeFreeStringHandle(cli, csvc);
+        #         DdeFreeStringHandle(cli, ctopic);
+        #         DdeFreeStringHandle(cli, citem);
+        #         BOOL u2 = DdeUninitialize(cli);
+        #         DdeNameService(srv, svc, 0, DNS_UNREGISTER);
+        #         BOOL u1 = DdeUninitialize(srv);
+        #         wsprintf(line[5], "disconnect %d, uninit %d %d, error %u", d, u1, u2, DdeGetLastError(srv));
+        #     }
+        #
+        #     LRESULT CALLBACK _export wndproc(HWND h, UINT m, WPARAM wp, LPARAM lp)
+        #     {
+        #         switch (m) {
+        #         case WM_PAINT: {
+        #             PAINTSTRUCT ps;
+        #             HDC dc = BeginPaint(h, &ps);
+        #             for (int i = 0; i < 8; i++)
+        #                 TextOut(dc, 4, 4 + 16 * i, line[i], (int)strlen(line[i]));
+        #             EndPaint(h, &ps);
+        #             return 0;
+        #         }
+        #         case WM_DESTROY:
+        #             PostQuitMessage(0);
+        #             return 0;
+        #         }
+        #         return DefWindowProc(h, m, wp, lp);
+        #     }
+        #
+        #     int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
+        #     {
+        #         WNDCLASS wc;
+        #         hinst = inst;
+        #         memset(&wc, 0, sizeof(wc));
+        #         wc.lpfnWndProc = wndproc;
+        #         wc.hInstance = inst;
+        #         wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        #         wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        #         wc.lpszClassName = "OwDdeClass";
+        #         RegisterClass(&wc);
+        #         HWND h = CreateWindow("OwDdeClass", "OWDDE - DDEML", WS_OVERLAPPEDWINDOW, 0, 0, 600, 140,
+        #                               NULL, NULL, inst, NULL);
+        #         ShowWindow(h, show);
+        #         dde();
+        #         InvalidateRect(h, NULL, TRUE);
+        #         MSG m;
+        #         while (GetMessage(&m, NULL, 0, 0)) {
+        #             TranslateMessage(&m);
+        #             DispatchMessage(&m);
+        #         }
+        #         return 0;
+        #     }
+        # ---- owdde.lnk
+        #     system windows
+        #     name owdde.exe
+        #     file owdde.o
+        #     library ddeml.lib
+        bytes.fromhex(
+            '4d5a80000100000004000000ffff0000b8000000000000004000000000000000000000000000000000000000'
+            '00000000000000000000000000000000800000000e1fba0e00b409cd21b8014ccd2154686973206973206120'
+            '57696e646f77732031362d6269742065786563757461626c650d0a240000000000000000000000004e450501'
+            '9a000d00000000000203020000040020280b010000000200020004000d004000500050007b00830027010000'
+            '000001000000020000000000000000039a00220e400d220ec408b002410c5008054f57444445000009534552'
+            '5645525f4342010009434c49454e545f4342020007574e4450524f43030000010007000e0013000005444445'
+            '4d4c064b45524e454c045553455203474449030171080071f30129a9080000096f776464652e657865000000'
+            'ccebfd90909090001e5890455589e51e8ed8b83200e8870a565781ec0e00817e2050407303e92100817e2050'
+            '407703e97a01817e2072807503e97200817e2090407503e9ea00e98f01817e20b0207503e96c00817e206210'
+            '7403e97b01ff064808ff7618ff7616ff363608ff3634089affff000085c07403e91700ff7614ff7612ff363e'
+            '08ff363c089affff000085c07403e90700c746f80100eb05c746f800008b46f8998946f48956f6e93401ff06'
+            '4608c746f40000c746f60000e92301ff064a08ff7614ff7612ff363208ff3630089affff000085c07403e906'
+            '00837e1e017403e93d00ff363a08ff3638088cd8bb1000505331c050b816005031c05031c050ff363208ff36'
+            '3008b801005031c0509affff000089c389d0895ef48946f6e9bf00c746f40000c746f60000e9b200c746f000'
+            '00c746f20000ff7610ff760e8cd08d5ef050539affff000089c389d0895eec8946ee8b4eec8b56ee31db31c0'
+            '39c27403e9040039d9740c837ef2007506837ef0407203e91a00ff76f08b46ec8b4eee8cdabbb00289de89c3'
+            '89f0e84009e90000ff7610ff760e9affff0000c746f40080c746f60000e93600ff7610ff760e8cd8baf00250'
+            '5231c050b840005031c05031c0509affff0000c746f40080c746f60000e90a00c746f40000c746f600008b46'
+            'f48b56f68d66fa5f5e1f5d4dca1c001e5890455589e51e8ed8b81000e89c08565781ec0400c746f60000c746'
+            'f800008b46f68b56f88d66fa5f5e1f5d4dca1c005589e5b82201e87208535152565781ecf6008cd8bb380850'
+            '53b8ffffbbffff5053ff3644089affff000089c389d0505331c05031c05031c05031c0509affff00008946e2'
+            '8cd8bb40085053b8ffffbbffff5053ff3644089affff000089c389d0505331c050b810005031c05031c0509a'
+            'ffff00008946e4ff363a08ff3638088cd8bb26005053b8ec03509affff000089c389d0891e3c08a33e08ff36'
+            '3a08ff3638088cd8bb2c005053b8ec03509affff000089c389d0891e3408a33608ff363a08ff3638088cd8bb'
+            '32005053b8ec03509affff000089c389d0891e3008a33208ff363a08ff363808ff363e08ff363c0831c05031'
+            'c050b80100509affff000089c389d0895ede8946e0b910008cd08ec08d7e8ebe6801f3a5ff363a08ff363808'
+            'ff363e08ff363c088cd08d5e8e505331c050b8200050b8ec03509affff000089c389d0895eca8946ccff76cc'
+            'ff76ca8cd08d5e8e50538b46e00b46de85c07403e90200eb07c746f40100eb05c746f40000ff76f4ff364208'
+            'ff364008ff363a08ff363808ff76e4ff76e28cd8bb370050538cd8bb300350539affff000083c41eff364208'
+            'ff3640088cd8bb26005053b8ec03509affff000089c389d0895eb28946b4ff364208ff3640088cd8bb2c0050'
+            '53b8ec03509affff000089c389d0895eb68946b8ff364208ff3640088cd8bb32005053b8ec03509affff0000'
+            '89c389d0895eba8946bcff364208ff364008ff76b4ff76b2ff76b8ff76b631c05031c0509affff000089c389'
+            'd0895ebe8946c0ff76b4ff76b2ff363e08ff363c089affff000085c07503e90200eb07c746f00100eb05c746'
+            'f00000ff76f0ff364608ff3648088b46c00b46be85c07403e90200eb07c746f20100eb05c746f20000ff76f2'
+            '8cd8ba640050528cd8bad00350529affff000083c4108b46c00b46be85c07503e90200eb03e9d303c746c200'
+            '00c746c4000031c05031c05031c05031c050ff76c0ff76beff76bcff76bab8010050b8b0205031c050b88813'
+            '508cd08d5ec250539affff000089c389d0895ec68946c8b920008cd08ec08dbe14ffbe8801f3a58b46c80b46'
+            'c685c07403e90300e92f00ff76c8ff76c68cd08d9e14ff505331c050b840005031c05031c0509affff000089'
+            'c389d0899e0eff898610ffe90c00c7860eff0000c78610ff00008b860eff8946ce8b8610ff8946d0c746d200'
+            '00c746d400008b46c80b46c685c07403e90300e92100ff76c8ff76c68cd08d5ed250539affff000089c389d0'
+            '899e0aff89860cffe90c00c7860aff0000c7860cff00008b860aff8946d68b860cff8946d8ff76d4ff76d28b'
+            '4ed68b5ed831d231c039c37403e9040039d174118b46d6898606ff8b46d8898608ffe90a008c9e08ffc78606'
+            'ff9100ffb608ffffb606ffff76d0ff76ce8cd08d9614ff50528b46c80b46c685c07403e90200eb08c78612ff'
+            '0100eb06c78612ff0000ffb612ff8cd8ba930050528cd8ba700450529affff000083c41a8b46c80b46c685c0'
+            '7403e90200eb16ff76c8ff76c69affff0000ff76c8ff76c69affff00008cd8bbb900505331c050b80b0050ff'
+            '76c0ff76beff76bcff76bab8010050b890405031c050b88813508cd08d5ec250539affff000089c389d0895e'
+            'ae8946b08cd8bbc400505331c050b8090050ff76c0ff76be31c05031c05031c050b850405031c050b8881350'
+            '8cd08d5ec250539affff000089c389d0895eda8946dc8cd8bbf00250538b46dc0b46da85c07403e90200eb08'
+            'c78602ff0100eb06c78602ff0000ffb602ff8cd8bab00250528b46b00b46ae85c07403e90200eb08c78600ff'
+            '0100eb06c78600ff0000ffb600ff8cd8bacd0050528cd8ba100550529affff000083c414bb3a0031d28d8654'
+            'ffe88e03c78654ff3a00c78656ff0000ff76c0ff76beb8ffff50b8ffff508cd08d9654ff50529affff000089'
+            '46e8ff364a08ffb674ffffb66affffb668ffff76b8ff76b69affff000085c07503e90200eb08c78604ff0100'
+            'eb06c78604ff0000ffb604ffffb656ffffb654ffff76e88cd8baeb0050528cd8bab00550529affff000083c4'
+            '14ff76c0ff76be9affff00008946eaff364208ff364008ff76b4ff76b29affff0000ff364208ff364008ff76'
+            'b8ff76b69affff0000ff364208ff364008ff76bcff76ba9affff0000ff364208ff3640089affff00008946ec'
+            'ff363a08ff363808ff363e08ff363c0831c05031c050b80200509affff0000ff363a08ff3638089affff0000'
+            '8946eeff363a08ff3638089affff000050ff76ecff76eeff76ea8cd8ba1d0150528cd8ba500650529affff00'
+            '0083c410e900008d66f65f5e5a595b5dc31e5890455589e51e8ed8b84000e8e601565781ec2800837e0c0f75'
+            '03e90c00837e0c027503e98000e99200ff760e8cd08d56d250529affff00008946f6c746f80000837ef8087d'
+            '03e90300e93e00ff76f6b8040050b1048b46f8d3e0050400508b46f8baa000f7eaba300301c28cd850528b46'
+            'f8baa000f7eaba300301d0e8e701509affff0000ff46f8ebb6ff760e8cd08d56d250529affff0000c746f200'
+            '00c746f40000e9360031c0509affff0000c746f20000c746f40000e92100ff760eff760cff760aff7608ff76'
+            '069affff000089c389d0895ef28946f4e900008b46f28b56f48d66fa5f5e1f5d4dca0a005589e5b85600e8fe'
+            '00565781ec30008b460ca34408bb1a0031d28d46cce83e01c746d0ffffc746ceffff8b460c8946d631c05031'
+            'c050b8007f509affff00008946dac746dc06008c5ee4c746e243018cd08d56cc50529affff00008cd8ba4301'
+            '50528cd8ba4e015052b8cf005031c05031c05031c050b8580250b88c005031c05031c050ff760c31c05031c0'
+            '509affff00008946faff76faff76049affff0000e8e9f7ff76fa31c05031c050b80100509affff0000e90000'
+            '8cd08d56e6505231c05031c05031c0509affff000085c07403e90300e91a008cd08d56e650529affff00008c'
+            'd08d56e650529affff0000ebc7c746f800008b46f88d66fc5f5e5dc20a008c16c801c33bc473132bc4f7d83b'
+            '060a0077068cd03b06c8017401c30e5ab8c10abb0100e90802537461636b204f766572666c6f7721005589e5'
+            '565789c78b460489de8ec21e57918ed8d1e9f3a513c9f3a45f1f89f85f5e5dc20200515789c789d988d0571e'
+            '078ae0d1e9f3ab13c9f3aa5f89f85f59c3515789c78cd88ec083c9ff33c0f2aef7d14989c85f59c3eb020300'
+            '9affff00000bc0750e5033c0ba0f00e86a0258b44ccd218c06ce01575606535253be4c088936e9018c1eeb01'
+            '268a078804464384c075f589360a005b2bc0509affff000057579affff0000fc1e07b94c08bfb0022bcf32c0'
+            'f3aab8720ca3e501b8ffffa3e701b430cd21a2d0018826d1019affff0000a2d2018826d30186e0a3d4015458'
+            '3bc475120f01e0a90100740ab001a2d601b003a2d7011ebff10157b89000509affff0000b8f101893eed018c'
+            '1eef01b8ff00e86b01e8b0fde9f9004f70656e20576174636f6d20432f432b2b31362052756e2d54696d6520'
+            '73797374656d2e20436f7079726967687420286329204f70656e20576174636f6d20436f6e7472696275746f'
+            '727320323030322d323032362e20506f7274696f6e7320436f7079726967687420284329205379626173652c'
+            '20496e632e20313938382d323030322e00c3cb005589e551565781ec800089c689df8d9e7aff8cd98ec2268a'
+            '0484c074173c0d74138d46f939c3730c268a048ec14626880743ebe031c08ec15026c607001e8d9e7aff531e'
+            'b85c015031c0509affff000089f8e94400515689c189d6e8330185c0750689c889f2eb9889d8e92c0000c3c3'
+            '535289c3833ea802007404ff16a802ff168202baff00b81000e8a800ff168202ff16840289d8e928fe5289c2'
+            'ff168202ff16840289d0e918fe5589e5535289c3833f0075078d66fc5a5b5dc31eff171febf35589e5535289'
+            'c38b47028b1785c0750485d274df1eff1f1febd95589e5535152565789c11ee813ffbfb00289fabbaa0289fe'
+            '88c839fb7316803f02750583c306ebf23a470172f689de8a4701ebef39fe74158d4402803c007508e88affc6'
+            '0402ebcbe89bffebf61f8d66f65f5e5a595b5dc35589e55351565789c11ee8bcfe88d5bfb00289fabbb00289'
+            'fe88c839fb7316803f02750583c306ebf23a470177f689de8a4701ebef39fe741c3a6c017305c60402ebd18d'
+            '4402803c007505e827ffebeee83bffebe91f8d66f85f5eeb9f803e860200750331c0c35250cceb0657564944'
+            '454fb8010083c404c300460003016c0b02001e000301730b0300050002008d0b0100280b03019e0b02000300'
+            '0301d00b020031000301c00c03000100030170000100240003018a00010024000301d2000100240003011201'
+            '01000e00030148010100110003019b01010012000301c7010100100002003e02010008000500410201000800'
+            '03014a02020033000301610201000200020070020100f301050073020100f30103017c020200330003019402'
+            '010002000301af02010015000301d202010015000301f5020100150003011f0301001b0003015f0301001700'
+            '0301bd030300a4010301d803010015000301fa030100150003011c0401001500030145040100070003016204'
+            '010024000301b3040300a4010301050501000b0003014f05010010000301a4050100110003014d060300a401'
+            '03016a060100120003017506010013000301aa0601000b000301e80601000b00030155070300a40103018b07'
+            '010009000301a907010024000301e2070300a4010301f0070100080003010608010016000301190801001600'
+            '03012c0801001600030139080100030003015b0801001b000301680801000300030178080100140003019508'
+            '0300a4010301df080300270003012c0904002100030140090300280003015509030006000301760903006b00'
+            '0200bb090100a9080500c0090100a9080301d3090300ad000301ef09030039000301260a030029000301340a'
+            '03002a000301490a03007d000301610a03006c000301770a030071000301830a0300720003012d0b02005b00'
+            '0000000005000000000000000000000068656c6c6f2066726f6d2074686520736572766572004f5733324400'
+            '546f706963004974656d00696e69742025752025752c2069647320256c7520256c752c207365727669636520'
+            '2564202725732720256c7500636f6e6e656374202564202861736b65642025642c20636f6e6669726d656420'
+            '2564292c2073616d65202564002d00726571756573742025643a202725732720256c752c2061636365737320'
+            '2725732720256c7500706f6b65642074657874005b72756e2831295d00706f6b6520256420272573272c2065'
+            '786563757465202564202725732700696e666f2025753a20636220256c752c20746f7069632025642c207374'
+            '617475732025582c20726571756573747320256400646973636f6e6e6563742025642c20756e696e69742025'
+            '642025642c206572726f72202575004f77446465436c617373004f57444445202d204444454d4c004f70656e'
+            '20576174636f6d00000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '000000000000000000000000000000000000ffff00000000000000000000000c000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000e30ce30c0000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000209a0a0000'
         )),
 }
 

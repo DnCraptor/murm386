@@ -1,0 +1,14 @@
+# USER32's DDEML from a Win32 program (OW32D): a server and a client instance
+# of its own; a request, a poke and an execute; DdeAccessData, DdeQueryConvInfo:
+#     ./winhost scripts/ow32d.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OW32D
+key RETURN
+wait 300
+snap d32_result.ppm
+exit

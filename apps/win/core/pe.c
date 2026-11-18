@@ -368,7 +368,7 @@ uint32_t win_pe_native_proc(win_pe_image *img, int module, const char *name, uin
     for (unsigned i = 0; i < win_pe_nfns; i++)
         if (win_pe_fns[i].module == module && !strcmp(win_pe_fns[i].name, name))
             return win_pe_thunk(img, (uint16_t)i, win_pe_fns[i].args);
-    return 0;
+    return module == PE_USER32 ? win_pe_dll_proc(img, module, name) : 0;   /* its DDEML */
 }
 
 /* a function none has: a thunk whose call ends the program */

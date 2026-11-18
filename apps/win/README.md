@@ -490,7 +490,7 @@ face "Winn Test TT": its sizes, bold and italic made, Cyrillic, the outline
 metrics, glyph bitmaps as they are, turned and wider, an outline drawn, a
 .FOT made), `OWHELP` (WinHelp), `OWDLG` (COMMDLG's
 Color, Font and Print dialogs, GetFileTitle), `OWHOOK` (COMMDLG's hooks
-and templates), `OWMISC` (moveable local
+and templates), `OWDDE` (DDEML, DdeAccessData), `OWMISC` (moveable local
 memory, KEYBOARD, OLECLI, OpenFile's OFSTRUCT: what WRITE.EXE needed),
 `OWSND` (SOUND, OLESVR),
 `OW31` (the rest of 3.1's USER, GDI, KERNEL), `OWMORE` with `OWDRV.DLL`
@@ -575,7 +575,8 @@ strings ANSI, kept after the block, whose size GetFileVersionInfoSizeA
 doubles). And of KERNEL32, USER32 and GDI32 what Win32s has besides:
 OpenFile, profile sections and structures, CreateProcess (WinExec: its
 process handle signaled when the task ends), WaitForMultipleObjects,
-semaphores; hooks (SetWindowsHookEx: the task's own, with Win32's
+semaphores; USER32's DDEML (DDEML.DLL's, the callback's arguments
+Win32's); hooks (SetWindowsHookEx: the task's own, with Win32's
 structures; CallNextHookEx), the clipboard (the program's HGLOBALs copied),
 the keyboard's functions, accelerator tables, icons from resources,
 GrayString, LoadMenuIndirect, MessageBoxIndirect; PolyPolygon,
@@ -588,7 +589,8 @@ before it starts. `host/mkpe_watcom.py` writes `OW32.EXE` and
 script; `scripts/ow32.txt`), and `OW32S.EXE`, Win32s' DLLs and functions
 (`scripts/ow32s.txt`), `OW32X.EXE`, structured exceptions
 (`scripts/ow32x.txt`), `OW32W.EXE`, WINMM's devices (`scripts/ow32w.txt`),
-`OW32H.EXE`, COMDLG32's hooks and templates (`scripts/ow32h.txt`).
+`OW32H.EXE`, COMDLG32's hooks and templates (`scripts/ow32h.txt`),
+`OW32D.EXE`, USER32's DDEML (`scripts/ow32d.txt`).
 
     WINN [:] [program [arguments]]
 
@@ -780,7 +782,8 @@ windows sends (COMMDLG's: the program's own FINDREPLACE, OPENFILENAME
 ...).
 
 DDEML (`include/ddeml.h` for native callers) is the DDE Management
-Library between the programs WINN runs, native and Win16 alike:
+Library between the programs WINN runs, native, Win16 and Win32 (USER32's
+Dde* functions) alike:
 instances with their callbacks and filters, services (DdeNameService,
 XTYP_REGISTER), conversations (DdeConnect asks the servers' callbacks with
 XTYP_CONNECT), the client's request, poke, execute and advise links
@@ -789,7 +792,9 @@ XTYP_CONNECT), the client's request, poke, execute and advise links
 string handles (global atoms). An instance's callback is called in its
 task, through a hidden window of the instance. There is no NetDDE, no
 conversation with a program speaking DDE's messages itself, no
-DdeConnectList, and a Win16 program's DdeAccessData gives nothing. The
+DdeConnectList. A program's DdeAccessData gives a copy of the handle's
+bytes in its own memory (a Win16 program's a global block of its),
+which DdeUnaccessData takes back. The
 Program Manager is a DDEML server as Windows' is for setup programs:
 service and topic PROGMAN, [CreateGroup], [ShowGroup], [AddItem],
 [DeleteItem], [ReplaceItem], [DeleteGroup] ([Reload], [ExitProgman] do
@@ -1013,6 +1018,7 @@ list the links.
     ./winhost scripts/owhelp.txt PROGMAN     # WinHelp from a Win16 program: context, keyword, quit
     ./winhost scripts/owdlg.txt PROGMAN      # COMMDLG: Color (full), Font, Print (no printer), GetFileTitle
     ./winhost scripts/owhook.txt PROGMAN     # COMMDLG's hooks and templates: Open, Color, Font, Find, Print
+    ./winhost scripts/owdde.txt PROGMAN      # DDEML: a server and a client of its own, DdeAccessData
     ./winhost scripts/owmisc.txt PROGMAN     # moveable local memory, KEYBOARD, OLECLI
     ./winhost scripts/owsnd.txt PROGMAN      # SOUND (tones on stderr), OLESVR
     ./winhost scripts/ow31.txt PROGMAN       # clipboard viewers, ClipCursor, bounds, EnumObjects...
@@ -1096,8 +1102,8 @@ Win32: threads (CreateThread fails), access violations (no paging: a bad
 pointer reads what is there), the FPU's exceptions' own codes, the Unicode
 (W) functions, what GDI draws into a DIB section (its bits are not brought
 back), ADVAPI32 but the registry, WINMM's CALLBACK_EVENT and wave input,
-COMCTL32, OLE32, DDEML's Win32
-functions; VxDs.
+COMCTL32, OLE32, DDEML's
+Unicode functions; VxDs.
 A spooler and Print Manager's queues (printing goes straight to the port),
 printer drivers of Windows' own (.DRV files: WINN's are native DLLs), a
 driver's private DEVMODE data, the mixer's inputs, `.GRP` files (`PROGMAN.INI` holds the groups as text), DLLs (`LoadLibrary`) of native applications;
