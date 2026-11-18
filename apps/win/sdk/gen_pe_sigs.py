@@ -78,6 +78,15 @@ KERNEL32: ExitProcess GetCommandLineA GetCommandLineW GetModuleHandleA GetModule
   GetTempFileNameA GetDateFormatA GetTimeFormatA FileTimeToDosDateTime
   CompareFileTime SearchPathA _lopen _lcreat _lread _lwrite _llseek _lclose
   GetSystemTimeAdjustment SetFileApisToOEM AreFileApisANSI
+  OpenFile DisableThreadLibraryCalls IsDebuggerPresent GetPrivateProfileSectionA
+  GetProfileSectionA WritePrivateProfileSectionA WriteProfileSectionA
+  GetPrivateProfileStructA WritePrivateProfileStructA ExpandEnvironmentStringsA
+  GetComputerNameA GlobalCompact LocalCompact LocalShrink GlobalFix GlobalUnfix GlobalWire
+  GlobalUnWire InterlockedCompareExchange InterlockedExchangeAdd LockFile UnlockFile
+  GetLogicalDriveStringsA LoadModule GetThreadPriority SetThreadPriority GetPriorityClass
+  SetPriorityClass ResumeThread SuspendThread GetProcessVersion IsValidLocale
+  GetExitCodeThread MoveFileExA CreateSemaphoreA ReleaseSemaphore PulseEvent
+  WaitForMultipleObjects CreateProcessA
 USER32: MessageBoxA RegisterClassA RegisterClassExA UnregisterClassA CreateWindowExA
   DefWindowProcA CallWindowProcA GetMessageA PeekMessageA DispatchMessageA TranslateMessage
   PostMessageA SendMessageA PostThreadMessageA PostQuitMessage BeginPaint EndPaint
@@ -91,9 +100,22 @@ USER32: MessageBoxA RegisterClassA RegisterClassExA UnregisterClassA CreateWindo
   SetWindowPlacement
   SystemParametersInfoA
   GetMessagePos MsgWaitForMultipleObjects WaitMessage
+  PtInRect SetWindowsHookExA SetWindowsHookA UnhookWindowsHookEx UnhookWindowsHook
+  CallNextHookEx CallMsgFilterA GetClipboardData SetClipboardData MapVirtualKeyA VkKeyScanA
+  ToAscii GetKeyNameTextA GetKeyboardType OemKeyScan GetKBCodePage CharToOemA OemToCharA
+  CharToOemBuffA OemToCharBuffA CopyIcon DestroyCursor GetIconInfo GrayStringA SetSysColors
+  TranslateMDISysAccel ChildWindowFromPointEx DragDetect DrawTextExA SendMessageTimeoutA
+  SendNotifyMessageA GetWindowThreadProcessId ExitWindowsEx CascadeWindows TileWindows
+  LoadMenuIndirectA MessageBoxIndirectA WaitForInputIdle GetKeyboardLayout
+  GetKeyboardLayoutNameA CreateIconFromResource CreateIconFromResourceEx
+  LookupIconIdFromDirectory LookupIconIdFromDirectoryEx CreateAcceleratorTableA
+  DestroyAcceleratorTable
 GDI32: GetObjectA GetTextMetricsA CreateFontIndirectA TextOutA ExtTextOutA SelectObject BitBlt
   StretchBlt DeleteObject SetDIBColorTable GetDIBColorTable
   GetTextExtentPoint32A GetTextExtentPointA GetStockObject CreateDIBSection
+  PolyPolygon CreatePolyPolygonRgn PolyPolyline EnumFontFamiliesA EnumFontsA GetClipRgn
+  GetGlyphOutlineA LineDDA ResetDCA SetAbortProc StartDocA SetBrushOrgEx GetDCOrgEx
+  GetTextExtentExPointA CreateDIBPatternBrushPt CreateBitmapIndirect ExtCreateRegion
 '''
 
 # Win32's names of Win16 functions

@@ -182,6 +182,9 @@ void    user_dialog_menu(HMENU menu);   /* the next dialog's menu */
 #define USER_HOOK_BIT(type) (1u << ((type) + 1))
 #endif
 void    user_set_hooks(unsigned types, LRESULT (*call)(int type, int code, WPARAM wp, LPARAM lp));
+/* the same for Win16 programs' (who 0, user_set_hooks') or Win32 ones' (1) */
+void    user_set_hooks_of(int who, unsigned types,
+                          LRESULT (*call)(int type, int code, WPARAM wp, LPARAM lp));
 LRESULT user_hook(int type, int code, WPARAM wp, LPARAM lp);
 HFONT   user_ctl_font(HWND h);
 int     user_ctl_line(HWND h);      /* its font's line height: 16 the system font's */

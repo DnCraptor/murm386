@@ -1,0 +1,37 @@
+# Win32s' DLLs and functions (OW32S): the registry, VERSION, LZ32, SHELL32,
+# KERNEL32's sections, structs, semaphores, USER32's hooks, clipboard,
+# keyboard, GDI32's; O: the Open dialog, C: colours, F: Find, P: PrintDlg:
+#     ./winhost scripts/ow32s.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OW32S
+key RETURN
+wait 1500
+snap o32s_main.ppm
+type o
+wait 100
+snap o32s_open.ppm
+type README.TXT
+key RETURN
+wait 50
+type c
+wait 100
+snap o32s_color.ppm
+key ESC
+wait 50
+type f
+wait 100
+snap o32s_find.ppm
+key RETURN
+wait 50
+snap o32s_next.ppm
+key ESC
+wait 50
+type p
+wait 100
+snap o32s_end.ppm
+exit

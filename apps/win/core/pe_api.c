@@ -323,6 +323,12 @@ static uint32_t heap_size(win_pe_ctx *ctx, uint32_t heap, uint32_t p)
     return b ? (pe_rd32(b) & ~1u) - 8u : 0xffffffffu;
 }
 
+uint32_t pe_heap_size(win_pe_ctx *ctx, uint32_t heap, uint32_t p)
+{
+    uint32_t n = heap_size(ctx, heap, p);
+    return n == 0xffffffffu ? 0 : n;
+}
+
 static uint32_t heap_realloc(win_pe_ctx *ctx, uint32_t heap, uint32_t p, uint32_t bytes,
                              uint32_t flags)
 {
@@ -441,6 +447,7 @@ void win_pe_start(win_pe_ctx *ctx, const char *cmdline)
 
 void win_pe_end(win_pe_ctx *ctx)
 {
+    win_pe_dlls_end(ctx);
     pe_user_end(ctx);
     for (int i = 0; i < PE_HANDLES; i++)
         switch (ctx->handle[i].kind) {
@@ -958,6 +965,8 @@ static void format_time(const SYSTEMTIME_N *t, const char *pic, char *out, size_
 
 /* the calls with buffers of their own: not in kernel32()'s frame, which
  * nested window procedures stack up */
+static int kernel32_win32s(pe_args *a, uint16_t service, uint32_t *eax);
+
 static __attribute__((noinline)) int kernel32_more(pe_args *a, uint16_t service, uint32_t *eax)
 {
     win_pe_ctx *ctx = a->ctx;
@@ -1117,6 +1126,466 @@ static __attribute__((noinline)) int kernel32_more(pe_args *a, uint16_t service,
             if (p)
                 pe_wr32(p, vals[k]);
         }
+        v = 1;
+        break;
+    }
+    default:
+        return kernel32_win32s(a, service, eax);
+    }
+    *eax = v;
+    return 1;
+}
+
+/* ---------------------------------------------------------------- Win32s' more */
+
+/* a handle waited for: 1 signaled (an auto-reset event reset, a
+ * semaphore's count taken), 0 not yet, -1 none of the program's */
+static int signaled(win_pe_ctx *ctx, uint32_t h)
+{
+    uint32_t i = h - PE_HANDLE(0);
+    if (h == CURRENT_PROCESS || h == CURRENT_THREAD)
+        return 0;
+    if (i >= PE_HANDLES || !ctx->handle[i].kind)
+        return -1;
+    switch (ctx->handle[i].kind) {
+    case PE_H_EVENT:
+        if (!ctx->handle[i].value)
+            return 0;
+        if (!ctx->handle[i].fd)             /* auto-reset */
+            ctx->handle[i].value = 0;
+        return 1;
+    case PE_H_SEMAPHORE:
+        if (!ctx->handle[i].value)
+            return 0;
+        ctx->handle[i].value--;
+        return 1;
+    case PE_H_PROCESS:                      /* the task it started: gone */
+        return !ctx->handle[i].value || !IsTask((HTASK)ctx->handle[i].value);
+    default:
+        return 1;                           /* one thread: its mutexes are its own */
+    }
+}
+
+/* WaitForSingleObject, WaitForMultipleObjects: the handles' first one
+ * signaled (all of them with all), the other tasks running meanwhile */
+static int wait_for(pe_args *a, const uint32_t *h, uint32_t n, int all, uint32_t ms,
+                    uint32_t *v)
+{
+    win_pe_ctx *ctx = a->ctx;
+    DWORD start = GetTickCount();
+    for (;;) {
+        uint32_t done = 0;
+        for (uint32_t k = 0; k < n; k++) {
+            int s = signaled(ctx, h[k]);
+            if (s < 0) {
+                ctx->last_error = ERROR_INVALID_HANDLE;
+                *v = 0xffffffffu;           /* WAIT_FAILED */
+                return 1;
+            }
+            if (s && !all) {
+                *v = k;                     /* WAIT_OBJECT_0 + k */
+                return 1;
+            }
+            done += (uint32_t)s;
+        }
+        if (all && done == n) {
+            *v = 0;
+            return 1;
+        }
+        if (ms != 0xffffffffu && GetTickCount() - start >= ms) {
+            *v = 0x102u;                    /* WAIT_TIMEOUT */
+            return 1;
+        }
+        int waits = 0;                      /* only a task's end will come */
+        for (uint32_t k = 0; k < n; k++) {
+            uint32_t i = h[k] - PE_HANDLE(0);
+            waits |= i < PE_HANDLES && ctx->handle[i].kind == PE_H_PROCESS;
+        }
+        if (!waits && ms == 0xffffffffu) {
+            *v = 0;                         /* nothing else can set them */
+            return 1;
+        }
+        if (ctx->yield && ctx->yield()) {
+            ctx->stopped = 1;
+            return WINX86_SERVICE_EXIT;
+        }
+    }
+}
+
+/* [section] of an INI file as "key=value\0...\0\0" */
+static uint32_t profile_section(pe_args *a, const char *app, uint32_t buf, uint32_t size,
+                                const char *file)
+{
+    char *keys = (char *)win_alloc(4096), val[256];
+    char *out = size ? (char *)pe_buf(a, buf, size) : NULL;
+    uint32_t n = 0;
+    if (!keys || !out || size < 2) {
+        win_free(keys);
+        return 0;
+    }
+    if (file)
+        GetPrivateProfileString(app, NULL, "", keys, 4096, file);
+    else
+        GetProfileString(app, NULL, "", keys, 4096);
+    for (const char *k = keys; *k; k += strlen(k) + 1) {
+        if (file)
+            GetPrivateProfileString(app, k, "", val, sizeof(val), file);
+        else
+            GetProfileString(app, k, "", val, sizeof(val));
+        uint32_t len = (uint32_t)(strlen(k) + 1 + strlen(val));
+        if (n + len + 2 > size)
+            break;
+        pe_fmt(out + n, len + 1, "%s=%s", k, val);
+        n += len + 1;
+    }
+    out[n] = 0;
+    if (!n)
+        out[1] = 0;
+    win_free(keys);
+    return n;
+}
+
+static uint32_t write_section(pe_args *a, const char *app, uint32_t list, const char *file)
+{
+    if (file)
+        WritePrivateProfileString(app, NULL, NULL, file);
+    else
+        WriteProfileString(app, NULL, NULL);
+    for (uint32_t at = list; list;) {
+        const char *s = pe_str(a, at);
+        if (!s || !*s)
+            break;
+        char key[128];
+        const char *eq = strchr(s, '=');
+        if (eq && (size_t)(eq - s) < sizeof(key)) {
+            memcpy(key, s, (size_t)(eq - s));
+            key[eq - s] = 0;
+            if (file)
+                WritePrivateProfileString(app, key, eq + 1, file);
+            else
+                WriteProfileString(app, key, eq + 1);
+        }
+        at += (uint32_t)strlen(s) + 1u;
+    }
+    return 1;
+}
+
+/* a structure kept as hex digits and their checksum, as Windows does */
+static uint32_t profile_struct(pe_args *a, int write)
+{
+    const char *sec = pe_str(a, pe_arg(a, 0)), *key = pe_str(a, pe_arg(a, 1));
+    const char *file = pe_arg(a, 4) ? pe_str(a, pe_arg(a, 4)) : "WIN.INI";
+    uint32_t n = pe_arg(a, 3);
+    uint8_t *d = n ? (uint8_t *)pe_buf(a, pe_arg(a, 2), n) : NULL;
+    static const char hex[] = "0123456789ABCDEF";
+    char text[1028];
+    if (!sec || !key || !file || !d || n > 500)
+        return 0;
+    if (write) {
+        uint8_t sum = 0;
+        for (uint32_t i = 0; i < n; i++) {
+            text[2 * i] = hex[d[i] >> 4];
+            text[2 * i + 1] = hex[d[i] & 15];
+            sum = (uint8_t)(sum + d[i]);
+        }
+        text[2 * n] = hex[sum >> 4];
+        text[2 * n + 1] = hex[sum & 15];
+        text[2 * n + 2] = 0;
+        return WritePrivateProfileString(sec, key, text, file);
+    }
+    if (GetPrivateProfileString(sec, key, "", text, sizeof(text), file) != (int)(2 * n + 2))
+        return 0;
+    uint8_t sum = 0, b[512];
+    for (uint32_t i = 0; i <= n; i++) {
+        int hi = text[2 * i], lo = text[2 * i + 1];
+        hi = hi <= '9' ? hi - '0' : (hi | 0x20) - 'a' + 10;
+        lo = lo <= '9' ? lo - '0' : (lo | 0x20) - 'a' + 10;
+        if (hi < 0 || hi > 15 || lo < 0 || lo > 15)
+            return 0;
+        b[i] = (uint8_t)(hi << 4 | lo);
+        if (i < n)
+            sum = (uint8_t)(sum + b[i]);
+    }
+    if (sum != b[n])
+        return 0;
+    memcpy(d, b, n);
+    return 1;
+}
+
+static __attribute__((noinline)) int kernel32_win32s(pe_args *a, uint16_t service, uint32_t *eax)
+{
+    win_pe_ctx *ctx = a->ctx;
+    uint32_t v = 0;
+    switch (service) {
+    case PEF_OpenFile: {
+        const char *s = pe_str(a, pe_arg(a, 0));
+        OFSTRUCT *of = (OFSTRUCT *)pe_buf(a, pe_arg(a, 1), sizeof(OFSTRUCT));
+        v = s && of ? (uint32_t)(int32_t)OpenFile(s, of, pe_arg(a, 2) & 0xffffu) : 0xffffffffu;
+        break;
+    }
+    case PEF_DisableThreadLibraryCalls: v = 1; break;
+    case PEF_IsDebuggerPresent: v = 0; break;
+    case PEF_GetPrivateProfileSectionA:
+    case PEF_GetProfileSectionA: {
+        int priv = service == PEF_GetPrivateProfileSectionA;
+        const char *app = pe_str(a, pe_arg(a, 0));
+        const char *file = priv ? pe_str(a, pe_arg(a, 3)) : NULL;
+        v = app && (!priv || file) ? profile_section(a, app, pe_arg(a, 1), pe_arg(a, 2), file) : 0;
+        break;
+    }
+    case PEF_WritePrivateProfileSectionA:
+    case PEF_WriteProfileSectionA: {
+        int priv = service == PEF_WritePrivateProfileSectionA;
+        const char *app = pe_str(a, pe_arg(a, 0));
+        const char *file = priv ? pe_str(a, pe_arg(a, 2)) : NULL;
+        v = app && (!priv || file) ? write_section(a, app, pe_arg(a, 1), file) : 0;
+        break;
+    }
+    case PEF_GetPrivateProfileStructA: v = profile_struct(a, 0); break;
+    case PEF_WritePrivateProfileStructA: v = profile_struct(a, 1); break;
+    case PEF_ExpandEnvironmentStringsA: {
+        const char *s = pe_str(a, pe_arg(a, 0));
+        char out[1024];
+        uint32_t n = 0;
+        while (s && *s && n + 1 < sizeof(out)) {
+            const char *end = *s == '%' ? strchr(s + 1, '%') : NULL;
+            char name[64];
+            const char *val = NULL;
+            if (end && (size_t)(end - s - 1) < sizeof(name)) {
+                memcpy(name, s + 1, (size_t)(end - s - 1));
+                name[end - s - 1] = 0;
+                val = name[0] ? env_find(ctx, name) : NULL;
+            }
+            if (val) {
+                while (*val && n + 1 < sizeof(out))
+                    out[n++] = *val++;
+                s = end + 1;
+            } else {
+                out[n++] = *s++;
+            }
+        }
+        out[n] = 0;
+        if (!s)
+            break;
+        v = n + 1u;
+        if (pe_arg(a, 2) >= v)
+            put_str(a, pe_arg(a, 1), pe_arg(a, 2), out);
+        break;
+    }
+    case PEF_GetComputerNameA: {
+        uint8_t *size = (uint8_t *)pe_buf(a, pe_arg(a, 1), 4);
+        char name[16];
+        GetProfileString("Network", "ComputerName", "WINN", name, sizeof(name));
+        uint32_t need = (uint32_t)strlen(name) + 1u;
+        if (!size)
+            break;
+        if (pe_rd32(size) < need) {
+            pe_wr32(size, need);
+            ctx->last_error = ERROR_INSUFFICIENT_BUFFER;
+            break;
+        }
+        put_str(a, pe_arg(a, 0), need, name);
+        pe_wr32(size, need - 1u);
+        v = 1;
+        break;
+    }
+    case PEF_GlobalCompact:
+    case PEF_LocalCompact: {
+        win_ne_mem_info mi;
+        win_ne_guest_mem_info(&mi);
+        v = mi.ext_size > mi.ext_used ? mi.ext_size - mi.ext_used : 0;
+        break;
+    }
+    case PEF_LocalShrink: v = 0x10000u; break;
+    case PEF_GlobalFix:
+    case PEF_GlobalUnfix:
+    case PEF_GlobalUnWire:
+        v = 1;
+        break;
+    case PEF_GlobalWire: v = pe_arg(a, 0); break;
+    case PEF_InterlockedCompareExchange: {
+        uint8_t *p = (uint8_t *)pe_buf(a, pe_arg(a, 0), 4);
+        if (!p)
+            break;
+        v = pe_rd32(p);
+        if (v == pe_arg(a, 2))
+            pe_wr32(p, pe_arg(a, 1));
+        break;
+    }
+    case PEF_InterlockedExchangeAdd: {
+        uint8_t *p = (uint8_t *)pe_buf(a, pe_arg(a, 0), 4);
+        if (!p)
+            break;
+        v = pe_rd32(p);
+        pe_wr32(p, v + pe_arg(a, 1));
+        break;
+    }
+    case PEF_LockFile:
+    case PEF_UnlockFile:
+        v = 1;
+        break;
+    case PEF_GetLogicalDriveStringsA: {
+        char list[4 * 26 + 1];
+        uint32_t n = 0;
+        for (int d = 0; d < 26; d++)
+            if (GetDriveType(d)) {
+                list[n++] = (char)('A' + d);
+                list[n++] = ':';
+                list[n++] = '\\';
+                list[n++] = 0;
+            }
+        list[n] = 0;
+        v = n;
+        if (pe_arg(a, 0) > n) {
+            char *p = (char *)pe_buf(a, pe_arg(a, 1), n + 1u);
+            if (p)
+                memcpy(p, list, n + 1u);
+        } else {
+            v = n + 1u;
+        }
+        break;
+    }
+    case PEF_LoadModule: {
+        /* LOADPARMS32: environment, the command tail (a counted string), the
+         * show command (two words), reserved */
+        const char *name = pe_str(a, pe_arg(a, 0));
+        const uint8_t *p = pe_arg(a, 1) ? (const uint8_t *)pe_buf(a, pe_arg(a, 1), 16) : NULL;
+        char cmd[300], tail[128];
+        UINT show = SW_SHOWNORMAL;
+        tail[0] = 0;
+        if (!name)
+            break;
+        if (p) {
+            const uint8_t *t = pe_rd32(p + 4) ? (const uint8_t *)pe_buf(a, pe_rd32(p + 4), 1) : NULL;
+            if (t && pe_buf(a, pe_rd32(p + 4), 1u + t[0])) {
+                uint32_t n = t[0] < sizeof(tail) ? t[0] : sizeof(tail) - 1u;
+                memcpy(tail, t + 1, n);
+                tail[n] = 0;
+            }
+            const uint8_t *s = pe_rd32(p + 8) ? (const uint8_t *)pe_buf(a, pe_rd32(p + 8), 4) : NULL;
+            if (s)
+                show = pe_rd16(s + 2);
+        }
+        pe_fmt(cmd, sizeof(cmd), "%s %s", name, tail);
+        v = WinExec(cmd, show);
+        break;
+    }
+    case PEF_GetThreadPriority: v = 0; break;
+    case PEF_SetThreadPriority:
+    case PEF_SetPriorityClass:
+        v = 1;
+        break;
+    case PEF_GetPriorityClass: v = 0x20; break;     /* NORMAL_PRIORITY_CLASS */
+    case PEF_ResumeThread:
+    case PEF_SuspendThread:
+        v = 0xffffffffu;
+        ctx->last_error = ERROR_INVALID_HANDLE;
+        break;
+    case PEF_GetProcessVersion: v = 0x00030000u; break;
+    case PEF_IsValidLocale: v = 1; break;
+    case PEF_GetExitCodeThread: {
+        uint8_t *p = (uint8_t *)pe_buf(a, pe_arg(a, 1), 4);
+        if (p)
+            pe_wr32(p, 259);                /* STILL_ACTIVE: its only thread */
+        v = p != NULL;
+        break;
+    }
+    case PEF_MoveFileExA: {
+        const char *s = pe_str(a, pe_arg(a, 0));
+        const char *d = pe_arg(a, 1) ? pe_str(a, pe_arg(a, 1)) : NULL;
+        if (!s || a->bad)
+            break;
+        if (!d) {                           /* to delete it */
+            v = DeleteFileN(s);
+            break;
+        }
+        if ((pe_arg(a, 2) & 1u) && win_file_attr(d, 0, 0) >= 0)    /* REPLACE_EXISTING */
+            DeleteFileN(d);
+        v = MoveFileN(s, d);
+        if (!v && (pe_arg(a, 2) & 2u)) {    /* COPY_ALLOWED */
+            HFILE in = _lopen(s, OF_READ), out = in == HFILE_ERROR ? HFILE_ERROR : _lcreat(d, 0);
+            char buf[512];
+            UINT n;
+            v = out != HFILE_ERROR;
+            while (v && (n = _lread(in, buf, sizeof(buf))) > 0 && n != (UINT)-1)
+                v = _lwrite(out, buf, n) == n;
+            if (in != HFILE_ERROR)
+                _lclose(in);
+            if (out != HFILE_ERROR)
+                _lclose(out);
+            if (v)
+                DeleteFileN(s);
+        }
+        break;
+    }
+    case PEF_CreateSemaphoreA: {
+        int i = new_handle(ctx, PE_H_SEMAPHORE, (int32_t)pe_arg(a, 2), pe_arg(a, 1));
+        v = i >= 0 ? PE_HANDLE(i) : 0;
+        break;
+    }
+    case PEF_ReleaseSemaphore: {
+        int i = handle_index(ctx, pe_arg(a, 0), PE_H_SEMAPHORE);
+        if (i < 0)
+            break;
+        uint8_t *prev = pe_arg(a, 2) ? (uint8_t *)pe_buf(a, pe_arg(a, 2), 4) : NULL;
+        if (prev)
+            pe_wr32(prev, ctx->handle[i].value);
+        if (ctx->handle[i].value + pe_arg(a, 1) > (uint32_t)ctx->handle[i].fd)
+            break;                          /* past its maximum */
+        ctx->handle[i].value += pe_arg(a, 1);
+        v = 1;
+        break;
+    }
+    case PEF_PulseEvent: v = handle_index(ctx, pe_arg(a, 0), PE_H_EVENT) >= 0; break;
+    case PEF_WaitForMultipleObjects: {
+        uint32_t n = pe_arg(a, 0), h[64];
+        const uint8_t *p = n && n <= 64 ? (const uint8_t *)pe_buf(a, pe_arg(a, 1), 4u * n) : NULL;
+        if (!p) {
+            ctx->last_error = ERROR_INVALID_PARAMETER;
+            v = 0xffffffffu;
+            break;
+        }
+        for (uint32_t k = 0; k < n; k++)
+            h[k] = pe_rd32(p + 4 * k);
+        int r = wait_for(a, h, n, pe_arg(a, 2) != 0, pe_arg(a, 3), &v);
+        if (r != 1)
+            return r;
+        break;
+    }
+    case PEF_CreateProcessA: {
+        /* the program started as WinExec does; PROCESS_INFORMATION: its
+         * task as the process (its end signals it) */
+        const char *app = pe_arg(a, 0) ? pe_str(a, pe_arg(a, 0)) : NULL;
+        const char *line = pe_arg(a, 1) ? pe_str(a, pe_arg(a, 1)) : NULL;
+        const uint8_t *si = pe_arg(a, 8) ? (const uint8_t *)pe_buf(a, pe_arg(a, 8), 68) : NULL;
+        uint8_t *pi = (uint8_t *)pe_buf(a, pe_arg(a, 9), 16);
+        char cmd[300];
+        if (a->bad || !pi || (!app && !line))
+            break;
+        if (app && line) {                  /* the line's first word is the program's name */
+            const char *rest = line;
+            int quoted = *rest == '"';
+            rest += quoted;
+            while (*rest && (quoted ? *rest != '"' : *rest != ' '))
+                rest++;
+            rest += *rest == '"';
+            pe_fmt(cmd, sizeof(cmd), "%s%s", app, rest);
+        } else {
+            pe_fmt(cmd, sizeof(cmd), "%s", app ? app : line);
+        }
+        UINT show = si && (pe_rd32(si + 44) & 1u) ? pe_rd16(si + 48) : SW_SHOWNORMAL;
+        UINT r = WinExec(cmd, show);
+        if (r < 32) {
+            ctx->last_error = r == 2 ? ERROR_FILE_NOT_FOUND : r == 3 ? ERROR_PATH_NOT_FOUND :
+                              r == 8 ? ERROR_NOT_ENOUGH_MEMORY : 193;  /* ERROR_BAD_EXE_FORMAT */
+            break;
+        }
+        int ip = new_handle(ctx, PE_H_PROCESS, 0, IsTask((HTASK)r) ? r : 0);
+        int it = new_handle(ctx, PE_H_PROCESS, 0, IsTask((HTASK)r) ? r : 0);
+        pe_wr32(pi, ip >= 0 ? PE_HANDLE(ip) : 0);
+        pe_wr32(pi + 4, it >= 0 ? PE_HANDLE(it) : 0);
+        pe_wr32(pi + 8, r);
+        pe_wr32(pi + 12, r);
         v = 1;
         break;
     }
@@ -2096,28 +2565,17 @@ static int kernel32(pe_args *a, uint16_t service, uint32_t *eax)
     }
     case PEF_ReleaseMutex: v = handle_index(ctx, pe_arg(a, 0), PE_H_MUTEX) >= 0; break;
     case PEF_WaitForSingleObject: {
-        uint32_t h = pe_arg(a, 0), ms = pe_arg(a, 1);
-        int i = handle_index(ctx, h, PE_H_EVENT);
-        if (i < 0 || ctx->handle[i].value) {
-            if (i >= 0 && !ctx->handle[i].fd)       /* auto-reset */
-                ctx->handle[i].value = 0;
-            v = 0;                          /* WAIT_OBJECT_0 */
-            break;
-        }
-        /* nothing else can set it: its time out, the other tasks running */
-        DWORD start = GetTickCount();
-        while (ms && ms != 0xffffffffu && GetTickCount() - start < ms)
-            if (ctx->yield && ctx->yield()) {
-                ctx->stopped = 1;
-                return WINX86_SERVICE_EXIT;
-            }
-        v = ms == 0xffffffffu ? 0 : 0x102u;
+        uint32_t h = pe_arg(a, 0);
+        int r = wait_for(a, &h, 1, 0, pe_arg(a, 1), &v);
+        if (r != 1)
+            return r;
         break;
     }
     case PEF_GetExitCodeProcess: {
         uint8_t *p = (uint8_t *)pe_buf(a, pe_arg(a, 1), 4);
-        if (p)
-            pe_wr32(p, 259);                /* STILL_ACTIVE */
+        int i = handle_index(ctx, pe_arg(a, 0), PE_H_PROCESS);
+        if (p)                              /* STILL_ACTIVE; a task's end: 0 */
+            pe_wr32(p, i >= 0 && signaled(ctx, pe_arg(a, 0)) > 0 ? 0 : 259);
         v = p != NULL;
         break;
     }
@@ -2245,6 +2703,16 @@ int win_pe_api(win_pe_ctx *ctx, uint32_t esp, uint16_t service, uint32_t *eax)
         r = pe_user_api(&a, service, eax);
         if (a.bad)
             ctx->invalid_args = 1;
+        return r;
+    }
+    if (service >= WIN_PE_SERVICE_DLLS && service < WIN_PE_SERVICE_DLLS + 0x100u) {
+        r = win_pe_dll_api(&a, service, eax);
+        if (a.bad)
+            ctx->invalid_args = 1;
+        if (r <= 0) {
+            ctx->unsupported = service;
+            win_pe_service_name(service, ctx->undefined, sizeof(ctx->undefined));
+        }
         return r;
     }
     if (service >= WIN_PE_SERVICE_MM && service < WIN_PE_SERVICE_MM + MM_FNS) {

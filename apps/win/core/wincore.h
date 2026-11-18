@@ -261,6 +261,13 @@ void     win_trace_init(void);
 void     win_trace_dump(void);
 void     win_trace_event(const char *name, uint32_t a, uint32_t b);
 void     win_path(const char *name, char *out, int size);
+/* ShellExecute's and WinExec's command for a file (ne_guest_kernel.c): the
+ * program itself, or WIN.INI [Extensions]' for a document; 0 none */
+int      win_shell_command(const char *file, const char *params, char *cmd, int cap);
+/* pe.c: a resource of a Win32 file (numbered type and name, 0 its first;
+ * the first language), its bytes in a block of malloc's; 1 found */
+int      win_pe_file_resource(const char *path, uint16_t type, uint16_t id, uint8_t **data,
+                              uint32_t *size);
 /* profile.c: the Windows directory's file, or the system one's if only it
  * has it */
 void     win_find_path(const char *name, char *out, int size);
@@ -369,6 +376,13 @@ int      user_key_char(const BYTE *keys, int vk, unsigned char *out);
 int      user_char_key(unsigned char c);
 UINT     user_map_key(UINT code, UINT type);
 int      user_key_name(LONG lp, char *out, int cap);
+/* user/msg.c: the hooks Win16 (who 0) or Win32 programs (1) have, their
+ * caller (user.h) */
+#ifndef USER_HOOK_BIT
+#define USER_HOOK_BIT(type) (1u << ((type) + 1))
+#endif
+void     user_set_hooks_of(int who, unsigned types,
+                           LRESULT (*call)(int type, int code, WPARAM wp, LPARAM lp));
 
 /* gdi.c: device-independent bitmaps (Win16 resources) */
 typedef struct {

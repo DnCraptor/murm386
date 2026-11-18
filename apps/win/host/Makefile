@@ -12,7 +12,8 @@ GDICORE  = $(filter-out ../core/exports.c ../core/task.c ../core/file.c ../core/
             ../core/ne_guest.c ../core/ne_guest_api.c ../core/ne_guest_dos.c ../core/ne_guest_user.c \
             ../core/ne_res.c ../core/ne_guest_int21.c ../core/ne_guest_call.c ../core/ne_guest_kernel.c \
             ../core/x86bridge.c ../core/windll.c ../core/sound.c ../core/trace.c \
-            ../core/pe.c ../core/pe_api.c ../core/pe_user.c,$(CORE))
+            ../core/pe.c ../core/pe_api.c ../core/pe_user.c ../core/pe_dlls.c \
+            ../core/winreg.c,$(CORE))
 
 # the applications, built in; each WinMain gets its own name
 APPS     = demo.o progman.o notepad.o clock.o calc.o control.o winfile.o taskman.o winmine.o winhelp.o hlpfile.o appinfo.o
@@ -80,7 +81,7 @@ OWHELLO.EXE OWBUSY.EXE OWWIN.EXE OWMENU.EXE OWSEGS.EXE OWDEMO.EXE OWFILE.EXE OWF
 	OWDLL.DLL OWDLL2.DLL OWFPU.EXE OWAPI.EXE OWGDI.EXE OWAPI2.EXE OWMETA.EXE OWSYS.EXE OWFONT.EXE OWHELP.EXE OWDLG.EXE OWMISC.EXE OWSND.EXE OW31.EXE OWTT.EXE OWMORE.EXE OWDRV.DLL OW95.EXE OW95X.EXE OWMIDI.EXE OWPRINT.EXE OWLAND.EXE OWMIXER.EXE OWWAVE.EXE: mkne_watcom.py
 	python3 mkne_watcom.py $(basename $@) $@
 # Win32 programs (PE) built by Open Watcom
-OW32.EXE OW32DLL.DLL: mkpe_watcom.py
+OW32.EXE OW32DLL.DLL OW32S.EXE: mkpe_watcom.py
 	python3 mkpe_watcom.py $(basename $@) $@
 # a self-loading program (OWSEGS's segments after a loader of its own)
 SELFLOAD.EXE: mkne_selfload.py OWSEGS.EXE
@@ -89,7 +90,7 @@ NEFIXTURES: NEAPP-fixture.exe NEDIALOG.EXE NELOOP-fixture.exe NEFAULT.EXE NEHANG
 	NESTACK.EXE NECLI.EXE NEOUT.EXE NECR0.EXE NEHLT.EXE NEFPU.EXE NEUNDEF.EXE OWHELLO.EXE OWBUSY.EXE \
 	OWWIN.EXE OWMENU.EXE OWSEGS.EXE OWDEMO.EXE OWFILE.EXE OWFILEL.EXE OWRES.EXE OWKERN.EXE \
 	OWUSE.EXE OWDLL.DLL OWDLL2.DLL OWFPU.EXE OWAPI.EXE OWGDI.EXE OWAPI2.EXE OWMETA.EXE OWSYS.EXE OWFONT.EXE OWHELP.EXE OWDLG.EXE OWMISC.EXE OWSND.EXE OW31.EXE OWTT.EXE OWMORE.EXE OWDRV.DLL OW95.EXE OW95X.EXE OWMIDI.EXE OWPRINT.EXE OWLAND.EXE OWMIXER.EXE OWWAVE.EXE WINNTEST.FON WINNTEST.HLP WINNTEST.TTF WINNTEST.FOT \
-	OW32.EXE OW32DLL.DLL SELFLOAD.EXE
+	OW32.EXE OW32DLL.DLL OW32S.EXE SELFLOAD.EXE
 
 test_ne_multi: ../core/ne.c ../core/ne_guest.c test_ne_multi.c NEAPP-fixture.exe
 	$(CC) -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -o $@ ../core/ne.c ../core/ne_guest.c test_ne_multi.c
@@ -240,7 +241,7 @@ HOSTWIN: NEFIXTURES
 	cp NEDIALOG.EXE NEFAULT.EXE NEHANG.EXE OWHELLO.EXE OWBUSY.EXE OWWIN.EXE OWMENU.EXE OWSEGS.EXE \
 		OWDEMO.EXE OWFILE.EXE OWFILEL.EXE OWRES.EXE OWKERN.EXE OWUSE.EXE OWDLL.DLL OWDLL2.DLL OWFPU.EXE \
 		OWAPI.EXE OWGDI.EXE OWAPI2.EXE OWMETA.EXE OWSYS.EXE OWFONT.EXE OWHELP.EXE OWDLG.EXE OWMISC.EXE OWSND.EXE OW31.EXE OWTT.EXE OWMORE.EXE OWDRV.DLL OW95.EXE OW95X.EXE OWMIDI.EXE OWPRINT.EXE OWLAND.EXE OWMIXER.EXE OWWAVE.EXE WINNTEST.FON WINNTEST.HLP WINNTEST.TTF WINNTEST.FOT \
-		OW32.EXE OW32DLL.DLL SELFLOAD.EXE HOSTWIN/
+		OW32.EXE OW32DLL.DLL OW32S.EXE SELFLOAD.EXE HOSTWIN/
 	cp ../WIN.INI HOSTWIN/
 	touch HOSTWIN/DEMO.EXE HOSTWIN/PROGMAN.EXE HOSTWIN/NOTEPAD.EXE HOSTWIN/CLOCK.EXE HOSTWIN/CALC.EXE HOSTWIN/CONTROL.EXE HOSTWIN/WINFILE.EXE HOSTWIN/TASKMAN.EXE HOSTWIN/WINMINE.EXE HOSTWIN/WINN.EXE HOSTWIN/NC.EXE
 	mkdir -p HOSTWIN/DOCS

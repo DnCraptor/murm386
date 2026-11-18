@@ -310,6 +310,8 @@ DWORD WINAPI GetFileResourceN(LPCSTR path, LPCSTR type, LPCSTR id, DWORD offset,
     uint32_t n = 0;
     int rc = id ? win_ne_resource(path, t, i, name, &d, &n)
                 : win_ne_resource_nth(path, t, 0, &d, &n);
+    if (rc != WIN_NE_OK && !name && win_pe_file_resource(path, t, i, &d, &n))
+        rc = WIN_NE_OK;                 /* a Win32 file's (numbered ones) */
     if (rc != WIN_NE_OK)
         return 0;
     if (buf && offset < n)

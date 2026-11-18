@@ -1500,6 +1500,10 @@ static BOOL show_window(HWND h, int cmd)
 BOOL WINAPI ShowWindow(HWND h, int cmd)
 {
     wwnd *w = user_wnd(h);
+    if (cmd == 10)                      /* Win32's SW_SHOWDEFAULT: as it was started */
+        cmd = SW_SHOWNORMAL;
+    else if (cmd == 11)                 /* SW_FORCEMINIMIZE */
+        cmd = SW_MINIMIZE;
     /* minimized, maximized, restored: the CBT hook may refuse it */
     if (w && (cmd == SW_MINIMIZE || cmd == SW_SHOWMINIMIZED || cmd == SW_SHOWMINNOACTIVE ||
               cmd == SW_SHOWMAXIMIZED || cmd == SW_RESTORE) &&

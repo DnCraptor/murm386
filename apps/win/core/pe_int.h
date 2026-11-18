@@ -27,8 +27,10 @@
 #include "ne_exec.h"
 
 /* WINN's modules: KERNEL32, USER32, GDI32 its own; WINMM the native
- * MMSYSTEM.DLL's (core/pe_api.c's table); WING32 pe_user.c's */
-enum { PE_KERNEL32, PE_USER32, PE_GDI32, PE_WINMM, PE_WING32, PE_MODULES };
+ * MMSYSTEM.DLL's (core/pe_api.c's table); WING32 pe_user.c's; Win32s'
+ * others pe_dlls.c's */
+enum { PE_KERNEL32, PE_USER32, PE_GDI32, PE_WINMM, PE_WING32, PE_ADVAPI32, PE_COMDLG32,
+       PE_SHELL32, PE_LZ32, PE_VERSION, PE_MODULES };
 extern const char *const win_pe_module_names[PE_MODULES];
 
 /* a function of WINN's: sig NULL for those with code of their own */
@@ -179,7 +181,7 @@ static inline uint32_t win_pe_addr(const win_pe_image *img, const void *p)
 
 /* the kernel objects of the program's (its HANDLEs: 100h + the slot) */
 enum { PE_H_FREE, PE_H_FILE, PE_H_FIND, PE_H_EVENT, PE_H_MUTEX, PE_H_STD, PE_H_PROCESS,
-       PE_H_THREAD, PE_H_HEAP };
+       PE_H_THREAD, PE_H_HEAP, PE_H_SEMAPHORE };
 
 typedef struct win_pe_ctx {
     win_pe_image *img;
@@ -265,6 +267,17 @@ int pe_user_api(pe_args *a, uint16_t service, uint32_t *eax);
 uint32_t win_pe_mm_proc(win_pe_image *img, const char *name);
 #define WIN_PE_SERVICE_WING 0x4a00u
 uint32_t win_pe_wing_proc(win_pe_image *img, const char *name);
+/* pe_dlls.c: ADVAPI32's, COMDLG32's, SHELL32's, LZ32's, VERSION's
+ * functions (4B00h + their place in its table); a call of one (1 done);
+ * a function's name; a registered message's lParam a native structure of
+ * theirs (the Find dialog's): the program's own (0 none); the program's
+ * end */
+#define WIN_PE_SERVICE_DLLS 0x4b00u
+uint32_t win_pe_dll_proc(win_pe_image *img, int module, const char *name);
+int win_pe_dll_api(pe_args *a, uint16_t service, uint32_t *eax);
+const char *win_pe_dll_name(uint16_t service);
+uint32_t win_pe_dll_lparam(win_pe_ctx *ctx, uint32_t msg, uint32_t lp);
+void win_pe_dlls_end(win_pe_ctx *ctx);
 void pe_user_start(win_pe_ctx *ctx);
 void pe_user_end(win_pe_ctx *ctx);
 /* the instance of the program's task for native functions */
@@ -275,6 +288,8 @@ int pe_module_of_instance(win_pe_ctx *ctx, uint32_t h);
 /* the guest heap: a block of the process's heap, freed (pe_api.c) */
 uint32_t pe_heap_alloc(win_pe_ctx *ctx, uint32_t heap, uint32_t bytes, int zero);
 int pe_heap_free(win_pe_ctx *ctx, uint32_t heap, uint32_t p);
+/* a block's size (0: none of the heap's) */
+uint32_t pe_heap_size(win_pe_ctx *ctx, uint32_t heap, uint32_t p);
 /* a copy of a string in the program's heap */
 uint32_t pe_strdup(win_pe_ctx *ctx, const char *s);
 

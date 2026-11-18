@@ -25,7 +25,8 @@ const char *win_ne_dll_dir(void);
 const char *win_ne_dll_system_dir(void);
 
 const char *const win_pe_module_names[PE_MODULES] = { "KERNEL32", "USER32", "GDI32", "WINMM",
-                                                      "WING32" };
+                                                      "WING32", "ADVAPI32", "COMDLG32",
+                                                      "SHELL32", "LZ32", "VERSION" };
 #define native_names win_pe_module_names
 
 /* ---------------------------------------------------------------- the file */
@@ -92,6 +93,76 @@ int win_pe_is(const char *path)
     pe_header h;
     int ok = header(f, &h) && (h.subsystem == 2 || h.subsystem == 3);
     fclose(f);
+    return ok;
+}
+
+/* an RVA's place in the file (0: in no section's data) */
+static uint32_t file_offset(FILE *f, const pe_header *h, uint32_t rva, uint32_t n)
+{
+    for (uint16_t i = 0; i < h->nsections; i++) {
+        uint8_t s[40];
+        if (!read_at(f, h->sections + 40u * i, s, sizeof(s)))
+            return 0;
+        uint32_t va = pe_rd32(s + 12), rsize = pe_rd32(s + 16), roff = pe_rd32(s + 20);
+        if (rva >= va && rva - va < rsize && n <= rsize - (rva - va))
+            return roff + (rva - va);
+    }
+    return 0;
+}
+
+/* the entry of a directory (at off of the resources' rsize bytes r) of
+ * the number id (0: the first); its offset, 0 none */
+static uint32_t file_res_entry(const uint8_t *r, uint32_t rsize, uint32_t off, uint16_t id)
+{
+    if (off > rsize || rsize - off < 16u)
+        return 0;
+    unsigned named = pe_rd16(r + off + 12), ids = pe_rd16(r + off + 14);
+    for (unsigned i = 0; i < named + ids; i++) {
+        uint32_t e = off + 16u + 8u * i;
+        if (e > rsize - 8u)
+            return 0;
+        uint32_t name = pe_rd32(r + e);
+        if (!id || (!(name & 0x80000000u) && name == id))
+            return pe_rd32(r + e + 4) & 0x7fffffffu;
+    }
+    return 0;
+}
+
+int win_pe_file_resource(const char *path, uint16_t type, uint16_t id, uint8_t **data,
+                         uint32_t *size)
+{
+    FILE *f = path ? fopen(path, "rb") : NULL;
+    pe_header h;
+    uint8_t *r = NULL;
+    int ok = 0;
+    *data = NULL;
+    *size = 0;
+    if (!f || !header(f, &h) || h.ndirs <= 2 || !h.dir[2][0] || !h.dir[2][1] ||
+        h.dir[2][1] > 0x100000u)
+        goto done;
+    uint32_t rsize = h.dir[2][1], at = file_offset(f, &h, h.dir[2][0], rsize);
+    r = at ? (uint8_t *)malloc(rsize) : NULL;
+    if (!r || !read_at(f, at, r, rsize))
+        goto done;
+    uint32_t e = file_res_entry(r, rsize, 0, type);
+    e = e ? file_res_entry(r, rsize, e, id) : 0;
+    e = e ? file_res_entry(r, rsize, e, 0) : 0;     /* its first language */
+    if (!e || e > rsize - 16u)
+        goto done;
+    uint32_t rva = pe_rd32(r + e), n = pe_rd32(r + e + 4);
+    uint32_t place = n && n <= 0x100000u ? file_offset(f, &h, rva, n) : 0;
+    uint8_t *d = place ? (uint8_t *)malloc(n) : NULL;
+    if (d && read_at(f, place, d, n)) {
+        *data = d;
+        *size = n;
+        ok = 1;
+    } else {
+        free(d);
+    }
+done:
+    free(r);
+    if (f)
+        fclose(f);
     return ok;
 }
 
@@ -279,6 +350,20 @@ uint32_t win_pe_native_proc(win_pe_image *img, int module, const char *name, uin
         return win_pe_mm_proc(img, name);
     if (module == PE_WING32)
         return win_pe_wing_proc(img, name);
+    if (module >= PE_ADVAPI32)
+        return win_pe_dll_proc(img, module, name);
+    /* Win32's other names of functions WINN has, of the same arguments */
+    static const char *const alias[][2] = {
+        { "_hread", "_lread" }, { "_hwrite", "_lwrite" }, { "IsBadHugeReadPtr", "IsBadReadPtr" },
+        { "IsBadHugeWritePtr", "IsBadWritePtr" }, { "ExitThread", "ExitProcess" },
+        { "GetStringTypeExA", "GetStringTypeA" }, { "GetCharWidth32A", "GetCharWidthA" },
+        { "SetPixelV", "SetPixel" },
+    };
+    for (unsigned k = 0; k < sizeof(alias) / sizeof(alias[0]); k++)
+        if (!strcmp(name, alias[k][0])) {
+            name = alias[k][1];
+            break;
+        }
     for (unsigned i = 0; i < win_pe_nfns; i++)
         if (win_pe_fns[i].module == module && !strcmp(win_pe_fns[i].name, name))
             return win_pe_thunk(img, (uint16_t)i, win_pe_fns[i].args);
@@ -310,6 +395,11 @@ static uint32_t undefined(win_pe_image *img, const char *module, const char *nam
 
 const char *win_pe_service_name(uint16_t service, char *buf, size_t cap)
 {
+    const char *dll = win_pe_dll_name(service);
+    if (dll) {
+        pe_fmt(buf, cap, "%s", dll);
+        return buf;
+    }
     if (service < win_pe_nfns) {
         pe_fmt(buf, cap, "%s.%s", native_names[win_pe_fns[service].module],
                  win_pe_fns[service].name);

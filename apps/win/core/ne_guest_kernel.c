@@ -323,7 +323,7 @@ static uint16_t temp_file_name(args *a)
 
 /* ShellExecute's and WinExec's command: the program itself, or the one
  * WIN.INI's [Extensions] names for the document ("notepad.exe ^.txt") */
-static int command_for(const char *file, const char *params, char *cmd, int cap)
+int win_shell_command(const char *file, const char *params, char *cmd, int cap)
 {
     const char *dot = NULL;
     for (const char *p = file; *p; p++)     /* the extension's dot */
@@ -1503,7 +1503,7 @@ static __attribute__((noinline)) int shell_service(args *a, uint16_t service,
     case 20: {                          /* ShellExecute(HWND, op, file, params, dir, show) */
         *v = 2;                         /* file not found */
         if (str_(a, dw(a, 14), file, sizeof(file)) && str_(a, dw(a, 10), params, sizeof(params))) {
-            if (!command_for(file, params, cmd, sizeof(cmd)))
+            if (!win_shell_command(file, params, cmd, sizeof(cmd)))
                 *v = 31;                /* no association */
             else
                 *v = WinExec(cmd, w(a, 4));
@@ -1512,7 +1512,7 @@ static __attribute__((noinline)) int shell_service(args *a, uint16_t service,
     }
     case 21: {                          /* FindExecutable(file, dir, LPSTR result) */
         *v = 2;
-        if (str_(a, dw(a, 12), file, sizeof(file)) && command_for(file, "", cmd, sizeof(cmd))) {
+        if (str_(a, dw(a, 12), file, sizeof(file)) && win_shell_command(file, "", cmd, sizeof(cmd))) {
             char *sp = strchr(cmd, ' ');
             if (sp)
                 *sp = 0;

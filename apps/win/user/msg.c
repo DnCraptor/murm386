@@ -134,13 +134,37 @@ void WINAPI PostQuitMessage(int code)
     t->quit_code = code;
 }
 
-static unsigned hook_types;
-static LRESULT (*hook_call)(int, int, WPARAM, LPARAM);
+/* the hooks' callers: Win16 programs' (0), Win32 programs' (1); what
+ * types each has */
+static unsigned hook_types, hook_types_of[2];
+static LRESULT (*hook_calls[2])(int, int, WPARAM, LPARAM);
+
+void user_set_hooks_of(int who, unsigned types,
+                       LRESULT (*call)(int type, int code, WPARAM wp, LPARAM lp))
+{
+    if (who < 0 || who > 1)
+        return;
+    hook_types_of[who] = call ? types : 0;
+    hook_calls[who] = call;
+    hook_types = hook_types_of[0] | hook_types_of[1];
+}
 
 void user_set_hooks(unsigned types, LRESULT (*call)(int type, int code, WPARAM wp, LPARAM lp))
 {
-    hook_types = call ? types : 0;
-    hook_call = call;
+    user_set_hooks_of(0, types, call);
+}
+
+/* each caller with hooks of the type: the first's nonzero result */
+static LRESULT hook_call(int type, int code, WPARAM wp, LPARAM lp)
+{
+    LRESULT r = 0;
+    for (int who = 0; who < 2; who++)
+        if ((hook_types_of[who] & USER_HOOK_BIT(type)) && hook_calls[who]) {
+            LRESULT x = hook_calls[who](type, code, wp, lp);
+            if (!r)
+                r = x;
+        }
+    return r;
 }
 
 LRESULT user_hook(int type, int code, WPARAM wp, LPARAM lp)

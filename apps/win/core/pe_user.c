@@ -36,6 +36,7 @@ void user_dialog_menu(HMENU menu);
 #define PE_USERDATA 64
 #define PE_ACCELS 8
 #define PE_IMAGES 32
+#define PE_CLIPS 4
 
 typedef struct pe_user {
     struct pe_user *next;
@@ -62,9 +63,11 @@ typedef struct pe_user {
      * its bits in its memory, their format; the DC it is selected into */
     struct pe_dib { HBITMAP h; uint32_t bits; HDC dc; uint8_t info[40 + 1024]; } dib[PE_DIBS];
     struct { HANDLE h; uint8_t kind; int module; uint32_t id; char name[24]; } image[PE_IMAGES];
+    struct { UINT fmt; uint32_t mem; } clip[PE_CLIPS];     /* GetClipboardData's copies */
 } pe_user;
 
 static pe_user *programs;
+static void hooks_end(pe_user *u);
 
 static pe_user *user_of(HTASK task)
 {
@@ -92,6 +95,7 @@ void pe_user_end(win_pe_ctx *ctx)
         if (*p == ctx->user) {
             pe_user *u = *p;
             *p = u->next;
+            hooks_end(u);
             for (int i = 0; i < PE_ACCELS; i++)
                 if (u->accel[i])
                     DestroyAcceleratorTableN(u->accel[i]);
@@ -416,6 +420,11 @@ static LRESULT message(pe_user *u, uint32_t proc, HWND h, UINT msg, WPARAM wp, L
         if ((msg == WM_CREATE || msg == WM_NCCREATE) && lp)  /* the strings' place known now */
             create_to_guest(u, (const CREATESTRUCT *)nat, at, blob, sizeof(blob));
         l = at;
+    }
+    if (!len && msg >= 0xc000u && lp) {    /* a native DLL's structure (the Find dialog's) */
+        uint32_t own = win_pe_dll_lparam(c, msg, (uint32_t)lp);
+        if (own)
+            l = own;
     }
     const uint32_t args[4] = { h, m, w, l };
     uint32_t r = win_pe_call(c, proc, args, 4, len ? blob : NULL, len, NULL);
@@ -1524,6 +1533,704 @@ static int res_module(pe_args *a, uint32_t inst)
     return inst ? pe_module_of_instance(a->ctx, inst) : -1;
 }
 
+/* ---------------------------------------------------------------- Win32s' more */
+
+#define PE_HOOKS 16
+#define HOOK_TYPES 12                   /* WH_MSGFILTER (-1) to WH_SHELL (10) */
+
+/* the programs' hooks: their type, procedure, number (the HHOOK's low
+ * word; the next in a chain the one made before) */
+static struct { pe_user *u; int type; uint32_t proc; uint16_t id; } hooks[PE_HOOKS];
+static uint16_t hook_ids;
+
+static LRESULT pe_hook(int type, int code, WPARAM wp, LPARAM lp);
+
+static void hooks_update(void)
+{
+    unsigned types = 0;
+    for (int i = 0; i < PE_HOOKS; i++)
+        if (hooks[i].u && hooks[i].type != WH_JOURNALRECORD && hooks[i].type != WH_JOURNALPLAYBACK)
+            types |= USER_HOOK_BIT(hooks[i].type);
+    user_set_hooks_of(1, types, types ? pe_hook : NULL);
+}
+
+/* the program's hook of the type made before the one numbered id (0: its
+ * last one); -1 none */
+static int hook_next(pe_user *u, int type, uint16_t id)
+{
+    int best = -1;
+    for (int i = 0; i < PE_HOOKS; i++)
+        if (hooks[i].u == u && hooks[i].type == type && (!id || hooks[i].id < id) &&
+            (best < 0 || hooks[i].id > hooks[best].id))
+            best = i;
+    return best;
+}
+
+static uint32_t hook_add(pe_user *u, int type, uint32_t proc)
+{
+    if (type < -1 || type > WH_SHELL || !proc)
+        return 0;
+    for (int i = 0; i < PE_HOOKS; i++)
+        if (!hooks[i].u) {
+            if (!++hook_ids)
+                hook_ids = 1;
+            hooks[i].u = u;
+            hooks[i].type = type;
+            hooks[i].proc = proc;
+            hooks[i].id = hook_ids;
+            hooks_update();
+            return 0x484b0000u | hook_ids;
+        }
+    return 0;
+}
+
+static void hooks_end(pe_user *u)
+{
+    for (int i = 0; i < PE_HOOKS; i++)
+        if (hooks[i].u == u)
+            hooks[i].u = NULL;
+    hooks_update();
+}
+
+/* a MSG in the program's layout (28 bytes), and back */
+static void msg_pack(const MSG *m, uint8_t *g)
+{
+    UINT msg = m->message;
+    uint32_t w = (uint32_t)m->wParam, l = (uint32_t)m->lParam;
+    to_guest(ctl_kind(m->hwnd), &msg, &w, &l);
+    pe_wr32(g, m->hwnd);
+    pe_wr32(g + 4, msg);
+    pe_wr32(g + 8, w);
+    pe_wr32(g + 12, l);
+    pe_wr32(g + 16, m->time);
+    pe_wr32(g + 20, (uint32_t)m->pt.x);
+    pe_wr32(g + 24, (uint32_t)m->pt.y);
+}
+
+static void msg_unpack(const uint8_t *g, MSG *m)
+{
+    m->hwnd = (HWND)pe_rd32(g);
+    UINT msg = pe_rd32(g + 4);
+    uint32_t w = pe_rd32(g + 8), l = pe_rd32(g + 12);
+    to_native(ctl_kind(m->hwnd), &msg, &w, &l);
+    m->message = msg;
+    m->wParam = w;
+    m->lParam = (LPARAM)l;
+}
+
+/* USER's call: the program's last hook of the type, with a copy of what
+ * lParam points to in Win32's layout (CBT_CREATEWND and its CREATESTRUCT,
+ * CBTACTIVATESTRUCT, CWPSTRUCT, MSG, MOUSEHOOKSTRUCT); a MSG it changed
+ * back. The program: a message sent, the window's; else the current task. */
+static __attribute__((noinline)) LRESULT pe_hook(int type, int code, WPARAM wp, LPARAM lp)
+{
+    int msg = type == WH_GETMESSAGE || type == WH_MSGFILTER || type == WH_SYSMSGFILTER;
+    const CWPSTRUCT *cwp = (const CWPSTRUCT *)(uintptr_t)lp;
+    if ((type == WH_CALLWNDPROC || msg || type == WH_MOUSE) && !lp)
+        return 0;
+    pe_user *u = user_of(type == WH_CALLWNDPROC ? GetWindowTask(cwp->hwnd) : GetCurrentTask());
+    int i = alive(u) ? hook_next(u, type, 0) : -1;
+    if (i < 0)
+        return 0;
+    win_pe_ctx *c = u->ctx;
+    uint8_t blob[264];
+    uint32_t len = 0, at;
+    if (msg) {
+        msg_pack((const MSG *)(uintptr_t)lp, blob);
+        len = 28;
+    } else if (type == WH_MOUSE) {
+        const MOUSEHOOKSTRUCT *mh = (const MOUSEHOOKSTRUCT *)(uintptr_t)lp;
+        pe_wr32(blob, (uint32_t)mh->pt.x);
+        pe_wr32(blob + 4, (uint32_t)mh->pt.y);
+        pe_wr32(blob + 8, mh->hwnd);
+        pe_wr32(blob + 12, mh->wHitTestCode);
+        pe_wr32(blob + 16, mh->dwExtraInfo);
+        len = 20;
+    } else if (type == WH_CALLWNDPROC) {
+        UINT m = cwp->message;
+        uint32_t w = (uint32_t)cwp->wParam, l = (uint32_t)cwp->lParam;
+        to_guest(ctl_kind(cwp->hwnd), &m, &w, &l);
+        pe_wr32(blob, l);
+        pe_wr32(blob + 4, w);
+        pe_wr32(blob + 8, m);
+        pe_wr32(blob + 12, cwp->hwnd);
+        len = 16;
+    } else if (type == WH_CBT && code == HCBT_ACTIVATE && lp) {
+        const CBTACTIVATESTRUCT *ca = (const CBTACTIVATESTRUCT *)(uintptr_t)lp;
+        pe_wr32(blob, (uint32_t)ca->fMouse);
+        pe_wr32(blob + 4, ca->hWndActive);
+        len = 8;
+    } else if (type == WH_CBT && code == HCBT_CREATEWND && lp) {
+        const CBT_CREATEWND *cw = (const CBT_CREATEWND *)(uintptr_t)lp;
+        len = cw->lpcs ? 8u + create_to_guest(u, cw->lpcs, 0, blob + 8, sizeof(blob) - 8) : 8u;
+        at = win_pe_blob(c, len);
+        if (!at)
+            return 0;
+        if (cw->lpcs)
+            create_to_guest(u, cw->lpcs, at + 8, blob + 8, sizeof(blob) - 8);
+        pe_wr32(blob, cw->lpcs ? at + 8 : 0);
+        pe_wr32(blob + 4, cw->hwndInsertAfter);
+    }
+    at = len ? win_pe_blob(c, len) : 0;
+    if (len && !at)
+        return 0;
+    const uint32_t args[3] = { (uint32_t)code, (uint32_t)wp, len ? at : (uint32_t)lp };
+    LRESULT r = (LRESULT)win_pe_call(c, hooks[i].proc, args, 3, len ? blob : NULL, len, NULL);
+    if (msg)
+        msg_unpack(blob, (MSG *)(uintptr_t)lp);
+    return r;
+}
+
+/* the program's HGLOBALs on the clipboard: native blocks; what it gets, a
+ * block of its heap (the clipboard's: freed with the next of its format) */
+static int clip_gdi(UINT fmt)
+{
+    return fmt == CF_BITMAP || fmt == CF_PALETTE || fmt == CF_DSPBITMAP || fmt == 14 ||
+           fmt == 0x8e || fmt == CF_METAFILEPICT;
+}
+
+static uint32_t clip_set(pe_args *a, UINT fmt, uint32_t h)
+{
+    win_pe_ctx *c = a->ctx;
+    if (!h || clip_gdi(fmt))
+        return SetClipboardData(fmt, (HANDLE)h) || !h ? h : 0;
+    uint32_t n = pe_heap_size(c, c->heap, h);
+    const uint8_t *s = n ? (const uint8_t *)pe_buf(a, h, n) : NULL;
+    HGLOBAL g = s ? GlobalAlloc(GMEM_MOVEABLE | GMEM_DDESHARE, n) : 0;
+    uint8_t *p = g ? (uint8_t *)GlobalLock(g) : NULL;
+    if (!p) {
+        if (g)
+            GlobalFree(g);
+        return 0;
+    }
+    memcpy(p, s, n);
+    GlobalUnlock(g);
+    if (!SetClipboardData(fmt, g)) {
+        GlobalFree(g);
+        return 0;
+    }
+    pe_heap_free(c, c->heap, h);            /* the clipboard's now */
+    return h;
+}
+
+static uint32_t clip_get(pe_user *u, UINT fmt)
+{
+    win_pe_ctx *c = u->ctx;
+    HANDLE n = GetClipboardData(fmt);
+    if (!n || clip_gdi(fmt))
+        return n;
+    DWORD size = GlobalSize(n);
+    const uint8_t *p = size ? (const uint8_t *)GlobalLock(n) : NULL;
+    if (!p)
+        return 0;
+    int k = 0;
+    while (k < PE_CLIPS - 1 && u->clip[k].mem && u->clip[k].fmt != fmt)
+        k++;
+    if (u->clip[k].mem)
+        pe_heap_free(c, c->heap, u->clip[k].mem);
+    uint32_t g = pe_heap_alloc(c, c->heap, size, 0);
+    if (g)
+        memcpy(win_pe_ptr(c->img, g, size), p, size);
+    GlobalUnlock(n);
+    u->clip[k].fmt = fmt;
+    u->clip[k].mem = g;
+    return g;
+}
+
+/* the callbacks of native functions to the program's procedures: the
+ * program, its procedure and argument (one at a time) */
+static struct { win_pe_ctx *c; uint32_t proc, lp; } cb;
+
+static void CALLBACK line_dda(int x, int y, LPARAM lp)
+{
+    (void)lp;
+    const uint32_t args[3] = { (uint32_t)x, (uint32_t)y, cb.lp };
+    win_pe_call(cb.c, cb.proc, args, 3, NULL, 0, NULL);
+}
+
+/* ENUMLOGFONTA (156 bytes) and NEWTEXTMETRICA (72) */
+static int CALLBACK enum_font(const LOGFONT *lf, const TEXTMETRIC *tm, int type, LPARAM lp)
+{
+    (void)lp;
+    uint8_t blob[228];
+    memset(blob, 0, sizeof(blob));
+    memcpy(blob, lf, sizeof(LOGFONT) < 60 ? sizeof(LOGFONT) : 60);
+    memcpy(blob + 60, lf->lfFaceName, 32);
+    textmetric(tm, blob + 156);
+    uint32_t at = win_pe_blob(cb.c, sizeof(blob));
+    if (!at)
+        return 0;
+    const uint32_t args[4] = { at, at + 156, (uint32_t)type, cb.lp };
+    return (int)win_pe_call(cb.c, cb.proc, args, 4, blob, sizeof(blob), NULL);
+}
+
+/* the program's points (POINT: two LONGs, as WINN's) and counts */
+static const POINT *points(pe_args *a, uint32_t at, const int *counts, uint32_t n,
+                           uint32_t *total)
+{
+    uint32_t t = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        if (counts[i] < 0 || counts[i] > 0x10000)
+            return NULL;
+        t += (uint32_t)counts[i];
+    }
+    *total = t;
+    return t ? (const POINT *)pe_buf(a, at, 8u * t) : NULL;
+}
+
+/* the best of an icon group's entries (GRPICONDIR: 6 bytes, 14 an
+ * entry): 32x32, the most colours; its id */
+static uint32_t icon_id(const uint8_t *d, uint32_t n, int cx, int cy)
+{
+    uint32_t count = n >= 6 ? pe_rd16(d + 4) : 0, best = 0;
+    int score = -1;
+    for (uint32_t i = 0; i < count && 6 + 14 * (i + 1) <= n; i++) {
+        const uint8_t *e = d + 6 + 14 * i;
+        int w = e[0] ? e[0] : 256, h = e[1] ? e[1] : 256;
+        int bits = pe_rd16(e + 6) ? pe_rd16(e + 6) : 4;
+        int s = (w == (cx ? cx : 32) && h == (cy ? cy : 32) ? 1000 : 0) + (bits <= 8 ? bits : 0);
+        if (s > score) {
+            score = s;
+            best = pe_rd16(e + 12);
+        }
+    }
+    return best;
+}
+
+static __attribute__((noinline)) int user_win32s(pe_args *a, pe_user *u, uint16_t service,
+                                                 uint32_t *eax)
+{
+    win_pe_ctx *ctx = a->ctx;
+    uint32_t v = 0;
+    switch (service) {
+    case PEF_PtInRect: {
+        const RECT *r = (const RECT *)pe_buf(a, pe_arg(a, 0), sizeof(RECT));
+        POINT p = { (int)pe_arg(a, 1), (int)pe_arg(a, 2) };
+        v = r && PtInRect(r, p);
+        break;
+    }
+    /* hooks */
+    case PEF_SetWindowsHookExA:
+        v = hook_add(u, (int)pe_arg(a, 0), pe_arg(a, 1));
+        break;
+    case PEF_SetWindowsHookA: {         /* the one before it, or a hook that does nothing */
+        int type = (int)pe_arg(a, 0), i = hook_next(u, type, 0);
+        uint32_t prev = i >= 0 ? hooks[i].proc : 0;
+        v = hook_add(u, type, pe_arg(a, 1)) ? prev : 0;
+        break;
+    }
+    case PEF_UnhookWindowsHookEx:
+    case PEF_UnhookWindowsHook:
+        for (int i = 0; i < PE_HOOKS; i++)
+            if (hooks[i].u == u &&
+                (service == PEF_UnhookWindowsHookEx ?
+                 (pe_arg(a, 0) >> 16) == 0x484bu && hooks[i].id == (uint16_t)pe_arg(a, 0) :
+                 hooks[i].type == (int)pe_arg(a, 0) && hooks[i].proc == pe_arg(a, 1))) {
+                hooks[i].u = NULL;
+                hooks_update();
+                v = 1;
+                break;
+            }
+        break;
+    case PEF_CallNextHookEx: {
+        uint32_t h = pe_arg(a, 0);
+        int at = -1, i = -1;
+        for (int k = 0; k < PE_HOOKS; k++)
+            if (hooks[k].u == u && (h >> 16) == 0x484bu && hooks[k].id == (uint16_t)h)
+                at = k;
+        if (at >= 0)
+            i = hook_next(u, hooks[at].type, hooks[at].id);
+        if (i >= 0) {
+            const uint32_t args[3] = { pe_arg(a, 1), pe_arg(a, 2), pe_arg(a, 3) };
+            v = win_pe_call(ctx, hooks[i].proc, args, 3, NULL, 0, NULL);
+        }
+        break;
+    }
+    case PEF_CallMsgFilterA: {
+        MSG m;
+        v = msg_in(a, pe_arg(a, 0), &m) && CallMsgFilter(&m, (int)pe_arg(a, 1));
+        break;
+    }
+    /* the clipboard */
+    case PEF_SetClipboardData: v = clip_set(a, pe_arg(a, 0), pe_arg(a, 1)); break;
+    case PEF_GetClipboardData: v = clip_get(u, pe_arg(a, 0)); break;
+    /* the keyboard */
+    case PEF_MapVirtualKeyA: v = user_map_key(pe_arg(a, 0), pe_arg(a, 1)); break;
+    case PEF_VkKeyScanA:
+        v = (uint32_t)(int32_t)(int16_t)user_char_key((unsigned char)pe_arg(a, 0));
+        break;
+    case PEF_ToAscii: {
+        const BYTE *keys = (const BYTE *)pe_buf(a, pe_arg(a, 2), 256);
+        uint8_t *out = (uint8_t *)pe_buf(a, pe_arg(a, 3), 2);
+        unsigned char ch;
+        if (keys && out && !(pe_arg(a, 1) & 0x8000u) && pe_arg(a, 0) < 256 &&
+            user_key_char(keys, (int)pe_arg(a, 0), &ch)) {
+            out[0] = ch;
+            out[1] = 0;
+            v = 1;
+        }
+        break;
+    }
+    case PEF_GetKeyNameTextA: {
+        char name[32];
+        int cap = (int)pe_arg(a, 2);
+        int n = user_key_name((LONG)pe_arg(a, 0), name, cap < (int)sizeof(name) ? cap : (int)sizeof(name));
+        char *d = cap > 0 ? (char *)pe_buf(a, pe_arg(a, 1), (uint32_t)n + 1u) : NULL;
+        if (d) {
+            memcpy(d, name, (size_t)n + 1);
+            v = (uint32_t)n;
+        }
+        break;
+    }
+    case PEF_GetKeyboardType: {
+        int which = (int)pe_arg(a, 0);
+        v = which == 0 ? 4 : which == 2 ? 12 : 0;
+        break;
+    }
+    case PEF_OemKeyScan: {
+        int k = user_char_key((unsigned char)win_oem_to_ansi((uint8_t)pe_arg(a, 0)));
+        UINT sc = k >= 0 ? user_map_key((UINT)k & 0xffu, 0) : 0;
+        v = k < 0 || !sc ? 0xffffffffu : sc | (uint32_t)(((unsigned)k >> 8) & 1u) << 17;
+        break;
+    }
+    case PEF_GetKBCodePage: v = 866; break;
+    case PEF_GetKeyboardLayout: v = 0x04090409u; break;
+    case PEF_GetKeyboardLayoutNameA: {
+        char *d = (char *)pe_buf(a, pe_arg(a, 0), 9);
+        if (d) {
+            memcpy(d, "00000409", 9);
+            v = 1;
+        }
+        break;
+    }
+    case PEF_CharToOemA:
+    case PEF_OemToCharA:
+    case PEF_CharToOemBuffA:
+    case PEF_OemToCharBuffA: {
+        int buff = service == PEF_CharToOemBuffA || service == PEF_OemToCharBuffA;
+        int to_oem = service == PEF_CharToOemA || service == PEF_CharToOemBuffA;
+        const char *s = buff ? (const char *)pe_buf(a, pe_arg(a, 0), pe_arg(a, 2)) : pe_str(a, pe_arg(a, 0));
+        uint32_t n = buff ? pe_arg(a, 2) : s ? (uint32_t)strlen(s) + 1u : 0;
+        uint8_t *d = s && n ? (uint8_t *)pe_buf(a, pe_arg(a, 1), n) : NULL;
+        for (uint32_t i = 0; d && i < n; i++) {
+            uint8_t c = (uint8_t)s[i];
+            d[i] = to_oem ? win_ansi_to_oem(c) : win_oem_to_ansi(c);
+        }
+        v = 1;
+        break;
+    }
+    /* icons, cursors, accelerators */
+    case PEF_CopyIcon: v = CopyIcon(0, (HICON)pe_arg(a, 0)); break;
+    case PEF_DestroyCursor: v = DestroyIcon((HICON)pe_arg(a, 0)); break;
+    case PEF_GetIconInfo: {
+        uint8_t *g = (uint8_t *)pe_buf(a, pe_arg(a, 1), 20);
+        ICONINFO ii;
+        if (g && GetIconInfo((HICON)pe_arg(a, 0), &ii)) {
+            pe_wr32(g, (uint32_t)ii.fIcon);
+            pe_wr32(g + 4, ii.xHotspot);
+            pe_wr32(g + 8, ii.yHotspot);
+            pe_wr32(g + 12, ii.hbmMask);
+            pe_wr32(g + 16, ii.hbmColor);
+            v = 1;
+        }
+        break;
+    }
+    case PEF_CreateIconFromResource:
+    case PEF_CreateIconFromResourceEx: {
+        uint32_t n = pe_arg(a, 1);
+        const uint8_t *d = n > 4 ? (const uint8_t *)pe_buf(a, pe_arg(a, 0), n) : NULL;
+        if (d)
+            v = pe_arg(a, 2) ? win_icon_from_dib(d, n) :
+                win_cursor_from_dib(d + 4, n - 4, pe_rd16(d), pe_rd16(d + 2));
+        break;
+    }
+    case PEF_LookupIconIdFromDirectory:
+    case PEF_LookupIconIdFromDirectoryEx: {
+        const uint8_t *d = (const uint8_t *)pe_buf(a, pe_arg(a, 0), 6);
+        uint32_t n = d ? 6u + 14u * pe_rd16(d + 4) : 0;
+        d = n ? (const uint8_t *)pe_buf(a, pe_arg(a, 0), n) : NULL;
+        int ex = service == PEF_LookupIconIdFromDirectoryEx;
+        if (d)
+            v = icon_id(d, n, ex ? (int)pe_arg(a, 2) : 0, ex ? (int)pe_arg(a, 3) : 0);
+        break;
+    }
+    case PEF_CreateAcceleratorTableA: {
+        int n = (int)pe_arg(a, 1);
+        const uint8_t *d = n > 0 && n <= 256 ? (const uint8_t *)pe_buf(a, pe_arg(a, 0), 6u * (uint32_t)n) : NULL;
+        ACCEL_N acc[256];
+        for (int i = 0; d && i < n; i++) {
+            acc[i].fVirt = (BYTE)(d[6 * i] & 0x1f);
+            acc[i].key = pe_rd16(d + 6 * i + 2);
+            acc[i].cmd = pe_rd16(d + 6 * i + 4);
+        }
+        v = d ? CreateAcceleratorTableN(acc, n) : 0;
+        break;
+    }
+    case PEF_DestroyAcceleratorTable:
+        for (int i = 0; i < PE_ACCELS; i++)
+            if (u->accel[i] == (HACCEL)pe_arg(a, 0))
+                u->accel[i] = 0;
+        v = DestroyAcceleratorTableN((HACCEL)pe_arg(a, 0));
+        break;
+    /* windows and messages */
+    case PEF_GrayStringA: {
+        /* (HDC, HBRUSH, proc, LPARAM, n, x, y, cx, cy): the procedure draws,
+         * or the string is drawn in the gray text colour */
+        HDC dc = (HDC)pe_arg(a, 0);
+        if (pe_arg(a, 2)) {
+            const uint32_t args[3] = { dc, pe_arg(a, 3), pe_arg(a, 4) };
+            v = win_pe_call(ctx, pe_arg(a, 2), args, 3, NULL, 0, NULL) != 0;
+            break;
+        }
+        const char *s = pe_str(a, pe_arg(a, 3));
+        if (!s)
+            break;
+        int n = (int)pe_arg(a, 4) ? (int)pe_arg(a, 4) : (int)strlen(s);
+        COLORREF old = SetTextColor(dc, GetSysColor(COLOR_GRAYTEXT));
+        int mode = SetBkMode(dc, TRANSPARENT);
+        v = TextOut(dc, (int)pe_arg(a, 5), (int)pe_arg(a, 6), s, n);
+        SetBkMode(dc, mode);
+        SetTextColor(dc, old);
+        break;
+    }
+    case PEF_SetSysColors: {
+        int n = (int)pe_arg(a, 0);
+        const int *idx = n > 0 && n < 64 ? (const int *)pe_buf(a, pe_arg(a, 1), 4u * (uint32_t)n) : NULL;
+        const COLORREF *col = idx ? (const COLORREF *)pe_buf(a, pe_arg(a, 2), 4u * (uint32_t)n) : NULL;
+        if (col) {
+            SetSysColors(n, idx, col);
+            v = 1;
+        }
+        break;
+    }
+    case PEF_TranslateMDISysAccel: {
+        MSG m;
+        v = msg_in(a, pe_arg(a, 1), &m) && TranslateMDISysAccel((HWND)pe_arg(a, 0), &m);
+        break;
+    }
+    case PEF_ChildWindowFromPointEx: {
+        POINT p = { (int)pe_arg(a, 1), (int)pe_arg(a, 2) };
+        v = ChildWindowFromPointEx((HWND)pe_arg(a, 0), p, pe_arg(a, 3));
+        break;
+    }
+    case PEF_DragDetect: {
+        POINT p = { (int)pe_arg(a, 1), (int)pe_arg(a, 2) };
+        v = DragDetect((HWND)pe_arg(a, 0), p);
+        break;
+    }
+    case PEF_DrawTextExA: {
+        int n = (int)pe_arg(a, 2);
+        char *s = n >= 0 ? (char *)pe_buf(a, pe_arg(a, 1), (uint32_t)n + 1u) : (char *)pe_str(a, pe_arg(a, 1));
+        RECT *r = (RECT *)pe_buf(a, pe_arg(a, 3), sizeof(RECT));
+        DRAWTEXTPARAMS *p = pe_arg(a, 5) ? (DRAWTEXTPARAMS *)pe_buf(a, pe_arg(a, 5), 20) : NULL;
+        if (s && r && !a->bad)
+            v = (uint32_t)DrawTextEx((HDC)pe_arg(a, 0), s, n, r, pe_arg(a, 4), p);
+        break;
+    }
+    case PEF_SendMessageTimeoutA: {
+        uint32_t r = (uint32_t)send_native(a, SendMessage, NULL, (HWND)pe_arg(a, 0), pe_arg(a, 1),
+                                           pe_arg(a, 2), pe_arg(a, 3));
+        uint8_t *p = pe_arg(a, 6) ? (uint8_t *)pe_buf(a, pe_arg(a, 6), 4) : NULL;
+        if (p)
+            pe_wr32(p, r);
+        v = 1;
+        break;
+    }
+    case PEF_SendNotifyMessageA:
+        send_native(a, SendMessage, NULL, (HWND)pe_arg(a, 0), pe_arg(a, 1), pe_arg(a, 2),
+                    pe_arg(a, 3));
+        v = 1;
+        break;
+    case PEF_GetWindowThreadProcessId: {
+        HTASK t = IsWindow((HWND)pe_arg(a, 0)) ? GetWindowTask((HWND)pe_arg(a, 0)) : 0;
+        uint8_t *p = pe_arg(a, 1) ? (uint8_t *)pe_buf(a, pe_arg(a, 1), 4) : NULL;
+        if (p)
+            pe_wr32(p, (uint32_t)t);
+        v = (uint32_t)t;
+        break;
+    }
+    case PEF_ExitWindowsEx: v = ExitWindows(0, 0); break;
+    case PEF_CascadeWindows:
+    case PEF_TileWindows:
+        if (service == PEF_CascadeWindows)
+            CascadeChildWindows((HWND)pe_arg(a, 0), pe_arg(a, 1));
+        else
+            TileChildWindows((HWND)pe_arg(a, 0), pe_arg(a, 1));
+        v = 1;
+        break;
+    case PEF_LoadMenuIndirectA: {
+        uint32_t n = 4096;                  /* as much of it as there is */
+        while (n > 4 && !win_pe_ptr(ctx->img, pe_arg(a, 0), n))
+            n /= 2;
+        v = menu_from((const uint8_t *)pe_buf(a, pe_arg(a, 0), n), n);
+        break;
+    }
+    case PEF_MessageBoxIndirectA: {
+        const uint8_t *p = (const uint8_t *)pe_buf(a, pe_arg(a, 0), 40);
+        const char *text = p ? pe_str(a, pe_rd32(p + 12)) : NULL;
+        const char *cap = p && pe_rd32(p + 16) ? pe_str(a, pe_rd32(p + 16)) : "Error";
+        if (text && cap)
+            v = (uint32_t)MessageBox((HWND)pe_rd32(p + 4), text, cap,
+                                     pe_rd32(p + 20) & ~0x80u);    /* MB_USERICON */
+        break;
+    }
+    case PEF_WaitForInputIdle: v = 0; break;
+    /* GDI */
+    case PEF_PolyPolygon:
+    case PEF_PolyPolyline:
+    case PEF_CreatePolyPolygonRgn: {
+        int rgn = service == PEF_CreatePolyPolygonRgn;
+        uint32_t n = pe_arg(a, rgn ? 2 : 3), total;
+        const int *counts = n && n < 4096 ? (const int *)pe_buf(a, pe_arg(a, rgn ? 1 : 2), 4u * n) : NULL;
+        const POINT *p = counts ? points(a, pe_arg(a, rgn ? 0 : 1), counts, n, &total) : NULL;
+        if (!p)
+            break;
+        if (rgn) {
+            v = CreatePolyPolygonRgn(p, counts, (int)n, (int)pe_arg(a, 3));
+        } else if (service == PEF_PolyPolygon) {
+            v = PolyPolygon((HDC)pe_arg(a, 0), p, counts, (int)n);
+        } else {
+            v = 1;
+            for (uint32_t i = 0; i < n; p += counts[i++])
+                v &= Polyline((HDC)pe_arg(a, 0), p, counts[i]) != 0;
+        }
+        break;
+    }
+    case PEF_EnumFontFamiliesA:
+    case PEF_EnumFontsA: {
+        const char *face = pe_arg(a, 1) ? pe_str(a, pe_arg(a, 1)) : NULL;
+        if (a->bad || !pe_arg(a, 2))
+            break;
+        typeof(cb) saved = cb;
+        cb.c = ctx;
+        cb.proc = pe_arg(a, 2);
+        cb.lp = pe_arg(a, 3);
+        v = (uint32_t)(service == PEF_EnumFontsA ? EnumFonts : EnumFontFamilies)(
+                (HDC)pe_arg(a, 0), face, enum_font, 0);
+        cb = saved;
+        break;
+    }
+    case PEF_LineDDA: {
+        typeof(cb) saved = cb;
+        cb.c = ctx;
+        cb.proc = pe_arg(a, 4);
+        cb.lp = pe_arg(a, 5);
+        if (cb.proc)
+            LineDDA((int)pe_arg(a, 0), (int)pe_arg(a, 1), (int)pe_arg(a, 2), (int)pe_arg(a, 3),
+                    line_dda, 0);
+        cb = saved;
+        v = 1;
+        break;
+    }
+    case PEF_GetClipRgn: {
+        HRGN r = GetClipRgn((HDC)pe_arg(a, 0));
+        v = r && CombineRgn((HRGN)pe_arg(a, 1), r, 0, RGN_COPY) != ERROR;
+        break;
+    }
+    case PEF_GetGlyphOutlineA: {
+        GLYPHMETRICS *gm = (GLYPHMETRICS *)pe_buf(a, pe_arg(a, 3), sizeof(GLYPHMETRICS));
+        uint32_t n = pe_arg(a, 4);
+        void *buf = n ? pe_buf(a, pe_arg(a, 5), n) : NULL;
+        const MAT2 *m = (const MAT2 *)pe_buf(a, pe_arg(a, 6), sizeof(MAT2));
+        v = gm && m && !a->bad ? GetGlyphOutline((HDC)pe_arg(a, 0), pe_arg(a, 1), pe_arg(a, 2),
+                                                 gm, n, buf, m) : 0xffffffffu;
+        break;
+    }
+    case PEF_ResetDCA: v = pe_arg(a, 0); break;
+    case PEF_SetAbortProc: v = 1; break;
+    case PEF_StartDocA: {
+        const uint8_t *g = (const uint8_t *)pe_buf(a, pe_arg(a, 1), 12);
+        DOCINFO di;
+        di.cbSize = sizeof(di);
+        di.lpszDocName = g && pe_rd32(g + 4) ? pe_str(a, pe_rd32(g + 4)) : NULL;
+        di.lpszOutput = g && pe_rd32(g + 8) ? pe_str(a, pe_rd32(g + 8)) : NULL;
+        v = g && !a->bad ? (uint32_t)StartDoc((HDC)pe_arg(a, 0), &di) : 0xffffffffu;
+        break;
+    }
+    case PEF_SetBrushOrgEx:
+    case PEF_GetDCOrgEx: {
+        int set = service == PEF_SetBrushOrgEx;
+        uint32_t at = pe_arg(a, set ? 3 : 1);
+        DWORD old = set ? SetBrushOrg((HDC)pe_arg(a, 0), (int)pe_arg(a, 1), (int)pe_arg(a, 2)) :
+                    GetDCOrg((HDC)pe_arg(a, 0));
+        uint8_t *p = at ? (uint8_t *)pe_buf(a, at, 8) : NULL;
+        if (p) {
+            pe_wr32(p, (uint32_t)(int32_t)(int16_t)LOWORD(old));
+            pe_wr32(p + 4, (uint32_t)(int32_t)(int16_t)HIWORD(old));
+        }
+        v = 1;
+        break;
+    }
+    case PEF_GetTextExtentExPointA: {
+        int n = (int)pe_arg(a, 2);
+        const char *s = n > 0 ? (const char *)pe_buf(a, pe_arg(a, 1), (uint32_t)n) : "";
+        int *fit = pe_arg(a, 4) ? (int *)pe_buf(a, pe_arg(a, 4), 4) : NULL;
+        int *dx = pe_arg(a, 5) && n > 0 ? (int *)pe_buf(a, pe_arg(a, 5), 4u * (uint32_t)n) : NULL;
+        SIZE *sz = (SIZE *)pe_buf(a, pe_arg(a, 6), sizeof(SIZE));
+        if (s && sz && !a->bad)
+            v = GetTextExtentEx((HDC)pe_arg(a, 0), s, n, (int)pe_arg(a, 3), fit, dx, sz);
+        break;
+    }
+    case PEF_CreateDIBPatternBrushPt: {
+        /* the packed DIB as a native block, as Win16's function takes it */
+        const uint8_t *h = (const uint8_t *)pe_buf(a, pe_arg(a, 0), 40);
+        if (!h)
+            break;
+        uint32_t bits = pe_rd16(h + 14), colors = pe_rd32(h + 32);
+        uint32_t w = pe_rd32(h + 4), ht = pe_rd32(h + 8);
+        if (ht & 0x80000000u)
+            ht = 0u - ht;
+        if (!colors && bits <= 8)
+            colors = 1u << bits;
+        uint32_t size = pe_rd32(h) + colors * (pe_arg(a, 1) ? 2u : 4u) +
+                        ((w * bits + 31u) / 32u) * 4u * ht;
+        const uint8_t *d = w < 4096 && ht < 4096 ? (const uint8_t *)pe_buf(a, pe_arg(a, 0), size) : NULL;
+        HGLOBAL g = d ? GlobalAlloc(GMEM_MOVEABLE, size) : 0;
+        void *p = g ? GlobalLock(g) : NULL;
+        if (p) {
+            memcpy(p, d, size);
+            GlobalUnlock(g);
+            v = CreateDIBPatternBrush(g, pe_arg(a, 1));
+        }
+        if (g)
+            GlobalFree(g);
+        break;
+    }
+    case PEF_CreateBitmapIndirect: {
+        const uint8_t *b = (const uint8_t *)pe_buf(a, pe_arg(a, 0), 24);
+        if (!b)
+            break;
+        uint32_t wb = pe_rd32(b + 12), ht = pe_rd32(b + 8);
+        const void *bits = pe_rd32(b + 20) && ht < 4096 ? pe_buf(a, pe_rd32(b + 20), wb * ht) : NULL;
+        v = CreateBitmap((int)pe_rd32(b + 4), (int)ht, pe_rd16(b + 16), pe_rd16(b + 18), bits);
+        break;
+    }
+    case PEF_ExtCreateRegion: {
+        /* RGNDATAHEADER (32 bytes), then its rectangles */
+        const uint8_t *h = (const uint8_t *)pe_buf(a, pe_arg(a, 2), 32);
+        uint32_t n = h ? pe_rd32(h + 8) : 0;
+        const uint8_t *r = h && n < 4096 ? (const uint8_t *)pe_buf(a, pe_arg(a, 2) + pe_rd32(h), 16u * n) : NULL;
+        if (!h || (n && !r))
+            break;
+        HRGN rgn = CreateRectRgn(0, 0, 0, 0);
+        for (uint32_t i = 0; rgn && i < n; i++) {
+            HRGN one = CreateRectRgn((int)pe_rd32(r + 16 * i), (int)pe_rd32(r + 16 * i + 4),
+                                     (int)pe_rd32(r + 16 * i + 8), (int)pe_rd32(r + 16 * i + 12));
+            if (one) {
+                CombineRgn(rgn, rgn, one, RGN_OR);
+                DeleteObject(one);
+            }
+        }
+        v = rgn;
+        break;
+    }
+    default:
+        return 0;
+    }
+    *eax = v;
+    return 1;
+}
+
 /* the calls with buffers of their own: not in pe_user_api()'s frame,
  * which nested window procedures stack up */
 static __attribute__((noinline)) int user_more(pe_args *a, pe_user *u, uint16_t service,
@@ -1623,7 +2330,7 @@ static __attribute__((noinline)) int user_more(pe_args *a, pe_user *u, uint16_t 
         break;
     }
     default:
-        return 0;
+        return user_win32s(a, u, service, eax);
     }
     *eax = v;
     return 1;

@@ -533,11 +533,32 @@ layout), painting, wsprintf, TEXTMETRIC, GetObject; DIB sections
 (CreateDIBSection: the bits in its memory, given to the bitmap before it is
 blitted), WinG (WING32.DLL: its DCs, top-down 8-bit bitmaps as DIB
 sections, WinGBitBlt and WinGStretchBlt); WINMM, the native MMSYSTEM.DLL's
-functions (the time, MCI's strings, sounds, the devices). A function WINN does
+functions (the time, MCI's strings, sounds, the devices). Win32s' other
+DLLs (`core/pe_dlls.c`): ADVAPI32's registry (WINN's, `core/winreg.c`:
+WINNREG.INI, HKEY_CLASSES_ROOT the Win16 programs' registration database
+too, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE ... keys of their own names
+beside it; values of any type) and GetUserName; COMDLG32, the native
+COMMDLG.DLL's dialogs (Open, Save, Color, Font, Print; Find and Replace
+modeless, their registered message's lParam the program's FINDREPLACE;
+hooks and templates ignored); SHELL32's ShellExecute, FindExecutable
+(WIN.INI's [Extensions]), ShellAbout, ExtractIcon; LZ32, LZEXPAND.DLL's;
+VERSION: a file's VERSIONINFO, Win16's and Win32's (Unicode: VerQueryValueA's
+strings ANSI, kept after the block, whose size GetFileVersionInfoSizeA
+doubles). And of KERNEL32, USER32 and GDI32 what Win32s has besides:
+OpenFile, profile sections and structures, CreateProcess (WinExec: its
+process handle signaled when the task ends), WaitForMultipleObjects,
+semaphores; hooks (SetWindowsHookEx: the task's own, with Win32's
+structures; CallNextHookEx), the clipboard (the program's HGLOBALs copied),
+the keyboard's functions, accelerator tables, icons from resources,
+GrayString, LoadMenuIndirect, MessageBoxIndirect; PolyPolygon,
+EnumFontFamilies, LineDDA, GetGlyphOutline, StartDoc, ExtCreateRegion ...
+`ShowWindow`'s SW_SHOWDEFAULT, which Win32 start-up code passes, is
+SW_SHOWNORMAL. A function WINN does
 not have ends it as it is called, named; a DLL that is not there is named
 before it starts. `host/mkpe_watcom.py` writes `OW32.EXE` and
 `OW32DLL.DLL` (Open Watcom's `nt_win` and `nt_dll`, their sources in the
-script; `scripts/ow32.txt`).
+script; `scripts/ow32.txt`), and `OW32S.EXE`, Win32s' DLLs and functions
+(`scripts/ow32s.txt`).
 
     WINN [:] [program [arguments]]
 
@@ -1039,8 +1060,9 @@ Cyrillic; TrueType fonts map the characters to Unicode themselves.
 
 Win32: threads (CreateThread fails), structured exceptions (an exception
 raised ends the program), the Unicode (W) functions, what GDI draws into a
-DIB section (its bits are not brought back), ADVAPI32, WINMM's devices
-(waveOut, midiOut) and mciSendCommand, COMDLG32, SHELL32, COMCTL32; VxDs.
+DIB section (its bits are not brought back), ADVAPI32 but the registry,
+WINMM's devices (waveOut, midiOut) and mciSendCommand, the common dialogs'
+hooks and templates, COMCTL32, OLE32, DDEML's Win32 functions; VxDs.
 A spooler and Print Manager's queues (printing goes straight to the port),
 printer drivers of Windows' own (.DRV files: WINN's are native DLLs), a
 driver's private DEVMODE data, the mixer's inputs, `.GRP` files (`PROGMAN.INI` holds the groups as text), DLLs (`LoadLibrary`) of native applications;
