@@ -96,7 +96,19 @@ typedef struct {
     uint32_t size;
     uint16_t selector;
     uint16_t flags;
+    /* a program's or a DLL's segment as Windows' memory manager has it:
+     * one that may be out of memory (WIN_NE_VM_DEMAND: a code segment
+     * loaded on call, or discardable), out now (WIN_NE_VM_ABSENT: its
+     * descriptor not present, linear 0); when it was used last (loaded,
+     * found loaded: the least recently is discarded first) */
+    uint8_t vm;
+    uint32_t used;
 } win_ne_guest_segment;
+#define WIN_NE_VM_DEMAND  1u
+#define WIN_NE_VM_ABSENT  2u
+/* NE segment flags */
+#define WIN_NE_SEG_PRELOAD     0x0040u
+#define WIN_NE_SEG_DISCARDABLE 0x1000u
 
 /* A DLL the program imports from (or loads): its module name, its file,
  * its segments (dll_segments[first ..], count of them), its DGROUP (a
@@ -226,6 +238,8 @@ uint32_t win_ne_guest_hook_terminator(const win_ne_guest_image *g);
  * the bytes of a service's PASCAL arguments; its name */
 int win_ne_native_import(const char *module, uint16_t ordinal, const char *name, uint16_t *id);
 int win_ne_native_has(const char *module, uint16_t ordinal, const char *name);
+/* a use of win_ne_native_import's let go (its id) */
+void win_ne_native_unref(uint16_t id);
 uint16_t win_ne_native_args(uint16_t id);
 const char *win_ne_native_name(uint16_t id, char *buf, unsigned cap);
 int win_ne_guest_module(const char *name);
@@ -271,6 +285,22 @@ uint16_t win_ne_guest_myalloc(win_ne_guest_image *g, uint16_t flags, uint32_t by
  * database's entry; 0 if handle is no block of the program's */
 int win_ne_guest_selfloaded(win_ne_guest_image *g, uint16_t k, uint16_t handle,
                             int (*read)(void *, uint32_t, void *, uint32_t));
+/* Windows' virtual memory of segments (the memory manager of Windows 3.x):
+ * a program's and its DLLs' code segments without PRELOAD are loaded when
+ * first used (their descriptors not present: the #NP the CPU raises, the
+ * service WIN_NE_SERVICE_NP, loads one from its file, fixups and all, and
+ * the instruction runs again), DISCARDABLE ones are discarded when memory
+ * runs out (the least recently used first, of every program) and loaded
+ * again the same way. win_ne_guest_present: the segment of the selector in
+ * memory, loaded now if it was not (1), not one of these (-1), no memory
+ * or no file for it (0). The bytes of the discardable code in memory (all
+ * the programs'); discarded until largest bytes are free (GlobalCompact:
+ * what is free then, the largest block). */
+#define WIN_NE_SERVICE_NP 0x2500u
+int win_ne_guest_present(win_ne_guest_image *g, uint16_t sel);
+uint32_t win_ne_guest_discardable(void);
+uint32_t win_ne_guest_compact(uint32_t bytes);
+
 /* the name of a service (a Win16 function), NULL if WINN has none */
 const char *win_ne_service_name(uint16_t service);
 win_ne_guest_segment *win_ne_guest_global(win_ne_guest_image *g, uint16_t sel);

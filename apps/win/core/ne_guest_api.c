@@ -16,6 +16,7 @@ extern uint32_t GetTickCount(void);
 extern int GetSystemMetrics(int);
 extern uint32_t GetSysColor(int);
 extern int MessageBox(uint16_t, const char *, const char *, unsigned int);
+extern int wsprintf(char *, const char *, ...);
 
 /* The segment of a selector: one of the program's, its PSP, a global block */
 static const win_ne_guest_segment *lookup_segment(
@@ -25,16 +26,24 @@ static const win_ne_guest_segment *lookup_segment(
         return NULL;
     const win_ne_guest_image *g = ctx->image;
     for (uint16_t i = 1; i <= g->info.segment_count; i++)
-        if ((g->segments[i].selector & ~3u) == (selector & ~3u))
+        if ((g->segments[i].selector & ~3u) == (selector & ~3u)) {
+            if (g->segments[i].vm & WIN_NE_VM_ABSENT)       /* in memory first */
+                win_ne_guest_present((win_ne_guest_image *)g, selector);
             return &g->segments[i];
+        }
     if (g->psp.selector && (g->psp.selector & ~3u) == (selector & ~3u))
         return &g->psp;
     for (unsigned i = 0; i < WIN_NE_GUEST_GLOBALS; i++)     /* GlobalAlloc's */
         if (g->globals[i].linear && (g->globals[i].selector & ~3u) == (selector & ~3u))
             return &g->globals[i];
-    for (unsigned i = 0; i < g->dll_segment_count; i++)     /* its DLLs' */
-        if (g->dll_segments[i].linear && (g->dll_segments[i].selector & ~3u) == (selector & ~3u))
-            return &g->dll_segments[i];
+    for (unsigned i = 0; i < g->dll_segment_count; i++) {   /* its DLLs' */
+        const win_ne_guest_segment *s = &g->dll_segments[i];
+        if ((s->selector & ~3u) != (selector & ~3u) || (!s->linear && !(s->vm & WIN_NE_VM_ABSENT)))
+            continue;
+        if (s->vm & WIN_NE_VM_ABSENT)
+            win_ne_guest_present((win_ne_guest_image *)g, selector);
+        return s->linear ? s : NULL;
+    }
     return NULL;
 }
 
@@ -409,6 +418,19 @@ __attribute__((weak)) void win_ne_guest_undefined_text(const win_ne_guest_image 
         out[0] = 0;
 }
 __attribute__((weak)) void win_ne_dll_init(win_ne_guest_api_context *ctx) { (void)ctx; }
+/* ... nor its memory manager's segments (ne_guest.c) */
+__attribute__((weak)) int win_ne_guest_present(win_ne_guest_image *g, uint16_t sel)
+{
+    (void)g; (void)sel;
+    return -1;
+}
+__attribute__((weak)) int wsprintf(char *out, const char *fmt, ...)
+{
+    (void)fmt;
+    if (out)
+        out[0] = 0;
+    return 0;
+}
 /* ... nor a trace */
 __attribute__((weak)) void win_trace_event(const char *name, uint32_t a, uint32_t b)
 {
@@ -513,6 +535,27 @@ int win_ne_guest_caller(void *opaque, win_ne_regs *cpu, uint16_t *cs, uint16_t *
     return cpu && read_stack_word(ctx, cpu, 0, ip) && read_stack_word(ctx, cpu, 2, cs);
 }
 
+/* Before the program goes back from a service: the selectors its ring 0
+ * code loads in memory (DS and ES as the gateway saved them, an
+ * interrupt's CS: the IRET to ring 3), a #NP being no exception ring 0
+ * may take. Those of a segment discarded while it waited are loaded again. */
+void win_ne_vm_return(void *opaque, win_ne_regs *cpu, uint16_t service)
+{
+    win_ne_guest_api_context *ctx = (win_ne_guest_api_context *)opaque;
+    if (!ctx || !ctx->image || !cpu || !cpu->frame)
+        return;
+    win_ne_guest_image *g = (win_ne_guest_image *)ctx->image;
+    uint16_t v;
+    if (frame_get(ctx, cpu, FR_DS, &v) && (v & ~3u))
+        win_ne_guest_present(g, v);
+    if (frame_get(ctx, cpu, FR_ES, &v) && (v & ~3u))
+        win_ne_guest_present(g, v);
+    int at = service == WIN_NE_SERVICE_INT21 || service == WIN_NE_SERVICE_YIELD ? 4 :
+             service == WIN_NE_SERVICE_BIOS ? 6 : service == WIN_NE_SERVICE_NP ? 8 : 0;
+    if (at && frame_get(ctx, cpu, at, &v))
+        win_ne_guest_present(g, v);
+}
+
 int win_ne_guest_api(void *opaque, win_ne_regs *cpu, uint16_t service)
 {
     if (!cpu) return 0;
@@ -614,6 +657,35 @@ int win_ne_guest_api(void *opaque, win_ne_regs *cpu, uint16_t service)
             return 0;
         dword = 1;
         break;
+    case WIN_NE_SERVICE_NP: {
+        /* #NP: the segment of the error code's selector in memory (loaded
+         * on call, or discarded), the instruction again; AX and DX the stub
+         * keeps. Another selector, or no memory for it: as Windows, the end */
+        uint16_t err;
+        win_ne_guest_image *g = (win_ne_guest_image *)ctx->image;
+        if (!frame_get(ctx, cpu, 4, &err))
+            return 0;
+        int r = win_ne_guest_present(g, (uint16_t)((err & ~7u) | 3u));
+        if (r != 1) {
+            char msg[200];
+            const char *name = g->path, *p;
+            for (p = g->path; *p; p++)
+                if (*p == '\\' || *p == '/' || *p == ':')
+                    name = p + 1;
+            if (r < 0)
+                wsprintf(msg, "%s caused a Segment Not Present fault (selector %04X).", name,
+                         (unsigned)(err | 3u));
+            else
+                wsprintf(msg, "There is not enough memory to load a segment (%04X) of %s.",
+                         (unsigned)(err | 3u), name);
+            MessageBox(0, msg, "Application Error", 0x10u);    /* MB_ICONSTOP */
+            ctx->stopped = 1;
+            return WINX86_SERVICE_EXIT;
+        }
+        value = 0;
+        dword = 1;
+        break;
+    }
     case WIN_NE_SERVICE_INT21: {
         int r = int21(ctx, cpu, &value);
         if (r != 1)

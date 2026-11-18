@@ -1796,9 +1796,14 @@ int ne_kernel_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *d
         *v = 0xffffffffu;
         *dword = 1;
         return 1;
-    case 25: case 169:                  /* GlobalCompact, GetFreeSpace */
+    case 25: case 169:                  /* GlobalCompact(DWORD), GetFreeSpace(UINT) */
 #if defined(__arm__) || defined(__thumb__)
-        *v = win_ne_guest_free_space();
+        /* GlobalCompact: the discardable code discarded (the least
+         * recently used first) until a block of that many bytes is free
+         * (-1: all of it), the largest free; GetFreeSpace: what is free and
+         * what could be by discarding (Windows' answer) */
+        *v = service == 25 ? win_ne_guest_compact(dw(a, 4)) :
+             win_ne_guest_free_space() + win_ne_guest_discardable();
 #else
         *v = 0x00080000u;               /* host-test fallback */
 #endif

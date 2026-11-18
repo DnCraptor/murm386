@@ -108,10 +108,14 @@ static int name_eq(const char *a, const char *b)
     return !*a && !*b;
 }
 
+static void vm_forget(const win_ne_guest_image *g);
+static void vm_note(win_ne_guest_image *g);
+
 void win_ne_guest_release(win_ne_guest_image *image)
 {
     if (!image)
         return;
+    vm_forget(image);
     if (image->io.free) {
         if (image->segments)
             for (uint16_t i = 1; i <= image->info.segment_count; i++)
@@ -136,13 +140,20 @@ void win_ne_guest_release(win_ne_guest_image *image)
     memset(image, 0, sizeof(*image));
 }
 
+static int vm_discard_one(void);
+
 static int guest_alloc_in(win_ne_guest_image *g, uint32_t bytes, uint32_t *linear, int low)
 {
     *linear = 0;
     int (*alloc)(void *, uint32_t, uint32_t *) =
         low && g->io.alloc_low ? g->io.alloc_low : g->io.alloc;
-    if (!alloc(g->opaque, bytes, linear))
-        return 0;
+    /* no memory: discardable code goes (Windows' memory manager), the
+     * least recently used first, until there is */
+    while (!alloc(g->opaque, bytes, linear)) {
+        *linear = 0;
+        if (!vm_discard_one())
+            return 0;
+    }
     if (low && *linear + bytes > 0x100000u) {
         g->io.free(g->opaque, *linear);
         *linear = 0;
@@ -168,7 +179,31 @@ typedef struct {
     win_ne_guest_image *g;
     int dll;
     int depth;                          /* DLLs loading DLLs */
+    int again;                          /* a segment loaded again: its imports had
+                                         * their uses counted at the load */
 } load_ctx;
+
+/* a code segment loaded when it is used (no PRELOAD), or one that may be
+ * discarded: its vm flags; not a self-loading module's (its loader's
+ * business), not the program's entry (the boot code goes there in ring 0) */
+static uint8_t vm_kind(const win_ne_guest_image *g, int dll, uint16_t index, uint16_t flags)
+{
+    if (flags & 1u)                     /* data */
+        return 0;
+    if (dll < 0 && ((g->info.module_flags & WIN_NE_SELF_LOADING) || index == g->info.cs_index))
+        return 0;
+    if (!(flags & WIN_NE_SEG_PRELOAD))
+        return WIN_NE_VM_DEMAND | WIN_NE_VM_ABSENT;
+    return (flags & WIN_NE_SEG_DISCARDABLE) ? WIN_NE_VM_DEMAND : 0;
+}
+
+/* an absent segment's descriptor: as it will be, not present */
+static void absent_descriptor(win_ne_guest_image *g, const win_ne_guest_segment *s)
+{
+    uint8_t *d = g->gdt + (s->selector & ~7u);
+    descriptor(d, 0, s->size, !(s->flags & 1u));
+    d[5] &= 0x7fu;
+}
 
 static int assign_selector(void *opaque, uint16_t index, uint16_t flags,
                            uint32_t bytes, uint16_t *selector)
@@ -181,13 +216,19 @@ static int assign_selector(void *opaque, uint16_t index, uint16_t flags,
             return 0;
         unsigned k = d->first + index - 1u;
         win_ne_guest_segment *s = &g->dll_segments[k];
-        if (s->linear || !guest_alloc(g, bytes, &s->linear))
+        uint8_t vm = vm_kind(g, lc->dll, index, flags);
+        if (s->linear || (!(vm & WIN_NE_VM_ABSENT) && !guest_alloc(g, bytes, &s->linear)))
             return 0;
         s->size = bytes;
         s->flags = flags;
+        s->vm = vm;
+        s->used = 0;
         s->selector = (uint16_t)((GDT_DLL(g) + k) * GDT_ENTRY_BYTES | 3u);
         *selector = s->selector;
-        descriptor(g->gdt + (s->selector & ~7u), s->linear, s->size, !(flags & 1u));
+        if (vm & WIN_NE_VM_ABSENT)
+            absent_descriptor(g, s);
+        else
+            descriptor(g->gdt + (s->selector & ~7u), s->linear, s->size, !(flags & 1u));
         return 1;
     }
     if (!index || index > g->info.segment_count || bytes > 65536u)
@@ -201,13 +242,19 @@ static int assign_selector(void *opaque, uint16_t index, uint16_t flags,
         *selector = s->selector;
         return 1;
     }
-    if (s->linear || !guest_alloc(g, bytes, &s->linear))
+    uint8_t vm = vm_kind(g, -1, index, flags);
+    if (s->linear || (!(vm & WIN_NE_VM_ABSENT) && !guest_alloc(g, bytes, &s->linear)))
         return 0;
     s->size = bytes;
     s->flags = flags;
+    s->vm = vm;
+    s->used = 0;
     s->selector = (uint16_t)(GDT_SEGMENT_INDEX(index) * GDT_ENTRY_BYTES | 3u);
     *selector = s->selector;
-    descriptor(g->gdt + (s->selector & ~7u), s->linear, s->size, !(flags & 1u));
+    if (vm & WIN_NE_VM_ABSENT)
+        absent_descriptor(g, s);
+    else
+        descriptor(g->gdt + (s->selector & ~7u), s->linear, s->size, !(flags & 1u));
     return 1;
 }
 
@@ -1034,6 +1081,24 @@ __attribute__((weak)) uint16_t win_ne_native_args(uint16_t id)
     return 0;
 }
 
+__attribute__((weak)) void win_ne_native_unref(uint16_t id)
+{
+    (void)id;
+}
+
+/* without WINN's trace (trace.c) */
+void win_trace_event(const char *name, uint32_t a, uint32_t b);
+__attribute__((weak)) void win_trace_event(const char *name, uint32_t a, uint32_t b)
+{
+    (void)name; (void)a; (void)b;
+}
+
+/* without ne_guest_dos.c: no memory to tell of */
+__attribute__((weak)) uint32_t win_ne_guest_free_space(void)
+{
+    return 0;
+}
+
 /* Win16 PASCAL return releases the argument words after popping CS:IP. */
 static uint16_t service_args(uint16_t id)
 {
@@ -1152,6 +1217,8 @@ static int resolve_import(void *opaque, const win_ne_import *imp,
                                          * may be none) */
         int native = win_ne_native_import(imp->module, imp->ordinal,
                                           imp->procedure[0] ? imp->procedure : NULL, &id);
+        if (native > 0 && lc->again)
+            win_ne_native_unref(id);    /* counted once, at the load */
         if (native < 0 && !(id = undefined_id(g, imp)))
             return 0;                   /* a native DLL without it, of no module known */
         if (!native) {
@@ -1409,7 +1476,7 @@ int win_ne_guest_load(const char *path, win_ne_guest_image *out,
 
     lstrcpy_n(out->path, path, sizeof(out->path));
     win_ne_image image;
-    load_ctx lc = { out, -1, 0 };
+    load_ctx lc = { out, -1, 0, 0 };
     rc = win_ne_load_image(path, &image, assign_selector, resolve_import, &lc);
     if (rc)
         goto fail;
@@ -1459,8 +1526,10 @@ int win_ne_guest_load(const char *path, win_ne_guest_image *out,
     rc = WIN_NE_OK;
 loaded_fail:
     win_ne_free_image(&image);
-    if (!rc)
+    if (!rc) {
+        vm_note(out);
         return WIN_NE_OK;
+    }
 fail:
     win_ne_guest_release(out);
     return rc;
@@ -1471,6 +1540,201 @@ uint16_t win_ne_guest_stack_top(const win_ne_guest_image *g, uint32_t size)
     if (g->info.ss_index == g->info.auto_data && size > g->info.heap_size)
         size -= g->info.heap_size;
     return (uint16_t)((size < 65536u ? size : 0xfffeu) & ~1u);
+}
+
+/* ---------------------------------------------------------------- virtual memory */
+
+/* The images whose segments may be discarded: those loaded (a program's,
+ * with its DLLs) */
+#define VM_IMAGES 32u
+static win_ne_guest_image *vm_images[VM_IMAGES];
+static uint32_t vm_clock;
+
+static void vm_note(win_ne_guest_image *g)
+{
+    for (unsigned i = 0; i < VM_IMAGES; i++)
+        if (!vm_images[i]) {
+            vm_images[i] = g;
+            return;
+        }
+}
+
+static void vm_forget(const win_ne_guest_image *g)
+{
+    for (unsigned i = 0; i < VM_IMAGES; i++)
+        if (vm_images[i] == g)
+            vm_images[i] = NULL;
+}
+
+/* a program's or a DLL's segment of the selector that may be out of memory
+ * (its module: -1 the program, else the DLL's index; its number there) */
+static win_ne_guest_segment *vm_segment(win_ne_guest_image *g, uint16_t sel, int *dll,
+                                        uint16_t *segno)
+{
+    sel &= (uint16_t)~3u;
+    if (!g || !sel || !g->segments)
+        return NULL;
+    for (uint16_t i = 1; i <= g->info.segment_count; i++)
+        if ((g->segments[i].selector & ~3u) == sel) {
+            if (!(g->segments[i].vm & WIN_NE_VM_DEMAND))
+                return NULL;
+            *dll = -1;
+            *segno = i;
+            return &g->segments[i];
+        }
+    for (uint16_t d = 0; d < g->dll_count; d++)
+        for (uint16_t k = 0; k < g->dlls[d].count; k++) {
+            win_ne_guest_segment *s = &g->dll_segments[g->dlls[d].first + k];
+            if ((s->selector & ~3u) == sel) {
+                if (!(s->vm & WIN_NE_VM_DEMAND))
+                    return NULL;
+                *dll = d;
+                *segno = (uint16_t)(k + 1u);
+                return s;
+            }
+        }
+    return NULL;
+}
+
+/* its descriptor written to the program's GDT (the guest's and the host's
+ * copy): present at linear, or not present */
+static int vm_descriptor(win_ne_guest_image *g, win_ne_guest_segment *s)
+{
+    uint8_t d[GDT_ENTRY_BYTES];
+    descriptor(d, s->linear, s->size, 1);
+    if (!s->linear)
+        d[5] &= 0x7fu;
+    uint32_t at = s->selector & ~7u;
+    if (!g->io.write(g->opaque, g->gdt_linear + at, d, sizeof(d)))
+        return 0;
+    memcpy(g->gdt + at, d, sizeof(d));
+    return 1;
+}
+
+/* One discardable code segment out of memory: the least recently used of
+ * all the programs'. A program waiting in WINN's code holds none of its
+ * segments in a register its ring 0 code loads (WINN makes those present
+ * again before it goes back: DS, ES, an interrupt's CS), and one in ring 3
+ * takes the #NP of a segment that went. 0 if there is none. */
+static int vm_discard_one(void)
+{
+    win_ne_guest_image *best_g = NULL;
+    win_ne_guest_segment *best = NULL;
+    for (unsigned i = 0; i < VM_IMAGES; i++) {
+        win_ne_guest_image *g = vm_images[i];
+        if (!g)
+            continue;
+        for (uint16_t k = 1; k <= g->info.segment_count + g->dll_segment_count; k++) {
+            win_ne_guest_segment *s = k <= g->info.segment_count ? &g->segments[k] :
+                                      &g->dll_segments[k - g->info.segment_count - 1u];
+            if ((s->vm & (WIN_NE_VM_DEMAND | WIN_NE_VM_ABSENT)) != WIN_NE_VM_DEMAND ||
+                !(s->flags & WIN_NE_SEG_DISCARDABLE) || !s->linear)
+                continue;
+            if (!best || (int32_t)(s->used - best->used) < 0) {
+                best = s;
+                best_g = g;
+            }
+        }
+    }
+    if (!best)
+        return 0;
+    uint32_t linear = best->linear;
+    best->linear = 0;
+    if (!vm_descriptor(best_g, best)) {
+        best->linear = linear;
+        return 0;
+    }
+    best->vm |= WIN_NE_VM_ABSENT;
+    best_g->io.free(best_g->opaque, linear);
+    win_trace_event("seg-discard", best->selector, best->size);
+    return 1;
+}
+
+int win_ne_guest_present(win_ne_guest_image *g, uint16_t sel)
+{
+    int dll;
+    uint16_t segno;
+    win_ne_guest_segment *s = vm_segment(g, sel, &dll, &segno);
+    if (!s)
+        return -1;
+    s->used = ++vm_clock;
+    if (!(s->vm & WIN_NE_VM_ABSENT))
+        return 1;
+    /* its module's segments as they have their selectors (the fixups to
+     * them), its file, its imports as they were resolved at the load */
+    win_ne_info info;
+    const char *path;
+    unsigned count;
+    const win_ne_guest_segment *first;
+    if (dll < 0) {
+        info = g->info;
+        path = g->path;
+        count = g->info.segment_count;
+        first = &g->segments[1];
+    } else {
+        memset(&info, 0, sizeof(info));
+        info.segment_count = g->dlls[dll].count;
+        path = g->dlls[dll].path;
+        count = g->dlls[dll].count;
+        first = &g->dll_segments[g->dlls[dll].first];
+    }
+    win_ne_segment_image *segs = (win_ne_segment_image *)calloc(count + 1u, sizeof(*segs));
+    uint8_t *data = (uint8_t *)calloc(s->size, 1);
+    int ok = 0;
+    if (segs && data) {
+        for (unsigned i = 0; i < count; i++) {
+            segs[i + 1].selector = first[i].selector;
+            segs[i + 1].size = first[i].size;
+            segs[i + 1].flags = first[i].flags;
+        }
+        load_ctx lc = { g, dll, 0, 1 };
+        uint32_t linear;
+        if (win_ne_load_segment(path, &info, segno, segs, data, s->size, resolve_import, &lc) ==
+                WIN_NE_OK &&
+            guest_alloc(g, s->size, &linear)) {
+            if (g->io.write(g->opaque, linear, data, s->size)) {
+                s->linear = linear;
+                if (vm_descriptor(g, s)) {
+                    s->vm &= (uint8_t)~WIN_NE_VM_ABSENT;
+                    ok = 1;
+                } else {
+                    s->linear = 0;
+                }
+            }
+            if (!ok)
+                g->io.free(g->opaque, linear);
+        }
+    }
+    free(segs);
+    free(data);
+    win_trace_event(ok ? "seg-load" : "seg-load-failed", s->selector, s->size);
+    return ok;
+}
+
+uint32_t win_ne_guest_discardable(void)
+{
+    uint32_t n = 0;
+    for (unsigned i = 0; i < VM_IMAGES; i++) {
+        const win_ne_guest_image *g = vm_images[i];
+        if (!g)
+            continue;
+        for (uint16_t k = 1; k <= g->info.segment_count + g->dll_segment_count; k++) {
+            const win_ne_guest_segment *s = k <= g->info.segment_count ? &g->segments[k] :
+                                            &g->dll_segments[k - g->info.segment_count - 1u];
+            if ((s->vm & (WIN_NE_VM_DEMAND | WIN_NE_VM_ABSENT)) == WIN_NE_VM_DEMAND &&
+                (s->flags & WIN_NE_SEG_DISCARDABLE) && s->linear)
+                n += s->size;
+        }
+    }
+    return n;
+}
+
+uint32_t win_ne_guest_compact(uint32_t bytes)
+{
+    uint32_t largest = win_ne_guest_free_space();
+    while (largest < bytes && vm_discard_one())
+        largest = win_ne_guest_free_space();
+    return largest;
 }
 
 /* ---------------------------------------------------------------- global memory */
@@ -1771,6 +2035,13 @@ int win_ne_guest_selector_get(const win_ne_guest_image *g, uint16_t sel, uint32_
     if (!at || (sel & 4u) || at + GDT_ENTRY_BYTES > (uint32_t)g->gdt_limit + 1u)
         return 0;
     const uint8_t *p = g->gdt + at;
+    if (!(p[5] & 0x80u)) {              /* a segment out of memory: in it now */
+        int dll;
+        uint16_t segno;
+        if (!vm_segment((win_ne_guest_image *)g, sel, &dll, &segno) ||
+            win_ne_guest_present((win_ne_guest_image *)g, sel) != 1)
+            return 0;
+    }
     if (!(p[5] & 0x80u) || !(p[5] & 0x10u) || (p[5] & 0x60u) != 0x60u)
         return 0;                       /* not present, a system one, not ring 3 */
     *base = p[2] | (uint32_t)p[3] << 8 | (uint32_t)p[4] << 16 | (uint32_t)p[7] << 24;
@@ -1996,13 +2267,13 @@ static int load_dll(win_ne_guest_image *g, const char *module, int depth)
     d->heap_size = info.heap_size;
     g->dll_segment_count = (uint16_t)(g->dll_segment_count + info.segment_count);
     win_ne_image image;
-    load_ctx lc = { g, i, depth + 1 };
+    load_ctx lc = { g, i, depth + 1, 0 };
     int rc = win_ne_load_image(path, &image, assign_selector, resolve_import, &lc);
     if (!rc) {
         patch_exports(g, i, &image);
         for (uint16_t k = 1; !rc && k <= d->count; k++) {
             const win_ne_guest_segment *s = &g->dll_segments[d->first + k - 1u];
-            if (!g->io.write(g->opaque, s->linear, image.segments[k].data, s->size))
+            if (s->linear && !g->io.write(g->opaque, s->linear, image.segments[k].data, s->size))
                 rc = WIN_NE_IO_ERROR;
         }
         win_ne_free_image(&image);
@@ -2082,6 +2353,11 @@ const char *win_ne_guest_path_of(const win_ne_guest_image *g, uint16_t instance,
 
 win_ne_guest_segment *win_ne_guest_segment_of(win_ne_guest_image *g, uint16_t sel)
 {
+    int dll;
+    uint16_t segno;
+    win_ne_guest_segment *v = vm_segment(g, sel, &dll, &segno);
+    if (v && (v->vm & WIN_NE_VM_ABSENT))   /* out of memory: in it now */
+        win_ne_guest_present(g, sel);
     sel &= (uint16_t)~3u;
     for (uint16_t i = 1; i <= g->info.segment_count; i++)
         if ((g->segments[i].selector & ~3u) == sel && g->segments[i].linear &&

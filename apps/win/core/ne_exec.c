@@ -243,6 +243,10 @@ static int invoke_native(void *opaque, CPU *cpu, uint16_t service)
                           (uint32_t)guest.gprx[regdx].r16 << 16 | guest.gprx[regax].r16);
     if (gate->api->invalid_args && !bad_before && !gate->api->invalid_call)
         gate->api->invalid_call = service;
+    /* the segments its ring 0 code loads on the way back in memory (those
+     * of a program waiting may have been discarded meanwhile) */
+    if (handled == 1)
+        win_ne_vm_return(gate->api, &guest, service);
     /* Yield only while the shared CPU is in its original DOS context. */
     if (handled == 1 && !gate->api->dead && !gate->api->exited && !gate->api->stopped &&
         turn_due(gate)) {
@@ -508,6 +512,9 @@ static uint32_t call_with(win_ne_guest_api_context *ctx, uint32_t proc, const ui
     if (!stack || sp < 64u || sp > args || at > top || top > stack->size ||
         r0sp < WIN_NE_RING0_FLOOR + 64u || r0sp > WIN_NE_RING0_BYTES)
         return 0;
+    /* the procedure's segment in memory: ring 0 code goes there (a far
+     * return to ring 3), where a #NP could not be taken */
+    win_ne_guest_present((win_ne_guest_image *)g, (uint16_t)(proc >> 16));
     uint8_t scratch[WIN_NE_BOOT_SCRATCH_BYTES];
     memcpy(scratch, dos_guest_linear_ptr(boot + WIN_NE_BOOT_SCRATCH_OFFSET), sizeof(scratch));
     const uint16_t sp0 = guest_get16(tss + 2u);

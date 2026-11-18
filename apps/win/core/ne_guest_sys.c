@@ -346,6 +346,14 @@ int win_ne_native_has(const char *module, uint16_t ordinal, const char *name)
     return r;
 }
 
+void win_ne_native_unref(uint16_t id)
+{
+    const win_dll_export *e;
+    int slot = dll_slot_of(id, &e);
+    if (slot >= 0)
+        win_dll_unref(slot);
+}
+
 uint16_t win_ne_native_args(uint16_t id)
 {
     const win_dll_export *e;

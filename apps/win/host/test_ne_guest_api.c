@@ -64,7 +64,7 @@ int main(void)
     assert(win_ne_guest_api(NULL, &cpu, 0x100d));
     assert(cpu.gprx[regax].r16 == 0x7890 && cpu.gprx[regdx].r16 == 0x3456);
 
-    win_ne_guest_segment segments[2] = { {0}, {BASE, sizeof(mem), 0x18, 1} };
+    win_ne_guest_segment segments[2] = { {0}, {BASE, sizeof(mem), 0x18, 1, 0, 0} };
     win_ne_guest_image img = { 0 };
     img.info.segment_count = 1;
     img.segments = segments;

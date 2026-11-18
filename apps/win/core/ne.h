@@ -115,6 +115,14 @@ int win_ne_load_image(const char *path, win_ne_image *image,
                       win_ne_selector_cb assign, win_ne_resolve_cb resolve,
                       void *opaque);
 void win_ne_free_image(win_ne_image *image);
+/* A segment loaded again from the file (when it is not present: loaded on
+ * call, or discarded): its data and its fixups (resolve as for
+ * win_ne_load_image) into data, bytes long (segs[segno].size, zeroed by the
+ * caller); segs [0..info->segment_count] the module's segments as they were
+ * given their selectors (their data unused). WIN_NE_OK or an error. */
+int win_ne_load_segment(const char *path, const win_ne_info *info, unsigned segno,
+                        const win_ne_segment_image *segs, uint8_t *data, uint32_t bytes,
+                        win_ne_resolve_cb resolve, void *opaque);
 /* called as the file is read (WINN's win_busy: the cursor follows the
  * mouse while a big program loads); NULL: nothing */
 extern void (*win_ne_reading)(void);

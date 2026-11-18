@@ -118,6 +118,9 @@
  * vector pushed, then as INT 21h with this service; the frame: AX, the
  * vector, IP, CS, FLAGS. */
 #define WIN_NE_SERVICE_BIOS      0x2300u
+/* #NP: the segment of the selector its error code has loaded (ne_guest.h's
+ * WIN_NE_SERVICE_NP); the frame: AX, DX, the error code, IP, CS, FLAGS */
+#define WIN_NE_SERVICE_NP_       0x2500u
 #define WIN_NE_BIOS_VECTOR(v)    ((v) == 0x10u || (v) == 0x11u || (v) == 0x12u || \
                                   (v) == 0x16u || (v) == 0x1au || \
                                   ((v) >= 0x22u && (v) < WIN_NE_IDT_VECTORS))

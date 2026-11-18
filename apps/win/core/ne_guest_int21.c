@@ -403,11 +403,19 @@ static void dpmi(win_ne_guest_api_context *ctx, win_ne_dos_regs *r)
     case 0x0500: {                      /* free memory: ES:DI, 48 bytes */
         uint8_t info[48];
         memset(info, 0xff, sizeof(info));
+#if defined(__arm__) || defined(__thumb__)
+        /* the largest block free; the pages free and those discardable
+         * code holds (Windows' memory manager makes them free) */
+        uint32_t free = win_ne_guest_free_space(),
+                 pages = (free + win_ne_guest_discardable()) >> 12;
+#else
         uint32_t free = 0x00080000u, pages = free >> 12;
+#endif
         for (int i = 0; i < 4; i++) {
             info[i] = (uint8_t)(free >> (8 * i));       /* the largest block */
             info[4 + i] = (uint8_t)(pages >> (8 * i));  /* unlocked pages */
             info[8 + i] = (uint8_t)(pages >> (8 * i));  /* lockable pages */
+            info[0x14 + i] = (uint8_t)(pages >> (8 * i));   /* free pages */
         }
         if (!win_ne_write(ctx, r->es, r->di, info, sizeof(info)))
             dpmi_fail(r, DPMI_BAD_SELECTOR);

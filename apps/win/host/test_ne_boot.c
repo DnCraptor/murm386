@@ -68,6 +68,19 @@ int main(void)
         unsigned pos=6*v;
         if (v==0x20 || v==0x21)
             continue;
+        if (v==11) {                            /* #NP: the segment loaded, IRET */
+            unsigned at=6*WIN_NE_YIELD_VECTOR;
+            const uint8_t np[]={0x52,0x50,0xb8,WIN_NE_SERVICE_NP_&255,WIN_NE_SERVICE_NP_>>8,0x9a,
+                                WIN_NE_BOOT_GATEWAY_OFFSET&255,WIN_NE_BOOT_GATEWAY_OFFSET>>8,
+                                8,0,0x58,0x5a,0x83,0xc4,0x02,0xcf};
+            assert(r16(idt+v*8)==WIN_NE_FAULT_CODE_OFFSET+at && idt[v*8+5]==0x86);
+            assert(!memcmp(code+at,np,sizeof(np)));
+            continue;
+        }
+        if (v==WIN_NE_YIELD_VECTOR) {           /* its gate: the DOS stubs' yield */
+            assert(r16(idt+v*8)==WIN_NE_YIELD_OFFSET);
+            continue;
+        }
         assert(r16(idt+v*8)==(v==WIN_NE_YIELD_VECTOR ? WIN_NE_YIELD_OFFSET :
                               WIN_NE_FAULT_CODE_OFFSET+pos));
         assert(r16(idt+v*8+2)==a.pm_segment);

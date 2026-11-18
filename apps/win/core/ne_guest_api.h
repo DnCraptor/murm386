@@ -49,6 +49,9 @@ typedef struct {
  * Returns 1, 0 when the call is not supported, WINX86_SERVICE_EXIT when
  * the program ends. */
 int win_ne_guest_api(void *opaque, win_ne_regs *cpu, uint16_t service);
+/* the program's selectors its ring 0 code loads as it goes back from a
+ * service in memory (ne_guest.h's virtual memory) */
+void win_ne_vm_return(void *opaque, win_ne_regs *cpu, uint16_t service);
 /* the far return address of the call being made (WINN's trace) */
 int win_ne_guest_caller(void *opaque, win_ne_regs *cpu, uint16_t *cs, uint16_t *ip);
 

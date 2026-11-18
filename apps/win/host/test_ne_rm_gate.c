@@ -122,7 +122,7 @@ int main(void)
     uint32_t scratch = 0x40400u;
     store16(scratch+WIN_NE_BOOT_CALL_SP_OFFSET, 0x7c); /* caller SP = 0x80 */
 
-    win_ne_guest_segment segments[2] = { {0}, {0x30000u, 256u, 0x18u, 1u} };
+    win_ne_guest_segment segments[2] = { {0}, {0x30000u, 256u, 0x18u, 1u, 0, 0} };
     win_ne_guest_image img = { 0 };
     img.info.segment_count = 1;
     img.segments = segments;

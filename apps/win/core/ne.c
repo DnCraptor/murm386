@@ -463,6 +463,129 @@ static int ne_apply_record(FILE *f, uint64_t file_size, uint64_t base,
     return WIN_NE_BAD_IMAGE;
 }
 
+/* The NE header's tables (from base): the segment table, the module
+ * references, the imported names; the alignment shift */
+static int ne_tables(FILE *f, uint64_t size, uint64_t base, const uint8_t h[NE_HDR_SIZE],
+                     uint64_t *segtab, uint64_t *modtab, uint64_t *nametab, uint16_t *shift)
+{
+    uint16_t nseg = rd16(h + 0x1c), nmod = rd16(h + 0x1e);
+    (void)f;
+    *segtab = base + rd16(h + 0x22);
+    *modtab = base + rd16(h + 0x28);
+    *nametab = base + rd16(h + 0x2a);
+    *shift = rd16(h + 0x32);
+    if (!*shift)
+        *shift = 9;
+    return *shift <= 15 && *segtab <= size &&
+           (uint64_t)nseg * NE_SEG_SIZE <= size - *segtab &&
+           *modtab <= size && (uint64_t)nmod * 2u <= size - *modtab && *nametab <= size;
+}
+
+/* Segment i's fixups applied to its data in image (its loader's and one
+ * without any: nothing) */
+static int ne_relocate(FILE *f, uint64_t size, uint64_t base, const uint8_t h[NE_HDR_SIZE],
+                       unsigned i, win_ne_image *image, win_ne_resolve_cb resolve, void *opaque)
+{
+    uint64_t segtab, modtab, nametab;
+    uint16_t shift;
+    uint8_t ent[NE_SEG_SIZE];
+    if (!ne_tables(f, size, base, h, &segtab, &modtab, &nametab, &shift) ||
+        !read_at(f, size, segtab + (uint64_t)(i - 1) * NE_SEG_SIZE, ent, sizeof(ent)))
+        return WIN_NE_BAD_IMAGE;
+    if (!(rd16(ent + 4) & NE_HAS_RELOCS))
+        return WIN_NE_OK;
+    uint16_t sector = rd16(ent);
+    uint32_t disk_len = rd16(ent + 2);
+    if (!disk_len)
+        disk_len = 65536u;
+    if (!sector)
+        return WIN_NE_BAD_IMAGE;
+    uint64_t fixups = ((uint64_t)sector << shift) + disk_len;
+    uint8_t count_bytes[2];
+    if (!read_at(f, size, fixups, count_bytes, 2))
+        return WIN_NE_BAD_IMAGE;
+    uint16_t count = rd16(count_bytes);
+    fixups += 2;
+    if (fixups > size || (uint64_t)count * NE_FIXUP_SIZE > size - fixups)
+        return WIN_NE_BAD_IMAGE;
+    for (unsigned j = 0; j < count; j++) {
+        uint8_t rec[NE_FIXUP_SIZE];
+        if (!read_at(f, size, fixups + (uint64_t)j * NE_FIXUP_SIZE, rec, sizeof(rec)))
+            return WIN_NE_BAD_IMAGE;
+        int rc = ne_apply_record(f, size, base, h, modtab, nametab, rd16(h + 0x1e), image, i,
+                                 rec, resolve, opaque);
+        if (rc)
+            return rc;
+    }
+    return WIN_NE_OK;
+}
+
+/* The file's NE header (base its offset): 1 */
+static int ne_header(FILE *f, uint64_t size, uint64_t *base, uint8_t h[NE_HDR_SIZE])
+{
+    uint8_t mz[64];
+    if (!read_at(f, size, 0, mz, sizeof(mz)) || rd16(mz) != 0x5a4d)
+        return 0;
+    *base = rd32(mz + 0x3c);
+    return read_at(f, size, *base, h, NE_HDR_SIZE) && rd16(h) == 0x454e;
+}
+
+int win_ne_load_segment(const char *path, const win_ne_info *info, unsigned segno,
+                        const win_ne_segment_image *segs, uint8_t *data, uint32_t bytes,
+                        win_ne_resolve_cb resolve, void *opaque)
+{
+    if (!info || !segs || !data || !segno || segno > info->segment_count ||
+        bytes != segs[segno].size)
+        return WIN_NE_BAD_IMAGE;
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return WIN_NE_NO_FILE;
+    int rc = WIN_NE_BAD_IMAGE;
+    long file_end;
+    uint64_t base;
+    uint8_t h[NE_HDR_SIZE], ent[NE_SEG_SIZE];
+    uint64_t segtab, modtab, nametab;
+    uint16_t shift;
+    win_ne_image image;
+    image.segments = NULL;
+    if (fseek(f, 0, SEEK_END) || (file_end = ftell(f)) < 0) {
+        rc = WIN_NE_IO_ERROR;
+        goto out;
+    }
+    uint64_t size = (uint64_t)file_end;
+    if (!ne_header(f, size, &base, h) || rd16(h + 0x1c) != info->segment_count ||
+        !ne_tables(f, size, base, h, &segtab, &modtab, &nametab, &shift) ||
+        !read_at(f, size, segtab + (uint64_t)(segno - 1) * NE_SEG_SIZE, ent, sizeof(ent)))
+        goto out;
+    /* the module's segments as they were given their selectors; this one
+     * its data */
+    image.info = *info;
+    image.segments = (win_ne_segment_image *)malloc(((size_t)info->segment_count + 1u) *
+                                                    sizeof(*image.segments));
+    if (!image.segments) {
+        rc = WIN_NE_NO_MEMORY;
+        goto out;
+    }
+    memcpy(image.segments, segs, ((size_t)info->segment_count + 1u) * sizeof(*image.segments));
+    for (unsigned i = 0; i <= info->segment_count; i++)
+        image.segments[i].data = NULL;
+    image.segments[segno].data = data;
+    uint16_t sector = rd16(ent);
+    uint32_t disk_len = rd16(ent + 2);
+    if (!disk_len)
+        disk_len = 65536u;
+    if (sector) {
+        if (disk_len > bytes ||
+            !read_at(f, size, (uint64_t)sector << shift, data, disk_len))
+            goto out;
+    }
+    rc = ne_relocate(f, size, base, h, segno, &image, resolve, opaque);
+out:
+    free(image.segments);
+    fclose(f);
+    return rc;
+}
+
 int win_ne_load_image(const char *path, win_ne_image *image,
                       win_ne_selector_cb assign, win_ne_resolve_cb resolve,
                       void *opaque)
@@ -562,36 +685,11 @@ int win_ne_load_image(const char *path, win_ne_image *image,
         }
     }
     for (unsigned i = 1; i <= nseg; i++) {
-        uint8_t ent[NE_SEG_SIZE];
-        if (!read_at(f, size, segtab + (uint64_t)(i - 1) * NE_SEG_SIZE,
-                     ent, sizeof(ent)))
-            goto out;
-        if (!(rd16(ent + 4) & NE_HAS_RELOCS) || !WIN_NE_LOADER_SEGMENT(&info, i))
+        if (!WIN_NE_LOADER_SEGMENT(&info, i))
             continue;
-        uint16_t sector = rd16(ent);
-        uint32_t disk_len = rd16(ent + 2);
-        if (!disk_len)
-            disk_len = 65536u;
-        if (!sector)
+        rc = ne_relocate(f, size, base, h, i, image, resolve, opaque);
+        if (rc)
             goto out;
-        uint64_t fixups = ((uint64_t)sector << shift) + disk_len;
-        uint8_t count_bytes[2];
-        if (!read_at(f, size, fixups, count_bytes, 2))
-            goto out;
-        uint16_t count = rd16(count_bytes);
-        fixups += 2;
-        if (fixups > size || (uint64_t)count * NE_FIXUP_SIZE > size - fixups)
-            goto out;
-        for (unsigned j = 0; j < count; j++) {
-            uint8_t rec[NE_FIXUP_SIZE];
-            if (!read_at(f, size, fixups + (uint64_t)j * NE_FIXUP_SIZE,
-                         rec, sizeof(rec)))
-                goto out;
-            rc = ne_apply_record(f, size, base, h, modtab, nametab,
-                                 info.module_count, image, i, rec, resolve, opaque);
-            if (rc)
-                goto out;
-        }
     }
     rc = WIN_NE_OK;
 out:

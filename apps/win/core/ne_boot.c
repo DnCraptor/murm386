@@ -355,6 +355,29 @@ int win_ne_fault_make(uint8_t idt[WIN_NE_FAULT_IDT_BYTES],
     patch16(&e, rmref, (uint16_t)(WIN_NE_FAULT_CODE_OFFSET -
                                  WIN_NE_BOOT_OFFSET + common + rm));
     memcpy(code + common, e.bytes, e.n);
+    if (!a->flat) {
+        /* #NP (a segment not present: one loaded when used, or discarded):
+         * WIN_NE_SERVICE_NP loads it, the faulting instruction runs again;
+         * AX, DX kept, the error code (the selector) dropped. Its 16 bytes
+         * in the stubs of the vectors whose gates go elsewhere: the yield
+         * vector's, INT 20h's, INT 21h's (18 bytes) */
+        emitter n = { 0 };
+        b8(&n, 0x52);                          /* push dx */
+        b8(&n, 0x50);                          /* push ax */
+        b8(&n, 0xb8); b16(&n, WIN_NE_SERVICE_NP_);  /* mov ax,service */
+        b8(&n, 0x9a); b16(&n, WIN_NE_BOOT_GATEWAY_OFFSET); /* call far gateway */
+        b16(&n, a->pm_segment);
+        b8(&n, 0x58);                          /* pop ax */
+        b8(&n, 0x5a);                          /* pop dx */
+        b8(&n, 0x83); b8(&n, 0xc4); b8(&n, 0x02);  /* add sp,2 (the error code) */
+        b8(&n, 0xcf);                          /* iret */
+        const unsigned at = 6u * WIN_NE_YIELD_VECTOR;
+        _Static_assert(WIN_NE_YIELD_VECTOR + 1u == 0x20u, "the stubs after the yield vector's");
+        if (n.overflow || n.n > 18u)
+            return 0;
+        memcpy(code + at, n.bytes, n.n);
+        gate(idt, 11, (uint16_t)(WIN_NE_FAULT_CODE_OFFSET + at), a->pm_segment, 0);
+    }
     return 1;
 }
 

@@ -997,6 +997,22 @@ grows where it is when it can. On the host, `WINN_EXT_KB` (decimal) limits
 the extended memory (8M) and `WINN_DOS_TOP` (hex) makes DOS's memory end
 lower than 640K, as a fuller DOS has it.
 
+The segments are managed as Windows 3.x's memory manager does: a program's
+and its DLLs' code segments without PRELOAD (all but the entry's) are not
+loaded at the start; their descriptors are not present, and the first
+use of one (a far call, a far return, a segment register loaded with it;
+WINN's own access of it: a string there) takes the #NP whose gate goes to
+the gateway (`WIN_NE_SERVICE_NP`): the segment is read from its file again,
+its fixups applied as at the load, and the instruction runs again.
+DISCARDABLE code segments go when memory runs out (an allocation that
+fails: the least recently used first, of all the programs), their
+descriptors not present again, and come back the same way. Ring 0 code
+takes no #NP: before WINN goes back to a waiting program the selectors its
+gateway loads (DS, ES, an interrupt's CS) and a callback's procedure are
+in memory. GetFreeSpace and DPMI 0500h count the discardable code as free,
+GlobalCompact discards until a block of its size is free. (Paging, a swap
+file: none. Data and resources stay where they are.)
+
 ## Keyboard
 
 Alt+Tab and Alt+Esc switch between applications (to one waiting in a
