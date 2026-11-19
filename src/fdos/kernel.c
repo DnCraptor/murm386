@@ -2383,6 +2383,11 @@ invalid_path:
 static char truename_src_scratch[FDOS_PATHLEN];
 static char truename_dst_scratch[FDOS_PATHLEN];
 
+COUNT fdos_truename_native(const char *src, char *dest, COUNT mode)
+{
+  return truename_worker(MK_FP(0, 0), src, dest, mode);
+}
+
 COUNT truename(dos_far_ptr x86_src, char *dest, COUNT mode)
 {
   const uint32_t src_linear = ((uint32_t)FP_SEG(x86_src) << 4) + FP_OFF(x86_src);

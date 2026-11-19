@@ -318,13 +318,131 @@ bits for flags (bits 11-8 are internal FreeDOS bits only)
         internal_data fields here (see lol.h), not "extern ASM"
         variables declared inline.
 */
-long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
+/* One INT 21h operation owns this scratch space. Guest buffers are copied
+   through the paging-aware accessors before the FAT walk starts. */
+static char lfn_input[260];
+static char lfn_path[FDOS_PATHLEN];
+static UNICODE lfn_name[256];
+
+static bool path_separator(char ch)
+{
+  return ch == '\\' || ch == '/';
+}
+
+static COUNT resolve_lfn_path(dos_far_ptr source, bool create)
+{
+  const uint32_t linear = dosfns_far_linear(source);
+  const size_t size = guest_strnlen_block(linear, sizeof(lfn_input));
+  if (size == 0 || size >= sizeof(lfn_input))
+    return DE_PATHNOTFND;
+  guest_read_block(linear, lfn_input, size);
+  lfn_input[size] = 0;
+  lfn_name[0] = 0;
+  if (path_separator(lfn_input[0]) && path_separator(lfn_input[1]))
+    return DE_PATHNOTFND;
+
+  /* Let the existing parser recognize DOS devices, including \\DEV\\. */
+  if (size < FDOS_PATHLEN && EFFECTIVE(IsDevice(lfn_input)))
+    return truename_guest(source, pri_path_far(), CDS_MODE_CHECK_DEV_PATH);
+
+  char root[FDOS_PATHLEN];
+  char anchor[5] = {};
+  char *component = lfn_input;
+  size_t prefix = 0;
+  if (component[1] == ':')
+  {
+    anchor[0] = component[0];
+    anchor[1] = ':';
+    prefix = 2;
+    component += 2;
+  }
+
+  anchor[prefix] = '\\';
+  COUNT result = fdos_truename_native(anchor, root, 0);
+  if (result < 0)
+    return result;
+  if (result & IS_NETWORK)
+    return DE_PATHNOTFND;
+  if (path_separator(*component))
+    strcpy(lfn_path, root);
+  else
+  {
+    anchor[prefix] = '.';
+    result = fdos_truename_native(anchor, lfn_path, 0);
+    if (result < 0)
+      return result;
+    if (result & IS_NETWORK)
+      return DE_PATHNOTFND;
+  }
+  size_t floor = strlen(root);
+  size_t length = strlen(lfn_path);
+  if (floor > 3 && root[floor - 1] == '\\')
+    --floor;
+  /* JOIN may map the working directory onto a different physical drive. */
+  if (lfn_path[0] != root[0])
+    floor = 3;
+  if (length > 3 && lfn_path[length - 1] == '\\')
+    lfn_path[--length] = 0;
+
+  while (*component)
+  {
+    while (path_separator(*component))
+      ++component;
+    if (!*component)
+      break;
+    char *next = component;
+    while (*next && !path_separator(*next))
+      ++next;
+    const bool directory = *next != 0;
+    if (directory)
+      *next++ = 0;
+
+    if (!strcmp(component, ".."))
+    {
+      if (length > floor)
+      {
+        char *slash = strrchr(lfn_path, '\\');
+        length = slash == lfn_path + 2 ? 3 : (size_t)(slash - lfn_path);
+        lfn_path[length] = 0;
+      }
+    }
+    else if (strcmp(component, "."))
+    {
+      size_t name_len = strlen(component);
+      while (name_len && (component[name_len - 1] == ' ' ||
+                          component[name_len - 1] == '.'))
+        component[--name_len] = 0;
+      if (!name_len)
+        return DE_PATHNOTFND;
+
+      char alias[13];
+      const int status = dos_lfn_component(lfn_path, component, lfn_name,
+                                           alias, directory, create && !directory);
+      if (status < 0)
+        return status;
+      const size_t alias_len = strlen(alias);
+      const bool separator = lfn_path[length - 1] != '\\';
+      if (length + separator + alias_len >= sizeof(lfn_path))
+        return DE_PATHNOTFND;
+      if (separator)
+        lfn_path[length++] = '\\';
+      memcpy(lfn_path + length, alias, alias_len + 1u);
+      length += alias_len;
+    }
+    component = next;
+  }
+
+  guest_write_block(pri_path_ref().guest_linear, lfn_path, length + 1u);
+  return result;
+}
+
+static long open_sft(dos_far_ptr fname, unsigned flags, unsigned attrib, bool lfn)
 {
   /* Keep the canonical path in the resident guest SDA.  A 128-byte native
      pathname snapshot both wastes the constrained core0 stack and breaks the
      paging boundary abstraction. */
-  COUNT path_result = truename_guest(fname, pri_path_far(),
-                                     CDS_MODE_CHECK_DEV_PATH);
+  COUNT path_result = lfn ? resolve_lfn_path(fname, flags & O_CREAT)
+                          : truename_guest(fname, pri_path_far(), CDS_MODE_CHECK_DEV_PATH);
   dpb_watch_check_chain("DosOpenSft 1");
   if (path_result < SUCCESS) {
     dpb_watch_check_chain("DosOpenSft 1err");
@@ -437,7 +555,8 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
     ref.count((UWORD)(ref.count() + 1u));
     ref.flags((UWORD)(UBYTE)(fdos_path_get(pri_path_ref(), 0) - 'A'));
   }
-  long open_result = dos_open_ref(pri_path_ref(), flags, attrib, sft_idx);
+  long open_result = dos_open_ref(pri_path_ref(), flags, attrib, sft_idx,
+                                 lfn && lfn_name[0] ? lfn_name : NULL);
   dpb_watch_check_chain("DosOpenSft 10");
   if (open_result < 0)
   {
@@ -464,6 +583,12 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
   dpb_watch_check_chain("DosOpenSft 11");
   return sft_idx | (open_result << 16);
 }
+
+long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
+{
+  return open_sft(fname, flags, attrib, false);
+}
+
 
 /*
     idx_to_sft_(SftIndex) - walk the SFT block list starting at
@@ -865,7 +990,7 @@ STATIC long get_free_hndl(void)
     Migrated from dosfns.c verbatim, aside from the native-pointer psp
     access noted in get_free_hndl() above.
 */
-long DosOpen(dos_far_ptr fname, unsigned mode, unsigned attrib)
+static long open_handle(dos_far_ptr fname, unsigned mode, unsigned attrib, bool lfn)
 {
   long result;
   unsigned hndl;
@@ -879,7 +1004,7 @@ long DosOpen(dos_far_ptr fname, unsigned mode, unsigned attrib)
     return result;
   hndl = (unsigned)result;
 
-  result = DosOpenSft(fname, mode, attrib);
+  result = open_sft(fname, mode, attrib, lfn);
   dpb_watch_check_chain("DosOpen");
   if (result < SUCCESS)
     return result;
@@ -894,6 +1019,38 @@ long DosOpen(dos_far_ptr fname, unsigned mode, unsigned attrib)
   }
 
   return hndl | (result & 0xffff0000l);
+}
+
+long DosOpen(dos_far_ptr fname, unsigned mode, unsigned attrib)
+{
+  return open_handle(fname, mode, attrib, false);
+}
+
+long DosLfnOpen(dos_far_ptr fname, unsigned mode, unsigned attrib)
+{
+  return open_handle(fname, mode, attrib, true);
+}
+
+COUNT DosLfnGetFattr(dos_far_ptr fname)
+{
+  const COUNT result = resolve_lfn_path(fname, false);
+  if (result < 0)
+    return result;
+  if (result & IS_DEVICE)
+    return DE_FILENOTFND;
+  if (fdos_path_get(pri_path_ref(), 3) == 0)
+    return D_DIR;
+  return dos_getfattr_ref(pri_path_ref());
+}
+
+COUNT DosLfnDelete(dos_far_ptr fname)
+{
+  const COUNT result = resolve_lfn_path(fname, false);
+  if (result < 0)
+    return result;
+  if (result & IS_DEVICE)
+    return DE_FILENOTFND;
+  return dos_delete_ref(pri_path_ref(), D_ALL);
 }
 
 COUNT DosGetFattr(dos_far_ptr name)

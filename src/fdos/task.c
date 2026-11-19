@@ -25,6 +25,7 @@
 #include "../diag.h"
 #include "../core0_stack.h"
 #include "../../apps/api/ez.h"
+#include "../../apps/api/ez_reloc.h"
 #include "../mem.h"
 #include "mcb_proxy.h"
 #include "kernel_guest_proxy.h"
@@ -3269,35 +3270,9 @@ static int arm_ez_apply_reloc(BYTE *base,
                               const struct ez_file_header *header,
                               const struct ez_reloc *rel)
 {
-  ULONG image_end = EZ_IMAGE_RVA + header->image_mem_size;
-  BYTE *place;
-
-  if (rel->reserved[0] != 0 || rel->reserved[1] != 0 || rel->reserved[2] != 0)
-    return DE_INVLDFMT;
-  if (rel->rva < EZ_IMAGE_RVA || rel->rva > image_end ||
-      image_end - rel->rva < 4u)
-    return DE_INVLDFMT;
-
-  place = base + rel->rva;
-  switch (rel->type) {
-    case EZ_RELOC_ABS32:
-      *(ULONG *)place += (ULONG)(uintptr_t)base;
-      return SUCCESS;
-
-    case EZ_RELOC_THM_ALU_ABS_G0_NC:
-      if ((uintptr_t)place & 1u)
-        return DE_INVLDFMT;
-      arm_elf_resolve_thm_alu_abs_g0_nc((UWORD *)place,
-                                        (ULONG)(uintptr_t)base);
-      return SUCCESS;
-
-    default:
-      dos_printf("ARM EZ: unsupported relocation type %u at RVA %08lx\r\n",
-                 (unsigned)rel->type, rel->rva);
-      return DE_INVLDFMT;
-  }
+  return ez_apply_reloc(base, EZ_IMAGE_RVA + header->image_mem_size, rel)
+      ? DE_INVLDFMT : SUCCESS;
 }
-
 
 /* Allocate an exact low-memory DOS block without changing the caller's mode. */
 static int arm_ez_alloc_low(UWORD paras, UWORD *mcb_seg, UWORD *actual)

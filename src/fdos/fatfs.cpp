@@ -17,6 +17,14 @@ extern "C" {
 
 #include "guest_ref.hpp"
 #include "path_guest.h"
+// FatFs and FDOS use different definitions for these legacy DOS type names.
+#define BYTE fatfs_byte
+#define WORD fatfs_word
+#define DWORD fatfs_dword
+#include "../../drivers/fatfs/ff.h"
+#undef DWORD
+#undef WORD
+#undef BYTE
 
 using fdos_guest::bpb_ref;
 using fdos_guest::cds_ref;
@@ -829,6 +837,22 @@ STATIC VOID wipe_out(f_node_ptr fnp);
 STATIC int alloc_find_free_ref(f_node_ptr fnp, fdos_path_ref path);
 STATIC void init_direntry(struct dirent *dentry, unsigned attrib, CLUSTER cluster, const char *name);
 
+static UBYTE lfn_checksum(const char *name)
+{
+  UBYTE sum = 0;
+  for (unsigned i = 0; i < 11; ++i)
+  {
+    UBYTE ch = (UBYTE)name[i];
+    if (i == 0 && ch == (UBYTE)EXT_DELETED)
+      ch = (UBYTE)DELETED;
+    sum = (UBYTE)(((sum >> 1) | (sum << 7)) + ch);
+  }
+  return sum;
+}
+
+static int create_lfn_file(f_node_ptr fnp, fdos_path_ref path,
+                           unsigned attrib, const UNICODE *name);
+
 /*
 Migrated from fatfs.c verbatim.
 
@@ -843,7 +867,8 @@ Migrated from fatfs.c verbatim.
     directory" path), so this is a straight restore of the upstream
     logic, not new design.
 */
-int dos_open_ref(fdos_path_ref path, unsigned flags, unsigned attrib, int fd)
+int dos_open_ref(fdos_path_ref path, unsigned flags, unsigned attrib, int fd,
+                 const UNICODE *long_name)
 {
   REG f_node_ptr fnp = sft_to_fnode(fd);
   int status = find_fname_ref(path, D_ALL | attrib, fnp);
@@ -888,7 +913,8 @@ int dos_open_ref(fdos_path_ref path, unsigned flags, unsigned attrib, int fd)
   }
   else if (status == DE_FILENOTFND && (flags & O_CREAT))
   {
-    int ret = alloc_find_free_ref(fnp, path);
+    int ret = long_name ? create_lfn_file(fnp, path, attrib, long_name)
+                        : alloc_find_free_ref(fnp, path);
     if (ret != SUCCESS)
       return ret;
     status = S_CREATED;
@@ -909,7 +935,7 @@ int dos_open_ref(fdos_path_ref path, unsigned flags, unsigned attrib, int fd)
   /* use FCLEAN even on replaced/created files: the bit is reset */
   /* if the file is written to later                             */
   fnp->f_flags |= SFT_FCLEAN;
-  if (status != S_OPENED)
+  if (status != S_OPENED && !(status == S_CREATED && long_name))
   {
     BYTE dm_name_pat[FNAME_SIZE + FEXT_SIZE];
     dmatch_read_name_pat(fnp->f_dmp, dm_name_pat);
@@ -928,7 +954,8 @@ int dos_open_ref(fdos_path_ref path, unsigned flags, unsigned attrib, int fd)
 
 int dos_open(char *path, unsigned flags, unsigned attrib, int fd)
 {
-  return dos_open_ref(fdos_path_native(path), flags, attrib, fd);
+  int result = dos_open_ref(fdos_path_native(path), flags, attrib, fd, NULL);
+  return result < 0 ? result : SUCCESS;
 }
 
 /* DosCloseSft() (the real implementation - network redirector close,
@@ -1651,21 +1678,39 @@ BOOL fcbmatch(const char *fcbname1, const char *fcbname2)
  * input: fnp with valid non-LFN directory entry, not equal to '..' or
  *  '.'
  */
+static bool lfn_metadata(const lfn_entry &entry);
+
 COUNT remove_lfn_entries(f_node_ptr fnp)
 {
   unsigned original_diroff = DM_GET16(fnp->f_dmp, dm_entry);
 
-  while (TRUE)
+  const UBYTE checksum = lfn_checksum(fnp->f_dir.dir_name);
+  unsigned rows = 0;
+  for (unsigned ordinal = 1; ordinal <= 20 && ordinal <= original_diroff; ++ordinal)
   {
-    if (DM_GET16(fnp->f_dmp, dm_entry) == 0)
+    DM_SET16(fnp->f_dmp, dm_entry, (UWORD)(original_diroff - ordinal));
+    if (dir_read(fnp) <= 0)
       break;
-    DM_SET16(fnp->f_dmp, dm_entry, (UWORD)(DM_GET16(fnp->f_dmp, dm_entry) - 1));
+    lfn_entry entry;
+    memcpy(&entry, &fnp->f_dir, sizeof(entry));
+    if (!lfn_metadata(entry) || entry.lfn_checksum != checksum ||
+        (entry.lfn_id & ~0x40) != ordinal)
+      break;
+    if (entry.lfn_id & 0x40)
+    {
+      rows = ordinal;
+      break;
+    }
+  }
+
+  for (unsigned i = rows; i > 0; --i)
+  {
+    DM_SET16(fnp->f_dmp, dm_entry, (UWORD)(original_diroff - i));
     if (dir_read(fnp) <= 0)
       return DE_ACCESS;
-    if (fnp->f_dir.dir_attrib != D_LFN)
-      break;
     fnp->f_dir.dir_name[0] = DELETED;
-    if (!dir_write(fnp)) return DE_ACCESS;
+    if (!dir_write(fnp))
+      return DE_ACCESS;
   }
   DM_SET16(fnp->f_dmp, dm_entry, (UWORD)original_diroff);
   if (dir_read(fnp) <= 0)
@@ -1770,6 +1815,330 @@ STATIC int alloc_find_free_ref(f_node_ptr fnp, fdos_path_ref path)
     }
   }
   return SUCCESS;
+}
+
+/* VFAT uses 13 UTF-16 code units per entry, split around the metadata. */
+static UNICODE lfn_char(const lfn_entry &entry, unsigned index)
+{
+  if (index < 5)
+    return entry.lfn_name0_4[index];
+  if (index < 11)
+    return entry.lfn_name5_10[index - 5];
+  return entry.lfn_name11_12[index - 11];
+}
+
+static bool lfn_metadata(const lfn_entry &entry)
+{
+  return entry.lfn_attrib == D_LFN && !entry.lfn_reserved1 && !entry.lfn_reserved2;
+}
+
+static bool lfn_chunk_matches(const lfn_entry &entry, const UNICODE *name,
+                              unsigned length, unsigned ordinal)
+{
+  for (unsigned i = 0; i < 13; ++i)
+  {
+    const unsigned offset = (ordinal - 1) * 13 + i;
+    const UNICODE ch = lfn_char(entry, i);
+    if (offset < length)
+    {
+      if (ff_wtoupper(ch) != ff_wtoupper(name[offset]))
+        return false;
+    }
+    else if (ch != (offset == length ? 0 : 0xffff))
+      return false;
+  }
+  return true;
+}
+
+/* Return the matched directory entry in fnp. Short aliases share the same
+   namespace, including aliases of entries whose long name does not match. */
+static int lfn_find(f_node_ptr fnp, const UNICODE *name, unsigned length,
+                    const char *short_name)
+{
+  unsigned remaining = 0;
+  UBYTE checksum = 0;
+  bool complete = false;
+  for (unsigned index = 0; index < 65535; ++index)
+  {
+    DM_SET16(fnp->f_dmp, dm_entry, (UWORD)index);
+    int status = dir_read(fnp);
+    if (status <= 0)
+      return status == 0 || status == DE_SEEK ? DE_FILENOTFND : status;
+    if (fnp->f_dir.dir_attrib == D_LFN)
+    {
+      lfn_entry entry;
+      memcpy(&entry, &fnp->f_dir, sizeof(entry));
+      const unsigned ordinal = entry.lfn_id & 0x1f;
+      if ((entry.lfn_id & 0xe0) == 0x40)
+      {
+        remaining = name && ordinal == (length + 12) / 13 ? ordinal : 0;
+        checksum = entry.lfn_checksum;
+        complete = false;
+      }
+      else if (entry.lfn_id != ordinal)
+        remaining = 0;
+      complete = remaining && ordinal == remaining &&
+                 lfn_metadata(entry) && entry.lfn_checksum == checksum &&
+                 lfn_chunk_matches(entry, name, length, ordinal);
+      remaining = complete ? remaining - 1 : 0;
+      continue;
+    }
+    if (fnp->f_dir.dir_name[0] != DELETED && !(fnp->f_dir.dir_attrib & D_VOLID) &&
+        ((short_name && fcbmatch(short_name, fnp->f_dir.dir_name)) ||
+         (complete && !remaining && checksum == lfn_checksum(fnp->f_dir.dir_name))))
+      return SUCCESS;
+    remaining = 0;
+    complete = false;
+  }
+  return DE_FILENOTFND;
+}
+
+static bool lfn_short_name(const char *name, char *alias)
+{
+  const char *dot = strchr(name, '.');
+  const size_t base = dot ? (size_t)(dot - name) : strlen(name);
+  const size_t ext = dot ? strlen(dot + 1) : 0;
+  if (!base || base > 8 || (dot && (!ext || ext > 3)))
+    return false;
+  memset(alias, ' ', 11);
+  for (size_t i = 0; name[i]; ++i)
+  {
+    const UBYTE ch = (UBYTE)name[i];
+    if (name + i == dot)
+      continue;
+    if (ch == ' ' || strchr(".\"[]:|<>+=;,", ch))
+      return false;
+    alias[dot && name + i > dot ? 7 + (name + i - dot) : i] = DosUpFChar(ch);
+  }
+  return true;
+}
+
+static unsigned lfn_alias_part(char *out, unsigned limit,
+                               const char *begin, const char *end)
+{
+  unsigned n = 0;
+  while (begin < end && n < limit)
+  {
+    UBYTE ch = DosUpFChar((UBYTE)*begin++);
+    if (ch == ' ' || ch == '.')
+      continue;
+    out[n++] = (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') ? ch : '_';
+  }
+  return n;
+}
+
+static int lfn_make_alias(f_node_ptr fnp, const char *name, char *alias)
+{
+  const char *end = name + strlen(name);
+  const char *dot = strrchr(name, '.');
+  if (dot == name)
+    dot = NULL;
+  for (unsigned number = 1; number <= 65535; ++number)
+  {
+    char digits[5];
+    unsigned count = 0;
+    for (unsigned value = number; value; value /= 10)
+      digits[count++] = '0' + value % 10;
+    memset(alias, ' ', 11);
+    unsigned n = lfn_alias_part(alias, 7 - count, name, dot ? dot : end);
+    if (n == 0)
+      alias[n++] = '_';
+    alias[n++] = '~';
+    while (count)
+      alias[n++] = digits[--count];
+    if (dot)
+      lfn_alias_part(alias + 8, 3, dot + 1, end);
+    int status = lfn_find(fnp, NULL, 0, alias);
+    if (status != SUCCESS)
+      return status == DE_FILENOTFND ? SUCCESS : status;
+  }
+  return DE_TOOMANY;
+}
+
+static UNICODE lfn_oem_to_unicode(UBYTE ch, UWORD code_page)
+{
+  /* The SD driver already links the CP866 table. FDOS defaults to CP437. */
+  static const UNICODE cp437[] = {
+    0x00c7, 0x00fc, 0x00e9, 0x00e2, 0x00e4, 0x00e0, 0x00e5, 0x00e7,
+    0x00ea, 0x00eb, 0x00e8, 0x00ef, 0x00ee, 0x00ec, 0x00c4, 0x00c5,
+    0x00c9, 0x00e6, 0x00c6, 0x00f4, 0x00f6, 0x00f2, 0x00fb, 0x00f9,
+    0x00ff, 0x00d6, 0x00dc, 0x00a2, 0x00a3, 0x00a5, 0x20a7, 0x0192,
+    0x00e1, 0x00ed, 0x00f3, 0x00fa, 0x00f1, 0x00d1, 0x00aa, 0x00ba,
+    0x00bf, 0x2310, 0x00ac, 0x00bd, 0x00bc, 0x00a1, 0x00ab, 0x00bb,
+    0x2591, 0x2592, 0x2593, 0x2502, 0x2524, 0x2561, 0x2562, 0x2556,
+    0x2555, 0x2563, 0x2551, 0x2557, 0x255d, 0x255c, 0x255b, 0x2510,
+    0x2514, 0x2534, 0x252c, 0x251c, 0x2500, 0x253c, 0x255e, 0x255f,
+    0x255a, 0x2554, 0x2569, 0x2566, 0x2560, 0x2550, 0x256c, 0x2567,
+    0x2568, 0x2564, 0x2565, 0x2559, 0x2558, 0x2552, 0x2553, 0x256b,
+    0x256a, 0x2518, 0x250c, 0x2588, 0x2584, 0x258c, 0x2590, 0x2580,
+    0x03b1, 0x00df, 0x0393, 0x03c0, 0x03a3, 0x03c3, 0x00b5, 0x03c4,
+    0x03a6, 0x0398, 0x03a9, 0x03b4, 0x221e, 0x03c6, 0x03b5, 0x2229,
+    0x2261, 0x00b1, 0x2265, 0x2264, 0x2320, 0x2321, 0x00f7, 0x2248,
+    0x00b0, 0x2219, 0x00b7, 0x221a, 0x207f, 0x00b2, 0x25a0, 0x00a0,
+  };
+  if (ch < 128)
+    return ch;
+  if (code_page == 437)
+    return cp437[ch - 128];
+  return ff_oem2uni(ch, code_page);
+}
+
+/* Resolve one component against an already canonical short parent path. */
+int dos_lfn_component(const char *parent, const char *name, UNICODE *wide,
+                      char *short_name, BOOL directory, BOOL create)
+{
+  f_node_ptr fnp = dir_open(parent, FALSE, fnode_slot(0));
+  if (!fnp)
+    return DE_PATHNOTFND;
+  UWORD code_page, system_page;
+  DosGetCodepage(&code_page, &system_page);
+  unsigned length = 0;
+  while (name[length])
+  {
+    const UBYTE ch = (UBYTE)name[length];
+    if (length == 255 || ch < ' ' || strchr("\"*:<>?|", ch))
+      return DE_PATHNOTFND;
+    wide[length] = lfn_oem_to_unicode(ch, code_page);
+    if (!wide[length])
+      return DE_PATHNOTFND;
+    ++length;
+  }
+  wide[length] = 0;
+  char alias[11];
+  const bool fits = lfn_short_name(name, alias);
+  int status = lfn_find(fnp, wide, length, fits ? alias : NULL);
+  if (status == SUCCESS)
+  {
+    if (directory && !(fnp->f_dir.dir_attrib & D_DIR))
+      return DE_PATHNOTFND;
+    ConvertName83ToNameSZ(short_name, fnp->f_dir.dir_name);
+    wide[0] = 0;
+    return SUCCESS;
+  }
+  if (status != DE_FILENOTFND)
+    return status;
+  if (directory)
+    return DE_PATHNOTFND;
+  if (!create)
+    return DE_FILENOTFND;
+  if (!fits && (status = lfn_make_alias(fnp, name, alias)) < 0)
+    return status;
+  ConvertName83ToNameSZ(short_name, alias);
+  if (fits && strcmp(short_name, name) == 0)
+    wide[0] = 0;
+  return SUCCESS;
+}
+
+static int create_lfn_file(f_node_ptr fnp, fdos_path_ref path,
+                           unsigned attrib, const UNICODE *name)
+{
+  if (!split_path_ref(path, fnp))
+    return DE_PATHNOTFND;
+  unsigned length = 0;
+  while (name[length])
+    ++length;
+  const unsigned rows = (length + 12) / 13;
+  unsigned run = 0;
+  unsigned end = 65535;
+  unsigned index = 0;
+  for (; index < 65535; ++index)
+  {
+    DM_SET16(fnp->f_dmp, dm_entry, (UWORD)index);
+    int status = dir_read(fnp);
+    if (status == DE_SEEK)
+    {
+      if (!DM_GET32(fnp->f_dmp, dm_dircluster))
+        return DE_TOOMANY;
+      status = extend_dir(fnp);
+      if (status < 0)
+        return status;
+      DM_SET16(fnp->f_dmp, dm_entry, (UWORD)index);
+      status = dir_read(fnp);
+    }
+    if (status < 0)
+      return status;
+    if (status == 0 && end == 65535)
+      end = index;
+    if (index >= end || fnp->f_dir.dir_name[0] == DELETED)
+    {
+      if (++run == rows + 1)
+        break;
+    }
+    else
+      run = 0;
+  }
+  if (index == 65535)
+    return DE_TOOMANY;
+
+  /* Keep an end marker after the new entry when replacing the old one. */
+  if (index >= end && index + 1 < 65535)
+  {
+    DM_SET16(fnp->f_dmp, dm_entry, (UWORD)(index + 1));
+    int status = dir_read(fnp);
+    if (status > 0)
+    {
+      memset(&fnp->f_dir, 0, sizeof(fnp->f_dir));
+      if (!dir_write(fnp))
+        return DE_ACCESS;
+    }
+    else if (status < 0 && status != DE_SEEK)
+      return status;
+  }
+
+  char alias[11];
+  dmatch_read_name_pat(fnp->f_dmp, alias);
+  const UBYTE checksum = lfn_checksum(alias);
+  const unsigned start = index - rows;
+  unsigned written = 0;
+  for (; written <= rows; ++written)
+  {
+    DM_SET16(fnp->f_dmp, dm_entry, (UWORD)(start + written));
+    if (dir_read(fnp) < 0)
+      break;
+    if (written == rows)
+      init_direntry(&fnp->f_dir, attrib, FREE, alias);
+    else
+    {
+      const unsigned ordinal = rows - written;
+      lfn_entry entry = {};
+      entry.lfn_id = (UBYTE)(ordinal | (written == 0 ? 0x40 : 0));
+      entry.lfn_attrib = D_LFN;
+      entry.lfn_checksum = checksum;
+      for (unsigned i = 0; i < 13; ++i)
+      {
+        const unsigned offset = (ordinal - 1) * 13 + i;
+        const UNICODE ch = offset <= length ? name[offset] : 0xffff;
+        if (i < 5)
+          entry.lfn_name0_4[i] = ch;
+        else if (i < 11)
+          entry.lfn_name5_10[i - 5] = ch;
+        else
+          entry.lfn_name11_12[i - 11] = ch;
+      }
+      memcpy(&fnp->f_dir, &entry, sizeof(entry));
+    }
+    if (!dir_write(fnp))
+    {
+      /* A failed flush may still leave the changed entry in the cache. */
+      ++written;
+      break;
+    }
+    if (written == rows)
+      return SUCCESS;
+  }
+
+  /* The short entry is the commit point. Restore the first end marker
+     when the failed create had started consuming unused slots. */
+  for (unsigned i = 0; i < written; ++i)
+  {
+    const unsigned slot = start + i;
+    DM_SET16(fnp->f_dmp, dm_entry, (UWORD)slot);
+    if (dir_read(fnp) < 0)
+      continue;
+    fnp->f_dir.dir_name[0] = slot < end ? DELETED : 0;
+    dir_write(fnp);
+  }
+  return DE_ACCESS;
 }
 
 COUNT dos_rename_ref(fdos_path_ref path1, fdos_path_ref path2, int attrib)

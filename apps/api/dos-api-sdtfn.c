@@ -1190,6 +1190,18 @@ int open(const char *path, int flags, ...)
     if (native_io_copy_path(path) != 0)
         return -1;
 
+    regs.w.ax = 0x716c;
+    regs.w.bx = (uint16_t)(flags & 3);
+    regs.w.dx = (flags & O_TRUNC) ? 2 : 1;
+    if (flags & O_CREAT)
+        regs.w.dx |= 0x10;
+    native_int21_with_ds(native_io_segment, &regs);
+    if (!regs.x.cflag)
+        return (int)regs.w.ax;
+    if (regs.w.ax != 0x7100)
+        return -1;
+
+    regs = (union REGS){0};
     if ((flags & O_CREAT) && (flags & O_TRUNC))
     {
         regs.h.ah = 0x3c;
@@ -1418,6 +1430,12 @@ int access(const char *path, int mode)
     if (native_io_copy_path(path) != 0)
         return -1;
 
+    regs.w.ax = 0x7143;
+    native_int21_with_ds(native_io_segment, &regs);
+    if (!regs.x.cflag || regs.w.ax != 0x7100)
+        return regs.x.cflag ? -1 : 0;
+
+    regs = (union REGS){0};
     regs.h.ah = 0x43;
     regs.h.al = 0x00;
     regs.w.dx = 0;
@@ -1448,6 +1466,12 @@ int remove(const char *filename)
     if (native_io_copy_path(filename) != 0)
         return -1;
 
+    regs.w.ax = 0x7141;
+    native_int21_with_ds(native_io_segment, &regs);
+    if (!regs.x.cflag || regs.w.ax != 0x7100)
+        return regs.x.cflag ? -1 : 0;
+
+    regs = (union REGS){0};
     regs.h.ah = 0x41;
     regs.w.dx = 0;
     native_int21_with_ds(native_io_segment, &regs);
@@ -1471,6 +1495,23 @@ struct native_dos_FILE
 
 static struct native_dos_FILE native_stdout_file = {1, 0, 1, 1};
 FILE *stdout = &native_stdout_file;
+static struct native_dos_FILE native_stderr_file = {2, 0, 1, 1};
+FILE *stderr = &native_stderr_file;
+
+int fflush(FILE *stream)
+{
+    (void)stream; /* All writes go directly to the underlying DOS handle. */
+    return 0;
+}
+
+int snprintf(char *buffer, size_t size, const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    int result = vsnprintf(buffer, size, format, args);
+    va_end(args);
+    return result;
+}
 
 /*
  * DOS console text output uses CRLF. Keep write() itself binary-transparent;
@@ -1665,9 +1706,10 @@ FILE *fopen(const char *filename, const char *mode)
             return NULL;
     }
 
-    for (const char *p = mode; *p; ++p)
-        if (*p == 'b')
-            flags |= O_BINARY;
+    if (strchr(mode, '+'))
+        flags = (flags & ~3) | O_RDWR;
+    if (strchr(mode, 'b'))
+        flags |= O_BINARY;
 
     handle = open(filename, flags, 0666);
     if (handle < 0)

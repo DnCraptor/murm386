@@ -102,6 +102,8 @@ enum ez_reloc_type {
      * Thumb-2 MOVW/MOVT absolute-address materialization.  The instruction at
      * rva contributes the low/high 16 bits respectively of an address which
      * must be rebased from link-time RVA space to process_base.
+     * MOVT carries the low 16 bits of the link-time value in reserved[0..1]
+     * (little endian) so adding the load base also propagates the carry.
      */
     EZ_RELOC_THM_MOVW_ABS_NC = 6,
     EZ_RELOC_THM_MOVT_ABS    = 7
@@ -177,9 +179,7 @@ const native_ez_process_info *native_ez_get_process_info(void);
  *     values rather than silently skipping them.
  *
  * reserved
- *     Must be zero in EZ v1.  Keeping each entry eight bytes wide makes the
- *     table naturally aligned and leaves room for a future relocation flag or
- *     small operand without changing the v1 header layout.
+ *     Zero except for the low 16 bits of the RVA/addend carried by MOVT.
  */
 #pragma pack(push, 1)
 

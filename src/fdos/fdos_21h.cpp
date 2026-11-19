@@ -1987,8 +1987,6 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
           case 0x39:
           case 0x3a:
           case 0x3b:
-          case 0x41:
-          case 0x43:
           case 0x47:
           case 0x4e:
           case 0x4f:
@@ -2011,8 +2009,39 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
                 goto lfn_unsupp;
             }
 
-          case 0xa9:
+          case 0x41:
+            if (R_SI != 0)
+              goto lfn_unsupp;
+            rc = DosLfnDelete(R_FP_DS_DX);
+            goto short_check;
+
+          case 0x43:
+            if (R_BL != 0)
+              goto lfn_unsupp;
+            rc = DosLfnGetFattr(R_FP_DS_DX);
+            if (rc < SUCCESS)
+              goto error_exit;
+            R_CX = (UWORD)rc;
+            goto short_check;
+
           case 0x6c:
+          {
+            if ((R_DX & 0xffefu) > 2)
+              goto error_invalid;
+            long result = DosLfnOpen(R_FP_DS_SI,
+                (R_BX & 0x70ff) | ((R_DX & 3) << 8) | ((R_DX & 0x10) << 6), R_CL);
+            if (result < SUCCESS)
+            {
+              rc = (COUNT)result;
+              goto error_exit;
+            }
+            R_CX = (UWORD)(result >> 16);
+            R_AX = (UWORD)result;
+            R_CF = 0;
+            break;
+          }
+
+          case 0xa9:
             goto lfn_unsupp;
 
           case 0xa7:

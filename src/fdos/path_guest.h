@@ -64,7 +64,10 @@ extern "C" {
 f_node_ptr dir_open_ref(fdos_path_ref dirname, BOOL split, f_node_ptr fnp);
 f_node_ptr split_path_ref(fdos_path_ref path, f_node_ptr fnp);
 int find_fname_ref(fdos_path_ref path, int attr, f_node_ptr fnp);
-int dos_open_ref(fdos_path_ref path, unsigned flags, unsigned attrib, int fd);
+int dos_open_ref(fdos_path_ref path, unsigned flags, unsigned attrib, int fd,
+                 const UNICODE *long_name);
+int dos_lfn_component(const char *parent, const char *name, UNICODE *wide,
+                      char *short_name, BOOL directory, BOOL create);
 COUNT dos_rename_ref(fdos_path_ref path1, fdos_path_ref path2, int attrib);
 COUNT dos_getfattr_ref(fdos_path_ref name);
 COUNT dos_setfattr_ref(fdos_path_ref name, UWORD attrp);

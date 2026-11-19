@@ -43,14 +43,11 @@ if(ELF2EZ_HOST)
         target_compile_definitions(elf2ez PRIVATE _CRT_SECURE_NO_WARNINGS)
     endif()
 
-    # Emit the host tool straight into the repository tools/ directory, with no
-    # per-config subfolder (elf2ez on Linux, elf2ez.exe on Windows). The *_DEBUG
-    # / *_RELEASE overrides pin the same path for multi-config generators (MSVC).
-    set(_elf2ez_tools "${CMAKE_CURRENT_SOURCE_DIR}/../../tools")
+    set(ELF2EZ_HOST_OUTPUT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../tools"
+        CACHE PATH "Output directory for the host elf2ez tool")
+    # Keep the output path the same for single- and multi-config generators.
     set_target_properties(elf2ez PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY         "${_elf2ez_tools}"
-        RUNTIME_OUTPUT_DIRECTORY_DEBUG   "${_elf2ez_tools}"
-        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${_elf2ez_tools}")
+        RUNTIME_OUTPUT_DIRECTORY "$<1:${ELF2EZ_HOST_OUTPUT_DIR}>")
 
     return()
 endif()

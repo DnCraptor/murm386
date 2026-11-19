@@ -14,30 +14,9 @@
 #include <string.h>
 #include "wincore.h"
 #include "winmod.h"
+#include "ez_reloc.h"
 
-#define EZ_MAGIC        0x5a45u
-#define EZ_IMAGE_RVA    0x100u
 #define EZ_BASE_ALIGN   64u
-
-#pragma pack(push, 1)
-typedef struct {
-    uint16_t magic, version, header_size, flags;
-    uint32_t required_dos_api_version;
-    uint32_t native_stack_size, dos_stack_size;
-    uint32_t image_file_size, image_mem_size;
-    uint32_t entry_rva;
-    uint32_t reloc_offset, reloc_count;
-    uint16_t reloc_entry_size, reserved;
-} ezhdr;
-
-typedef struct {
-    uint32_t rva;
-    uint8_t  type, reserved[3];
-} ezrel;
-#pragma pack(pop)
-
-/* the kinds the firmware's EZ loader applies; others are rejected */
-enum { EZ_ABS32 = 1, EZ_THM_G0_NC = 2 };
 
 static void key_cb(int vk, int sc, int down) { win_ddi_key_event(vk, sc, down); }
 static void mouse_cb(int x, int y, unsigned b) { win_ddi_mouse_event(x, y, b); }
@@ -47,43 +26,14 @@ static const win_module_host host_table = {
     WINMOD_VERSION, sizeof(win_module_host), key_cb, mouse_cb, track_cb,
 };
 
-/* 16-bit immediate split as imm4:i:imm3:imm8 (MOVW encoding). */
-static uint32_t movw_get(const uint16_t *p)
+#if defined(__arm__)
+static int win_ez_has_thumb2(void)
 {
-    return ((uint32_t)(p[0] & 0xF) << 12) | ((uint32_t)((p[0] >> 10) & 1) << 11) |
-           ((uint32_t)((p[1] >> 12) & 7) << 8) | (p[1] & 0xFF);
+    /* WINN itself may be built for Thumb-1 and run on either chip. */
+    const uint32_t part = (*(const volatile uint32_t *)0xe000ed00u >> 4) & 0xfffu;
+    return part == 0xd21u; /* RP2350 Cortex-M33 */
 }
-
-static void movw_set(uint16_t *p, uint32_t v)
-{
-    v &= 0xFFFF;
-    p[0] = (uint16_t)((p[0] & ~0x040Fu) | ((v >> 12) & 0xF) | (((v >> 11) & 1) << 10));
-    p[1] = (uint16_t)((p[1] & ~0x70FFu) | (((v >> 8) & 7) << 12) | (v & 0xFF));
-}
-
-static int apply(uint8_t *base, uint32_t mem_end, const ezrel *r)
-{
-    if (r->rva < EZ_IMAGE_RVA || r->rva > mem_end - 4)
-        return -1;
-    if (r->type == EZ_THM_G0_NC && (r->rva & 1))
-        return -1;
-    uint8_t *p = base + r->rva;
-    uint32_t b = (uint32_t)(uintptr_t)base;
-    switch (r->type) {
-    case EZ_ABS32: {
-        uint32_t v;
-        memcpy(&v, p, 4);
-        v += b;
-        memcpy(p, &v, 4);
-        return 0;
-    }
-    case EZ_THM_G0_NC:          /* handled like the firmware loader does */
-        movw_set((uint16_t *)p, movw_get((uint16_t *)p) + b);
-        return 0;
-    default:
-        return -1;
-    }
-}
+#endif
 
 /* Read, place and relocate an EZ image. 0 ok, -1 no file, < -1 bad. */
 int win_ez_load(const char *path, win_ez_image *img)
@@ -92,15 +42,21 @@ int win_ez_load(const char *path, win_ez_image *img)
     FILE *f = fopen(path, "rb");
     if (!f)
         return -1;
-    ezhdr h;
+    struct ez_file_header h;
     int rc = -2;
     uint8_t *raw = NULL;
-    if (fread(&h, 1, sizeof(h), f) != sizeof(h) || h.magic != EZ_MAGIC || h.version != 1 ||
+    if (fread(&h, 1, sizeof(h), f) != sizeof(h) || h.magic != EZ_MAGIC || h.version != EZ_FORMAT_VERSION ||
+        (h.flags & ~EZ_FLAG_KNOWN_MASK) || !(h.flags & EZ_FLAG_THUMB) ||
+        !(h.flags & EZ_FLAG_SOFT_FLOAT) ||
+        ((h.flags & EZ_FLAG_ARMV6M) && (h.flags & EZ_FLAG_THUMB2)) ||
+#if defined(__arm__)
+        ((h.flags & EZ_FLAG_THUMB2) && !win_ez_has_thumb2()) ||
+#endif
         h.header_size < sizeof(h) || h.image_mem_size < h.image_file_size ||
         h.image_mem_size > UINT32_MAX - EZ_IMAGE_RVA - EZ_BASE_ALIGN ||
         h.entry_rva < EZ_IMAGE_RVA ||
         h.entry_rva - EZ_IMAGE_RVA >= h.image_mem_size ||
-        (h.reloc_count && h.reloc_entry_size < sizeof(ezrel)))
+        (h.reloc_count && h.reloc_entry_size < sizeof(struct ez_reloc)))
         goto out;
 
     /* Validate file ranges before allocating memory and applying relocations. */
@@ -126,13 +82,13 @@ int win_ez_load(const char *path, win_ez_image *img)
         if (fseek(f, (long)h.reloc_offset, SEEK_SET))
             goto out;
         for (uint32_t i = 0; i < h.reloc_count; i++) {
-            ezrel r;
+            struct ez_reloc r;
             if (fread(&r, 1, sizeof(r), f) != sizeof(r))
                 goto out;
             if (h.reloc_entry_size > sizeof(r) &&
                 fseek(f, (long)(h.reloc_entry_size - sizeof(r)), SEEK_CUR))
                 goto out;
-            if (apply(base, total, &r)) {
+            if (ez_apply_reloc(base, total, &r)) {
                 rc = -5;
                 goto out;
             }
@@ -171,10 +127,10 @@ int win_ez_is_app(const char *path)
     FILE *f = fopen(path, "rb");
     if (!f)
         return 0;
-    ezhdr h;
+    struct ez_file_header h;
     uint32_t sig = 0;
     uint32_t e = 0;
-    if (fread(&h, 1, sizeof(h), f) == sizeof(h) && h.magic == EZ_MAGIC && h.version == 1 &&
+    if (fread(&h, 1, sizeof(h), f) == sizeof(h) && h.magic == EZ_MAGIC && h.version == EZ_FORMAT_VERSION &&
         h.header_size >= sizeof(h)) {
         e = h.entry_rva & ~1u;
         uint64_t end = (uint64_t)EZ_IMAGE_RVA + h.image_file_size;
@@ -196,11 +152,11 @@ winapp_info *win_ez_read_info(const char *path)
     FILE *f = fopen(path, "rb");
     if (!f)
         return NULL;
-    ezhdr h;
+    struct ez_file_header h;
     uint32_t w[2] = { 0, 0 };
     winapp_info head, *out = NULL;
     const uint32_t hsize = (uint32_t)offsetof(winapp_info, icon);
-    if (fread(&h, 1, sizeof(h), f) == sizeof(h) && h.magic == EZ_MAGIC && h.version == 1 &&
+    if (fread(&h, 1, sizeof(h), f) == sizeof(h) && h.magic == EZ_MAGIC && h.version == EZ_FORMAT_VERSION &&
         h.header_size >= sizeof(h)) {
         uint32_t e = h.entry_rva & ~1u;
         uint64_t end = (uint64_t)EZ_IMAGE_RVA + h.image_file_size;

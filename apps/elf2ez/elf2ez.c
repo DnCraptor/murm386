@@ -11,7 +11,7 @@
 #include "fcntl.h"
 #include "io.h"
 #endif
-#include "ez.h"
+#include "ez_reloc.h"
 
 #define ELF2EZ_OUTPUT_NAME_MAX 260u
 #define ELF2EZ_READ_CHUNK 32256u
@@ -38,11 +38,16 @@
 #define STB_WEAK                2u
 #define STT_OBJECT              1u
 #define STT_FUNC                2u
+#define R_ARM_NONE              0u
 #define R_ARM_ABS32             2u
 #define R_ARM_REL32             3u
 #define R_ARM_THM_PC22          10u
 #define R_ARM_THM_JUMP24        30u
-#define R_ARM_THM_ALU_ABS_G0_NC 102u
+#define R_ARM_TARGET1           38u
+#define R_ARM_PREL31            42u
+#define R_ARM_THM_MOVW_ABS_NC   47u
+#define R_ARM_THM_MOVT_ABS      48u
+#define R_ARM_THM_PC11          102u
 
 #define ELF_SEC_UNSEEN          0u
 #define ELF_SEC_LOADING         1u
@@ -128,6 +133,7 @@ typedef struct {
     uint32_t fini_array_rva;
     uint32_t fini_array_count;
     uint32_t relocation_progress;
+    uint8_t thumb2;
     uint32_t reloc_store_addr;
     uint32_t ez_reloc_count;
     uint16_t shnum;
@@ -274,51 +280,17 @@ static void free_dos_block(dos_block *block)
 #else
 static int alloc_largest_block(dos_block *block)
 {
-    union REGS regs = {0};
-    uint16_t largest;
-
+    const size_t size = malloc_largest_block();
     memset(block, 0, sizeof(*block));
-    regs.h.ah = 0x48;
-    regs.w.bx = 0xffffu;
-    int386(0x21, &regs, &regs);
-
-    if (!regs.x.cflag) {
-        block->segment = regs.w.ax;
-        block->paragraphs = 0xffffu;
-    } else {
-        largest = regs.w.bx;
-        if (largest == 0)
-            return -1;
-
-        memset(&regs, 0, sizeof(regs));
-        regs.h.ah = 0x48;
-        regs.w.bx = largest;
-        int386(0x21, &regs, &regs);
-        if (regs.x.cflag)
-            return -1;
-
-        block->segment = regs.w.ax;
-        block->paragraphs = largest;
-    }
-
-    block->ptr = (uint8_t *)dos_guest_far_ptr(block->segment, 0);
-    block->size = (uint32_t)block->paragraphs << 4;
+    if (!size || !(block->ptr = malloc(size)))
+        return -1;
+    block->size = size;
     return 0;
 }
 
 static void free_dos_block(dos_block *block)
 {
-    union REGS regs = {0};
-    struct SREGS sregs;
-
-    if (block->segment == 0)
-        return;
-
-    segread(&sregs);
-    sregs.es = block->segment;
-    regs.h.ah = 0x49;
-    int386x(0x21, &regs, &regs, &sregs);
-    memset(block, 0, sizeof(*block));
+    free(block->ptr);
 }
 #endif
 
@@ -362,7 +334,7 @@ static int ensure_capacity(const elf_load_meta *meta, uint32_t end_off)
     return image_end <= meta->reloc_store_addr ? 0 : -1;
 }
 
-static int emit_ez_reloc(elf_load_meta *meta, uint32_t rva, uint8_t type)
+static int emit_ez_reloc_ex(elf_load_meta *meta, uint32_t rva, uint8_t type, uint16_t low)
 {
     uint32_t image_end;
     uint32_t reloc_addr;
@@ -386,8 +358,15 @@ static int emit_ez_reloc(elf_load_meta *meta, uint32_t rva, uint8_t type)
     ++meta->ez_reloc_count;
     rel->rva = rva;
     rel->type = type;
-    memset(rel->reserved, 0, sizeof(rel->reserved));
+    rel->reserved[0] = (uint8_t)low;
+    rel->reserved[1] = (uint8_t)(low >> 8);
+    rel->reserved[2] = 0;
     return 0;
+}
+
+static int emit_ez_reloc(elf_load_meta *meta, uint32_t rva, uint8_t type)
+{
+    return emit_ez_reloc_ex(meta, rva, type, 0);
 }
 
 static int read_section(int fd, uint8_t *base, uint32_t dst_off,
@@ -396,90 +375,28 @@ static int read_section(int fd, uint8_t *base, uint32_t dst_off,
     return read_exact_at(fd, file_off, base + dst_off, size);
 }
 
-static void resolve_thm_pc22(uint16_t *addr, uint32_t place_rva,
-                             uint32_t sym_val)
+static int resolve_thm_branch(uint8_t *p, uint32_t place, uint32_t symbol, int jump)
 {
-    uint16_t instr0 = addr[0], instr1 = addr[1];
-    uint32_t s = (instr0 >> 10) & 1u;
-    uint32_t j1 = (instr1 >> 13) & 1u;
-    uint32_t j2 = (instr1 >> 11) & 1u;
-    uint32_t imm10 = instr0 & 0x03ffu;
-    uint32_t imm11 = instr1 & 0x07ffu;
-    uint32_t i1 = (~(j1 ^ s)) & 1u;
-    uint32_t i2 = (~(j2 ^ s)) & 1u;
-    int32_t offset = (int32_t)((i1 << 23) | (i2 << 22) |
-                               (imm10 << 12) | (imm11 << 1));
-    uint32_t new_offset;
-
-    if (s)
-        offset |= (int32_t)0xff800000u;
-    new_offset = (uint32_t)(offset + (int32_t)sym_val -
-                            (int32_t)place_rva);
-    s = new_offset >> 31;
-    i1 = (new_offset >> 23) & 1u;
-    i2 = (new_offset >> 22) & 1u;
-    imm10 = (new_offset >> 12) & 0x03ffu;
-    imm11 = (new_offset >> 1) & 0x07ffu;
-    j1 = (~(i1 ^ s)) & 1u;
-    j2 = (~(i2 ^ s)) & 1u;
-    addr[0] = (uint16_t)(0xf000u | (s << 10) | imm10);
-    addr[1] = (uint16_t)((0x1au << 11) | (j1 << 13) | (j2 << 11) | imm11);
-}
-
-static int resolve_thm_jump24(uint16_t *addr, uint32_t place_rva,
-                              uint32_t sym_val)
-{
-    uint16_t instr0 = addr[0], instr1 = addr[1];
-    uint32_t s = (instr0 >> 10) & 1u;
-    uint32_t j1 = (instr1 >> 13) & 1u;
-    uint32_t j2 = (instr1 >> 11) & 1u;
-    uint32_t imm10 = instr0 & 0x03ffu;
-    uint32_t imm11 = instr1 & 0x07ffu;
-    uint32_t i1 = (~(j1 ^ s)) & 1u;
-    uint32_t i2 = (~(j2 ^ s)) & 1u;
-    int32_t addend = (int32_t)((s << 24) | (i1 << 23) | (i2 << 22) |
-                                (imm10 << 12) | (imm11 << 1));
-    int32_t rel;
-    uint32_t urel;
-
-    if (s)
-        addend |= (int32_t)0xff000000u;
-    rel = addend + (int32_t)(sym_val & ~1u) -
-          ((int32_t)place_rva + 4);
-    if (rel < -(1L << 24) || rel > ((1L << 24) - 2))
+    const uint16_t a = ez_read16(p), b = ez_read16(p + 2);
+    const uint32_t opcode = jump ? 0x9000u : 0xd000u;
+    if ((a & 0xf800u) != 0xf000u || (b & 0xd000u) != opcode)
         return -1;
 
-    urel = (uint32_t)rel;
-    s = (urel >> 24) & 1u;
-    i1 = (urel >> 23) & 1u;
-    i2 = (urel >> 22) & 1u;
-    imm10 = (urel >> 12) & 0x03ffu;
-    imm11 = (urel >> 1) & 0x07ffu;
-    j1 = (~(i1 ^ s)) & 1u;
-    j2 = (~(i2 ^ s)) & 1u;
-    addr[0] = (uint16_t)(0xf000u | (s << 10) | imm10);
-    addr[1] = (uint16_t)((0x1cu << 11) | (j1 << 13) | (j2 << 11) | imm11);
+    uint32_t sign = (a >> 10) & 1u;
+    uint32_t value = (sign << 24) | (((~(b >> 13) ^ sign) & 1u) << 23) |
+                     (((~(b >> 11) ^ sign) & 1u) << 22) |
+                     ((uint32_t)(a & 1023u) << 12) | ((uint32_t)(b & 2047u) << 1);
+    int32_t addend = (int32_t)(value << 7) >> 7;
+    int64_t delta = (int64_t)(symbol & ~1u) + addend - place;
+    if (delta < -(1L << 24) || delta >= (1L << 24))
+        return -1;
+
+    value = (uint32_t)delta;
+    sign = (value >> 24) & 1u;
+    ez_write16(p, (uint16_t)(0xf000u | (sign << 10) | ((value >> 12) & 1023u)));
+    ez_write16(p + 2, (uint16_t)(opcode | (((~(value >> 23) ^ sign) & 1u) << 13) |
+                               (((~(value >> 22) ^ sign) & 1u) << 11) | ((value >> 1) & 2047u)));
     return 0;
-}
-
-static void resolve_thm_alu_abs_g0_nc(uint16_t *addr, uint32_t value)
-{
-    uint16_t instr0 = addr[0], instr1 = addr[1];
-    uint32_t imm4 = instr0 & 0x000fu;
-    uint32_t ibit = (instr0 >> 10) & 1u;
-    uint32_t imm3 = (instr1 >> 12) & 7u;
-    uint32_t imm8 = instr1 & 0x00ffu;
-    uint32_t addend = (imm4 << 12) | (ibit << 11) | (imm3 << 8) | imm8;
-    uint32_t imm16 = (value + addend) & 0xffffu;
-
-    instr0 = (uint16_t)((instr0 & ~0x040fu) |
-                        ((imm16 >> 12) & 0x0fu) |
-                        (((imm16 >> 11) & 1u) << 10));
-    instr1 = (uint16_t)((instr1 & ~0x70ffu) |
-                        (((imm16 >> 8) & 7u) << 12) |
-                        (imm16 & 0xffu));
-    addr[0] = instr0;
-    addr[1] = instr1;
 }
 
 static int find_tables(int fd, elf_load_meta *meta)
@@ -903,11 +820,14 @@ static int apply_section_relocations(int fd, uint8_t *base,
             if (read_exact_at(fd, relsec.offset + j * rel_entsize,
                               &rel, sizeof(rel)) != 0)
                 return -1;
-            if (rel.offset > target->size || target->size - rel.offset < 4)
-                return -1;
-
             sym_index = rel.info >> 8;
             type = (uint8_t)(rel.info & 0xffu);
+            if (type == R_ARM_NONE)
+                continue;
+            const unsigned width = type == R_ARM_THM_PC11 ? 2u : 4u;
+            if (rel.offset > target->size || target->size - rel.offset < width)
+                return -1;
+
             if (symbol_ref(fd, base, meta, sym_index, &sym) != 0)
                 return -1;
 
@@ -921,76 +841,74 @@ static int apply_section_relocations(int fd, uint8_t *base,
 
             switch (type) {
                 case R_ARM_ABS32:
-                    *(uint32_t *)place += sym.value;
+                case R_ARM_TARGET1:
+                    ez_write32(place, ez_read32(place) + sym.value);
                     if (sym.rebase &&
                         emit_ez_reloc(meta, place_rva, EZ_RELOC_ABS32) != 0)
                         return -1;
                     break;
 
                 case R_ARM_REL32:
-                    if (!sym.rebase) {
-                        print_relocation_symbol_error(
-                            fd, meta, sym_index, type, sec_num, rel.offset,
-                            "cannot resolve relocation symbol");
-                        return -1;
+                case R_ARM_PREL31: {
+                    const uint32_t word = ez_read32(place);
+                    if (!sym.rebase)
+                        goto bad_relocation;
+                    if (type == R_ARM_REL32) {
+                        ez_write32(place, word + sym.value - place_rva);
+                    } else {
+                        const int32_t addend = (int32_t)(word << 1) >> 1;
+                        const int64_t value = (int64_t)sym.value + addend - place_rva;
+                        if (value < -(1ll << 30) || value >= (1ll << 30))
+                            goto bad_relocation;
+                        ez_write32(place, (word & 0x80000000u) | ((uint32_t)value & 0x7fffffffu));
                     }
-                    *(uint32_t *)place =
-                        sym.value + *(uint32_t *)place - place_rva;
                     break;
+                }
 
                 case R_ARM_THM_PC22:
-                    if (!sym.rebase) {
-                        print_relocation_symbol_error(
-                            fd, meta, sym_index, type, sec_num, rel.offset,
-                            "cannot resolve relocation symbol");
-                        return -1;
-                    }
-                    resolve_thm_pc22((uint16_t *)place, place_rva, sym.value);
-                    break;
-
                 case R_ARM_THM_JUMP24:
-                    if (!sym.rebase) {
-                        print_relocation_symbol_error(
-                            fd, meta, sym_index, type, sec_num, rel.offset,
-                            "cannot resolve relocation symbol");
-                        return -1;
-                    }
-                    if (resolve_thm_jump24((uint16_t *)place,
-                                           place_rva, sym.value) != 0) {
-                        printf("\nELF: Thumb JUMP24 relocation out of range "
-                               "(section %u, offset %lu)\n",
-                               (unsigned)sec_num, (unsigned long)rel.offset);
-                        return -1;
-                    }
+                    if (!sym.rebase || (place_rva & 1u) ||
+                        resolve_thm_branch(place, place_rva, sym.value,
+                                           type == R_ARM_THM_JUMP24) != 0)
+                        goto bad_relocation;
+                    if (type == R_ARM_THM_JUMP24)
+                        meta->thumb2 = 1;
                     break;
 
-                case R_ARM_THM_ALU_ABS_G0_NC:
-                    if ((uintptr_t)place & 1u)
-                        return -1;
-                    resolve_thm_alu_abs_g0_nc((uint16_t *)place, sym.value);
-                    if (sym.rebase &&
-                        emit_ez_reloc(meta, place_rva,
-                                      EZ_RELOC_THM_ALU_ABS_G0_NC) != 0)
-                        return -1;
+                case R_ARM_THM_PC11: {
+                    const uint16_t op = ez_read16(place);
+                    const int32_t addend = (int32_t)((uint32_t)(op & 0x07ffu) << 21) >> 20;
+                    const int64_t delta = (int64_t)(sym.value & ~1u) + addend - place_rva;
+                    if (!sym.rebase || (place_rva & 1u) || (op & 0xf800u) != 0xe000u ||
+                        delta < -2048 || delta > 2046)
+                        goto bad_relocation;
+                    ez_write16(place, (uint16_t)(0xe000u | (((uint32_t)delta >> 1) & 0x07ffu)));
                     break;
-
-                default: {
-                    elf32_sym diag_sym;
-                    char name[64];
-                    if (read_symbol(fd, meta, sym_index, &diag_sym) == 0 &&
-                        symbol_name(fd, meta, &diag_sym, name, sizeof(name)))
-                        printf("\nELF: unsupported relocation type %u "
-                               "(section %u, offset %lu, symbol %s)\n",
-                               (unsigned)type, (unsigned)sec_num,
-                               (unsigned long)rel.offset, name);
-                    else
-                        printf("\nELF: unsupported relocation type %u "
-                               "(section %u, offset %lu, symbol #%lu)\n",
-                               (unsigned)type, (unsigned)sec_num,
-                               (unsigned long)rel.offset,
-                               (unsigned long)sym_index);
-                    return -1;
                 }
+
+                case R_ARM_THM_MOVW_ABS_NC:
+                case R_ARM_THM_MOVT_ABS: {
+                    const int high = type == R_ARM_THM_MOVT_ABS;
+                    if ((place_rva & 1u) ||
+                        (ez_read16(place) & 0xfbf0u) != (high ? 0xf2c0u : 0xf240u))
+                        goto bad_relocation;
+                    const int32_t addend = (int16_t)ez_thumb_mov_get(place);
+                    const uint32_t value = sym.value + (uint32_t)addend;
+                    ez_thumb_mov_set(place, (uint16_t)(high ? value >> 16 : value));
+                    if (sym.rebase && emit_ez_reloc_ex(meta, place_rva,
+                            high ? EZ_RELOC_THM_MOVT_ABS : EZ_RELOC_THM_MOVW_ABS_NC,
+                            high ? (uint16_t)value : 0) != 0)
+                        return -1;
+                    meta->thumb2 = 1;
+                    break;
+                }
+
+                default:
+                bad_relocation:
+                    print_relocation_symbol_error(fd, meta, sym_index, type,
+                                                  sec_num, rel.offset,
+                                                  "unsupported or invalid relocation");
+                    return -1;
             }
         }
     }
@@ -1373,7 +1291,7 @@ static int write_exact(int fd, const void *src, uint32_t size)
     return 0;
 }
 
-static int convert_elf_to_ez(int input, int output)
+static int convert_elf_to_ez(int input, int output, int thumb2)
 {
     dos_block block;
     elf32_ehdr eh;
@@ -1503,7 +1421,8 @@ static int convert_elf_to_ez(int input, int output)
     header.magic = EZ_MAGIC;
     header.version = EZ_FORMAT_VERSION;
     header.header_size = sizeof(header);
-    header.flags = EZ_FLAG_THUMB | EZ_FLAG_ARMV6M | EZ_FLAG_SOFT_FLOAT;
+    header.flags = EZ_FLAG_THUMB | EZ_FLAG_SOFT_FLOAT |
+                   (thumb2 || meta->thumb2 ? EZ_FLAG_THUMB2 : EZ_FLAG_ARMV6M);
     header.required_dos_api_version = requirements.required_dos_api_version;
     header.native_stack_size = requirements.native_stack_size;
     header.dos_stack_size = requirements.dos_stack_size;
@@ -1542,11 +1461,25 @@ out:
 }
 
 
+static int path_compare(const char *a, const char *b)
+{
+    for (;;) {
+        unsigned x = (unsigned char)*a++, y = (unsigned char)*b++;
+        if (x >= 'a' && x <= 'z') x -= 'a' - 'A';
+        if (y >= 'a' && y <= 'z') y -= 'a' - 'A';
+        if (x == '/') x = '\\';
+        if (y == '/') y = '\\';
+        if (x != y || x == 0) return (int)x - (int)y;
+    }
+}
+
 int main(int argc, char **argv)
 {
     char output_name[ELF2EZ_OUTPUT_NAME_MAX];
     const char *input_name = NULL;
     int overwrite = 0;
+    int thumb2 = 0;
+    const char *explicit_output = NULL;
     int input;
     int output;
     int i;
@@ -1554,7 +1487,11 @@ int main(int argc, char **argv)
     for (i = 1; i < argc; ++i) {
         if (is_yes_option(argv[i])) {
             overwrite = 1;
-        } else if (input_name == NULL) {
+        } else if (strcmp(argv[i], "--thumb2") == 0) {
+            thumb2 = 1;
+        } else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc && !explicit_output) {
+            explicit_output = argv[++i];
+        } else if (input_name == NULL && argv[i][0] != '-') {
             input_name = argv[i];
         } else {
             input_name = NULL;
@@ -1563,12 +1500,19 @@ int main(int argc, char **argv)
     }
 
     if (input_name == NULL) {
-        printf("Usage: elf2ez [/y] <input-file>\n");
+        printf("Usage: elf2ez [/y] [--thumb2] [-o output] <input-file>\n");
         return 1;
     }
 
-    if (!make_output_name(input_name, output_name, sizeof(output_name))) {
+    if (explicit_output && strlen(explicit_output) < sizeof(output_name)) {
+        strcpy(output_name, explicit_output);
+    } else if (explicit_output || !make_output_name(input_name, output_name, sizeof(output_name))) {
         printf("Bad filename: %s\n", input_name);
+        return 1;
+    }
+
+    if (path_compare(input_name, output_name) == 0) {
+        puts("Input and output must be different files");
         return 1;
     }
 
@@ -1592,7 +1536,7 @@ int main(int argc, char **argv)
     }
 
     {
-        int convert_result = convert_elf_to_ez(input, output);
+        int convert_result = convert_elf_to_ez(input, output, thumb2);
         if (convert_result != 0) {
             close(input);
             close(output);
