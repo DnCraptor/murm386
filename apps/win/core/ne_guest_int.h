@@ -95,7 +95,7 @@ typedef struct ne_user {
     /* ne_guest_call.c: its hooks (SetWindowsHook(Ex)): the type, its
      * procedure, the task it is for (0 all its own), its number (HHOOK's
      * low word, made one after the other: the later the first called) */
-    struct { int16_t type; uint16_t task, id; uint32_t proc; } hook[NE_HOOKS];
+    struct { int16_t type; uint16_t task, id, word_result; uint32_t proc; } hook[NE_HOOKS];
 } ne_user;
 
 

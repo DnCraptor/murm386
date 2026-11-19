@@ -2168,13 +2168,16 @@ static uint32_t hook_call(ne_user *u, int i, int code, uint16_t wp, uint32_t lp,
                           uint8_t *blob, uint16_t len)
 {
     const uint16_t words[4] = { (uint16_t)code, wp, (uint16_t)(lp >> 16), (uint16_t)lp };
+    int word_result = u->hook[i].word_result;
     win_trace_event("hook-enter", u->hook[i].proc, (uint16_t)code);
     uint32_t result = win_ne_call(u->ctx, u->hook[i].proc, words, 4, blob, len);
+    if (word_result)
+        result = (uint32_t)(int32_t)(int16_t)result;
     win_trace_event("hook-leave", u->hook[i].proc, result);
     return result;
 }
 
-static uint16_t hook_add(ne_user *u, int type, uint32_t proc, uint16_t task)
+static uint16_t hook_add(ne_user *u, int type, uint32_t proc, uint16_t task, int word_result)
 {
     for (int i = 0; i < NE_HOOKS; i++)
         if (!u->hook[i].id) {
@@ -2183,6 +2186,7 @@ static uint16_t hook_add(ne_user *u, int type, uint32_t proc, uint16_t task)
             u->hook[i].type = (int16_t)type;
             u->hook[i].proc = proc;
             u->hook[i].task = task;
+            u->hook[i].word_result = word_result;
             u->hook[i].id = hook_ids;
             hooks_count(type, 1);
             return hook_ids;
@@ -2231,11 +2235,6 @@ static __attribute__((noinline)) LRESULT ne_hook(int type, int code, WPARAM wp, 
         return 0;
     int i = hook_next(u, type, 0);
     win_trace_event("hook-dispatch", (uint16_t)type, (uint16_t)code);
-    /* WH_MSGFILTER is used by CLIPBRD.EXE. Persist the last events before
-     * entering its guest callback: the native keyboard may not be polled
-     * again if the callback never returns. Diagnostic builds only. */
-    if (type == WH_MSGFILTER)
-        win_trace_dump();
     if (i < 0)
         return 0;
     uint8_t blob[10 + 30 + 64 + 64];
@@ -2288,7 +2287,7 @@ static int hook_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int 
 {
     switch (service) {
     case 0x1123:                        /* SetWindowsHookEx(int, HOOKPROC, HINSTANCE, HTASK) */
-        *v = a->bad ? 0 : hook_add(u, (int16_t)w(a, 12), dw(a, 8), w(a, 4));
+        *v = a->bad ? 0 : hook_add(u, (int16_t)w(a, 12), dw(a, 8), w(a, 4), 0);
         if (*v)
             *v |= 0x484b0000u;
         *dword = 1;
@@ -2301,7 +2300,9 @@ static int hook_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int 
             uint32_t proc = dw(a, 4);
             uint32_t prev = i >= 0 ? u->hook[i].proc :
                             win_ne_guest_hook_terminator(a->ctx->image);
-            if (!a->bad && proc && prev && hook_add(u, type, proc, 0))
+            /* The legacy message filter is int FAR PASCAL. DX is undefined. */
+            int word_result = type == WH_MSGFILTER || type == WH_SYSMSGFILTER;
+            if (!a->bad && proc && prev && hook_add(u, type, proc, 0, word_result))
                 *v = prev;
         }
         return 1;
