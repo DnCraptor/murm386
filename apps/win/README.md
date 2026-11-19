@@ -175,7 +175,8 @@ generic previews can be retained without drawing. The generic WMF
 format with a boundary-dependent trailer is unsupported. Opening the
 source, updating links and editing still require the OLE server protocol.
 Clients can read ObjectLink for links and OwnerLink/Native for embeddings
-through OleGetData. Link update preferences travel with the saved link.
+through OleGetData. OleSetData with ObjectLink changes the source of a
+link, retaining its cached preview and update preference when saved.
 OleObjectConvert can break the link by creating a static copy of the
 cached picture.
 Clipboard Paste and Paste Link accept OwnerLink/Native and ObjectLink

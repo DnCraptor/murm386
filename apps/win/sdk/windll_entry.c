@@ -45,7 +45,7 @@ const win_dll_info *__windll_start(const win_dll_host *host)
     /* started from DOS directly: the argument is argc, not a pointer */
     if ((uintptr_t)host < 0x10000u || host->magic != WINDLL_MAGIC ||
         host->version != WINDLL_VERSION || host->size < sizeof(win_dll_host) ||
-        !host->ne || host->ne->size < sizeof(win_dll_ne))
+        !host->ne || host->ne->size < WIN_DLL_NE_PROC_SIZE)
         return 0;
     __win_api = host->modules;
     __win_dll_ne = host->ne;

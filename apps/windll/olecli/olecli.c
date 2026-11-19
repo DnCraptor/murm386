@@ -1144,14 +1144,17 @@ static OLESTATUS WINAPI OleRevokeClientDoc(LHCLIENTDOC h)
 typedef struct { UINT owner, object, native; } ole_clip_formats;
 typedef struct { const uint8_t *text; DWORD size; } ole_clip_string;
 
+static UINT clipboard_format(LPCSTR name, BOOL publish)
+{
+    UINT format = FindAtom(name);
+    return format || !publish ? format : RegisterClipboardFormat(name);
+}
+
 static ole_clip_formats clipboard_formats(BOOL publish)
 {
-    ole_clip_formats f = { FindAtom("OwnerLink"), FindAtom("ObjectLink"), FindAtom("Native") };
-    if (publish && !f.owner)
-        f.owner = RegisterClipboardFormat("OwnerLink");
-    if (publish && !f.native)
-        f.native = RegisterClipboardFormat("Native");
-    return f;
+    return (ole_clip_formats){ clipboard_format("OwnerLink", publish),
+                               clipboard_format("ObjectLink", FALSE),
+                               clipboard_format("Native", publish) };
 }
 
 static BOOL clip_has(UINT format)
@@ -1221,6 +1224,16 @@ static BOOL stream_triplet(const uint8_t *p, DWORD size, ole_clip_string fields[
     return fields[0].size > 1;
 }
 
+static uint8_t *write_triplet(uint8_t *p, const ole_clip_string fields[3])
+{
+    for (unsigned i = 0; i < 3; i++) {
+        write32(p, fields[i].size);
+        memcpy(p + 4, fields[i].text, fields[i].size);
+        p += 4 + fields[i].size;
+    }
+    return p;
+}
+
 static BOOL native_before_owner(ole_clip_formats f)
 {
     for (UINT fmt = EnumClipboardFormats(0); fmt; fmt = EnumClipboardFormats(fmt)) {
@@ -1259,12 +1272,7 @@ static OLESTATUS make_clip_header(HGLOBAL meta, HGLOBAL native, WORD type, HGLOB
     if (p) {
         write32(p, 0x501);
         write32(p + 4, type);
-        p += 8;
-        for (unsigned i = 0; i < 3; i++) {
-            write32(p, fields[i].size);
-            memcpy(p + 4, fields[i].text, fields[i].size);
-            p += 4 + fields[i].size;
-        }
+        p = write_triplet(p + 8, fields);
         if (type == OT_EMBEDDED) {
             const void *data = GlobalLock(native);
             if (data) {
@@ -1427,10 +1435,10 @@ static void object_formats(const OLEOBJECT *o, OLECLIPFORMAT formats[DATA_SLOTS]
     if (o->image)
         formats[DATA_PICTURE] = o->metafile ? CF_METAFILEPICT : CF_DIB;
     if (o->type == OT_EMBEDDED) {
-        formats[DATA_NATIVE] = RegisterClipboardFormat("Native");
-        formats[DATA_IDENTITY] = RegisterClipboardFormat("OwnerLink");
+        formats[DATA_NATIVE] = clipboard_format("Native", TRUE);
+        formats[DATA_IDENTITY] = clipboard_format("OwnerLink", TRUE);
     } else if (o->type == OT_LINK) {
-        formats[DATA_IDENTITY] = RegisterClipboardFormat("ObjectLink");
+        formats[DATA_IDENTITY] = clipboard_format("ObjectLink", TRUE);
     }
 }
 
@@ -1487,6 +1495,109 @@ static OLESTATUS WINAPI OleGetData(LPOLEOBJECT object, OLECLIPFORMAT fmt, HANDLE
     return OLE_OK;
 }
 
+static OLESTATUS set_data_status(OLEOBJECT *o, OLECLIPFORMAT format)
+{
+    if (!o)
+        return OLE_ERROR_OBJECT;
+    if (o->type == OT_STATIC)
+        return OLE_ERROR_STATIC;
+    if (!format || format != clipboard_format("ObjectLink", FALSE))
+        return OLE_ERROR_NOT_OPEN;
+    if (o->type != OT_LINK)
+        return OLE_ERROR_NOT_LINK;
+    return o->writing ? OLE_BUSY : OLE_OK;
+}
+
+/* Locate the update hint after the length-prefixed network name and
+ * reserved DWORD. Everything from the hint onward survives a relink. */
+static DWORD link_hint_offset(const uint8_t *tail, DWORD size)
+{
+    if (size < 12 || read32(tail) > size - 12)
+        return 0;
+    return 8 + read32(tail);
+}
+
+static OLESTATUS replace_link_source(OLEOBJECT *o, const uint8_t *data, DWORD size)
+{
+    ole_clip_string next[3], previous[3];
+    if (!clipboard_triplet(data, size, next) || next[1].size <= 1)
+        return OLE_ERROR_FORMAT;
+    const uint8_t *head = GlobalLock(o->stream_head);
+    if (!head)
+        return OLE_ERROR_MEMORY;
+    const uint8_t *tail;
+    DWORD n, hint;
+    HGLOBAL replacement = 0;
+    OLESTATUS status = OLE_ERROR_FORMAT;
+    if (!stream_triplet(head, o->head_bytes, previous, &tail, &n) ||
+        !(hint = link_hint_offset(tail, n)))
+        goto done;
+
+    /* Network metadata belongs to the old topic. Retain it only when
+     * the new identity still refers to exactly that topic. */
+    BOOL same_topic = previous[1].size == next[1].size &&
+                      !memcmp(previous[1].text, next[1].text, next[1].size);
+    DWORD suffix = same_topic ? n : n - hint + 8;
+    uint64_t total = 20ull + next[0].size + next[1].size + next[2].size + suffix;
+    status = OLE_ERROR_SIZE;
+    if (total + o->tail_bytes > UINT32_MAX)
+        goto done;
+    replacement = GlobalAlloc(GMEM_MOVEABLE, (DWORD)total);
+    uint8_t *p = replacement ? GlobalLock(replacement) : NULL;
+    status = OLE_ERROR_MEMORY;
+    if (!p)
+        goto done;
+    memcpy(p, head, 8);
+    p = write_triplet(p + 8, next);
+    if (same_topic) {
+        memcpy(p, tail, n);
+    } else {
+        memset(p, 0, 8);
+        memcpy(p + 8, tail + hint, n - hint);
+    }
+    GlobalUnlock(replacement);
+    status = OLE_OK;
+done:
+    GlobalUnlock(o->stream_head);
+    if (status != OLE_OK) {
+        if (replacement)
+            GlobalFree(replacement);
+        return status;
+    }
+    GlobalFree(o->stream_head);
+    o->stream_head = replacement;
+    o->head_bytes = GlobalSize(replacement);
+    return OLE_OK;
+}
+
+static void invalidate_identity(OLEOBJECT *o)
+{
+    if (o->identity) {
+        GlobalFree(o->identity);
+        o->identity = 0;
+    }
+    if (o->guest_data[DATA_IDENTITY]) {
+        NE->task_free((uint16_t)GetCurrentTask(), o->guest_data[DATA_IDENTITY]);
+        o->guest_data[DATA_IDENTITY] = 0;
+    }
+}
+
+static OLESTATUS WINAPI OleSetData(LPOLEOBJECT object, OLECLIPFORMAT format, HANDLE data)
+{
+    OLEOBJECT *o = object_of(object);
+    OLESTATUS status = set_data_status(o, format);
+    if (status != OLE_OK)
+        return status;
+    const uint8_t *bytes = GlobalLock(data);
+    if (!bytes)
+        return OLE_ERROR_HANDLE;
+    status = replace_link_source(o, bytes, GlobalSize(data));
+    GlobalUnlock(data);
+    if (status == OLE_OK)
+        invalidate_identity(o);
+    return status;
+}
+
 static OLESTATUS clipboard_object_data(OLEOBJECT *o, ole_clip_formats f,
                                       WINNCLIPDATA *items, UINT *count)
 {
@@ -1524,11 +1635,11 @@ static OLESTATUS link_update_option(LPOLEOBJECT object, OLEOPT_UPDATE *option, B
         return OLE_ERROR_MEMORY;
     ole_clip_string fields[3];
     const uint8_t *tail;
-    DWORD n;
+    DWORD n, hint;
     OLESTATUS status = OLE_ERROR_FORMAT;
-    if (stream_triplet(p, o->head_bytes, fields, &tail, &n) && n >= 12 &&
-        read32(tail) <= n - 12) {
-        uint8_t *wire = p + (tail - p) + 8 + read32(tail);
+    if (stream_triplet(p, o->head_bytes, fields, &tail, &n) &&
+        (hint = link_hint_offset(tail, n))) {
+        uint8_t *wire = p + (tail - p) + hint;
         /* The Win16 enum starts at zero. The wire hint starts at one,
          * and absent or unrecognized hints default to automatic updates. */
         if (set)
@@ -1687,7 +1798,7 @@ static const struct {
     { 26, 6, "OleEnumFormats", 0, R_OWN, (const void *)OleEnumFormats },
     { 27, 4, "OleClose", 0, R_OBJECT, NULL },
     { 28, 10, "OleGetData", 0, R_OWN, (const void *)OleGetData },
-    { 29, 8, "OleSetData", 0, R_OBJECT, NULL },
+    { 29, 8, "OleSetData", 0, R_OWN, (const void *)OleSetData },
     { 30, 8, "OleQueryProtocol", 0, R_OWN, (const void *)OleQueryProtocol },
     { 31, 4, "OleQueryOutOfDate", 0, R_OBJECT, NULL },
     { 32, 24, "OleObjectConvert", 0, R_OWN, (const void *)OleObjectConvert },
@@ -1749,7 +1860,7 @@ static LPOLEOBJECT guest_object(uint32_t far)
 
 static int guest_attach(LPOLEOBJECT o)
 {
-    if (!NE || NE->size < sizeof(*NE) || !NE->task_proc ||
+    if (!NE || NE->size < WIN_DLL_NE_PROC_SIZE || !NE->task_proc ||
         !NE->task_alloc || !NE->task_free || !NE->task_write)
         return 0;
     /* OLEOBJECT starts with a far pointer to its OLEOBJECTVTBL. These
@@ -1850,8 +1961,6 @@ static OLESTATUS guest_data(win_dll_call *c, LPOLEOBJECT o, UINT format, uint32_
                     image == o->native ? DATA_NATIVE : DATA_PICTURE;
     BOOL metafile = format == CF_METAFILEPICT;
     DWORD n = metafile ? 8 : slot == DATA_PICTURE ? o->size : GlobalSize(image);
-    if (n > 0x10000u)
-        return OLE_ERROR_SIZE;
     if (!o->guest_data[slot]) {
         uint16_t task = (uint16_t)GetCurrentTask();
         uint32_t far = NE->task_alloc(task, n);
@@ -1878,6 +1987,33 @@ static OLESTATUS guest_data(win_dll_call *c, LPOLEOBJECT o, UINT format, uint32_
         o->guest_data[slot] = far;
     }
     return put16(c, out, (uint16_t)(o->guest_data[slot] >> 16)) ? OLE_OK : OLE_ERROR_ADDRESS;
+}
+
+static OLESTATUS guest_set_data(win_dll_call *c, LPOLEOBJECT o, WORD format, WORD handle)
+{
+    OLESTATUS status = set_data_status(o, format);
+    if (status != OLE_OK)
+        return status;
+    if (NE->size < sizeof(*NE) || !NE->task_global_size)
+        return OLE_ERROR_GENERIC;
+    DWORD size = NE->task_global_size((uint16_t)GetCurrentTask(), handle);
+    if (!size)
+        return OLE_ERROR_HANDLE;
+
+    HGLOBAL copy = GlobalAlloc(GMEM_MOVEABLE, size);
+    uint8_t *bytes = copy ? GlobalLock(copy) : NULL;
+    status = OLE_ERROR_MEMORY;
+    if (bytes) {
+        uint32_t far = (uint32_t)(handle | 3u) << 16;
+        status = NE->read(c, far, bytes, size) ? replace_link_source(o, bytes, size) :
+                                                 OLE_ERROR_ADDRESS;
+        GlobalUnlock(copy);
+    }
+    if (copy)
+        GlobalFree(copy);
+    if (status == OLE_OK)
+        invalidate_identity(o);
+    return status;
 }
 
 static int guest_stream(win_dll_call *c, uint32_t far, int put, picture_stream *s)
@@ -2037,6 +2173,9 @@ static int ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *v)
         return WINDLL_WORD;
     case 28:
         *v = guest_data(c, guest_object(NE->arg32(c, 10)), NE->arg16(c, 8), NE->arg32(c, 4));
+        return WINDLL_WORD;
+    case 29:
+        *v = guest_set_data(c, guest_object(NE->arg32(c, 8)), NE->arg16(c, 6), NE->arg16(c, 4));
         return WINDLL_WORD;
     case 30: {
         char protocol[32];
