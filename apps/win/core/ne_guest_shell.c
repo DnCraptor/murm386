@@ -114,11 +114,17 @@ int ne_shell_registry_service(args *a, unsigned op, uint32_t *v)
             *v = ERROR_INVALID_PARAMETER;
             return 1;
         }
-        *v = winreg_get(task, dw(a, 16), child, NULL, &type, &d, &n);
-        if (*v == WINREG_SUCCESS) {
-            n = (uint32_t)strlen((const char *)d) + 1u;
-            *v = value_out(a, type, d, n, 0, dw(a, 8), dw(a, 4));
+        uint32_t key = dw(a, 16);
+        *v = winreg_get(task, key, child, NULL, NULL, &d, &n);
+        /* Legacy RegQueryValue returns an empty string for an existing
+         * key without a default value. A missing subkey still fails. */
+        if (*v == WINREG_FILE_NOT_FOUND && winreg_key_exists(task, key, child)) {
+            d = (const uint8_t *)"";
+            *v = WINREG_SUCCESS;
         }
+        if (*v == WINREG_SUCCESS)
+            *v = value_out(a, REG_SZ, d, (unsigned)strlen((const char *)d) + 1u,
+                           0, dw(a, 8), dw(a, 4));
         return 1;
     }
     case 7:                              /* RegEnumKey(HKEY, index, LPSTR, cb) */

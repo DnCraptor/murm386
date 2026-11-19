@@ -34,6 +34,7 @@
  * handle (the key itself for a root and no subkey) */
 uint32_t winreg_open(HTASK task, uint32_t key, const char *sub, int create, uint32_t *out);
 uint32_t winreg_close(HTASK task, uint32_t key);
+int winreg_key_exists(HTASK task, uint32_t key, const char *sub);
 /* a subkey and the keys under it */
 uint32_t winreg_delete_key(HTASK task, uint32_t key, const char *sub);
 /* the index-th subkey's name (cap bytes with its NUL) */

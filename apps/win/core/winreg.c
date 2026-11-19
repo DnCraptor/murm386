@@ -98,6 +98,12 @@ static int key_exists(const char *path)
                                    REG_FILE) && mark[0] == '1';
 }
 
+int winreg_key_exists(HTASK task, uint32_t key, const char *sub)
+{
+    char path[WINREG_NAME_BYTES];
+    return path_name(task, key, sub, path) && key_exists(path);
+}
+
 /* the key and those on the way to it */
 static int key_create(const char *path)
 {

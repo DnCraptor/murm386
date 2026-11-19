@@ -78,6 +78,12 @@ struct WINN_OLESTREAM {
 #define olerender_draw          1
 #define olerender_format        2
 
+typedef enum {
+    oleupdate_always,
+    oleupdate_onsave,
+    oleupdate_oncall
+} OLEOPT_UPDATE;
+
 /* the functions' types, for GetProcAddress (their names: Windows') */
 typedef OLESTATUS (WINAPI *OLEREGISTERCLIENTDOC)(LPCSTR cls, LPCSTR doc, LONG reserved,
                                                  LHCLIENTDOC *out);
@@ -106,6 +112,10 @@ typedef OLESTATUS (WINAPI *OLEQUERYTYPE)(LPOLEOBJECT object, LONG *type);
 typedef OLESTATUS (WINAPI *OLEQUERYBOUNDS)(LPOLEOBJECT object, RECT *bounds);
 typedef OLECLIPFORMAT (WINAPI *OLEENUMFORMATS)(LPOLEOBJECT object, OLECLIPFORMAT previous);
 typedef OLESTATUS (WINAPI *OLEGETDATA)(LPOLEOBJECT object, OLECLIPFORMAT format, HANDLE *data);
+typedef OLESTATUS (WINAPI *OLEGETLINKUPDATEOPTIONS)(LPOLEOBJECT object, OLEOPT_UPDATE *option);
+typedef OLESTATUS (WINAPI *OLESETLINKUPDATEOPTIONS)(LPOLEOBJECT object, OLEOPT_UPDATE option);
+typedef OLESTATUS (WINAPI *OLEOBJECTCONVERT)(LPOLEOBJECT object, LPCSTR protocol,
+    LPOLECLIENT client, LHCLIENTDOC doc, LPCSTR name, LPOLEOBJECT *converted);
 typedef OLESTATUS (WINAPI *OLEENUMOBJECTS)(LHCLIENTDOC doc, LPOLEOBJECT *object);
 typedef OLESTATUS (WINAPI *OLERENAME)(LPOLEOBJECT object, LPCSTR name);
 typedef OLESTATUS (WINAPI *OLEQUERYNAME)(LPOLEOBJECT object, LPSTR name, UINT *count);

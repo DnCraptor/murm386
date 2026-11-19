@@ -66,6 +66,8 @@ static OLESTATUS WINAPI OleSavedClientDoc(LHCLIENTDOC h)
 }
 
 /* Pictures own their packed DIB or WMF bytes independently of the clipboard. */
+enum { DATA_PICTURE, DATA_IDENTITY, DATA_NATIVE, DATA_SLOTS };
+
 struct WINN_OLEOBJECT {
     LHCLIENTDOC doc;
     HGLOBAL image, descriptor;
@@ -74,7 +76,9 @@ struct WINN_OLEOBJECT {
     WORD type;
     HMETAFILE metafile;
     int map_mode;
-    DWORD size, bits, guest, guest_data;
+    DWORD size, bits, guest;
+    HGLOBAL identity, native;
+    DWORD guest_data[DATA_SLOTS];
     SIZE pixels;
     LONG width, height;              /* positive HIMETRIC extents */
     BOOL writing;
@@ -488,12 +492,17 @@ static OLESTATUS create_clip_picture(LHCLIENTDOC doc, LPCSTR name, LPOLEOBJECT *
 
 static void free_picture(OLEOBJECT *o, uint16_t task)
 {
-    if (o->guest_data)
-        NE->task_free(task, o->guest_data);
+    for (unsigned i = 0; i < DATA_SLOTS; i++)
+        if (o->guest_data[i])
+            NE->task_free(task, o->guest_data[i]);
     if (o->guest)
         NE->task_free(task, o->guest);
     if (o->descriptor)
         GlobalFree(o->descriptor);
+    if (o->identity)
+        GlobalFree(o->identity);
+    if (o->native)
+        GlobalFree(o->native);
     if (o->metafile)
         DeleteMetaFile(o->metafile);
     if (o->image)
@@ -665,36 +674,6 @@ static OLESTATUS WINAPI OleDraw(LPOLEOBJECT object, HDC dc, const RECT *bounds, 
         RestoreDC(dc, saved);
     GlobalUnlock(o->image);
     return drawn > 0 ? OLE_OK : OLE_ERROR_DRAW;
-}
-
-static OLECLIPFORMAT WINAPI OleEnumFormats(LPOLEOBJECT object, OLECLIPFORMAT previous)
-{
-    OLEOBJECT *o = object_of(object);
-    return !previous && o && o->image ? (o->metafile ? CF_METAFILEPICT : CF_DIB) : 0;
-}
-
-static OLESTATUS WINAPI OleGetData(LPOLEOBJECT object, OLECLIPFORMAT fmt, HANDLE *out)
-{
-    if (!out)
-        return OLE_ERROR_ADDRESS;
-    *out = 0;
-    OLEOBJECT *o = object_of(object);
-    if (!o)
-        return OLE_ERROR_OBJECT;
-    if (!o->image)
-        return OLE_ERROR_BLANK;
-    if (fmt != (o->metafile ? CF_METAFILEPICT : CF_DIB))
-        return OLE_ERROR_FORMAT;
-    if (o->metafile) {
-        if (!o->descriptor)
-            o->descriptor = metafile_descriptor(o->metafile, o->width, o->height);
-        if (!o->descriptor)
-            return OLE_ERROR_MEMORY;
-        *out = o->descriptor;
-    } else {
-        *out = o->image;
-    }
-    return OLE_OK;
 }
 
 static OLESTATUS WINAPI OleRename(LPOLEOBJECT object, LPCSTR name)
@@ -1420,11 +1399,10 @@ static HGLOBAL clipboard_identity(ole_clip_string fields[3])
     return block;
 }
 
-static OLESTATUS clipboard_object_data(OLEOBJECT *o, ole_clip_formats f,
-                                      WINNCLIPDATA *items, UINT *count)
+/* Build fresh handles for clipboard transfers and object-owned handles
+ * for OleGetData from the same persisted fields. */
+static OLESTATUS stream_data(OLEOBJECT *o, BOOL native, HGLOBAL *out)
 {
-    if (!f.owner || (o->type == OT_EMBEDDED && !f.native))
-        return OLE_ERROR_MEMORY;
     const uint8_t *p = GlobalLock(o->stream_head);
     if (!p)
         return OLE_ERROR_MEMORY;
@@ -1433,29 +1411,169 @@ static OLESTATUS clipboard_object_data(OLEOBJECT *o, ole_clip_formats f,
     DWORD n;
     OLESTATUS status = OLE_ERROR_FORMAT;
     if (stream_triplet(p, o->head_bytes, fields, &tail, &n)) {
-        status = OLE_OK;
-        if (o->type == OT_EMBEDDED) {
-            DWORD size = n >= 4 ? read32(tail) : 0;
-            if (!size || size > n - 4)
-                status = OLE_ERROR_FORMAT;
-            else {
-                HGLOBAL native = copy_block(tail + 4, size);
-                if (native)
-                    items[(*count)++] = (WINNCLIPDATA){ f.native, native };
-                else
-                    status = OLE_ERROR_MEMORY;
-            }
-        }
-        if (status == OLE_OK) {
-            HGLOBAL owner = clipboard_identity(fields);
-            if (owner)
-                items[(*count)++] = (WINNCLIPDATA){ f.owner, owner };
-            else
-                status = OLE_ERROR_MEMORY;
+        DWORD size = n >= 4 ? read32(tail) : 0;
+        if (!native || (size && size <= n - 4)) {
+            *out = native ? copy_block(tail + 4, size) : clipboard_identity(fields);
+            status = *out ? OLE_OK : OLE_ERROR_MEMORY;
         }
     }
     GlobalUnlock(o->stream_head);
     return status;
+}
+
+static void object_formats(const OLEOBJECT *o, OLECLIPFORMAT formats[DATA_SLOTS])
+{
+    memset(formats, 0, DATA_SLOTS * sizeof(*formats));
+    if (o->image)
+        formats[DATA_PICTURE] = o->metafile ? CF_METAFILEPICT : CF_DIB;
+    if (o->type == OT_EMBEDDED) {
+        formats[DATA_NATIVE] = RegisterClipboardFormat("Native");
+        formats[DATA_IDENTITY] = RegisterClipboardFormat("OwnerLink");
+    } else if (o->type == OT_LINK) {
+        formats[DATA_IDENTITY] = RegisterClipboardFormat("ObjectLink");
+    }
+}
+
+static OLECLIPFORMAT WINAPI OleEnumFormats(LPOLEOBJECT object, OLECLIPFORMAT previous)
+{
+    OLEOBJECT *o = object_of(object);
+    if (!o)
+        return 0;
+    OLECLIPFORMAT formats[DATA_SLOTS];
+    object_formats(o, formats);
+    for (unsigned i = 0; i < DATA_SLOTS; i++) {
+        if (formats[i] && !previous)
+            return formats[i];
+        if (formats[i] == previous)
+            previous = 0;
+    }
+    return 0;
+}
+
+static OLESTATUS WINAPI OleGetData(LPOLEOBJECT object, OLECLIPFORMAT fmt, HANDLE *out)
+{
+    if (!out)
+        return OLE_ERROR_ADDRESS;
+    *out = 0;
+    OLEOBJECT *o = object_of(object);
+    if (!o)
+        return OLE_ERROR_OBJECT;
+    OLECLIPFORMAT formats[DATA_SLOTS];
+    object_formats(o, formats);
+    if (fmt && (fmt == formats[DATA_IDENTITY] || fmt == formats[DATA_NATIVE])) {
+        BOOL native = fmt == formats[DATA_NATIVE];
+        HGLOBAL *cached = native ? &o->native : &o->identity;
+        if (!*cached) {
+            OLESTATUS status = stream_data(o, native, cached);
+            if (status != OLE_OK)
+                return status;
+        }
+        *out = *cached;
+        return OLE_OK;
+    }
+    if (!o->image && (fmt == CF_DIB || fmt == CF_METAFILEPICT))
+        return OLE_ERROR_BLANK;
+    if (!fmt || fmt != formats[DATA_PICTURE])
+        return OLE_ERROR_FORMAT;
+    if (o->metafile) {
+        if (!o->descriptor)
+            o->descriptor = metafile_descriptor(o->metafile, o->width, o->height);
+        if (!o->descriptor)
+            return OLE_ERROR_MEMORY;
+        *out = o->descriptor;
+    } else {
+        *out = o->image;
+    }
+    return OLE_OK;
+}
+
+static OLESTATUS clipboard_object_data(OLEOBJECT *o, ole_clip_formats f,
+                                      WINNCLIPDATA *items, UINT *count)
+{
+    HGLOBAL data;
+    if (!f.owner || (o->type == OT_EMBEDDED && !f.native))
+        return OLE_ERROR_MEMORY;
+    if (o->type == OT_EMBEDDED) {
+        OLESTATUS status = stream_data(o, TRUE, &data);
+        if (status != OLE_OK)
+            return status;
+        items[(*count)++] = (WINNCLIPDATA){ f.native, data };
+    }
+    OLESTATUS status = stream_data(o, FALSE, &data);
+    if (status == OLE_OK)
+        items[(*count)++] = (WINNCLIPDATA){ f.owner, data };
+    return status;
+}
+
+static OLESTATUS link_update_option(LPOLEOBJECT object, OLEOPT_UPDATE *option, BOOL set)
+{
+    OLEOBJECT *o = object_of(object);
+    if (!o)
+        return OLE_ERROR_OBJECT;
+    if (o->type != OT_LINK)
+        return OLE_ERROR_NOT_LINK;
+    if (!option)
+        return OLE_ERROR_ADDRESS;
+    if (set && (unsigned)*option > oleupdate_oncall)
+        return OLE_ERROR_OPTION;
+    if (set && o->writing)
+        return OLE_BUSY;
+
+    uint8_t *p = GlobalLock(o->stream_head);
+    if (!p)
+        return OLE_ERROR_MEMORY;
+    ole_clip_string fields[3];
+    const uint8_t *tail;
+    DWORD n;
+    OLESTATUS status = OLE_ERROR_FORMAT;
+    if (stream_triplet(p, o->head_bytes, fields, &tail, &n) && n >= 12 &&
+        read32(tail) <= n - 12) {
+        uint8_t *wire = p + (tail - p) + 8 + read32(tail);
+        /* The Win16 enum starts at zero. The wire hint starts at one,
+         * and absent or unrecognized hints default to automatic updates. */
+        if (set)
+            write32(wire, (DWORD)*option + 1);
+        else {
+            DWORD value = read32(wire);
+            *option = value >= 1 && value <= 3 ? (OLEOPT_UPDATE)(value - 1) : oleupdate_always;
+        }
+        status = OLE_OK;
+    }
+    GlobalUnlock(o->stream_head);
+    return status;
+}
+
+static OLESTATUS WINAPI OleGetLinkUpdateOptions(LPOLEOBJECT object, OLEOPT_UPDATE *option)
+{
+    return link_update_option(object, option, FALSE);
+}
+
+static OLESTATUS WINAPI OleSetLinkUpdateOptions(LPOLEOBJECT object, OLEOPT_UPDATE option)
+{
+    return link_update_option(object, &option, TRUE);
+}
+
+static OLESTATUS WINAPI OleObjectConvert(LPOLEOBJECT object, LPCSTR protocol, LPOLECLIENT client,
+                                         LHCLIENTDOC doc, LPCSTR name, LPOLEOBJECT *out)
+{
+    (void)client;
+    if (!out)
+        return OLE_ERROR_ADDRESS;
+    *out = NULL;
+    OLEOBJECT *o = object_of(object);
+    if (!o)
+        return OLE_ERROR_OBJECT;
+    if (!static_protocol(protocol))
+        return OLE_ERROR_PROTOCOL;
+    if (!name)
+        return OLE_ERROR_ADDRESS;
+    if (doc_of(doc) < 0)
+        return OLE_ERROR_HANDLE;
+    if (!o->image)
+        return OLE_ERROR_BLANK;
+    HGLOBAL image = copy_handle(o->image, o->size);
+    return image ? new_picture(image, o->map_mode, doc, name, o->width, o->height, out) :
+                   OLE_ERROR_MEMORY;
 }
 
 static OLESTATUS WINAPI OleCopyToClipboard(LPOLEOBJECT object)
@@ -1564,15 +1682,15 @@ static const struct {
     { 21, 16, "OleActivate", 0, R_OBJECT, NULL },
     { 22, 4, "OleUpdate", 0, R_OBJECT, NULL },
     { 23, 4, "OleReconnect", 0, R_OBJECT, NULL },
-    { 24, 8, "OleGetLinkUpdateOptions", 0, R_OBJECT, NULL },
-    { 25, 6, "OleSetLinkUpdateOptions", 0, R_OBJECT, NULL },
+    { 24, 8, "OleGetLinkUpdateOptions", 0, R_OWN, (const void *)OleGetLinkUpdateOptions },
+    { 25, 6, "OleSetLinkUpdateOptions", 0, R_OWN, (const void *)OleSetLinkUpdateOptions },
     { 26, 6, "OleEnumFormats", 0, R_OWN, (const void *)OleEnumFormats },
     { 27, 4, "OleClose", 0, R_OBJECT, NULL },
     { 28, 10, "OleGetData", 0, R_OWN, (const void *)OleGetData },
     { 29, 8, "OleSetData", 0, R_OBJECT, NULL },
     { 30, 8, "OleQueryProtocol", 0, R_OWN, (const void *)OleQueryProtocol },
     { 31, 4, "OleQueryOutOfDate", 0, R_OBJECT, NULL },
-    { 32, 24, "OleObjectConvert", 4, R_CREATE, NULL },
+    { 32, 24, "OleObjectConvert", 0, R_OWN, (const void *)OleObjectConvert },
     { 33, 28, "OleCreateFromTemplate", 8, R_CREATE, NULL },
     { 34, 28, "OleCreate", 8, R_CREATE, NULL },
     { 35, 4, "OleQueryReleaseStatus", 0, R_OWN, (const void *)OleQueryReleaseStatus },
@@ -1728,16 +1846,19 @@ static OLESTATUS guest_data(win_dll_call *c, LPOLEOBJECT o, UINT format, uint32_
     OLESTATUS status = OleGetData(o, (OLECLIPFORMAT)format, &image);
     if (status != OLE_OK)
         return status;
-    DWORD n = o->metafile ? 8 : o->size;
+    unsigned slot = image == o->identity ? DATA_IDENTITY :
+                    image == o->native ? DATA_NATIVE : DATA_PICTURE;
+    BOOL metafile = format == CF_METAFILEPICT;
+    DWORD n = metafile ? 8 : slot == DATA_PICTURE ? o->size : GlobalSize(image);
     if (n > 0x10000u)
         return OLE_ERROR_SIZE;
-    if (!o->guest_data) {
+    if (!o->guest_data[slot]) {
         uint16_t task = (uint16_t)GetCurrentTask();
         uint32_t far = NE->task_alloc(task, n);
         if (!far)
             return OLE_ERROR_MEMORY;
         int ok;
-        if (o->metafile) {
+        if (metafile) {
             WORD w = o->width <= INT16_MAX ? (WORD)o->width : 0;
             WORD h = o->height <= INT16_MAX ? (WORD)o->height : 0;
             uint8_t picture[] = { MM_ANISOTROPIC, 0, (uint8_t)w, (uint8_t)(w >> 8),
@@ -1754,9 +1875,9 @@ static OLESTATUS guest_data(win_dll_call *c, LPOLEOBJECT o, UINT format, uint32_
             NE->task_free(task, far);
             return OLE_ERROR_MEMORY;
         }
-        o->guest_data = far;
+        o->guest_data[slot] = far;
     }
-    return put16(c, out, (uint16_t)(o->guest_data >> 16)) ? OLE_OK : OLE_ERROR_ADDRESS;
+    return put16(c, out, (uint16_t)(o->guest_data[slot] >> 16)) ? OLE_OK : OLE_ERROR_ADDRESS;
 }
 
 static int guest_stream(win_dll_call *c, uint32_t far, int put, picture_stream *s)
@@ -1900,6 +2021,17 @@ static int ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *v)
     case 20:
         *v = OleQueryOpen(guest_object(NE->arg32(c, 4)));
         return WINDLL_WORD;
+    case 24: {
+        OLEOPT_UPDATE option;
+        uint32_t out = NE->arg32(c, 4);
+        *v = OleGetLinkUpdateOptions(guest_object(NE->arg32(c, 8)), out ? &option : NULL);
+        if (*v == OLE_OK && !put16(c, out, (uint16_t)option))
+            *v = OLE_ERROR_ADDRESS;
+        return WINDLL_WORD;
+    }
+    case 25:
+        *v = OleSetLinkUpdateOptions(guest_object(NE->arg32(c, 6)), NE->arg16(c, 4));
+        return WINDLL_WORD;
     case 26:
         *v = OleEnumFormats(guest_object(NE->arg32(c, 6)), NE->arg16(c, 4));
         return WINDLL_WORD;
@@ -1912,6 +2044,20 @@ static int ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *v)
         if (g_str(c, NE->arg32(c, 4), protocol, sizeof(protocol)) && OleQueryProtocol(o, protocol))
             *v = o->guest;
         return WINDLL_DWORD;
+    }
+    case 32: {
+        char protocol[32], name[128];
+        uint32_t out = NE->arg32(c, 4), far_name = NE->arg32(c, 8);
+        if (!put32(c, out, 0) || !far_name || !g_str(c, far_name, name, sizeof(name)) ||
+            !g_str(c, NE->arg32(c, 20), protocol, sizeof(protocol))) {
+            *v = OLE_ERROR_ADDRESS;
+        } else {
+            LPOLEOBJECT picture = NULL;
+            OLESTATUS status = OleObjectConvert(guest_object(NE->arg32(c, 24)), protocol, NULL,
+                (LHCLIENTDOC)NE->arg32(c, 12), name, &picture);
+            *v = guest_created(c, out, status, picture);
+        }
+        return WINDLL_WORD;
     }
     case 35: case 36:
         *v = OleQueryReleaseStatus(guest_object(NE->arg32(c, 4)));
