@@ -160,9 +160,20 @@ and metafile pictures. The Static protocol can paste CF_DIB and
 CF_METAFILEPICT, and converts CF_BITMAP when drawing is requested.
 Static streams can contain DIB, BITMAP or METAFILEPICT. BITMAP pictures
 are normalized to DIB when loaded, and WMF pictures retain their vector
-records through drawing, copying and saving. Win16 uses the OLECLI
+records through drawing, copying and saving. WMF playback also follows
+map-mode changes and the metafile's SaveDC/RestoreDC stack. Win16 uses the OLECLI
 ordinals and native callers use GetProcAddress with include/ole.h.
-Linked and editable objects still require the OLE client/server protocol.
+StdFileEditing can load linked and embedded OLE 1.0 objects from a
+document stream and display cached DIB, BITMAP and WMF pictures. Saving
+or cloning these objects retains their wire data, including the link
+fields and embedded native bytes. Objects with null or unrenderable
+generic previews can be retained without drawing. The generic WMF
+format with a boundary-dependent trailer is unsupported. Opening the
+source, updating links and editing still require the OLE server protocol.
+Clipboard Paste and Paste Link accept OwnerLink/Native and ObjectLink
+with standard picture previews. Copy publishes Native before OwnerLink
+for embedded objects, and OwnerLink for linked objects. A copy replaces
+the OLE formats as a group, leaving unrelated clipboard formats intact.
 COMMDLG has
 Windows 3.1's common dialogs: Open and Save As, Find and Replace (the
 program's FINDREPLACE in their messages, kept up to date), Color (the 48

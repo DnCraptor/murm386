@@ -744,70 +744,152 @@ BOOL WINAPI PlayMetaFile(HDC h, HMETAFILE mf)
     return mf_enum(h, mf, play_one, NULL);
 }
 
+/* The source DC follows normal GDI map-mode rules. The destination DC
+ * receives that logical-to-device mapping composed with a fixed transform
+ * from the recorded viewport to the OLE destination rectangle. */
 typedef struct {
-    POINT origin, source_origin;
-    SIZE size, source_view;
-    int save_level, fixed;
+    int origin, source_origin, extent;
+    uint64_t span_num;             /* source device units: span_num / span_den */
+    unsigned span_den;
+} mf_picture_axis;
+
+typedef struct {
+    HDC source;
+    mf_picture_axis x, y;
+    int save_level;
 } mf_picture;
 
-static int picture_scale(int value, int dest, int source)
+static uint64_t magnitude(int value)
 {
-    int64_t result = (int64_t)value * dest / source;
-    return result < INT32_MIN ? INT32_MIN : result > INT32_MAX ? INT32_MAX : (int)result;
+    return value < 0 ? (uint64_t)-(int64_t)value : (uint64_t)value;
+}
+
+static uint64_t common_factor(uint64_t a, uint64_t b)
+{
+    while (b) {
+        uint64_t r = a % b;
+        a = b;
+        b = r;
+    }
+    return a;
+}
+
+static int picture_axis(const mf_picture_axis *axis, int origin, int view, int window,
+                        int *dest_origin, int *dest_view, int *dest_window)
+{
+    if (!view || !window)
+        return 0;
+    uint64_t num = magnitude(view) * magnitude(axis->extent), den = magnitude(window);
+    uint64_t span = axis->span_num;
+    uint64_t g = common_factor(num, span);
+    num /= g;
+    span /= g;
+    unsigned divisor = axis->span_den;
+    g = common_factor(den, divisor);
+    den /= g;
+    divisor /= (unsigned)g;
+    if (num > UINT64_MAX / divisor || den > UINT64_MAX / span)
+        return 0;
+    num *= divisor;
+    den *= span;
+    g = common_factor(num, den);
+    num /= g;
+    den /= g;
+    if (num > INT32_MAX || den > INT32_MAX)
+        return 0;
+
+    int64_t offset = ((int64_t)origin - axis->source_origin) * axis->extent;
+    if (offset > INT64_MAX / axis->span_den || offset < INT64_MIN / axis->span_den)
+        return 0;
+    offset = offset * axis->span_den / (int64_t)axis->span_num;
+    if (offset < (int64_t)INT32_MIN - axis->origin || offset > (int64_t)INT32_MAX - axis->origin)
+        return 0;
+    *dest_origin = (int)(offset + axis->origin);
+    *dest_window = (int)den;
+    *dest_view = ((view < 0) ^ (window < 0) ^ (axis->extent < 0)) ? -(int)num : (int)num;
+    return 1;
+}
+
+static int picture_mapping(const mf_picture *f, HDC dc)
+{
+    const wdc *source = gdi_dc(f->source);
+    POINT origin;
+    SIZE view, window;
+    if (!picture_axis(&f->x, source->vp_x, source->vex, source->wex,
+                      &origin.x, &view.cx, &window.cx) ||
+        !picture_axis(&f->y, source->vp_y, source->vey, source->wey,
+                      &origin.y, &view.cy, &window.cy))
+        return 0;
+    return SetWindowOrgEx(dc, source->win_x, source->win_y, NULL) &&
+           SetWindowExtEx(dc, window.cx, window.cy, NULL) &&
+           SetViewportOrgEx(dc, origin.x, origin.y, NULL) &&
+           SetViewportExtEx(dc, view.cx, view.cy, NULL);
 }
 
 static int play_picture_record(void *opaque, HDC dc, HGDIOBJ *table, int n,
                                const uint8_t *rec, uint32_t bytes)
 {
     mf_picture *f = opaque;
-    unsigned op = get16(rec + 4);
-    if (op == META_SETMAPMODE || (f->fixed && (op == META_SETWINDOWEXT ||
-        op == META_SETVIEWPORTEXT || op == META_SCALEWINDOWEXT || op == META_SCALEVIEWPORTEXT)))
-        return 1;
-    if (op == META_RESTOREDC && bytes >= 8) {
+    switch (get16(rec + 4)) {
+    case META_SETMAPMODE:
+    case META_SETWINDOWORG:
+    case META_SETWINDOWEXT:
+    case META_SETVIEWPORTORG:
+    case META_SETVIEWPORTEXT:
+    case META_OFFSETWINDOWORG:
+    case META_OFFSETVIEWPORTORG:
+    case META_SCALEWINDOWEXT:
+    case META_SCALEVIEWPORTEXT:
+        mf_play_record(f->source, NULL, 0, rec, bytes);
+        return picture_mapping(f, dc);
+    case META_SAVEDC:
+        return SaveDC(f->source) && SaveDC(dc);
+    case META_RESTOREDC: {
+        if (bytes < 8)
+            return 1;
         int level = (int16_t)get16(rec + 6);
-        int current = gdi_dc(dc)->save_level;
-        int restore = level < 0 ? current + level + 1 : f->save_level + level;
-        if (restore > f->save_level && restore <= current)
-            RestoreDC(dc, restore);
+        int current = gdi_dc(f->source)->save_level;
+        int restore = level < 0 ? current + level + 1 : level;
+        if (restore <= 0 || restore > current)
+            return 1;
+        /* Positive SaveDC levels serialized by WINN are relative to the
+         * metafile. Do not let them pop the caller's saved state. */
+        return RestoreDC(f->source, restore) && RestoreDC(dc, f->save_level + restore);
+    }
+    default:
+        mf_play_record(dc, table, n, rec, bytes);
         return 1;
     }
-    if (op == META_SAVEDC)
-        return SaveDC(dc) != 0;
-    if (bytes >= 10 && (op == META_SETVIEWPORTORG || op == META_SETVIEWPORTEXT ||
-                        op == META_OFFSETVIEWPORTORG)) {
-        int x = (int16_t)get16(rec + 8), y = (int16_t)get16(rec + 6);
-        if (op == META_SETVIEWPORTORG) {
-            x -= f->source_origin.x;
-            y -= f->source_origin.y;
-        }
-        x = picture_scale(x, f->size.cx, f->source_view.cx);
-        y = picture_scale(y, f->size.cy, f->source_view.cy);
-        if (op == META_SETVIEWPORTEXT)
-            SetViewportExtEx(dc, x, y, NULL);
-        else {
-            wdc *state = gdi_dc(dc);
-            int64_t left = (int64_t)(op == META_OFFSETVIEWPORTORG ? state->vp_x : f->origin.x) + x;
-            int64_t top = (int64_t)(op == META_OFFSETVIEWPORTORG ? state->vp_y : f->origin.y) + y;
-            if (left < INT32_MIN || left > INT32_MAX || top < INT32_MIN || top > INT32_MAX)
-                return 0;
-            SetViewportOrgEx(dc, (int)left, (int)top, NULL);
-        }
-        return 1;
-    }
-    mf_play_record(dc, table, n, rec, bytes);
-    return 1;
 }
 
-/* Standard OLE picture mapping. Use the first window/viewport extents to
- * establish the original frame, while subsequent records are played within
- * the destination viewport. Fixed map modes use their conventional units. */
+/* Only mapping and coordinate-independent setup can define the initial
+ * frame. Geometry or a nested saved DC may use a different map mode. */
+static int picture_setup(unsigned op)
+{
+    switch (op) {
+    case META_SETMAPMODE: case META_SETWINDOWORG: case META_SETWINDOWEXT:
+    case META_SETVIEWPORTORG: case META_SETVIEWPORTEXT:
+    case META_OFFSETWINDOWORG: case META_OFFSETVIEWPORTORG:
+    case META_SCALEWINDOWEXT: case META_SCALEVIEWPORTEXT:
+    case META_SETBKCOLOR: case META_SETTEXTCOLOR: case META_SETBKMODE:
+    case META_SETROP2: case META_SETPOLYFILLMODE: case META_SETSTRETCHBLTMODE:
+    case META_SETTEXTCHAREXTRA: case META_SETTEXTJUSTIFICATION: case META_SETTEXTALIGN:
+    case META_CREATEPENINDIRECT: case META_CREATEBRUSHINDIRECT: case META_CREATEFONTINDIRECT:
+    case META_CREATEPALETTE: case META_SELECTOBJECT: case META_SELECTPALETTE:
+    case META_REALIZEPALETTE: case META_DELETEOBJECT:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/* Recover the reference frame for a scalable picture from its setup.
+ * Fixed modes describe their frame in physical units. */
 BOOL WINAPI PlayMetaFileRectN(HDC dc, HMETAFILE mf, const RECT *rect,
                               int mode, LONG width, LONG height)
 {
     wmeta *m = meta_of(mf);
-    wdc *out = gdi_dc(dc);
-    if (!m || !out || !rect || width <= 0 || height <= 0 || !valid(m->bits, m->size))
+    if (!m || !rect || width <= 0 || height <= 0 || !valid(m->bits, m->size))
         return FALSE;
     POINT corners[2] = { { rect->left, rect->top }, { rect->right, rect->bottom } };
     if (!LPtoDP(dc, corners, 2))
@@ -816,7 +898,7 @@ BOOL WINAPI PlayMetaFileRectN(HDC dc, HMETAFILE mf, const RECT *rect,
     int64_t h = (int64_t)corners[1].y - corners[0].y;
     if (!w || !h || w <= INT32_MIN || w > INT32_MAX || h <= INT32_MIN || h > INT32_MAX)
         return FALSE;
-    mf_picture f = { .origin = corners[0], .size = { (int)w, (int)h } };
+    POINT origin = {0};
     SIZE window = {0}, view = {0};
     int have_mode = 0, have_origin = 0;
     for (uint32_t at = MF_HEADER; at + 6 <= m->size;) {
@@ -825,11 +907,16 @@ BOOL WINAPI PlayMetaFileRectN(HDC dc, HMETAFILE mf, const RECT *rect,
         if (words < 3 || words > (m->size - at) / 2)
             return FALSE;
         unsigned op = get16(rec + 4);
-        if (!op)
+        if (!picture_setup(op))
             break;
-        if (!have_mode && op == META_SETMAPMODE && words >= 4) {
-            mode = (int16_t)get16(rec + 6);
-            have_mode = 1;
+        if (op == META_SETMAPMODE && words >= 4) {
+            int recorded = (int16_t)get16(rec + 6);
+            if (recorded >= MM_TEXT && recorded <= MM_ANISOTROPIC) {
+                if (have_mode && recorded != mode)
+                    break;
+                mode = recorded;
+                have_mode = 1;
+            }
         }
         if (words >= 5) {
             int x = (int16_t)get16(rec + 8), y = (int16_t)get16(rec + 6);
@@ -838,42 +925,48 @@ BOOL WINAPI PlayMetaFileRectN(HDC dc, HMETAFILE mf, const RECT *rect,
             if (!view.cx && op == META_SETVIEWPORTEXT && x && y)
                 view = (SIZE){ x, y };
             if (!have_origin && op == META_SETVIEWPORTORG) {
-                f.source_origin = (POINT){ x, y };
+                origin = (POINT){ x, y };
                 have_origin = 1;
             }
         }
         at += words * 2u;
     }
-    static const int units[] = { 0, 96, 254, 2540, 100, 1000, 1440 };
     if (mode < MM_TEXT || mode > MM_ANISOTROPIC)
         mode = MM_ANISOTROPIC;
-    f.fixed = mode <= MM_TWIPS;
-    if (!window.cx || f.fixed) {
-        int per_inch = mode <= MM_TWIPS ? units[mode] : 2540;
-        window.cx = picture_scale(width, per_inch, 2540);
-        window.cy = picture_scale(height, per_inch, 2540);
-        if (!window.cx)
-            window.cx = 1;
-        if (!window.cy)
-            window.cy = 1;
-    }
-    if (!view.cx || f.fixed)
-        view = (SIZE){ window.cx > 0 ? window.cx : -window.cx,
-                       (mode > MM_TEXT && mode <= MM_TWIPS) ?
-                           -window.cy : (window.cy > 0 ? window.cy : -window.cy) };
-    f.source_view = (SIZE){ view.cx > 0 ? view.cx : -view.cx, view.cy > 0 ? view.cy : -view.cy };
-    int saved = SaveDC(dc);
-    if (!saved)
+    mf_picture f = {
+        .x = { corners[0].x, origin.x, (int)w, (uint64_t)width * 96, 2540 },
+        .y = { corners[0].y, origin.y, (int)h, (uint64_t)height * 96, 2540 },
+    };
+    f.source = CreateCompatibleDC(0);
+    if (!f.source)
         return FALSE;
-    f.save_level = saved + 1;          /* mf_enum protects the initial playback state */
-    SetMapMode(dc, MM_ANISOTROPIC);
-    SetWindowOrgEx(dc, 0, 0, NULL);
-    SetWindowExtEx(dc, window.cx, window.cy, NULL);
-    SetViewportOrgEx(dc, f.origin.x, f.origin.y, NULL);
-    SetViewportExtEx(dc, view.cx > 0 ? f.size.cx : -f.size.cx,
-                    view.cy > 0 ? f.size.cy : -f.size.cy, NULL);
-    BOOL ok = mf_enum(dc, mf, play_picture_record, &f);
-    RestoreDC(dc, saved);
+    SetMapMode(f.source, mode);
+    SetViewportOrgEx(f.source, origin.x, origin.y, NULL);
+    if (mode >= MM_ISOTROPIC && (window.cx || view.cx)) {
+        if (!window.cx)
+            window = (SIZE){ width, height };
+        if (!view.cx)
+            view = (SIZE){ (int)magnitude(window.cx), (int)magnitude(window.cy) };
+        SetWindowExtEx(f.source, window.cx, window.cy, NULL);
+        SetViewportExtEx(f.source, view.cx, view.cy, NULL);
+        f.x.span_num = magnitude(view.cx);
+        f.y.span_num = magnitude(view.cy);
+        f.x.span_den = f.y.span_den = 1;
+    } else if (mode >= MM_ISOTROPIC) {
+        /* With no recorded extents yet use the size in HIMETRIC, with Y
+         * increasing down to match the scalable picture's default. */
+        SetWindowExtEx(f.source, 2540, 2540, NULL);
+        SetViewportExtEx(f.source, 96, 96, NULL);
+    }
+    int saved = SaveDC(dc);
+    BOOL ok = FALSE;
+    if (saved) {
+        f.save_level = saved + 1;      /* mf_enum protects the initial playback state */
+        SetMapMode(dc, MM_ANISOTROPIC);
+        ok = picture_mapping(&f, dc) && mf_enum(dc, mf, play_picture_record, &f);
+        RestoreDC(dc, saved);
+    }
+    DeleteDC(f.source);
     return ok;
 }
 

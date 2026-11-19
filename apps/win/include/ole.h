@@ -2,7 +2,7 @@
  * ole.h - OLE 1.0's client library (OLECLI.DLL, a native DLL of WINN's:
  * apps/windll/olecli) for native callers, who take its functions with
  * LoadLibrary("OLECLI") and GetProcAddress. WINN has no OLE servers (no
- * registration database): client documents can hold static pictures.
+ * registration database): client documents can hold static pictures and saved linked/embedded objects.
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
@@ -27,6 +27,8 @@ struct WINN_OLESTREAM {
     const OLESTREAMVTBL *lpstbl;
 };
 
+#define OT_LINK 1
+#define OT_EMBEDDED 2
 #define OT_STATIC 3
 
 #define OLE_OK                  0
@@ -92,6 +94,7 @@ typedef BOOL (WINAPI *OLEISDCMETA)(HDC dc);
 
 typedef OLESTATUS (WINAPI *OLECREATEFROMCLIP)(LPCSTR protocol, LPOLECLIENT client,
     LHCLIENTDOC doc, LPCSTR name, LPOLEOBJECT *object, UINT render, OLECLIPFORMAT format);
+typedef OLECREATEFROMCLIP OLECREATELINKFROMCLIP;
 typedef OLESTATUS (WINAPI *OLEDELETE)(LPOLEOBJECT object);
 typedef OLESTATUS (WINAPI *OLECLONE)(LPOLEOBJECT object, LPOLECLIENT client,
     LHCLIENTDOC doc, LPCSTR name, LPOLEOBJECT *copy);

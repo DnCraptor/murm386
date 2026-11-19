@@ -11822,6 +11822,23 @@ PlayMetaFileRectN:
     .ltorg
     .size PlayMetaFileRectN, .-PlayMetaFileRectN
 
+    .section .text.winapi.SetClipboardDataBatchN,"ax",%progbits
+    .global SetClipboardDataBatchN
+    .type SetClipboardDataBatchN, %function
+    .thumb_func
+SetClipboardDataBatchN:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #12]
+    ldr  r1, =148
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SetClipboardDataBatchN, .-SetClipboardDataBatchN
+
     .section .text.winapi.GetOpenFileName,"ax",%progbits
     .global GetOpenFileName
     .type GetOpenFileName, %function

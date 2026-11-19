@@ -36,3 +36,4 @@
 34 PrinterNeCallN
 35 GetPackedDIBInfoN
 36 PlayMetaFileRectN
+37 SetClipboardDataBatchN

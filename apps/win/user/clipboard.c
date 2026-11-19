@@ -134,6 +134,43 @@ HANDLE WINAPI SetClipboardData(UINT fmt, HANDLE data)
     return data;
 }
 
+/* Replace the named formats as a group. A zero handle removes its format.
+ * Nonzero handles are new clipboard-owned data after a successful call. */
+BOOL WINAPI SetClipboardDataBatchN(const WINNCLIPDATA *items, UINT count)
+{
+    if (!is_open || !items || !count || count > CLIP_MAX)
+        return FALSE;
+    int used = nclip;
+    for (UINT i = 0; i < count; i++) {
+        if (!items[i].format)
+            return FALSE;
+        for (UINT j = 0; j < i; j++)
+            if (items[j].format == items[i].format ||
+                (items[i].handle && items[j].handle == items[i].handle))
+                return FALSE;
+        for (int j = 0; items[i].handle && j < nclip; j++)
+            if (clip[j].data == items[i].handle)
+                return FALSE;
+        used += (items[i].handle != 0) - (find(items[i].format) >= 0);
+    }
+    if (used > CLIP_MAX)
+        return FALSE;
+    for (UINT i = 0; i < count; i++) {
+        int slot = find(items[i].format);
+        if (slot >= 0) {
+            if (clip[slot].data)
+                free_format(clip[slot].fmt, clip[slot].data);
+            --nclip;
+            memmove(clip + slot, clip + slot + 1, (nclip - slot) * sizeof(*clip));
+        }
+    }
+    for (UINT i = 0; i < count; i++)
+        if (items[i].handle)
+            SetClipboardData(items[i].format, items[i].handle);
+    changed = 1;
+    return TRUE;
+}
+
 HANDLE WINAPI GetClipboardData(UINT fmt)
 {
     if (!is_open)

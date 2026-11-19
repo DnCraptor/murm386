@@ -1002,6 +1002,11 @@ BOOL    WINAPI CloseClipboard(void);
 BOOL    WINAPI EmptyClipboard(void);
 HWND    WINAPI GetClipboardOwner(void);
 HANDLE  WINAPI SetClipboardData(UINT fmt, HANDLE data);
+typedef struct {
+    UINT format;
+    HANDLE handle;
+} WINNCLIPDATA;
+BOOL    WINAPI SetClipboardDataBatchN(const WINNCLIPDATA *items, UINT count);
 HANDLE  WINAPI GetClipboardData(UINT fmt);
 int     WINAPI CountClipboardFormats(void);
 UINT    WINAPI EnumClipboardFormats(UINT fmt);

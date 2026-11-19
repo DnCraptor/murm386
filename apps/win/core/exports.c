@@ -562,6 +562,7 @@ extern void SetCaretPos(void);
 extern void SetClassLong(void);
 extern void SetClassWord(void);
 extern void SetClipboardData(void);
+extern void SetClipboardDataBatchN(void);
 extern void SetClipboardViewer(void);
 extern void SetCursor(void);
 extern void SetCursorPos(void);
@@ -1374,7 +1375,7 @@ static const void *const exports_user[931] = {
     [930] = (const void *)MessageBoxEx,
 };
 
-static const void *const exports_winn[37] = {
+static const void *const exports_winn[38] = {
     [1] = (const void *)DialogBoxIndirectN,
     [2] = (const void *)CreateDialogIndirectN,
     [3] = (const void *)CreateAcceleratorTableN,
@@ -1411,6 +1412,7 @@ static const void *const exports_winn[37] = {
     [34] = (const void *)PrinterNeCallN,
     [35] = (const void *)GetPackedDIBInfoN,
     [36] = (const void *)PlayMetaFileRectN,
+    [37] = (const void *)SetClipboardDataBatchN,
 };
 
 static const void *const exports_commdlg[28] = {
