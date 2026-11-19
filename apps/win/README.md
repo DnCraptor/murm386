@@ -795,8 +795,11 @@ conversation with a program speaking DDE's messages itself.
 DdeConnectList enumerates local servers for a service/topic pair. A
 wildcard service or topic asks servers for matching pairs with
 XTYP_WILDCONNECT. DdeQueryNextServer walks the list, and DdeDisconnectList
-ends its conversations. A program's DdeAccessData gives a copy of the handle's
-bytes in its own memory (a Win16 program's a global block of its),
+ends its conversations. During XTYP_DISCONNECT the client can call
+DdeReconnect to open a new conversation with the same server and ask
+it to restore the advise loops. A program's DdeAccessData gives a copy
+of the handle's bytes in its own memory (a Win16 program's a global block
+of its),
 which DdeUnaccessData takes back. The
 Program Manager is a DDEML server as Windows' is for setup programs:
 service and topic PROGMAN, [CreateGroup], [ShowGroup], [AddItem],

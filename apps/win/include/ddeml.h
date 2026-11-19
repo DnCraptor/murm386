@@ -149,6 +149,7 @@ typedef BOOL (WINAPI *DDEDISCONNECTLIST)(HCONVLIST list);
 typedef UINT (WINAPI *DDEQUERYCONVINFO)(HCONV conv, DWORD transaction, PCONVINFO info);
 typedef HCONV (WINAPI *DDECONNECT)(DWORD inst, HSZ service, HSZ topic, PCONVCONTEXT cc);
 typedef BOOL (WINAPI *DDEDISCONNECT)(HCONV conv);
+typedef HCONV (WINAPI *DDERECONNECT)(HCONV conv);
 typedef HDDEDATA (WINAPI *DDECLIENTTRANSACTION)(LPBYTE data, DWORD cb, HCONV conv, HSZ item,
                                                UINT fmt, UINT type, DWORD timeout,
                                                LPDWORD result);

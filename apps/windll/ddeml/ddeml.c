@@ -73,6 +73,7 @@ typedef struct {
     int inst;
     int partner;                    /* the other end, -1 when it went */
     int client, closing;
+    int reconnect_from;             /* old server slot + 1 during XTYP_DISCONNECT */
     HSZ service, topic;
     HCONVLIST list;
     CONVCONTEXT context;
@@ -266,7 +267,7 @@ static HDDEDATA invoke(const callback_call *c)
 static int filtered(const instance *in, UINT type)
 {
     DWORD f = in->cmd;
-    switch (type) {
+    switch (type & ~(XTYPF_NODATA | XTYPF_ACKREQ)) {
     case XTYP_CONNECT: case XTYP_WILDCONNECT:
         return (f & CBF_FAIL_CONNECTIONS) != 0;
     case XTYP_ADVSTART: case XTYP_ADVSTOP:
@@ -701,6 +702,13 @@ static HCONV WINAPI DdeConnect(DWORD id, HSZ service, HSZ topic, PCONVCONTEXT cc
     return 0;
 }
 
+static void drop_links(conversation *cv)
+{
+    for (int i = 0; i < LINKS; i++)
+        if (cv->links[i].item)
+            GlobalDeleteAtom((ATOM)cv->links[i].item);
+}
+
 static void conv_end(int c, int tell)
 {
     conversation *cv = &convs[c];
@@ -708,7 +716,7 @@ static void conv_end(int c, int tell)
         return;
     int p = cv->partner;
     int linked = p >= 0 && convs[p].used && convs[p].partner == c;
-    int client = linked && convs[p].list ? p : c;
+    int client = linked && convs[p].client ? p : c;
     conversation_list *list = list_of(convs[client].list);
     if (list)
         for (unsigned i = 0; i < list->count; i++)
@@ -717,17 +725,21 @@ static void conv_end(int c, int tell)
                 memmove(list->members + i, list->members + i + 1, list->count - i);
                 break;
             }
-    convs[client].list = 0;
     cv->closing = 1;
     cv->partner = -1;
     if (linked) {
         convs[p].partner = -1;
         convs[p].closing = 1;
-        if (tell)
+        if (tell) {
+            if (convs[p].client && !cv->client)
+                convs[p].reconnect_from = c + 1;
             callback(convs[p].inst, XTYP_DISCONNECT, 0, conv_handle(p), 0, 0, 0, 0,
                      convs[p].inst == cv->inst);
+        }
+        drop_links(&convs[p]);
         memset(&convs[p], 0, sizeof(convs[p]));
     }
+    drop_links(cv);
     if (cv->service)
         GlobalDeleteAtom((ATOM)cv->service);
     if (cv->topic)
@@ -744,10 +756,68 @@ static BOOL WINAPI DdeDisconnect(HCONV h)
     return TRUE;
 }
 
+static HDDEDATA transact(int c, HDDEDATA given, HSZ item, UINT fmt, UINT type, DWORD *status);
+
 static HCONV WINAPI DdeReconnect(HCONV h)
 {
-    (void)h;
-    return 0;
+    int c = conv_index(h);
+    if (c < 0)
+        return 0;
+    conversation *cv = &convs[c];
+    int inst = cv->inst;
+    instance *in = &insts[inst];
+    if (in->task != GetCurrentTask())
+        return 0;
+    int from = cv->reconnect_from - 1;
+    if (from < 0) {
+        set_error(inst, DMLERR_INVALIDPARAMETER);
+        return 0;
+    }
+
+    /* Both old slots stay reserved until XTYP_DISCONNECT returns. */
+    const conversation *old_server = &convs[from];
+    int server = old_server->inst;
+    DWORD client_gen = in->generation, server_gen = insts[server].generation;
+    HSZ service = cv->service, topic = cv->topic;
+    CONVCONTEXT ctx = cv->context;
+    cv->reconnect_from = 0;
+    if (!can_connect(inst, server, service) ||
+        !callback(server, XTYP_CONNECT, 0, 0, topic, service, 0,
+                  (DWORD)(uintptr_t)&ctx, server == inst) ||
+        in->generation != client_gen || insts[server].generation != server_gen ||
+        !can_connect(inst, server, service)) {
+        cv->reconnect_from = from + 1;
+        if (in->generation == client_gen)
+            set_error(inst, DMLERR_NO_CONV_ESTABLISHED);
+        return 0;
+    }
+
+    conversation_list *list = list_of(cv->list);
+    if (list && list->closing)
+        list = NULL;
+    in->error = DMLERR_NO_ERROR;
+    HCONV fresh = connect_pair(inst, server, service, topic, &ctx, list);
+    if (!fresh) {
+        cv->reconnect_from = from + 1;
+        if (in->generation == client_gen && !in->error)
+            in->error = DMLERR_NO_CONV_ESTABLISHED;
+        return 0;
+    }
+
+    for (int i = 0; i < LINKS; i++) {
+        int next = conv_index(fresh);
+        if (next < 0)
+            return 0;
+        const advise_link *link = &old_server->links[i];
+        if (link->item) {
+            DWORD status;
+            transact(next, 0, link->item, link->fmt, link->type, &status);
+        }
+    }
+    if (conv_index(fresh) < 0)
+        return 0;
+    in->error = DMLERR_NO_ERROR;
+    return fresh;
 }
 
 static void list_close(conversation_list *list, int tell)
@@ -882,8 +952,13 @@ static UINT WINAPI DdeQueryConvInfo(HCONV h, DWORD id, PCONVINFO ci)
     if (cv->list)
         info.wStatus |= ST_INLIST;
     info.wConvst = cv->partner >= 0 ? XST_CONNECTED : XST_NULL;
-    for (int k = 0; k < LINKS && !cv->client; k++)
-        if (cv->links[k].item)
+    const conversation *server = cv;
+    if (cv->client) {
+        int p = cv->partner >= 0 ? cv->partner : cv->reconnect_from - 1;
+        server = p >= 0 ? &convs[p] : NULL;
+    }
+    for (int k = 0; server && k < LINKS; k++)
+        if (server->links[k].item)
             info.wStatus |= ST_ADVISE;
     DWORD n = ci->cb && ci->cb < sizeof(info) ? ci->cb : sizeof(info);
     memcpy(ci, &info, n);
@@ -910,6 +985,19 @@ static BOOL WINAPI DdeAbandonTransaction(DWORD id, HCONV h, DWORD xid)
 
 /* ---------------------------------------------------------------- transactions */
 
+static int advise_slot(const conversation *server, HSZ item, UINT fmt)
+{
+    int free_slot = -1;
+    for (int i = 0; i < LINKS; i++) {
+        const advise_link *link = &server->links[i];
+        if (link->item == item && link->fmt == fmt)
+            return i;
+        if (!link->item && free_slot < 0)
+            free_slot = i;
+    }
+    return free_slot;
+}
+
 /* the client's transaction with the server: its result (a data handle,
  * TRUE, or 0), *status DDE_FACK ... The data given is the system's then. */
 static HDDEDATA transact(int c, HDDEDATA given, HSZ item, UINT fmt, UINT type, DWORD *status)
@@ -923,7 +1011,7 @@ static HDDEDATA transact(int c, HDDEDATA given, HSZ item, UINT fmt, UINT type, D
         return 0;
     }
     int s = convs[p].inst;
-    HCONV sh = conv_handle(p);
+    HCONV sh = conv_handle(p), ch = conv_handle(c);
     HDDEDATA r = 0;
     switch (type & ~(XTYPF_NODATA | XTYPF_ACKREQ)) {
     case XTYP_REQUEST:
@@ -949,26 +1037,33 @@ static HDDEDATA transact(int c, HDDEDATA given, HSZ item, UINT fmt, UINT type, D
         break;
     }
     case XTYP_ADVSTART: {
-        int k = 0;
-        while (k < LINKS && convs[p].links[k].item &&
-               !(convs[p].links[k].item == item && convs[p].links[k].fmt == fmt))
-            k++;
-        if (k < LINKS && callback(s, XTYP_ADVSTART, fmt, sh, cv->topic, item, 0, 0, 0)) {
-            convs[p].links[k].item = item;
-            convs[p].links[k].fmt = fmt;
-            convs[p].links[k].type = type;
-            *status = DDE_FACK;
-            r = 1;
+        if (!item || advise_slot(&convs[p], item, fmt) < 0 ||
+            !DdeKeepStringHandle((DWORD)(cv->inst + 1), item))
+            break;
+        if (callback(s, type, fmt, sh, cv->topic, item, 0, 0, 0) && conv_index(sh) == p) {
+            int k = advise_slot(&convs[p], item, fmt);
+            if (k >= 0) {
+                advise_link *link = &convs[p].links[k];
+                if (link->item)
+                    GlobalDeleteAtom((ATOM)link->item);
+                *link = (advise_link){ item, fmt, type };
+                *status = DDE_FACK;
+                r = 1;
+            }
         }
+        if (!r)
+            GlobalDeleteAtom((ATOM)item);
         break;
     }
     case XTYP_ADVSTOP:
         for (int k = 0; k < LINKS; k++)
-            if (convs[p].links[k].item == item && convs[p].links[k].fmt == fmt) {
+            if (convs[p].links[k].item == item && item && convs[p].links[k].fmt == fmt) {
                 memset(&convs[p].links[k], 0, sizeof(convs[p].links[k]));
                 callback(s, XTYP_ADVSTOP, fmt, sh, cv->topic, item, 0, 0, 0);
+                GlobalDeleteAtom((ATOM)item);
                 *status = DDE_FACK;
                 r = 1;
+                break;
             }
         break;
     default:
@@ -977,7 +1072,7 @@ static HDDEDATA transact(int c, HDDEDATA given, HSZ item, UINT fmt, UINT type, D
         return 0;
     }
     data_release(given);
-    if (!r)
+    if (!r && conv_index(ch) == c)
         set_error(cv->inst, DMLERR_NOTPROCESSED);
     return r;
 }
@@ -1050,20 +1145,23 @@ static BOOL WINAPI DdePostAdvise(DWORD id, HSZ topic, HSZ item)
     int inst = (int)id - 1;
     for (int c = 0; c < CONVS; c++) {
         conversation *cv = &convs[c];
-        if (!cv->used || cv->client || cv->inst != inst || (topic && cv->topic != topic))
+        if (!cv->used || cv->client || cv->partner < 0 || cv->inst != inst ||
+            (topic && cv->topic != topic))
             continue;
+        HCONV h = conv_handle(c);
         for (int k = 0; k < LINKS; k++) {
             advise_link l = cv->links[k];
             if (!l.item || (item && l.item != item))
                 continue;
             HDDEDATA d = callback(inst, XTYP_ADVREQ, l.fmt, conv_handle(c), cv->topic, l.item, 0,
                                   0, 0);
-            int p = cv->partner;
-            if (p >= 0 && convs[p].used)
+            if (conv_index(h) == c && cv->partner >= 0) {
+                int p = cv->partner;
                 callback(convs[p].inst, XTYP_ADVDATA, l.fmt, conv_handle(p), cv->topic, l.item,
                          (l.type & XTYPF_NODATA) ? 0 : d, 0, 0);
+            }
             data_release(d);
-            if (!cv->used)
+            if (conv_index(h) < 0)
                 break;
         }
     }
