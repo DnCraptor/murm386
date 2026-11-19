@@ -145,16 +145,20 @@ program's own code is, not a fault.
 
 Windows' own DLLs WINN has: TOOLHELP (`core/ne_guest_sys.c`), and as
 native DLLs (see Native DLLs) MMSYSTEM, VER, LZEXPAND, DDEML, COMMDLG, OLECLI,
-OLESVR, SOUND. OLESVR is OLE 1.0's server library with no clients: a
-server and its documents are registered, renamed, saved, reverted and
-revoked, revoking one calls its Release method (as the library does once
-no client holds it), OleUnblockServer has no requests waiting. SOUND is
+OLESVR, SOUND. SOUND is
 Windows' sound driver with one voice, the PC speaker's: a task opens it,
 queues notes (1 to 84, middle C 37, of a length and dots in the voice's
 tempo, mode and pitch) and tones (a frequency for clock ticks),
 StartSound plays them, StopSound silences them, WaitSoundState waits for
 them, CountVoiceNotes counts them; volume, envelopes, noise and
 thresholds do nothing (`include/sound.h` for native callers).
+OLESVR exposes server and document registration, renaming and revocation
+to both Win16 and native callers. Registrations belong to their task.
+Revoking a server closes its documents before releasing their resources
+and the server itself; a document can revoke itself from its Close
+callback, with Release deferred until Close returns.
+Client connections, server request queues and object notifications are
+still pending.
 OLECLI registers client documents and supports OLE 1.0 static raster
 and metafile pictures. The Static protocol can paste CF_DIB and
 CF_METAFILEPICT, and converts CF_BITMAP when drawing is requested.
