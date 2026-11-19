@@ -57,6 +57,8 @@ def stage(root, destination, fdoscrt, wincrt, library, tcc, elf2ez, converter):
         encoding="ascii", newline="\r\n")
     for sample in sorted((compiler / "examples").glob("*.c")):
         shutil.copyfile(sample, destination / "SRC" / sample.name)
+    check = (compiler / "examples/CHECK.BAT").read_text(encoding="ascii")
+    (destination / "SRC/CHECK.BAT").write_text(check, encoding="ascii", newline="\r\n")
     shutil.copyfile(compiler / "COPYING", destination / "COPYING")
 
 

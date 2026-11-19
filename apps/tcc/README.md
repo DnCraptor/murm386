@@ -12,8 +12,8 @@ Build with the Pico SDK, ARM GCC and a host C compiler. CMake builds the
 host converter from the same checkout in the build directory.
 
 ```sh
-cmake -S apps/tcc -B build/tcc -DCMAKE_BUILD_TYPE=Release
-cmake --build build/tcc --target tcc_sdk
+cmake -S apps/tcc -B apps/tcc/build -DCMAKE_BUILD_TYPE=Release
+cmake --build apps/tcc/build --target tcc_sdk
 ```
 
 On Windows, the host build uses MinGW `gcc.exe` from PATH. Set
@@ -25,14 +25,49 @@ With a Ninja build, CMake uses the same Ninja executable for the host tool.
 The build also writes `apps/compiled/tcc.com` and
 `apps/compiled/elf2ez.com`.
 
-Copy the generated `build/tcc/TCC` directory to the root of the FDOS
-drive. It contains `TCC.COM`, `ELF2EZ.COM`, headers, compiler and converter
+## Install on a mounted volume
+
+Run this from the repository root. Use the host path of the mounted FAT
+volume that FDOS will see. For an image-backed DOS drive, use the mount
+point of the FAT partition inside the image.
+
+```sh
+python tools/install_tcc.py --dest E:/
+```
+
+The installer copies the staged SDK into `TCC` at the volume root. It
+replaces files present in the staged SDK and leaves other files in place.
+Use `--sdk path/to/build/TCC` with a different CMake build directory.
+The SDK contains `TCC.COM`, `ELF2EZ.COM`, headers, compiler and converter
 sources, and the GCC-built ARM startup objects and `libfdos.a`. The staged
 names match the originals. The SDK uses the FDOS long filename calls for
 opening, creating, checking and deleting files on FAT volumes.
 Use the same drive for source files or pass explicit include and library
 paths. Systems without sufficient conventional memory need available
 application PSRAM for compiler allocations and converter workspace.
+
+## Check on RP2350
+
+Boot the updated native FDOS firmware. Select the DOS drive where you
+installed the SDK and run:
+
+```bat
+CD \TCC\SRC
+..\TCC.COM -v
+CHECK.BAT
+```
+
+The batch compiles and links the FDOS example, converts it to EZ, and
+runs it. Look for `Native FDOS C:` followed by the executable name.
+The intermediate file `fdhello-smoke.o` exercises creation and opening
+by long filename.
+
+Then start the rebuilt WINN and use Program Manager's **File > Run** to
+open `<drive>:\TCC\SRC\WNHELLO.EXE`. The **WINN C** dialog should show
+**Built by native TinyCC**. After both examples pass, return to
+`\TCC\SRC` and run `MKELF2EZ.BAT` and `SELF.BAT`. Use the resulting
+`E2ESELF.COM` and `TCCSELF.COM` to rebuild the FDOS example before
+replacing either bootstrap executable.
 
 ## Build on FDOS
 
