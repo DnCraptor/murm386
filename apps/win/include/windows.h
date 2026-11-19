@@ -818,6 +818,8 @@ HDC       WINAPI CreateMetaFile(LPCSTR file);
 HMETAFILE WINAPI CloseMetaFile(HDC hdc);
 BOOL      WINAPI DeleteMetaFile(HMETAFILE mf);
 BOOL      WINAPI PlayMetaFile(HDC hdc, HMETAFILE mf);
+BOOL      WINAPI PlayMetaFileRectN(HDC dc, HMETAFILE mf, const RECT *rect,
+                                   int mode, LONG width, LONG height);
 HMETAFILE WINAPI GetMetaFile(LPCSTR file);
 HMETAFILE WINAPI CopyMetaFile(HMETAFILE mf, LPCSTR file);
 BOOL      WINAPI IsValidMetaFile(HMETAFILE mf);

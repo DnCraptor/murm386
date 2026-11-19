@@ -1594,16 +1594,28 @@ static uint16_t clip_set(args *a, ne_user *u, UINT fmt, uint16_t h)
     win_ne_guest_segment *s = win_ne_guest_global(g, h);
     if (!s)
         return 0;
-    HGLOBAL n = GlobalAlloc(GMEM_MOVEABLE | GMEM_DDESHARE, s->size);
-    uint8_t *p = n ? (uint8_t *)GlobalLock(n) : NULL;
-    if (!p || !rd(a, (uint32_t)h << 16, p, s->size)) {
-        if (n) {
-            GlobalUnlock(n);
-            GlobalFree(n);
+    HGLOBAL n;
+    if (fmt == CF_METAFILEPICT || fmt == CF_DSPMETAFILEPICT) {
+        uint8_t b[8];
+        if (s->size < sizeof(b) || !rd(a, (uint32_t)h << 16, b, sizeof(b)))
+            return 0;
+        METAFILEPICT picture = { (int16_t)rd16(b), (int16_t)rd16(b + 2),
+                                 (int16_t)rd16(b + 4), rd16(b + 6) };
+        n = clip_pack_metafile(&picture);
+        if (!n)
+            return 0;
+    } else {
+        n = GlobalAlloc(GMEM_MOVEABLE | GMEM_DDESHARE, s->size);
+        uint8_t *p = n ? (uint8_t *)GlobalLock(n) : NULL;
+        if (!p || !rd(a, (uint32_t)h << 16, p, s->size)) {
+            if (p)
+                GlobalUnlock(n);
+            if (n)
+                GlobalFree(n);
+            return 0;
         }
-        return 0;
+        GlobalUnlock(n);
     }
-    GlobalUnlock(n);
     if (!SetClipboardData(fmt, n)) {
         GlobalFree(n);
         return 0;
@@ -1621,12 +1633,29 @@ static uint16_t clip_get(args *a, ne_user *u, UINT fmt)
     HANDLE n = GetClipboardData(fmt);
     if (!n || clip_gdi(fmt))
         return n;
-    DWORD size = GlobalSize(n);
-    const uint8_t *p = (const uint8_t *)GlobalLock(n);
-    if (!p || !size || size > 0x10000u) {
-        if (p)
-            GlobalUnlock(n);
-        return 0;
+    uint8_t picture16[8];
+    int metafile = fmt == CF_METAFILEPICT || fmt == CF_DSPMETAFILEPICT;
+    DWORD size;
+    const uint8_t *p;
+    if (metafile) {
+        METAFILEPICT picture;
+        if (!clip_read_metafile(n, &picture) ||
+            picture.xExt < INT16_MIN || picture.xExt > INT16_MAX ||
+            picture.yExt < INT16_MIN || picture.yExt > INT16_MAX)
+            return 0;
+        wr16(picture16, (uint16_t)picture.mm);
+        wr16(picture16 + 2, (uint16_t)picture.xExt);
+        wr16(picture16 + 4, (uint16_t)picture.yExt);
+        wr16(picture16 + 6, picture.hMF);
+        p = picture16;
+        size = sizeof(picture16);
+    } else {
+        size = GlobalSize(n);
+        if (!size || size > 0x10000u)
+            return 0;
+        p = GlobalLock(n);
+        if (!p)
+            return 0;
     }
     clip_free(a, u, fmt);
     int i = 0;
@@ -1639,7 +1668,8 @@ static uint16_t clip_get(args *a, ne_user *u, UINT fmt)
         win_ne_guest_global_free(g, sel);
         sel = 0;
     }
-    GlobalUnlock(n);
+    if (!metafile)
+        GlobalUnlock(n);
     if (sel) {
         u->clip[i].fmt = fmt;
         u->clip[i].sel = sel;

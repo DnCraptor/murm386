@@ -65,11 +65,12 @@ static OLESTATUS WINAPI OleSavedClientDoc(LHCLIENTDOC h)
     return doc_of(h) < 0 ? OLE_ERROR_HANDLE : OLE_OK;
 }
 
-/* Static pictures use a private packed DIB. Clipboard handles can disappear
- * as soon as the caller closes or replaces the clipboard. */
+/* Pictures own their packed DIB or WMF bytes independently of the clipboard. */
 struct WINN_OLEOBJECT {
     LHCLIENTDOC doc;
-    HGLOBAL image;
+    HGLOBAL image, descriptor;
+    HMETAFILE metafile;
+    int map_mode;
     DWORD size, bits, guest, guest_data;
     SIZE pixels;
     LONG width, height;              /* positive HIMETRIC extents */
@@ -78,7 +79,8 @@ struct WINN_OLEOBJECT {
 };
 
 #define OBJECTS 32
-#define STATIC_HEADER 28
+#define STATIC_FIXED_HEADER 24
+#define WMF_PREFIX 8
 #define STREAM_CHUNK 4096
 
 static OLEOBJECT objects[OBJECTS];
@@ -99,12 +101,15 @@ static int static_protocol(LPCSTR protocol)
 static UINT static_format(UINT render, OLECLIPFORMAT fmt)
 {
     if (render == olerender_format)
-        return fmt == CF_DIB && IsClipboardFormatAvailable(CF_DIB) ? CF_DIB : 0;
+        return (fmt == CF_DIB || fmt == CF_METAFILEPICT) && IsClipboardFormatAvailable(fmt) ?
+            fmt : 0;
     if (render == olerender_draw) {
         if (IsClipboardFormatAvailable(CF_DIB))
             return CF_DIB;
         if (IsClipboardFormatAvailable(CF_BITMAP))
             return CF_BITMAP;
+        if (IsClipboardFormatAvailable(CF_METAFILEPICT))
+            return CF_METAFILEPICT;
     }
     return 0;
 }
@@ -156,37 +161,285 @@ static HGLOBAL bitmap_to_dib(HBITMAP bitmap)
     return 0;
 }
 
-/* Takes ownership of the private DIB even when creation fails. */
-static OLESTATUS new_picture(HGLOBAL image, LHCLIENTDOC doc, LPCSTR name, LONG w, LONG h,
-                             LPOLEOBJECT *out)
+static uint32_t read32(const uint8_t *p);
+static uint16_t read16(const uint8_t *b);
+static void write32(uint8_t *p, uint32_t v);
+
+/* OLE Bitmap16 contains a fixed header and top-down, WORD-aligned DDB
+ * scanlines. Normalize to the packed DIB understood by the rest of OLECLI. */
+static OLESTATUS bitmap16_to_dib(HGLOBAL source, HGLOBAL *out)
 {
-    SIZE pixels;
-    DWORD bits;
-    void *data = GlobalLock(image);
-    DWORD size = data ? GetPackedDIBInfoN(data, GlobalSize(image), &pixels, &bits) : 0;
-    if (data)
-        GlobalUnlock(image);
-    OLESTATUS status = !size ? OLE_ERROR_FORMAT : doc_of(doc) < 0 ? OLE_ERROR_HANDLE :
-                       !name ? OLE_ERROR_ADDRESS : OLE_ERROR_MEMORY;
-    if (status == OLE_ERROR_MEMORY) {
-        for (int i = 0; i < OBJECTS; i++)
-            if (!objects[i].image) {
-                HDC screen = (w && h) ? 0 : GetDC(0);
-                int dx = screen ? GetDeviceCaps(screen, LOGPIXELSX) : 0;
-                int dy = screen ? GetDeviceCaps(screen, LOGPIXELSY) : 0;
-                if (screen)
-                    ReleaseDC(0, screen);
-                objects[i] = (OLEOBJECT){ .doc = doc, .image = image, .size = size, .bits = bits,
-                                          .pixels = pixels,
-                                          .width = w ? w : MulDiv(pixels.cx, 2540, dx > 0 ? dx : 96),
-                                          .height = h ? h : MulDiv(pixels.cy, 2540, dy > 0 ? dy : 96) };
-                lstrcpyn(objects[i].name, name, sizeof(objects[i].name));
-                *out = &objects[i];
-                return OLE_OK;
-            }
+    const uint8_t *p = GlobalLock(source);
+    DWORD size = GlobalSize(source);
+    OLESTATUS status = OLE_ERROR_FORMAT;
+    *out = 0;
+    if (!p)
+        return status;
+    if (size < 10)
+        goto done;
+    int w = (int16_t)read16(p + 2), h = (int16_t)read16(p + 4);
+    int stride = (int16_t)read16(p + 6), depth = p[9];
+    if (read16(p) || p[8] != 1 || w < 1 || h < 1 || w > 4096 || h > 4096 ||
+        (depth != 1 && depth != 4 && depth != 8 && depth != 24))
+        goto done;
+    DWORD row = ((DWORD)w * depth + 7u) / 8u;
+    if (stride < (int)((row + 1u) & ~1u) || (stride & 1))
+        goto done;
+    DWORD pixels = (DWORD)stride * (DWORD)h;
+    /* Some Win16 producers retain the four-byte bmBits placeholder. */
+    DWORD at = size == 10u + pixels ? 10 : 14;
+    if (size < at || pixels != size - at)
+        goto done;
+
+    DWORD pitch = (row + 3u) & ~3u;
+    DWORD colors = depth <= 8 ? 1u << depth : 0;
+    DWORD offset = sizeof(BITMAPINFOHEADER) + colors * sizeof(RGBQUAD);
+    HGLOBAL dib = GlobalAlloc(GMEM_MOVEABLE | GMEM_DDESHARE | GMEM_ZEROINIT, offset + pitch * h);
+    BITMAPINFO *info = dib ? GlobalLock(dib) : NULL;
+    status = OLE_ERROR_MEMORY;
+    if (info) {
+        info->bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        info->bmiHeader.biBitCount = (WORD)depth;
+        BOOL palette_ok = TRUE;
+        if (colors) {
+            HBITMAP pixel = CreateBitmap(1, 1, 1, 1, NULL);
+            palette_ok = pixel && GetDIBits(0, pixel, 0, 0, NULL, info, DIB_RGB_COLORS) != 0;
+            if (pixel)
+                DeleteObject(pixel);
+        }
+        if (palette_ok) {
+            info->bmiHeader.biWidth = w;
+            info->bmiHeader.biHeight = h;
+            info->bmiHeader.biPlanes = 1;
+            info->bmiHeader.biSizeImage = pitch * h;
+            uint8_t *bits = (uint8_t *)info + offset;
+            for (int y = 0; y < h; y++)
+                memcpy(bits + (DWORD)(h - y - 1) * pitch, p + at + (DWORD)y * stride, row);
+            *out = dib;
+            status = OLE_OK;
+        }
+        GlobalUnlock(dib);
     }
+    if (dib && !*out)
+        GlobalFree(dib);
+done:
+    GlobalUnlock(source);
+    return status;
+}
+
+/* Return the first recorded mapping and window extent and validate the
+ * complete record sequence before giving a stream to the WMF player. */
+static int metafile_layout(const uint8_t *p, DWORD size, int *mode, SIZE *window)
+{
+    *mode = 0;
+    *window = (SIZE){ 0, 0 };
+    for (DWORD at = 18; at <= size && size - at >= 6;) {
+        DWORD words = read32(p + at);
+        if (words < 3 || words > (size - at) / 2)
+            return 0;
+        UINT op = read16(p + at + 4);
+        if (!op)
+            return words == 3 && at + 6 == size;
+        if (!*mode && op == META_SETMAPMODE && words >= 4) {
+            int m = (int16_t)read16(p + at + 6);
+            if (m >= MM_TEXT && m <= MM_ANISOTROPIC)
+                *mode = m;
+        }
+        if (!window->cx && op == META_SETWINDOWEXT && words >= 5) {
+            int x = (int16_t)read16(p + at + 8), y = (int16_t)read16(p + at + 6);
+            if (x && y)
+                *window = (SIZE){ x > 0 ? x : -x, y > 0 ? y : -y };
+        }
+        at += words * 2;
+    }
+    return 0;
+}
+
+static HGLOBAL metafile_bits(HMETAFILE mf, int mode)
+{
+    HMETAFILE copy = CopyMetaFile(mf, NULL);
+    HGLOBAL bits = copy ? GetMetaFileBits(copy) : 0;
+    if (copy && !bits)
+        DeleteMetaFile(copy);
+    if (!bits)
+        return 0;
+    const uint8_t *p = GlobalLock(bits);
+    int recorded_mode;
+    SIZE window;
+    DWORD n = GlobalSize(bits);
+    HGLOBAL image = 0;
+    if (p) {
+        if (!metafile_layout(p, n, &recorded_mode, &window) || recorded_mode) {
+            GlobalUnlock(bits);
+            return bits;
+        }
+        /* A stream's eight-byte prefix is reserved. Keep a clipboard
+         * picture's mapping in the WMF itself so a round trip preserves it. */
+        image = GlobalAlloc(GMEM_MOVEABLE | GMEM_DDESHARE, n + 8);
+        uint8_t *out = image ? GlobalLock(image) : NULL;
+        if (out) {
+            memcpy(out, p, 18);
+            write32(out + 6, n / 2 + 4);
+            if (read32(out + 12) < 4)
+                write32(out + 12, 4);
+            uint8_t record[] = { 4, 0, 0, 0, META_SETMAPMODE & 0xff,
+                                 META_SETMAPMODE >> 8, (uint8_t)mode, 0 };
+            memcpy(out + 18, record, sizeof(record));
+            memcpy(out + 26, p + 18, n - 18);
+            GlobalUnlock(image);
+        } else if (image) {
+            GlobalFree(image);
+            image = 0;
+        }
+    }
+    if (p)
+        GlobalUnlock(bits);
+    GlobalFree(bits);
+    return image;
+}
+
+static HGLOBAL metafile_descriptor(HMETAFILE mf, LONG width, LONG height)
+{
+    HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE | GMEM_DDESHARE | GMEM_ZEROINIT, sizeof(METAFILEPICT));
+    METAFILEPICT *p = h ? GlobalLock(h) : NULL;
+    if (!p) {
+        if (h)
+            GlobalFree(h);
+        return 0;
+    }
+    p->mm = MM_ANISOTROPIC;
+    p->xExt = width;
+    p->yExt = height;
+    p->hMF = mf;
+    GlobalUnlock(h);
+    return h;
+}
+
+static LONG picture_extent(int mode, int value, int dpi)
+{
+    static const int units[] = { 0, 0, 254, 2540, 100, 1000, 1440 };
+    if (value == INT32_MIN)
+        return 0;
+    if (value < 0)
+        value = -value;
+    if (mode == MM_ANISOTROPIC || mode == MM_ISOTROPIC)
+        return value;
+    int per_inch = mode == MM_TEXT ? dpi : units[mode];
+    return MulDiv(value, 2540, per_inch > 0 ? per_inch : 96);
+}
+
+/* No suggested size is required for an anisotropic clipboard picture. Infer
+ * one from its first complete window extent, which provides an aspect ratio. */
+static int metafile_window(HGLOBAL image, LONG *width, LONG *height)
+{
+    const uint8_t *p = GlobalLock(image);
+    if (!p)
+        return 0;
+    int mode;
+    SIZE window;
+    int ok = metafile_layout(p, GlobalSize(image), &mode, &window);
+    GlobalUnlock(image);
+    if (!ok || !window.cx)
+        return 0;
+    *width = window.cx;
+    *height = window.cy;
+    return 1;
+}
+
+/* Takes ownership of the packed image even when creation fails. */
+static OLESTATUS new_picture(HGLOBAL image, int mode, LHCLIENTDOC doc, LPCSTR name,
+                             LONG w, LONG h, LPOLEOBJECT *out)
+{
+    SIZE pixels = {0};
+    DWORD bits = 0, size = 0;
+    HMETAFILE mf = 0;
+    const uint8_t *data = GlobalLock(image);
+    OLESTATUS status = OLE_ERROR_FORMAT;
+    if (data) {
+        DWORD n = GlobalSize(image);
+        if (!mode) {
+            size = GetPackedDIBInfoN(data, n, &pixels, &bits);
+        } else if (n >= 18 && read32(data + 6) >= 9 && read32(data + 6) <= n / 2) {
+            size = read32(data + 6) * 2;
+            int recorded_mode;
+            SIZE window;
+            if (metafile_layout(data, size, &recorded_mode, &window)) {
+                mode = recorded_mode ? recorded_mode : window.cx ? MM_ANISOTROPIC : MM_TEXT;
+                HGLOBAL copy = copy_block(data, size);
+                if (copy) {
+                    mf = SetMetaFileBits(copy);
+                    if (!mf)
+                        GlobalFree(copy);
+                } else {
+                    status = OLE_ERROR_MEMORY;
+                }
+            }
+        }
+        GlobalUnlock(image);
+    }
+    if (size && (!mode || mf)) {
+        status = doc_of(doc) < 0 ? OLE_ERROR_HANDLE : !name ? OLE_ERROR_ADDRESS : OLE_ERROR_MEMORY;
+        if (status == OLE_ERROR_MEMORY) {
+            for (int i = 0; i < OBJECTS; i++)
+                if (!objects[i].image) {
+                    HDC screen = (w && h) ? 0 : GetDC(0);
+                    int dx = screen ? GetDeviceCaps(screen, LOGPIXELSX) : 0;
+                    int dy = screen ? GetDeviceCaps(screen, LOGPIXELSY) : 0;
+                    if (screen)
+                        ReleaseDC(0, screen);
+                    objects[i] = (OLEOBJECT){ .doc = doc, .image = image, .metafile = mf,
+                                             .map_mode = mode, .size = size, .bits = bits,
+                                             .pixels = pixels,
+                                             .width = w ? w : MulDiv(pixels.cx, 2540, dx > 0 ? dx : 96),
+                                             .height = h ? h : MulDiv(pixels.cy, 2540, dy > 0 ? dy : 96) };
+                    lstrcpyn(objects[i].name, name, sizeof(objects[i].name));
+                    *out = &objects[i];
+                    return OLE_OK;
+                }
+        }
+    }
+    if (mf)
+        DeleteMetaFile(mf);
     GlobalFree(image);
     return status;
+}
+
+static OLESTATUS create_metafile_picture(HGLOBAL data, LHCLIENTDOC doc, LPCSTR name,
+                                          LPOLEOBJECT *out)
+{
+    if (GlobalSize(data) < sizeof(METAFILEPICT))
+        return OLE_ERROR_FORMAT;
+    const METAFILEPICT *p = GlobalLock(data);
+    if (!p)
+        return OLE_ERROR_FORMAT;
+    METAFILEPICT mf = *p;
+    GlobalUnlock(data);
+    if (mf.mm < MM_TEXT || mf.mm > MM_ANISOTROPIC || !IsValidMetaFile(mf.hMF))
+        return OLE_ERROR_FORMAT;
+    HGLOBAL image = metafile_bits(mf.hMF, mf.mm);
+    if (!image)
+        return OLE_ERROR_MEMORY;
+    HDC screen = mf.mm == MM_TEXT ? GetDC(0) : 0;
+    LONG w = picture_extent(mf.mm, mf.xExt, screen ? GetDeviceCaps(screen, LOGPIXELSX) : 0);
+    LONG h = picture_extent(mf.mm, mf.yExt, screen ? GetDeviceCaps(screen, LOGPIXELSY) : 0);
+    if (screen)
+        ReleaseDC(0, screen);
+    if (w <= 0 || h <= 0 || (mf.mm == MM_ISOTROPIC && mf.xExt < 0 && mf.yExt < 0)) {
+        LONG x, y;
+        if (!metafile_window(image, &x, &y)) {
+            GlobalFree(image);
+            return OLE_ERROR_FORMAT;
+        }
+        if (mf.mm == MM_ISOTROPIC && mf.xExt < 0 && mf.yExt < 0 && w > 0 && h > 0) {
+            x = MulDiv(x, 2540, 96);
+            h = MulDiv(x, h, w);
+            w = x;
+        } else {
+            if (w <= 0) w = MulDiv(x, 2540, 96);
+            if (h <= 0) h = MulDiv(y, 2540, 96);
+        }
+    }
+    return new_picture(image, mf.mm, doc, name, w > 0 ? w : 1, h > 0 ? h : 1, out);
 }
 
 static OLESTATUS WINAPI OleCreateFromClip(LPCSTR protocol, LPOLECLIENT client, LHCLIENTDOC doc,
@@ -205,6 +458,8 @@ static OLESTATUS WINAPI OleCreateFromClip(LPCSTR protocol, LPOLECLIENT client, L
     HANDLE data = GetClipboardData(fmt);
     if (!data)
         return OLE_ERROR_CLIPBOARD;
+    if (fmt == CF_METAFILEPICT)
+        return create_metafile_picture(data, doc, name, out);
     HGLOBAL image = 0;
     if (fmt == CF_BITMAP) {
         image = bitmap_to_dib(data);
@@ -218,7 +473,7 @@ static OLESTATUS WINAPI OleCreateFromClip(LPCSTR protocol, LPOLECLIENT client, L
         if (!n)
             return OLE_ERROR_FORMAT;
     }
-    return image ? new_picture(image, doc, name, 0, 0, out) : OLE_ERROR_MEMORY;
+    return image ? new_picture(image, 0, doc, name, 0, 0, out) : OLE_ERROR_MEMORY;
 }
 
 static void free_picture(OLEOBJECT *o, uint16_t task)
@@ -227,6 +482,10 @@ static void free_picture(OLEOBJECT *o, uint16_t task)
         NE->task_free(task, o->guest_data);
     if (o->guest)
         NE->task_free(task, o->guest);
+    if (o->descriptor)
+        GlobalFree(o->descriptor);
+    if (o->metafile)
+        DeleteMetaFile(o->metafile);
     GlobalFree(o->image);
     memset(o, 0, sizeof(*o));
 }
@@ -256,7 +515,7 @@ static OLESTATUS WINAPI OleClone(LPOLEOBJECT object, LPOLECLIENT client, LHCLIEN
     HGLOBAL image = p ? copy_block(p, o->size) : 0;
     if (p)
         GlobalUnlock(o->image);
-    return image ? new_picture(image, doc, name, o->width, o->height, out) : OLE_ERROR_MEMORY;
+    return image ? new_picture(image, o->map_mode, doc, name, o->width, o->height, out) : OLE_ERROR_MEMORY;
 }
 
 static OLESTATUS WINAPI OleEqual(LPOLEOBJECT a, LPOLEOBJECT b)
@@ -266,7 +525,8 @@ static OLESTATUS WINAPI OleEqual(LPOLEOBJECT a, LPOLEOBJECT b)
         return OLE_ERROR_OBJECT;
     if (x == y)
         return OLE_OK;
-    if (x->width != y->width || x->height != y->height || x->size != y->size)
+    if (x->width != y->width || x->height != y->height || x->size != y->size ||
+        x->map_mode != y->map_mode)
         return OLE_ERROR_NOT_EQUAL;
     const void *p = GlobalLock(x->image), *q = GlobalLock(y->image);
     OLESTATUS status = p && q && !memcmp(p, q, x->size) ? OLE_OK : OLE_ERROR_NOT_EQUAL;
@@ -282,6 +542,18 @@ static OLESTATUS WINAPI OleCopyToClipboard(LPOLEOBJECT object)
     OLEOBJECT *o = object_of(object);
     if (!o)
         return OLE_ERROR_OBJECT;
+    if (o->metafile) {
+        HMETAFILE copy = CopyMetaFile(o->metafile, NULL);
+        if (!copy)
+            return OLE_ERROR_MEMORY;
+        HGLOBAL data = metafile_descriptor(copy, o->width, o->height);
+        if (data && SetClipboardData(CF_METAFILEPICT, data))
+            return OLE_OK;
+        if (data)
+            GlobalFree(data);
+        DeleteMetaFile(copy);
+        return data ? OLE_ERROR_CLIPBOARD : OLE_ERROR_MEMORY;
+    }
     const void *p = GlobalLock(o->image);
     HGLOBAL copy = p ? copy_block(p, o->size) : 0;
     if (p)
@@ -327,6 +599,16 @@ static OLESTATUS WINAPI OleDraw(LPOLEOBJECT object, HDC dc, const RECT *bounds, 
     int64_t w = (int64_t)bounds->right - bounds->left, h = (int64_t)bounds->bottom - bounds->top;
     if (!w || !h || w <= INT32_MIN || w > INT32_MAX || h <= INT32_MIN || h > INT32_MAX)
         return OLE_ERROR_DRAW;
+    if (o->metafile) {
+        int saved = SaveDC(dc);
+        if (!saved)
+            return OLE_ERROR_DRAW;
+        if (clip)
+            IntersectClipRect(dc, clip->left, clip->top, clip->right, clip->bottom);
+        BOOL ok = PlayMetaFileRectN(dc, o->metafile, bounds, o->map_mode, o->width, o->height);
+        RestoreDC(dc, saved);
+        return ok ? OLE_OK : OLE_ERROR_DRAW;
+    }
     const uint8_t *dib = GlobalLock(o->image);
     if (!dib)
         return OLE_ERROR_BLANK;
@@ -347,7 +629,8 @@ static OLESTATUS WINAPI OleDraw(LPOLEOBJECT object, HDC dc, const RECT *bounds, 
 
 static OLECLIPFORMAT WINAPI OleEnumFormats(LPOLEOBJECT object, OLECLIPFORMAT previous)
 {
-    return !previous && object_of(object) ? CF_DIB : 0;
+    OLEOBJECT *o = object_of(object);
+    return !previous && o ? (o->metafile ? CF_METAFILEPICT : CF_DIB) : 0;
 }
 
 static OLESTATUS WINAPI OleGetData(LPOLEOBJECT object, OLECLIPFORMAT fmt, HANDLE *out)
@@ -358,9 +641,17 @@ static OLESTATUS WINAPI OleGetData(LPOLEOBJECT object, OLECLIPFORMAT fmt, HANDLE
     OLEOBJECT *o = object_of(object);
     if (!o)
         return OLE_ERROR_OBJECT;
-    if (fmt != CF_DIB)
+    if (fmt != (o->metafile ? CF_METAFILEPICT : CF_DIB))
         return OLE_ERROR_FORMAT;
-    *out = o->image;
+    if (o->metafile) {
+        if (!o->descriptor)
+            o->descriptor = metafile_descriptor(o->metafile, o->width, o->height);
+        if (!o->descriptor)
+            return OLE_ERROR_MEMORY;
+        *out = o->descriptor;
+    } else {
+        *out = o->image;
+    }
     return OLE_OK;
 }
 
@@ -421,7 +712,8 @@ static OLESTATUS WINAPI OleQuerySize(LPOLEOBJECT object, DWORD *size)
         return OLE_ERROR_OBJECT;
     if (!size)
         return OLE_ERROR_ADDRESS;
-    *size = STATIC_HEADER + o->size;
+    *size = STATIC_FIXED_HEADER + o->size + (o->metafile ? sizeof("METAFILEPICT") + WMF_PREFIX :
+                                                          sizeof("DIB"));
     return OLE_OK;
 }
 
@@ -487,19 +779,21 @@ static OLESTATUS save_picture(LPOLEOBJECT object, picture_stream *stream)
         return OLE_ERROR_OBJECT;
     if (o->writing)
         return OLE_BUSY;
-    uint8_t header[STATIC_HEADER] = {0};
+    const char *cls = o->metafile ? "METAFILEPICT" : "DIB";
+    DWORD len = (DWORD)strlen(cls) + 1, prefix = o->metafile ? WMF_PREFIX : 0;
+    uint8_t header[STATIC_FIXED_HEADER + sizeof("METAFILEPICT") + WMF_PREFIX] = {0};
     write32(header, 0x501);
     write32(header + 4, OT_STATIC);
-    write32(header + 8, 4);
-    memcpy(header + 12, "DIB", 4);
-    write32(header + 16, (DWORD)o->width);
-    write32(header + 20, (DWORD)-o->height);
-    write32(header + 24, o->size);
+    write32(header + 8, len);
+    memcpy(header + 12, cls, len);
+    write32(header + 12 + len, (DWORD)o->width);
+    write32(header + 16 + len, (DWORD)-o->height);
+    write32(header + 20 + len, o->size + prefix);
     void *image = GlobalLock(o->image);
     if (!image)
         return OLE_ERROR_BLANK;
     o->writing = TRUE;
-    int ok = stream_transfer(stream, header, sizeof(header), 1) &&
+    int ok = stream_transfer(stream, header, STATIC_FIXED_HEADER + len + prefix, 1) &&
              stream_transfer(stream, image, o->size, 1);
     o->writing = FALSE;
     GlobalUnlock(o->image);
@@ -516,22 +810,27 @@ static OLESTATUS load_picture(picture_stream *stream, LPCSTR protocol, LHCLIENTD
         return OLE_ERROR_HANDLE;
     if (!static_protocol(protocol) && (!protocol || lstrcmpi(protocol, "StdFileEditing")))
         return OLE_ERROR_PROTOCOL;
-    uint8_t b[16];
-    if (!stream_transfer(stream, b, 8, 0))
-        return OLE_ERROR_STREAM;
-    DWORD version = read32(b);
-    if ((version & 0xffffff00u) != 0x500u || read32(b + 4) != OT_STATIC)
-        return OLE_ERROR_FORMAT;
-    if (!stream_transfer(stream, b, 4, 0))
-        return OLE_ERROR_STREAM;
-    if (read32(b) != 4)
-        return OLE_ERROR_FORMAT;
+    uint8_t b[12], cls[sizeof("METAFILEPICT")];
     if (!stream_transfer(stream, b, sizeof(b), 0))
         return OLE_ERROR_STREAM;
-    LONG w = (LONG)read32(b + 4), h = (LONG)read32(b + 8);
-    DWORD n = read32(b + 12);
-    if (memcmp(b, "DIB", 4) || w <= 0 || h == INT32_MIN || n < 12)
+    DWORD version = read32(b), len = read32(b + 8);
+    if ((version & 0xffffff00u) != 0x500u || read32(b + 4) != OT_STATIC ||
+        (len != sizeof("DIB") && len != sizeof("BITMAP") && len != sizeof("METAFILEPICT")))
         return OLE_ERROR_FORMAT;
+    if (!stream_transfer(stream, cls, len, 0) || !stream_transfer(stream, b, sizeof(b), 0))
+        return OLE_ERROR_STREAM;
+    int bitmap = len == sizeof("BITMAP") && !memcmp(cls, "BITMAP", len);
+    int metafile = len == sizeof("METAFILEPICT") && !memcmp(cls, "METAFILEPICT", len);
+    if (!bitmap && !metafile && (len != sizeof("DIB") || memcmp(cls, "DIB", len)))
+        return OLE_ERROR_FORMAT;
+    LONG w = (LONG)read32(b), h = (LONG)read32(b + 4);
+    DWORD n = read32(b + 8), prefix = metafile ? WMF_PREFIX : 0;
+    if (w <= 0 || h == INT32_MIN || (metafile && !h) ||
+        n < (metafile ? 18 + WMF_PREFIX : bitmap ? 10 : 12))
+        return OLE_ERROR_FORMAT;
+    if (prefix && !stream_transfer(stream, b, prefix, 0))
+        return OLE_ERROR_STREAM;
+    n -= prefix;
     HGLOBAL image = GlobalAlloc(GMEM_MOVEABLE | GMEM_DDESHARE, n);
     void *p = image ? GlobalLock(image) : NULL;
     if (!p) {
@@ -545,7 +844,16 @@ static OLESTATUS load_picture(picture_stream *stream, LPCSTR protocol, LHCLIENTD
         GlobalFree(image);
         return OLE_ERROR_STREAM;
     }
-    return new_picture(image, doc, name, w, h < 0 ? -h : h, out);
+    if (bitmap) {
+        HGLOBAL dib;
+        OLESTATUS status = bitmap16_to_dib(image, &dib);
+        GlobalFree(image);
+        if (status != OLE_OK)
+            return status;
+        image = dib;
+    }
+    return new_picture(image, metafile ? MM_ANISOTROPIC : 0, doc, name,
+                       w, h < 0 ? -h : h, out);
 }
 
 static OLESTATUS WINAPI OleSaveToStream(LPOLEOBJECT object, LPOLESTREAM stream)
@@ -804,17 +1112,28 @@ static OLESTATUS guest_data(win_dll_call *c, LPOLEOBJECT o, UINT format, uint32_
     OLESTATUS status = OleGetData(o, (OLECLIPFORMAT)format, &image);
     if (status != OLE_OK)
         return status;
-    if (o->size > 0x10000u)
+    DWORD n = o->metafile ? 8 : o->size;
+    if (n > 0x10000u)
         return OLE_ERROR_SIZE;
     if (!o->guest_data) {
         uint16_t task = (uint16_t)GetCurrentTask();
-        uint32_t far = NE->task_alloc(task, o->size);
+        uint32_t far = NE->task_alloc(task, n);
         if (!far)
             return OLE_ERROR_MEMORY;
-        const void *p = GlobalLock(image);
-        int ok = p && NE->task_write(task, far, p, o->size);
-        if (p)
-            GlobalUnlock(image);
+        int ok;
+        if (o->metafile) {
+            WORD w = o->width <= INT16_MAX ? (WORD)o->width : 0;
+            WORD h = o->height <= INT16_MAX ? (WORD)o->height : 0;
+            uint8_t picture[] = { MM_ANISOTROPIC, 0, (uint8_t)w, (uint8_t)(w >> 8),
+                                  (uint8_t)h, (uint8_t)(h >> 8),
+                                  (uint8_t)o->metafile, (uint8_t)(o->metafile >> 8) };
+            ok = NE->task_write(task, far, picture, n);
+        } else {
+            const void *p = GlobalLock(image);
+            ok = p && NE->task_write(task, far, p, n);
+            if (p)
+                GlobalUnlock(image);
+        }
         if (!ok) {
             NE->task_free(task, far);
             return OLE_ERROR_MEMORY;

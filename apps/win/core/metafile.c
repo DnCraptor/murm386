@@ -704,6 +704,10 @@ BOOL mf_enum(HDC h, HMETAFILE mf, mf_enum_fn fn, void *ctx)
     if (!table)
         return FALSE;
     int level = SaveDC(h);
+    if (!level) {
+        win_free(table);
+        return FALSE;
+    }
     BOOL ok = TRUE;
     uint32_t at = get16(m->bits + 2) * 2u;
     while (at + 6 <= m->size) {
@@ -738,6 +742,139 @@ static int play_one(void *ctx, HDC h, HGDIOBJ *table, int n, const uint8_t *rec,
 BOOL WINAPI PlayMetaFile(HDC h, HMETAFILE mf)
 {
     return mf_enum(h, mf, play_one, NULL);
+}
+
+typedef struct {
+    POINT origin, source_origin;
+    SIZE size, source_view;
+    int save_level, fixed;
+} mf_picture;
+
+static int picture_scale(int value, int dest, int source)
+{
+    int64_t result = (int64_t)value * dest / source;
+    return result < INT32_MIN ? INT32_MIN : result > INT32_MAX ? INT32_MAX : (int)result;
+}
+
+static int play_picture_record(void *opaque, HDC dc, HGDIOBJ *table, int n,
+                               const uint8_t *rec, uint32_t bytes)
+{
+    mf_picture *f = opaque;
+    unsigned op = get16(rec + 4);
+    if (op == META_SETMAPMODE || (f->fixed && (op == META_SETWINDOWEXT ||
+        op == META_SETVIEWPORTEXT || op == META_SCALEWINDOWEXT || op == META_SCALEVIEWPORTEXT)))
+        return 1;
+    if (op == META_RESTOREDC && bytes >= 8) {
+        int level = (int16_t)get16(rec + 6);
+        int current = gdi_dc(dc)->save_level;
+        int restore = level < 0 ? current + level + 1 : f->save_level + level;
+        if (restore > f->save_level && restore <= current)
+            RestoreDC(dc, restore);
+        return 1;
+    }
+    if (op == META_SAVEDC)
+        return SaveDC(dc) != 0;
+    if (bytes >= 10 && (op == META_SETVIEWPORTORG || op == META_SETVIEWPORTEXT ||
+                        op == META_OFFSETVIEWPORTORG)) {
+        int x = (int16_t)get16(rec + 8), y = (int16_t)get16(rec + 6);
+        if (op == META_SETVIEWPORTORG) {
+            x -= f->source_origin.x;
+            y -= f->source_origin.y;
+        }
+        x = picture_scale(x, f->size.cx, f->source_view.cx);
+        y = picture_scale(y, f->size.cy, f->source_view.cy);
+        if (op == META_SETVIEWPORTEXT)
+            SetViewportExtEx(dc, x, y, NULL);
+        else {
+            wdc *state = gdi_dc(dc);
+            int64_t left = (int64_t)(op == META_OFFSETVIEWPORTORG ? state->vp_x : f->origin.x) + x;
+            int64_t top = (int64_t)(op == META_OFFSETVIEWPORTORG ? state->vp_y : f->origin.y) + y;
+            if (left < INT32_MIN || left > INT32_MAX || top < INT32_MIN || top > INT32_MAX)
+                return 0;
+            SetViewportOrgEx(dc, (int)left, (int)top, NULL);
+        }
+        return 1;
+    }
+    mf_play_record(dc, table, n, rec, bytes);
+    return 1;
+}
+
+/* Standard OLE picture mapping. Use the first window/viewport extents to
+ * establish the original frame, while subsequent records are played within
+ * the destination viewport. Fixed map modes use their conventional units. */
+BOOL WINAPI PlayMetaFileRectN(HDC dc, HMETAFILE mf, const RECT *rect,
+                              int mode, LONG width, LONG height)
+{
+    wmeta *m = meta_of(mf);
+    wdc *out = gdi_dc(dc);
+    if (!m || !out || !rect || width <= 0 || height <= 0 || !valid(m->bits, m->size))
+        return FALSE;
+    POINT corners[2] = { { rect->left, rect->top }, { rect->right, rect->bottom } };
+    if (!LPtoDP(dc, corners, 2))
+        return FALSE;
+    int64_t w = (int64_t)corners[1].x - corners[0].x;
+    int64_t h = (int64_t)corners[1].y - corners[0].y;
+    if (!w || !h || w <= INT32_MIN || w > INT32_MAX || h <= INT32_MIN || h > INT32_MAX)
+        return FALSE;
+    mf_picture f = { .origin = corners[0], .size = { (int)w, (int)h } };
+    SIZE window = {0}, view = {0};
+    int have_mode = 0, have_origin = 0;
+    for (uint32_t at = MF_HEADER; at + 6 <= m->size;) {
+        const uint8_t *rec = m->bits + at;
+        uint32_t words = get32(rec);
+        if (words < 3 || words > (m->size - at) / 2)
+            return FALSE;
+        unsigned op = get16(rec + 4);
+        if (!op)
+            break;
+        if (!have_mode && op == META_SETMAPMODE && words >= 4) {
+            mode = (int16_t)get16(rec + 6);
+            have_mode = 1;
+        }
+        if (words >= 5) {
+            int x = (int16_t)get16(rec + 8), y = (int16_t)get16(rec + 6);
+            if (!window.cx && op == META_SETWINDOWEXT && x && y)
+                window = (SIZE){ x, y };
+            if (!view.cx && op == META_SETVIEWPORTEXT && x && y)
+                view = (SIZE){ x, y };
+            if (!have_origin && op == META_SETVIEWPORTORG) {
+                f.source_origin = (POINT){ x, y };
+                have_origin = 1;
+            }
+        }
+        at += words * 2u;
+    }
+    static const int units[] = { 0, 96, 254, 2540, 100, 1000, 1440 };
+    if (mode < MM_TEXT || mode > MM_ANISOTROPIC)
+        mode = MM_ANISOTROPIC;
+    f.fixed = mode <= MM_TWIPS;
+    if (!window.cx || f.fixed) {
+        int per_inch = mode <= MM_TWIPS ? units[mode] : 2540;
+        window.cx = picture_scale(width, per_inch, 2540);
+        window.cy = picture_scale(height, per_inch, 2540);
+        if (!window.cx)
+            window.cx = 1;
+        if (!window.cy)
+            window.cy = 1;
+    }
+    if (!view.cx || f.fixed)
+        view = (SIZE){ window.cx > 0 ? window.cx : -window.cx,
+                       (mode > MM_TEXT && mode <= MM_TWIPS) ?
+                           -window.cy : (window.cy > 0 ? window.cy : -window.cy) };
+    f.source_view = (SIZE){ view.cx > 0 ? view.cx : -view.cx, view.cy > 0 ? view.cy : -view.cy };
+    int saved = SaveDC(dc);
+    if (!saved)
+        return FALSE;
+    f.save_level = saved + 1;          /* mf_enum protects the initial playback state */
+    SetMapMode(dc, MM_ANISOTROPIC);
+    SetWindowOrgEx(dc, 0, 0, NULL);
+    SetWindowExtEx(dc, window.cx, window.cy, NULL);
+    SetViewportOrgEx(dc, f.origin.x, f.origin.y, NULL);
+    SetViewportExtEx(dc, view.cx > 0 ? f.size.cx : -f.size.cx,
+                    view.cy > 0 ? f.size.cy : -f.size.cy, NULL);
+    BOOL ok = mf_enum(dc, mf, play_picture_record, &f);
+    RestoreDC(dc, saved);
+    return ok;
 }
 
 typedef struct {

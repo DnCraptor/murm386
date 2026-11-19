@@ -1736,7 +1736,7 @@ static __attribute__((noinline)) LRESULT pe_hook(int type, int code, WPARAM wp, 
 static int clip_gdi(UINT fmt)
 {
     return fmt == CF_BITMAP || fmt == CF_PALETTE || fmt == CF_DSPBITMAP || fmt == 14 ||
-           fmt == 0x8e || fmt == CF_METAFILEPICT;
+           fmt == 0x8e;
 }
 
 static uint32_t clip_set(pe_args *a, UINT fmt, uint32_t h)
@@ -1746,15 +1746,28 @@ static uint32_t clip_set(pe_args *a, UINT fmt, uint32_t h)
         return SetClipboardData(fmt, (HANDLE)h) || !h ? h : 0;
     uint32_t n = pe_heap_size(c, c->heap, h);
     const uint8_t *s = n ? (const uint8_t *)pe_buf(a, h, n) : NULL;
-    HGLOBAL g = s ? GlobalAlloc(GMEM_MOVEABLE | GMEM_DDESHARE, n) : 0;
-    uint8_t *p = g ? (uint8_t *)GlobalLock(g) : NULL;
-    if (!p) {
-        if (g)
-            GlobalFree(g);
+    if (!s)
         return 0;
+    HGLOBAL g;
+    if (fmt == CF_METAFILEPICT || fmt == CF_DSPMETAFILEPICT) {
+        if (n < 16 || pe_rd32(s + 12) > UINT16_MAX)
+            return 0;
+        METAFILEPICT picture = { (int32_t)pe_rd32(s), (int32_t)pe_rd32(s + 4),
+                                 (int32_t)pe_rd32(s + 8), (HMETAFILE)pe_rd32(s + 12) };
+        g = clip_pack_metafile(&picture);
+        if (!g)
+            return 0;
+    } else {
+        g = GlobalAlloc(GMEM_MOVEABLE | GMEM_DDESHARE, n);
+        void *p = g ? GlobalLock(g) : NULL;
+        if (!p) {
+            if (g)
+                GlobalFree(g);
+            return 0;
+        }
+        memcpy(p, s, n);
+        GlobalUnlock(g);
     }
-    memcpy(p, s, n);
-    GlobalUnlock(g);
     if (!SetClipboardData(fmt, g)) {
         GlobalFree(g);
         return 0;
@@ -1769,10 +1782,26 @@ static uint32_t clip_get(pe_user *u, UINT fmt)
     HANDLE n = GetClipboardData(fmt);
     if (!n || clip_gdi(fmt))
         return n;
-    DWORD size = GlobalSize(n);
-    const uint8_t *p = size ? (const uint8_t *)GlobalLock(n) : NULL;
-    if (!p)
-        return 0;
+    uint8_t picture32[16];
+    int metafile = fmt == CF_METAFILEPICT || fmt == CF_DSPMETAFILEPICT;
+    DWORD size;
+    const uint8_t *p;
+    if (metafile) {
+        METAFILEPICT picture;
+        if (!clip_read_metafile(n, &picture))
+            return 0;
+        pe_wr32(picture32, (uint32_t)picture.mm);
+        pe_wr32(picture32 + 4, (uint32_t)picture.xExt);
+        pe_wr32(picture32 + 8, (uint32_t)picture.yExt);
+        pe_wr32(picture32 + 12, picture.hMF);
+        size = sizeof(picture32);
+        p = picture32;
+    } else {
+        size = GlobalSize(n);
+        p = size ? GlobalLock(n) : NULL;
+        if (!p)
+            return 0;
+    }
     int k = 0;
     while (k < PE_CLIPS - 1 && u->clip[k].mem && u->clip[k].fmt != fmt)
         k++;
@@ -1781,7 +1810,8 @@ static uint32_t clip_get(pe_user *u, UINT fmt)
     uint32_t g = pe_heap_alloc(c, c->heap, size, 0);
     if (g)
         memcpy(win_pe_ptr(c->img, g, size), p, size);
-    GlobalUnlock(n);
+    if (!metafile)
+        GlobalUnlock(n);
     u->clip[k].fmt = fmt;
     u->clip[k].mem = g;
     return g;

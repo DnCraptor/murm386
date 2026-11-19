@@ -484,6 +484,7 @@ extern void PeekMessage(void);
 extern void Pie(void);
 extern void PlayMetaFile(void);
 extern void PlayMetaFileRecord(void);
+extern void PlayMetaFileRectN(void);
 extern void PolyBezier(void);
 extern void PolyBezierTo(void);
 extern void PolyPolygon(void);
@@ -1373,7 +1374,7 @@ static const void *const exports_user[931] = {
     [930] = (const void *)MessageBoxEx,
 };
 
-static const void *const exports_winn[36] = {
+static const void *const exports_winn[37] = {
     [1] = (const void *)DialogBoxIndirectN,
     [2] = (const void *)CreateDialogIndirectN,
     [3] = (const void *)CreateAcceleratorTableN,
@@ -1409,6 +1410,7 @@ static const void *const exports_winn[36] = {
     [33] = (const void *)PrinterCapabilitiesN,
     [34] = (const void *)PrinterNeCallN,
     [35] = (const void *)GetPackedDIBInfoN,
+    [36] = (const void *)PlayMetaFileRectN,
 };
 
 static const void *const exports_commdlg[28] = {

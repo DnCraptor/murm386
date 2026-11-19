@@ -394,6 +394,9 @@ uint32_t gdi_dib_value(const gdi_dib *b, int half, int x, int y);
 COLORREF gdi_dib_pixel(const gdi_dib *b, int x, int y);
 HBITMAP  gdi_bitmap_from_dib(const uint8_t *d, uint32_t n);
 
+BOOL clip_read_metafile(HGLOBAL data, METAFILEPICT *out);
+HGLOBAL clip_pack_metafile(const METAFILEPICT *picture);
+
 /* ne_res.c: a Win16 program's (file's) icons and description, as an EZ
  * application's; its icon, cursor and bitmap resources by number or name */
 winapp_info *win_ne_app_info(const char *path);

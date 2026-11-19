@@ -155,14 +155,14 @@ tempo, mode and pitch) and tones (a frequency for clock ticks),
 StartSound plays them, StopSound silences them, WaitSoundState waits for
 them, CountVoiceNotes counts them; volume, envelopes, noise and
 thresholds do nothing (`include/sound.h` for native callers).
-OLECLI registers client documents and supports OLE 1.0 static DIB pictures.
-The Static protocol can paste CF_DIB, or convert a clipboard CF_BITMAP
-when drawing is requested. Static DIB pictures can be drawn, copied,
-cloned, enumerated and saved to or loaded from an OLE 1.0 stream.
-Win16 uses the OLECLI ordinals and native callers use GetProcAddress
-with the types in include/ole.h. Linked and editable objects need the
-OLE client/server protocol, which is not implemented. Static streams
-whose presentation is BITMAP or METAFILEPICT are also unsupported.
+OLECLI registers client documents and supports OLE 1.0 static raster
+and metafile pictures. The Static protocol can paste CF_DIB and
+CF_METAFILEPICT, and converts CF_BITMAP when drawing is requested.
+Static streams can contain DIB, BITMAP or METAFILEPICT. BITMAP pictures
+are normalized to DIB when loaded, and WMF pictures retain their vector
+records through drawing, copying and saving. Win16 uses the OLECLI
+ordinals and native callers use GetProcAddress with include/ole.h.
+Linked and editable objects still require the OLE client/server protocol.
 COMMDLG has
 Windows 3.1's common dialogs: Open and Save As, Find and Replace (the
 program's FINDREPLACE in their messages, kept up to date), Color (the 48

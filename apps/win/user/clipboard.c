@@ -1,7 +1,7 @@
 /*
  * clipboard.c - the clipboard (USER) and RegisterWindowMessage.
  *
- * One set of formats, each a global memory handle that belongs to the
+ * One set of formats. Global memory and GDI handles belong to the
  * clipboard once set. A handle of 0 is delayed rendering: the owner gets
  * WM_RENDERFORMAT when someone asks for the data. CF_TEXT and CF_OEMTEXT
  * stand in for each other (the same bytes; text here is Windows-1251 and
@@ -45,12 +45,47 @@ BOOL WINAPI CloseClipboard(void)
     return TRUE;
 }
 
+BOOL clip_read_metafile(HGLOBAL data, METAFILEPICT *out)
+{
+    if (GlobalSize(data) < sizeof(*out))
+        return FALSE;
+    const METAFILEPICT *p = GlobalLock(data);
+    if (!p)
+        return FALSE;
+    *out = *p;
+    GlobalUnlock(data);
+    return TRUE;
+}
+
+HGLOBAL clip_pack_metafile(const METAFILEPICT *picture)
+{
+    if (!IsValidMetaFile(picture->hMF))
+        return 0;
+    HGLOBAL data = GlobalAlloc(GMEM_MOVEABLE | GMEM_DDESHARE | GMEM_ZEROINIT, sizeof(*picture));
+    METAFILEPICT *p = data ? GlobalLock(data) : NULL;
+    if (!p) {
+        if (data)
+            GlobalFree(data);
+        return 0;
+    }
+    p->mm = picture->mm;
+    p->xExt = picture->xExt;
+    p->yExt = picture->yExt;
+    p->hMF = picture->hMF;
+    GlobalUnlock(data);
+    return data;
+}
+
 static void free_format(UINT fmt, HANDLE data)
 {
     if (fmt == CF_BITMAP || fmt == CF_DSPBITMAP || fmt == CF_PALETTE)
         DeleteObject(data);
-    else
+    else {
+        METAFILEPICT picture;
+        if ((fmt == CF_METAFILEPICT || fmt == CF_DSPMETAFILEPICT) && clip_read_metafile(data, &picture))
+            DeleteMetaFile(picture.hMF);
         GlobalFree(data);
+    }
 }
 
 BOOL WINAPI EmptyClipboard(void)
