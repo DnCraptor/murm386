@@ -899,7 +899,8 @@ void *arm_native_app_realloc(void *ptr, size_t size)
     if (new_ptr != NULL)
       return new_ptr;
 
-    new_ptr = arm_app_dos_malloc(size);
+    /* A blocked in-place grow can still move to another PSRAM block. */
+    new_ptr = arm_native_app_malloc(size);
     if (new_ptr == NULL)
       return NULL;
     dos_api_memcpy(new_ptr, ptr, old_payload < size ? old_payload : size);

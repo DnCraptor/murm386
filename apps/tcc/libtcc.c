@@ -249,8 +249,14 @@ PUB_FUNC void *tcc_realloc(void *ptr, unsigned long size)
         return NULL;
     }
     ptr1 = realloc(ptr, size);
-    if (!ptr1 && size)
-        _tcc_error("memory full (realloc)");
+    if (!ptr1) {
+#ifdef TCC_MURM386
+        _tcc_error("memory full (realloc: %lu bytes requested, largest free block %lu bytes)",
+                   size, (unsigned long)malloc_largest_block());
+#else
+        _tcc_error("memory full (realloc: %lu bytes requested)", size);
+#endif
+    }
     return ptr1;
 }
 

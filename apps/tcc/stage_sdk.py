@@ -45,9 +45,11 @@ def stage(root, destination, fdoscrt, wincrt, library, tcc, elf2ez, converter):
         (destination / "SRC" / name).write_text("\n".join(args) + "\n", encoding="ascii", newline="\r\n")
 
     (destination / "SRC/SELF.BAT").write_text(
-        "@echo off\n..\\TCC @COMPILE.RSP\nif errorlevel 1 goto done\n"
-        "..\\TCC @LINK.RSP\nif errorlevel 1 goto done\n"
-        "..\\ELF2EZ /y --thumb2 -o ..\\TCCSELF.COM TCCSELF.O\n:done\n",
+        "@echo off\necho Compiling TinyCC...\n..\\TCC -v @COMPILE.RSP\nif errorlevel 1 goto failed\n"
+        "echo Linking TinyCC...\n..\\TCC @LINK.RSP\nif errorlevel 1 goto failed\n"
+        "echo Converting TinyCC to EZ...\n..\\ELF2EZ /y --thumb2 -o ..\\TCCSELF.COM TCCSELF.O\n"
+        "if errorlevel 1 goto failed\necho Built ..\\TCCSELF.COM\ngoto done\n"
+        ":failed\necho TinyCC self-build failed.\n:done\n",
         encoding="ascii", newline="\r\n")
     (destination / "SRC/MKELF2EZ.BAT").write_text(
         "@echo off\n..\\TCC -nostdlib -fno-common -r -I../INCLUDE -o E2ESELF.O "
