@@ -162,7 +162,9 @@ static const char version[] =
 #ifdef TCC_ARM_HARDFLOAT
         " Hard Float"
 #endif
-#ifdef TCC_TARGET_PE
+#if defined(TCC_MURM386)
+        " Native FreeDOS"
+#elif defined(TCC_TARGET_PE)
         " Windows"
 #elif defined(TCC_TARGET_MACHO)
         " Darwin"

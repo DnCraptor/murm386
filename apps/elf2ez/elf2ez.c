@@ -8,10 +8,18 @@
 #else
 #include "dos.h"
 #include "dos-api.h"
+#include "dos_api_version.h"
 #include "fcntl.h"
 #include "io.h"
 #endif
 #include "ez_reloc.h"
+
+#ifndef ELF2EZ_HOST
+/* Section discovery follows relocation dependencies recursively. */
+const native_ez_process_requirements __native_ez_process_requirements = {
+    16u * 1024u, 0, DOS_API_VERSION
+};
+#endif
 
 #define ELF2EZ_OUTPUT_NAME_MAX 260u
 #define ELF2EZ_READ_CHUNK 32256u
@@ -299,29 +307,19 @@ static elf_sec_state *elf_states(elf_load_meta *meta)
     return (elf_sec_state *)(meta + 1);
 }
 
-static uint32_t elf_metadata_size(uint16_t shnum)
+static uint32_t elf_section_table_offset(uint16_t shnum)
 {
-    uint32_t table_size = (uint32_t)shnum * (uint32_t)sizeof(elf_sec_state);
-    uint32_t total = (uint32_t)sizeof(elf_load_meta);
-
-    if (shnum != 0 && table_size / sizeof(elf_sec_state) != shnum)
-        return UINT32_MAX;
-    if (total > UINT32_MAX - table_size)
-        return UINT32_MAX;
-    return align_up(total + table_size, 4u);
+    return align_up(sizeof(elf_load_meta) + (uint32_t)shnum * sizeof(elf_sec_state), 4u);
 }
 
-static int read_shdr(int fd, const elf32_ehdr *eh, uint16_t sec_num,
-                     elf32_shdr *sh)
+static int read_shdr(const elf_load_meta *meta, uint16_t sec_num, elf32_shdr *sh)
 {
-    uint32_t off;
+    if (sec_num >= meta->shnum)
+        return -1;
 
-    if (sec_num >= eh->shnum)
-        return -1;
-    off = eh->shoff + (uint32_t)sec_num * eh->shentsize;
-    if (off < eh->shoff)
-        return -1;
-    return read_exact_at(fd, off, sh, sizeof(*sh));
+    const uint8_t *table = (const uint8_t *)meta + elf_section_table_offset(meta->shnum);
+    memcpy(sh, table + (uint32_t)sec_num * sizeof(*sh), sizeof(*sh));
+    return 0;
 }
 
 static int ensure_capacity(const elf_load_meta *meta, uint32_t end_off)
@@ -399,25 +397,25 @@ static int resolve_thm_branch(uint8_t *p, uint32_t place, uint32_t symbol, int j
     return 0;
 }
 
-static int find_tables(int fd, elf_load_meta *meta)
+static int find_tables(elf_load_meta *meta)
 {
     uint16_t i;
 
     if (meta->eh.shstrndx == SHN_UNDEF || meta->eh.shstrndx >= meta->eh.shnum)
         return -1;
-    if (read_shdr(fd, &meta->eh, meta->eh.shstrndx, &meta->shstrtab) != 0 ||
+    if (read_shdr(meta, meta->eh.shstrndx, &meta->shstrtab) != 0 ||
         meta->shstrtab.type != SHT_STRTAB)
         return -1;
 
     for (i = 0; i < meta->eh.shnum; ++i) {
         elf32_shdr sh;
-        if (read_shdr(fd, &meta->eh, i, &sh) != 0)
+        if (read_shdr(meta, i, &sh) != 0)
             return -1;
         if (sh.type != SHT_SYMTAB)
             continue;
         if (sh.link >= meta->eh.shnum)
             return -1;
-        if (read_shdr(fd, &meta->eh, (uint16_t)sh.link, &meta->strtab) != 0 ||
+        if (read_shdr(meta, (uint16_t)sh.link, &meta->strtab) != 0 ||
             meta->strtab.type != SHT_STRTAB)
             return -1;
         meta->symtab = sh;
@@ -521,7 +519,7 @@ static int discover_startup_sections(int fd, uint8_t *base, elf_load_meta *meta)
         uint8_t kind;
         uint32_t sec_addr;
 
-        if (read_shdr(fd, &meta->eh, i, &sh) != 0)
+        if (read_shdr(meta, i, &sh) != 0)
             return -1;
         if ((sh.flags & SHF_ALLOC) == 0)
             continue;
@@ -554,8 +552,8 @@ static int startup_section_less(int fd, const elf_load_meta *meta,
 
     if (rhs == 0xffffu)
         return 1;
-    if (read_shdr(fd, &meta->eh, lhs, &lsh) != 0 ||
-        read_shdr(fd, &meta->eh, rhs, &rsh) != 0)
+    if (read_shdr(meta, lhs, &lsh) != 0 ||
+        read_shdr(meta, rhs, &rsh) != 0)
         return lhs < rhs;
     if (!section_name(fd, meta, &lsh, lname, sizeof(lname)) ||
         !section_name(fd, meta, &rsh, rname, sizeof(rname)))
@@ -753,7 +751,7 @@ static int symbol_ref(int fd, uint8_t *base, elf_load_meta *meta,
     }
     if (sym.shndx >= meta->eh.shnum)
         return -1;
-    if (read_shdr(fd, &meta->eh, sym.shndx, &sec) != 0 || sym.value > sec.size)
+    if (read_shdr(meta, sym.shndx, &sec) != 0 || sym.value > sec.size)
         return -1;
     if (load_section(fd, base, meta, sym.shndx, &sec_rva) != 0)
         return -1;
@@ -795,13 +793,13 @@ static int apply_section_relocations(int fd, uint8_t *base,
         elf32_shdr relsec, symtab;
         uint32_t j, rel_entsize;
 
-        if (read_shdr(fd, &meta->eh, i, &relsec) != 0)
+        if (read_shdr(meta, i, &relsec) != 0)
             return -1;
         if (relsec.type != SHT_REL || relsec.info != sec_num)
             continue;
         if (relsec.link >= meta->eh.shnum || relsec.link != meta->symtab_index)
             return -1;
-        if (read_shdr(fd, &meta->eh, (uint16_t)relsec.link, &symtab) != 0 ||
+        if (read_shdr(meta, (uint16_t)relsec.link, &symtab) != 0 ||
             symtab.type != SHT_SYMTAB)
             return -1;
 
@@ -931,7 +929,7 @@ static int load_section(int fd, uint8_t *base, elf_load_meta *meta,
         return 0;
     }
 
-    if (read_shdr(fd, &meta->eh, sec_num, &sh) != 0)
+    if (read_shdr(meta, sec_num, &sh) != 0)
         return -1;
     off = align_up(meta->cursor, sh.addralign);
     if (off == UINT32_MAX || off > UINT32_MAX - sh.size ||
@@ -1094,7 +1092,7 @@ static int finalize_image_layout(int fd, uint8_t *base, elf_load_meta *meta,
 
         if (states[i].state != ELF_SEC_LOADED)
             continue;
-        if (read_shdr(fd, &meta->eh, (uint16_t)i, &sh) != 0)
+        if (read_shdr(meta, (uint16_t)i, &sh) != 0)
             return -1;
         if (sh.type == SHT_NOBITS)
             continue;
@@ -1124,7 +1122,7 @@ static int finalize_image_layout(int fd, uint8_t *base, elf_load_meta *meta,
 
         if (states[i].state != ELF_SEC_LOADED)
             continue;
-        if (read_shdr(fd, &meta->eh, (uint16_t)i, &sh) != 0)
+        if (read_shdr(meta, (uint16_t)i, &sh) != 0)
             return -1;
         if (sh.type != SHT_NOBITS)
             continue;
@@ -1160,7 +1158,7 @@ static int finalize_image_layout(int fd, uint8_t *base, elf_load_meta *meta,
 
         if (states[i].state != ELF_SEC_LOADED)
             continue;
-        if (read_shdr(fd, &meta->eh, (uint16_t)i, &sh) != 0)
+        if (read_shdr(meta, (uint16_t)i, &sh) != 0)
             return -1;
         if (sh.type != SHT_NOBITS && sh.size != 0 &&
             read_section(fd, base, states[i].offset, sh.offset, sh.size) != 0)
@@ -1177,7 +1175,7 @@ static int finalize_image_layout(int fd, uint8_t *base, elf_load_meta *meta,
 
         if (states[i].state != ELF_SEC_LOADED)
             continue;
-        if (read_shdr(fd, &meta->eh, (uint16_t)i, &sh) != 0 ||
+        if (read_shdr(meta, (uint16_t)i, &sh) != 0 ||
             apply_section_relocations(fd, base, meta, (uint16_t)i, &sh,
                                       states[i].offset) != 0)
             return -1;
@@ -1263,7 +1261,7 @@ static int read_named_data_symbol(int fd, const elf_load_meta *meta,
         if (sym.shndx == SHN_UNDEF)
             return 0;
         if (sym.shndx >= meta->eh.shnum ||
-            read_shdr(fd, &meta->eh, sym.shndx, &sh) != 0 ||
+            read_shdr(meta, sym.shndx, &sh) != 0 ||
             sh.type == SHT_NOBITS || sym.value > sh.size ||
             size > sh.size - sym.value)
             return -1;
@@ -1323,11 +1321,13 @@ static int convert_elf_to_ez(int input, int output, int thumb2)
         return -1;
     }
 
-    metadata_size = elf_metadata_size(eh.shnum);
-    if (metadata_size == UINT32_MAX) {
-        printf("Bad ELF: metadata overflow\n");
+    const uint32_t table_off = elf_section_table_offset(eh.shnum);
+    const uint32_t table_size = (uint32_t)eh.shnum * sizeof(elf32_shdr);
+    if (eh.shoff > INT32_MAX || table_size > INT32_MAX - eh.shoff) {
+        printf("Bad ELF: section table out of range\n");
         return -1;
     }
+    metadata_size = table_off + table_size;
 
     if (alloc_largest_block(&block) != 0) {
         printf("Unable to allocate ELF work block\n");
@@ -1347,6 +1347,10 @@ static int convert_elf_to_ez(int input, int output, int thumb2)
     meta->eh = eh;
     meta->shnum = eh.shnum;
     meta->cursor = 0;
+    if (read_exact_at(input, eh.shoff, block.ptr + table_off, table_size) != 0) {
+        printf("Bad ELF: cannot read section table\n");
+        goto out;
+    }
 #ifdef ELF2EZ_HOST
     /*
      * On a 64-bit host a work-block pointer cannot survive truncation to the
@@ -1364,7 +1368,7 @@ static int convert_elf_to_ez(int input, int output, int thumb2)
 #endif
     reloc_store_top = meta->reloc_store_addr;
 
-    if (find_tables(input, meta) != 0) {
+    if (find_tables(meta) != 0) {
         printf("Bad ELF: cannot find symbol/string tables\n");
         goto out;
     }
