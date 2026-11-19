@@ -120,6 +120,10 @@ typedef DWORD HDDEDATA;
 typedef HDDEDATA (CALLBACK *PFNCALLBACK)(UINT type, UINT fmt, HCONV conv, HSZ hsz1, HSZ hsz2,
                                          HDDEDATA data, DWORD data1, DWORD data2);
 
+typedef struct tagHSZPAIR {
+    HSZ hszSvc, hszTopic;
+} HSZPAIR, *PHSZPAIR;
+
 typedef struct tagCONVCONTEXT {
     UINT cb, wFlags, wCountryID;
     int iCodePage;
@@ -138,6 +142,11 @@ typedef struct tagCONVINFO {
 /* the functions' types, for GetProcAddress (their names: Windows') */
 typedef UINT (WINAPI *DDEINITIALIZE)(LPDWORD inst, PFNCALLBACK cb, DWORD cmd, DWORD res);
 typedef BOOL (WINAPI *DDEUNINITIALIZE)(DWORD inst);
+typedef HCONVLIST (WINAPI *DDECONNECTLIST)(DWORD inst, HSZ service, HSZ topic, HCONVLIST list,
+                                         PCONVCONTEXT cc);
+typedef HCONV (WINAPI *DDEQUERYNEXTSERVER)(HCONVLIST list, HCONV previous);
+typedef BOOL (WINAPI *DDEDISCONNECTLIST)(HCONVLIST list);
+typedef UINT (WINAPI *DDEQUERYCONVINFO)(HCONV conv, DWORD transaction, PCONVINFO info);
 typedef HCONV (WINAPI *DDECONNECT)(DWORD inst, HSZ service, HSZ topic, PCONVCONTEXT cc);
 typedef BOOL (WINAPI *DDEDISCONNECT)(HCONV conv);
 typedef HDDEDATA (WINAPI *DDECLIENTTRANSACTION)(LPBYTE data, DWORD cb, HCONV conv, HSZ item,

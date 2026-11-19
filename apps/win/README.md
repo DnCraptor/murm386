@@ -791,8 +791,11 @@ XTYP_CONNECT), the client's request, poke, execute and advise links
 (XTYP_XACT_COMPLETE as the client takes its messages), data handles and
 string handles (global atoms). An instance's callback is called in its
 task, through a hidden window of the instance. There is no NetDDE, no
-conversation with a program speaking DDE's messages itself, no
-DdeConnectList. A program's DdeAccessData gives a copy of the handle's
+conversation with a program speaking DDE's messages itself.
+DdeConnectList enumerates local servers for a service/topic pair. A
+wildcard service or topic asks servers for matching pairs with
+XTYP_WILDCONNECT. DdeQueryNextServer walks the list, and DdeDisconnectList
+ends its conversations. A program's DdeAccessData gives a copy of the handle's
 bytes in its own memory (a Win16 program's a global block of its),
 which DdeUnaccessData takes back. The
 Program Manager is a DDEML server as Windows' is for setup programs:

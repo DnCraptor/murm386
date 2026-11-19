@@ -33,12 +33,14 @@
 
 #define INSTS     16
 #define CONVS     32
+#define LISTS     16
 #define LINKS     8
 #define DATAS     64
 #define SERVICES  8
 #define PENDING   8
 
-#define CONV_TAG  0x43000000u           /* HCONV: tag | index + 1 */
+#define CONV_TAG  0x43000000u           /* HCONV: tag, generation, index + 1 */
+#define LIST_TAG  0x4c000000u           /* HCONVLIST: tag, generation, index + 1 */
 #define DATA_TAG  0x44000000u           /* HDDEDATA */
 
 #define NE (__win_dll_ne)
@@ -48,12 +50,14 @@
 
 typedef struct {
     int used;
+    DWORD generation;
     HTASK task;
     PFNCALLBACK native;             /* a native caller's callback, or */
     uint32_t proc;                  /* a Win16 program's (selector:offset) */
     DWORD cmd;                      /* APPCMD_, CBF_ */
     HWND hwnd;
     UINT error;
+    int closing;                    /* DdeUninitialize in progress */
     int unfiltered;                 /* DNS_FILTEROFF */
     HSZ services[SERVICES];
 } instance;
@@ -65,10 +69,13 @@ typedef struct {
 
 typedef struct {
     int used;
+    HCONV handle;
     int inst;
     int partner;                    /* the other end, -1 when it went */
-    int client;
+    int client, closing;
     HSZ service, topic;
+    HCONVLIST list;
+    CONVCONTEXT context;
     DWORD user;
     advise_link links[LINKS];       /* a server's */
 } conversation;
@@ -88,19 +95,35 @@ typedef struct {
 
 /* an asynchronous transaction done: XTYP_XACT_COMPLETE to the client */
 typedef struct {
-    int used, inst, conv;
+    int used, inst;
+    HCONV conv;
     UINT fmt;
     HSZ item;
     HDDEDATA data;
     DWORD id, result;
 } pending;
 
+typedef struct {
+    HCONVLIST handle;
+    int inst;
+    int busy, closing;               /* operations that invoke callbacks */
+    unsigned count;
+    uint8_t members[CONVS];
+} conversation_list;
+
+static conversation_list lists[LISTS];
+static DWORD list_generation, conv_generation, inst_generation;
 static instance insts[INSTS];
 static conversation convs[CONVS];
 static data_handle datas[DATAS];
 static pending pend[PENDING];
 static DWORD next_id = 1;
 static ATOM wnd_class;
+
+static uint16_t rd16le(const uint8_t *b) { return (uint16_t)(b[0] | b[1] << 8); }
+static uint32_t rd32le(const uint8_t *b) { return rd16le(b) | (uint32_t)rd16le(b + 2) << 16; }
+static void wr16le(uint8_t *b, uint16_t v) { b[0] = (uint8_t)v; b[1] = (uint8_t)(v >> 8); }
+static void wr32le(uint8_t *b, uint32_t v) { wr16le(b, (uint16_t)v); wr16le(b + 2, (uint16_t)(v >> 16)); }
 
 /* ---------------------------------------------------------------- handles */
 
@@ -111,11 +134,11 @@ static instance *inst_of(DWORD id)
 
 static int conv_index(HCONV h)
 {
-    unsigned i = (unsigned)(h & 0xffffu) - 1u;
-    return (h & 0xffff0000u) == CONV_TAG && i < CONVS && convs[i].used ? (int)i : -1;
+    unsigned i = (h & 0xffu) - 1u;
+    return i < CONVS && convs[i].used && convs[i].handle == h ? (int)i : -1;
 }
 
-static HCONV conv_handle(int i) { return i >= 0 ? CONV_TAG | (DWORD)(i + 1) : 0; }
+static HCONV conv_handle(int i) { return i >= 0 ? convs[i].handle : 0; }
 
 static data_handle *data_of(HDDEDATA h)
 {
@@ -178,6 +201,36 @@ typedef struct {
     HDDEDATA result;
 } callback_call;
 
+static uint32_t guest_context(uint16_t task, const CONVCONTEXT *cc)
+{
+    if (NE->size < sizeof(win_dll_ne) || !NE->task_alloc || !NE->task_free || !NE->task_write)
+        return 0;
+    int flat = NE->task_flat && NE->task_flat(task);
+    uint8_t b[36] = {0};
+    unsigned n = flat ? sizeof(b) : 16;
+    if (flat) {
+        wr32le(b, n);
+        wr32le(b + 4, cc->wFlags);
+        wr32le(b + 8, cc->wCountryID);
+        wr32le(b + 12, (DWORD)cc->iCodePage);
+        wr32le(b + 16, cc->dwLangID);
+        wr32le(b + 20, cc->dwSecurity);
+    } else {
+        wr16le(b, n);
+        wr16le(b + 2, (WORD)cc->wFlags);
+        wr16le(b + 4, (WORD)cc->wCountryID);
+        wr16le(b + 6, (WORD)cc->iCodePage);
+        wr32le(b + 8, cc->dwLangID);
+        wr32le(b + 12, cc->dwSecurity);
+    }
+    uint32_t at = NE->task_alloc(task, n);
+    if (at && !NE->task_write(task, at, b, n)) {
+        NE->task_free(task, at);
+        at = 0;
+    }
+    return at;
+}
+
 static HDDEDATA invoke(const callback_call *c)
 {
     instance *in = &insts[c->inst];
@@ -185,6 +238,14 @@ static HDDEDATA invoke(const callback_call *c)
         return in->native(c->type, c->fmt, c->conv, c->hsz1, c->hsz2, c->data, c->data1, c->data2);
     if (!in->proc || !NE || NE->size < sizeof(win_dll_ne) || !NE->call)
         return 0;
+    uint16_t task = (uint16_t)in->task;
+    DWORD data1 = c->data1;
+    int has_context = data1 && (c->type == XTYP_CONNECT || c->type == XTYP_WILDCONNECT);
+    if (has_context) {
+        data1 = guest_context(task, (const CONVCONTEXT *)(uintptr_t)data1);
+        if (!data1)
+            return 0;
+    }
     /* (UINT, UINT, HCONV, HSZ, HSZ, HDDEDATA, DWORD, DWORD) */
     const uint16_t w[14] = {
         (uint16_t)c->type, (uint16_t)c->fmt,
@@ -192,10 +253,13 @@ static HDDEDATA invoke(const callback_call *c)
         (uint16_t)(c->hsz1 >> 16), (uint16_t)c->hsz1,
         (uint16_t)(c->hsz2 >> 16), (uint16_t)c->hsz2,
         (uint16_t)(c->data >> 16), (uint16_t)c->data,
-        (uint16_t)(c->data1 >> 16), (uint16_t)c->data1,
+        (uint16_t)(data1 >> 16), (uint16_t)data1,
         (uint16_t)(c->data2 >> 16), (uint16_t)c->data2,
     };
-    return NE->call((uint16_t)in->task, in->proc, w, 14);
+    HDDEDATA result = NE->call(task, in->proc, w, 14);
+    if (has_context)
+        NE->task_free(task, data1);
+    return result;
 }
 
 /* what the instance's filters keep from its callback */
@@ -244,8 +308,8 @@ static LRESULT CALLBACK ddeml_wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     if (msg == WM_DDEML_COMPLETE && wp < PENDING && pend[wp].used) {
         pending p = pend[wp];
         pend[wp].used = 0;
-        int ci = p.conv;
-        if (convs[ci].used && convs[ci].inst == p.inst)
+        int ci = conv_index(p.conv);
+        if (ci >= 0 && convs[ci].inst == p.inst)
             callback(p.inst, XTYP_XACT_COMPLETE, p.fmt, conv_handle(ci), convs[ci].topic, p.item,
                      p.data, p.id, p.result);
         return 0;
@@ -285,6 +349,7 @@ static UINT init(LPDWORD id, PFNCALLBACK native, uint32_t proc, DWORD cmd)
             if (!in->hwnd)
                 return DMLERR_SYS_ERROR;
             in->used = 1;
+            in->generation = ++inst_generation;
             in->task = GetCurrentTask();
             in->native = native;
             in->proc = proc;
@@ -339,7 +404,7 @@ static BOOL WINAPI DdeFreeStringHandle(DWORD id, HSZ hsz)
 static BOOL WINAPI DdeKeepStringHandle(DWORD id, HSZ hsz)
 {
     char s[256];
-    return inst_of(id) && hsz && GlobalGetAtomName((ATOM)hsz, s, sizeof(s)) &&
+    return inst_of(id) && hsz && hsz <= 0xffffu && GlobalGetAtomName((ATOM)hsz, s, sizeof(s)) &&
            GlobalAddAtom(s) == (ATOM)hsz;
 }
 
@@ -455,7 +520,7 @@ static int serves(const instance *in, HSZ service)
     for (int k = 0; k < SERVICES; k++)
         if (in->services[k] && (!service || in->services[k] == service))
             return 1;
-    return service && in->unfiltered;
+    return in->unfiltered;
 }
 
 static HSZ first_service(const instance *in)
@@ -498,6 +563,10 @@ static HDDEDATA WINAPI DdeNameService(DWORD id, HSZ hsz1, HSZ hsz2, UINT cmd)
             return 0;
         }
         if (in->services[k] != hsz1) {
+            if (!DdeKeepStringHandle(id, hsz1)) {
+                in->error = DMLERR_INVALIDPARAMETER;
+                return 0;
+            }
             in->services[k] = hsz1;
             tell_others(inst, XTYP_REGISTER, hsz1);
         }
@@ -507,6 +576,7 @@ static HDDEDATA WINAPI DdeNameService(DWORD id, HSZ hsz1, HSZ hsz2, UINT cmd)
                 HSZ s = in->services[k];
                 in->services[k] = 0;
                 tell_others(inst, XTYP_UNREGISTER, s);
+                GlobalDeleteAtom((ATOM)s);
             }
     }
     return 1;
@@ -520,6 +590,7 @@ static int conv_new(int inst, int client, HSZ service, HSZ topic)
         if (!convs[i].used) {
             memset(&convs[i], 0, sizeof(convs[i]));
             convs[i].used = 1;
+            convs[i].handle = CONV_TAG | (++conv_generation & 0xffffu) << 8 | (DWORD)(i + 1);
             convs[i].inst = inst;
             convs[i].client = client;
             convs[i].service = service;
@@ -530,34 +601,101 @@ static int conv_new(int inst, int client, HSZ service, HSZ topic)
     return -1;
 }
 
+static conversation_list *list_of(HCONVLIST handle)
+{
+    unsigned i = (handle & 0xffu) - 1u;
+    return i < LISTS && lists[i].handle == handle ? &lists[i] : NULL;
+}
+
+static conversation_list *list_new(int inst)
+{
+    for (unsigned i = 0; i < LISTS; i++)
+        if (!lists[i].handle && !lists[i].busy) {
+            lists[i].handle = LIST_TAG | (++list_generation & 0xffffu) << 8 | (i + 1u);
+            lists[i].inst = inst;
+            return &lists[i];
+        }
+    return NULL;
+}
+
+static int can_connect(int client, int server, HSZ service)
+{
+    const instance *in = &insts[client], *sv = &insts[server];
+    return in->used && !in->closing && sv->used && !sv->closing && serves(sv, service) &&
+           (client != server || !(in->cmd & CBF_FAIL_SELFCONNECTIONS));
+}
+
+static HCONV connect_pair(int inst, int server, HSZ service, HSZ topic, const CONVCONTEXT *cc,
+                          conversation_list *list)
+{
+    if (list) {
+        for (unsigned i = 0; i < list->count; i++) {
+            const conversation *cv = &convs[list->members[i]];
+            if (cv->service == service && cv->topic == topic && cv->partner >= 0 &&
+                convs[cv->partner].inst == server)
+                return 0;
+        }
+    }
+    DWORD id = (DWORD)(inst + 1);
+    if (service && !DdeKeepStringHandle(id, service))
+        return 0;
+    if (topic && !DdeKeepStringHandle(id, topic)) {
+        if (service)
+            GlobalDeleteAtom((ATOM)service);
+        return 0;
+    }
+    int c = conv_new(inst, 1, service, topic);
+    int v = c >= 0 ? conv_new(server, 0, service, topic) : -1;
+    if (v < 0) {
+        if (c >= 0)
+            convs[c].used = 0;
+        if (service)
+            GlobalDeleteAtom((ATOM)service);
+        if (topic)
+            GlobalDeleteAtom((ATOM)topic);
+        set_error(inst, DMLERR_LOW_MEMORY);
+        return 0;
+    }
+    convs[c].partner = v;
+    convs[v].partner = c;
+    convs[c].context = convs[v].context = *cc;
+    if (list) {
+        convs[c].list = list->handle;
+        list->members[list->count++] = (uint8_t)c;
+    }
+    HCONV h = conv_handle(c);
+    callback(server, XTYP_CONNECT_CONFIRM, 0, conv_handle(v), topic, service, 0, 0, server == inst);
+    return conv_index(h) >= 0 ? h : 0;
+}
+
+static CONVCONTEXT connect_context(const CONVCONTEXT *cc)
+{
+    CONVCONTEXT ctx = { .cb = sizeof(ctx), .iCodePage = CP_WINANSI };
+    if (cc) {
+        ctx = *cc;
+        ctx.cb = sizeof(ctx);
+    }
+    return ctx;
+}
+
 static HCONV WINAPI DdeConnect(DWORD id, HSZ service, HSZ topic, PCONVCONTEXT cc)
 {
-    (void)cc;
     instance *in = inst_of(id);
-    int inst = (int)id - 1;
-    if (!in)
+    if (!in || in->closing)
         return 0;
+    int inst = (int)id - 1;
+    CONVCONTEXT ctx = connect_context(cc);
+    DWORD client = in->generation;
     for (int s = 0; s < INSTS; s++) {
-        instance *sv = &insts[s];
-        if (!sv->used || !serves(sv, service) ||
-            (s == inst && (in->cmd & CBF_FAIL_SELFCONNECTIONS)))
+        if (!can_connect(inst, s, service))
             continue;
-        HSZ name = service ? service : first_service(sv);
-        if (!callback(s, XTYP_CONNECT, 0, 0, topic, name, 0, 0, s == inst))
-            continue;
-        int c = conv_new(inst, 1, name, topic), v = c >= 0 ? conv_new(s, 0, name, topic) : -1;
-        if (v < 0) {
-            if (c >= 0)
-                convs[c].used = 0;
-            in->error = DMLERR_LOW_MEMORY;
+        HSZ name = service ? service : first_service(&insts[s]);
+        DWORD server = insts[s].generation;
+        if (callback(s, XTYP_CONNECT, 0, 0, topic, name, 0, (DWORD)(uintptr_t)&ctx, s == inst) &&
+            in->generation == client && insts[s].generation == server && can_connect(inst, s, service))
+            return connect_pair(inst, s, name, topic, &ctx, NULL);
+        if (in->generation != client || in->closing)
             return 0;
-        }
-        convs[c].partner = v;
-        convs[v].partner = c;
-        callback(s, XTYP_CONNECT_CONFIRM, 0, conv_handle(v), topic, name, 0, 0, s == inst);
-        if (!convs[c].used)
-            return 0;                   /* gone in it */
-        return conv_handle(c);
     }
     in->error = DMLERR_NO_CONV_ESTABLISHED;
     return 0;
@@ -565,21 +703,42 @@ static HCONV WINAPI DdeConnect(DWORD id, HSZ service, HSZ topic, PCONVCONTEXT cc
 
 static void conv_end(int c, int tell)
 {
-    int p = convs[c].partner;
-    convs[c].used = 0;
-    if (p >= 0 && convs[p].used && convs[p].partner == c) {
+    conversation *cv = &convs[c];
+    if (cv->closing)
+        return;
+    int p = cv->partner;
+    int linked = p >= 0 && convs[p].used && convs[p].partner == c;
+    int client = linked && convs[p].list ? p : c;
+    conversation_list *list = list_of(convs[client].list);
+    if (list)
+        for (unsigned i = 0; i < list->count; i++)
+            if (list->members[i] == client) {
+                --list->count;
+                memmove(list->members + i, list->members + i + 1, list->count - i);
+                break;
+            }
+    convs[client].list = 0;
+    cv->closing = 1;
+    cv->partner = -1;
+    if (linked) {
         convs[p].partner = -1;
+        convs[p].closing = 1;
         if (tell)
             callback(convs[p].inst, XTYP_DISCONNECT, 0, conv_handle(p), 0, 0, 0, 0,
-                     convs[p].inst == convs[c].inst);
-        convs[p].used = 0;
+                     convs[p].inst == cv->inst);
+        memset(&convs[p], 0, sizeof(convs[p]));
     }
+    if (cv->service)
+        GlobalDeleteAtom((ATOM)cv->service);
+    if (cv->topic)
+        GlobalDeleteAtom((ATOM)cv->topic);
+    memset(cv, 0, sizeof(*cv));
 }
 
 static BOOL WINAPI DdeDisconnect(HCONV h)
 {
     int c = conv_index(h);
-    if (c < 0)
+    if (c < 0 || convs[c].closing)
         return FALSE;
     conv_end(c, 1);
     return TRUE;
@@ -591,23 +750,103 @@ static HCONV WINAPI DdeReconnect(HCONV h)
     return 0;
 }
 
-static HCONVLIST WINAPI DdeConnectList(DWORD id, HSZ service, HSZ topic, HCONVLIST list,
+static void list_close(conversation_list *list, int tell)
+{
+    if (list->closing)
+        return;
+    list->closing = 1;
+    while (list->count)
+        conv_end(list->members[list->count - 1], tell);
+    memset(list, 0, sizeof(*list));
+}
+
+static HCONVLIST WINAPI DdeConnectList(DWORD id, HSZ service, HSZ topic, HCONVLIST handle,
                                        PCONVCONTEXT cc)
 {
-    (void)service; (void)topic; (void)list; (void)cc;
-    set_error((int)id - 1, DMLERR_NO_CONV_ESTABLISHED);
-    return 0;
+    instance *in = inst_of(id);
+    if (!in || in->closing)
+        return 0;
+    int inst = (int)id - 1;
+    conversation_list *list = handle ? list_of(handle) : list_new(inst);
+    if (!list || list->inst != inst || list->busy || list->closing) {
+        in->error = !handle ? DMLERR_LOW_MEMORY :
+                    list && list->inst == inst ? DMLERR_REENTRANCY : DMLERR_INVALIDPARAMETER;
+        return 0;
+    }
+    handle = list->handle;
+    list->busy = 1;
+    in->error = DMLERR_NO_ERROR;
+    CONVCONTEXT ctx = connect_context(cc);
+    DWORD context = (DWORD)(uintptr_t)&ctx;
+    for (int s = 0; s < INSTS && list->handle == handle; s++) {
+        if (!can_connect(inst, s, service))
+            continue;
+        DWORD server = insts[s].generation;
+        if (service && topic) {
+            if (callback(s, XTYP_CONNECT, 0, 0, topic, service, 0, context, s == inst) &&
+                list->handle == handle && insts[s].generation == server && can_connect(inst, s, service))
+                connect_pair(inst, s, service, topic, &ctx, list);
+            continue;
+        }
+
+        HDDEDATA h = callback(s, XTYP_WILDCONNECT, 0, 0, topic, service, 0, context, s == inst);
+        data_handle *d = data_of(h);
+        if (!d)
+            continue;
+        /* A confirmation callback can release the original data handle. */
+        DWORD n = d->size;
+        uint8_t *pairs = malloc(n ? n : 1);
+        if (pairs)
+            memcpy(pairs, d->bytes, n);
+        data_release(h);
+        if (!pairs) {
+            set_error(inst, DMLERR_LOW_MEMORY);
+            break;
+        }
+        for (DWORD i = 0; n - i >= 8 && list->handle == handle && insts[s].generation == server; i += 8) {
+            HSZ svc = rd32le(pairs + i), top = rd32le(pairs + i + 4);
+            if (!svc || !top)
+                break;
+            if ((!service || service == svc) && (!topic || topic == top) && can_connect(inst, s, svc))
+                connect_pair(inst, s, svc, top, &ctx, list);
+        }
+        free(pairs);
+    }
+    if (list->handle != handle)
+        return 0;                       /* a callback uninitialized the client */
+    list->busy = 0;
+    if (!list->count) {
+        list_close(list, 0);
+        if (!in->error)
+            in->error = DMLERR_NO_CONV_ESTABLISHED;
+        return 0;
+    }
+    in->error = DMLERR_NO_ERROR;
+    return handle;
 }
 
-static HCONV WINAPI DdeQueryNextServer(HCONVLIST list, HCONV prev)
+static HCONV WINAPI DdeQueryNextServer(HCONVLIST handle, HCONV prev)
 {
-    (void)list; (void)prev;
-    return 0;
+    conversation_list *list = list_of(handle);
+    if (!list || list->closing)
+        return 0;
+    unsigned i = 0;
+    if (prev) {
+        while (i < list->count && conv_handle(list->members[i]) != prev)
+            i++;
+        if (i == list->count)
+            return 0;
+        i++;
+    }
+    return i < list->count ? conv_handle(list->members[i]) : 0;
 }
 
-static BOOL WINAPI DdeDisconnectList(HCONVLIST list)
+static BOOL WINAPI DdeDisconnectList(HCONVLIST handle)
 {
-    (void)list;
+    conversation_list *list = list_of(handle);
+    if (!list || list->busy || list->closing)
+        return FALSE;
+    list_close(list, 1);
     return TRUE;
 }
 
@@ -635,9 +874,13 @@ static UINT WINAPI DdeQueryConvInfo(HCONV h, DWORD id, PCONVINFO ci)
     info.hConvPartner = cv->partner >= 0 ? conv_handle(cv->partner) : 0;
     info.hszSvcPartner = info.hszServiceReq = cv->service;
     info.hszTopic = cv->topic;
-    info.wStatus = (UINT)(ST_CONNECTED | ST_ISLOCAL | (cv->client ? ST_CLIENT : 0) |
-                          (cv->partner < 0 ? ST_TERMINATED : 0) |
+    info.wStatus = (UINT)(ST_ISLOCAL | (cv->client ? ST_CLIENT : 0) |
+                          (cv->partner < 0 ? ST_TERMINATED : ST_CONNECTED) |
                           (cv->partner >= 0 && convs[cv->partner].inst == cv->inst ? ST_ISSELF : 0));
+    info.hConvList = cv->list;
+    info.ConvCtxt = cv->context;
+    if (cv->list)
+        info.wStatus |= ST_INLIST;
     info.wConvst = cv->partner >= 0 ? XST_CONNECTED : XST_NULL;
     for (int k = 0; k < LINKS && !cv->client; k++)
         if (cv->links[k].item)
@@ -749,11 +992,16 @@ static HDDEDATA client_transaction(int c, HDDEDATA given, HSZ item, UINT fmt, UI
         set_error(convs[c].inst, DMLERR_INVALIDPARAMETER);
         return 0;
     }
+    HCONV h = conv_handle(c);
     HDDEDATA r = transact(c, given, item, fmt, type, &status);
     if (timeout != TIMEOUT_ASYNC) {
         if (result)
             *result = status;
         return r;
+    }
+    if (conv_index(h) < 0) {
+        data_release(r > 1 ? r : 0);
+        return 0;
     }
     /* asynchronous: done already, its XTYP_XACT_COMPLETE as the client
      * takes its messages */
@@ -762,7 +1010,7 @@ static HDDEDATA client_transaction(int c, HDDEDATA given, HSZ item, UINT fmt, UI
             pending *p = &pend[i];
             p->used = 1;
             p->inst = convs[c].inst;
-            p->conv = c;
+            p->conv = h;
             p->fmt = fmt;
             p->item = item;
             p->data = r > 1 ? r : 0;
@@ -827,6 +1075,12 @@ static BOOL WINAPI DdePostAdvise(DWORD id, HSZ topic, HSZ item)
 static void uninit(int inst, int tell)
 {
     instance *in = &insts[inst];
+    if (in->closing)
+        return;
+    in->closing = 1;
+    for (int i = 0; i < LISTS; i++)
+        if (lists[i].handle && lists[i].inst == inst)
+            list_close(&lists[i], tell);
     for (int c = 0; c < CONVS; c++)
         if (convs[c].used && convs[c].inst == inst)
             conv_end(c, tell);
@@ -837,8 +1091,13 @@ static void uninit(int inst, int tell)
         if (pend[i].used && pend[i].inst == inst)
             pend[i].used = 0;
     for (int k = 0; k < SERVICES; k++)
-        if (in->services[k] && tell)
-            tell_others(inst, XTYP_UNREGISTER, in->services[k]);
+        if (in->services[k]) {
+            HSZ service = in->services[k];
+            in->services[k] = 0;
+            if (tell)
+                tell_others(inst, XTYP_UNREGISTER, service);
+            GlobalDeleteAtom((ATOM)service);
+        }
     if (tell && in->hwnd && IsWindow(in->hwnd))
         DestroyWindow(in->hwnd);
     memset(in, 0, sizeof(*in));
@@ -894,8 +1153,21 @@ static int flat(void)
            NE->task_flat((uint16_t)GetCurrentTask());
 }
 
-static void wr16le(uint8_t *b, uint16_t v) { b[0] = (uint8_t)v; b[1] = (uint8_t)(v >> 8); }
-static void wr32le(uint8_t *b, uint32_t v) { wr16le(b, (uint16_t)v); wr16le(b + 2, (uint16_t)(v >> 16)); }
+static int read_context(win_dll_call *c, uint32_t far, CONVCONTEXT *cc)
+{
+    uint8_t b[24];
+    int is_flat = flat();
+    unsigned n = is_flat ? sizeof(b) : 16;
+    if (!NE->read(c, far, b, n) || (is_flat ? rd32le(b) : rd16le(b)) < n)
+        return 0;
+    cc->cb = sizeof(*cc);
+    cc->wFlags = is_flat ? rd32le(b + 4) : rd16le(b + 2);
+    cc->wCountryID = is_flat ? rd32le(b + 8) : rd16le(b + 4);
+    cc->iCodePage = is_flat ? (int32_t)rd32le(b + 12) : (int16_t)rd16le(b + 6);
+    cc->dwLangID = rd32le(b + (is_flat ? 16 : 8));
+    cc->dwSecurity = rd32le(b + (is_flat ? 20 : 12));
+    return 1;
+}
 
 static int ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *v)
 {
@@ -913,19 +1185,29 @@ static int ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *v)
     case 3:                             /* DdeUninitialize(DWORD) */
         *v = DdeUninitialize(NE->arg32(c, 4));
         return WINDLL_WORD;
-    case 4:                             /* DdeConnectList(inst, svc, topic, list, LPCONVCONTEXT) */
-        *v = DdeConnectList(NE->arg32(c, 20), NE->arg32(c, 16), NE->arg32(c, 12),
-                            NE->arg32(c, 8), NULL);
+    case 4:                             /* DdeConnectList */
+    case 7: {                           /* DdeConnect */
+        unsigned off = ordinal == 4 ? 4 : 0;
+        DWORD id = NE->arg32(c, 16 + off);
+        HSZ service = NE->arg32(c, 12 + off), topic = NE->arg32(c, 8 + off);
+        uint32_t far = NE->arg32(c, 4);
+        CONVCONTEXT cc;
+        *v = 0;
+        if (far && !read_context(c, far, &cc)) {
+            set_error((int)id - 1, DMLERR_INVALIDPARAMETER);
+        } else if (ordinal == 4) {
+            *v = DdeConnectList(id, service, topic, NE->arg32(c, 8), far ? &cc : NULL);
+        } else {
+            *v = DdeConnect(id, service, topic, far ? &cc : NULL);
+        }
         return WINDLL_DWORD;
+    }
     case 5:                             /* DdeQueryNextServer(list, prev) */
         *v = DdeQueryNextServer(NE->arg32(c, 8), NE->arg32(c, 4));
         return WINDLL_DWORD;
     case 6:                             /* DdeDisconnectList(list) */
         *v = DdeDisconnectList(NE->arg32(c, 4));
         return WINDLL_WORD;
-    case 7:                             /* DdeConnect(inst, svc, topic, LPCONVCONTEXT) */
-        *v = DdeConnect(NE->arg32(c, 16), NE->arg32(c, 12), NE->arg32(c, 8), NULL);
-        return WINDLL_DWORD;
     case 8:                             /* DdeDisconnect(HCONV) */
         *v = DdeDisconnect(NE->arg32(c, 4));
         return WINDLL_WORD;
@@ -956,7 +1238,12 @@ static int ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *v)
         wr16le(b + 34, (uint16_t)ci.wConvst);
         wr16le(b + 36, (uint16_t)ci.wLastError);
         wr32le(b + 38, ci.hConvList);
-        wr16le(b + 42, 16);             /* its CONVCONTEXT's size */
+        wr16le(b + 42, 16);
+        wr16le(b + 44, (WORD)ci.ConvCtxt.wFlags);
+        wr16le(b + 46, (WORD)ci.ConvCtxt.wCountryID);
+        wr16le(b + 48, (WORD)ci.ConvCtxt.iCodePage);
+        wr32le(b + 50, ci.ConvCtxt.dwLangID);
+        wr32le(b + 54, ci.ConvCtxt.dwSecurity);
         *v = NE->write(c, far, b, cb) ? cb : 0;
         return WINDLL_WORD;
     }

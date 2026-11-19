@@ -1139,8 +1139,7 @@ static __attribute__((noinline)) uint32_t version(pe_args *a, unsigned fn)
 /* a Win32 CONVINFO (96 bytes) of the native one */
 static uint32_t conv_info(pe_args *a)
 {
-    BOOL (WINAPI *fn)(HCONV, DWORD, PCONVINFO) =
-        (BOOL (WINAPI *)(HCONV, DWORD, PCONVINFO))native("DDEML", "DdeQueryConvInfo");
+    DDEQUERYCONVINFO fn = (DDEQUERYCONVINFO)native("DDEML", "DdeQueryConvInfo");
     uint8_t *g = pe_rw(a, ARG(2), 4);
     CONVINFO ci;
     memset(&ci, 0, sizeof(ci));
@@ -1150,13 +1149,15 @@ static uint32_t conv_info(pe_args *a)
     uint32_t cb = pe_rd32(g);
     uint8_t b[96];
     memset(b, 0, sizeof(b));
-    const uint32_t v[] = { cb, ci.hUser, ci.hConvPartner, ci.hszSvcPartner, ci.hszServiceReq,
-                           ci.hszTopic, ci.hszItem, ci.wFmt, ci.wType, ci.wStatus, ci.wConvst,
-                           ci.wLastError, ci.hConvList, 36 /* its CONVCONTEXT's cb */ };
-    for (unsigned i = 0; i < sizeof(v) / sizeof(v[0]); i++)
-        pe_wr32(b + 4 * i, v[i]);
     if (!cb || cb > sizeof(b))
         cb = sizeof(b);
+    const uint32_t v[] = { cb, ci.hUser, ci.hConvPartner, ci.hszSvcPartner, ci.hszServiceReq,
+                           ci.hszTopic, ci.hszItem, ci.wFmt, ci.wType, ci.wStatus, ci.wConvst,
+                           ci.wLastError, ci.hConvList, 36, ci.ConvCtxt.wFlags,
+                           ci.ConvCtxt.wCountryID, (uint32_t)ci.ConvCtxt.iCodePage,
+                           ci.ConvCtxt.dwLangID, ci.ConvCtxt.dwSecurity };
+    for (unsigned i = 0; i < sizeof(v) / sizeof(v[0]); i++)
+        pe_wr32(b + 4 * i, v[i]);
     uint8_t *out = pe_rw(a, ARG(2), cb);
     if (!out)
         return 0;
