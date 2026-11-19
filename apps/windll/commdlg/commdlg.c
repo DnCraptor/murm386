@@ -2844,7 +2844,7 @@ static UINT ne_hook(const CDHOSTN *h, int which, HWND dlg, UINT msg, WPARAM wp, 
     { extern int printf(const char *, ...);
       printf( "HOOK msg %04x wp %04x lp %08lx\n", msg, (unsigned)wp, (unsigned long)lp); }
 #endif
-    if (msg != WM_INITDIALOG && NE->size >= sizeof(win_dll_ne) && NE->task_message)
+    if (msg != WM_INITDIALOG && NE->size >= WIN_DLL_NE_BASE_SIZE && NE->task_message)
         return (uint16_t)NE->task_message(task, proc, (uint16_t)dlg, (uint16_t)msg,
                                           (uint16_t)wp, (uint32_t)lp);
     uint32_t l = lp && lp == (LPARAM)(intptr_t)h->native ? ne_guest(h, lp) : (uint32_t)lp;
@@ -2855,7 +2855,7 @@ static UINT ne_hook(const CDHOSTN *h, int which, HWND dlg, UINT msg, WPARAM wp, 
 
 static int ne_dialog(const CDHOSTN *h, int which, HWND owner, DLGPROC proc, int modeless)
 {
-    if (NE->size < sizeof(win_dll_ne) || !NE->task_dialog)
+    if (NE->size < WIN_DLL_NE_BASE_SIZE || !NE->task_dialog)
         return -1;
     return NE->task_dialog((uint16_t)h->data[H_TASK], (uint16_t)h->data[H_INST],
                            h->data[H_TPL0 + which], (int)((h->data[H_HANDLES] >> which) & 1u),
@@ -2879,7 +2879,7 @@ static void ne_host(CDHOSTN *h, int kind, uint32_t far, DWORD hooks, uint32_t ho
     h->guest = ne_guest;
     h->logfont = ne_logfont;
     h->hooks = hooks & ((hook0 ? 1u : 0) | (hook1 ? 2u : 0));   /* (none given: none) */
-    h->templates = NE->size >= sizeof(win_dll_ne) && NE->task_dialog ?
+    h->templates = NE->size >= WIN_DLL_NE_BASE_SIZE && NE->task_dialog ?
                    templates & ((tpl0 ? 1u : 0) | (tpl1 ? 2u : 0)) : 0;
     h->data[H_TASK] = (DWORD)GetCurrentTask();
     h->data[H_GUEST] = far;
@@ -3001,12 +3001,12 @@ static uint16_t ne_print(win_dll_call *c)
     unsigned n = devnames(&r.sel, b, sizeof(b));
     HTASK task = GetCurrentTask();
     uint16_t mode = mode_ok ? (uint16_t)old_mode :
-                    NE->size >= sizeof(win_dll_ne) && NE->task_global ?
+                    NE->size >= WIN_DLL_NE_BASE_SIZE && NE->task_global ?
                     NE->task_global((uint16_t)task, sizeof(DEVMODE)) : 0;
     if (mode && !NE->task_write((uint16_t)task, (uint32_t)mode << 16, &r.dm, sizeof(DEVMODE)))
         mode = 0;
     wr16(g + 6, mode);
-    uint16_t names = n && NE->size >= sizeof(win_dll_ne) && NE->task_global ?
+    uint16_t names = n && NE->size >= WIN_DLL_NE_BASE_SIZE && NE->task_global ?
                      NE->task_global((uint16_t)task, n) : 0;
     if (names)
         NE->task_write((uint16_t)task, (uint32_t)names << 16, b, n);

@@ -148,7 +148,7 @@ static void call_timer(int i)
     DWORD user = timers[i].user;
     if (timers[i].native) {
         timers[i].native(id, 0, user, 0, 0);
-    } else if (NE && NE->size >= sizeof(win_dll_ne) && NE->call) {
+    } else if (NE && NE->size >= WIN_DLL_NE_BASE_SIZE && NE->call) {
         /* (UINT id, UINT msg, DWORD user, DWORD, DWORD) */
         const uint16_t w[8] = { (uint16_t)id, 0, (uint16_t)(user >> 16), (uint16_t)user,
                                 0, 0, 0, 0 };

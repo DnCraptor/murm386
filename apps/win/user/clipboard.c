@@ -45,6 +45,14 @@ BOOL WINAPI CloseClipboard(void)
     return TRUE;
 }
 
+static void free_format(UINT fmt, HANDLE data)
+{
+    if (fmt == CF_BITMAP || fmt == CF_DSPBITMAP || fmt == CF_PALETTE)
+        DeleteObject(data);
+    else
+        GlobalFree(data);
+}
+
 BOOL WINAPI EmptyClipboard(void)
 {
     if (!is_open)
@@ -53,7 +61,7 @@ BOOL WINAPI EmptyClipboard(void)
         SendMessage(clip_owner, WM_DESTROYCLIPBOARD, 0, 0);
     for (int i = 0; i < nclip; i++)
         if (clip[i].data)
-            GlobalFree(clip[i].data);
+            free_format(clip[i].fmt, clip[i].data);
     nclip = 0;
     clip_owner = clip_open;
     changed = 1;
@@ -84,7 +92,7 @@ HANDLE WINAPI SetClipboardData(UINT fmt, HANDLE data)
         i = nclip++;
         clip[i].fmt = fmt;
     } else if (clip[i].data && clip[i].data != data) {
-        GlobalFree(clip[i].data);
+        free_format(fmt, clip[i].data);
     }
     clip[i].data = data;
     changed = 1;

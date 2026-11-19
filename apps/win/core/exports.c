@@ -294,6 +294,7 @@ extern void GetObject(void);
 extern void GetOpenClipboardWindow(void);
 extern void GetOpenFileName(void);
 extern void GetOutlineTextMetrics(void);
+extern void GetPackedDIBInfoN(void);
 extern void GetPaletteEntries(void);
 extern void GetParent(void);
 extern void GetPhysicalFontHandle(void);
@@ -1372,7 +1373,7 @@ static const void *const exports_user[931] = {
     [930] = (const void *)MessageBoxEx,
 };
 
-static const void *const exports_winn[35] = {
+static const void *const exports_winn[36] = {
     [1] = (const void *)DialogBoxIndirectN,
     [2] = (const void *)CreateDialogIndirectN,
     [3] = (const void *)CreateAcceleratorTableN,
@@ -1407,6 +1408,7 @@ static const void *const exports_winn[35] = {
     [32] = (const void *)PrinterDeviceModeN,
     [33] = (const void *)PrinterCapabilitiesN,
     [34] = (const void *)PrinterNeCallN,
+    [35] = (const void *)GetPackedDIBInfoN,
 };
 
 static const void *const exports_commdlg[28] = {

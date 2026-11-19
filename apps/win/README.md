@@ -155,12 +155,15 @@ tempo, mode and pitch) and tones (a frequency for clock ticks),
 StartSound plays them, StopSound silences them, WaitSoundState waits for
 them, CountVoiceNotes counts them; volume, envelopes, noise and
 thresholds do nothing (`include/sound.h` for native callers).
-OLECLI is OLE 1.0's client library with no servers (WINN has no
-registration database): a client's documents are registered, renamed,
-saved, reverted, revoked; nothing on the clipboard can become an object
-(OleQueryCreateFromClip: OLE_ERROR_FORMAT), no object is ever made
-(OleCreate and the rest: OLE_ERROR_CLASS), a call about one has none
-(OLE_ERROR_OBJECT); for native callers too (`include/ole.h`). COMMDLG has
+OLECLI registers client documents and supports OLE 1.0 static DIB pictures.
+The Static protocol can paste CF_DIB, or convert a clipboard CF_BITMAP
+when drawing is requested. Static DIB pictures can be drawn, copied,
+cloned, enumerated and saved to or loaded from an OLE 1.0 stream.
+Win16 uses the OLECLI ordinals and native callers use GetProcAddress
+with the types in include/ole.h. Linked and editable objects need the
+OLE client/server protocol, which is not implemented. Static streams
+whose presentation is BITMAP or METAFILEPICT are also unsupported.
+COMMDLG has
 Windows 3.1's common dialogs: Open and Save As, Find and Replace (the
 program's FINDREPLACE in their messages, kept up to date), Color (the 48
 basic colours, 16 custom ones, a colour defined by hue, saturation and
@@ -790,7 +793,11 @@ XTYP_CONNECT), the client's request, poke, execute and advise links
 (DdePostAdvise: XTYP_ADVREQ, XTYP_ADVDATA), asynchronous transactions
 (XTYP_XACT_COMPLETE as the client takes its messages), data handles and
 string handles (global atoms). An instance's callback is called in its
-task, through a hidden window of the instance. There is no NetDDE, no
+task, through a hidden window of the instance. DdeEnableCallback controls
+blockable transactions. A transaction that returns CBR_BLOCK remains in
+the queue until the conversation is enabled. EC_QUERYWAITING inspects the
+queue and EC_ENABLEONE allows one callback per selected conversation.
+There is no NetDDE, no
 conversation with a program speaking DDE's messages itself.
 DdeConnectList enumerates local servers for a service/topic pair. A
 wildcard service or topic asks servers for matching pairs with

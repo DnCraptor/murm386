@@ -310,6 +310,8 @@ int gdi_dib_parse(const uint8_t *d, uint32_t n, int halves, gdi_dib *out)
     }
     if (bpp != 1 && bpp != 4 && bpp != 8 && bpp != 24)
         return 0;
+    if (h == INT32_MIN)
+        return 0;
     int top_down = h < 0;
     if (top_down)
         h = -h;
@@ -324,13 +326,27 @@ int gdi_dib_parse(const uint8_t *d, uint32_t n, int halves, gdi_dib *out)
     out->colors = (int)colors;
     out->pal = d + hs;
     out->pitch = (int)(((uint32_t)w * (uint32_t)bpp + 31u) / 32u * 4u);
-    out->bits = out->pal + colors * (uint32_t)entry;
+    uint64_t offset = (uint64_t)hs + colors * (uint32_t)entry;
     /* the image, then (an icon's, a cursor's) the mask: 1 bit a pixel */
-    uint64_t need = (uint64_t)(out->bits - d) + (uint64_t)out->pitch * (uint64_t)h +
+    uint64_t need = offset + (uint64_t)out->pitch * (uint64_t)h +
                     (halves > 1 ? ((uint64_t)w + 31u) / 32u * 4u * (uint64_t)h : 0);
     if (need > n)
         return 0;
+    out->bits = d + (size_t)offset;
     return 1;
+}
+
+DWORD WINAPI GetPackedDIBInfoN(const void *dib, DWORD size, SIZE *pixels, DWORD *offset)
+{
+    gdi_dib image;
+    if (!gdi_dib_parse(dib, size, 1, &image))
+        return 0;
+    DWORD bits = (DWORD)(image.bits - (const uint8_t *)dib);
+    if (pixels)
+        *pixels = (SIZE){ image.w, image.h };
+    if (offset)
+        *offset = bits;
+    return bits + (DWORD)image.pitch * (DWORD)image.h;
 }
 
 /* the raw value (a palette index, or 0xRRGGBB for 24 bits) of the pixel at

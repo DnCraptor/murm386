@@ -411,10 +411,19 @@ static void task_free(uint16_t task, uint32_t far)
     }
 }
 
+static uint32_t task_proc(uint16_t task, const char *module, uint16_t ordinal)
+{
+    ne_user *u = ne_user_of((HTASK)task);
+    int slot = win_dll_find(module);
+    const win_dll_export *entry = slot >= 0 ? win_dll_export_of(slot, ordinal, NULL) : NULL;
+    return u && u->ctx && entry ?
+        win_ne_guest_thunk((win_ne_guest_image *)u->ctx->image, win_ne_dll_service(slot, entry)) : 0;
+}
+
 static const win_dll_ne dll_ne = {
     sizeof(win_dll_ne), call_arg16, call_arg32, call_read, call_write, call_string, task_call,
     task_read, task_write, task_global, task_flat, task_message, task_dialog, task_alloc,
-    task_free,
+    task_free, task_proc,
 };
 
 const win_dll_ne *win_dll_ne_glue(void) { return &dll_ne; }

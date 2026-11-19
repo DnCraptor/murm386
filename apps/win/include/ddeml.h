@@ -150,6 +150,8 @@ typedef UINT (WINAPI *DDEQUERYCONVINFO)(HCONV conv, DWORD transaction, PCONVINFO
 typedef HCONV (WINAPI *DDECONNECT)(DWORD inst, HSZ service, HSZ topic, PCONVCONTEXT cc);
 typedef BOOL (WINAPI *DDEDISCONNECT)(HCONV conv);
 typedef HCONV (WINAPI *DDERECONNECT)(HCONV conv);
+typedef BOOL (WINAPI *DDEENABLECALLBACK)(DWORD inst, HCONV conv, UINT command);
+typedef BOOL (WINAPI *DDEABANDONTRANSACTION)(DWORD inst, HCONV conv, DWORD transaction);
 typedef HDDEDATA (WINAPI *DDECLIENTTRANSACTION)(LPBYTE data, DWORD cb, HCONV conv, HSZ item,
                                                UINT fmt, UINT type, DWORD timeout,
                                                LPDWORD result);

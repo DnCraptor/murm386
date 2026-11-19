@@ -40,7 +40,7 @@ static void CALLBACK tick(HWND h, UINT msg, UINT id, DWORD time)
             return;
         if (timers[i].native)
             timers[i].native();
-        else if (NE && NE->size >= sizeof(win_dll_ne) && NE->call)
+        else if (NE && NE->size >= WIN_DLL_NE_BASE_SIZE && NE->call)
             NE->call((uint16_t)t, timers[i].proc, NULL, 0);
         return;
     }

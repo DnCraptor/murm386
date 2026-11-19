@@ -616,6 +616,7 @@ HBITMAP WINAPI CreateDIBitmap(HDC hdc, const BITMAPINFOHEADER *bih, DWORD init,
                               const void *bits, const BITMAPINFO *bi, UINT usage);
 int     WINAPI SetDIBits(HDC hdc, HBITMAP bmp, UINT start, UINT lines, const void *bits,
                          const BITMAPINFO *bi, UINT usage);
+DWORD   WINAPI GetPackedDIBInfoN(const void *dib, DWORD size, SIZE *pixels, DWORD *offset);
 int     WINAPI GetDIBits(HDC hdc, HBITMAP bmp, UINT start, UINT lines, void *bits,
                          BITMAPINFO *bi, UINT usage);
 HBRUSH  WINAPI CreateDIBPatternBrush(HGLOBAL dib, UINT usage);

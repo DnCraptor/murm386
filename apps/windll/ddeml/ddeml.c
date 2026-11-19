@@ -20,8 +20,7 @@
  * back).
  *
  * WINN has no DDE between machines (NetDDE) and no conversations with
- * programs speaking DDE's messages themselves; a callback that blocks
- * (CBR_BLOCK, DdeEnableCallback) is not queued.
+ * programs speaking DDE's messages themselves.
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
@@ -46,7 +45,7 @@
 #define NE (__win_dll_ne)
 
 #define WM_DDEML_CALLBACK (WM_USER + 0x0D0)
-#define WM_DDEML_COMPLETE (WM_USER + 0x0D1)
+#define WM_DDEML_READY (WM_USER + 0x0D1)
 
 typedef struct {
     int used;
@@ -73,6 +72,7 @@ typedef struct {
     int inst;
     int partner;                    /* the other end, -1 when it went */
     int client, closing;
+    UINT callback_state;           /* ST_BLOCKED or ST_BLOCKNEXT */
     int reconnect_from;             /* old server slot + 1 during XTYP_DISCONNECT */
     HSZ service, topic;
     HCONVLIST list;
@@ -82,7 +82,7 @@ typedef struct {
 } conversation;
 
 typedef struct {
-    int used;
+    HDDEDATA handle;
     int inst;
     uint8_t *bytes;
     DWORD size;
@@ -94,14 +94,15 @@ typedef struct {
     uint32_t at;
 } data_handle;
 
-/* an asynchronous transaction done: XTYP_XACT_COMPLETE to the client */
+/* A transaction waiting for the server or a notification waiting for the client.
+ * A synchronous transaction retains its slot until the waiting caller resumes. */
 typedef struct {
-    int used, inst;
-    HCONV conv;
-    UINT fmt;
+    DWORD order, id, status;
+    HCONV target, client;
+    UINT type, fmt, error;
     HSZ item;
     HDDEDATA data;
-    DWORD id, result;
+    int sync, running, posted, cancelled;
 } pending;
 
 typedef struct {
@@ -118,7 +119,7 @@ static instance insts[INSTS];
 static conversation convs[CONVS];
 static data_handle datas[DATAS];
 static pending pend[PENDING];
-static DWORD next_id = 1;
+static DWORD next_id, next_order, data_generation;
 static ATOM wnd_class;
 
 static uint16_t rd16le(const uint8_t *b) { return (uint16_t)(b[0] | b[1] << 8); }
@@ -143,14 +144,14 @@ static HCONV conv_handle(int i) { return i >= 0 ? convs[i].handle : 0; }
 
 static data_handle *data_of(HDDEDATA h)
 {
-    unsigned i = (unsigned)(h & 0xffffu) - 1u;
-    return (h & 0xffff0000u) == DATA_TAG && i < DATAS && datas[i].used ? &datas[i] : NULL;
+    unsigned i = (h & 0xffu) - 1u;
+    return h && i < DATAS && datas[i].handle == h ? &datas[i] : NULL;
 }
 
 static HDDEDATA data_new(int inst, const uint8_t *src, DWORD size, HSZ item, UINT fmt, int owned)
 {
     for (int i = 0; i < DATAS; i++)
-        if (!datas[i].used) {
+        if (!datas[i].handle) {
             data_handle *d = &datas[i];
             d->bytes = (uint8_t *)malloc(size ? size : 1);
             if (!d->bytes)
@@ -159,14 +160,14 @@ static HDDEDATA data_new(int inst, const uint8_t *src, DWORD size, HSZ item, UIN
                 memcpy(d->bytes, src, size);
             else
                 memset(d->bytes, 0, size ? size : 1);
-            d->used = 1;
+            d->handle = DATA_TAG | (++data_generation & 0xffffu) << 8 | (DWORD)(i + 1);
             d->inst = inst;
             d->size = size;
             d->item = item;
             d->fmt = fmt;
             d->app_owned = owned;
             d->locked = 0;
-            return DATA_TAG | (DWORD)(i + 1);
+            return d->handle;
         }
     return 0;
 }
@@ -175,7 +176,7 @@ static void data_free(HDDEDATA h)
 {
     data_handle *d = data_of(h);
     if (d) {
-        if (d->at && NE && NE->size >= sizeof(win_dll_ne) && NE->task_free)
+        if (d->at && NE && NE->size >= WIN_DLL_NE_BASE_SIZE && NE->task_free)
             NE->task_free(d->at_task, d->at);
         free(d->bytes);
         memset(d, 0, sizeof(*d));
@@ -204,7 +205,7 @@ typedef struct {
 
 static uint32_t guest_context(uint16_t task, const CONVCONTEXT *cc)
 {
-    if (NE->size < sizeof(win_dll_ne) || !NE->task_alloc || !NE->task_free || !NE->task_write)
+    if (NE->size < WIN_DLL_NE_BASE_SIZE || !NE->task_alloc || !NE->task_free || !NE->task_write)
         return 0;
     int flat = NE->task_flat && NE->task_flat(task);
     uint8_t b[36] = {0};
@@ -237,7 +238,7 @@ static HDDEDATA invoke(const callback_call *c)
     instance *in = &insts[c->inst];
     if (in->native)
         return in->native(c->type, c->fmt, c->conv, c->hsz1, c->hsz2, c->data, c->data1, c->data2);
-    if (!in->proc || !NE || NE->size < sizeof(win_dll_ne) || !NE->call)
+    if (!in->proc || !NE || NE->size < WIN_DLL_NE_BASE_SIZE || !NE->call)
         return 0;
     uint16_t task = (uint16_t)in->task;
     DWORD data1 = c->data1;
@@ -296,8 +297,10 @@ static HDDEDATA callback(int inst, UINT type, UINT fmt, HCONV conv, HSZ hsz1, HS
         SendMessage(in->hwnd, WM_DDEML_CALLBACK, 0, (LPARAM)(uintptr_t)&c);
     else
         c.result = invoke(&c);
-    return c.result == CBR_BLOCK ? 0 : c.result;
+    return (type & XTYPF_NOBLOCK) && c.result == CBR_BLOCK ? 0 : c.result;
 }
+
+static void drain_callbacks(int inst, HCONV h);
 
 static LRESULT CALLBACK ddeml_wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -306,13 +309,13 @@ static LRESULT CALLBACK ddeml_wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         c->result = invoke(c);
         return 0;
     }
-    if (msg == WM_DDEML_COMPLETE && wp < PENDING && pend[wp].used) {
-        pending p = pend[wp];
-        pend[wp].used = 0;
-        int ci = conv_index(p.conv);
-        if (ci >= 0 && convs[ci].inst == p.inst)
-            callback(p.inst, XTYP_XACT_COMPLETE, p.fmt, conv_handle(ci), convs[ci].topic, p.item,
-                     p.data, p.id, p.result);
+    if (msg == WM_DDEML_READY && wp < PENDING) {
+        pending *p = &pend[wp];
+        int c = conv_index(p->target);
+        if (p->posted && p->order == (DWORD)lp && c >= 0 && insts[convs[c].inst].hwnd == h) {
+            p->posted = 0;
+            drain_callbacks(convs[c].inst, 0);
+        }
         return 0;
     }
     return DefWindowProc(h, msg, wp, lp);
@@ -702,6 +705,34 @@ static HCONV WINAPI DdeConnect(DWORD id, HSZ service, HSZ topic, PCONVCONTEXT cc
     return 0;
 }
 
+static void drop_pending(pending *p)
+{
+    data_release(p->data);
+    if (p->item)
+        GlobalDeleteAtom((ATOM)p->item);
+    memset(p, 0, sizeof(*p));
+}
+
+static void cancel_pending(pending *p, UINT error)
+{
+    if (p->running) {
+        p->cancelled = 1;
+        p->error = error;
+    } else if (p->sync) {
+        p->target = 0;
+        p->error = error;
+    } else {
+        drop_pending(p);
+    }
+}
+
+static void drop_conversation_pending(HCONV h)
+{
+    for (int i = 0; i < PENDING; i++)
+        if (pend[i].target && (pend[i].target == h || pend[i].client == h))
+            cancel_pending(&pend[i], DMLERR_SERVER_DIED);
+}
+
 static void drop_links(conversation *cv)
 {
     for (int i = 0; i < LINKS; i++)
@@ -727,9 +758,11 @@ static void conv_end(int c, int tell)
             }
     cv->closing = 1;
     cv->partner = -1;
+    drop_conversation_pending(conv_handle(c));
     if (linked) {
         convs[p].partner = -1;
         convs[p].closing = 1;
+        drop_conversation_pending(conv_handle(p));
         if (tell) {
             if (convs[p].client && !cv->client)
                 convs[p].reconnect_from = c + 1;
@@ -756,7 +789,8 @@ static BOOL WINAPI DdeDisconnect(HCONV h)
     return TRUE;
 }
 
-static HDDEDATA transact(int c, HDDEDATA given, HSZ item, UINT fmt, UINT type, DWORD *status);
+static HDDEDATA client_transaction(int c, HDDEDATA given, HSZ item, UINT fmt, UINT type,
+                                   DWORD timeout, LPDWORD result);
 
 static HCONV WINAPI DdeReconnect(HCONV h)
 {
@@ -809,10 +843,8 @@ static HCONV WINAPI DdeReconnect(HCONV h)
         if (next < 0)
             return 0;
         const advise_link *link = &old_server->links[i];
-        if (link->item) {
-            DWORD status;
-            transact(next, 0, link->item, link->fmt, link->type, &status);
-        }
+        if (link->item)
+            client_transaction(next, 0, link->item, link->fmt, link->type, 0, NULL);
     }
     if (conv_index(fresh) < 0)
         return 0;
@@ -947,6 +979,7 @@ static UINT WINAPI DdeQueryConvInfo(HCONV h, DWORD id, PCONVINFO ci)
     info.wStatus = (UINT)(ST_ISLOCAL | (cv->client ? ST_CLIENT : 0) |
                           (cv->partner < 0 ? ST_TERMINATED : ST_CONNECTED) |
                           (cv->partner >= 0 && convs[cv->partner].inst == cv->inst ? ST_ISSELF : 0));
+    info.wStatus |= cv->callback_state;
     info.hConvList = cv->list;
     info.ConvCtxt = cv->context;
     if (cv->list)
@@ -966,23 +999,6 @@ static UINT WINAPI DdeQueryConvInfo(HCONV h, DWORD id, PCONVINFO ci)
     return (UINT)n;
 }
 
-static BOOL WINAPI DdeEnableCallback(DWORD id, HCONV h, UINT cmd)
-{
-    (void)h; (void)cmd;
-    return inst_of(id) != NULL;
-}
-
-static BOOL WINAPI DdeAbandonTransaction(DWORD id, HCONV h, DWORD xid)
-{
-    (void)h;
-    for (int i = 0; i < PENDING; i++)
-        if (pend[i].used && pend[i].inst == (int)id - 1 && (!xid || pend[i].id == xid)) {
-            data_release(pend[i].data);
-            pend[i].used = 0;
-        }
-    return inst_of(id) != NULL;
-}
-
 /* ---------------------------------------------------------------- transactions */
 
 static int advise_slot(const conversation *server, HSZ item, UINT fmt)
@@ -999,15 +1015,13 @@ static int advise_slot(const conversation *server, HSZ item, UINT fmt)
 }
 
 /* the client's transaction with the server: its result (a data handle,
- * TRUE, or 0), *status DDE_FACK ... The data given is the system's then. */
+ * TRUE, 0, or CBR_BLOCK). The queue retains the input until completion. */
 static HDDEDATA transact(int c, HDDEDATA given, HSZ item, UINT fmt, UINT type, DWORD *status)
 {
     conversation *cv = &convs[c];
     int p = cv->partner;
     *status = 0;
     if (p < 0 || !convs[p].used) {
-        data_release(given);
-        set_error(cv->inst, DMLERR_SERVER_DIED);
         return 0;
     }
     int s = convs[p].inst;
@@ -1016,7 +1030,9 @@ static HDDEDATA transact(int c, HDDEDATA given, HSZ item, UINT fmt, UINT type, D
     switch (type & ~(XTYPF_NODATA | XTYPF_ACKREQ)) {
     case XTYP_REQUEST:
         r = callback(s, XTYP_REQUEST, fmt, sh, cv->topic, item, 0, 0, 0);
-        if (r && data_of(r)) {          /* the client's to free: the server's own a copy */
+        if (r == CBR_BLOCK)
+            return r;
+        if (r && data_of(r) && conv_index(ch) == c) {          /* the client's to free: the server's own a copy */
             data_handle *d = data_of(r);
             if (d->app_owned)
                 r = data_new(cv->inst, d->bytes, d->size, d->item, d->fmt, 0);
@@ -1024,6 +1040,7 @@ static HDDEDATA transact(int c, HDDEDATA given, HSZ item, UINT fmt, UINT type, D
                 d->inst = cv->inst;
             *status = r ? DDE_FACK : 0;
         } else {
+            data_release(r);
             r = 0;
         }
         break;
@@ -1032,6 +1049,8 @@ static HDDEDATA transact(int c, HDDEDATA given, HSZ item, UINT fmt, UINT type, D
         UINT t = (type & XTYP_MASK) == (XTYP_POKE & XTYP_MASK) ? XTYP_POKE : XTYP_EXECUTE;
         HDDEDATA a = callback(s, t, t == XTYP_POKE ? fmt : 0, sh, cv->topic,
                               t == XTYP_POKE ? item : 0, given, 0, 0);
+        if (a == CBR_BLOCK)
+            return a;
         *status = (DWORD)(a & 0xffffu);
         r = (a & DDE_FACK) ? 1 : 0;
         break;
@@ -1040,7 +1059,8 @@ static HDDEDATA transact(int c, HDDEDATA given, HSZ item, UINT fmt, UINT type, D
         if (!item || advise_slot(&convs[p], item, fmt) < 0 ||
             !DdeKeepStringHandle((DWORD)(cv->inst + 1), item))
             break;
-        if (callback(s, type, fmt, sh, cv->topic, item, 0, 0, 0) && conv_index(sh) == p) {
+        HDDEDATA answer = callback(s, type, fmt, sh, cv->topic, item, 0, 0, 0);
+        if (answer && answer != CBR_BLOCK && conv_index(sh) == p) {
             int k = advise_slot(&convs[p], item, fmt);
             if (k >= 0) {
                 advise_link *link = &convs[p].links[k];
@@ -1053,74 +1073,292 @@ static HDDEDATA transact(int c, HDDEDATA given, HSZ item, UINT fmt, UINT type, D
         }
         if (!r)
             GlobalDeleteAtom((ATOM)item);
+        if (answer == CBR_BLOCK)
+            return answer;
         break;
     }
     case XTYP_ADVSTOP:
         for (int k = 0; k < LINKS; k++)
             if (convs[p].links[k].item == item && item && convs[p].links[k].fmt == fmt) {
-                memset(&convs[p].links[k], 0, sizeof(convs[p].links[k]));
-                callback(s, XTYP_ADVSTOP, fmt, sh, cv->topic, item, 0, 0, 0);
-                GlobalDeleteAtom((ATOM)item);
+                if (callback(s, XTYP_ADVSTOP, fmt, sh, cv->topic, item, 0, 0, 0) == CBR_BLOCK)
+                    return CBR_BLOCK;
+                advise_link *link = &convs[p].links[k];
+                if (conv_index(sh) == p && link->item == item && link->fmt == fmt) {
+                    memset(link, 0, sizeof(*link));
+                    GlobalDeleteAtom((ATOM)item);
+                }
                 *status = DDE_FACK;
                 r = 1;
                 break;
             }
         break;
-    default:
-        data_release(given);
-        set_error(cv->inst, DMLERR_INVALIDPARAMETER);
-        return 0;
     }
-    data_release(given);
-    if (!r && conv_index(ch) == c)
-        set_error(cv->inst, DMLERR_NOTPROCESSED);
     return r;
 }
 
-/* data given as bytes (a handle when cb is -1) */
+static DWORD advance(DWORD *counter)
+{
+    if (!++*counter)
+        ++*counter;
+    return *counter;
+}
+
+static pending *queue_callback(int inst, HCONV target, UINT type, UINT fmt, HSZ item,
+                               HDDEDATA data)
+{
+    pending *p = NULL;
+    for (int i = 0; i < PENDING; i++)
+        if (!pend[i].order) {
+            p = &pend[i];
+            break;
+        }
+    if (!p || (item && !DdeKeepStringHandle((DWORD)(inst + 1), item))) {
+        set_error(inst, p ? DMLERR_INVALIDPARAMETER : DMLERR_BUSY);
+        data_release(data);
+        return NULL;
+    }
+    *p = (pending){ .order = advance(&next_order), .target = target,
+                    .type = type, .fmt = fmt, .item = item, .data = data };
+    return p;
+}
+
+static void run_pending(pending *p, int c)
+{
+    conversation *cv = &convs[c];
+    HCONV target = p->target;
+    int notify = p->type == XTYP_ADVDATA || p->type == XTYP_XACT_COMPLETE;
+    int client = conv_index(p->client);
+    DWORD status = 0;
+
+    if (cv->callback_state == ST_BLOCKNEXT)
+        cv->callback_state = ST_BLOCKED;
+    p->running = 1;
+    HDDEDATA result = notify ?
+        callback(cv->inst, p->type, p->fmt, target, cv->topic, p->item, p->data, p->id, p->status) :
+        transact(client, p->data, p->item, p->fmt, p->type, &status);
+    p->running = 0;
+
+    if (result == CBR_BLOCK && !p->cancelled && conv_index(target) >= 0) {
+        cv->callback_state = ST_BLOCKED;
+        return;
+    }
+    if (notify) {
+        drop_pending(p);
+        return;
+    }
+    if (p->cancelled) {
+        if (p->data != result)
+            data_release(result);
+        cancel_pending(p, p->error);
+        return;
+    }
+    if (p->data != result)
+        data_release(p->data);
+    p->data = result;
+    p->status = status;
+    p->target = 0;
+    if (p->sync) {
+        p->error = result ? DMLERR_NO_ERROR : DMLERR_NOTPROCESSED;
+        return;
+    }
+    client = conv_index(p->client);
+    if (client < 0) {
+        drop_pending(p);
+        return;
+    }
+    int inst = convs[client].inst;
+    p->type = XTYP_XACT_COMPLETE;
+    p->target = p->client;
+    p->order = advance(&next_order);
+    p->posted = 1;
+    if (!PostMessage(insts[inst].hwnd, WM_DDEML_READY, (WPARAM)(p - pend), (LPARAM)p->order)) {
+        set_error(inst, DMLERR_POSTMSG_FAILED);
+        drop_pending(p);
+    }
+}
+
+static int waiting_for(const pending *p, int inst, HCONV h)
+{
+    if (p->running || p->cancelled || !p->target || (h && p->target != h))
+        return -1;
+    int c = conv_index(p->target);
+    return c >= 0 && convs[c].inst == inst ? c : -1;
+}
+
+static void drain_callbacks(int inst, HCONV h)
+{
+    DWORD generation = insts[inst].generation;
+    while (insts[inst].generation == generation && !insts[inst].closing) {
+        /* Leave callbacks for a conversation already dispatching on its stack. */
+        pending *first = NULL;
+        int target = -1;
+        for (int i = 0; i < PENDING; i++) {
+            pending *p = &pend[i];
+            int c = waiting_for(p, inst, h);
+            if (c < 0 || p->posted || convs[c].callback_state == ST_BLOCKED)
+                continue;
+            int prior = 0;
+            for (int k = 0; k < PENDING; k++)
+                if (pend[k].target == p->target &&
+                    (pend[k].running ||
+                     (pend[k].posted && (int32_t)(pend[k].order - p->order) < 0)))
+                    prior = 1;
+            if (!prior && (!first || (int32_t)(p->order - first->order) < 0)) {
+                first = p;
+                target = c;
+            }
+        }
+        if (!first)
+            return;
+        run_pending(first, target);
+    }
+}
+
+static BOOL WINAPI DdeEnableCallback(DWORD id, HCONV h, UINT cmd)
+{
+    instance *in = inst_of(id);
+    if (!in || in->closing)
+        return FALSE;
+    int inst = (int)id - 1;
+    int c = conv_index(h);
+    if ((h && (c < 0 || convs[c].inst != inst || convs[c].closing)) ||
+        (cmd != EC_QUERYWAITING && cmd != EC_ENABLEALL && cmd != EC_ENABLEONE && cmd != EC_DISABLE)) {
+        in->error = DMLERR_INVALIDPARAMETER;
+        return FALSE;
+    }
+    in->error = DMLERR_NO_ERROR;
+    if (cmd == EC_QUERYWAITING) {
+        for (int i = 0; i < PENDING; i++)
+            if (waiting_for(&pend[i], inst, h) >= 0)
+                return TRUE;
+        return FALSE;
+    }
+    for (int i = 0; i < CONVS; i++)
+        if (convs[i].used && !convs[i].closing && convs[i].inst == inst && (!h || i == c))
+            convs[i].callback_state = cmd;
+    if (cmd != EC_DISABLE)
+        drain_callbacks(inst, h);
+    return TRUE;
+}
+
+static BOOL WINAPI DdeAbandonTransaction(DWORD id, HCONV h, DWORD xid)
+{
+    instance *in = inst_of(id);
+    if (!in)
+        return FALSE;
+    int c = conv_index(h), inst = (int)id - 1;
+    if (h && (c < 0 || convs[c].inst != inst || !convs[c].client)) {
+        in->error = DMLERR_INVALIDPARAMETER;
+        return FALSE;
+    }
+    if (!h)
+        xid = 0;
+    BOOL found = FALSE;
+    for (int i = 0; i < PENDING; i++) {
+        pending *p = &pend[i];
+        int client = conv_index(p->client);
+        if (p->id && !p->cancelled && client >= 0 && convs[client].inst == inst &&
+            (!h || p->client == h) && (!xid || p->id == xid)) {
+            cancel_pending(p, DMLERR_NO_ERROR);
+            found = TRUE;
+        }
+    }
+    in->error = !xid || found ? DMLERR_NO_ERROR : DMLERR_UNFOUND_QUEUE_ID;
+    return !in->error;
+}
+
+static UINT timeout_error(UINT type)
+{
+    switch (type & ~(XTYPF_NODATA | XTYPF_ACKREQ)) {
+    case XTYP_ADVSTART: return DMLERR_ADVACKTIMEOUT;
+    case XTYP_ADVSTOP:  return DMLERR_UNADVACKTIMEOUT;
+    case XTYP_POKE:     return DMLERR_POKEACKTIMEOUT;
+    case XTYP_EXECUTE:  return DMLERR_EXECACKTIMEOUT;
+    default:            return DMLERR_DATAACKTIMEOUT;
+    }
+}
+
 static HDDEDATA client_transaction(int c, HDDEDATA given, HSZ item, UINT fmt, UINT type,
                                    DWORD timeout, LPDWORD result)
 {
-    DWORD status;
-    if (!convs[c].client) {
+    conversation *cv = &convs[c];
+    int inst = cv->inst, server = cv->partner;
+    int sync = timeout != TIMEOUT_ASYNC;
+    UINT error = DMLERR_INVALIDPARAMETER;
+    switch (type & ~(XTYPF_NODATA | XTYPF_ACKREQ)) {
+    case XTYP_ADVSTART: case XTYP_ADVSTOP: case XTYP_EXECUTE: case XTYP_POKE: case XTYP_REQUEST:
+        if (cv->client)
+            error = server < 0 ? DMLERR_SERVER_DIED : DMLERR_NO_ERROR;
+        break;
+    }
+    if (error) {
         data_release(given);
-        set_error(convs[c].inst, DMLERR_INVALIDPARAMETER);
+        set_error(inst, error);
         return 0;
     }
-    HCONV h = conv_handle(c);
-    HDDEDATA r = transact(c, given, item, fmt, type, &status);
-    if (timeout != TIMEOUT_ASYNC) {
-        if (result)
-            *result = status;
-        return r;
-    }
-    if (conv_index(h) < 0) {
-        data_release(r > 1 ? r : 0);
-        return 0;
-    }
-    /* asynchronous: done already, its XTYP_XACT_COMPLETE as the client
-     * takes its messages */
-    for (int i = 0; i < PENDING; i++)
-        if (!pend[i].used) {
-            pending *p = &pend[i];
-            p->used = 1;
-            p->inst = convs[c].inst;
-            p->conv = h;
-            p->fmt = fmt;
-            p->item = item;
-            p->data = r > 1 ? r : 0;
-            p->id = next_id++;
-            if (!next_id)
-                next_id = 1;
-            p->result = status;
-            if (result)
-                *result = p->id;
-            PostMessage(insts[p->inst].hwnd, WM_DDEML_COMPLETE, (WPARAM)i, 0);
-            return 1;
+
+    if (sync)
+        for (int i = 0; i < PENDING; i++) {
+            int owner = conv_index(pend[i].client);
+            if (pend[i].sync && owner >= 0 &&
+                insts[convs[owner].inst].task == insts[inst].task) {
+                data_release(given);
+                set_error(inst, DMLERR_REENTRANCY);
+                return 0;
+            }
         }
-    data_release(r > 1 ? r : 0);
-    set_error(convs[c].inst, DMLERR_BUSY);
-    return 0;
+
+    data_handle *input = data_of(given);
+    if (input && input->app_owned) {
+        given = data_new(inst, input->bytes, input->size, input->item, input->fmt, 0);
+        if (!given) {
+            set_error(inst, DMLERR_MEMORY_ERROR);
+            return 0;
+        }
+    }
+    DWORD generation = insts[inst].generation, started = GetTickCount();
+    pending *p = queue_callback(inst, conv_handle(server), type, fmt, item, given);
+    if (!p)
+        return 0;
+    p->client = conv_handle(c);
+    p->sync = sync;
+    DWORD order = p->order, id = sync ? 0 : advance(&next_id);
+    p->id = id;
+    if (result)
+        *result = id;
+    drain_callbacks(convs[server].inst, p->target);
+    if (!sync)
+        return 1;
+
+    while (p->order == order && p->target && GetTickCount() - started < timeout) {
+        MSG msg;
+        if (!PeekMessage(&msg, 0, 0, 0, PM_REMOVE))
+            continue;
+        if (msg.message == WM_QUIT) {
+            PostQuitMessage((int)msg.wParam);
+            break;
+        }
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+    if (p->order != order)
+        return 0;
+    HDDEDATA answer = 0;
+    if (p->target) {
+        error = timeout_error(type);
+    } else {
+        error = p->error;
+        if (!error) {
+            answer = p->data;
+            p->data = 0;
+        }
+    }
+    if (result)
+        *result = p->status;
+    drop_pending(p);
+    if (insts[inst].generation == generation)
+        set_error(inst, error);
+    return answer;
 }
 
 static HDDEDATA WINAPI DdeClientTransaction(LPBYTE data, DWORD cb, HCONV h, HSZ item, UINT fmt,
@@ -1133,8 +1371,13 @@ static HDDEDATA WINAPI DdeClientTransaction(LPBYTE data, DWORD cb, HCONV h, HSZ 
     if (cb == 0xffffffffu)
         given = (HDDEDATA)(uintptr_t)data;
     else if (data && ((type & XTYP_MASK) == (XTYP_POKE & XTYP_MASK) ||
-                      (type & XTYP_MASK) == (XTYP_EXECUTE & XTYP_MASK)))
+                      (type & XTYP_MASK) == (XTYP_EXECUTE & XTYP_MASK))) {
         given = data_new(convs[c].inst, data, cb, item, fmt, 0);
+        if (!given) {
+            set_error(convs[c].inst, DMLERR_MEMORY_ERROR);
+            return 0;
+        }
+    }
     return client_transaction(c, given, item, fmt, type, timeout, result);
 }
 
@@ -1143,6 +1386,7 @@ static BOOL WINAPI DdePostAdvise(DWORD id, HSZ topic, HSZ item)
     if (!inst_of(id))
         return FALSE;
     int inst = (int)id - 1;
+    BOOL ok = TRUE;
     for (int c = 0; c < CONVS; c++) {
         conversation *cv = &convs[c];
         if (!cv->used || cv->client || cv->partner < 0 || cv->inst != inst ||
@@ -1156,16 +1400,36 @@ static BOOL WINAPI DdePostAdvise(DWORD id, HSZ topic, HSZ item)
             HDDEDATA d = callback(inst, XTYP_ADVREQ, l.fmt, conv_handle(c), cv->topic, l.item, 0,
                                   0, 0);
             if (conv_index(h) == c && cv->partner >= 0) {
-                int p = cv->partner;
-                callback(convs[p].inst, XTYP_ADVDATA, l.fmt, conv_handle(p), cv->topic, l.item,
-                         (l.type & XTYPF_NODATA) ? 0 : d, 0, 0);
+                int p = cv->partner, client = convs[p].inst;
+                HDDEDATA given = 0;
+                if (!(l.type & XTYPF_NODATA)) {
+                    data_handle *src = data_of(d);
+                    if (src && src->app_owned) {
+                        given = data_new(client, src->bytes, src->size, src->item, src->fmt, 0);
+                        if (!given) {
+                            set_error(inst, DMLERR_MEMORY_ERROR);
+                            ok = FALSE;
+                        }
+                    } else if (src) {
+                        given = d;
+                        src->inst = client;
+                        d = 0;
+                    }
+                }
+                if (given || (l.type & XTYPF_NODATA)) {
+                    HCONV target = conv_handle(p);
+                    if (queue_callback(inst, target, XTYP_ADVDATA, l.fmt, l.item, given))
+                        drain_callbacks(client, target);
+                    else
+                        ok = FALSE;
+                }
             }
             data_release(d);
             if (conv_index(h) < 0)
                 break;
         }
     }
-    return TRUE;
+    return ok;
 }
 
 /* its conversations ended (the others told, when they may be), its data,
@@ -1183,11 +1447,8 @@ static void uninit(int inst, int tell)
         if (convs[c].used && convs[c].inst == inst)
             conv_end(c, tell);
     for (int i = 0; i < DATAS; i++)
-        if (datas[i].used && datas[i].inst == inst)
-            data_free(DATA_TAG | (DWORD)(i + 1));
-    for (int i = 0; i < PENDING; i++)
-        if (pend[i].used && pend[i].inst == inst)
-            pend[i].used = 0;
+        if (datas[i].handle && datas[i].inst == inst)
+            data_free(datas[i].handle);
     for (int k = 0; k < SERVICES; k++)
         if (in->services[k]) {
             HSZ service = in->services[k];
@@ -1247,7 +1508,7 @@ static HDDEDATA guest_data(win_dll_call *c, int inst, uint32_t far, DWORD n, DWO
 /* the caller a Win32 program: its "far" pointers flat (no 64K segments) */
 static int flat(void)
 {
-    return NE->size >= sizeof(win_dll_ne) && NE->task_flat &&
+    return NE->size >= WIN_DLL_NE_BASE_SIZE && NE->task_flat &&
            NE->task_flat((uint16_t)GetCurrentTask());
 }
 
@@ -1363,8 +1624,13 @@ static int ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *v)
         if (cb == 0xffffffffu)
             given = data;
         else if (data && ((type & XTYP_MASK) == (XTYP_POKE & XTYP_MASK) ||
-                          (type & XTYP_MASK) == (XTYP_EXECUTE & XTYP_MASK)))
+                          (type & XTYP_MASK) == (XTYP_EXECUTE & XTYP_MASK))) {
             given = guest_data(c, convs[ci].inst, data, cb, 0, item, fmt, 0);
+            if (!given) {
+                set_error(convs[ci].inst, DMLERR_MEMORY_ERROR);
+                return WINDLL_DWORD;
+            }
+        }
         *v = client_transaction(ci, given, item, fmt, type, timeout, &result);
         put32(c, result_far, result);
         return WINDLL_DWORD;
@@ -1426,7 +1692,7 @@ static int ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *v)
         uint16_t task = (uint16_t)GetCurrentTask();
         DWORD n = d ? d->size : 0;
         *v = 0;
-        if (!d || (!flat() && n > 0xfff0u) || NE->size < sizeof(win_dll_ne) || !NE->task_alloc)
+        if (!d || (!flat() && n > 0xfff0u) || NE->size < WIN_DLL_NE_BASE_SIZE || !NE->task_alloc)
             return WINDLL_DWORD;
         if (d->at && d->at_task != task) {
             NE->task_free(d->at_task, d->at);

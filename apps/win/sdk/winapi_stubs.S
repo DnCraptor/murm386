@@ -11788,6 +11788,23 @@ PrinterNeCallN:
     .ltorg
     .size PrinterNeCallN, .-PrinterNeCallN
 
+    .section .text.winapi.GetPackedDIBInfoN,"ax",%progbits
+    .global GetPackedDIBInfoN
+    .type GetPackedDIBInfoN, %function
+    .thumb_func
+GetPackedDIBInfoN:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #12]
+    ldr  r1, =140
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetPackedDIBInfoN, .-GetPackedDIBInfoN
+
     .section .text.winapi.GetOpenFileName,"ax",%progbits
     .global GetOpenFileName
     .type GetOpenFileName, %function

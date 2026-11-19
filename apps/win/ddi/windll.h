@@ -26,6 +26,7 @@
 #ifndef MURM_WINDLL_H
 #define MURM_WINDLL_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #define WINDLL_MAGIC   0x4C44574Eu       /* "NWDL" */
@@ -77,7 +78,12 @@ typedef struct win_dll_ne {
      * program ends (size covers them) */
     uint32_t (*task_alloc)(uint16_t task, uint32_t n);
     void (*task_free)(uint16_t task, uint32_t far);
+    /* Far-call thunk of an already loaded native DLL export in a Win16 task. */
+    uint32_t (*task_proc)(uint16_t task, const char *module, uint16_t ordinal);
 } win_dll_ne;
+
+/* Size of the original interface through task_free. */
+#define WIN_DLL_NE_BASE_SIZE offsetof(win_dll_ne, task_proc)
 
 typedef struct win_dll_export {
     uint16_t ordinal;               /* Win16's */

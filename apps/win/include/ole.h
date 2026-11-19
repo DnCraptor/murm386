@@ -2,8 +2,7 @@
  * ole.h - OLE 1.0's client library (OLECLI.DLL, a native DLL of WINN's:
  * apps/windll/olecli) for native callers, who take its functions with
  * LoadLibrary("OLECLI") and GetProcAddress. WINN has no OLE servers (no
- * registration database): a client's documents are registered, no object
- * is ever made.
+ * registration database): client documents can hold static pictures.
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
@@ -15,6 +14,20 @@
 typedef UINT OLESTATUS;
 typedef LONG LHCLIENTDOC;
 typedef WORD OLECLIPFORMAT;
+
+typedef struct WINN_OLEOBJECT OLEOBJECT, *LPOLEOBJECT;
+typedef struct WINN_OLECLIENT OLECLIENT, *LPOLECLIENT;
+
+typedef struct WINN_OLESTREAM OLESTREAM, *LPOLESTREAM;
+typedef struct {
+    DWORD (CALLBACK *Get)(LPOLESTREAM stream, void *data, DWORD size);
+    DWORD (CALLBACK *Put)(LPOLESTREAM stream, const void *data, DWORD size);
+} OLESTREAMVTBL;
+struct WINN_OLESTREAM {
+    const OLESTREAMVTBL *lpstbl;
+};
+
+#define OT_STATIC 3
 
 #define OLE_OK                  0
 #define OLE_WAIT_FOR_RELEASE    1
@@ -76,5 +89,26 @@ typedef OLESTATUS (WINAPI *OLEQUERYLINKFROMCLIP)(LPCSTR protocol, UINT render,
                                                  OLECLIPFORMAT format);
 typedef DWORD (WINAPI *OLEQUERYCLIENTVERSION)(void);
 typedef BOOL (WINAPI *OLEISDCMETA)(HDC dc);
+
+typedef OLESTATUS (WINAPI *OLECREATEFROMCLIP)(LPCSTR protocol, LPOLECLIENT client,
+    LHCLIENTDOC doc, LPCSTR name, LPOLEOBJECT *object, UINT render, OLECLIPFORMAT format);
+typedef OLESTATUS (WINAPI *OLEDELETE)(LPOLEOBJECT object);
+typedef OLESTATUS (WINAPI *OLECLONE)(LPOLEOBJECT object, LPOLECLIENT client,
+    LHCLIENTDOC doc, LPCSTR name, LPOLEOBJECT *copy);
+typedef OLESTATUS (WINAPI *OLEEQUAL)(LPOLEOBJECT first, LPOLEOBJECT second);
+typedef OLESTATUS (WINAPI *OLEDRAW)(LPOLEOBJECT object, HDC dc, const RECT *bounds,
+    const RECT *clip, HDC target);
+typedef OLESTATUS (WINAPI *OLECOPYTOCLIPBOARD)(LPOLEOBJECT object);
+typedef OLESTATUS (WINAPI *OLEQUERYTYPE)(LPOLEOBJECT object, LONG *type);
+typedef OLESTATUS (WINAPI *OLEQUERYBOUNDS)(LPOLEOBJECT object, RECT *bounds);
+typedef OLECLIPFORMAT (WINAPI *OLEENUMFORMATS)(LPOLEOBJECT object, OLECLIPFORMAT previous);
+typedef OLESTATUS (WINAPI *OLEGETDATA)(LPOLEOBJECT object, OLECLIPFORMAT format, HANDLE *data);
+typedef OLESTATUS (WINAPI *OLEENUMOBJECTS)(LHCLIENTDOC doc, LPOLEOBJECT *object);
+typedef OLESTATUS (WINAPI *OLERENAME)(LPOLEOBJECT object, LPCSTR name);
+typedef OLESTATUS (WINAPI *OLEQUERYNAME)(LPOLEOBJECT object, LPSTR name, UINT *count);
+typedef OLESTATUS (WINAPI *OLEQUERYSIZE)(LPOLEOBJECT object, DWORD *size);
+typedef OLESTATUS (WINAPI *OLESAVETOSTREAM)(LPOLEOBJECT object, LPOLESTREAM stream);
+typedef OLESTATUS (WINAPI *OLELOADFROMSTREAM)(LPOLESTREAM stream, LPCSTR protocol,
+    LPOLECLIENT client, LHCLIENTDOC doc, LPCSTR name, LPOLEOBJECT *object);
 
 #endif /* WINN_OLE_H */
