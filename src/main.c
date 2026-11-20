@@ -2016,16 +2016,13 @@ static bool init_emulator(void) {
 #else
     const bool direct_qspi_guest = true;
 #endif
+    size_t native_stack_top = fdos_native_stack_top(usable_psram, config.mem_size);
     if (direct_qspi_guest &&
-        usable_psram > FDOS_XMS_EMB_BASE_PHYS +
-                             ARM_ELF_NATIVE_STACK_ARENA_SIZE) {
+        native_stack_top > FDOS_XMS_EMB_BASE_PHYS + ARM_ELF_NATIVE_STACK_ARENA_SIZE) {
         uintptr_t low = (uintptr_t)PSRAM_BASE_ADDR + FDOS_XMS_EMB_BASE_PHYS;
-        uintptr_t guest_end = (uintptr_t)PSRAM_BASE_ADDR + config.mem_size;
-        uintptr_t stack_begin = (uintptr_t)PSRAM_BASE_ADDR + usable_psram -
-                                ARM_ELF_NATIVE_STACK_ARENA_SIZE;
-        uintptr_t high = guest_end < stack_begin ? guest_end : stack_begin;
-        if (high > low)
-            sdcard_enable_ff_qspi_cache((void *)low, (void *)high);
+        uintptr_t high = (uintptr_t)PSRAM_BASE_ADDR + native_stack_top -
+                         ARM_ELF_NATIVE_STACK_ARENA_SIZE;
+        sdcard_enable_ff_qspi_cache((void *)low, (void *)high);
     }
 
 #if REMOTE_MEM

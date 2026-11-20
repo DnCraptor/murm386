@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Rebuild everything of the native Windows: WINN.EXE (apps/win), the driver
+# Rebuild everything of the native Windows: WIN.COM and WINN.EXE (apps/win), the driver
 # modules (apps/windrv/*), the native DLLs (apps/windll/*) and the
 # applications (apps/winapps/*), each in a
 # fresh build directory, into apps/compiled. Mirrors build_win.bat.
@@ -61,9 +61,13 @@ for p in "${PROJECTS[@]}"; do
     # (the grep in braces: "|| true" after the pipe would reset PIPESTATUS)
     cmake --build "$dir" "${JOBS[@]}" 2>&1 | tee -a "$dir.log" | { grep -E "EZ image|warning|error" || true; }
     [[ ${PIPESTATUS[0]} -eq 0 ]] || { echo "build failed: $name (see $dir.log)" >&2; exit 1; }
-    # the EZ file this project wrote: the newest file in apps/compiled
-    out="$(ls -t "$COMPILED" | head -n 1)"
-    OUTPUTS+=("$out")
+    if [[ "$p" == "$WIN_DIR" ]]; then
+        OUTPUTS+=(win.com winn.exe)
+    else
+        # the EZ file this project wrote: the newest file in apps/compiled
+        out="$(ls -t "$COMPILED" | head -n 1)"
+        OUTPUTS+=("$out")
+    fi
 done
 
 CC="$(sed -n 's/^CMAKE_C_COMPILER:[A-Z]*=//p' "$BUILD_ROOT/$(basename "$WIN_DIR")/CMakeCache.txt")"

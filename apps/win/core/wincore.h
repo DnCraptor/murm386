@@ -9,6 +9,7 @@
 #include "windows.h"
 #include "../ddi/winddi.h"
 #include "../ddi/winmod.h"
+#include "ez_image.h"
 
 /* ---------------------------------------------------------------- handles */
 
@@ -255,7 +256,7 @@ int      win_boot(const char *exe_path, const win_display_driver *const *disp,
 int      user_init(void);                        /* user/dialog.c */
 
 /* dos_exec.c / module.c */
-int      win_dos_is_mz(const char *path);
+int      win_dos_is_image(const char *path);
 int      win_dos_is_ez(const char *path);
 UINT     win_dos_exec(const char *path, const char *args);
 
@@ -493,14 +494,6 @@ void   user_cursor_refresh(void);
 int    win_busy(void);
 
 /* module.c: an EZ image loaded and relocated */
-typedef struct {
-    void     *raw;              /* allocation to free */
-    uint8_t  *base;
-    void     *entry;
-    uint32_t  image_size;       /* image memory size, for entry bounds */
-    uint32_t  stack_size;       /* from the EZ header, 0 = default */
-} win_ez_image;
-int    win_ez_load(const char *path, win_ez_image *img);
 winapp_info *win_ez_read_info(const char *path);        /* win_alloc'd or NULL */
 winapp_info *win_app_info(const char *path);            /* task.c: also the host's */
 /* the SDK's application entry starts with a branch over WINAPP_MAGIC */

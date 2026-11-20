@@ -1,5 +1,5 @@
 @echo off
-rem Rebuild everything of the native Windows: WINN.EXE (apps\win), the driver
+rem Rebuild everything of the native Windows: WIN.COM and WINN.EXE (apps\win), the driver
 rem modules (apps\windrv\*), the native DLLs (apps\windll\*) and the
 rem applications (apps\winapps\*), each in a
 rem fresh build directory, into apps\compiled. Mirrors build_win.sh.
@@ -131,6 +131,10 @@ if errorlevel 1 (
     exit /b 1
 )
 findstr /c:"EZ image" /c:"warning" "!DIR!.log"
+if /i "!P!"=="%WIN_DIR%" (
+    set "OUTPUTS=!OUTPUTS! win.com winn.exe"
+    exit /b 0
+)
 rem the EZ file this project wrote: the newest file in apps\compiled
 for /f "delims=" %%F in ('dir /b /a-d /o-d "%COMPILED%"') do (
     set "OUTPUTS=!OUTPUTS! "%%F""

@@ -5,6 +5,9 @@
 #include "fdos.h"
 #include "sdcard.h"
 #include "psram_layout.h"
+#include "psram_alloc.h"
+#include "psram_init.h"
+#include "../mem.h"
 
 #define XMS_VERSION 0x00
 #define REQUEST_HMA 0x01
@@ -45,9 +48,25 @@ static inline uint16_t xms_memory_kb(void) {
 
 /* Extended memory reported by CMOS starts at 1 MiB and includes the HMA;
  * the EMB pool excludes the first 64 KiB (HMA). */
-static inline uint32_t emb_pool_size(void) {
+static uint32_t native_pool_size(void) {
+    const size_t reserved = FDOS_XMS_EMB_BASE_PHYS + ARM_ELF_NATIVE_STACK_ARENA_SIZE;
+    size_t usable = fdos_native_stack_top(psram_usable_size(), phys_mem_size);
+    return usable > reserved ? (uint32_t)(usable - reserved) & ~1023u : 0;
+}
+
+static uint32_t emb_pool_size(void) {
     uint16_t kb = xms_memory_kb();
-    return (kb > 64) ? ((uint32_t)(kb - 64) << 10) : 0;
+    uint32_t pool = kb > 64 ? (uint32_t)(kb - 64) << 10 : 0;
+#if !defined(NO_PAGING)
+    if (ega128_paging_active())
+        return pool;
+#endif
+    if (psram_usable_size() >= (1u << 20)) {
+        uint32_t native_limit = native_pool_size();
+        if (pool > native_limit)
+            pool = native_limit;
+    }
+    return pool;
 }
 
 static inline uint8_t *xms_ptr(uint32_t offset) {
@@ -77,17 +96,24 @@ static inline void xms_store8(uint32_t offset, uint8_t value)
 typedef struct {
     uint32_t base;   /* byte offset inside the EMB pool */
     uint32_t size;   /* bytes */
-    uint8_t  used;
-    uint8_t  locks;
+    uint8_t used;
+    uint8_t locks;
 } emb_handle_t;
 
-static emb_handle_t emb_handles[XMS_HANDLES + 1]; /* index 0 is never a valid handle */
+static emb_handle_t emb_handles[XMS_HANDLES + 1];
 
-static void xms_update_ff_qspi_floor(void)
+/* Native entries live at the bottom of the reserved PSRAM stack arena.
+ * XMS remains available before any native app has started and on paged RAM. */
+static fdos_psram_span *native_spans;
+static unsigned native_span_count;
+_Static_assert(sizeof(fdos_psram_span) * FDOS_NATIVE_SPANS <= FDOS_NATIVE_SPAN_TABLE_SIZE,
+               "native PSRAM slot table exceeds its reserve");
+
+static void xms_update_ff_qspi_floor(uint32_t minimum)
 {
-    uint32_t high = 0;
+    uint32_t high = minimum;
     for (int i = 1; i <= XMS_HANDLES; ++i) {
-        if (!emb_handles[i].used)
+        if (!emb_handles[i].used || emb_handles[i].size == 0)
             continue;
         uint32_t end = emb_handles[i].base + emb_handles[i].size;
         if (end > high)
@@ -95,6 +121,19 @@ static void xms_update_ff_qspi_floor(void)
     }
     sdcard_ff_qspi_cache_set_floor(
         SDCARD_FF_QSPI_OWNER_XMS,
+        (void *)((uintptr_t)PSRAM_BASE_ADDR + FDOS_XMS_EMB_BASE_PHYS + high));
+}
+
+static void native_update_ff_qspi_floor(void)
+{
+    uint32_t high = 0;
+    for (unsigned i = 0; i < native_span_count; ++i) {
+        const fdos_psram_span *span = &native_spans[i];
+        if (span->used && span->base + span->size > high)
+            high = span->base + span->size;
+    }
+    sdcard_ff_qspi_cache_set_floor(
+        SDCARD_FF_QSPI_OWNER_NATIVE,
         (void *)((uintptr_t)PSRAM_BASE_ADDR + FDOS_XMS_EMB_BASE_PHYS + high));
 }
 
@@ -126,60 +165,156 @@ static int emb_free_handle_count(void) {
     return n;
 }
 
-/* First-fit search for a gap of `size` bytes in the pool. Returns true and
- * the base offset on success. size == 0 is legal per XMS spec. */
-static bool emb_find_gap(uint32_t size, uint32_t *out_base) {
-    const uint32_t pool = emb_pool_size();
-    if (size > pool)
-        return false;
-    uint32_t cand = 0;
-    bool moved = true;
-    while (moved) {
-        moved = false;
-        for (int i = 1; i <= XMS_HANDLES; ++i) {
-            const emb_handle_t *h = &emb_handles[i];
-            if (!h->used || h->size == 0)
-                continue;
-            if (cand < h->base + h->size && h->base < cand + (size ? size : 1)) {
-                cand = h->base + h->size;
-                moved = true;
-            }
-        }
-        if (cand + size > pool)
-            return false;
+static void psram_scan_span(uint32_t base, uint32_t size,
+                            uint32_t *cursor, uint32_t *next)
+{
+    if (base + size <= *cursor)
+        return;
+    if (base <= *cursor) {
+        *cursor = base + size;
+        *next = 0;
+    } else if (base < *next) {
+        *next = base;
     }
-    *out_base = cand;
-    return true;
 }
 
-static void emb_free_stats(uint32_t *largest, uint32_t *total) {
-    const uint32_t pool = emb_pool_size();
-    uint32_t used = 0;
-    uint32_t big = 0;
-    /* total free */
-    for (int i = 1; i <= XMS_HANDLES; ++i)
-        if (emb_handles[i].used)
-            used += emb_handles[i].size;
-    *total = (pool > used) ? pool - used : 0;
-    /* largest gap: walk gaps between sorted extents (O(n^2), n<=64) */
-    uint32_t cursor = 0;
-    for (;;) {
-        /* find the used extent with the smallest base >= cursor */
-        uint32_t next_base = pool, next_end = pool;
-        for (int i = 1; i <= XMS_HANDLES; ++i) {
-            const emb_handle_t *h = &emb_handles[i];
-            if (h->used && h->size && h->base + h->size > cursor && h->base < next_base) {
-                next_base = h->base;
-                next_end = h->base + h->size;
-            }
+/* Walk the occupied ranges in address order, keeping the public handle
+ * indices stable. The same gaps drive allocation and free-space reporting. */
+static bool psram_next_gap(uint32_t cursor, uint32_t limit,
+                           uint32_t *begin, uint32_t *end)
+{
+    while (cursor < limit) {
+        uint32_t next = limit;
+        for (int i = 1; next && i <= XMS_HANDLES; ++i) {
+            const emb_handle_t *span = &emb_handles[i];
+            if (span->used && span->size)
+                psram_scan_span(span->base, span->size, &cursor, &next);
         }
-        if (next_base > cursor && next_base - cursor > big)
-            big = next_base - cursor;
-        if (next_base == pool)
-            break;
-        cursor = (next_end > cursor) ? next_end : cursor + 1;
+        for (unsigned i = 0; next && i < native_span_count; ++i) {
+            const fdos_psram_span *span = &native_spans[i];
+            if (span->used)
+                psram_scan_span(span->base, span->size, &cursor, &next);
+        }
+        if (next != 0) {
+            *begin = cursor;
+            *end = next;
+            return true;
+        }
     }
-    *largest = big;
+    return false;
+}
+
+static bool psram_find_gap(uint32_t size, uint32_t limit, uint32_t *out_base)
+{
+    uint32_t begin, end = 0;
+    while (psram_next_gap(end, limit, &begin, &end)) {
+        if (size <= end - begin) {
+            *out_base = begin;
+            return true;
+        }
+    }
+    if (size == 0) {
+        *out_base = limit;
+        return true;
+    }
+    return false;
+}
+
+static void psram_free_stats(uint32_t limit, uint32_t *largest, uint32_t *total)
+{
+    uint32_t begin, end = 0;
+    *largest = *total = 0;
+    while (psram_next_gap(end, limit, &begin, &end)) {
+        uint32_t size = end - begin;
+        *total += size;
+        if (size > *largest)
+            *largest = size;
+    }
+}
+
+fdos_psram_span *fdos_native_span_next(uint16_t owner, fdos_psram_span *previous)
+{
+    unsigned i = previous ? (unsigned)(previous - native_spans) + 1 : 0;
+    for (; i < native_span_count; ++i)
+        if (native_spans[i].used && native_spans[i].owner == owner)
+            return &native_spans[i];
+    return NULL;
+}
+
+static unsigned native_span_slot(void)
+{
+    unsigned i = 0;
+    for (; i < native_span_count; ++i)
+        if (!native_spans[i].used)
+            break;
+    return i;
+}
+
+fdos_psram_span *fdos_native_span_reserve(uint16_t owner, uint32_t size)
+{
+    uint32_t base;
+    size_t top = fdos_native_stack_top(psram_usable_size(), phys_mem_size);
+    unsigned slot = native_span_slot();
+    if (slot == FDOS_NATIVE_SPANS || size == 0 ||
+        !psram_find_gap(size, native_pool_size(), &base))
+        return NULL;
+    if (!native_spans) {
+        native_spans = (fdos_psram_span *)((uintptr_t)PSRAM_BASE_ADDR + top -
+                                           ARM_ELF_NATIVE_STACK_ARENA_SIZE);
+    }
+    fdos_psram_span *span = &native_spans[slot];
+    *span = (fdos_psram_span){ .base = base, .size = size, .owner = owner, .used = 1 };
+    if (slot == native_span_count)
+        ++native_span_count;
+    native_update_ff_qspi_floor();
+    return span;
+}
+
+uint32_t fdos_native_span_largest(void)
+{
+    uint32_t largest, total;
+    if (native_span_slot() == FDOS_NATIVE_SPANS)
+        return 0;
+    psram_free_stats(native_pool_size(), &largest, &total);
+    return largest;
+}
+
+uint32_t fdos_native_span_capacity(const fdos_psram_span *span)
+{
+    uint32_t begin, end;
+    uint32_t tail = span->base + span->size;
+    if (psram_next_gap(tail, native_pool_size(), &begin, &end) && begin == tail)
+        return end - span->base;
+    return span->size;
+}
+
+static void native_span_trim_table(void)
+{
+    while (native_span_count && !native_spans[native_span_count - 1].used)
+        --native_span_count;
+}
+
+void fdos_native_span_set_size(fdos_psram_span *span, uint32_t size)
+{
+    span->size = size;
+    span->used = size != 0;
+    if (size == 0)
+        native_span_trim_table();
+    native_update_ff_qspi_floor();
+}
+
+void fdos_native_span_release_owner(uint16_t owner)
+{
+    fdos_psram_span *span = NULL;
+    bool released = false;
+    while ((span = fdos_native_span_next(owner, span)) != NULL) {
+        span->used = 0;
+        released = true;
+    }
+    if (released) {
+        native_span_trim_table();
+        native_update_ff_qspi_floor();
+    }
 }
 
 #ifdef NO_HANDLER_DETECTOR
@@ -307,7 +442,10 @@ void reset_umb() {
         emb_handles[i].base = emb_handles[i].size = 0;
     }
     xms_handles = 0;
-    xms_update_ff_qspi_floor();
+    native_spans = NULL;
+    native_span_count = 0;
+    xms_update_ff_qspi_floor(0);
+    native_update_ff_qspi_floor();
 }
 
 /*
@@ -573,7 +711,7 @@ static bool xms_handler(CPU* cpu, bios_callback_params_t* params) {
             break;
         case QUERY_EMB: { // 08h
             uint32_t largest, total;
-            emb_free_stats(&largest, &total);
+            psram_free_stats(emb_pool_size(), &largest, &total);
             CPU_AX = (uint16_t)(largest >> 10); /* largest free block, KB */
             CPU_DX = (uint16_t)(total >> 10);   /* total free EMB, KB */
             CPU_BL = (largest == 0) ? 0xA0 : 0;
@@ -590,7 +728,7 @@ static bool xms_handler(CPU* cpu, bios_callback_params_t* params) {
             }
             const uint32_t size = (uint32_t)CPU_DX << 10;
             uint32_t base = 0;
-            if (!emb_find_gap(size, &base)) {
+            if (!psram_find_gap(size, emb_pool_size(), &base)) {
                 CPU_AX = 0;
                 CPU_BL = 0xA0; /* out of memory */
                 break;
@@ -600,7 +738,7 @@ static bool xms_handler(CPU* cpu, bios_callback_params_t* params) {
             emb_handles[hnd].base = base;
             emb_handles[hnd].size = size;
             xms_handles++;
-            xms_update_ff_qspi_floor();
+            xms_update_ff_qspi_floor(0);
             CPU_DX = (uint16_t)hnd;
             CPU_AX = 1;
             CPU_BL = 0;
@@ -621,7 +759,7 @@ static bool xms_handler(CPU* cpu, bios_callback_params_t* params) {
             emb_handles[hnd].used = 0;
             emb_handles[hnd].base = emb_handles[hnd].size = 0;
             if (xms_handles) xms_handles--;
-            xms_update_ff_qspi_floor();
+            xms_update_ff_qspi_floor(0);
             CPU_AX = 1;
             CPU_BL = 0;
             break;
@@ -883,7 +1021,7 @@ static bool xms_handler(CPU* cpu, bios_callback_params_t* params) {
             emb_handle_t *h = &emb_handles[hnd];
             if (new_size <= h->size) {
                 h->size = new_size;
-                xms_update_ff_qspi_floor();
+                xms_update_ff_qspi_floor(0);
                 CPU_AX = 1;
                 CPU_BL = 0;
                 break;
@@ -892,18 +1030,20 @@ static bool xms_handler(CPU* cpu, bios_callback_params_t* params) {
             const uint32_t old_base = h->base, old_size = h->size;
             h->used = 0;
             uint32_t base = 0;
-            bool ok = emb_find_gap(new_size, &base);
+            bool ok = psram_find_gap(new_size, emb_pool_size(), &base);
             h->used = 1;
             if (!ok) {
                 CPU_AX = 0;
                 CPU_BL = 0xA0; /* out of memory */
                 break;
             }
-            if (base != old_base && old_size)
+            if (base != old_base && old_size) {
+                xms_update_ff_qspi_floor(base + new_size);
                 xms_move_xms_to_xms(base, old_base, old_size);
+            }
             h->base = base;
             h->size = new_size;
-            xms_update_ff_qspi_floor();
+            xms_update_ff_qspi_floor(0);
             CPU_AX = 1;
             CPU_BL = 0;
             break;

@@ -1,11 +1,12 @@
 # Native Windows 3.x API for murm386
 
 An MIT-licensed implementation of the Windows 3.x API (KERNEL, GDI, USER
-subset) for native ARM programs. `WINN.EXE` is the Windows loader: it holds
+subset) for native ARM programs. `WIN.COM` loads the adjacent `WINN.EXE`
+into the native heap, which uses QSPI PSRAM first. `WINN.EXE` holds
 KERNEL, GDI, USER and the built-in drivers, loads driver modules, and runs
 applications (separate EZ files) as cooperative tasks, as Windows 3.x does.
 The preliminary 386 NE path is available through ordinary `WinExec` and
-`WINN PROGRAM.EXE`: a Win16 program of code segments and one data segment
+`WIN PROGRAM.EXE`: a Win16 program of code segments and one data segment
 (the small and medium models of Open Watcom, `wcl -bt=windows -l=windows
 -ms`/`-mm`) runs on the
 emulator's 386 core in 16-bit protected mode with its own GDT, with its
@@ -78,13 +79,13 @@ stack and enters it as any other program. Its `ExitProc` is not called.
 segments, the program's scrambled on disk, its loader in the script;
 `scripts/selfload.txt`).
 
-DOS MZ executables and native FDOS EZ executables can also be launched
+DOS MZ and COM executables and native FDOS EZ executables can also be launched
 through WinExec. They run full screen through FDOS EXEC, with the
 calling task's working drive and directories. WinExec returns when
 the DOS child exits, and WINN restores its display, palette and input.
-Native DOS executables can use the .EXE or .EZ extension and require QSPI
-PSRAM as when launched from FDOS. Use the existing Windows launch paths
-for Win16 NE, Win32 PE and Windows EZ applications.
+Native DOS executables can use the .EXE, .EZ or .COM extension and require
+QSPI PSRAM as when launched from FDOS. For a command without an extension
+WinExec tries .EXE first and then .COM in its normal launch directories.
 
 Word for Windows 1.0 (WINWORD.EXE, November 1989) runs so: it starts, asks
 for the user's name, opens Document1, takes typing, its menus and dialogs
@@ -654,7 +655,13 @@ script; `scripts/ow32.txt`), and `OW32S.EXE`, Win32s' DLLs and functions
 `OW32H.EXE`, COMDLG32's hooks and templates (`scripts/ow32h.txt`),
 `OW32D.EXE`, USER32's DDEML (`scripts/ow32d.txt`).
 
-    WINN [:] [program [arguments]]
+    WIN [:] [program [arguments]]
+
+Install `WIN.COM` and `WINN.EXE` together in the Windows directory.
+When installing over an existing Windows 3.x directory, replace its
+`WIN.COM`. `LH WIN` can place the launcher in an available UMB. Use the
+matching firmware for a shared PSRAM allocation map between XMS, WINN and
+its native DOS children.
 
 `WIN.INI` next to `WINN.EXE` (see the sample here) holds what programs
 keep with GetProfileString and WriteProfileString: [windows] (the mouse),
@@ -1039,7 +1046,7 @@ and build type. The scripts fix the build type (MinSizeRel) and take the SDK
 `PICO_SDK_PATH` / `PICO_TOOLCHAIN_PATH`); they end with the compiler, the SDK
 and a SHA-256 of every file, so two builds can be compared. One project:
 
-    cmake -S apps/win -B build-win                 # apps/compiled/winn.exe
+    cmake -S apps/win -B build-win                 # apps/compiled/{win.com,winn.exe}
     cmake --build build-win
     cmake -S apps/windrv/vga800 -B build-vga800    # apps/compiled/VGA800.DRV
     cmake --build build-vga800

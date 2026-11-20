@@ -1274,7 +1274,7 @@ static void run_cmd(const char *cmd)
         const char *reason =
             r == 2 ? "The file was not found." :
             r == 8 ? "There is not enough memory." :
-            r == 11 ? "It is not a Windows application." :
+            r == 11 ? "The executable format is invalid or unsupported." :
             r == 12 ? "Win16 NE requires a 386 or newer CPU." :
             r == 13 ? "This Win16 NE image layout is not supported." :
             "An unknown WinExec error occurred.";

@@ -513,7 +513,7 @@ static void run(const char *given, int minimized, int startup)
     wsprintf(msg, "Cannot run '%s':\n%s.", cmd,
              r == 2 ? "the file was not found" :
              r == 8 ? "there is not enough memory" :
-             r == 11 ? "it is not a Windows application" : "it cannot be started");
+             r == 11 ? "the executable format is invalid or unsupported" : "it cannot be started");
     MessageBox(hframe, msg, "Program Manager", MB_OK | MB_ICONEXCLAMATION);
 }
 

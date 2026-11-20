@@ -38,6 +38,7 @@ extern volatile uint32_t dos_diag_kernel_code;
 #include "../board_config.h"
 #include "sdcard.h"
 #include "psram_layout.h"
+#include "psram_alloc.h"
 
 /*
  * Keep this dependency narrow.  Including ../pc.h here pulls host stdio
@@ -60,7 +61,11 @@ static BOOL arm_native_runtime_available(void)
   /* Native ARM code/data addresses must remain stable for the lifetime of
      the process. Only physically detected QSPI PSRAM provides that model;
      SPI/SWAP guest paging deliberately has no stable native aliases. */
-  return psram_usable_size() >= (1u << 20);
+#if !defined(NO_PAGING)
+  if (guest_ram_base == ram_pages)
+    return FALSE;
+#endif
+  return fdos_native_stack_top(psram_usable_size(), phys_mem_size) >= (1u << 20);
 }
 
 /* The ARM native loader is the sole remaining consumer of a stable host
@@ -405,13 +410,6 @@ typedef struct arm_elf_sec_chunk {
   UWORD data_seg;           /* DOS data segment, 0 for application heap */
 } arm_elf_sec_chunk;
 
-typedef struct arm_app_heap_context {
-  ULONG begin;
-  ULONG end;
-  UBYTE ready;
-  UBYTE reserved[3];
-} arm_app_heap_context;
-
 typedef struct arm_elf_sec_state {
   ULONG offset;             /* primary-block offset for logical section 0 */
   ULONG size;
@@ -463,7 +461,7 @@ typedef struct arm_elf_load_meta {
   UBYTE allocation_high;
   UBYTE allocation_reserved[3];
   native_ez_process_info process_info;
-  arm_app_heap_context app_heap;
+  UWORD heap_owner;
 } arm_elf_load_meta;
 #pragma pack(pop)
 
@@ -477,26 +475,18 @@ typedef struct arm_ez_load_meta {
   UWORD dos_stack_seg;
   UWORD argc;
   native_ez_process_info process_info;
-  arm_app_heap_context app_heap;
 } arm_ez_load_meta;
 
 static const native_ez_process_info *arm_ez_active_process_info;
-static arm_app_heap_context *arm_app_active_heap;
-static int arm_native_process_is_active(void);
+static UWORD arm_app_heap_owner;
 
 const native_ez_process_info *arm_ez_get_process_info(void)
 {
   return arm_ez_active_process_info;
 }
 
-/*
- * Process-local native application heap.  The heap context belongs to the
- * EXEC child metadata, so nested native EXEC saves/restores allocator state
- * together with the active process.
- *
- * Allocation policy is unchanged from the former apps/api implementation:
- * application PSRAM first, ordinary DOS allocation second.
- */
+/* Each process grows its own arenas out of the shared XMS/PSRAM pool.
+ * Free blocks inside an arena use boundary tags for in-place realloc. */
 #define ARM_APP_HEAP_ALIGN       16u
 #define ARM_APP_BLOCK_FREE       1u
 #define ARM_APP_BLOCK_MAGIC      0x5053524du /* "PSRM" */
@@ -512,28 +502,6 @@ typedef struct arm_app_heap_block {
 _Static_assert(sizeof(arm_app_heap_block) == ARM_APP_HEAP_ALIGN,
                "native application heap header alignment");
 
-/* QSPI L2 is a discardable owner of the free PSRAM tail.  Native application
- * memory uses in-band heap headers, so the first implementation only raises
- * this high-water mark.  It never reclaims native heap space on free; that
- * conservative policy avoids exposing stale cache lines over live allocator
- * metadata and can be relaxed later when the heap moves to out-of-band extents. */
-static uintptr_t arm_ff_qspi_high_water;
-
-static void arm_ff_qspi_claim_until(uintptr_t end)
-{
-  if (end <= arm_ff_qspi_high_water)
-    return;
-  arm_ff_qspi_high_water = end;
-  sdcard_ff_qspi_cache_set_floor(SDCARD_FF_QSPI_OWNER_NATIVE,
-                                  (void *)end);
-}
-
-static uintptr_t arm_app_align_up(uintptr_t value)
-{
-  return (value + (ARM_APP_HEAP_ALIGN - 1u)) &
-         ~(uintptr_t)(ARM_APP_HEAP_ALIGN - 1u);
-}
-
 static ULONG arm_app_block_size(const arm_app_heap_block *block)
 {
   return block->size_flags & ~ARM_APP_BLOCK_FREE;
@@ -544,241 +512,243 @@ static int arm_app_block_is_free(const arm_app_heap_block *block)
   return (block->size_flags & ARM_APP_BLOCK_FREE) != 0;
 }
 
-static uintptr_t arm_app_heap_begin(void)
+static uintptr_t arm_app_span_begin(const fdos_psram_span *span)
 {
-  return arm_app_active_heap != NULL ? (uintptr_t)arm_app_active_heap->begin : 0;
+  return (uintptr_t)PSRAM_BASE_ADDR + FDOS_XMS_EMB_BASE_PHYS + span->base;
 }
 
-static uintptr_t arm_app_heap_end(void)
+static uintptr_t arm_app_span_end(const fdos_psram_span *span)
 {
-  return arm_app_active_heap != NULL ? (uintptr_t)arm_app_active_heap->end : 0;
+  return arm_app_span_begin(span) + span->size;
 }
 
-static int arm_app_heap_init(void)
-{
-  uintptr_t begin;
-  uintptr_t end;
-  arm_app_heap_block *first;
-
-  if (arm_app_active_heap == NULL)
-    return FALSE;
-  if (arm_app_active_heap->ready)
-    return arm_app_active_heap->begin != 0;
-
-  arm_app_active_heap->ready = TRUE;
-  begin = arm_app_align_up((uintptr_t)arm_app_active_heap->begin);
-  end = (uintptr_t)arm_app_active_heap->end &
-        ~(uintptr_t)(ARM_APP_HEAP_ALIGN - 1u);
-
-  if (begin == 0 || end <= begin ||
-      end - begin < sizeof(arm_app_heap_block) + ARM_APP_MIN_PAYLOAD)
-    return FALSE;
-
-  arm_app_active_heap->begin = (ULONG)begin;
-  arm_app_active_heap->end = (ULONG)end;
-  first = (arm_app_heap_block *)begin;
-  arm_ff_qspi_claim_until(begin + sizeof(*first));
-  first->size_flags = (ULONG)(end - begin) | ARM_APP_BLOCK_FREE;
-  first->prev_size = 0;
-  first->magic = ARM_APP_BLOCK_MAGIC;
-  first->reserved = 0;
-  return TRUE;
-}
-
-static arm_app_heap_block *arm_app_next(arm_app_heap_block *block)
+static arm_app_heap_block *arm_app_next(const fdos_psram_span *span,
+                                        const arm_app_heap_block *block)
 {
   uintptr_t next = (uintptr_t)block + arm_app_block_size(block);
-  return next < arm_app_heap_end() ? (arm_app_heap_block *)next : NULL;
+  return next < arm_app_span_end(span) ? (arm_app_heap_block *)next : NULL;
 }
 
-static arm_app_heap_block *arm_app_prev(arm_app_heap_block *block)
+static int arm_app_block_valid(const fdos_psram_span *span,
+                                const arm_app_heap_block *block)
 {
-  uintptr_t begin = arm_app_heap_begin();
-
-  if (block->prev_size == 0 ||
-      (uintptr_t)block < begin + block->prev_size)
-    return NULL;
-  return (arm_app_heap_block *)((uintptr_t)block - block->prev_size);
-}
-
-static int arm_app_block_valid(const arm_app_heap_block *block)
-{
-  uintptr_t begin = arm_app_heap_begin();
-  uintptr_t end = arm_app_heap_end();
   uintptr_t p = (uintptr_t)block;
+  uintptr_t end = arm_app_span_end(span);
   ULONG size;
 
-  if (begin == 0 || p < begin || p >= end ||
-      block->magic != ARM_APP_BLOCK_MAGIC)
+  if ((p & (ARM_APP_HEAP_ALIGN - 1u)) != 0 || p < arm_app_span_begin(span) ||
+      p >= end || end - p < sizeof(*block) || block->magic != ARM_APP_BLOCK_MAGIC)
     return FALSE;
 
   size = arm_app_block_size(block);
-  return size >= sizeof(arm_app_heap_block) + ARM_APP_MIN_PAYLOAD &&
-         (size & (ARM_APP_HEAP_ALIGN - 1u)) == 0 &&
-         size <= end - p;
+  return size >= sizeof(*block) + ARM_APP_MIN_PAYLOAD &&
+         (size & (ARM_APP_HEAP_ALIGN - 1u)) == 0 && size <= end - p;
 }
 
-static void arm_app_fix_next_prev(arm_app_heap_block *block)
+static void arm_app_init_block(arm_app_heap_block *block, ULONG size, ULONG prev)
 {
-  arm_app_heap_block *next = arm_app_next(block);
+  *block = (arm_app_heap_block){
+    .size_flags = size | ARM_APP_BLOCK_FREE,
+    .prev_size = prev,
+    .magic = ARM_APP_BLOCK_MAGIC
+  };
+}
+
+static void arm_app_fix_next_prev(const fdos_psram_span *span,
+                                  arm_app_heap_block *block)
+{
+  arm_app_heap_block *next = arm_app_next(span, block);
   if (next != NULL)
     next->prev_size = arm_app_block_size(block);
 }
 
-static void arm_app_split_allocated(arm_app_heap_block *block, ULONG wanted)
+static void arm_app_split_allocated(const fdos_psram_span *span,
+                                    arm_app_heap_block *block, ULONG wanted)
 {
   ULONG old_size = arm_app_block_size(block);
   ULONG remainder = old_size - wanted;
 
-  /* The final free block's payload may currently be occupied by discardable
-   * QSPI cache lines.  Shrink the cache before writing a new tail header or
-   * returning any part of that payload to the native application. */
-  if (arm_app_next(block) == NULL)
-    arm_ff_qspi_claim_until((uintptr_t)block + wanted + sizeof(*block));
-
-  if (remainder >= sizeof(arm_app_heap_block) + ARM_APP_MIN_PAYLOAD) {
-    arm_app_heap_block *tail =
-        (arm_app_heap_block *)((uintptr_t)block + wanted);
-
+  if (remainder >= sizeof(*block) + ARM_APP_MIN_PAYLOAD) {
+    arm_app_heap_block *next = arm_app_next(span, block);
+    arm_app_heap_block *tail = (arm_app_heap_block *)((uintptr_t)block + wanted);
+    if (next && arm_app_block_is_free(next))
+      remainder += arm_app_block_size(next);
     block->size_flags = wanted;
-    tail->size_flags = remainder | ARM_APP_BLOCK_FREE;
-    tail->prev_size = wanted;
-    tail->magic = ARM_APP_BLOCK_MAGIC;
-    tail->reserved = 0;
-    arm_app_fix_next_prev(tail);
+    arm_app_init_block(tail, remainder, wanted);
+    arm_app_fix_next_prev(span, tail);
   } else {
     block->size_flags = old_size;
-    arm_app_fix_next_prev(block);
+    arm_app_fix_next_prev(span, block);
   }
 }
 
-static void *arm_app_psram_malloc(size_t size)
+static ULONG arm_app_wanted(size_t size)
 {
-  uintptr_t cursor;
-  ULONG wanted;
-
+  if (size > UINT32_MAX - sizeof(arm_app_heap_block) - 1023u)
+    return 0;
   if (size == 0)
     size = 1;
-  if (!arm_app_heap_init() ||
-      size > 0xfffffffful - sizeof(arm_app_heap_block) -
-             (ARM_APP_HEAP_ALIGN - 1u))
+  return (ULONG)(size + sizeof(arm_app_heap_block) + ARM_APP_HEAP_ALIGN - 1u) &
+         ~(ARM_APP_HEAP_ALIGN - 1u);
+}
+
+static void arm_app_trim_tail(fdos_psram_span *span, arm_app_heap_block *block)
+{
+  ULONG offset = (ULONG)((uintptr_t)block - arm_app_span_begin(span));
+  ULONG keep = (offset + sizeof(*block) + ARM_APP_MIN_PAYLOAD + 1023u) & ~1023u;
+  if (keep < span->size) {
+    block->size_flags = (keep - offset) | ARM_APP_BLOCK_FREE;
+    fdos_native_span_set_size(span, keep);
+  }
+}
+
+static BOOL arm_app_grow(fdos_psram_span *span, ULONG extra)
+{
+  ULONG capacity = fdos_native_span_capacity(span);
+  extra = (extra + 1023u) & ~1023u;
+  if (extra > capacity - span->size)
+    return FALSE;
+  fdos_native_span_set_size(span, span->size + extra);
+  return TRUE;
+}
+
+static void *arm_app_psram_malloc_for(UWORD owner, size_t size)
+{
+  fdos_psram_span *span = NULL;
+  arm_app_heap_block *block;
+  ULONG wanted = arm_app_wanted(size);
+
+  if (!owner || !wanted)
     return NULL;
 
-  wanted = (ULONG)(size + sizeof(arm_app_heap_block) +
-                   (ARM_APP_HEAP_ALIGN - 1u)) &
-           ~(ARM_APP_HEAP_ALIGN - 1u);
-
-  for (cursor = arm_app_heap_begin(); cursor < arm_app_heap_end(); ) {
-    arm_app_heap_block *block = (arm_app_heap_block *)cursor;
-
-    if (!arm_app_block_valid(block))
-      return NULL;
-    if (arm_app_block_is_free(block) &&
-        arm_app_block_size(block) >= wanted) {
-      arm_app_split_allocated(block, wanted);
-      return (void *)(block + 1);
+  while ((span = fdos_native_span_next(owner, span)) != NULL) {
+    arm_app_heap_block *last = NULL;
+    for (block = (arm_app_heap_block *)arm_app_span_begin(span);
+         block; block = arm_app_next(span, block)) {
+      if (!arm_app_block_valid(span, block))
+        return NULL;
+      if (arm_app_block_is_free(block) && arm_app_block_size(block) >= wanted) {
+        arm_app_split_allocated(span, block, wanted);
+        return block + 1;
+      }
+      last = block;
     }
-    cursor += arm_app_block_size(block);
+
+    ULONG old_size = span->size;
+    ULONG tail = arm_app_block_is_free(last) ? arm_app_block_size(last) : 0;
+    if (arm_app_grow(span, wanted - tail)) {
+      ULONG added = span->size - old_size;
+      if (tail) {
+        block = last;
+        block->size_flags = (tail + added) | ARM_APP_BLOCK_FREE;
+      } else {
+        block = (arm_app_heap_block *)(arm_app_span_begin(span) + old_size);
+        arm_app_init_block(block, added, arm_app_block_size(last));
+      }
+      arm_app_split_allocated(span, block, wanted);
+      return block + 1;
+    }
   }
-  return NULL;
+
+  span = fdos_native_span_reserve(owner, (wanted + 1023u) & ~1023u);
+  if (!span)
+    return NULL;
+  block = (arm_app_heap_block *)arm_app_span_begin(span);
+  arm_app_init_block(block, span->size, 0);
+  arm_app_split_allocated(span, block, wanted);
+  return block + 1;
 }
 
 static size_t arm_app_psram_largest(void)
 {
-  uintptr_t cursor;
-  size_t largest = 0;
-
-  if (!arm_app_heap_init())
+  if (!arm_app_heap_owner)
     return 0;
-
-  for (cursor = arm_app_heap_begin(); cursor < arm_app_heap_end(); ) {
-    arm_app_heap_block *block = (arm_app_heap_block *)cursor;
-    ULONG total;
-
-    if (!arm_app_block_valid(block))
-      return 0;
-    total = arm_app_block_size(block);
-    if (arm_app_block_is_free(block) && total > sizeof(*block)) {
-      size_t payload = total - sizeof(*block);
-      if (payload > largest)
-        largest = payload;
+  ULONG largest = fdos_native_span_largest();
+  fdos_psram_span *span = NULL;
+  while ((span = fdos_native_span_next(arm_app_heap_owner, span)) != NULL) {
+    ULONG tail = 0;
+    for (arm_app_heap_block *block = (arm_app_heap_block *)arm_app_span_begin(span);
+         block; block = arm_app_next(span, block)) {
+      if (!arm_app_block_valid(span, block))
+        return 0;
+      tail = arm_app_block_is_free(block) ? arm_app_block_size(block) : 0;
+      if (tail > largest)
+        largest = tail;
     }
-    cursor += total;
+    ULONG available = tail + fdos_native_span_capacity(span) - span->size;
+    if (available > largest)
+      largest = available;
   }
-  return largest;
+  return largest > sizeof(arm_app_heap_block) ? largest - sizeof(arm_app_heap_block) : 0;
 }
 
-static int arm_app_psram_owns(const void *ptr)
+static fdos_psram_span *arm_app_psram_span(const void *ptr)
 {
-  uintptr_t p;
-
-  if (ptr == NULL || !arm_app_heap_init())
-    return FALSE;
-  p = (uintptr_t)ptr;
-  return p >= arm_app_heap_begin() + sizeof(arm_app_heap_block) &&
-         p < arm_app_heap_end();
+  fdos_psram_span *span = NULL;
+  uintptr_t p = (uintptr_t)ptr;
+  if (!arm_app_heap_owner || p < (uintptr_t)PSRAM_BASE_ADDR + FDOS_XMS_EMB_BASE_PHYS)
+    return NULL;
+  while ((span = fdos_native_span_next(arm_app_heap_owner, span)) != NULL)
+    if (p >= arm_app_span_begin(span) + sizeof(arm_app_heap_block) &&
+        p < arm_app_span_end(span))
+      return span;
+  return NULL;
 }
 
-static void arm_app_psram_free(void *ptr)
+static void arm_app_psram_free(fdos_psram_span *span, void *ptr)
 {
-  arm_app_heap_block *block = ((arm_app_heap_block *)ptr) - 1;
-  arm_app_heap_block *next;
-  arm_app_heap_block *prev;
-  ULONG size;
-
-  if (!arm_app_block_valid(block) || arm_app_block_is_free(block))
+  arm_app_heap_block *block = (arm_app_heap_block *)((uintptr_t)ptr - sizeof(*block));
+  if (!arm_app_block_valid(span, block) || arm_app_block_is_free(block))
     return;
 
-  size = arm_app_block_size(block);
+  ULONG size = arm_app_block_size(block);
+  arm_app_heap_block *next = arm_app_next(span, block);
+  if (next && arm_app_block_is_free(next))
+    size += arm_app_block_size(next);
+
+  if (block->prev_size && block->prev_size <= (uintptr_t)block - arm_app_span_begin(span)) {
+    arm_app_heap_block *prev = (arm_app_heap_block *)((uintptr_t)block - block->prev_size);
+    if (arm_app_block_valid(span, prev) && arm_app_block_is_free(prev)) {
+      size += arm_app_block_size(prev);
+      block = prev;
+    }
+  }
+
+  if (size == span->size) {
+    fdos_native_span_set_size(span, 0);
+    return;
+  }
   block->size_flags = size | ARM_APP_BLOCK_FREE;
-
-  next = arm_app_next(block);
-  if (next != NULL && arm_app_block_valid(next) &&
-      arm_app_block_is_free(next)) {
-    block->size_flags =
-        (size + arm_app_block_size(next)) | ARM_APP_BLOCK_FREE;
-    size = arm_app_block_size(block);
-    arm_app_fix_next_prev(block);
-  }
-
-  prev = arm_app_prev(block);
-  if (prev != NULL && arm_app_block_valid(prev) &&
-      arm_app_block_is_free(prev)) {
-    prev->size_flags =
-        (arm_app_block_size(prev) + size) | ARM_APP_BLOCK_FREE;
-    arm_app_fix_next_prev(prev);
-  }
+  arm_app_fix_next_prev(span, block);
+  if (!arm_app_next(span, block))
+    arm_app_trim_tail(span, block);
 }
 
-static void *arm_app_psram_realloc(void *ptr, size_t size)
+static void *arm_app_psram_realloc(fdos_psram_span *span,
+                                   arm_app_heap_block *block, size_t size)
 {
-  arm_app_heap_block *block = ((arm_app_heap_block *)ptr) - 1;
-  arm_app_heap_block *next;
-  ULONG old_total;
-  ULONG wanted;
-
-  if (!arm_app_block_valid(block) || arm_app_block_is_free(block) ||
-      size > 0xfffffffful - sizeof(*block) - (ARM_APP_HEAP_ALIGN - 1u))
+  ULONG wanted = arm_app_wanted(size);
+  if (!wanted)
     return NULL;
 
-  old_total = arm_app_block_size(block);
-  wanted = (ULONG)(size + sizeof(*block) + (ARM_APP_HEAP_ALIGN - 1u)) &
-           ~(ARM_APP_HEAP_ALIGN - 1u);
+  ULONG available = arm_app_block_size(block);
+  arm_app_heap_block *next = arm_app_next(span, block);
+  if (wanted > available && next && arm_app_block_is_free(next))
+    available += arm_app_block_size(next);
 
-  if (wanted <= old_total) {
-    arm_app_split_allocated(block, wanted);
-    return ptr;
+  if (wanted > available) {
+    ULONG old_size = span->size;
+    if ((uintptr_t)block + available != arm_app_span_end(span) ||
+        !arm_app_grow(span, wanted - available))
+      return NULL;
+    available += span->size - old_size;
   }
-
-  next = arm_app_next(block);
-  if (next != NULL && arm_app_block_valid(next) &&
-      arm_app_block_is_free(next) &&
-      old_total + arm_app_block_size(next) >= wanted) {
-    block->size_flags = old_total + arm_app_block_size(next);
-    arm_app_split_allocated(block, wanted);
-    return ptr;
-  }
-  return NULL;
+  block->size_flags = available;
+  arm_app_split_allocated(span, block, wanted);
+  next = arm_app_next(span, block);
+  if (next && arm_app_block_is_free(next) && !arm_app_next(span, next))
+    arm_app_trim_tail(span, next);
+  return block + 1;
 }
 
 static UWORD arm_app_dos_segment(const void *ptr)
@@ -836,7 +806,7 @@ void *arm_native_app_malloc(size_t size)
   void *ptr;
   if (!arm_native_runtime_available())
     return NULL;
-  ptr = arm_app_psram_malloc(size);
+  ptr = arm_app_psram_malloc_for(arm_app_heap_owner, size);
   return ptr != NULL ? ptr : arm_app_dos_malloc(size);
 }
 
@@ -848,8 +818,9 @@ void arm_native_app_free(void *ptr)
     return;
   if (ptr == NULL)
     return;
-  if (arm_app_psram_owns(ptr)) {
-    arm_app_psram_free(ptr);
+  fdos_psram_span *span = arm_app_psram_span(ptr);
+  if (span) {
+    arm_app_psram_free(span, ptr);
     return;
   }
 
@@ -887,15 +858,16 @@ void *arm_native_app_realloc(void *ptr, size_t size)
     return NULL;
   }
 
-  if (arm_app_psram_owns(ptr)) {
+  fdos_psram_span *span = arm_app_psram_span(ptr);
+  if (span) {
     arm_app_heap_block *block = ((arm_app_heap_block *)ptr) - 1;
     size_t old_payload;
 
-    if (!arm_app_block_valid(block) || arm_app_block_is_free(block))
+    if (!arm_app_block_valid(span, block) || arm_app_block_is_free(block))
       return NULL;
     old_payload = arm_app_block_size(block) - sizeof(*block);
 
-    new_ptr = arm_app_psram_realloc(ptr, size);
+    new_ptr = arm_app_psram_realloc(span, block, size);
     if (new_ptr != NULL)
       return new_ptr;
 
@@ -904,7 +876,7 @@ void *arm_native_app_realloc(void *ptr, size_t size)
     if (new_ptr == NULL)
       return NULL;
     dos_api_memcpy(new_ptr, ptr, old_payload < size ? old_payload : size);
-    arm_app_psram_free(ptr);
+    arm_app_psram_free(span, ptr);
     return new_ptr;
   }
 
@@ -1560,7 +1532,7 @@ static void arm_elf_report_symbol_oom(COUNT fd, arm_elf_load_meta *meta,
   ULONG low_free, low_largest;
   ULONG umb_free, umb_largest;
   size_t app_largest;
-  arm_app_heap_context *saved_app_heap;
+  UWORD saved_heap_owner;
   int have_sym;
 
   arm_elf_loader_progress_end(meta);
@@ -1573,10 +1545,10 @@ static void arm_elf_report_symbol_oom(COUNT fd, arm_elf_load_meta *meta,
     strcpy((char *)sym_name, "?");
   arm_elf_pool_free_stats(FALSE, &low_free, &low_largest);
   arm_elf_pool_free_stats(TRUE, &umb_free, &umb_largest);
-  saved_app_heap = arm_app_active_heap;
-  arm_app_active_heap = &meta->app_heap;
+  saved_heap_owner = arm_app_heap_owner;
+  arm_app_heap_owner = meta->heap_owner;
   app_largest = arm_app_psram_largest();
-  arm_app_active_heap = saved_app_heap;
+  arm_app_heap_owner = saved_heap_owner;
 
   if (have_sym)
     dos_printf("ARM ELF: symbol %s in section %u %s does not fit DOS memory\r\n",
@@ -1610,13 +1582,10 @@ static void arm_elf_append_chunk(arm_elf_sec_state *state,
 static void arm_elf_free_extra_blocks(arm_elf_load_meta *meta)
 {
   arm_elf_sec_state *states;
-  arm_app_heap_context *saved_app_heap;
   UWORD i;
 
   if (meta == NULL)
     return;
-  saved_app_heap = arm_app_active_heap;
-  arm_app_active_heap = &meta->app_heap;
   states = arm_elf_states(meta);
   for (i = 0; i < meta->shnum; ++i) {
     ULONG chunk_addr = states[i].extra_chunks;
@@ -1626,15 +1595,12 @@ static void arm_elf_free_extra_blocks(arm_elf_load_meta *meta)
       UWORD mcb_seg = chunk->mcb_seg;
       if (mcb_seg != 0)
         DosMemFree(mcb_seg);
-      else
-        arm_native_app_free(chunk);
       chunk_addr = next_addr;
     }
     states[i].extra_chunks = 0;
   }
   meta->extra_block_count = 0;
   meta->extra_block_bytes = 0;
-  arm_app_active_heap = saved_app_heap;
 }
 
 static UBYTE arm_elf_startup_kind(const BYTE *name, ULONG type,
@@ -2441,19 +2407,19 @@ retry_pool:
 
 app_heap_fallback:
     {
-      arm_app_heap_context *saved_app_heap = arm_app_active_heap;
+      UWORD saved_heap_owner = arm_app_heap_owner;
       size_t largest;
       size_t overhead;
       size_t alloc_size;
       void *allocation;
       uintptr_t native_base;
 
-      arm_app_active_heap = &meta->app_heap;
+      arm_app_heap_owner = meta->heap_owner;
       largest = arm_app_psram_largest();
       overhead = sizeof(arm_elf_sec_chunk) +
                  (sh.addralign > 1 ? (size_t)sh.addralign - 1u : 0u);
       if (largest <= overhead) {
-        arm_app_active_heap = saved_app_heap;
+        arm_app_heap_owner = saved_heap_owner;
         arm_elf_report_symbol_oom(fd, meta, sec_num, &sh, logical, 0);
         return DE_NOMEM;
       }
@@ -2465,12 +2431,12 @@ app_heap_fallback:
         rc = arm_elf_safe_piece_end(fd, meta, sec_num, logical, capacity,
                                     sh.size, &piece_end);
         if (rc != SUCCESS) {
-          arm_app_active_heap = saved_app_heap;
+          arm_app_heap_owner = saved_heap_owner;
           return rc;
         }
       }
       if (piece_end <= logical) {
-        arm_app_active_heap = saved_app_heap;
+        arm_app_heap_owner = saved_heap_owner;
         arm_elf_report_symbol_oom(fd, meta, sec_num, &sh, logical, capacity);
         return DE_NOMEM;
       }
@@ -2478,10 +2444,10 @@ app_heap_fallback:
       piece_size = piece_end - logical;
       alloc_size = overhead + piece_size;
       allocation = arm_native_app_malloc(alloc_size);
-      if (allocation == NULL || !arm_app_psram_owns(allocation)) {
+      if (allocation == NULL || !arm_app_psram_span(allocation)) {
         if (allocation != NULL)
           arm_native_app_free(allocation);
-        arm_app_active_heap = saved_app_heap;
+        arm_app_heap_owner = saved_heap_owner;
         arm_elf_report_symbol_oom(fd, meta, sec_num, &sh, logical, capacity);
         return DE_NOMEM;
       }
@@ -2492,7 +2458,7 @@ app_heap_fallback:
                                                   sh.addralign);
       if ((size_t)data_off + piece_size > alloc_size) {
         arm_native_app_free(allocation);
-        arm_app_active_heap = saved_app_heap;
+        arm_app_heap_owner = saved_heap_owner;
         return DE_NOMEM;
       }
 
@@ -2503,7 +2469,7 @@ app_heap_fallback:
                                          sh.offset + logical, piece_size);
         if (rc != SUCCESS) {
           arm_native_app_free(allocation);
-          arm_app_active_heap = saved_app_heap;
+          arm_app_heap_owner = saved_heap_owner;
           dos_printf("ARM ELF: cannot read section %u bytes %lu..%lu "
                      "into application heap\r\n",
                      (unsigned)sec_num, logical, piece_end);
@@ -2523,7 +2489,7 @@ app_heap_fallback:
       ++meta->extra_block_count;
       meta->extra_block_bytes += (ULONG)alloc_size;
       logical = piece_end;
-      arm_app_active_heap = saved_app_heap;
+      arm_app_heap_owner = saved_heap_owner;
     }
   }
 
@@ -2836,12 +2802,14 @@ void doom_stack_guard_check(unsigned stage)
 
 static uintptr_t arm_elf_native_stack_arena_end(void)
 {
-  return (uintptr_t)PSRAM_BASE_ADDR + (uintptr_t)psram_usable_size();
+  return (uintptr_t)PSRAM_BASE_ADDR +
+         fdos_native_stack_top(psram_usable_size(), phys_mem_size);
 }
 
 static uintptr_t arm_elf_native_stack_arena_begin(void)
 {
-  return arm_elf_native_stack_arena_end() - ARM_ELF_NATIVE_STACK_ARENA_SIZE;
+  return arm_elf_native_stack_arena_end() - ARM_ELF_NATIVE_STACK_ARENA_SIZE +
+         FDOS_NATIVE_SPAN_TABLE_SIZE;
 }
 
 static int arm_elf_native_stack_acquire(ULONG size, uintptr_t *bottom,
@@ -3271,7 +3239,7 @@ static int arm_ez_apply_reloc(BYTE *base,
                               const struct ez_file_header *header,
                               const struct ez_reloc *rel)
 {
-  return ez_apply_reloc(base, EZ_IMAGE_RVA + header->image_mem_size, rel)
+  return ez_apply_reloc((uint8_t *)base, EZ_IMAGE_RVA + header->image_mem_size, rel)
       ? DE_INVLDFMT : SUCCESS;
 }
 
@@ -3353,8 +3321,6 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   int image_in_low = FALSE;
   BYTE *image_base;
   BYTE *image_data;
-  uintptr_t psram_image_addr = 0;
-  uintptr_t app_psram_begin;
   UWORD final_paras;
   UWORD alloc_mcb = 0, asize = 0, load_seg;
   UWORD env_mcb = 0;
@@ -3490,9 +3456,9 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
     int low_rc;
     fail_stage = "guest largest-block query";
     low_rc = ExecMemLargest(&low_largest, low_required_paras);
-    if (low_rc != SUCCESS)
+    if (low_rc != SUCCESS && low_rc != DE_NOMEM)
       rc = low_rc;
-    else if (low_required_paras != 0 && low_largest >= low_required_paras)
+    else if (low_rc == SUCCESS && low_required_paras != 0 && low_largest >= low_required_paras)
       image_in_low = TRUE;
   }
 #if DIAG
@@ -3548,8 +3514,11 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
     dos_printf("ARM EZ: load failed at %s, rc=%d\r\n", fail_stage, rc);
     if (reserved_stack_mcb != 0)
       DosMemFree(reserved_stack_mcb);
+    if (alloc_mcb != 0)
+      DosMemFree(alloc_mcb);
     if (env_mcb != 0)
       DosMemFree(env_mcb);
+    DosCloseSft(fd, FALSE);
     return (COUNT)rc;
   }
   load_seg = alloc_mcb + 1;
@@ -3563,44 +3532,19 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
       rc = DE_INVLDFMT;
       goto fail;
     }
-    app_psram_begin =
-        (uintptr_t)PSRAM_BASE_ADDR + ARM_ELF_APP_PSRAM_BEGIN_OFFSET;
   } else {
-    uintptr_t psram_end = arm_elf_native_stack_arena_begin();
-
-    if (arm_native_process_is_active()) {
-      rc = arm_ez_reject(DE_NOMEM,
-          "PSRAM fallback is unsafe during nested native EXEC");
+    fail_stage = "PSRAM image allocation";
+    image_base = arm_app_psram_malloc_for(load_seg, image_end);
+    if (!image_base) {
+      rc = DE_NOMEM;
       goto fail;
     }
-    psram_image_addr =
-        (uintptr_t)PSRAM_BASE_ADDR + ARM_ELF_APP_PSRAM_BEGIN_OFFSET;
-#if DIAG
-    dos_printf("ARM EZ: PSRAM image=%08lx end=%08lx available=%lu need=%lu\r\n",
-               (ULONG)psram_image_addr, (ULONG)psram_end,
-               (ULONG)(psram_end - psram_image_addr),
-               header.image_mem_size);
-#endif
-    if (psram_image_addr < EZ_IMAGE_RVA ||
-        header.image_mem_size > (ULONG)(psram_end - psram_image_addr)) {
-      rc = arm_ez_reject(DE_NOMEM, "EZ image does not fit application PSRAM");
-      goto fail;
-    }
-    arm_ff_qspi_claim_until(
-        (psram_image_addr + header.image_mem_size + 15u) & ~(uintptr_t)15u);
-    image_data = (BYTE *)psram_image_addr;
-    image_base = image_data - EZ_IMAGE_RVA;
+    image_data = image_base + EZ_IMAGE_RVA;
     fail_stage = "PSRAM image read/staging";
     rc = arm_ez_read_native_image(fd, image_data, header.header_size,
                                   header.image_file_size);
     if (rc != SUCCESS)
       goto fail;
-    app_psram_begin =
-        (psram_image_addr + header.image_mem_size + 15u) & ~(uintptr_t)15u;
-    if (app_psram_begin < psram_image_addr || app_psram_begin > psram_end) {
-      rc = arm_ez_reject(DE_NOMEM, "EZ image leaves no valid application PSRAM");
-      goto fail;
-    }
   }
 
   if (header.image_mem_size > header.image_file_size)
@@ -3636,8 +3580,6 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   reserved_stack_seg = 0;
   meta->process_info.native_stack_size = native_stack_size;
   meta->process_info.dos_stack_size = dos_stack_size;
-  meta->app_heap.begin = (ULONG)app_psram_begin;
-  meta->app_heap.end = (ULONG)arm_elf_native_stack_arena_begin();
 
   fail_stage = "argv construction";
   rc = arm_ez_build_argv(load_seg, meta, &cursor, (ULONG)asize << 4,
@@ -3674,7 +3616,7 @@ fail:
   dos_printf("ARM EZ: load failed at %s, rc=%d\r\n", fail_stage, rc);
   DosCloseSft(fd, FALSE);
 
-//fail_closed:
+  fdos_native_span_release_owner(load_seg);
   if (meta != NULL && meta->dos_stack_mcb != 0)
     DosMemFree(meta->dos_stack_mcb);
   else if (reserved_stack_mcb != 0)
@@ -3816,9 +3758,7 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   meta->cursor = initial_cursor;
   meta->allocation_end = (ULONG)asize << 4;
   meta->allocation_high = load_high_requested;
-  meta->app_heap.begin =
-      (ULONG)((uintptr_t)PSRAM_BASE_ADDR + ARM_ELF_APP_PSRAM_BEGIN_OFFSET);
-  meta->app_heap.end = (ULONG)arm_elf_native_stack_arena_begin();
+  meta->heap_owner = load_seg;
 
   /*
    * argv is permanent child runtime state, not part of the relocatable ELF
@@ -4021,6 +3961,7 @@ fail:
     DosMemFree(meta->dos_stack_mcb);
   if (meta != NULL)
     arm_elf_free_extra_blocks(meta);
+  fdos_native_span_release_owner(load_seg);
   DosMemFree(alloc_mcb);
   DosMemFree(env_mcb);
   DosCloseSft(fd, FALSE);
@@ -4524,6 +4465,7 @@ static void exec_release_child(UWORD child_psp_seg)
     UWORD maxfiles = fdos_psp_max_files(child_psp_seg);
     for(i=0;i<maxfiles;i++) DosClose(i);
     FcbCloseAll();
+    fdos_native_span_release_owner(child_psp_seg);
     FreeProcessMem(child_psp_seg);
   }
 }
@@ -4686,11 +4628,6 @@ typedef void (*arm_elf_fini_fn)(void *);
  * SP in its own metadata.
  */
 static volatile ULONG *arm_elf_active_main_sp;
-
-static int arm_native_process_is_active(void)
-{
-  return arm_elf_active_main_sp != NULL || arm_ez_active_process_info != NULL;
-}
 
 /*
  * Synthetic guest return point used while a native ELF application yields.
@@ -5100,12 +5037,13 @@ static COUNT exec_run_process(const struct exec_process_start *start)
     int exit_code;
     const native_ez_process_info *saved_ez_process_info =
         arm_ez_active_process_info;
-    arm_app_heap_context *saved_app_heap = arm_app_active_heap;
+    UWORD saved_heap_owner = arm_app_heap_owner;
 
     if (arm_elf_native_stack_acquire(native_stack_size, &stack_bottom,
                                      &previous_stack_cursor) != SUCCESS) {
       dos_printf("ARM native: PSRAM stack arena exhausted (%lu bytes)\r\n",
                  native_stack_size);
+      term_exit_type = 0;  /* no child code ran or stayed resident */
       exec_leave_child(saved_linear, start->child_psp);
       return DE_NOMEM;
     }
@@ -5115,13 +5053,11 @@ static COUNT exec_run_process(const struct exec_process_start *start)
       ez_meta->native_stack_addr = (ULONG)stack_bottom;
     stack_top = stack_bottom + native_stack_size;
 
-    if (ez_meta) {
+    arm_app_heap_owner = start->child_psp;
+    if (ez_meta)
       arm_ez_active_process_info = &ez_meta->process_info;
-      arm_app_active_heap = &ez_meta->app_heap;
-    } else if (elf_meta->entry_addr != 0) {
+    else if (elf_meta->entry_addr != 0)
       arm_ez_active_process_info = &elf_meta->process_info;
-      arm_app_active_heap = &elf_meta->app_heap;
-    }
 
     {
       uintptr_t saved_diag_native_bottom = doom_diag_native_stack_bottom;
@@ -5149,10 +5085,8 @@ static COUNT exec_run_process(const struct exec_process_start *start)
       doom_diag_dos_stack_size = saved_diag_dos_size;
     }
 
-    if (ez_meta || (elf_meta && elf_meta->entry_addr != 0)) {
-      arm_ez_active_process_info = saved_ez_process_info;
-      arm_app_active_heap = saved_app_heap;
-    }
+    arm_ez_active_process_info = saved_ez_process_info;
+    arm_app_heap_owner = saved_heap_owner;
 
     arm_elf_native_stack_release(stack_bottom, previous_stack_cursor);
     if (elf_meta)
@@ -5660,11 +5594,16 @@ COUNT DosExeLoader(dos_far_ptr namep, exec_blk * exp, COUNT mode, COUNT fd)
 static uint32_t native_stack_free(void)
 {
 #if defined(__arm__) || defined(__thumb__)
-  /* Runtime floor follows the selected core0 stack: normally CORE0_STACK_EXT,
-     or the unused tail of GFX_BUFFER when reduced VRAM uses direct QSPI RAM. */
   uint32_t sp;
   __asm volatile ("mov %0, sp" : "=r" (sp));
   uint32_t floor = (uint32_t)core0_stack_floor_runtime;
+  /* The main core0 stack uses the runtime SRAM bounds. Native DOS and WINN
+     switch both SP and MSPLIM, including for WINN's individual task stacks. */
+  if (sp < floor || sp > core0_stack_top_runtime) {
+    __asm volatile ("mrs %0, msplim" : "=r" (floor));
+    if (!floor)
+      return 0;
+  }
   return sp > floor ? sp - floor : 0;
 #else
   return 0xffffffffu;   /* host-сборки для статического анализа */

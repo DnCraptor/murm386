@@ -587,6 +587,22 @@ static void split_cmd(LPCSTR cmd, char *prog, int psize, const char **args)
     *args = cmd;
 }
 
+static int executable_file(const char *path)
+{
+    int attr = win_file_attr(path, 0, 0);
+    return attr >= 0 && !(attr & 0x10);
+}
+
+static int resolve_exec_path(const char *prog, char *path, int size)
+{
+    /* Bare names search the task's directory before the Windows directory. */
+    if (!strchr(prog, '\\') && !strchr(prog, '/') && !strchr(prog, ':') &&
+        win_file_resolve(prog, path, size) && executable_file(path))
+        return 1;
+    win_path(prog, path, size);
+    return executable_file(path);
+}
+
 UINT WINAPI WinExec(LPCSTR cmd, UINT show)
 {
     char prog[80], path[128];
@@ -598,21 +614,21 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
     for (const char *p = prog; *p; p++)
         if (*p == '.')
             dot = 1;
-        else if (*p == '\\' || *p == '/')
+        else if (*p == '\\' || *p == '/' || *p == ':')
             dot = 0;
-    if (!dot && lstrlen(prog) + 4 < (int)sizeof(prog))
-        lstrcat(prog, ".EXE");
-    win_path(prog, path, sizeof(path));
-    /* WinExec searches the calling task's directory before the Windows
-     * directory.  win_path() alone forces bare names into the latter. */
-    if (!strchr(prog, '\\') && !strchr(prog, '/') && !strchr(prog, ':')) {
-        char local[sizeof(path)];
-        if (win_file_resolve(prog, local, sizeof(local))) {
-            int attr = win_file_attr(local, 0, 0);
-            if (attr >= 0 && !(attr & 0x10))
-                lstrcpyn(path, local, sizeof(path));
+    int len = lstrlen(prog);
+    if (!dot && len + 4 < (int)sizeof(prog)) {
+        lstrcpy(prog + len, ".EXE");
+        if (!resolve_exec_path(prog, path, sizeof(path))) {
+            char com_path[sizeof(path)];
+            lstrcpy(prog + len, ".COM");
+            if (resolve_exec_path(prog, com_path, sizeof(com_path)))
+                lstrcpy(path, com_path);
+            else
+                lstrcpy(prog + len, ".EXE");
         }
-    }
+    } else
+        resolve_exec_path(prog, path, sizeof(path));
     /* The NE loader uses fopen on this filename, not the virtual file APIs
      * (the host tests': their own file names, drive C: their directory) */
     char image_path[sizeof(path)];
@@ -672,7 +688,7 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
             rc = 0;
             break;
         default:
-            if (win_dos_is_mz(path)) {
+            if (win_dos_is_image(path)) {
                 cursor_wait_end();
                 return win_dos_exec(path, args);
             }
@@ -686,7 +702,7 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
     }
     if (rc) {
         cursor_wait_end();
-        return 11;                  /* invalid .EXE */
+        return 11;                  /* invalid executable */
     }
     /* the module name is the file name without directory and extension */
     const char *base = prog;

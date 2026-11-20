@@ -6,15 +6,16 @@
 #include <string.h>
 #include "wincore.h"
 
-int win_dos_is_mz(const char *path)
+int win_dos_is_image(const char *path)
 {
     FILE *f = fopen(path, "rb");
     if (!f)
         return 0;
     uint8_t h[64];
     size_t n = fread(h, 1, sizeof(h), f);
-    int mz = n >= 28 && ((h[0] == 'M' && h[1] == 'Z') || (h[0] == 'Z' && h[1] == 'M'));
-    if (mz && n == sizeof(h) && (h[24] >= 0x40 || h[25])) {
+    int mz = n >= 2 && ((h[0] == 'M' && h[1] == 'Z') || (h[0] == 'Z' && h[1] == 'M'));
+    int executable = mz && n >= 28;
+    if (executable && n == sizeof(h) && (h[24] >= 0x40 || h[25])) {
         uint32_t at = (uint32_t)h[60] | (uint32_t)h[61] << 8 |
                       (uint32_t)h[62] << 16 | (uint32_t)h[63] << 24;
         if (at >= sizeof(h) && at <= INT32_MAX && !fseek(f, (long)at, SEEK_SET) &&
@@ -22,11 +23,19 @@ int win_dos_is_mz(const char *path)
             /* Do not fall through to the DOS stub of a Windows image
              * rejected by the NE/PE loader. DOS extenders can use LE. */
             if ((h[0] == 'N' && h[1] == 'E') || !memcmp(h, "PE\0\0", 4))
-                mz = 0;
+                executable = 0;
+        }
+    }
+    if (!mz && n && !(n >= 2 && !memcmp(h, "EZ", 2)) &&
+        !(n >= 4 && !memcmp(h, "\177ELF", 4))) {
+        size_t len = strlen(path);
+        if (len >= 4 && !lstrcmpi(path + len - 4, ".COM") && !fseek(f, 0, SEEK_END)) {
+            long size = ftell(f);
+            executable = size > 0 && size <= 0xff00;
         }
     }
     fclose(f);
-    return mz;
+    return executable;
 }
 
 #if defined(__arm__) || defined(__thumb__)

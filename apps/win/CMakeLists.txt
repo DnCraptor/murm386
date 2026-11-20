@@ -1,10 +1,8 @@
-# Native Windows 3.x for murm386: WINN.EXE with KERNEL, GDI, USER and the
-# built-in drivers.
+# Native Windows 3.x for murm386: WIN.COM loads the WINN.EXE core.
 #
 #   cmake -S apps/win -B build-win && cmake --build build-win
 #
-# The result is apps/compiled/winn.exe ("Windows native"): the loader that
-# runs the core, the drivers and the applications (apps/winapps/*).
+# The outputs are apps/compiled/win.com and apps/compiled/winn.exe.
 #
 # The same sources build on Linux for snapshot tests: see host/Makefile.
 
@@ -30,12 +28,11 @@ include(pico_sdk_import.cmake)
 project(winn C CXX ASM)
 pico_sdk_init()
 
-set(BUILD_NAME "${PROJECT_NAME}")
 set(CMAKE_C_STANDARD 11)
 
 set(OUTPUT_DIR "${CMAKE_SOURCE_DIR}/../../bin/${CMAKE_BUILD_TYPE}")
 set(COMPILED_DIR "${CMAKE_SOURCE_DIR}/../../apps/compiled")
-if(WIN32)
+if(CMAKE_HOST_WIN32)
     set(ELF2EZ_TOOL "${CMAKE_SOURCE_DIR}/../../tools/elf2ez.exe")
 else()
     set(ELF2EZ_TOOL "${CMAKE_SOURCE_DIR}/../../tools/elf2ez")
@@ -54,57 +51,45 @@ add_executable(${PROJECT_NAME}
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime/ez_process.c
 )
 
+add_executable(win_loader
+    core/ez_image.c
+    runtime/win_loader.c
+    runtime/ez_process.c
+)
+
 include(${CMAKE_CURRENT_SOURCE_DIR}/../api/native-dos-runtime.cmake)
-native_dos_runtime_attach(${PROJECT_NAME})
-
-target_sources(${PROJECT_NAME} PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/../api/crt0.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../api/crt0.S
-)
-
-target_include_directories(${PROJECT_NAME} PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/core
-    ${CMAKE_CURRENT_SOURCE_DIR}/ddi
-    ${CMAKE_CURRENT_SOURCE_DIR}/user
-    ${CMAKE_CURRENT_SOURCE_DIR}/../api
-)
-
 configure_file(memmap.ld.in memmap.ld @ONLY)
-pico_set_linker_script(${PROJECT_NAME} ${CMAKE_CURRENT_BINARY_DIR}/memmap.ld)
 
-pico_set_program_name(${PROJECT_NAME} "Windows native loader")
+function(win_ez_target target filename)
+    native_dos_runtime_attach(${target})
+    target_sources(${target} PRIVATE ../api/crt0.c ../api/crt0.S)
+    target_include_directories(${target} PRIVATE include core ddi user)
+    pico_set_linker_script(${target} ${CMAKE_CURRENT_BINARY_DIR}/memmap.ld)
+    target_link_options(${target} PRIVATE -Xlinker --print-memory-usage -r)
+    if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+        target_compile_options(${target} PRIVATE -fno-jump-tables -Wall -Wno-unused-parameter)
+    endif()
+    target_compile_definitions(${target} PRIVATE ELF_MODE)
+    pico_enable_stdio_uart(${target} 0)
+    pico_enable_stdio_usb(${target} 0)
 
-target_link_options(${PROJECT_NAME} PRIVATE -Xlinker --print-memory-usage -r)
+    # Older host converters always derive a .exe filename from the input.
+    # Convert in the build directory before publishing the final .exe or .com.
+    set(ez_stage "${CMAKE_CURRENT_BINARY_DIR}/${target}-ez")
+    add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND}
+            -DNM=${CMAKE_NM}
+            -DINPUT=$<TARGET_FILE:${target}>
+            -DALLOW_UNRESOLVED=__ez_preinit_array_start,__ez_preinit_array_end,__ez_init_array_start,__ez_init_array_end,__ez_fini_array_start,__ez_fini_array_end
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/check_unresolved.cmake
+        COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:${target}> ${ez_stage}.crt
+        COMMAND ${ELF2EZ_TOOL} /y ${ez_stage}.crt
+        COMMAND ${CMAKE_COMMAND} -E copy ${ez_stage}.exe ${COMPILED_DIR}/${filename}
+        COMMAND ${CMAKE_COMMAND} -E rm -f ${ez_stage}.crt ${ez_stage}.exe
+        VERBATIM
+    )
+endfunction()
 
-if (CMAKE_C_COMPILER_ID STREQUAL "GNU")
-target_compile_options(${PROJECT_NAME} PUBLIC
-        -fno-jump-tables  # suppress __gnu_thumb1_case_uni symbol generation
-        -Wall
-        -Wno-unused-parameter
-)
-endif ()
-
-target_compile_definitions(${PROJECT_NAME} PRIVATE ELF_MODE)
-
-set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "${BUILD_NAME}")
-
-pico_enable_stdio_uart(${PROJECT_NAME} 0)
-pico_enable_stdio_usb(${PROJECT_NAME} 0)
-
-add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-    # -r link: unresolved symbols must be rejected explicitly (no dynamic
-    # linker at run time); elf2ez provides the __ez_*_array_* bounds.
-    COMMAND ${CMAKE_COMMAND}
-        -DNM=${CMAKE_NM}
-        -DINPUT=$<TARGET_FILE:${PROJECT_NAME}>
-        -DALLOW_UNRESOLVED=__ez_preinit_array_start,__ez_preinit_array_end,__ez_init_array_start,__ez_init_array_end,__ez_fini_array_start,__ez_fini_array_end
-        -P ${CMAKE_CURRENT_SOURCE_DIR}/check_unresolved.cmake
-    COMMAND ${CMAKE_COMMAND} -E copy
-        $<TARGET_FILE:${PROJECT_NAME}>
-        ${COMPILED_DIR}/${BUILD_NAME}.crt
-    COMMAND ${ELF2EZ_TOOL}
-        /y ${COMPILED_DIR}/${BUILD_NAME}.crt
-    COMMAND ${CMAKE_COMMAND} -E rm -f
-        ${COMPILED_DIR}/${BUILD_NAME}.crt
-)
+win_ez_target(winn winn.exe)
+win_ez_target(win_loader win.com)
+add_dependencies(win_loader winn)

@@ -1,7 +1,7 @@
 /*
- * winmain_ez.c - WINN.EXE: the Windows loader.
+ * winmain_ez.c - entry point of the Windows core loaded by WIN.COM.
  *
- *   WINN [:] [program [arguments]]
+ *   WIN [:] [program [arguments]]
  *
  * Starts the drivers named in SYSTEM.INI (or the built-in ones), GDI and
  * USER, then runs the shell given by [boot] shell= (PROGMAN.EXE when the
@@ -29,7 +29,7 @@ static const char *exec_error(UINT r)
     switch (r) {
     case 2: return "file not found";
     case 8: return "out of memory";
-    case 11: return "not a Native Windows application";
+    case 11: return "invalid or unsupported executable format";
     case WIN_EXEC_NE_REQUIRES_386: return "Win16 NE requires a firmware build with a 386+ CPU core";
     case WIN_EXEC_NE_UNSUPPORTED: return "Win16 NE format not yet supported";
     default: return "cannot start";
