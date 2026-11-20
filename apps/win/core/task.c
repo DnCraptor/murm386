@@ -754,8 +754,8 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
     if (use_exe_dir)
         win_file_task_workdir(t, path);
     /* The hourglass stays while it starts (a Win16 program loads in its
-     * own task), as in Windows: until it first waits for input, in its
-     * message loop or a dialog's, or ends (task_started) */
+     * own task), until it reaches its message loop, waits for input
+     * or ends. */
     t->starting = 1;
     /* WinExec waits for the child to reach its message loop or time out.
      * The first scheduler turn can end during application initialization.

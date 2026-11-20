@@ -217,6 +217,38 @@ static void wave_played(uint32_t bytes)
     }
 }
 
+/* Win16 huge allocations are tiled at 64 KiB with __AHINCR = 8.
+ * A far pointer is selector:offset, so ordinary DWORD arithmetic cannot
+ * advance it across a tile boundary (it increments selector by 1, not 8).
+ * Preserve the existing flat-program behaviour. */
+static int wave_data_read(uint16_t task, uint32_t far, uint32_t offset,
+                          uint8_t *dst, unsigned count)
+{
+    int flat = NE->size > offsetof(win_dll_ne, task_flat) && NE->task_flat &&
+               NE->task_flat(task);
+    if (flat)
+        return NE->task_read(task, far + offset, dst, count);
+
+    uint64_t pos = (uint16_t)far + (uint64_t)offset;
+    uint64_t selector = (far >> 16) + (pos >> 16) * 8u;
+    if (selector > 0xffffu)
+        return 0;
+    while (count) {
+        unsigned off = (unsigned)pos & 0xffffu;
+        unsigned n = 0x10000u - off;
+        if (n > count)
+            n = count;
+        if (!NE->task_read(task, (uint32_t)(selector << 16) | off, dst, n))
+            return 0;
+        dst += n;
+        pos += n;
+        count -= n;
+        if (count && (selector += 8u) > 0xffffu)
+            return 0;
+    }
+    return 1;
+}
+
 /* The driver's blocks played, the headers they finish returned; then as
  * many blocks as it takes, each filled from the headers in turn (a block
  * may hold the end of one and the start of the next): the next is queued
@@ -247,8 +279,8 @@ static void wave_pump(void)
                     take = max - got;
                 if (q->limit - q->sent < take)
                     take = (unsigned)(q->limit - q->sent);
-                uint32_t addr = q->data + offset;
-                if (!NE->task_read((uint16_t)output.task, addr, raw + got, take))
+                if (!wave_data_read((uint16_t)output.task, q->data, offset,
+                                    raw + got, take))
                     memset(raw + got, output.format.bits == 16 ? 0 : 0x80, take);
                 q->sent += take;
                 got += take;
@@ -410,9 +442,17 @@ static MMRESULT wave_header(win_dll_call *c, unsigned ordinal)
                NE->task_flat((uint16_t)output.task);
     uint32_t loop_flags = f & (WHDR_BEGINLOOP | WHDR_ENDLOOP);
     if (!bytes || !data || !(data >> 16) || bytes % output.format.block ||
-        (!flat && bytes > 0x10000u - (uint16_t)data) ||
         (loop_flags && loop_flags != (WHDR_BEGINLOOP | WHDR_ENDLOOP)))
         return MMSYSERR_INVALPARAM;      /* multi-header loops not yet supported */
+    /* A single selector cannot represent a buffer crossing 64 KiB.  Huge
+     * allocations use the next descriptor (selector + 8) for each tile.
+     * Check the final byte before queueing it; ordinary short buffers use
+     * the unchanged path. */
+    if (!flat && bytes > 0x10000u - (uint16_t)data) {
+        uint8_t last;
+        if (!wave_data_read((uint16_t)output.task, data, bytes - 1u, &last, 1))
+            return MMSYSERR_INVALPARAM;
+    }
     if (output.count == queue_cap) {    /* the ring grown, in order from its head */
         unsigned cap = queue_cap ? queue_cap * 2u : WAVE_QUEUE;
         queued_wave *grown = (queued_wave *)malloc(cap * sizeof(queued_wave));

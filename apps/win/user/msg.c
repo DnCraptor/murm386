@@ -959,6 +959,8 @@ static void got_message(MSG *msg)
 
 BOOL WINAPI GetMessage(LPMSG msg, HWND h, UINT first, UINT last)
 {
+    /* WinExec waits for the message loop, even if a message is already queued. */
+    task_started(task_current());
     for (;;) {
         int r = get_one(msg, h, first, last, 1);
         if (r) {
