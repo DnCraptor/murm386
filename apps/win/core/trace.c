@@ -31,6 +31,8 @@ typedef struct {
 } tturn;
 
 static tcall *calls;
+static char capture_call[64];
+static void dump_trace(const char *file, const char *trigger);
 static tturn turns[TURNS];
 static unsigned ncalls, nturns;     /* how many ever (the ring's next: % size) */
 
@@ -58,24 +60,22 @@ void win_trace_event(const char *name, uint32_t a, uint32_t b)
 static void on_call(uint16_t service, uint16_t cs, uint16_t ip, uint32_t result)
 {
     uint16_t task = (uint16_t)GetCurrentTask();
-    if (ncalls) {
-        tcall *last = &calls[(ncalls - 1) % CALLS];
-        if (last->task == task && last->service == service && last->cs == cs &&
-            last->ip == ip) {
-            last->count++;
-            last->result = result;
-            last->ms = GetTickCount();
-            return;
-        }
+    tcall *t = ncalls ? &calls[(ncalls - 1) % CALLS] : NULL;
+    if (!t || t->task != task || t->service != service || t->cs != cs || t->ip != ip) {
+        t = &calls[ncalls++ % CALLS];
+        *t = (tcall){ .task = task, .service = service, .cs = cs, .ip = ip };
     }
-    tcall *t = &calls[ncalls++ % CALLS];
-    t->ms = GetTickCount();
+    t->count++;
     t->result = result;
-    t->count = 1;
-    t->task = task;
-    t->service = service;
-    t->cs = cs;
-    t->ip = ip;
+    t->ms = GetTickCount();
+
+    if (capture_call[0]) {
+        char native_name[sizeof(capture_call)];
+        const char *name = service >= WIN_NE_SERVICE_DLL && service < WIN_NE_SERVICE_UNDEFINED ?
+            win_ne_native_name(service, native_name, sizeof(native_name)) : win_ne_service_name(service);
+        if (name && !lstrcmpi(name, capture_call))
+            dump_trace("WINNCALL.LOG", name);
+    }
 }
 
 static void on_turn(uint16_t cs, uint16_t ip)
@@ -93,23 +93,14 @@ void win_trace_init(void)
 #if defined(__arm__) || defined(__thumb__) || defined(WINN_NE_HOST)  /* Win16 programs run */
     if (calls || !GetPrivateProfileInt("debug", "trace", 0, "SYSTEM.INI"))
         return;
-    /* Confirm that trace=1 was read and the Windows directory is writable.
-     * This marker is created before any guest program can hang. */
-    char path[160];
-    win_path("WINNTRAC.LOG", path, sizeof(path));
-    HFILE f = _lcreat(path, 0);
-    if (f != HFILE_ERROR) {
-        static const char marker[] = "WINN trace enabled\\r\\n";
-        _lwrite(f, marker, sizeof(marker) - 1);
-        _lclose(f);
-    }
+    /* Keep the previous session's dump until there is a new trace to write. */
+    GetPrivateProfileString("debug", "trace.call", "", capture_call, sizeof(capture_call), "SYSTEM.INI");
     calls = (tcall *)win_alloc(sizeof(tcall) * CALLS);
     if (!calls)
         return;
     memset(calls, 0, sizeof(tcall) * CALLS);
     win_ne_trace_call = on_call;
     win_ne_trace_turn = on_turn;
-    win_trace_dump();
 #endif
 }
 
@@ -120,16 +111,24 @@ static void put(HFILE f, const char *s)
 
 void win_trace_dump(void)
 {
-    if (!calls)
-        return;
+    if (ncalls || nturns || nevents)
+        dump_trace("WINNTRAC.LOG", NULL);
+}
+
+static void dump_trace(const char *file, const char *trigger)
+{
     char path[160], line[160], name[32];
-    win_path("WINNTRAC.LOG", path, sizeof(path));
+    win_path(file, path, sizeof(path));
     HFILE f = _lcreat(path, 0);
     if (f == HFILE_ERROR)
         return;
     wsprintf(line, "WINN trace at %lu ms: calls (ms task caller call -> DX:AX xcount)\r\n",
              (unsigned long)GetTickCount());
     put(f, line);
+    if (trigger) {
+        wsprintf(line, "captured after %s\r\n", trigger);
+        put(f, line);
+    }
 #if defined(__arm__) || defined(__thumb__) || defined(WINN_NE_HOST)
     win_ne_mem_info m;
     win_ne_guest_mem_info(&m);

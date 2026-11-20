@@ -35,6 +35,7 @@ void winn_snd_release(void);                                                    
 #define WAVERR_BADFORMAT      32u
 
 #define WAVE_FORMAT_QUERY     0x0001u
+#define WAVE_ALLOWSYNC        0x0002u
 #define WAVE_MAPPER           0xffffu
 #define CALLBACK_TYPEMASK    0x00070000ul
 #define CALLBACK_WINDOW      0x00010000ul
@@ -284,7 +285,7 @@ static MMRESULT wave_open(win_dll_call *c)
         return MMSYSERR_INVALPARAM;
     if (output.driver)
         return MMSYSERR_ALLOCATED;
-    if (flags & ~(WAVE_FORMAT_QUERY | CALLBACK_TYPEMASK))
+    if (flags & ~(WAVE_FORMAT_QUERY | WAVE_ALLOWSYNC | CALLBACK_TYPEMASK))
         return MMSYSERR_INVALPARAM;
     unsigned cb = (unsigned)(flags & CALLBACK_TYPEMASK);
     if (cb != 0 && cb != CALLBACK_WINDOW && cb != CALLBACK_FUNCTION)

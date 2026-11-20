@@ -523,11 +523,19 @@ const char *win_ne_native_name(uint16_t id, char *buf, unsigned cap)
     const win_dll_info *d = win_dll_get(dll_slot_of(id, &e));
     if (!d || !e)
         return NULL;
-    if (e->name)
-        wsprintf(buf, "%s.%s", d->name, e->name);
-    else
-        wsprintf(buf, "%s.%u", d->name, (unsigned)e->ordinal);
-    (void)cap;
+    char ordinal[6];
+    const char *proc = e->name;
+    if (!proc) {
+        wsprintf(ordinal, "%u", (unsigned)e->ordinal);
+        proc = ordinal;
+    }
+    unsigned module_len = (unsigned)strlen(d->name);
+    unsigned proc_len = (unsigned)strlen(proc);
+    if (module_len + proc_len + 2 > cap)
+        return NULL;
+    memcpy(buf, d->name, module_len);
+    buf[module_len] = '.';
+    memcpy(buf + module_len + 1, proc, proc_len + 1);
     return buf;
 }
 
