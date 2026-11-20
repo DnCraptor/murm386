@@ -169,15 +169,20 @@ identity through rename. A poke on that topic passes a copy of a
 global-memory payload to the target object's SetData method.
 StdShowItem on the system or document topic calls the object's Show
 method. StdDoVerbItem on the document topic passes the verb, visibility
-and focus flags to DoVerb. An open document conversation keeps
-working after the server renames the document.
+and focus flags to DoVerb. StdCloseDocument closes the document associated
+with the topic. An open document conversation keeps working after the
+server renames the document.
 DDE transport for GDI-object formats, document advises and server request
 queues are still pending.
 OLECLI's OleCreate uses a running server or launches the registered
 StdFileEditing server with /Embedding. It creates a temporary document,
 captures its Native data and optional DIB, then closes the temporary
-document. The result can be stored as an embedded object. Live activation
-and updates are separate operations.
+document. The result can be stored as an embedded object. OleActivate
+opens a linked document or restores an embedded object's Native data into
+a temporary document, then runs the requested verb. OleUpdate refreshes
+the cached DIB and, for an open embedded object, its Native data. OleClose
+captures changes to an embedded object before closing its temporary
+document. Closing a linked object disconnects from the source document.
 OLECLI registers client documents and supports OLE 1.0 static raster
 and metafile pictures. The Static protocol can paste CF_DIB and
 CF_METAFILEPICT, and converts CF_BITMAP when drawing is requested.

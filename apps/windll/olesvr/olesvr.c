@@ -692,7 +692,14 @@ static OLESTATUS document_command(int doc, char **text)
 {
     LPCSTR verb;
     BOOL parens;
-    if (!execute_begin(text, &verb, &parens) || !parens)
+    if (!execute_begin(text, &verb, &parens))
+        return OLE_ERROR_SYNTAX;
+    if (!lstrcmpi(verb, "StdCloseDocument")) {
+        if (!execute_end(text, parens))
+            return OLE_ERROR_SYNTAX;
+        return docs[doc].transferring || docs[doc].closing ? OLE_BUSY : close_doc(doc);
+    }
+    if (!parens)
         return OLE_ERROR_SYNTAX;
     if (!lstrcmpi(verb, "StdDoVerbItem"))
         return execute_action(doc, text, TRUE);
