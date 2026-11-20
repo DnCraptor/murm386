@@ -159,14 +159,21 @@ and the server itself; a document can revoke itself from its Close
 callback, with Release deferred until Close returns.
 OLESVR registers each server class as a DDEML service. Its System and
 OLESystem topics support discovery and dispatch StdOpenDocument,
-StdNewDocument, StdNewFromTemplate, StdEditDocument and StdExit through
+StdNewDocument, StdNewFromTemplate, StdEditDocument, StdCloseDocument and StdExit through
 the server's methods. A created or registered document is available
 as a named topic. A request on that topic resolves the entire document
 or the named item through GetObject, copies the GetData result into DDEML,
 and releases the object. This covers global-memory formats including
 Native, DIB and text. Existing conversations retain their document
-identity through rename. GDI-object formats, document pokes and advises,
-server request queues and OleCreate on the client side are still pending.
+identity through rename. A poke on that topic passes a copy of a
+global-memory payload to the target object's SetData method.
+DDE transport for GDI-object formats, document advises and server request
+queues are still pending.
+OLECLI's OleCreate uses a running server or launches the registered
+StdFileEditing server with /Embedding. It creates a temporary document,
+captures its Native data and optional DIB, then closes the temporary
+document. The result can be stored as an embedded object. Live activation
+and updates are separate operations.
 OLECLI registers client documents and supports OLE 1.0 static raster
 and metafile pictures. The Static protocol can paste CF_DIB and
 CF_METAFILEPICT, and converts CF_BITMAP when drawing is requested.

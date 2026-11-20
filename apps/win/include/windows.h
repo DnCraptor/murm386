@@ -1069,6 +1069,7 @@ HGLOBAL WINAPI GlobalLRUOldest(HGLOBAL h);
 HGLOBAL WINAPI GlobalLRUNewest(HGLOBAL h);
 
 
+BOOL    WINAPI WinRegQueryClassStringN(LPCSTR key, LPSTR value, UINT capacity);
 UINT    WINAPI WinExec(LPCSTR cmdline, UINT show);
 HTASK   WINAPI GetCurrentTask(void);
 BOOL    WINAPI IsTask(HTASK task);

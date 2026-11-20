@@ -34,7 +34,7 @@ static struct {
     LHSERVERDOC handle;
     LHSERVER server;
     LPOLESERVERDOC native;
-    BOOL closing, revoked, opening, reading;
+    BOOL closing, revoked, opening, transferring;
     char name[128];
 } docs[DOCS];
 
@@ -57,6 +57,8 @@ static struct {
     DDESETUSERHANDLE user_handle;
     DDECREATEDATAHANDLE create_data;
     DDEGETDATA get_data;
+    DDEACCESSDATA access_data;
+    DDEUNACCESSDATA unaccess_data;
 } dde;
 
 static HDDEDATA CALLBACK system_callback(UINT type, UINT fmt, HCONV conv, HSZ topic,
@@ -96,6 +98,8 @@ static DWORD open_endpoint(HTASK task)
     DDE_IMPORT(user_handle, DDESETUSERHANDLE, "DdeSetUserHandle");
     DDE_IMPORT(create_data, DDECREATEDATAHANDLE, "DdeCreateDataHandle");
     DDE_IMPORT(get_data, DDEGETDATA, "DdeGetData");
+    DDE_IMPORT(access_data, DDEACCESSDATA, "DdeAccessData");
+    DDE_IMPORT(unaccess_data, DDEUNACCESSDATA, "DdeUnaccessData");
 #undef DDE_IMPORT
     if (dde.init(&id, system_callback, CBF_SKIP_REGISTRATIONS | CBF_SKIP_UNREGISTRATIONS | CBF_SKIP_DISCONNECTS, 0))
         goto fail;
@@ -299,7 +303,7 @@ static OLESTATUS WINAPI OleRevokeServerDoc(LHSERVERDOC doc)
     int i = doc_of(doc);
     if (i < 0)
         return OLE_ERROR_HANDLE;
-    if (docs[i].closing || docs[i].opening || docs[i].reading) {
+    if (docs[i].closing || docs[i].opening || docs[i].transferring) {
         docs[i].revoked = TRUE;
         return OLE_WAIT_FOR_RELEASE;
     }
@@ -337,7 +341,7 @@ static OLESTATUS WINAPI OleRevokeServer(LHSERVER handle)
         return OLE_WAIT_FOR_RELEASE;
     }
     for (int d = 0; d < DOCS; d++)
-        if (docs[d].server == handle && (docs[d].opening || docs[d].reading))
+        if (docs[d].server == handle && (docs[d].opening || docs[d].transferring))
             return OLE_BUSY;
     server_owner owner = servers[i].owner;
     LPOLESERVER server = servers[i].native;
@@ -378,7 +382,7 @@ static DWORD WINAPI OleQueryServerVersion(void)
     return 0x0001;
 }
 
-enum { SERVER_OPEN, SERVER_CREATE, SERVER_TEMPLATE, SERVER_EDIT, SERVER_EXIT };
+enum { SERVER_OPEN, SERVER_CREATE, SERVER_TEMPLATE, SERVER_EDIT, SERVER_EXIT, SERVER_CLOSE };
 
 static int service_doc(HTASK task, HSZ service, LPCSTR name)
 {
@@ -549,7 +553,7 @@ static OLESTATUS system_command(int s, char **text)
 {
     static const struct { LPCSTR name; unsigned argc; } verbs[] = {
         { "StdOpenDocument", 1 }, { "StdNewDocument", 2 },
-        { "StdNewFromTemplate", 3 }, { "StdEditDocument", 1 }, { "StdExit", 0 },
+        { "StdNewFromTemplate", 3 }, { "StdEditDocument", 1 }, { "StdExit", 0 }, { "StdCloseDocument", 1 },
     };
     char *p = *text;
     if (*p++ != '[')
@@ -603,6 +607,12 @@ static OLESTATUS system_command(int s, char **text)
 
     if (method == SERVER_EXIT)
         return system_exit(s);
+    if (method == SERVER_CLOSE) {
+        int doc = service_doc(servers[s].owner.task, servers[s].service, arg[0]);
+        if (doc < 0)
+            return OLE_ERROR_NOT_OPEN;
+        return docs[doc].transferring ? OLE_BUSY : close_doc(doc);
+    }
     BOOL has_class = method == SERVER_CREATE || method == SERVER_TEMPLATE;
     if (has_class && lstrcmpi(servers[s].cls, arg[0]))
         return OLE_ERROR_CLASS;
@@ -667,8 +677,8 @@ static HDDEDATA system_item(DWORD id, HTASK task, HSZ service, HSZ item)
     return dde.create_data(id, (LPBYTE)text, (DWORD)strlen(text) + 1, 0, item, CF_TEXT, 0);
 }
 
-/* Synchronous document requests hold one client reference until the
- * result has been copied into DDEML. */
+/* A synchronous document transaction holds its client reference until
+ * the server's object has been released. */
 typedef struct request_client {
     OLECLIENT native;
     uint32_t guest;
@@ -723,21 +733,53 @@ static BOOL memory_format(UINT format)
     }
 }
 
+static HDDEDATA poke_status(OLESTATUS status)
+{
+    if (status == OLE_OK)
+        return DDE_FACK;
+    return status == OLE_BUSY ? DDE_FBUSY : DDE_FNOTPROCESSED;
+}
+
+static HANDLE native_poke_data(HDDEDATA data)
+{
+    DWORD bytes;
+    const uint8_t *src = dde.access_data(data, &bytes);
+    if (!src)
+        return 0;
+    HANDLE handle = GlobalAlloc(GMEM_MOVEABLE | GMEM_DDESHARE, bytes);
+    void *out = handle ? GlobalLock(handle) : NULL;
+    if (out) {
+        memcpy(out, src, bytes);
+        GlobalUnlock(handle);
+    } else if (handle) {
+        GlobalFree(handle);
+        handle = 0;
+    }
+    dde.unaccess_data(data);
+    return handle;
+}
+
 static HDDEDATA document_native(int doc, DWORD id, HSZ item, LPCSTR name, WORD format,
-                                 request_client *client)
+                                 HDDEDATA incoming, request_client *client)
 {
     LPOLESERVERDOC server_doc = docs[doc].native;
     const OLESERVERDOCVTBL *vt = server_doc->lpvtbl;
     LPOLEOBJECT object = NULL;
-    if (!vt || !vt->GetObject ||
-        vt->GetObject(server_doc, name, &object, &client->native) != OLE_OK || !object)
+    if (!vt || !vt->GetObject)
         return 0;
+    OLESTATUS status = vt->GetObject(server_doc, name, &object, &client->native);
+    if (status != OLE_OK || !object)
+        return incoming && status == OLE_BUSY ? DDE_FBUSY : 0;
 
     const OLESERVEROBJECTVTBL *objvt = ((const OLESERVEROBJECT *)(const void *)object)->lpvtbl;
     HANDLE handle = 0;
     HDDEDATA result = 0;
-    if (!client->revoked && !docs[doc].revoked && objvt && objvt->GetData &&
-        objvt->GetData(object, format, &handle) == OLE_OK && handle) {
+    if (!client->revoked && !docs[doc].revoked && objvt && incoming && objvt->SetData) {
+        handle = native_poke_data(incoming);
+        if (handle)
+            result = poke_status(objvt->SetData(object, format, handle));
+    } else if (!client->revoked && !docs[doc].revoked && objvt && !incoming && objvt->GetData &&
+               objvt->GetData(object, format, &handle) == OLE_OK && handle) {
         if (!client->revoked && !docs[doc].revoked) {
             LPBYTE bytes = GlobalLock(handle);
             if (bytes) {
@@ -752,7 +794,37 @@ static HDDEDATA document_native(int doc, DWORD id, HSZ item, LPCSTR name, WORD f
     return result;
 }
 
-/* Win16 Globals exceeding 64 KiB use a tile selector for each window. */
+/* Win16 Globals exceeding 64 KiB use a tile selector for each window.
+ * A far pointer at offset zero addresses each tile in turn. */
+static uint32_t global_tile(WORD handle, DWORD offset)
+{
+    uint32_t sel = (handle | 3u) + (offset >> 16) * 8u;
+    return sel <= UINT16_MAX ? sel << 16 : 0;
+}
+
+static WORD guest_poke_data(uint16_t task, HDDEDATA data)
+{
+    DWORD bytes;
+    const uint8_t *src = dde.access_data(data, &bytes);
+    if (!src)
+        return 0;
+    uint32_t buf = NE->task_alloc(task, bytes ? bytes : 1);
+    for (DWORD offset = 0; buf && offset < bytes;) {
+        DWORD chunk = bytes - offset;
+        if (chunk > 0x10000u)
+            chunk = 0x10000u;
+        uint32_t far = global_tile((WORD)(buf >> 16), offset);
+        if (!far || !NE->task_write(task, far, src + offset, chunk)) {
+            NE->task_free(task, buf);
+            buf = 0;
+            break;
+        }
+        offset += chunk;
+    }
+    dde.unaccess_data(data);
+    return (WORD)(buf >> 16);
+}
+
 static HDDEDATA guest_request_data(DWORD id, HSZ item, WORD format, uint16_t task, WORD handle)
 {
     DWORD bytes = NE->task_global_size(task, handle);
@@ -766,8 +838,8 @@ static HDDEDATA guest_request_data(DWORD id, HSZ item, WORD format, uint16_t tas
         DWORD chunk = bytes - offset;
         if (chunk > 0x10000u)
             chunk = 0x10000u;
-        uint32_t sel = (handle | 3u) + (offset >> 16) * 8u;
-        if (sel > UINT16_MAX || !NE->task_read(task, sel << 16, copy + offset, chunk))
+        uint32_t far = global_tile(handle, offset);
+        if (!far || !NE->task_read(task, far, copy + offset, chunk))
             goto done;
         offset += chunk;
     }
@@ -778,7 +850,7 @@ done:
 }
 
 static HDDEDATA document_guest(int doc, DWORD id, HSZ item, LPCSTR name, WORD format,
-                                request_client *client)
+                                HDDEDATA incoming, request_client *client)
 {
     server_owner owner = docs[doc].owner;
     uint32_t get_object = guest_proc(owner, 4);
@@ -808,19 +880,32 @@ static HDDEDATA document_guest(int doc, DWORD id, HSZ item, LPCSTR name, WORD fo
                     name ? sel : 0, name ? (WORD)(buf + NAME) : 0,
                     sel, (WORD)(buf + OUT_OBJECT), sel, (WORD)(buf + CLIENT) };
     HDDEDATA result = 0;
-    if (!NE->task_write(task, buf, params, sizeof(params)) ||
-        (WORD)NE->call(task, get_object, args, 8) != OLE_OK ||
-        !NE->task_read(task, buf + OUT_OBJECT, params, 4))
+    if (!NE->task_write(task, buf, params, sizeof(params)))
+        goto done;
+    OLESTATUS status = (WORD)NE->call(task, get_object, args, 8);
+    if (status != OLE_OK) {
+        if (incoming && status == OLE_BUSY)
+            result = DDE_FBUSY;
+        goto done;
+    }
+    if (!NE->task_read(task, buf + OUT_OBJECT, params, 4))
         goto done;
 
     server_owner object = { owner.task, read32(params) };
     if (!(object.guest >> 16))
         goto done;
-    uint32_t get_data = guest_proc(object, 4);
-    if (!client->revoked && !docs[doc].revoked && (get_data >> 16)) {
+    uint32_t method = guest_proc(object, incoming ? 5 : 4);
+    if (!client->revoked && !docs[doc].revoked && (method >> 16) && incoming) {
+        WORD handle = guest_poke_data(task, incoming);
+        if (handle) {
+            /* Once called, SetData owns this guest global block. */
+            WORD words[] = { (WORD)(object.guest >> 16), (WORD)object.guest, format, handle };
+            result = poke_status((WORD)NE->call(task, method, words, 4));
+        }
+    } else if (!client->revoked && !docs[doc].revoked && (method >> 16)) {
         WORD words[] = { (WORD)(object.guest >> 16), (WORD)object.guest, format,
                          sel, (WORD)(buf + OUT_DATA) };
-        if ((WORD)NE->call(task, get_data, words, 5) == OLE_OK &&
+        if ((WORD)NE->call(task, method, words, 5) == OLE_OK &&
             NE->task_read(task, buf + OUT_DATA, params, 2)) {
             WORD handle = (WORD)(params[0] | params[1] << 8);
             if (handle && NE->task_global_size(task, handle)) {
@@ -837,11 +922,12 @@ done:
     return result;
 }
 
-static HDDEDATA document_request(int i, DWORD id, HSZ item, UINT format)
+static HDDEDATA document_transaction(int i, DWORD id, HSZ item, UINT format, HDDEDATA incoming)
 {
-    if (i < 0 || docs[i].opening || docs[i].closing || docs[i].reading || docs[i].revoked ||
-        !memory_format(format))
+    if (i < 0 || docs[i].revoked || !memory_format(format))
         return 0;
+    if (docs[i].opening || docs[i].closing || docs[i].transferring)
+        return incoming ? DDE_FBUSY : 0;
 
     char name[256] = {0};
     if (item && !dde.query(id, item, name, sizeof(name), CP_WINANSI))
@@ -851,13 +937,13 @@ static HDDEDATA document_request(int i, DWORD id, HSZ item, UINT format)
     request_client client = { .native = { &request_client_vt }, .task = GetCurrentTask(),
                               .next = active_client };
     active_client = &client;
-    docs[i].reading = TRUE;
+    docs[i].transferring = TRUE;
     HDDEDATA result = docs[i].native ?
-        document_native(i, id, item, object_name, (WORD)format, &client) :
-        document_guest(i, id, item, object_name, (WORD)format, &client);
+        document_native(i, id, item, object_name, (WORD)format, incoming, &client) :
+        document_guest(i, id, item, object_name, (WORD)format, incoming, &client);
     active_client = client.next;
     if (docs[i].handle == handle) {
-        docs[i].reading = FALSE;
+        docs[i].transferring = FALSE;
         if (docs[i].revoked)
             revoke_doc(i);
     }
@@ -869,7 +955,7 @@ static HDDEDATA CALLBACK system_callback(UINT type, UINT fmt, HCONV conv, HSZ to
 {
     (void)d1; (void)d2;
     if (type != XTYP_CONNECT && type != XTYP_CONNECT_CONFIRM &&
-        type != XTYP_REQUEST && type != XTYP_EXECUTE)
+        type != XTYP_REQUEST && type != XTYP_POKE && type != XTYP_EXECUTE)
         return 0;
     HTASK task = GetCurrentTask();
     DWORD id = endpoint_of(task);
@@ -879,7 +965,7 @@ static HDDEDATA CALLBACK system_callback(UINT type, UINT fmt, HCONV conv, HSZ to
     BOOL system = !lstrcmpi(name, "System") || !lstrcmpi(name, "OLESystem");
     CONVINFO info = { .cb = sizeof(info) };
     HSZ service = item;
-    if (type == XTYP_REQUEST || type == XTYP_EXECUTE) {
+    if (type == XTYP_REQUEST || type == XTYP_POKE || type == XTYP_EXECUTE) {
         if (!dde.conv_info(conv, QID_SYNC, &info))
             return 0;
         service = info.hszServiceReq;
@@ -894,12 +980,15 @@ static HDDEDATA CALLBACK system_callback(UINT type, UINT fmt, HCONV conv, HSZ to
             dde.user_handle(conv, QID_SYNC, (DWORD)docs[i].handle);
         return 0;
     }
-    if (!system)
-        return type == XTYP_REQUEST ? document_request(doc_of((LHSERVERDOC)info.hUser), id, item, fmt) :
-                                      0;
+    if (!system) {
+        if (type == XTYP_REQUEST || (type == XTYP_POKE && data))
+            return document_transaction(doc_of((LHSERVERDOC)info.hUser), id, item, fmt,
+                                        type == XTYP_POKE ? data : 0);
+        return 0;
+    }
     if (type == XTYP_EXECUTE)
         return system_execute(task, service, data);
-    return fmt == CF_TEXT ? system_item(id, task, service, item) : 0;
+    return type == XTYP_REQUEST && fmt == CF_TEXT ? system_item(id, task, service, item) : 0;
 }
 
 static int ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *v)

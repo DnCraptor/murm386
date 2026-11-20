@@ -824,3 +824,23 @@ void winreg_task_end(HTASK task)
 }
 
 #endif
+
+/* Read an HKCR default string through the effective WINN registry. */
+BOOL WINAPI WinRegQueryClassStringN(LPCSTR key, LPSTR value, UINT capacity)
+{
+    if (!value || !capacity)
+        return FALSE;
+    value[0] = 0;
+#if defined(__arm__) || defined(__thumb__) || defined(WINN_NE_HOST)
+    const uint8_t *bytes;
+    uint32_t type, size;
+    if (!key || winreg_get(GetCurrentTask(), 0x80000000ul, key, NULL, &type, &bytes, &size) ||
+        type != WINREG_SZ || !size || size > capacity || bytes[size - 1])
+        return FALSE;
+    memcpy(value, bytes, size);
+#else
+    (void)key;
+    return FALSE;
+#endif
+    return TRUE;
+}

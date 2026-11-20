@@ -682,6 +682,7 @@ extern void WinDirListN(void);
 extern void WinExec(void);
 extern void WinFindFilesN(void);
 extern void WinHelp(void);
+extern void WinRegQueryClassStringN(void);
 extern void WindowFromDC(void);
 extern void WindowFromPoint(void);
 extern void WriteDialog(void);
@@ -1375,7 +1376,7 @@ static const void *const exports_user[931] = {
     [930] = (const void *)MessageBoxEx,
 };
 
-static const void *const exports_winn[38] = {
+static const void *const exports_winn[39] = {
     [1] = (const void *)DialogBoxIndirectN,
     [2] = (const void *)CreateDialogIndirectN,
     [3] = (const void *)CreateAcceleratorTableN,
@@ -1413,6 +1414,7 @@ static const void *const exports_winn[38] = {
     [35] = (const void *)GetPackedDIBInfoN,
     [36] = (const void *)PlayMetaFileRectN,
     [37] = (const void *)SetClipboardDataBatchN,
+    [38] = (const void *)WinRegQueryClassStringN,
 };
 
 static const void *const exports_commdlg[28] = {

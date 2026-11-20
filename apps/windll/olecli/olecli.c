@@ -7,6 +7,7 @@
 #include <string.h>
 #include "windows.h"
 #include "ole.h"
+#include "ddeml.h"
 #include "windll.h"
 
 #define NE (__win_dll_ne)
@@ -16,6 +17,7 @@
 
 static struct {
     uint16_t task;                  /* 0: free */
+    unsigned creating;
     char name[128];
 } docs[DOCS];
 
@@ -1134,6 +1136,8 @@ static OLESTATUS WINAPI OleRevokeClientDoc(LHCLIENTDOC h)
     int i = doc_of(h);
     if (i < 0)
         return OLE_ERROR_HANDLE;
+    if (docs[i].creating)
+        return OLE_BUSY;
     for (int j = 0; j < OBJECTS; j++)
         if (objects[j].doc == h)
             return OLE_ERROR_NOT_EMPTY;
@@ -1245,27 +1249,19 @@ static BOOL native_before_owner(ole_clip_formats f)
     return FALSE;
 }
 
-/* Snapshot the OLE data before retrieving a possibly delayed picture from
- * the clipboard. The header reserves space for the picture's wire header. */
-static OLESTATUS make_clip_header(HGLOBAL meta, HGLOBAL native, WORD type, HGLOBAL *out, DWORD *used)
+/* The allocation leaves room for the presentation header. */
+static OLESTATUS make_object_header(const ole_clip_string fields[3], HGLOBAL native,
+                                     WORD type, HGLOBAL *out, DWORD *used)
 {
-    DWORD meta_size = GlobalSize(meta), native_size = native ? GlobalSize(native) : 0;
-    const uint8_t *source = GlobalLock(meta);
-    if (!source)
-        return OLE_ERROR_CLIPBOARD;
-    ole_clip_string fields[3];
-    OLESTATUS status = OLE_ERROR_FORMAT;
-    if (!clipboard_triplet(source, meta_size, fields) || (type == OT_LINK && fields[1].size <= 1))
-        goto unlock_meta;
+    DWORD native_size = native ? GlobalSize(native) : 0;
     if (type == OT_EMBEDDED && !native_size)
-        goto unlock_meta;
+        return OLE_ERROR_FORMAT;
+    OLESTATUS status;
 
     uint64_t size = 20ull + fields[0].size + fields[1].size + fields[2].size;
     size += type == OT_EMBEDDED ? 4ull + native_size : 12ull;
-    if (size > UINT32_MAX - PICTURE_HEADER_MAX) {
-        status = OLE_ERROR_SIZE;
-        goto unlock_meta;
-    }
+    if (size > UINT32_MAX - PICTURE_HEADER_MAX)
+        return OLE_ERROR_SIZE;
     HGLOBAL head = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, (DWORD)size + PICTURE_HEADER_MAX);
     uint8_t *p = head ? GlobalLock(head) : NULL;
     status = OLE_ERROR_MEMORY;
@@ -1296,9 +1292,46 @@ static OLESTATUS make_clip_header(HGLOBAL meta, HGLOBAL native, WORD type, HGLOB
     } else if (head) {
         GlobalFree(head);
     }
-unlock_meta:
+    return status;
+}
+
+static OLESTATUS make_clip_header(HGLOBAL meta, HGLOBAL native, WORD type, HGLOBAL *out, DWORD *used)
+{
+    const uint8_t *source = GlobalLock(meta);
+    if (!source)
+        return OLE_ERROR_CLIPBOARD;
+    ole_clip_string fields[3];
+    OLESTATUS status = OLE_ERROR_FORMAT;
+    if (clipboard_triplet(source, GlobalSize(meta), fields) &&
+        (type != OT_LINK || fields[1].size > 1))
+        status = make_object_header(fields, native, type, out, used);
     GlobalUnlock(meta);
     return status;
+}
+
+static OLESTATUS finish_stream_object(WORD type, LPOLEOBJECT *out, HGLOBAL head, DWORD used)
+{
+    OLEOBJECT *o = *out;
+    uint8_t *data = GlobalLock(head);
+    if (!data) {
+        GlobalFree(head);
+        OleDelete(o);
+        *out = NULL;
+        return OLE_ERROR_MEMORY;
+    }
+    used += picture_header(o, o->image ? 5 : 0, data + used);
+    GlobalUnlock(head);
+    if (o->size > UINT32_MAX - used) {
+        GlobalFree(head);
+        OleDelete(o);
+        *out = NULL;
+        return OLE_ERROR_SIZE;
+    }
+    o->type = type;
+    o->stream_head = head;
+    o->head_bytes = used;
+    o->tail_bytes = o->size;
+    return OLE_OK;
 }
 
 static OLESTATUS create_clip_object(LPCSTR protocol, LHCLIENTDOC doc, LPCSTR name, LPOLEOBJECT *out,
@@ -1344,27 +1377,251 @@ static OLESTATUS create_clip_object(LPCSTR protocol, LHCLIENTDOC doc, LPCSTR nam
         GlobalFree(head);
         return status;
     }
-    OLEOBJECT *o = *out;
-    uint8_t *data = GlobalLock(head);
-    if (!data) {
-        GlobalFree(head);
-        OleDelete(o);
-        *out = NULL;
+    return finish_stream_object(type, out, head, used);
+}
+
+/* A create transaction snapshots the server's new embedded document.
+ * Keep all DDE handles local to the synchronous call. */
+typedef struct {
+    HINSTANCE dll;
+    DWORD inst;
+    DDEUNINITIALIZE uninit;
+    DDECREATESTRINGHANDLE string;
+    DDEFREESTRINGHANDLE free_string;
+    DDECONNECT connect;
+    DDEDISCONNECT disconnect;
+    DDECLIENTTRANSACTION transaction;
+    DDEGETDATA get_data;
+    DDEFREEDATAHANDLE free_data;
+} ole_dde;
+
+static HDDEDATA CALLBACK ole_dde_callback(UINT type, UINT fmt, HCONV conv, HSZ topic,
+                                          HSZ item, HDDEDATA data, DWORD d1, DWORD d2)
+{
+    (void)type; (void)fmt; (void)conv; (void)topic;
+    (void)item; (void)data; (void)d1; (void)d2;
+    return 0;
+}
+
+static BOOL ole_dde_begin(ole_dde *dde)
+{
+    dde->dll = LoadLibrary("DDEML");
+    if (dde->dll <= 2)
+        return FALSE;
+#define DDE_BIND(member, type, name) \
+    dde->member = (type)(void (*)(void))GetProcAddress(dde->dll, name); \
+    if (!dde->member) goto failed
+    DDEINITIALIZE init = (DDEINITIALIZE)(void (*)(void))GetProcAddress(dde->dll, "DdeInitialize");
+    if (!init)
+        goto failed;
+    DDE_BIND(uninit, DDEUNINITIALIZE, "DdeUninitialize");
+    DDE_BIND(string, DDECREATESTRINGHANDLE, "DdeCreateStringHandle");
+    DDE_BIND(free_string, DDEFREESTRINGHANDLE, "DdeFreeStringHandle");
+    DDE_BIND(connect, DDECONNECT, "DdeConnect");
+    DDE_BIND(disconnect, DDEDISCONNECT, "DdeDisconnect");
+    DDE_BIND(transaction, DDECLIENTTRANSACTION, "DdeClientTransaction");
+    DDE_BIND(get_data, DDEGETDATA, "DdeGetData");
+    DDE_BIND(free_data, DDEFREEDATAHANDLE, "DdeFreeDataHandle");
+#undef DDE_BIND
+    if (!init(&dde->inst, ole_dde_callback, APPCMD_CLIENTONLY | CBF_SKIP_ALLNOTIFICATIONS, 0))
+        return TRUE;
+failed:
+    FreeLibrary(dde->dll);
+    return FALSE;
+}
+
+static HCONV ole_connect(const ole_dde *dde, HSZ service, LPCSTR topic)
+{
+    HSZ name = dde->string(dde->inst, topic, CP_WINANSI);
+    if (!name)
+        return 0;
+    HCONV conv = dde->connect(dde->inst, service, name, NULL);
+    dde->free_string(dde->inst, name);
+    return conv;
+}
+
+static HCONV ole_connect_system(const ole_dde *dde, HSZ service)
+{
+    HCONV conv = ole_connect(dde, service, "OLESystem");
+    return conv ? conv : ole_connect(dde, service, "System");
+}
+
+static OLESTATUS ole_start_server(const ole_dde *dde, HSZ service, LPCSTR cls, HCONV *out,
+                                  BOOL *started)
+{
+    *out = ole_connect_system(dde, service);
+    if (*out)
+        return OLE_OK;
+
+    char key[128], command[512 + sizeof(" /Embedding")];
+    wsprintf(key, "%s\\protocol\\StdFileEditing\\server", cls);
+    if (!WinRegQueryClassStringN(key, command, 512) || !command[0])
+        return OLE_ERROR_CLASS;
+    lstrcat(command, " /Embedding");
+    if (WinExec(command, SW_HIDE) < 32)
+        return OLE_ERROR_LAUNCH;
+    *started = TRUE;
+
+    DWORD start = GetTickCount();
+    do {
+        *out = ole_connect_system(dde, service);
+        if (*out)
+            return OLE_OK;
+    } while (GetTickCount() - start < 2000 && Yield());
+    return OLE_ERROR_COMM;
+}
+
+static OLESTATUS ole_execute_system(const ole_dde *dde, HCONV conv, LPSTR command,
+                                     OLESTATUS failure)
+{
+    DWORD flags = 0;
+    if (dde->transaction((LPBYTE)command, (DWORD)strlen(command) + 1, conv,
+                         0, 0, XTYP_EXECUTE, 2000, &flags))
+        return OLE_OK;
+    return flags & DDE_FBUSY ? OLE_BUSY : failure;
+}
+
+static OLESTATUS ole_request_block(const ole_dde *dde, HCONV conv, UINT format, HGLOBAL *out)
+{
+    if (!format)
         return OLE_ERROR_MEMORY;
+    HDDEDATA data = dde->transaction(NULL, 0, conv, 0, format, XTYP_REQUEST, 2000, NULL);
+    if (!data)
+        return OLE_ERROR_FORMAT;
+
+    DWORD bytes = dde->get_data(data, NULL, 0, 0);
+    HGLOBAL block = bytes ? GlobalAlloc(GMEM_MOVEABLE | GMEM_DDESHARE, bytes) : 0;
+    LPBYTE dst = block ? GlobalLock(block) : NULL;
+    OLESTATUS status = bytes ? OLE_ERROR_MEMORY : OLE_ERROR_BLANK;
+    if (dst) {
+        status = dde->get_data(data, dst, bytes, 0) == bytes ? OLE_OK : OLE_ERROR_COMM;
+        GlobalUnlock(block);
     }
-    used += picture_header(o, o->image ? 5 : 0, data + used);
-    GlobalUnlock(head);
-    if (o->size > UINT32_MAX - used) {
-        GlobalFree(head);
-        OleDelete(o);
-        *out = NULL;
-        return OLE_ERROR_SIZE;
+    dde->free_data(data);
+    if (status == OLE_OK)
+        *out = block;
+    else if (block)
+        GlobalFree(block);
+    return status;
+}
+
+static OLESTATUS create_server_snapshot(LPCSTR cls, LHCLIENTDOC doc, LPCSTR name,
+                                         UINT render, LPOLEOBJECT *out,
+                                         HGLOBAL native, HGLOBAL image)
+{
+    const ole_clip_string identity[] = {
+        { (const uint8_t *)cls, (DWORD)strlen(cls) + 1 },
+        { (const uint8_t *)"", 1 }, { (const uint8_t *)"", 1 }
+    };
+    HGLOBAL head = 0;
+    DWORD used = 0;
+    OLESTATUS status = make_object_header(identity, native, OT_EMBEDDED, &head, &used);
+    if (status != OLE_OK) {
+        if (image)
+            GlobalFree(image);
+        return status;
     }
-    o->type = type;
-    o->stream_head = head;
-    o->head_bytes = used;
-    o->tail_bytes = o->size;
-    return OLE_OK;
+    if (image) {
+        status = new_picture(image, 0, doc, name, 0, 0, out);
+        if (status == OLE_ERROR_FORMAT && render == olerender_draw)
+            image = 0;
+    }
+    if (!image) {
+        *out = new_object(doc, name);
+        status = *out ? OLE_OK : OLE_ERROR_MEMORY;
+    }
+    if (status == OLE_OK)
+        return finish_stream_object(OT_EMBEDDED, out, head, used);
+    GlobalFree(head);
+    return status;
+}
+
+static OLESTATUS WINAPI OleCreate(LPCSTR protocol, LPOLECLIENT client, LPCSTR cls,
+                                   LHCLIENTDOC doc, LPCSTR name, LPOLEOBJECT *out,
+                                   UINT render, OLECLIPFORMAT format)
+{
+    (void)client;
+    if (!out)
+        return OLE_ERROR_ADDRESS;
+    *out = NULL;
+    if (!name || !cls)
+        return OLE_ERROR_ADDRESS;
+    if (!protocol || lstrcmpi(protocol, "StdFileEditing"))
+        return OLE_ERROR_PROTOCOL;
+    if (!*cls || strlen(cls) >= 64 || strchr(cls, '"') || strchr(cls, '\\') || strchr(cls, '/'))
+        return OLE_ERROR_CLASS;
+    if (render != olerender_none && render != olerender_draw && render != olerender_format)
+        return OLE_ERROR_OPTION;
+    if (render == olerender_format && format != CF_DIB)
+        return OLE_ERROR_FORMAT;
+    int d = doc_of(doc);
+    if (d < 0)
+        return OLE_ERROR_HANDLE;
+
+    ole_dde dde;
+    if (!ole_dde_begin(&dde))
+        return OLE_ERROR_COMM;
+
+    static DWORD next_topic;
+    char topic[40], command[160];
+    wsprintf(topic, "WINN-OLE-%04X-%08X", (UINT)GetCurrentTask(), (unsigned)++next_topic);
+    HSZ service = dde.string(dde.inst, cls, CP_WINANSI);
+    HCONV sys = 0, data = 0;
+    HGLOBAL native = 0, image = 0;
+    OLESTATUS status = OLE_ERROR_MEMORY;
+    BOOL created = FALSE, started = FALSE;
+    docs[d].creating++;
+    if (!service)
+        goto done;
+    status = ole_start_server(&dde, service, cls, &sys, &started);
+    if (status != OLE_OK)
+        goto done;
+    wsprintf(command, "[StdNewDocument(\"%s\",\"%s\")]", cls, topic);
+    status = ole_execute_system(&dde, sys, command, OLE_ERROR_NEW);
+    if (status != OLE_OK)
+        goto done;
+    created = TRUE;
+    data = ole_connect(&dde, service, topic);
+    status = OLE_ERROR_COMM;
+    if (!data)
+        goto done;
+    status = ole_request_block(&dde, data, clipboard_format("Native", TRUE), &native);
+    if (status != OLE_OK)
+        goto done;
+    if (render != olerender_none) {
+        status = ole_request_block(&dde, data, CF_DIB, &image);
+        if (status != OLE_OK &&
+            (render == olerender_format || (status != OLE_ERROR_FORMAT && status != OLE_ERROR_BLANK)))
+            goto done;
+    }
+    status = OLE_OK;
+done:
+    if (data)
+        dde.disconnect(data);
+    if (created) {
+        wsprintf(command, "[StdCloseDocument(\"%s\")]", topic);
+        OLESTATUS closed = ole_execute_system(&dde, sys, command, OLE_ERROR_TERMINATE);
+        if (closed != OLE_OK && status == OLE_OK)
+            status = closed;
+    }
+    if (started && sys && status != OLE_OK)
+        ole_execute_system(&dde, sys, "[StdExit]", OLE_ERROR_TERMINATE);
+    if (sys)
+        dde.disconnect(sys);
+    if (service)
+        dde.free_string(dde.inst, service);
+    dde.uninit(dde.inst);
+    FreeLibrary(dde.dll);
+    if (status == OLE_OK) {
+        status = create_server_snapshot(cls, doc, name, render, out, native, image);
+        image = 0;                    /* snapshot creation consumes it */
+    }
+    if (image)
+        GlobalFree(image);
+    if (native)
+        GlobalFree(native);
+    docs[d].creating--;
+    return status;
 }
 
 static OLESTATUS WINAPI OleCreateFromClip(LPCSTR protocol, LPOLECLIENT client, LHCLIENTDOC doc,
@@ -1803,7 +2060,7 @@ static const struct {
     { 31, 4, "OleQueryOutOfDate", 0, R_OBJECT, NULL },
     { 32, 24, "OleObjectConvert", 0, R_OWN, (const void *)OleObjectConvert },
     { 33, 28, "OleCreateFromTemplate", 8, R_CREATE, NULL },
-    { 34, 28, "OleCreate", 8, R_CREATE, NULL },
+    { 34, 28, "OleCreate", 0, R_OWN, (const void *)OleCreate },
     { 35, 4, "OleQueryReleaseStatus", 0, R_OWN, (const void *)OleQueryReleaseStatus },
     { 36, 4, "OleQueryReleaseError", 0, R_OWN, (const void *)OleQueryReleaseStatus },
     { 37, 4, "OleQueryReleaseMethod", 0, R_OWN, NULL },
@@ -2120,6 +2377,22 @@ static int ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *v)
                                                  name, &object, NE->arg16(c, 6),
                                                  NE->arg16(c, 4), ordinal == 11);
             *v = guest_created(c, out, result, object);
+        }
+        return WINDLL_WORD;
+    }
+    case 34: {
+        char protocol[32], cls[65], name[128];
+        uint32_t out = NE->arg32(c, 8);
+        LPOLEOBJECT object = NULL;
+        if (!put32(c, out, 0) || !NE->arg32(c, 12) ||
+            !g_str(c, NE->arg32(c, 28), protocol, sizeof(protocol)) ||
+            !g_str(c, NE->arg32(c, 20), cls, sizeof(cls)) ||
+            !g_str(c, NE->arg32(c, 12), name, sizeof(name))) {
+            *v = OLE_ERROR_ADDRESS;
+        } else {
+            OLESTATUS status = OleCreate(protocol, NULL, cls, (LHCLIENTDOC)NE->arg32(c, 16),
+                                         name, &object, NE->arg16(c, 6), NE->arg16(c, 4));
+            *v = guest_created(c, out, status, object);
         }
         return WINDLL_WORD;
     }
