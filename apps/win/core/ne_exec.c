@@ -378,6 +378,9 @@ static void fault_where(const win_ne_guest_image *g, const win_ne_native_gate *g
     f->frame_valid = 1;
     f->ip = (uint16_t)(fr[0] | fr[1] << 8);
     f->cs = (uint16_t)(fr[2] | fr[3] << 8);
+    if (is_error_code_vector(f->vector))
+        win_trace_event("ne-fault-error", f->vector,
+                        guest_get16(gate->ring0_linear + f->frame_sp));
     for (uint16_t i = 1; i <= g->info.segment_count; i++)
         if ((g->segments[i].selector & ~3u) == (f->cs & ~3u))
             f->segment = i;

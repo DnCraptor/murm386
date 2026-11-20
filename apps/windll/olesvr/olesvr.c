@@ -1015,7 +1015,7 @@ static HDDEDATA document_guest(int doc, DWORD id, HSZ item, LPCSTR name, WORD fo
 {
     server_owner owner = docs[doc].owner;
     uint32_t get_object = guest_proc(owner, 4);
-    if (!(get_object >> 16) || NE->size < sizeof(*NE) || !NE->task_global_size ||
+    if (!(get_object >> 16) || NE->size < WIN_DLL_NE_GLOBAL_SIZE || !NE->task_global_size ||
         !NE->task_alloc || !NE->task_free || !NE->task_write || !NE->task_proc)
         return 0;
 

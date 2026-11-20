@@ -429,10 +429,16 @@ static uint32_t task_global_size(uint16_t task, uint16_t handle)
     return block ? block->size : 0;
 }
 
+static int task_starting(uint16_t task)
+{
+    const wtask *t = task_from_handle((HTASK)task);
+    return t && t->starting;
+}
+
 static const win_dll_ne dll_ne = {
     sizeof(win_dll_ne), call_arg16, call_arg32, call_read, call_write, call_string, task_call,
     task_read, task_write, task_global, task_flat, task_message, task_dialog, task_alloc,
-    task_free, task_proc, task_global_size,
+    task_free, task_proc, task_global_size, task_starting,
 };
 
 const win_dll_ne *win_dll_ne_glue(void) { return &dll_ne; }

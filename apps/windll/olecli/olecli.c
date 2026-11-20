@@ -1470,15 +1470,20 @@ static OLESTATUS ole_start_server(const ole_dde *dde, HSZ service, LPCSTR cls, H
     if (!WinRegQueryClassStringN(key, command, 512) || !command[0])
         return OLE_ERROR_CLASS;
     lstrcat(command, " /Embedding");
-    if (WinExec(command, SW_HIDE) < 32)
+    UINT task = WinExec(command, SW_HIDE);
+    if (task < 32)
         return OLE_ERROR_LAUNCH;
     *started = TRUE;
 
+    /* The service may be registered before the server can create a document. */
     DWORD start = GetTickCount();
     do {
-        *out = ole_connect_system(dde, service);
-        if (*out)
-            return OLE_OK;
+        if (!NE || NE->size < sizeof(*NE) || !NE->task_starting ||
+            !NE->task_starting((uint16_t)task)) {
+            *out = ole_connect_system(dde, service);
+            if (*out)
+                return OLE_OK;
+        }
     } while (GetTickCount() - start < 2000 && Yield());
     return OLE_ERROR_COMM;
 }
@@ -2653,7 +2658,7 @@ static OLESTATUS guest_set_data(win_dll_call *c, LPOLEOBJECT o, WORD format, WOR
     OLESTATUS status = set_data_status(o, format);
     if (status != OLE_OK)
         return status;
-    if (NE->size < sizeof(*NE) || !NE->task_global_size)
+    if (NE->size < WIN_DLL_NE_GLOBAL_SIZE || !NE->task_global_size)
         return OLE_ERROR_GENERIC;
     DWORD size = NE->task_global_size((uint16_t)GetCurrentTask(), handle);
     if (!size)
