@@ -167,6 +167,10 @@ and releases the object. This covers global-memory formats including
 Native, DIB and text. Existing conversations retain their document
 identity through rename. A poke on that topic passes a copy of a
 global-memory payload to the target object's SetData method.
+StdShowItem on the system or document topic calls the object's Show
+method. StdDoVerbItem on the document topic passes the verb, visibility
+and focus flags to DoVerb. An open document conversation keeps
+working after the server renames the document.
 DDE transport for GDI-object formats, document advises and server request
 queues are still pending.
 OLECLI's OleCreate uses a running server or launches the registered

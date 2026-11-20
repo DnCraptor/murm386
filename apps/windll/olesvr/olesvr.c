@@ -547,68 +547,201 @@ static void spaces(char **p)
         (*p)++;
 }
 
-/* OLE's system execute vocabulary uses [command("arg",...)] groups.
- * Parse in place in a private copy of the DDE data. */
-static OLESTATUS system_command(int s, char **text)
+typedef struct {
+    BOOL verb, show, focus;
+    WORD index;
+} object_action;
+
+static HDDEDATA document_action(int doc, LPCSTR item, const object_action *action);
+
+/* Parse execute groups in the private copy of the DDE data. */
+static BOOL execute_begin(char **text, LPCSTR *verb, BOOL *parens)
 {
-    static const struct { LPCSTR name; unsigned argc; } verbs[] = {
-        { "StdOpenDocument", 1 }, { "StdNewDocument", 2 },
-        { "StdNewFromTemplate", 3 }, { "StdEditDocument", 1 }, { "StdExit", 0 }, { "StdCloseDocument", 1 },
-    };
     char *p = *text;
     if (*p++ != '[')
-        return OLE_ERROR_SYNTAX;
+        return FALSE;
     spaces(&p);
-    char *verb = p;
+    *verb = p;
     while (*p && *p != ' ' && *p != '\t' && *p != '(' && *p != ']')
         p++;
     char delimiter = *p;
-    if (!delimiter)
+    if (!delimiter || p == *verb)
+        return FALSE;
+    *p++ = 0;
+    if (delimiter == ' ' || delimiter == '\t') {
+        spaces(&p);
+        delimiter = *p++;
+    }
+    if (delimiter != '(' && delimiter != ']')
+        return FALSE;
+    *parens = delimiter == '(';
+    *text = p;
+    return TRUE;
+}
+
+static BOOL execute_string(char **text, LPCSTR *value)
+{
+    char *p = *text;
+    spaces(&p);
+    if (*p++ != '"')
+        return FALSE;
+    char *end = strchr(p, '"');
+    if (!end || (size_t)(end - p) >= 256)
+        return FALSE;
+    *end = 0;
+    *value = p;
+    *text = end + 1;
+    return TRUE;
+}
+
+static BOOL execute_separator(char **text, char token)
+{
+    spaces(text);
+    if (**text != token)
+        return FALSE;
+    (*text)++;
+    return TRUE;
+}
+
+static BOOL execute_end(char **text, BOOL parens)
+{
+    if (parens && (!execute_separator(text, ')') || !execute_separator(text, ']')))
+        return FALSE;
+    spaces(text);
+    return TRUE;
+}
+
+static BOOL execute_item(char **text, LPCSTR *item)
+{
+    if (execute_string(text, item)) {
+        if (!**item)
+            *item = NULL;
+        return TRUE;
+    }
+    char *p = *text;
+    spaces(&p);
+    if (strncasecmp(p, "NULL", 4))
+        return FALSE;
+    *item = NULL;
+    *text = p + 4;
+    return TRUE;
+}
+
+static BOOL execute_number(char **text, WORD *value)
+{
+    char *p = *text;
+    spaces(&p);
+    if (*p < '0' || *p > '9')
+        return FALSE;
+    DWORD n = 0;
+    do {
+        n = 10 * n + (unsigned)(*p++ - '0');
+        if (n > UINT16_MAX)
+            return FALSE;
+    } while (*p >= '0' && *p <= '9');
+    *value = (WORD)n;
+    *text = p;
+    return TRUE;
+}
+
+static BOOL execute_bool(char **text, BOOL *value)
+{
+    spaces(text);
+    if (!strncasecmp(*text, "TRUE", 4)) {
+        *value = TRUE;
+        *text += 4;
+    } else if (!strncasecmp(*text, "FALSE", 5)) {
+        *value = FALSE;
+        *text += 5;
+    } else {
+        WORD n;
+        if (!execute_number(text, &n) || n > 1)
+            return FALSE;
+        *value = n != 0;
+    }
+    return TRUE;
+}
+
+static OLESTATUS execute_action(int doc, char **text, BOOL verb)
+{
+    LPCSTR item;
+    BOOL no_focus = FALSE;
+    object_action action = { .verb = verb, .show = TRUE };
+    if (!execute_item(text, &item))
         return OLE_ERROR_SYNTAX;
-    *p = 0;
+    if (verb) {
+        if (!execute_separator(text, ',') || !execute_number(text, &action.index) ||
+            !execute_separator(text, ',') || !execute_bool(text, &action.show) ||
+            !execute_separator(text, ',') || !execute_bool(text, &no_focus))
+            return OLE_ERROR_SYNTAX;
+    } else if (execute_separator(text, ',') && !execute_bool(text, &no_focus)) {
+        return OLE_ERROR_SYNTAX;
+    }
+    if (!execute_end(text, TRUE))
+        return OLE_ERROR_SYNTAX;
+    if (doc < 0)
+        return OLE_ERROR_NOT_OPEN;
+    action.focus = !no_focus;
+    HDDEDATA result = document_action(doc, item, &action);
+    if (result == DDE_FACK)
+        return OLE_OK;
+    return result == DDE_FBUSY ? OLE_BUSY : (verb ? OLE_ERROR_DOVERB : OLE_ERROR_SHOW);
+}
+
+static OLESTATUS document_command(int doc, char **text)
+{
+    LPCSTR verb;
+    BOOL parens;
+    if (!execute_begin(text, &verb, &parens) || !parens)
+        return OLE_ERROR_SYNTAX;
+    if (!lstrcmpi(verb, "StdDoVerbItem"))
+        return execute_action(doc, text, TRUE);
+    if (!lstrcmpi(verb, "StdShowItem"))
+        return execute_action(doc, text, FALSE);
+    return OLE_ERROR_COMMAND;
+}
+
+static OLESTATUS system_command(int s, char **text)
+{
+    static const struct { LPCSTR name; unsigned argc; } verbs[] = {
+        { "StdOpenDocument", 1 }, { "StdNewDocument", 2 }, { "StdNewFromTemplate", 3 },
+        { "StdEditDocument", 1 }, { "StdExit", 0 }, { "StdCloseDocument", 1 },
+    };
+    LPCSTR verb;
+    BOOL parens;
+    if (!execute_begin(text, &verb, &parens))
+        return OLE_ERROR_SYNTAX;
+    HTASK task = servers[s].owner.task;
+    HSZ service = servers[s].service;
+    if (!lstrcmpi(verb, "StdShowItem")) {
+        LPCSTR topic;
+        if (!parens || !execute_string(text, &topic) || !*topic ||
+            !execute_separator(text, ','))
+            return OLE_ERROR_SYNTAX;
+        return execute_action(service_doc(task, service, topic), text, FALSE);
+    }
+
     unsigned method = 0;
     while (method < sizeof(verbs) / sizeof(*verbs) && lstrcmpi(verb, verbs[method].name))
         method++;
-    *p = delimiter;
     if (method == sizeof(verbs) / sizeof(*verbs))
         return OLE_ERROR_COMMAND;
     unsigned argc = verbs[method].argc;
+    if (argc && !parens)
+        return OLE_ERROR_SYNTAX;
     LPCSTR arg[3] = {0};
-    spaces(&p);
-    if (*p == '(') {
-        p++;
-        for (unsigned i = 0; i < argc; i++) {
-            spaces(&p);
-            if (i && *p++ != ',')
-                return OLE_ERROR_SYNTAX;
-            spaces(&p);
-            if (*p++ != '"')
-                return OLE_ERROR_SYNTAX;
-            char *end = strchr(p, '"');
-            if (!end || end == p)
-                return OLE_ERROR_SYNTAX;
-            if ((size_t)(end - p) >= sizeof(docs[0].name))
-                return OLE_ERROR_NAME;
-            *end = 0;
-            arg[i] = p;
-            p = end + 1;
-        }
-        spaces(&p);
-        if (*p++ != ')')
+    for (unsigned i = 0; i < argc; i++)
+        if ((i && !execute_separator(text, ',')) || !execute_string(text, &arg[i]) || !*arg[i])
             return OLE_ERROR_SYNTAX;
-    } else if (argc) {
+        else if (strlen(arg[i]) >= sizeof(docs[0].name))
+            return OLE_ERROR_NAME;
+    if (!execute_end(text, parens))
         return OLE_ERROR_SYNTAX;
-    }
-    spaces(&p);
-    if (*p++ != ']')
-        return OLE_ERROR_SYNTAX;
-    spaces(&p);
-    *text = p;
 
     if (method == SERVER_EXIT)
         return system_exit(s);
     if (method == SERVER_CLOSE) {
-        int doc = service_doc(servers[s].owner.task, servers[s].service, arg[0]);
+        int doc = service_doc(task, service, arg[0]);
         if (doc < 0)
             return OLE_ERROR_NOT_OPEN;
         return docs[doc].transferring ? OLE_BUSY : close_doc(doc);
@@ -619,7 +752,7 @@ static OLESTATUS system_command(int s, char **text)
     return system_document(s, method, arg[has_class ? 1 : 0], arg[2]);
 }
 
-static HDDEDATA system_execute(HTASK task, HSZ service, HDDEDATA data)
+static HDDEDATA execute_commands(LHSERVER handle, LHSERVERDOC document, HDDEDATA data)
 {
     DWORD bytes = dde.get_data(data, NULL, 0, 0);
     char *text = bytes ? malloc(bytes) : NULL;
@@ -629,12 +762,13 @@ static HDDEDATA system_execute(HTASK task, HSZ service, HDDEDATA data)
     if (dde.get_data(data, (LPBYTE)text, bytes, 0) == bytes && memchr(text, 0, bytes)) {
         char *p = text;
         spaces(&p);
-        int first = service_server(task, service);
-        if (*p && first >= 0) {
-            LHSERVER handle = servers[first].handle;
+        if (*p) {
             do {
-                int s = server_of(handle);
-                status = s >= 0 ? system_command(s, &p) : OLE_ERROR_HANDLE;
+                int slot = document ? doc_of(document) : server_of(handle);
+                if (slot < 0)
+                    status = OLE_ERROR_HANDLE;
+                else
+                    status = document ? document_command(slot, &p) : system_command(slot, &p);
             } while (status == OLE_OK && *p);
         }
     }
@@ -733,7 +867,7 @@ static BOOL memory_format(UINT format)
     }
 }
 
-static HDDEDATA poke_status(OLESTATUS status)
+static HDDEDATA dde_status(OLESTATUS status)
 {
     if (status == OLE_OK)
         return DDE_FACK;
@@ -760,7 +894,7 @@ static HANDLE native_poke_data(HDDEDATA data)
 }
 
 static HDDEDATA document_native(int doc, DWORD id, HSZ item, LPCSTR name, WORD format,
-                                 HDDEDATA incoming, request_client *client)
+                                 HDDEDATA incoming, const object_action *action, request_client *client)
 {
     LPOLESERVERDOC server_doc = docs[doc].native;
     const OLESERVERDOCVTBL *vt = server_doc->lpvtbl;
@@ -769,15 +903,20 @@ static HDDEDATA document_native(int doc, DWORD id, HSZ item, LPCSTR name, WORD f
         return 0;
     OLESTATUS status = vt->GetObject(server_doc, name, &object, &client->native);
     if (status != OLE_OK || !object)
-        return incoming && status == OLE_BUSY ? DDE_FBUSY : 0;
+        return (incoming || action) && status == OLE_BUSY ? DDE_FBUSY : 0;
 
     const OLESERVEROBJECTVTBL *objvt = ((const OLESERVEROBJECT *)(const void *)object)->lpvtbl;
     HANDLE handle = 0;
     HDDEDATA result = 0;
-    if (!client->revoked && !docs[doc].revoked && objvt && incoming && objvt->SetData) {
+    if (!client->revoked && !docs[doc].revoked && objvt && action) {
+        if (action->verb && objvt->DoVerb)
+            result = dde_status(objvt->DoVerb(object, action->index, action->show, action->focus));
+        else if (!action->verb && objvt->Show)
+            result = dde_status(objvt->Show(object, action->focus));
+    } else if (!client->revoked && !docs[doc].revoked && objvt && incoming && objvt->SetData) {
         handle = native_poke_data(incoming);
         if (handle)
-            result = poke_status(objvt->SetData(object, format, handle));
+            result = dde_status(objvt->SetData(object, format, handle));
     } else if (!client->revoked && !docs[doc].revoked && objvt && !incoming && objvt->GetData &&
                objvt->GetData(object, format, &handle) == OLE_OK && handle) {
         if (!client->revoked && !docs[doc].revoked) {
@@ -850,7 +989,7 @@ done:
 }
 
 static HDDEDATA document_guest(int doc, DWORD id, HSZ item, LPCSTR name, WORD format,
-                                HDDEDATA incoming, request_client *client)
+                                HDDEDATA incoming, const object_action *action, request_client *client)
 {
     server_owner owner = docs[doc].owner;
     uint32_t get_object = guest_proc(owner, 4);
@@ -884,7 +1023,7 @@ static HDDEDATA document_guest(int doc, DWORD id, HSZ item, LPCSTR name, WORD fo
         goto done;
     OLESTATUS status = (WORD)NE->call(task, get_object, args, 8);
     if (status != OLE_OK) {
-        if (incoming && status == OLE_BUSY)
+        if ((incoming || action) && status == OLE_BUSY)
             result = DDE_FBUSY;
         goto done;
     }
@@ -894,13 +1033,19 @@ static HDDEDATA document_guest(int doc, DWORD id, HSZ item, LPCSTR name, WORD fo
     server_owner object = { owner.task, read32(params) };
     if (!(object.guest >> 16))
         goto done;
-    uint32_t method = guest_proc(object, incoming ? 5 : 4);
-    if (!client->revoked && !docs[doc].revoked && (method >> 16) && incoming) {
+    unsigned slot = action ? (action->verb ? 3 : 2) : (incoming ? 5 : 4);
+    uint32_t method = guest_proc(object, slot);
+    if (!client->revoked && !docs[doc].revoked && (method >> 16) && action) {
+        WORD words[] = { (WORD)(object.guest >> 16), (WORD)object.guest,
+                         action->verb ? action->index : (WORD)action->focus,
+                         (WORD)action->show, (WORD)action->focus };
+        result = dde_status((WORD)NE->call(task, method, words, action->verb ? 5 : 3));
+    } else if (!client->revoked && !docs[doc].revoked && (method >> 16) && incoming) {
         WORD handle = guest_poke_data(task, incoming);
         if (handle) {
             /* Once called, SetData owns this guest global block. */
             WORD words[] = { (WORD)(object.guest >> 16), (WORD)object.guest, format, handle };
-            result = poke_status((WORD)NE->call(task, method, words, 4));
+            result = dde_status((WORD)NE->call(task, method, words, 4));
         }
     } else if (!client->revoked && !docs[doc].revoked && (method >> 16)) {
         WORD words[] = { (WORD)(object.guest >> 16), (WORD)object.guest, format,
@@ -922,25 +1067,21 @@ done:
     return result;
 }
 
-static HDDEDATA document_transaction(int i, DWORD id, HSZ item, UINT format, HDDEDATA incoming)
+static HDDEDATA document_call(int i, DWORD id, HSZ item, LPCSTR object_name, UINT format,
+                              HDDEDATA incoming, const object_action *action)
 {
-    if (i < 0 || docs[i].revoked || !memory_format(format))
+    if (i < 0 || docs[i].revoked)
         return 0;
     if (docs[i].opening || docs[i].closing || docs[i].transferring)
-        return incoming ? DDE_FBUSY : 0;
-
-    char name[256] = {0};
-    if (item && !dde.query(id, item, name, sizeof(name), CP_WINANSI))
-        return 0;
-    LPCSTR object_name = name[0] ? name : NULL;
+        return incoming || action ? DDE_FBUSY : 0;
     LHSERVERDOC handle = docs[i].handle;
     request_client client = { .native = { &request_client_vt }, .task = GetCurrentTask(),
                               .next = active_client };
     active_client = &client;
     docs[i].transferring = TRUE;
     HDDEDATA result = docs[i].native ?
-        document_native(i, id, item, object_name, (WORD)format, incoming, &client) :
-        document_guest(i, id, item, object_name, (WORD)format, incoming, &client);
+        document_native(i, id, item, object_name, (WORD)format, incoming, action, &client) :
+        document_guest(i, id, item, object_name, (WORD)format, incoming, action, &client);
     active_client = client.next;
     if (docs[i].handle == handle) {
         docs[i].transferring = FALSE;
@@ -948,6 +1089,19 @@ static HDDEDATA document_transaction(int i, DWORD id, HSZ item, UINT format, HDD
             revoke_doc(i);
     }
     return result;
+}
+
+static HDDEDATA document_transaction(int doc, DWORD id, HSZ item, UINT format, HDDEDATA incoming)
+{
+    char name[256] = {0};
+    if (!memory_format(format) || (item && !dde.query(id, item, name, sizeof(name), CP_WINANSI)))
+        return 0;
+    return document_call(doc, id, item, name[0] ? name : NULL, format, incoming, NULL);
+}
+
+static HDDEDATA document_action(int doc, LPCSTR item, const object_action *action)
+{
+    return document_call(doc, 0, 0, item, 0, 0, action);
 }
 
 static HDDEDATA CALLBACK system_callback(UINT type, UINT fmt, HCONV conv, HSZ topic,
@@ -970,7 +1124,8 @@ static HDDEDATA CALLBACK system_callback(UINT type, UINT fmt, HCONV conv, HSZ to
             return 0;
         service = info.hszServiceReq;
     }
-    if (service_server(task, service) < 0)
+    int server = service_server(task, service);
+    if (server < 0)
         return 0;
     if (type == XTYP_CONNECT)
         return system || service_doc(task, service, name) >= 0;
@@ -981,13 +1136,16 @@ static HDDEDATA CALLBACK system_callback(UINT type, UINT fmt, HCONV conv, HSZ to
         return 0;
     }
     if (!system) {
+        LHSERVERDOC document = (LHSERVERDOC)info.hUser;
         if (type == XTYP_REQUEST || (type == XTYP_POKE && data))
-            return document_transaction(doc_of((LHSERVERDOC)info.hUser), id, item, fmt,
+            return document_transaction(doc_of(document), id, item, fmt,
                                         type == XTYP_POKE ? data : 0);
+        if (type == XTYP_EXECUTE && document)
+            return execute_commands(0, document, data);
         return 0;
     }
     if (type == XTYP_EXECUTE)
-        return system_execute(task, service, data);
+        return execute_commands(servers[server].handle, 0, data);
     return type == XTYP_REQUEST && fmt == CF_TEXT ? system_item(id, task, service, item) : 0;
 }
 
