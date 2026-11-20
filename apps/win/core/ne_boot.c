@@ -403,6 +403,20 @@ int win_ne_fault_make(uint8_t idt[WIN_NE_FAULT_IDT_BYTES],
             return 0;
         memcpy(code + at, n.bytes, n.n);
         gate(idt, 11, (uint16_t)(WIN_NE_FAULT_CODE_OFFSET + at), a->pm_segment, 0);
+
+        /* #GP has the same saved-register and IRET frame as #NP.
+         * Jump into #NP's CALL FAR / register restore / error pop, but use
+         * a distinct service so only CLI/STI can be recovered in WINN. */
+        unsigned gp = common + (unsigned)e.n;
+        if (gp + 8u > WIN_NE_FAULT_CODE_BYTES)
+            return 0;
+        code[gp] = 0x52;                     /* push dx */
+        code[gp + 1u] = 0x50;                /* push ax */
+        code[gp + 2u] = 0xb8;                /* mov ax, WIN_NE_SERVICE_GP */
+        put16(code + gp + 3u, WIN_NE_SERVICE_GP);
+        code[gp + 5u] = 0xe9;                /* jmp to NP's call far */
+        put16(code + gp + 6u, (uint16_t)((int)(at + 5u) - (int)(gp + 8u)));
+        gate(idt, 13, (uint16_t)(WIN_NE_FAULT_CODE_OFFSET + gp), a->pm_segment, 0);
     }
     return 1;
 }

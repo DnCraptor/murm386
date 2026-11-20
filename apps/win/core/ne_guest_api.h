@@ -27,6 +27,7 @@ typedef struct {
     uint16_t invalid_call;  /* the first call refused for it (its service) */
     const char *path;  /* the program file (GetModuleFileName) */
     int show;          /* nCmdShow (InitTask) */
+    uint8_t virtual_if; /* per-NE-task virtual interrupt enable: CLI/STI, DPMI 0900-0902 */
     int exited;        /* it ended itself (INT 21h 4Ch), with exit_code */
     uint8_t exit_code;
     uint16_t unsupported;   /* the call it made that WINN does not have:
@@ -49,6 +50,9 @@ typedef struct {
  * Returns 1, 0 when the call is not supported, WINX86_SERVICE_EXIT when
  * the program ends. */
 int win_ne_guest_api(void *opaque, win_ne_regs *cpu, uint16_t service);
+/* Virtual interrupt state; op 0=disable, 1=enable, 2=query.
+ * Returns the state before the operation (DPMI INT 31h 0900-0902). */
+unsigned win_ne_virtual_if(win_ne_guest_api_context *ctx, unsigned op);
 /* the program's selectors its ring 0 code loads as it goes back from a
  * service in memory (ne_guest.h's virtual memory) */
 void win_ne_vm_return(void *opaque, win_ne_regs *cpu, uint16_t service);

@@ -121,6 +121,9 @@
 /* #NP: the segment of the selector its error code has loaded (ne_guest.h's
  * WIN_NE_SERVICE_NP); the frame: AX, DX, the error code, IP, CS, FLAGS */
 #define WIN_NE_SERVICE_NP_       0x2500u
+/* Ring-3 Win16 #GP(0): emulate CLI/STI against the task's virtual IF.
+ * The exception frame layout matches #NP (error, IP, CS, FLAGS). */
+#define WIN_NE_SERVICE_GP        0x2600u
 /* A flat (Win32) program's exceptions (vectors below this): the service
  * WIN_PE_SERVICE_EXCEPTION_ (pe_int.h's WIN_PE_SERVICE_EXCEPTION); the
  * ring 0 frame: the gateway's return address, EAX, the vector, the error

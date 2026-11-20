@@ -422,7 +422,8 @@ static void dpmi(win_ne_guest_api_context *ctx, win_ne_dos_regs *r)
         break;
     }
     case 0x0900: case 0x0901: case 0x0902:   /* the virtual interrupt flag: it was on */
-        r->ax = (uint16_t)((r->ax & 0xff00u) | 1u);
+        r->ax = (uint16_t)((r->ax & 0xff00u) |
+                           win_ne_virtual_if(ctx, r->ax - 0x0900u));
         break;
     case 0x0e00:                        /* the coprocessor: there, a 487's, no emulation */
         r->ax = 0x0045;

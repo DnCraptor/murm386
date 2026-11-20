@@ -702,6 +702,7 @@ static int execute(win_ne_guest_image *gp, const char *path, const char *cmdline
     cpu->prefetch_base = (uint32_t)-1;
     win_ne_guest_api_context api;
     memset(&api, 0, sizeof(api));
+    api.virtual_if = 1;  /* new Win16 task starts with virtual IRQs enabled */
     api.image = gp;
     api.read = read_guest;
     api.path = path;

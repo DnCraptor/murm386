@@ -195,6 +195,16 @@ static int frame_set(win_ne_guest_api_context *ctx, win_ne_regs *cpu, int at, ui
            ctx->image->io.write(ctx->image->opaque, (uint32_t)(cpu->frame + at), b, 2);
 }
 
+/* CLI/STI and the DPMI virtual-interrupt functions share one task-local bit.
+ * This does not alter the emulator's IF/IOPL or the host DOS IRQ state. */
+unsigned win_ne_virtual_if(win_ne_guest_api_context *ctx, unsigned op)
+{
+    unsigned old = ctx && ctx->virtual_if ? 1u : 0u;
+    if (ctx && op <= 1u)
+        ctx->virtual_if = (uint8_t)op;
+    return old;
+}
+
 /* the guest's BX, CX, DX, SI, DI as they were when it called (keybd_event
  * and mouse_event have them as their arguments) */
 int win_ne_saved_regs(win_ne_guest_api_context *ctx, win_ne_regs *cpu, uint16_t r[5])
@@ -558,7 +568,8 @@ void win_ne_vm_return(void *opaque, win_ne_regs *cpu, uint16_t service)
     if (frame_get(ctx, cpu, FR_ES, &v) && (v & ~3u))
         win_ne_guest_present(g, v);
     int at = service == WIN_NE_SERVICE_INT21 || service == WIN_NE_SERVICE_YIELD ? 4 :
-             service == WIN_NE_SERVICE_BIOS ? 6 : service == WIN_NE_SERVICE_NP ? 8 : 0;
+             service == WIN_NE_SERVICE_BIOS ? 6 :
+             (service == WIN_NE_SERVICE_NP || service == WIN_NE_SERVICE_GP) ? 8 : 0;
     if (at && frame_get(ctx, cpu, at, &v))
         win_ne_guest_present(g, v);
     /* a call through the gate: the caller's code segment, which the gateway
@@ -697,6 +708,39 @@ int win_ne_guest_api(void *opaque, win_ne_regs *cpu, uint16_t service)
         value = 0;
         dword = 1;
         break;
+    }
+    case WIN_NE_SERVICE_GP: {
+        /* CPL=3, IOPL=0 faults on CLI/STI.  Recover only these opcodes;
+         * maintain the task's VIF, without changing the physical IF or
+         * allowing a guest to mask the DOS host's hardware interrupts. */
+        uint16_t err = 0, ip = 0, cs = 0;
+        uint8_t opcode = 0;
+        int valid = ctx && ctx->image && frame_get(ctx, cpu, 4, &err) &&
+                    frame_get(ctx, cpu, 6, &ip) && frame_get(ctx, cpu, 8, &cs);
+        if (valid && err == 0 && (cs & 3u) == 3u &&
+            read_segment(ctx, cs, ip, &opcode, 1) &&
+            (opcode == 0xfau || opcode == 0xfbu) &&
+            frame_set(ctx, cpu, 6, (uint16_t)(ip + 1u))) {
+            win_ne_virtual_if(ctx, opcode == 0xfbu ? 1u : 0u);
+            value = 0;
+            dword = 1;
+            break;
+        }
+        /* All other general-protection faults still terminate the guest. */
+        memset(&ctx->fault, 0, sizeof(ctx->fault));
+        ctx->fault.vector = 13;
+        if (valid) {
+            ctx->fault.cs = cs;
+            ctx->fault.ip = ip;
+            const win_ne_guest_image *g = ctx->image;
+            for (uint16_t i = 1; i <= g->info.segment_count; i++)
+                if ((g->segments[i].selector & ~3u) == (cs & ~3u)) {
+                    ctx->fault.segment = i;
+                    break;
+                }
+        }
+        ctx->dead = 1;
+        return WINX86_SERVICE_EXIT;
     }
     case WIN_NE_SERVICE_INT21: {
         int r = int21(ctx, cpu, &value);

@@ -70,7 +70,15 @@ int main(void)
     img.segments = segments;
     img.ss = 0x18;
     img.io.write = write_guest;
-    win_ne_guest_api_context ctx = { .image = &img, .read = read_guest, .path = "TEST.EXE", .show = 1 };
+    win_ne_guest_api_context ctx = { .image = &img, .read = read_guest, .path = "TEST.EXE", .show = 1,
+                                     .virtual_if = 1 };
+    win_ne_guest_api_context other = { .virtual_if = 1 };
+    assert(win_ne_virtual_if(&ctx, 2) == 1);
+    assert(win_ne_virtual_if(&ctx, 0) == 1 && ctx.virtual_if == 0);
+    assert(win_ne_virtual_if(&ctx, 2) == 0);
+    assert(win_ne_virtual_if(&other, 2) == 1); /* task state is isolated */
+    assert(win_ne_virtual_if(&ctx, 1) == 0 && ctx.virtual_if == 1);
+    assert(win_ne_virtual_if(&ctx, 2) == 1);
     cpu.gprx[regsp].r16 = 0x80; /* SS:SP points at caller's far return IP */
     cpu.ss = 0x18;
     put16(0x80, 0x2222);

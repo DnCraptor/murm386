@@ -77,6 +77,15 @@ int main(void)
             assert(!memcmp(code+at,np,sizeof(np)));
             continue;
         }
+        if (v==13) {                            /* #GP: task-local virtual IF */
+            unsigned at=6*WIN_NE_YIELD_VECTOR;
+            unsigned gp=r16(idt+v*8)-WIN_NE_FAULT_CODE_OFFSET;
+            const uint8_t head[]={0x52,0x50,0xb8,WIN_NE_SERVICE_GP&255,WIN_NE_SERVICE_GP>>8,0xe9};
+            assert(gp+8<=WIN_NE_FAULT_CODE_BYTES && idt[v*8+5]==0x86);
+            assert(!memcmp(code+gp,head,sizeof(head)));
+            assert((int)gp+8+(int16_t)r16(code+gp+6)==(int)at+5);
+            continue;
+        }
         if (v==WIN_NE_YIELD_VECTOR) {           /* its gate: the DOS stubs' yield */
             assert(r16(idt+v*8)==WIN_NE_YIELD_OFFSET);
             continue;
