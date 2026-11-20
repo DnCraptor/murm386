@@ -1434,6 +1434,7 @@ static BOOL ole_dde_begin(ole_dde *dde)
     DDE_BIND(get_data, DDEGETDATA, "DdeGetData");
     DDE_BIND(free_data, DDEFREEDATAHANDLE, "DdeFreeDataHandle");
 #undef DDE_BIND
+    dde->inst = 0;                      /* a new DDEML instance */
     if (!init(&dde->inst, ole_dde_callback, APPCMD_CLIENTONLY | CBF_SKIP_ALLNOTIFICATIONS, 0))
         return TRUE;
 failed:

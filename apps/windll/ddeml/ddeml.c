@@ -329,7 +329,7 @@ static UINT init(LPDWORD id, PFNCALLBACK native, uint32_t proc, DWORD cmd)
         return DMLERR_INVALIDPARAMETER;
     instance *in = inst_of(*id);
     if (*id) {                          /* its flags again */
-        if (!in)
+        if (!in || in->closing || in->task != GetCurrentTask())
             return DMLERR_INVALIDPARAMETER;
         in->cmd = (in->cmd & ~0xfffff000ul) | (cmd & 0xfffff000ul);
         return DMLERR_NO_ERROR;

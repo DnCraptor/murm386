@@ -335,7 +335,8 @@ int win_shell_command(const char *file, const char *params, char *cmd, int cap)
     if (!dot || strlen(dot + 1) > 3)
         return 0;
     lstrcpyn(ext, dot + 1, sizeof(ext));
-    if (!lstrcmpi(ext, "EXE") || !lstrcmpi(ext, "COM") || !lstrcmpi(ext, "BAT")) {
+    if (!lstrcmpi(ext, "EXE") || !lstrcmpi(ext, "EZ") ||
+        !lstrcmpi(ext, "COM") || !lstrcmpi(ext, "BAT")) {
         wsprintf(cmd, params && params[0] ? "%s %s" : "%s", file, params);
         return 1;
     }

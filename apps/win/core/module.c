@@ -14,6 +14,7 @@
 #include <string.h>
 #include "wincore.h"
 #include "winmod.h"
+#include "windll.h"
 #include "ez_reloc.h"
 
 #define EZ_BASE_ALIGN   64u
@@ -122,26 +123,51 @@ int win_ez_entry_is_app(const win_ez_image *img)
     return sig == WINAPP_MAGIC;
 }
 
-int win_ez_is_app(const char *path)
+/* Determine which loader owns the EZ without allocating the image. */
+static int ez_kind(const char *path)
 {
     FILE *f = fopen(path, "rb");
     if (!f)
         return 0;
     struct ez_file_header h;
-    uint32_t sig = 0;
+    int kind = 0;
+    uint32_t sig;
     uint32_t e = 0;
     if (fread(&h, 1, sizeof(h), f) == sizeof(h) && h.magic == EZ_MAGIC && h.version == EZ_FORMAT_VERSION &&
         h.header_size >= sizeof(h)) {
         e = h.entry_rva & ~1u;
         uint64_t end = (uint64_t)EZ_IMAGE_RVA + h.image_file_size;
         uint64_t at = (uint64_t)h.header_size + e - EZ_IMAGE_RVA + 4;
-        if (!(e & 3) && e >= EZ_IMAGE_RVA && (uint64_t)e + 8 <= end &&
-            at <= INT32_MAX && !fseek(f, (long)at, SEEK_SET) &&
-            fread(&sig, 1, 4, f) != 4)
-            sig = 0;
+        if (e >= EZ_IMAGE_RVA && (uint64_t)e < end) {
+            kind = 2;                   /* FDOS executable */
+            if (!(e & 3) && (uint64_t)e + 8 <= end && at <= INT32_MAX &&
+                !fseek(f, (long)at, SEEK_SET) && fread(&sig, 1, 4, f) == 4) {
+                if (sig == WINAPP_MAGIC)
+                    kind = 1;
+                else if (sig == WINDLL_MAGIC)
+                    kind = 0;
+            }
+        }
     }
     fclose(f);
-    return sig == WINAPP_MAGIC;
+    return kind;
+}
+
+int win_ez_is_app(const char *path)
+{
+    return ez_kind(path) == 1;
+}
+
+int win_dos_is_ez(const char *path)
+{
+    /* Drivers use the EZ container too. */
+    const char *ext = NULL;
+    for (const char *p = path; *p; p++)
+        if (*p == '.')
+            ext = p;
+        else if (*p == '\\' || *p == '/' || *p == ':')
+            ext = NULL;
+    return ext && (!lstrcmpi(ext, ".EXE") || !lstrcmpi(ext, ".EZ")) && ez_kind(path) == 2;
 }
 
 /* The winapp_info of an application file (its address follows WINAPP_MAGIC

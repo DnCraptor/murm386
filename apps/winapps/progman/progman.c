@@ -484,7 +484,8 @@ static void with_program(const char *cmd, char *out, int size)
     if (!dot || end - dot - 1 > 3 || end - dot - 1 < 1)
         return;
     lstrcpyn(ext, dot + 1, (int)(end - dot));
-    if (!lstrcmpi(ext, "EXE") || !lstrcmpi(ext, "COM") || !lstrcmpi(ext, "BAT") ||
+    if (!lstrcmpi(ext, "EXE") || !lstrcmpi(ext, "EZ") ||
+        !lstrcmpi(ext, "COM") || !lstrcmpi(ext, "BAT") ||
         !lstrcmpi(ext, "PIF") ||
         !GetProfileString("Extensions", ext, "", v, sizeof(v)) || !v[0])
         return;

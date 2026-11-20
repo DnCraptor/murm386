@@ -225,7 +225,8 @@ static void commas(char *out, DWORD v)
 static int is_program(const char *name)
 {
     const char *e = ext_of(name);
-    return !lstrcmpi(e, "EXE") || !lstrcmpi(e, "COM") || !lstrcmpi(e, "BAT") || !lstrcmpi(e, "PIF");
+    return !lstrcmpi(e, "EXE") || !lstrcmpi(e, "EZ") || !lstrcmpi(e, "COM") ||
+           !lstrcmpi(e, "BAT") || !lstrcmpi(e, "PIF");
 }
 
 /* the command a document opens with, from WIN.INI [Extensions] */

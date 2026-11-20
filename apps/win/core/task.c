@@ -633,6 +633,10 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
 #endif
     }
 #else
+    if (win_dos_is_ez(path)) {
+        cursor_wait_end();
+        return win_dos_exec(path, args);
+    }
     int rc = win_ez_load(path, &img);
     if (!rc && !win_ez_entry_is_app(&img)) {
         win_free(img.raw);          /* a DOS program or a driver */
@@ -659,6 +663,10 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
             rc = 0;
             break;
         default:
+            if (win_dos_is_mz(path)) {
+                cursor_wait_end();
+                return win_dos_exec(path, args);
+            }
             break;
         }
     }

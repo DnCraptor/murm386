@@ -78,6 +78,14 @@ stack and enters it as any other program. Its `ExitProc` is not called.
 segments, the program's scrambled on disk, its loader in the script;
 `scripts/selfload.txt`).
 
+DOS MZ executables and native FDOS EZ executables can also be launched
+through WinExec. They run full screen through FDOS EXEC, with the
+calling task's working drive and directories. WinExec returns when
+the DOS child exits, and WINN restores its display, palette and input.
+Native DOS executables can use the .EXE or .EZ extension and require QSPI
+PSRAM as when launched from FDOS. Use the existing Windows launch paths
+for Win16 NE, Win32 PE and Windows EZ applications.
+
 Word for Windows 1.0 (WINWORD.EXE, November 1989) runs so: it starts, asks
 for the user's name, opens Document1, takes typing, its menus and dialogs
 work. What it counts on, as Windows 2.x and 3.x had it: DGROUP's stack

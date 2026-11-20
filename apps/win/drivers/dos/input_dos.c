@@ -69,6 +69,7 @@ static int ext_vk(uint8_t sc, uint8_t al, int *xsc)
 
 /* The microsecond counter wraps every ~71 minutes: accumulate deltas. */
 static uint32_t last_us, ms_acc, us_rem;
+static int clock_started;
 static uint32_t update_ticks(void);
 
 static int has_mouse;
@@ -87,11 +88,19 @@ static int dos_in_enable(int w, int h)
         int386(0x33, &r, &r);
         r.w.ax = 0x0008; r.w.cx = 0; r.w.dx = (uint16_t)(h - 1);
         int386(0x33, &r, &r);
-        r.w.ax = 0x0004; r.w.cx = (uint16_t)(w / 2); r.w.dx = (uint16_t)(h / 2);
+        r.w.ax = 0x0004;
+        r.w.cx = (uint16_t)(last_x >= 0 && last_x < w ? last_x : w / 2);
+        r.w.dx = (uint16_t)(last_y >= 0 && last_y < h ? last_y : h / 2);
         int386(0x33, &r, &r);
     }
-    last_us = dos_yield();
-    kb_flags = 0x20;            /* what USER starts with: NumLock on */
+    if (clock_started) {
+        update_ticks();
+    } else {
+        clock_started = 1;
+        last_us = dos_yield();
+        kb_flags = 0x20;        /* what USER starts with: NumLock on */
+    }
+    last_x = last_y = -1;
     return 0;
 }
 
