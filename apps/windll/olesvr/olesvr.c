@@ -1037,8 +1037,10 @@ static HDDEDATA document_guest(int doc, DWORD id, HSZ item, LPCSTR name, WORD fo
     if (name)
         strcpy((char *)params + NAME, name);
     WORD sel = (WORD)(buf >> 16);
+    /* The whole-document DDE item has a zero-length name. Pass a Win16
+     * string even for that item, as servers may read its first byte. */
     WORD args[] = { (WORD)(owner.guest >> 16), (WORD)owner.guest,
-                    name ? sel : 0, name ? (WORD)(buf + NAME) : 0,
+                    sel, (WORD)(buf + NAME),
                     sel, (WORD)(buf + OUT_OBJECT), sel, (WORD)(buf + CLIENT) };
     HDDEDATA result = 0;
     if (!NE->task_write(task, buf, params, sizeof(params)))

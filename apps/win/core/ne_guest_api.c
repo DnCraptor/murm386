@@ -454,6 +454,13 @@ __attribute__((weak)) void win_ne_bios(win_ne_guest_api_context *ctx, unsigned v
     (void)ctx; (void)vector; (void)r;
 }
 
+int win_ne_buffer_fits(win_ne_guest_api_context *ctx, uint32_t far, uint64_t bytes, int write)
+{
+    const win_ne_guest_segment *s = lookup_segment(ctx, (uint16_t)(far >> 16));
+    uint32_t offset = (uint16_t)far;
+    return s && (!write || (s->flags & 1u)) && offset <= s->size && bytes <= s->size - offset;
+}
+
 int win_ne_read(win_ne_guest_api_context *ctx, uint16_t sel, uint32_t off, void *dst, uint32_t n)
 {
     return read_segment(ctx, sel, off, dst, n);

@@ -714,7 +714,7 @@ static uint8_t *dib_info_in(args *a, uint32_t far, int usage, uint32_t *len, uin
     uint32_t entry = usage == DIB_PAL_COLORS ? 2 : hs == 12 ? 3 : 4;
     *len = hs + (usage < 0 ? 0 : colors * entry);
     *pitch = (wd * bpp + 31u) / 32u * 4u;
-    *rows = (uint32_t)(ht < 0 ? -ht : ht);
+    *rows = ht < 0 ? 0u - (uint32_t)ht : (uint32_t)ht;
     uint8_t *bi = (uint8_t *)win_alloc(hs + 256u * 4u);
     if (bi && !rd_(a, far, bi, *len)) {
         win_free(bi);
@@ -723,10 +723,10 @@ static uint8_t *dib_info_in(args *a, uint32_t far, int usage, uint32_t *len, uin
     return bi;
 }
 
-/* n bytes of the program's at far, in its segment */
-static uint8_t *bytes_in(args *a, uint32_t far, uint32_t n)
+/* The selector bounds include the remainder of a tiled global block. */
+static uint8_t *bytes_in(args *a, uint32_t far, uint64_t n)
 {
-    if (!n || (uint32_t)(uint16_t)far + n > 0x10000u)
+    if (!n || !win_ne_buffer_fits(a->ctx, far, n, 0))
         return NULL;
     uint8_t *d = (uint8_t *)win_alloc(n);
     if (d && !rd_(a, far, d, n)) {
@@ -751,7 +751,7 @@ static __attribute__((noinline)) int dib_service(args *a, uint16_t service, uint
         bfar = dw(a, 6);
         bits_far = dw(a, 10);
         if ((bi = dib_info_in(a, bfar, usage, &len, &pitch, &rows)) &&
-            (bits = bytes_in(a, bits_far, pitch * w(a, 14))))
+            (bits = bytes_in(a, bits_far, (uint64_t)pitch * w(a, 14))))
             *v = (uint16_t)SetDIBitsToDevice(w(a, 30), (int16_t)w(a, 28), (int16_t)w(a, 26),
                                              (int16_t)w(a, 24), (int16_t)w(a, 22),
                                              (int16_t)w(a, 20), (int16_t)w(a, 18), w(a, 16),
@@ -763,7 +763,7 @@ static __attribute__((noinline)) int dib_service(args *a, uint16_t service, uint
         bfar = dw(a, 10);
         bits_far = dw(a, 14);
         if ((bi = dib_info_in(a, bfar, usage, &len, &pitch, &rows)) &&
-            (bits = bytes_in(a, bits_far, pitch * rows)))
+            (bits = bytes_in(a, bits_far, (uint64_t)pitch * rows)))
             *v = (uint16_t)StretchDIBits(w(a, 34), (int16_t)w(a, 32), (int16_t)w(a, 30),
                                          (int16_t)w(a, 28), (int16_t)w(a, 26),
                                          (int16_t)w(a, 24), (int16_t)w(a, 22),
@@ -779,7 +779,7 @@ static __attribute__((noinline)) int dib_service(args *a, uint16_t service, uint
             break;
         if ((dw(a, 14) & CBM_INIT) && dw(a, 10) && dw(a, 6) &&
             (bi = dib_info_in(a, dw(a, 6), usage, &len, &pitch, &rows)))
-            bits = bytes_in(a, dw(a, 10), pitch * rows);
+            bits = bytes_in(a, dw(a, 10), (uint64_t)pitch * rows);
         *v = (uint16_t)CreateDIBitmap(w(a, 22), (const BITMAPINFOHEADER *)bih,
                                       bits ? dw(a, 14) : 0, bits, (const BITMAPINFO *)bi, usage);
         win_free(bih);
@@ -789,7 +789,7 @@ static __attribute__((noinline)) int dib_service(args *a, uint16_t service, uint
                                          * BITMAPINFO FAR *, usage) */
         usage = w(a, 4);
         if ((bi = dib_info_in(a, dw(a, 6), usage, &len, &pitch, &rows)) &&
-            (bits = bytes_in(a, dw(a, 10), pitch * w(a, 14))))
+            (bits = bytes_in(a, dw(a, 10), (uint64_t)pitch * w(a, 14))))
             *v = (uint16_t)SetDIBits(w(a, 20), w(a, 18), w(a, 16), w(a, 14), bits,
                                      (const BITMAPINFO *)bi, usage);
         break;
@@ -805,9 +805,9 @@ static __attribute__((noinline)) int dib_service(args *a, uint16_t service, uint
         n = w(a, 14);
         uint32_t want = ((const BITMAPINFOHEADER *)bi)->biBitCount, out = 0;
         uint32_t bpitch = ((uint32_t)bm.bmWidth * want + 31u) / 32u * 4u;
-        if (bits_far && want && (uint32_t)(uint16_t)bits_far + bpitch * n > 0x10000u)
+        uint64_t size = (uint64_t)bpitch * n;
+        if (bits_far && want && !win_ne_buffer_fits(c, bits_far, size, 1))
             break;
-        uint32_t size = bpitch * n;
         if (bits_far && want)
             bits = (uint8_t *)win_alloc(size ? size : 1u);
         if (bits_far && want && !bits)
@@ -816,9 +816,9 @@ static __attribute__((noinline)) int dib_service(args *a, uint16_t service, uint
                                  (BITMAPINFO *)bi, usage);
         want = ((const BITMAPINFOHEADER *)bi)->biBitCount;
         out = 40u + (want && want <= 8 ? 4u << want : 0u);
-        wr_(a, bfar, bi, out);
-        if (bits)
-            wr_(a, bits_far, bits, bpitch * n);
+        if (*v && (!wr_(a, bfar, bi, out) ||
+                   (bits && !wr_(a, bits_far, bits, bpitch * *v))))
+            *v = 0;
         break;
     }
     case 0x31bd: {                      /* CreateDIBPatternBrush(HGLOBAL, usage): its block */

@@ -246,10 +246,19 @@ void task_init(void)
 
 /* ---------------------------------------------------------------- life cycle */
 
+static void finish_startup(wtask *t)
+{
+    t->starting = 0;
+    if (t->launch_waiter) {
+        *t->launch_waiter = NULL;
+        t->launch_waiter = NULL;
+    }
+}
+
 void task_started(wtask *t)
 {
     if (t && t->starting) {
-        t->starting = 0;
+        finish_startup(t);
         /* its own cursor now: what it set meanwhile (an hourglass while it
          * started, as Taipei) is no longer what the mouse is over */
         if (cursor_wait_end())
@@ -263,7 +272,7 @@ static void task_start(void)
     t->state = WTASK_RUNNING;
     t->exit_code = t->run(t);
     if (t->starting) {                  /* it ended without waiting once: */
-        t->starting = 0;                /* no window of its to ask */
+        finish_startup(t);
         cursor_wait_end();
     }
     /* Final window/file teardown may block on SD or driver operations. */
@@ -730,14 +739,18 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
      * own task), as in Windows: until it first waits for input, in its
      * message loop or a dialog's, or ends (task_started) */
     t->starting = 1;
-    /* let it start right away, as Windows does */
-    /* The new task may finish and be reaped while the caller is suspended.
-     * Do not dereference t after switching away: reap() frees it.  WinExec
-     * reports success as a value > 31, not necessarily a task handle. */
-    UINT result = t->h;
-    if (result < 32)
-        result = 33;
-    task_run_now(t);
+    /* WinExec waits for the child to reach its message loop or time out.
+     * The first scheduler turn can end during application initialization.
+     * The child clears pending before it can exit and be reaped. */
+    UINT result = t->h < 32 ? 33 : t->h;
+    wtask *pending = t;
+    t->launch_waiter = &pending;
+    DWORD start = GetTickCount();
+    do {
+        task_run_now(pending);
+    } while (pending && GetTickCount() - start < 2000 && has_work(pending));
+    if (pending)
+        pending->launch_waiter = NULL;
     return result;
 }
 

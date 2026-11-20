@@ -86,6 +86,8 @@ void win_ne_user_end(win_ne_guest_api_context *ctx);
 /* For those services: the guest's memory, by selector:offset, checked
  * against its segments (and PSP); an argument word at SP + offset; a NUL
  * terminated string (0:0 is ""). */
+/* A tiled Win16 allocation may continue beyond the first 64 KiB window. */
+int win_ne_buffer_fits(win_ne_guest_api_context *ctx, uint32_t far, uint64_t bytes, int write);
 int win_ne_read(win_ne_guest_api_context *ctx, uint16_t sel, uint32_t off, void *dst, uint32_t n);
 int win_ne_write(win_ne_guest_api_context *ctx, uint16_t sel, uint32_t off, const void *src,
                  uint32_t n);

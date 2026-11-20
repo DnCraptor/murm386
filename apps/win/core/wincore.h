@@ -454,6 +454,7 @@ typedef struct wtask {
     int       lent;             /* its window procedures running on another task's
                                  * stack (SendMessage): it does not run meanwhile */
     int       starting;         /* WinExec's hourglass is its until it first waits */
+    struct wtask **launch_waiter; /* WinExec's pending task until input or exit */
     uint32_t  queue_time;       /* when it last looked at its queue (GetTickCount) */
     int       priority;         /* SetPriority's: noted */
     HANDLE    queue;            /* SetTaskQueue's (0: the task) */
