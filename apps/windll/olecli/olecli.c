@@ -83,7 +83,7 @@ struct WINN_OLEOBJECT {
     HMETAFILE metafile;
     int map_mode;
     DWORD size, bits, guest;
-    HGLOBAL identity, native;
+    HGLOBAL identity, native, target_device;
     DWORD guest_data[DATA_SLOTS];
     SIZE pixels;
     LONG width, height;              /* positive HIMETRIC extents */
@@ -512,6 +512,8 @@ static void free_picture(OLEOBJECT *o, uint16_t task)
         GlobalFree(o->identity);
     if (o->native)
         GlobalFree(o->native);
+    if (o->target_device)
+        GlobalFree(o->target_device);
     if (o->metafile)
         DeleteMetaFile(o->metafile);
     if (o->image)
@@ -1389,8 +1391,7 @@ static OLESTATUS create_clip_object(LPCSTR protocol, LHCLIENTDOC doc, LPCSTR nam
     return finish_stream_object(type, out, head, used);
 }
 
-/* A create transaction snapshots the server's new embedded document.
- * Keep all DDE handles local to the synchronous call. */
+/* DDE library bindings and the instance owned by a client conversation. */
 typedef struct {
     HINSTANCE dll;
     DWORD inst;
@@ -1405,6 +1406,13 @@ typedef struct {
     DDEGETLASTERROR last_error;
     DDEFREEDATAHANDLE free_data;
 } ole_dde;
+
+struct ole_session {
+    ole_dde dde;
+    HCONV conv;
+    HSZ item;
+    char item_name[256];
+};
 
 static HDDEDATA CALLBACK ole_dde_callback(UINT type, UINT fmt, HCONV conv, HSZ topic,
                                           HSZ item, HDDEDATA data, DWORD d1, DWORD d2)
@@ -1469,7 +1477,7 @@ static void ole_debug_status(LPCSTR operation, DWORD status, DWORD detail)
 }
 
 static OLESTATUS ole_start_server(const ole_dde *dde, HSZ service, LPCSTR cls, HCONV *out,
-                                  BOOL *started)
+                                  BOOL *started, UINT show)
 {
     *out = ole_connect_system(dde, service);
     if (*out)
@@ -1480,7 +1488,7 @@ static OLESTATUS ole_start_server(const ole_dde *dde, HSZ service, LPCSTR cls, H
     if (!WinRegQueryClassStringN(key, command, 512) || !command[0])
         return OLE_ERROR_CLASS;
     lstrcat(command, " /Embedding");
-    UINT task = WinExec(command, SW_HIDE);
+    UINT task = WinExec(command, show);
     if (task < 32)
         return OLE_ERROR_LAUNCH;
     *started = TRUE;
@@ -1635,7 +1643,7 @@ static OLESTATUS WINAPI OleCreate(LPCSTR protocol, LPOLECLIENT client, LPCSTR cl
     if (!service)
         goto done;
     stage = "OleCreate server startup";
-    status = ole_start_server(&dde, service, cls, &sys, &started);
+    status = ole_start_server(&dde, service, cls, &sys, &started, SW_SHOWMINNOACTIVE);
     if (status != OLE_OK)
         goto done;
     wsprintf(command, "[StdNewDocument(\"%s\",\"%s\")]", cls, topic);
@@ -1662,32 +1670,48 @@ static OLESTATUS WINAPI OleCreate(LPCSTR protocol, LPOLECLIENT client, LPCSTR cl
             (render == olerender_format || (status != OLE_ERROR_FORMAT && status != OLE_ERROR_BLANK)))
             goto done;
     }
-    status = OLE_OK;
-done:
-    if (status != OLE_OK)
-        ole_debug_status(stage, status, 0);
-    if (created) {
-        OLESTATUS closed = ole_close_document(&dde, sys, data, topic);
-        if (closed != OLE_OK && status == OLE_OK) {
-            ole_debug_status("OleCreate close document", closed, 0);
-            status = closed;
-        }
+    stage = "OleCreate session";
+    ole_session *session = calloc(1, sizeof(*session));
+    status = OLE_ERROR_MEMORY;
+    if (!session)
+        goto done;
+    stage = "OleCreate snapshot";
+    LPOLEOBJECT object = NULL;
+    status = create_server_snapshot(cls, doc, name, render, &object, native, image);
+    image = 0;                        /* snapshot creation consumes it */
+    if (status == OLE_OK) {
+        stage = "OleCreate show document";
+        object->writing = TRUE;
+        status = ole_execute(&dde, data, "[StdShowItem(\"\")]", OLE_ERROR_SHOW);
+        object->writing = FALSE;
     }
-    if (data)
-        dde.disconnect(data);
-    if (started && sys && status != OLE_OK)
-        ole_execute(&dde, sys, "[StdExit]", OLE_ERROR_TERMINATE);
+    if (status == OLE_OK) {
+        session->dde = dde;
+        session->conv = data;
+        object->session = session;
+        *out = object;
+    } else {
+        free(session);
+        if (object)
+            OleDelete(object);
+    }
+done:
+    if (status != OLE_OK) {
+        ole_debug_status(stage, status, 0);
+        if (created)
+            ole_close_document(&dde, sys, data, topic);
+        if (data)
+            dde.disconnect(data);
+        if (started && sys)
+            ole_execute(&dde, sys, "[StdExit]", OLE_ERROR_TERMINATE);
+    }
     if (sys)
         dde.disconnect(sys);
     if (service)
         dde.free_string(dde.inst, service);
-    dde.uninit(dde.inst);
-    FreeLibrary(dde.dll);
-    if (status == OLE_OK) {
-        status = create_server_snapshot(cls, doc, name, render, out, native, image);
-        image = 0;                    /* snapshot creation consumes it */
-        if (status != OLE_OK)
-            ole_debug_status("OleCreate snapshot", status, 0);
+    if (status != OLE_OK) {
+        dde.uninit(dde.inst);
+        FreeLibrary(dde.dll);
     }
     if (image)
         GlobalFree(image);
@@ -1994,13 +2018,6 @@ static OLESTATUS WINAPI OleSetLinkUpdateOptions(LPOLEOBJECT object, OLEOPT_UPDAT
     return link_update_option(object, &option, TRUE);
 }
 
-struct ole_session {
-    ole_dde dde;
-    HCONV conv;
-    HSZ item;
-    char item_name[256];
-};
-
 static BOOL session_open(const ole_session *session)
 {
     if (!session)
@@ -2043,6 +2060,59 @@ static OLESTATUS WINAPI OleQueryOpen(LPOLEOBJECT object)
     return !o ? OLE_ERROR_OBJECT : session_open(o->session) ? OLE_OK : OLE_ERROR_NOT_OPEN;
 }
 
+static OLESTATUS send_target_device(const ole_session *s, HGLOBAL device)
+{
+    const ole_dde *dde = &s->dde;
+    HSZ item = dde->string(dde->inst, "StdTargetDevice", CP_WINANSI);
+    UINT format = clipboard_format("Binary", TRUE);
+    DWORD bytes = device ? GlobalSize(device) : 0;
+    BYTE empty = 0;
+    LPBYTE data = device ? GlobalLock(device) : &empty;
+    OLESTATUS status = OLE_ERROR_MEMORY;
+    if (item && format && data) {
+        DWORD flags = 0;
+        if (dde->transaction(data, bytes, s->conv, item, format, XTYP_POKE, 2000, &flags)) {
+            status = OLE_OK;
+        } else {
+            /* StdTargetDevice is optional for OLE servers. */
+            status = ole_transaction_error(dde, flags, OLE_OK);
+        }
+    }
+    if (item)
+        dde->free_string(dde->inst, item);
+    if (data && device)
+        GlobalUnlock(device);
+    return status;
+}
+
+static OLESTATUS WINAPI OleSetTargetDevice(LPOLEOBJECT object, HGLOBAL device)
+{
+    OLEOBJECT *o = object_of(object);
+    if (!o)
+        return OLE_ERROR_OBJECT;
+    if (o->writing)
+        return OLE_BUSY;
+
+    DWORD size = device ? GlobalSize(device) : 0;
+    if (device && size < 7 * sizeof(WORD))
+        return OLE_ERROR_HANDLE;
+    HGLOBAL copy = device ? copy_handle(device, size) : 0;
+    if (device && !copy)
+        return OLE_ERROR_MEMORY;
+
+    o->writing = TRUE;
+    OLESTATUS status = session_open(o->session) ? send_target_device(o->session, copy) : OLE_OK;
+    if (status == OLE_OK) {
+        if (o->target_device)
+            GlobalFree(o->target_device);
+        o->target_device = copy;
+    } else if (copy) {
+        GlobalFree(copy);
+    }
+    o->writing = FALSE;
+    return status;
+}
+
 static OLESTATUS poke_native(OLEOBJECT *o, const ole_session *s)
 {
     HGLOBAL data = 0;
@@ -2076,7 +2146,7 @@ static BOOL session_name(char *out, size_t capacity, const ole_clip_string *fiel
     return !strchr(out, '"');
 }
 
-static OLESTATUS connect_object(OLEOBJECT *o)
+static OLESTATUS connect_object(OLEOBJECT *o, BOOL show)
 {
     char cls[64], topic[256];
     ole_session *s = calloc(1, sizeof(*s));
@@ -2120,7 +2190,8 @@ static OLESTATUS connect_object(OLEOBJECT *o)
     } else {
         make_topic_name(topic);
     }
-    status = ole_start_server(dde, service, cls, &sys, &started);
+    status = ole_start_server(dde, service, cls, &sys, &started,
+                              show ? SW_SHOWMINNOACTIVE : SW_HIDE);
     if (link && started)
         s->conv = ole_connect(dde, service, topic);
     if (s->conv) {
@@ -2138,6 +2209,8 @@ static OLESTATUS connect_object(OLEOBJECT *o)
     s->conv = ole_connect(dde, service, topic);
     status = !s->conv ? OLE_ERROR_COMM : link ? OLE_OK : poke_native(o, s);
 done:
+    if (status == OLE_OK && o->target_device)
+        status = send_target_device(s, o->target_device);
     if (status != OLE_OK && sys && created)
         ole_close_document(dde, sys, s->conv, topic);
     if (status != OLE_OK && sys && started)
@@ -2171,7 +2244,7 @@ static OLESTATUS WINAPI OleActivate(LPOLEOBJECT object, UINT verb, BOOL show, BO
     if (opened) {
         if (o->session)
             disconnect_session(o);
-        status = connect_object(o);
+        status = connect_object(o, show);
     }
     if (status == OLE_OK) {
         ole_session *s = o->session;
@@ -2345,7 +2418,7 @@ static OLESTATUS WINAPI OleUpdate(LPOLEOBJECT object)
     OLESTATUS status = OLE_OK;
     if (temporary) {
         disconnect_session(o);
-        status = connect_object(o);
+        status = connect_object(o, FALSE);
     }
     if (status == OLE_OK)
         status = update_open_object(o);
@@ -2498,7 +2571,7 @@ static const struct {
     { 13, 4, "OleCopyToClipboard", 0, R_OWN, (const void *)OleCopyToClipboard },
     { 14, 8, "OleQueryType", 0, R_OWN, (const void *)OleQueryType },
     { 15, 12, "OleSetHostNames", 0, R_OWN, (const void *)OleSetHostNames },
-    { 16, 6, "OleSetTargetDevice", 0, R_OBJECT, NULL },
+    { 16, 6, "OleSetTargetDevice", 0, R_OWN, (const void *)OleSetTargetDevice },
     { 17, 8, "OleSetBounds", 0, R_OBJECT, NULL },
     { 18, 8, "OleQueryBounds", 0, R_OWN, (const void *)OleQueryBounds },
     { 19, 16, "OleDraw", 0, R_OWN, (const void *)OleDraw },
@@ -2869,6 +2942,32 @@ static int ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *v)
         *v = g_str(c, NE->arg32(c, 8), app, sizeof(app)) &&
              g_str(c, NE->arg32(c, 4), host, sizeof(host)) ?
             OleSetHostNames(guest_object(NE->arg32(c, 12)), app, host) : OLE_ERROR_ADDRESS;
+        return WINDLL_WORD;
+    }
+    case 16: {                         /* OleSetTargetDevice(object, Win16 global handle) */
+        LPOLEOBJECT o = guest_object(NE->arg32(c, 6));
+        WORD handle = NE->arg16(c, 4);
+        if (!o || !handle) {
+            *v = OleSetTargetDevice(o, 0);
+            return WINDLL_WORD;
+        }
+        DWORD size = NE->size >= WIN_DLL_NE_GLOBAL_SIZE && NE->task_global_size ?
+            NE->task_global_size((uint16_t)GetCurrentTask(), handle) : 0;
+        if (size < 7 * sizeof(WORD) || size > 0x10000u) {
+            *v = OLE_ERROR_HANDLE;
+            return WINDLL_WORD;
+        }
+        HGLOBAL copy = GlobalAlloc(GMEM_MOVEABLE, size);
+        void *bytes = copy ? GlobalLock(copy) : NULL;
+        if (bytes) {
+            BOOL read = NE->read(c, (uint32_t)(handle | 3u) << 16, bytes, size);
+            GlobalUnlock(copy);
+            *v = read ? OleSetTargetDevice(o, copy) : OLE_ERROR_ADDRESS;
+        } else {
+            *v = OLE_ERROR_MEMORY;
+        }
+        if (copy)
+            GlobalFree(copy);
         return WINDLL_WORD;
     }
     case 18:

@@ -38,6 +38,8 @@ uint32_t GetTickCount(void) { return 0x34567890UL; }
 int GetSystemMetrics(int id) { return id == 0 ? 640 : -1; }
 uint32_t GetSysColor(int id) { return id == 5 ? 0x00123456u : 0; }
 static unsigned messagebox_calls;
+static unsigned wave_services;
+void win_dll_audio_service(void) { wave_services++; }
 int MessageBox(uint16_t owner, const char *text, const char *title, unsigned type)
 {
     assert(owner == 0 && type == 0);
@@ -92,6 +94,18 @@ int main(void)
     put16(0x84, 5);
     assert(win_ne_guest_api(&ctx, &cpu, 0x10b4));
     assert(cpu.gprx[regax].r16 == 0x3456 && cpu.gprx[regdx].r16 == 0x0012);
+
+    /* Win16 yield must service native PCM without waiting for GetMessage,
+     * and preserve the ring-0 frame's saved AX:DX. */
+    cpu.frame = BASE + 0x60;
+    put16(0x60, 0x1234); /* AX */
+    put16(0x56, 0xabcd); /* DX */
+    put16(0x66, 0x0200); /* FLAGS */
+    assert(win_ne_guest_api(&ctx, &cpu, WIN_NE_SERVICE_YIELD));
+    assert(wave_services == 1);
+    assert(cpu.gprx[regax].r16 == 0x1234 && cpu.gprx[regdx].r16 == 0xabcd);
+    assert(mem[0x66] == 0x00 && mem[0x67] == 0x00);
+    cpu.frame = 0;
 
     /* KERNEL.lstrlen(SS:0x10): valid FAR pointer */
     memcpy(mem + 0x10, "NE arguments", 13);

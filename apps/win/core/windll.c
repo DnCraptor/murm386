@@ -283,6 +283,18 @@ const win_dll_export *win_dll_export_of(int slot, uint16_t ordinal, const char *
     return NULL;
 }
 
+/* Called only by a Win16 task while the shared CPU is back in its saved
+ * real-mode context.  No extra DLL reference is acquired: the playing task
+ * already owns MMSYSTEM, and the lookup tolerates it being unloaded. */
+void win_dll_audio_service(void)
+{
+    int slot = win_dll_find("MMSYSTEM");
+    const win_dll_export *e = slot >= 0 ?
+        win_dll_export_of(slot, 0, "WinWaveService") : NULL;
+    if (e && e->native)
+        ((void (*)(void))e->native)();
+}
+
 /* ---------------------------------------------------------------- KERNEL */
 
 HINSTANCE WINAPI LoadLibrary(LPCSTR name)

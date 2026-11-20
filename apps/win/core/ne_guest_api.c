@@ -446,6 +446,9 @@ __attribute__((weak)) void win_trace_event(const char *name, uint32_t a, uint32_
 {
     (void)name; (void)a; (void)b;
 }
+/* Optional native-DLL audio service at Win16's safe real-mode yield.
+ * Host tests without the DLL manager retain a no-op. */
+__attribute__((weak)) void win_dll_audio_service(void) { }
 /* ... nor global blocks (a self-loading program's loader's stack) */
 __attribute__((weak)) int win_ne_guest_global_free(win_ne_guest_image *g, uint16_t sel)
 {
@@ -667,6 +670,9 @@ int win_ne_guest_api(void *opaque, win_ne_regs *cpu, uint16_t service)
         flags &= (uint16_t)~0x200u;
         if (!frame_set(ctx, cpu, FR_FLAGS, flags))
             return 0;
+        /* The guest need not return to GetMessage while synthesizing PCM.
+         * Pump its native wave device here, in the original DOS context. */
+        win_dll_audio_service();
         if (ctx->yield && ctx->yield()) {
             ctx->stopped = 1;
             return WINX86_SERVICE_EXIT;

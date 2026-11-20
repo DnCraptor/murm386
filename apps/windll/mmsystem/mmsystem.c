@@ -23,6 +23,7 @@
 int winn_wave_ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *value);
 void winn_wave_task_end(uint16_t task);
 void winn_wave_term(void);
+void winn_wave_service(void);
 UINT WINAPI winn_wave_num(void);
 /* Win16 midiOut lives in midi.c, behind installed native MIDI drivers. */
 int winn_midi_ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *value);
@@ -1010,6 +1011,8 @@ static const win_dll_export exports[] = {
     { 1224, 8, "mmioAscend", (const void *)mmioAscend },
     { 1225, 8, "mmioCreateChunk", (const void *)mmioCreateChunk },
     { 1226, 16, "mmioRename", (const void *)mmioRename },
+    /* Private native service; not a Win16 MMSYSTEM ordinal. */
+    { 0, 0, "WinWaveService", (const void *)winn_wave_service },
 };
 
 static const win_dll_info info = {

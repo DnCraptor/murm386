@@ -83,9 +83,10 @@ static void restore_cpu(CPU *cpu, const win_cpu_snapshot *s)
     cpu->excerr = s->excerr;
 }
 
-/* Bursts of 4096 instructions a guest runs without calling the API before
- * other tasks get their turn: some 260 thousand instructions. */
-#define WIN_NE_EXEC_SLICE 64u
+/* Service other WINN tasks and native PCM while a Win16 program is doing
+ * long computations without API calls (e.g. synthesizing an entire WAVEHDR).
+ * 8 bursts of 4096 rather than 64 keep the service interval bounded. */
+#define WIN_NE_EXEC_SLICE 8u
 
 /* What a guest must not have when it enters ring 3: IF (it gets no DOS
  * interrupt in protected mode), IOPL (it may not CLI, OUT or set IF

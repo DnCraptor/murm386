@@ -299,11 +299,18 @@ static void wave_pump(void)
     }
 }
 
+/* Also callable at a Win16 scheduler yield.  There is no active guest
+ * instruction here: its CPU state is back in the original DOS context. */
+void winn_wave_service(void)
+{
+    if (output.driver && output.task == GetCurrentTask())
+        wave_pump();
+}
+
 static void CALLBACK wave_tick(HWND hwnd, UINT msg, UINT id, DWORD ticks)
 {
     (void)hwnd; (void)msg; (void)id; (void)ticks;
-    if (output.task == GetCurrentTask())
-        wave_pump();
+    winn_wave_service();
 }
 
 static MMRESULT wave_open(win_dll_call *c)

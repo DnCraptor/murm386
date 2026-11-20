@@ -900,6 +900,12 @@ static HDDEDATA dde_status(OLESTATUS status)
     return status == OLE_BUSY ? DDE_FBUSY : DDE_FNOTPROCESSED;
 }
 
+static BOOL target_device_item(UINT format, LPCSTR name)
+{
+    return name && !lstrcmpi(name, "StdTargetDevice") &&
+           format == RegisterClipboardFormat("Binary");
+}
+
 static HANDLE native_poke_data(HDDEDATA data)
 {
     DWORD bytes;
@@ -1036,6 +1042,11 @@ static HDDEDATA document_guest(int doc, DWORD id, HSZ item, LPCSTR name, WORD fo
     if (!notice)
         return 0;
 
+    BOOL target = incoming && target_device_item(format, name);
+    DWORD target_bytes = target ? dde.get_data(incoming, NULL, 0, 0) : 0;
+    if (target_bytes && target_bytes < 7 * sizeof(WORD))
+        return DDE_FNOTPROCESSED;
+
     enum { CLIENT = 0, VTABLE = 4, OUT_OBJECT = 8, OUT_DATA = 12, NAME = 14 };
     uint8_t params[NAME + 256] = {0};
     uint32_t buf = NE->task_alloc(task, sizeof(params));
@@ -1046,7 +1057,7 @@ static HDDEDATA document_guest(int doc, DWORD id, HSZ item, LPCSTR name, WORD fo
     for (unsigned j = 0; j < 2; j++)
         for (unsigned k = 0; k < 4; k++)
             params[4 * j + k] = (uint8_t)(writes[j] >> (8 * k));
-    if (name)
+    if (name && !target)
         strcpy((char *)params + NAME, name);
     WORD sel = (WORD)(buf >> 16);
     /* The whole-document DDE item has a zero-length name. Pass a Win16
@@ -1069,7 +1080,7 @@ static HDDEDATA document_guest(int doc, DWORD id, HSZ item, LPCSTR name, WORD fo
     server_owner object = { owner.task, read32(params) };
     if (!(object.guest >> 16))
         goto done;
-    unsigned slot = action ? (action->verb ? 3 : 2) : (incoming ? 5 : 4);
+    unsigned slot = action ? (action->verb ? 3 : 2) : (target ? 6 : incoming ? 5 : 4);
     uint32_t method = guest_proc(object, slot);
     if (!client->revoked && !docs[doc].revoked && (method >> 16) && action) {
         WORD words[] = { (WORD)(object.guest >> 16), (WORD)object.guest,
@@ -1077,11 +1088,13 @@ static HDDEDATA document_guest(int doc, DWORD id, HSZ item, LPCSTR name, WORD fo
                          (WORD)action->show, (WORD)action->focus };
         result = dde_status((WORD)NE->call(task, method, words, action->verb ? 5 : 3));
     } else if (!client->revoked && !docs[doc].revoked && (method >> 16) && incoming) {
-        WORD handle = guest_poke_data(task, incoming);
-        if (handle) {
-            /* Once called, SetData owns this guest global block. */
+        WORD handle = target && !target_bytes ? 0 : guest_poke_data(task, incoming);
+        if (handle || (target && !target_bytes)) {
+            /* These callbacks own the supplied global block. */
             WORD words[] = { (WORD)(object.guest >> 16), (WORD)object.guest, format, handle };
-            result = dde_status((WORD)NE->call(task, method, words, 4));
+            if (target)
+                words[2] = handle;
+            result = dde_status((WORD)NE->call(task, method, words, target ? 3 : 4));
         }
     } else if (!client->revoked && !docs[doc].revoked && (method >> 16)) {
         WORD words[] = { (WORD)(object.guest >> 16), (WORD)object.guest, format,
@@ -1110,6 +1123,8 @@ static HDDEDATA document_call(int i, DWORD id, HSZ item, LPCSTR object_name, UIN
         return 0;
     if (docs[i].opening || docs[i].closing || docs[i].transferring)
         return incoming || action ? DDE_FBUSY : 0;
+    if (incoming && docs[i].native && target_device_item(format, object_name))
+        return DDE_FNOTPROCESSED;     /* older native server vtables have no such slot */
     LHSERVERDOC handle = docs[i].handle;
     request_client client = { .native = { &request_client_vt }, .task = GetCurrentTask(),
                               .next = active_client };
