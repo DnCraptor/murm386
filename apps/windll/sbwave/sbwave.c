@@ -131,9 +131,10 @@ static void ring_put(uint32_t at, const uint8_t *data, unsigned n, int silent)
             k = n;
         if (silent)
             memset(buffer + off, quiet(), k);
-        else
+        else {
             memcpy(buffer + off, data, k);
-        data += silent ? 0 : k;
+            data += k;               /* never do pointer arithmetic on NULL */
+        }
         at += k;
         n -= k;
     }
@@ -340,6 +341,7 @@ static int sb_submit(const uint8_t *data, unsigned n, unsigned rate,
     blocks++;
     give();
     return running;
+    return 1;
 }
 
 static int sb_room(void)

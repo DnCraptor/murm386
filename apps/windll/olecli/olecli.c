@@ -1531,20 +1531,27 @@ static OLESTATUS ole_start_server(const ole_dde *dde, HSZ service, LPCSTR cls, H
         return OLE_ERROR_LAUNCH;
     *started = TRUE;
 
-    /* The service may be registered before the server can create a document. */
-    DWORD start = GetTickCount();
-    BOOL waiting;
-    do {
-        waiting = NE && NE->size >= sizeof(*NE) && NE->task_starting &&
-                  NE->task_starting((uint16_t)task);
-        if (!waiting) {
-            *out = ole_connect_system(dde, service);
-            if (*out)
-                return OLE_OK;
+    /* The service can be registered before its server can create a document.
+     * Let the launched task reach its message loop before starting the
+     * shorter wait for the DDE service. WinExec can return during startup. */
+    if (NE && NE->size >= sizeof(*NE) && NE->task_starting) {
+        DWORD start = GetTickCount();
+        while (NE->task_starting((uint16_t)task)) {
+            DWORD elapsed = GetTickCount() - start;
+            if (elapsed >= 15000 || !Yield()) {
+                ole_debug_status("server still starting", task, elapsed);
+                return OLE_ERROR_COMM;
+            }
         }
+    }
+
+    DWORD start = GetTickCount();
+    do {
+        *out = ole_connect_system(dde, service);
+        if (*out)
+            return OLE_OK;
     } while (GetTickCount() - start < 2000 && Yield());
-    ole_debug_status(waiting ? "server still starting" : "system conversation",
-                     task, waiting ? 0 : dde->last_error(dde->inst));
+    ole_debug_status("system conversation", task, dde->last_error(dde->inst));
     return OLE_ERROR_COMM;
 }
 

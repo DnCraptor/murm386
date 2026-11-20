@@ -125,6 +125,10 @@ struct SB16State {
     unsigned int audio_p, audio_q;
     uint32_t audio_phase;
     int16_t audio_last_l, audio_last_r;
+    /* Last auto-init PCM format: consecutive B6/C6 blocks must not reset
+     * the DAC phase while samples of the previous block are buffered. */
+    int pcm_stream_valid, pcm_stream_rate, pcm_stream_stereo;
+    AudioFormat pcm_stream_format;
     void *voice;
     int active_out;
 
@@ -283,6 +287,7 @@ static void dma_cmd8 (SB16State *s, int mask, int dma_len)
     s->direct_dac_sample = 0;
     s->audio_phase = 0;
     s->audio_last_l = s->audio_last_r = 0;
+    s->pcm_stream_valid = 0;
     s->fmt = AUDIO_FORMAT_U8;
     s->use_hdma = 0;
     s->fmt_bits = 8;
@@ -328,8 +333,6 @@ static void dma_cmd8 (SB16State *s, int mask, int dma_len)
 static void dma_cmd (SB16State *s, uint8_t cmd, uint8_t d0, int dma_len)
 {
     s->direct_dac_sample = 0;
-    s->audio_phase = 0;
-    s->audio_last_l = s->audio_last_r = 0;
     s->use_hdma = cmd < 0xc0;
     s->fifo = (cmd >> 1) & 1;
     s->dma_auto = (cmd >> 2) & 1;
@@ -388,6 +391,23 @@ static void dma_cmd (SB16State *s, uint8_t cmd, uint8_t d0, int dma_len)
             s->fmt = AUDIO_FORMAT_U8;
         }
     }
+
+    /* WINN's SBWAVE reissues auto-init B6/C6 for successive blocks. The
+     * SB16's 4-KiB output FIFO can still contain the preceding block;
+     * zeroing phase/held sample here introduces a periodic artifact.
+     * Reset only for a new format, a reset device, or single-cycle DMA. */
+    if (!s->dma_auto || !s->pcm_stream_valid ||
+        s->pcm_stream_rate != s->freq ||
+        s->pcm_stream_format != s->fmt ||
+        s->pcm_stream_stereo != s->fmt_stereo ||
+        (!s->active_out && s->audio_p == s->audio_q)) {
+        s->audio_phase = 0;
+        s->audio_last_l = s->audio_last_r = 0;
+    }
+    s->pcm_stream_valid = s->dma_auto;
+    s->pcm_stream_rate = s->freq;
+    s->pcm_stream_format = s->fmt;
+    s->pcm_stream_stereo = s->fmt_stereo;
 
     s->left_till_irq = s->block_size;
 
@@ -937,6 +957,7 @@ static void reset (SB16State *s)
     s->audio_p = s->audio_q;
     s->audio_phase = 0;
     s->audio_last_l = s->audio_last_r = 0;
+    s->pcm_stream_valid = 0;
     s->dma_paused = false;
     legacy_reset (s);
 }

@@ -148,6 +148,7 @@ static void context_fault(win_ne_fault *f, CPU *cpu, int flat)
 static int invoke_pe(win_ne_native_gate *gate, CPU *cpu, uint16_t service);
 #endif
 
+void (*win_ne_trace_enter)(uint16_t service);
 void (*win_ne_trace_call)(uint16_t service, uint16_t cs, uint16_t ip, uint32_t result);
 void (*win_ne_trace_turn)(uint16_t cs, uint16_t ip);
 int (*win_ne_busy)(void);
@@ -246,6 +247,8 @@ static int invoke_native(void *opaque, CPU *cpu, uint16_t service)
     if (win_ne_trace_call)
         win_ne_guest_caller(gate->api, &guest, &from_cs, &from_ip);
     win_trace_event("api-enter", service, ((uint32_t)from_cs << 16) | from_ip);
+    if (win_ne_trace_enter)
+        win_ne_trace_enter(service);
     int handled = win_ne_guest_api(gate->api, &guest, service);
     win_trace_event("api-leave", service, (uint32_t)handled);
     if (win_ne_trace_call)

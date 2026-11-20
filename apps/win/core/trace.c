@@ -32,8 +32,7 @@ typedef struct {
 } tturn;
 
 static tcall *calls;
-static char capture_call[64];
-static void dump_trace(const char *file, const char *trigger);
+static void dump_trace(const char *file, const char *trigger, BOOL before);
 static tturn turns[TURNS];
 static unsigned ncalls, nturns;     /* how many ever (the ring's next: % size) */
 
@@ -81,6 +80,36 @@ void win_trace_event(const char *name, uint32_t a, uint32_t b)
 }
 
 #if defined(__arm__) || defined(__thumb__) || defined(WINN_NE_HOST)
+typedef struct {
+    char name[64];
+    BOOL native_dll;
+} capture_target;
+
+static capture_target capture_after, capture_before;
+
+static void read_capture_target(capture_target *target, LPCSTR key)
+{
+    GetPrivateProfileString("debug", key, "", target->name, sizeof(target->name), "SYSTEM.INI");
+    target->native_dll = strchr(target->name, '.') != NULL;
+}
+
+static void capture(const capture_target *target, uint16_t service, BOOL before)
+{
+    BOOL native_dll = service >= WIN_NE_SERVICE_DLL && service < WIN_NE_SERVICE_UNDEFINED;
+    if (!target->name[0] || target->native_dll != native_dll)
+        return;
+    char native_name[sizeof(target->name)];
+    const char *name = native_dll ? win_ne_native_name(service, native_name, sizeof(native_name)) :
+                                   win_ne_service_name(service);
+    if (name && !lstrcmpi(name, target->name))
+        dump_trace(before ? "WINNENTR.LOG" : "WINNCALL.LOG", name, before);
+}
+
+static void on_enter(uint16_t service)
+{
+    capture(&capture_before, service, TRUE);
+}
+
 static void on_call(uint16_t service, uint16_t cs, uint16_t ip, uint32_t result)
 {
     uint16_t task = (uint16_t)GetCurrentTask();
@@ -93,13 +122,7 @@ static void on_call(uint16_t service, uint16_t cs, uint16_t ip, uint32_t result)
     t->result = result;
     t->ms = GetTickCount();
 
-    if (capture_call[0]) {
-        char native_name[sizeof(capture_call)];
-        const char *name = service >= WIN_NE_SERVICE_DLL && service < WIN_NE_SERVICE_UNDEFINED ?
-            win_ne_native_name(service, native_name, sizeof(native_name)) : win_ne_service_name(service);
-        if (name && !lstrcmpi(name, capture_call))
-            dump_trace("WINNCALL.LOG", name);
-    }
+    capture(&capture_after, service, FALSE);
 }
 
 static void on_turn(uint16_t cs, uint16_t ip)
@@ -118,11 +141,14 @@ void win_trace_init(void)
     if (calls || !GetPrivateProfileInt("debug", "trace", 0, "SYSTEM.INI"))
         return;
     /* Keep the previous session's dump until there is a new trace to write. */
-    GetPrivateProfileString("debug", "trace.call", "", capture_call, sizeof(capture_call), "SYSTEM.INI");
+    read_capture_target(&capture_after, "trace.call");
+    read_capture_target(&capture_before, "trace.call.before");
     calls = (tcall *)win_alloc(sizeof(tcall) * CALLS);
     if (!calls)
         return;
     memset(calls, 0, sizeof(tcall) * CALLS);
+    if (capture_before.name[0])
+        win_ne_trace_enter = on_enter;
     win_ne_trace_call = on_call;
     win_ne_trace_turn = on_turn;
 #endif
@@ -136,10 +162,10 @@ static void put(HFILE f, const char *s)
 void win_trace_dump(void)
 {
     if (ncalls || nturns || nevents || ndebug)
-        dump_trace("WINNTRAC.LOG", NULL);
+        dump_trace("WINNTRAC.LOG", NULL, FALSE);
 }
 
-static void dump_trace(const char *file, const char *trigger)
+static void dump_trace(const char *file, const char *trigger, BOOL before)
 {
     char path[160], line[160], name[32];
     win_path(file, path, sizeof(path));
@@ -150,7 +176,7 @@ static void dump_trace(const char *file, const char *trigger)
              (unsigned long)GetTickCount());
     put(f, line);
     if (trigger) {
-        wsprintf(line, "captured after %s\r\n", trigger);
+        wsprintf(line, "captured %s %s\r\n", before ? "before" : "after", trigger);
         put(f, line);
     }
 #if defined(__arm__) || defined(__thumb__) || defined(WINN_NE_HOST)

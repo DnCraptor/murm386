@@ -66,6 +66,7 @@ const char *win_pe_service_name(uint16_t service, char *buf, size_t cap);
 /* WINN's trace (core/trace.c, SYSTEM.INI [debug] trace=1): each call a
  * program makes of WINN's, with its caller and DX:AX; a running program's
  * place where its turn ended. NULL: no trace. */
+extern void (*win_ne_trace_enter)(uint16_t service);
 extern void (*win_ne_trace_call)(uint16_t service, uint16_t cs, uint16_t ip, uint32_t result);
 extern void (*win_ne_trace_turn)(uint16_t cs, uint16_t ip);
 /* WINN's win_busy, after each call a program makes: nonzero, input has
