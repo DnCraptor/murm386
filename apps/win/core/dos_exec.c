@@ -202,6 +202,30 @@ static void flush_keyboard(void)
     int386(0x21, &r, &r);
 }
 
+static void wait_for_return(void)
+{
+    union REGS r = {0};
+    r.h.ah = 0x0f;
+    int386(0x10, &r, &r);
+    unsigned mode = r.h.al & 0x7f;
+    unsigned page = r.h.bh;
+    /* Keep text output intact. If the child left graphics active, get a
+     * visible console before asking for a key. */
+    if (mode > 3 && mode != 7) {
+        set_mode(3);
+        page = 0;
+    }
+    /* BIOS output and input also work with DOS handles redirected. */
+    const char *prompt = "\r\nPress any key to return to Windows.";
+    for (; *prompt; ++prompt) {
+        r.w.ax = 0x0e00 | (uint8_t)*prompt;
+        r.w.bx = (page << 8) | 7;
+        int386(0x10, &r, &r);
+    }
+    r.w.ax = 0x1000;                   /* consume one full keystroke */
+    int386(0x16, &r, &r);
+}
+
 static UINT execute(uint16_t seg)
 {
     union REGS r = {0};
@@ -262,6 +286,10 @@ UINT win_dos_exec(const char *path, const char *args)
     dos_free_low(b);
     win_free(saved);
     flush_keyboard();
+    if (rc >= 32) {
+        wait_for_return();
+        flush_keyboard();
+    }
     if (win_sys.sound) {
         win_sys.sound->disable();
         win_sys.sound->enable();
