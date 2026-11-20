@@ -9,6 +9,7 @@
 #include "ole.h"
 #include "ddeml.h"
 #include "windll.h"
+#include "../ole_picture.h"
 
 #define NE (__win_dll_ne)
 #define SERVERS 8
@@ -19,6 +20,16 @@ typedef struct {
     HTASK task;
     uint32_t guest;
 } server_owner;
+
+typedef struct request_client {
+    OLECLIENT native;
+    uint32_t guest;
+    HTASK task;
+    BOOL revoked;
+    struct request_client *next;
+} request_client;
+
+static request_client *active_client;
 
 static struct {
     server_owner owner;
@@ -36,6 +47,8 @@ static struct {
     LHSERVER server;
     LPOLESERVERDOC native;
     BOOL closing, revoked, opening, transferring;
+    request_client editor;
+    uint32_t editor_object;
     char name[128];
 } docs[DOCS];
 
@@ -54,6 +67,7 @@ static struct {
     DDEFREESTRINGHANDLE free_string;
     DDEQUERYSTRING query;
     DDENAMESERVICE service;
+    DDEPOSTADVISE post_advise;
     DDEQUERYCONVINFO conv_info;
     DDESETUSERHANDLE user_handle;
     DDECREATEDATAHANDLE create_data;
@@ -97,6 +111,7 @@ static DWORD open_endpoint(HTASK task)
     DDE_IMPORT(free_string, DDEFREESTRINGHANDLE, "DdeFreeStringHandle");
     DDE_IMPORT(query, DDEQUERYSTRING, "DdeQueryString");
     DDE_IMPORT(service, DDENAMESERVICE, "DdeNameService");
+    DDE_IMPORT(post_advise, DDEPOSTADVISE, "DdePostAdvise");
     DDE_IMPORT(conv_info, DDEQUERYCONVINFO, "DdeQueryConvInfo");
     DDE_IMPORT(user_handle, DDESETUSERHANDLE, "DdeSetUserHandle");
     DDE_IMPORT(create_data, DDECREATEDATAHANDLE, "DdeCreateDataHandle");
@@ -295,9 +310,18 @@ static void revoke_doc(int i)
 {
     server_owner owner = docs[i].owner;
     LPOLESERVERDOC doc = docs[i].native;
+    request_client editor = docs[i].editor;
+    uint32_t object = docs[i].editor_object;
     /* A Release can call registration or revocation again. Never touch
      * the old slot after the callback. */
     memset(&docs[i], 0, sizeof(docs[i]));
+    if (editor.guest) {
+        editor.next = active_client;
+        active_client = &editor;
+        guest_method((server_owner){owner.task, object}, 1, OLE_OK);
+        active_client = editor.next;
+        NE->task_free((uint16_t)owner.task, editor.guest);
+    }
     if (!doc)
         guest_method(owner, DOC_RELEASE, OLE_OK);
     else if (doc->lpvtbl && doc->lpvtbl->Release)
@@ -315,6 +339,27 @@ static OLESTATUS WINAPI OleRevokeServerDoc(LHSERVERDOC doc)
     }
     revoke_doc(i);
     return OLE_OK;
+}
+
+static OLESTATUS post_document_notice(int i, LPCSTR signal)
+{
+    DWORD id = endpoint_of(GetCurrentTask());
+    HSZ topic = dde.string(id, docs[i].name, CP_WINANSI);
+    HSZ item = dde.string(id, signal, CP_WINANSI);
+    OLESTATUS status = OLE_ERROR_MEMORY;
+    if (topic && item)
+        status = dde.post_advise(id, topic, item) ? OLE_OK : OLE_ERROR_COMM;
+    if (item)
+        dde.free_string(id, item);
+    if (topic)
+        dde.free_string(id, topic);
+    return status;
+}
+
+static OLESTATUS WINAPI OleSavedServerDoc(LHSERVERDOC doc)
+{
+    int i = doc_of(doc);
+    return i < 0 ? OLE_ERROR_HANDLE : post_document_notice(i, "/Save");
 }
 
 static OLESTATUS close_doc(int i)
@@ -837,24 +882,16 @@ static HDDEDATA system_item(DWORD id, HTASK task, HSZ service, HSZ item)
     return dde.create_data(id, (LPBYTE)text, (DWORD)strlen(text) + 1, 0, item, CF_TEXT, 0);
 }
 
-/* A synchronous document transaction holds its client reference until
- * the server's object has been released. */
-typedef struct request_client {
-    OLECLIENT native;
-    uint32_t guest;
-    HTASK task;
-    BOOL revoked;
-    struct request_client *next;
-} request_client;
-
-static request_client *active_client;
-
 static request_client *find_client(LPOLECLIENT native, uint32_t guest)
 {
     HTASK task = GetCurrentTask();
     for (request_client *p = active_client; p; p = p->next)
         if (p->task == task && (native ? native == &p->native : guest && guest == p->guest))
             return p;
+    if (guest)
+        for (int i = 0; i < DOCS; i++)
+            if (docs[i].owner.task == task && docs[i].editor.guest == guest)
+                return &docs[i].editor;
     return NULL;
 }
 
@@ -925,6 +962,25 @@ static HANDLE native_poke_data(HDDEDATA data)
     return handle;
 }
 
+static HDDEDATA request_global_data(DWORD id, HSZ item, UINT format, HGLOBAL handle)
+{
+    HDDEDATA result = 0;
+    LPBYTE bytes = GlobalLock(handle);
+    if (bytes) {
+        result = dde.create_data(id, bytes, GlobalSize(handle), 0, item, format, 0);
+        GlobalUnlock(handle);
+    }
+    GlobalFree(handle);
+    return result;
+}
+
+static HDDEDATA request_bitmap_data(DWORD id, HSZ item, HBITMAP bitmap, BOOL revoked)
+{
+    HGLOBAL dib = revoked ? 0 : bitmap_to_dib(bitmap, FALSE);
+    DeleteObject(bitmap);
+    return dib ? request_global_data(id, item, CF_DIB, dib) : 0;
+}
+
 static HDDEDATA document_native(int doc, DWORD id, HSZ item, LPCSTR name, WORD format,
                                  HDDEDATA incoming, const object_action *action, request_client *client)
 {
@@ -951,14 +1007,13 @@ static HDDEDATA document_native(int doc, DWORD id, HSZ item, LPCSTR name, WORD f
             result = dde_status(objvt->SetData(object, format, handle));
     } else if (!client->revoked && !docs[doc].revoked && objvt && !incoming && objvt->GetData &&
                objvt->GetData(object, format, &handle) == OLE_OK && handle) {
-        if (!client->revoked && !docs[doc].revoked) {
-            LPBYTE bytes = GlobalLock(handle);
-            if (bytes) {
-                result = dde.create_data(id, bytes, GlobalSize(handle), 0, item, format, 0);
-                GlobalUnlock(handle);
-            }
-        }
-        GlobalFree(handle);
+        BOOL revoked = client->revoked || docs[doc].revoked;
+        if (format == CF_BITMAP)
+            result = request_bitmap_data(id, item, handle, revoked);
+        else if (!revoked)
+            result = request_global_data(id, item, format, handle);
+        else
+            GlobalFree(handle);
     }
     if (objvt && objvt->Release)
         objvt->Release(object);
@@ -1052,42 +1107,48 @@ static HDDEDATA document_guest(int doc, DWORD id, HSZ item, LPCSTR name, WORD fo
     uint32_t buf = NE->task_alloc(task, sizeof(params));
     if (!buf)
         return 0;
-    client->guest = buf + CLIENT;
-    uint32_t writes[] = { buf + VTABLE, notice };
-    for (unsigned j = 0; j < 2; j++)
-        for (unsigned k = 0; k < 4; k++)
-            params[4 * j + k] = (uint8_t)(writes[j] >> (8 * k));
-    if (name && !target)
-        strcpy((char *)params + NAME, name);
+    BOOL existing = (!name || !*name || target) && docs[doc].editor_object &&
+                    !docs[doc].editor.revoked;
+    request_client *request = existing ? &docs[doc].editor : client;
+    server_owner object = { owner.task, existing ? docs[doc].editor_object : 0 };
     WORD sel = (WORD)(buf >> 16);
-    /* The whole-document DDE item has a zero-length name. Pass a Win16
-     * string even for that item, as servers may read its first byte. */
-    WORD args[] = { (WORD)(owner.guest >> 16), (WORD)owner.guest,
-                    sel, (WORD)(buf + NAME),
-                    sel, (WORD)(buf + OUT_OBJECT), sel, (WORD)(buf + CLIENT) };
     HDDEDATA result = 0;
-    if (!NE->task_write(task, buf, params, sizeof(params)))
-        goto done;
-    OLESTATUS status = (WORD)NE->call(task, get_object, args, 8);
-    if (status != OLE_OK) {
-        if ((incoming || action) && status == OLE_BUSY)
-            result = DDE_FBUSY;
+    if (!existing) {
+        client->guest = buf + CLIENT;
+        uint32_t writes[] = { buf + VTABLE, notice };
+        for (unsigned j = 0; j < 2; j++)
+            for (unsigned k = 0; k < 4; k++)
+                params[4 * j + k] = (uint8_t)(writes[j] >> (8 * k));
+        if (name && !target)
+            strcpy((char *)params + NAME, name);
+        /* Pass an empty Win16 string for the whole-document item. */
+        WORD args[] = { (WORD)(owner.guest >> 16), (WORD)owner.guest,
+                        sel, (WORD)(buf + NAME),
+                        sel, (WORD)(buf + OUT_OBJECT), sel, (WORD)(buf + CLIENT) };
+        if (!NE->task_write(task, buf, params, sizeof(params)))
+            goto done;
+        OLESTATUS status = (WORD)NE->call(task, get_object, args, 8);
+        if (status != OLE_OK) {
+            if ((incoming || action) && status == OLE_BUSY)
+                result = DDE_FBUSY;
+            goto done;
+        }
+        if (!NE->task_read(task, buf + OUT_OBJECT, params, 4))
+            goto done;
+        object.guest = read32(params);
+        if (!(object.guest >> 16))
+            goto done;
+    } else if (!incoming && !action && !NE->task_write(task, buf + OUT_DATA, params, 2)) {
         goto done;
     }
-    if (!NE->task_read(task, buf + OUT_OBJECT, params, 4))
-        goto done;
-
-    server_owner object = { owner.task, read32(params) };
-    if (!(object.guest >> 16))
-        goto done;
     unsigned slot = action ? (action->verb ? 3 : 2) : (target ? 6 : incoming ? 5 : 4);
     uint32_t method = guest_proc(object, slot);
-    if (!client->revoked && !docs[doc].revoked && (method >> 16) && action) {
+    if (!request->revoked && !docs[doc].revoked && (method >> 16) && action) {
         WORD words[] = { (WORD)(object.guest >> 16), (WORD)object.guest,
                          action->verb ? action->index : (WORD)action->focus,
                          (WORD)action->show, (WORD)action->focus };
         result = dde_status((WORD)NE->call(task, method, words, action->verb ? 5 : 3));
-    } else if (!client->revoked && !docs[doc].revoked && (method >> 16) && incoming) {
+    } else if (!request->revoked && !docs[doc].revoked && (method >> 16) && incoming) {
         WORD handle = target && !target_bytes ? 0 : guest_poke_data(task, incoming);
         if (handle || (target && !target_bytes)) {
             /* These callbacks own the supplied global block. */
@@ -1096,23 +1157,38 @@ static HDDEDATA document_guest(int doc, DWORD id, HSZ item, LPCSTR name, WORD fo
                 words[2] = handle;
             result = dde_status((WORD)NE->call(task, method, words, target ? 3 : 4));
         }
-    } else if (!client->revoked && !docs[doc].revoked && (method >> 16)) {
+    } else if (!request->revoked && !docs[doc].revoked && (method >> 16)) {
         WORD words[] = { (WORD)(object.guest >> 16), (WORD)object.guest, format,
                          sel, (WORD)(buf + OUT_DATA) };
         if ((WORD)NE->call(task, method, words, 5) == OLE_OK &&
             NE->task_read(task, buf + OUT_DATA, params, 2)) {
             WORD handle = (WORD)(params[0] | params[1] << 8);
-            if (handle && NE->task_global_size(task, handle)) {
-                if (!client->revoked && !docs[doc].revoked)
+            if (handle && format == CF_BITMAP) {
+                result = request_bitmap_data(id, item, handle, request->revoked || docs[doc].revoked);
+            } else if (handle && NE->task_global_size(task, handle)) {
+                if (!request->revoked && !docs[doc].revoked)
                     result = guest_request_data(id, item, format, task, handle);
                 NE->task_free(task, (uint32_t)handle << 16);
             }
         }
     }
-    guest_method(object, 1, OLE_OK);
+    if (!existing) {
+        /* The server must keep this client reference while the whole
+         * document is being edited, so it can publish the final changes. */
+        if (action && action->show && (!name || !*name) && result == DDE_FACK &&
+            !request->revoked && !docs[doc].revoked && !docs[doc].editor_object) {
+            docs[doc].editor = *client;
+            docs[doc].editor.next = NULL;
+            docs[doc].editor_object = object.guest;
+            buf = 0;
+        } else {
+            guest_method(object, 1, OLE_OK);
+        }
+    }
 done:
     client->guest = 0;
-    NE->task_free(task, buf);
+    if (buf)
+        NE->task_free(task, buf);
     return result;
 }
 
@@ -1147,7 +1223,14 @@ static HDDEDATA document_transaction(int doc, DWORD id, HSZ item, UINT format, H
     char name[256] = {0};
     if (!memory_format(format) || (item && !dde.query(id, item, name, sizeof(name), CP_WINANSI)))
         return 0;
-    return document_call(doc, id, item, name[0] ? name : NULL, format, incoming, NULL);
+    LPCSTR object_name = name[0] ? name : NULL;
+    LHSERVERDOC handle = doc >= 0 ? docs[doc].handle : 0;
+    HDDEDATA data = document_call(doc, id, item, object_name, format, incoming, NULL);
+    /* Ask for a device-dependent bitmap when the server has no packed DIB.
+     * The caller still receives an ordinary CF_DIB data block. */
+    if (!data && !incoming && format == CF_DIB && handle && docs[doc].handle == handle)
+        data = document_call(doc, id, item, object_name, CF_BITMAP, 0, NULL);
+    return data;
 }
 
 static HDDEDATA document_action(int doc, LPCSTR item, const object_action *action)
@@ -1159,8 +1242,11 @@ static HDDEDATA CALLBACK system_callback(UINT type, UINT fmt, HCONV conv, HSZ to
                                          HSZ item, HDDEDATA data, DWORD d1, DWORD d2)
 {
     (void)d1; (void)d2;
+    BOOL warm = (type & XTYPF_NODATA) != 0;
+    type &= ~(XTYPF_NODATA | XTYPF_ACKREQ);
     if (type != XTYP_CONNECT && type != XTYP_CONNECT_CONFIRM &&
-        type != XTYP_REQUEST && type != XTYP_POKE && type != XTYP_EXECUTE)
+        type != XTYP_REQUEST && type != XTYP_POKE && type != XTYP_EXECUTE &&
+        type != XTYP_ADVSTART)
         return 0;
     HTASK task = GetCurrentTask();
     DWORD id = endpoint_of(task);
@@ -1170,7 +1256,7 @@ static HDDEDATA CALLBACK system_callback(UINT type, UINT fmt, HCONV conv, HSZ to
     BOOL system = !lstrcmpi(name, "System") || !lstrcmpi(name, "OLESystem");
     CONVINFO info = { .cb = sizeof(info) };
     HSZ service = item;
-    if (type == XTYP_REQUEST || type == XTYP_POKE || type == XTYP_EXECUTE) {
+    if (type != XTYP_CONNECT && type != XTYP_CONNECT_CONFIRM) {
         if (!dde.conv_info(conv, QID_SYNC, &info))
             return 0;
         service = info.hszServiceReq;
@@ -1188,6 +1274,12 @@ static HDDEDATA CALLBACK system_callback(UINT type, UINT fmt, HCONV conv, HSZ to
     }
     if (!system) {
         LHSERVERDOC document = (LHSERVERDOC)info.hUser;
+        if (type == XTYP_ADVSTART) {
+            char advise[16];
+            return warm && doc_of(document) >= 0 && fmt == RegisterClipboardFormat("Native") &&
+                   dde.query(id, item, advise, sizeof(advise), CP_WINANSI) &&
+                   (!lstrcmpi(advise, "/Save") || !lstrcmpi(advise, "/Close"));
+        }
         if (type == XTYP_REQUEST || (type == XTYP_POKE && data))
             return document_transaction(doc_of(document), id, item, fmt,
                                         type == XTYP_POKE ? data : 0);
@@ -1260,8 +1352,11 @@ static int ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *v)
             OleRenameServerDoc((LHSERVERDOC)NE->arg32(c, 8), name) : OLE_ERROR_ADDRESS;
         break;
     }
-    case 9: case 10:                    /* OleRevertServerDoc, OleSavedServerDoc */
+    case 9:                             /* OleRevertServerDoc */
         *v = doc_of((LHSERVERDOC)NE->arg32(c, 4)) < 0 ? OLE_ERROR_HANDLE : OLE_OK;
+        break;
+    case 10:
+        *v = OleSavedServerDoc((LHSERVERDOC)NE->arg32(c, 4));
         break;
     case 11:
         *v = revoke_object(NULL, NE->arg32(c, 4));
@@ -1269,6 +1364,15 @@ static int ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *v)
     case REQUEST_NOTICE: {
         request_client *p = find_client(NULL, NE->arg32(c, 10));
         *v = p && !p->revoked;
+        if (*v) {
+            WORD notice = NE->arg16(c, 8);
+            for (int i = 0; i < DOCS; i++)
+                if (p == &docs[i].editor && !docs[i].transferring && !docs[i].revoked &&
+                    (notice == OLE_CHANGED || notice == OLE_SAVED || notice == OLE_CLOSED)) {
+                    *v = post_document_notice(i, notice == OLE_CLOSED ? "/Close" : "/Save") == OLE_OK;
+                    break;
+                }
+        }
         break;
     }
     case 12:
@@ -1303,7 +1407,7 @@ static const win_dll_export exports[] = {
     { 7, 4, "OleRevokeServerDoc", (const void *)OleRevokeServerDoc },
     { 8, 8, "OleRenameServerDoc", (const void *)OleRenameServerDoc },
     { 9, 4, "OleRevertServerDoc", NULL },
-    { 10, 4, "OleSavedServerDoc", NULL },
+    { 10, 4, "OleSavedServerDoc", (const void *)OleSavedServerDoc },
     { 11, 4, "OleRevokeObject", (const void *)OleRevokeObject },
     { 12, 0, "OleQueryServerVersion", (const void *)OleQueryServerVersion },
     { REQUEST_NOTICE, 10, "WinnOleRequestNotice", NULL },

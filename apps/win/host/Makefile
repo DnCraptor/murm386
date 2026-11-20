@@ -200,9 +200,9 @@ mixer.o: ../../windll/mmsystem/mixer.c ../include/mmsystem.h ../ddi/windll.h
 	$(CC) $(CFLAGS) $(INC) -c -o $@ $<
 commdlg.o: ../../windll/commdlg/commdlg.c ../include/commdlg.h ../ddi/windll.h
 	$(CC) $(CFLAGS) $(INC) -DWinDllInit=commdlg_WinDllInit -c -o $@ $<
-olecli.o: ../../windll/olecli/olecli.c ../include/ole.h ../ddi/windll.h
+olecli.o: ../../windll/olecli/olecli.c ../../windll/ole_picture.h ../include/ole.h ../ddi/windll.h
 	$(CC) $(CFLAGS) $(INC) -DWinDllInit=olecli_WinDllInit -c -o $@ $<
-olesvr.o: ../../windll/olesvr/olesvr.c ../include/ole.h ../ddi/windll.h
+olesvr.o: ../../windll/olesvr/olesvr.c ../../windll/ole_picture.h ../include/ole.h ../ddi/windll.h
 	$(CC) $(CFLAGS) $(INC) -DWinDllInit=olesvr_WinDllInit -c -o $@ $<
 sound.o: ../../windll/sound/sound.c ../include/sound.h ../ddi/windll.h
 	$(CC) $(CFLAGS) $(INC) -DWinDllInit=sound_WinDllInit -c -o $@ $<

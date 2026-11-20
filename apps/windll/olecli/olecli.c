@@ -10,6 +10,7 @@
 #include "ole.h"
 #include "ddeml.h"
 #include "windll.h"
+#include "../ole_picture.h"
 
 #define NE (__win_dll_ne)
 
@@ -89,6 +90,8 @@ struct WINN_OLEOBJECT {
     LONG width, height;              /* positive HIMETRIC extents */
     BOOL writing;
     ole_session *session;
+    LPOLECLIENT client;
+    uint32_t guest_client;
     char name[128];
 };
 
@@ -162,32 +165,6 @@ static HGLOBAL copy_handle(HGLOBAL source, DWORD size)
     HGLOBAL copy = copy_block(p, size);
     GlobalUnlock(source);
     return copy;
-}
-
-static HGLOBAL bitmap_to_dib(HBITMAP bitmap)
-{
-    BITMAPINFO bi = {0};
-    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    if (!GetDIBits(0, bitmap, 0, 0, NULL, &bi, DIB_RGB_COLORS))
-        return 0;
-    LONG w = bi.bmiHeader.biWidth, h = bi.bmiHeader.biHeight;
-    if (w < 1 || w > 4096 || h < 1 || h > 4096)
-        return 0;
-    DWORD bytes = sizeof(BITMAPINFOHEADER) + (((DWORD)w * 3 + 3) & ~3u) * (DWORD)h;
-    HGLOBAL dib = GlobalAlloc(GMEM_MOVEABLE | GMEM_DDESHARE, bytes);
-    BITMAPINFO *packed = dib ? GlobalLock(dib) : NULL;
-    if (packed) {
-        packed->bmiHeader = bi.bmiHeader;
-        packed->bmiHeader.biBitCount = 24;
-        int n = GetDIBits(0, bitmap, 0, (UINT)h, (uint8_t *)packed + sizeof(BITMAPINFOHEADER),
-                          packed, DIB_RGB_COLORS);
-        GlobalUnlock(dib);
-        if (n == h)
-            return dib;
-    }
-    if (dib)
-        GlobalFree(dib);
-    return 0;
 }
 
 static uint32_t read32(const uint8_t *p);
@@ -483,7 +460,7 @@ static OLESTATUS create_clip_picture(LHCLIENTDOC doc, LPCSTR name, LPOLEOBJECT *
         return create_metafile_picture(data, doc, name, out);
     HGLOBAL image = 0;
     if (fmt == CF_BITMAP) {
-        image = bitmap_to_dib(data);
+        image = bitmap_to_dib(data, TRUE);
     } else {
         void *p = GlobalLock(data);
         DWORD n = p ? GetPackedDIBInfoN(p, GlobalSize(data), NULL, NULL) : 0;
@@ -546,7 +523,6 @@ static OLESTATUS WINAPI OleDelete(LPOLEOBJECT object)
 static OLESTATUS WINAPI OleClone(LPOLEOBJECT object, LPOLECLIENT client, LHCLIENTDOC doc,
                                   LPCSTR name, LPOLEOBJECT *out)
 {
-    (void)client;
     if (!out)
         return OLE_ERROR_ADDRESS;
     *out = NULL;
@@ -577,6 +553,7 @@ static OLESTATUS WINAPI OleClone(LPOLEOBJECT object, LPOLECLIENT client, LHCLIEN
     if (status == OLE_OK) {
         OLEOBJECT *copy = *out;
         copy->type = o->type;
+        copy->client = client;
         copy->stream_head = head;
         copy->stream_tail = tail;
         copy->head_bytes = o->head_bytes;
@@ -1132,14 +1109,16 @@ static OLESTATUS WINAPI OleSaveToStream(LPOLEOBJECT object, LPOLESTREAM stream)
 static OLESTATUS WINAPI OleLoadFromStream(LPOLESTREAM stream, LPCSTR protocol, LPOLECLIENT client,
                                          LHCLIENTDOC doc, LPCSTR name, LPOLEOBJECT *out)
 {
-    (void)client;
     if (!stream || !stream->lpstbl || !stream->lpstbl->Get) {
         if (out)
             *out = NULL;
         return OLE_ERROR_ADDRESS;
     }
     picture_stream s = { .native = stream };
-    return load_picture(&s, protocol, doc, name, out);
+    OLESTATUS status = load_picture(&s, protocol, doc, name, out);
+    if (status == OLE_OK)
+        (*out)->client = client;
+    return status;
 }
 
 static OLESTATUS WINAPI OleRevokeClientDoc(LHCLIENTDOC h)
@@ -1410,16 +1389,59 @@ typedef struct {
 struct ole_session {
     ole_dde dde;
     HCONV conv;
+    BOOL closed;
     HSZ item;
     char item_name[256];
 };
 
+static OLESTATUS update_open_object(OLEOBJECT *o);
+
+static void notify_client(OLEOBJECT *o, WORD notice)
+{
+    if (o->guest_client && o->guest) {
+        uint16_t task = (uint16_t)GetCurrentTask();
+        uint8_t bytes[4];
+        if (!NE->task_read(task, o->guest_client, bytes, sizeof(bytes)))
+            return;
+        uint32_t vtable = read32(bytes);
+        if (!(vtable >> 16) || !NE->task_read(task, vtable, bytes, sizeof(bytes)))
+            return;
+        uint32_t proc = read32(bytes);
+        WORD args[] = { (WORD)(o->guest_client >> 16), (WORD)o->guest_client, notice,
+                        (WORD)(o->guest >> 16), (WORD)o->guest };
+        if (proc >> 16)
+            NE->call(task, proc, args, 5);
+    } else if (o->client && o->client->lpvtbl && o->client->lpvtbl->CallBack) {
+        o->client->lpvtbl->CallBack(o->client, notice, o);
+    }
+}
+
 static HDDEDATA CALLBACK ole_dde_callback(UINT type, UINT fmt, HCONV conv, HSZ topic,
                                           HSZ item, HDDEDATA data, DWORD d1, DWORD d2)
 {
-    (void)type; (void)fmt; (void)conv; (void)topic;
-    (void)item; (void)data; (void)d1; (void)d2;
-    return 0;
+    (void)topic; (void)data; (void)d1; (void)d2;
+    if (type != XTYP_ADVDATA || fmt != clipboard_format("Native", FALSE))
+        return 0;
+    BOOL closed = item == FindAtom("/Close");
+    if (!closed && item != FindAtom("/Save"))
+        return DDE_FNOTPROCESSED;
+    for (unsigned i = 0; i < OBJECTS; i++) {
+        OLEOBJECT *o = &objects[i];
+        if (!o->session || o->session->conv != conv || doc_of(o->doc) < 0)
+            continue;
+        if (o->writing)
+            return DDE_FBUSY;
+        o->writing = TRUE;
+        OLESTATUS status = update_open_object(o);
+        o->writing = FALSE;
+        if (status != OLE_OK)
+            return DDE_FNOTPROCESSED;
+        if (closed)
+            o->session->closed = TRUE;
+        notify_client(o, closed ? OLE_CLOSED : OLE_CHANGED);
+        return DDE_FACK;
+    }
+    return DDE_FNOTPROCESSED;
 }
 
 static BOOL ole_dde_begin(ole_dde *dde)
@@ -1474,6 +1496,22 @@ static void ole_debug_status(LPCSTR operation, DWORD status, DWORD detail)
     wsprintf(message, "OLECLI %s: %08lX %08lX", operation,
              (unsigned long)status, (unsigned long)detail);
     OutputDebugString(message);
+}
+
+static void subscribe_document_notices(const ole_dde *dde, HCONV conv)
+{
+    UINT format = clipboard_format("Native", TRUE);
+    if (!format)
+        return;
+    LPCSTR signals[] = { "/Save", "/Close" };
+    for (unsigned i = 0; i < sizeof(signals) / sizeof(*signals); i++) {
+        HSZ item = dde->string(dde->inst, signals[i], CP_WINANSI);
+        if (item) {
+            dde->transaction(NULL, 0, conv, item, format,
+                              XTYP_ADVSTART | XTYPF_NODATA, 2000, NULL);
+            dde->free_string(dde->inst, item);
+        }
+    }
 }
 
 static OLESTATUS ole_start_server(const ole_dde *dde, HSZ service, LPCSTR cls, HCONV *out,
@@ -1607,7 +1645,6 @@ static OLESTATUS WINAPI OleCreate(LPCSTR protocol, LPOLECLIENT client, LPCSTR cl
                                    LHCLIENTDOC doc, LPCSTR name, LPOLEOBJECT *out,
                                    UINT render, OLECLIPFORMAT format)
 {
-    (void)client;
     if (!out)
         return OLE_ERROR_ADDRESS;
     *out = NULL;
@@ -1689,7 +1726,9 @@ static OLESTATUS WINAPI OleCreate(LPCSTR protocol, LPOLECLIENT client, LPCSTR cl
         session->dde = dde;
         session->conv = data;
         object->session = session;
+        object->client = client;
         *out = object;
+        subscribe_document_notices(&dde, data);
     } else {
         free(session);
         if (object)
@@ -1725,16 +1764,20 @@ static OLESTATUS WINAPI OleCreateFromClip(LPCSTR protocol, LPOLECLIENT client, L
                                          LPCSTR name, LPOLEOBJECT *out, UINT render,
                                          OLECLIPFORMAT format)
 {
-    (void)client;
-    return create_clip_object(protocol, doc, name, out, render, format, FALSE);
+    OLESTATUS status = create_clip_object(protocol, doc, name, out, render, format, FALSE);
+    if (status == OLE_OK)
+        (*out)->client = client;
+    return status;
 }
 
 static OLESTATUS WINAPI OleCreateLinkFromClip(LPCSTR protocol, LPOLECLIENT client, LHCLIENTDOC doc,
                                              LPCSTR name, LPOLEOBJECT *out, UINT render,
                                              OLECLIPFORMAT format)
 {
-    (void)client;
-    return create_clip_object(protocol, doc, name, out, render, format, TRUE);
+    OLESTATUS status = create_clip_object(protocol, doc, name, out, render, format, TRUE);
+    if (status == OLE_OK)
+        (*out)->client = client;
+    return status;
 }
 
 static HGLOBAL clipboard_identity(ole_clip_string fields[3])
@@ -2020,7 +2063,7 @@ static OLESTATUS WINAPI OleSetLinkUpdateOptions(LPOLEOBJECT object, OLEOPT_UPDAT
 
 static BOOL session_open(const ole_session *session)
 {
-    if (!session)
+    if (!session || session->closed)
         return FALSE;
     CONVINFO info = { .cb = sizeof(info) };
     return session->dde.conv_info(session->conv, QID_SYNC, &info) &&
@@ -2211,6 +2254,8 @@ static OLESTATUS connect_object(OLEOBJECT *o, BOOL show)
 done:
     if (status == OLE_OK && o->target_device)
         status = send_target_device(s, o->target_device);
+    if (status == OLE_OK && !link)
+        subscribe_document_notices(dde, s->conv);
     if (status != OLE_OK && sys && created)
         ole_close_document(dde, sys, s->conv, topic);
     if (status != OLE_OK && sys && started)
@@ -2678,7 +2723,8 @@ static int guest_attach(LPOLEOBJECT o)
     return 1;
 }
 
-static OLESTATUS guest_created(win_dll_call *c, uint32_t out, OLESTATUS status, LPOLEOBJECT o)
+static OLESTATUS guest_created(win_dll_call *c, uint32_t out, OLESTATUS status, LPOLEOBJECT o,
+                               unsigned client_arg)
 {
     if (status != OLE_OK)
         return status;
@@ -2688,6 +2734,8 @@ static OLESTATUS guest_created(win_dll_call *c, uint32_t out, OLESTATUS status, 
         status = OLE_ERROR_ADDRESS;
     if (status != OLE_OK)
         OleDelete(o);
+    else
+        o->guest_client = NE->arg32(c, client_arg);
     return status;
 }
 
@@ -2867,7 +2915,7 @@ static int ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *v)
             OLESTATUS result = load_picture(&s, protocol, (LHCLIENTDOC)NE->arg32(c, 12),
                                             name, &object);
             NE->task_free(s.task, s.buffer);
-            *v = guest_created(c, out, result, object);
+            *v = guest_created(c, out, result, object, 16);
         }
         return WINDLL_WORD;
     }
@@ -2880,7 +2928,7 @@ static int ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *v)
         } else {
             OLESTATUS result = OleClone(guest_object(NE->arg32(c, 20)), NULL,
                                         (LHCLIENTDOC)NE->arg32(c, 12), name, &object);
-            *v = guest_created(c, out, result, object);
+            *v = guest_created(c, out, result, object, 16);
         }
         return WINDLL_WORD;
     }
@@ -2905,7 +2953,7 @@ static int ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *v)
             OLESTATUS result = create_clip_object(protocol, (LHCLIENTDOC)NE->arg32(c, 16),
                                                  name, &object, NE->arg16(c, 6),
                                                  NE->arg16(c, 4), ordinal == 11);
-            *v = guest_created(c, out, result, object);
+            *v = guest_created(c, out, result, object, 20);
         }
         return WINDLL_WORD;
     }
@@ -2921,7 +2969,7 @@ static int ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *v)
         } else {
             OLESTATUS status = OleCreate(protocol, NULL, cls, (LHCLIENTDOC)NE->arg32(c, 16),
                                          name, &object, NE->arg16(c, 6), NE->arg16(c, 4));
-            *v = guest_created(c, out, status, object);
+            *v = guest_created(c, out, status, object, 24);
         }
         return WINDLL_WORD;
     }
@@ -3036,7 +3084,7 @@ static int ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *v)
             LPOLEOBJECT picture = NULL;
             OLESTATUS status = OleObjectConvert(guest_object(NE->arg32(c, 24)), protocol, NULL,
                 (LHCLIENTDOC)NE->arg32(c, 12), name, &picture);
-            *v = guest_created(c, out, status, picture);
+            *v = guest_created(c, out, status, picture, 16);
         }
         return WINDLL_WORD;
     }

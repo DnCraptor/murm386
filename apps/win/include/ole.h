@@ -171,6 +171,8 @@ struct WINN_OLESERVERDOC { const OLESERVERDOCVTBL *lpvtbl; };
 
 /* Server-owned objects returned by GetObject start with this vtable.
  * Client objects obtained from OLECLI remain opaque to native callers. */
+enum { OLE_CHANGED = 0, OLE_SAVED, OLE_CLOSED };
+
 typedef struct {
     int (CALLBACK *CallBack)(LPOLECLIENT, UINT, LPOLEOBJECT);
 } OLECLIENTVTBL;
