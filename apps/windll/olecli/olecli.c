@@ -1460,6 +1460,14 @@ static HCONV ole_connect_system(const ole_dde *dde, HSZ service)
     return conv ? conv : ole_connect(dde, service, "System");
 }
 
+static void ole_debug_status(LPCSTR operation, DWORD status, DWORD detail)
+{
+    char message[96];
+    wsprintf(message, "OLECLI %s: %08lX %08lX", operation,
+             (unsigned long)status, (unsigned long)detail);
+    OutputDebugString(message);
+}
+
 static OLESTATUS ole_start_server(const ole_dde *dde, HSZ service, LPCSTR cls, HCONV *out,
                                   BOOL *started)
 {
@@ -1479,20 +1487,25 @@ static OLESTATUS ole_start_server(const ole_dde *dde, HSZ service, LPCSTR cls, H
 
     /* The service may be registered before the server can create a document. */
     DWORD start = GetTickCount();
+    BOOL waiting;
     do {
-        if (!NE || NE->size < sizeof(*NE) || !NE->task_starting ||
-            !NE->task_starting((uint16_t)task)) {
+        waiting = NE && NE->size >= sizeof(*NE) && NE->task_starting &&
+                  NE->task_starting((uint16_t)task);
+        if (!waiting) {
             *out = ole_connect_system(dde, service);
             if (*out)
                 return OLE_OK;
         }
     } while (GetTickCount() - start < 2000 && Yield());
+    ole_debug_status(waiting ? "server still starting" : "system conversation",
+                     task, waiting ? 0 : dde->last_error(dde->inst));
     return OLE_ERROR_COMM;
 }
 
 static OLESTATUS ole_transaction_error(const ole_dde *dde, DWORD flags, OLESTATUS rejected)
 {
     UINT error = dde->last_error(dde->inst);
+    ole_debug_status("DDE transaction", error, flags);
     if ((flags & DDE_FBUSY) || error == DMLERR_BUSY)
         return OLE_BUSY;
     if (error == DMLERR_MEMORY_ERROR || error == DMLERR_LOW_MEMORY)
@@ -1605,8 +1618,10 @@ static OLESTATUS WINAPI OleCreate(LPCSTR protocol, LPOLECLIENT client, LPCSTR cl
         return OLE_ERROR_HANDLE;
 
     ole_dde dde;
-    if (!ole_dde_begin(&dde))
+    if (!ole_dde_begin(&dde)) {
+        ole_debug_status("OleCreate DDE initialization", OLE_ERROR_COMM, 0);
         return OLE_ERROR_COMM;
+    }
 
     char topic[40], command[160];
     make_topic_name(topic);
@@ -1615,25 +1630,33 @@ static OLESTATUS WINAPI OleCreate(LPCSTR protocol, LPOLECLIENT client, LPCSTR cl
     HGLOBAL native = 0, image = 0;
     OLESTATUS status = OLE_ERROR_MEMORY;
     BOOL created = FALSE, started = FALSE;
+    LPCSTR stage = "OleCreate service handle";
     docs[d].creating++;
     if (!service)
         goto done;
+    stage = "OleCreate server startup";
     status = ole_start_server(&dde, service, cls, &sys, &started);
     if (status != OLE_OK)
         goto done;
     wsprintf(command, "[StdNewDocument(\"%s\",\"%s\")]", cls, topic);
+    stage = "OleCreate StdNewDocument";
     status = ole_execute(&dde, sys, command, OLE_ERROR_NEW);
     if (status != OLE_OK)
         goto done;
     created = TRUE;
+    stage = "OleCreate document conversation";
     data = ole_connect(&dde, service, topic);
     status = OLE_ERROR_COMM;
-    if (!data)
+    if (!data) {
+        ole_debug_status("DdeConnect document", dde.last_error(dde.inst), 0);
         goto done;
+    }
+    stage = "OleCreate native data";
     status = ole_request_block(&dde, data, 0, clipboard_format("Native", TRUE), &native);
     if (status != OLE_OK)
         goto done;
     if (render != olerender_none) {
+        stage = "OleCreate presentation";
         status = ole_request_block(&dde, data, 0, CF_DIB, &image);
         if (status != OLE_OK &&
             (render == olerender_format || (status != OLE_ERROR_FORMAT && status != OLE_ERROR_BLANK)))
@@ -1641,10 +1664,14 @@ static OLESTATUS WINAPI OleCreate(LPCSTR protocol, LPOLECLIENT client, LPCSTR cl
     }
     status = OLE_OK;
 done:
+    if (status != OLE_OK)
+        ole_debug_status(stage, status, 0);
     if (created) {
         OLESTATUS closed = ole_close_document(&dde, sys, data, topic);
-        if (closed != OLE_OK && status == OLE_OK)
+        if (closed != OLE_OK && status == OLE_OK) {
+            ole_debug_status("OleCreate close document", closed, 0);
             status = closed;
+        }
     }
     if (data)
         dde.disconnect(data);
@@ -1659,6 +1686,8 @@ done:
     if (status == OLE_OK) {
         status = create_server_snapshot(cls, doc, name, render, out, native, image);
         image = 0;                    /* snapshot creation consumes it */
+        if (status != OLE_OK)
+            ole_debug_status("OleCreate snapshot", status, 0);
     }
     if (image)
         GlobalFree(image);

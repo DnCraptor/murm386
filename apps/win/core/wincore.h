@@ -265,6 +265,7 @@ void     win_set_home(const char *exe_path);
 /* trace.c: SYSTEM.INI [debug] trace=1 starts it; the dump: WINNTRAC.LOG */
 void     win_trace_init(void);
 void     win_trace_dump(void);
+void     win_trace_debug_string(LPCSTR text);
 void     win_trace_event(const char *name, uint32_t a, uint32_t b);
 void     win_path(const char *name, char *out, int size);
 /* ShellExecute's and WinExec's command for a file (ne_guest_kernel.c): the

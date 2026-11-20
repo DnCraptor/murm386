@@ -45,6 +45,8 @@ void winn_snd_release(void);                                                    
 #define MM_WOM_DONE          0x03bdu
 #define WHDR_DONE            0x00000001ul
 #define WHDR_PREPARED        0x00000002ul
+#define WHDR_BEGINLOOP       0x00000004ul
+#define WHDR_ENDLOOP         0x00000008ul
 #define WHDR_INQUEUE         0x00000010ul
 
 /* Win16 WAVEFORMAT: PCM fields through wBitsPerSample, 16 bytes. */
@@ -55,7 +57,9 @@ typedef struct {
 
 typedef struct {
     uint32_t header, data, bytes;
-    uint32_t sent, position;            /* given to the driver, played */
+    uint64_t sent, position;            /* total bytes submitted, played (all iterations) */
+    uint64_t limit;                     /* bytes * dwLoops; shortened by BreakLoop */
+    int loop;                           /* both WHDR_BEGINLOOP and WHDR_ENDLOOP */
 } queued_wave;
 
 typedef struct {
@@ -203,12 +207,12 @@ static void wave_played(uint32_t bytes)
     output.played_bytes += bytes;
     while (bytes && output.count) {
         queued_wave *q = &queue[output.head];
-        uint32_t take = q->bytes - q->position;
-        if (take > bytes)
-            take = bytes;
+        uint32_t take = bytes;
+        if (q->limit - q->position < take)
+            take = (uint32_t)(q->limit - q->position);
         q->position += take;
         bytes -= take;
-        if (q->position >= q->bytes)
+        if (q->position == q->limit)
             wave_return_head(1);
     }
 }
@@ -236,16 +240,19 @@ static void wave_pump(void)
         max -= max % output.format.block;
         for (unsigned i = 0; i < output.count && got < max; i++) {
             queued_wave *q = &queue[(output.head + i) % queue_cap];
-            if (q->sent >= q->bytes)
-                continue;
-            unsigned take = q->bytes - q->sent;
-            if (take > max - got)
-                take = max - got;
-            uint32_t addr = q->data + q->sent;
-            if (!NE->task_read((uint16_t)output.task, addr, raw + got, take))
-                memset(raw + got, output.format.bits == 16 ? 0 : 0x80, take);
-            q->sent += take;
-            got += take;
+            while (q->sent < q->limit && got < max) {
+                uint32_t offset = q->loop ? (uint32_t)(q->sent % q->bytes) : (uint32_t)q->sent;
+                unsigned take = q->bytes - offset;
+                if (take > max - got)
+                    take = max - got;
+                if (q->limit - q->sent < take)
+                    take = (unsigned)(q->limit - q->sent);
+                uint32_t addr = q->data + offset;
+                if (!NE->task_read((uint16_t)output.task, addr, raw + got, take))
+                    memset(raw + got, output.format.bits == 16 ? 0 : 0x80, take);
+                q->sent += take;
+                got += take;
+            }
         }
         if (!got)
             break;
@@ -334,6 +341,26 @@ static MMRESULT wave_reset(int notify)
     return 0;
 }
 
+/* Stop a single-header loop after the last iteration already submitted to
+ * the driver.  Submitted blocks cannot be withdrawn without stopping DMA. */
+static MMRESULT wave_break_loop(void)
+{
+    if (!output.driver)
+        return MMSYSERR_INVALHANDLE;
+    for (unsigned i = 0; i < output.count; i++) {
+        queued_wave *q = &queue[(output.head + i) % queue_cap];
+        if (!q->loop)
+            continue;
+        uint64_t end = ((q->sent + q->bytes - 1u) / q->bytes) * q->bytes;
+        if (end < q->bytes)
+            end = q->bytes;
+        if (end < q->limit)
+            q->limit = end;
+        break;
+    }
+    return 0;
+}
+
 static MMRESULT wave_close(void)
 {
     if (!output.driver)
@@ -381,9 +408,11 @@ static MMRESULT wave_header(win_dll_call *c, unsigned ordinal)
     uint32_t data = rd32(b);
     int flat = NE->size > offsetof(win_dll_ne, task_flat) && NE->task_flat &&
                NE->task_flat((uint16_t)output.task);
+    uint32_t loop_flags = f & (WHDR_BEGINLOOP | WHDR_ENDLOOP);
     if (!bytes || !data || !(data >> 16) || bytes % output.format.block ||
-        (!flat && bytes > 0x10000u - (uint16_t)data) || (f & (0x04u | 0x08u)))
-        return MMSYSERR_INVALPARAM;      /* looped WAVEHDRs not yet supported */
+        (!flat && bytes > 0x10000u - (uint16_t)data) ||
+        (loop_flags && loop_flags != (WHDR_BEGINLOOP | WHDR_ENDLOOP)))
+        return MMSYSERR_INVALPARAM;      /* multi-header loops not yet supported */
     if (output.count == queue_cap) {    /* the ring grown, in order from its head */
         unsigned cap = queue_cap ? queue_cap * 2u : WAVE_QUEUE;
         queued_wave *grown = (queued_wave *)malloc(cap * sizeof(queued_wave));
@@ -401,6 +430,9 @@ static MMRESULT wave_header(win_dll_call *c, unsigned ordinal)
     q->data = data;
     q->bytes = bytes;
     q->position = q->sent = 0;
+    q->loop = loop_flags != 0;
+    uint32_t loops = q->loop ? rd32(b + 20) : 1u;
+    q->limit = (uint64_t)bytes * (loops ? loops : 1u);
     if (!set_header_flags(hdrfar, (f | WHDR_INQUEUE) & ~WHDR_DONE))
         return MMSYSERR_INVALPARAM;
     output.count++;
@@ -485,6 +517,10 @@ int winn_wave_ne_call(win_dll_call *c, uint16_t o, uint32_t *v)
         break;
     case 411:
         r = NE->arg16(c, 4) == WAVE_HANDLE ? wave_reset(1) : MMSYSERR_INVALHANDLE;
+        break;
+    case 419:                                 /* waveOutBreakLoop */
+        r = output.task == GetCurrentTask() && NE->arg16(c, 4) == WAVE_HANDLE ?
+            wave_break_loop() : MMSYSERR_INVALHANDLE;
         break;
     case 412: r = wave_position(c); break;
     case 420:                                 /* waveOutGetID */

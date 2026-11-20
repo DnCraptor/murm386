@@ -287,7 +287,7 @@ HMODULE WINAPI GetModuleHandle(LPCSTR name)
 
 void WINAPI FatalExit(int code) { exit(code); }
 
-void WINAPI OutputDebugString(LPCSTR str) { (void)str; }
+void WINAPI OutputDebugString(LPCSTR str) { win_trace_debug_string(str); }
 
 /* ---------------------------------------------------------------- strings */
 

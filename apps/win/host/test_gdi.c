@@ -10,6 +10,7 @@ int win_file_attr(LPCSTR path, int set, UINT attr) { return -1; }   /* no files:
 int win_dll_find(const char *name) { return -1; }                    /* no DLLs */
 HANDLE win_dll_handle(int slot) { return 0; }
 wtask *task_current(void) { static wtask t; return &t; }   /* no tasks either */
+void win_trace_debug_string(LPCSTR text) { (void)text; }
 void win_trace_init(void) {}                                          /* no trace */
 const struct win_dll_ne *win_dll_ne_glue(void) { return NULL; }
 /* print.c's: no printer dialogs, files, drivers' DLLs */

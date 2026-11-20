@@ -19,6 +19,7 @@
 #define CALLS 256
 #define TURNS 32
 #define EVENTS 128
+#define DEBUG_STRINGS 16
 
 typedef struct {
     uint32_t ms, result, count;
@@ -43,6 +44,29 @@ typedef struct {
 } tevent;
 static tevent events[EVENTS];
 static unsigned nevents;
+
+typedef struct {
+    uint32_t ms;
+    uint16_t task;
+    char text[128];
+} tdebug;
+static tdebug *debug_strings;
+static unsigned ndebug;
+
+void win_trace_debug_string(LPCSTR text)
+{
+    if (!calls || !text)
+        return;
+    if (!debug_strings) {
+        debug_strings = win_alloc(sizeof(*debug_strings) * DEBUG_STRINGS);
+        if (!debug_strings)
+            return;
+    }
+    tdebug *entry = &debug_strings[ndebug++ % DEBUG_STRINGS];
+    entry->ms = GetTickCount();
+    entry->task = (uint16_t)GetCurrentTask();
+    lstrcpyn(entry->text, text, sizeof(entry->text));
+}
 
 void win_trace_event(const char *name, uint32_t a, uint32_t b)
 {
@@ -111,7 +135,7 @@ static void put(HFILE f, const char *s)
 
 void win_trace_dump(void)
 {
-    if (ncalls || nturns || nevents)
+    if (ncalls || nturns || nevents || ndebug)
         dump_trace("WINNTRAC.LOG", NULL);
 }
 
@@ -166,6 +190,16 @@ static void dump_trace(const char *file, const char *trigger)
                  (unsigned long)e->ms, e->task, e->name,
                  (unsigned long)e->a, (unsigned long)e->b);
         put(f, line);
+    }
+    if (ndebug) {
+        put(f, "debug strings (ms task text)\r\n");
+        first = ndebug > DEBUG_STRINGS ? ndebug - DEBUG_STRINGS : 0;
+        for (unsigned i = first; i < ndebug; i++) {
+            const tdebug *entry = &debug_strings[i % DEBUG_STRINGS];
+            wsprintf(line, "%8lu %04X %s\r\n", (unsigned long)entry->ms,
+                     entry->task, entry->text);
+            put(f, line);
+        }
     }
     _lclose(f);
 }
