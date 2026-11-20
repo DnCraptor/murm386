@@ -258,7 +258,7 @@ int      user_init(void);                        /* user/dialog.c */
 /* dos_exec.c / module.c */
 int      win_dos_is_image(const char *path);
 int      win_dos_is_ez(const char *path);
-UINT     win_dos_exec(const char *path, const char *args);
+UINT     win_dos_exec(const char *path, const char *args, BOOL use_exe_dir);
 
 /* profile.c */
 void     win_set_home(const char *exe_path);
@@ -529,6 +529,7 @@ void   win_files_task_ended(HTASK task);
 void   win_files_init(void);
 BOOL   win_file_task_init(wtask *task, const wtask *parent);
 void   win_file_task_end(wtask *task);
+int    win_file_exe_dir(LPCSTR exe, LPSTR dir, int size);
 void   win_file_task_workdir(wtask *task, LPCSTR exe);
 BOOL   win_file_resolve(LPCSTR name, LPSTR out, int size);
 /* ... as fopen takes it (the host tests': "C:/DIR/FILE", their directory

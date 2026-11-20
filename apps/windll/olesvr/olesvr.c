@@ -57,9 +57,11 @@ static struct {
     DDEQUERYCONVINFO conv_info;
     DDESETUSERHANDLE user_handle;
     DDECREATEDATAHANDLE create_data;
+    DDEADDDATA add_data;
     DDEGETDATA get_data;
     DDEACCESSDATA access_data;
     DDEUNACCESSDATA unaccess_data;
+    DDEFREEDATAHANDLE free_data;
 } dde;
 
 static HDDEDATA CALLBACK system_callback(UINT type, UINT fmt, HCONV conv, HSZ topic,
@@ -98,9 +100,11 @@ static DWORD open_endpoint(HTASK task)
     DDE_IMPORT(conv_info, DDEQUERYCONVINFO, "DdeQueryConvInfo");
     DDE_IMPORT(user_handle, DDESETUSERHANDLE, "DdeSetUserHandle");
     DDE_IMPORT(create_data, DDECREATEDATAHANDLE, "DdeCreateDataHandle");
+    DDE_IMPORT(add_data, DDEADDDATA, "DdeAddData");
     DDE_IMPORT(get_data, DDEGETDATA, "DdeGetData");
     DDE_IMPORT(access_data, DDEACCESSDATA, "DdeAccessData");
     DDE_IMPORT(unaccess_data, DDEUNACCESSDATA, "DdeUnaccessData");
+    DDE_IMPORT(free_data, DDEFREEDATAHANDLE, "DdeFreeDataHandle");
 #undef DDE_IMPORT
     if (dde.init(&id, system_callback, CBF_SKIP_REGISTRATIONS | CBF_SKIP_UNREGISTRATIONS | CBF_SKIP_DISCONNECTS, 0))
         goto fail;
@@ -991,23 +995,31 @@ static HDDEDATA guest_request_data(DWORD id, HSZ item, WORD format, uint16_t tas
     DWORD bytes = NE->task_global_size(task, handle);
     if (!bytes)
         return 0;
-    LPBYTE copy = malloc(bytes);
-    HDDEDATA result = 0;
-    if (!copy)
+    DWORD capacity = bytes < 4096 ? bytes : 4096;
+    LPBYTE scratch = malloc(capacity);
+    if (!scratch)
         return 0;
-    for (DWORD offset = 0; offset < bytes;) {
+    HDDEDATA data = dde.create_data(id, NULL, bytes, 0, item, format, 0);
+    for (DWORD offset = 0; data && offset < bytes;) {
         DWORD chunk = bytes - offset;
-        if (chunk > 0x10000u)
-            chunk = 0x10000u;
+        DWORD tile_offset = offset & 0xffffu;
+        if (chunk > capacity)
+            chunk = capacity;
+        if (chunk > 0x10000u - tile_offset)
+            chunk = 0x10000u - tile_offset;
         uint32_t far = global_tile(handle, offset);
-        if (!far || !NE->task_read(task, far, copy + offset, chunk))
-            goto done;
+        HDDEDATA filled = far && NE->task_read(task, far | tile_offset, scratch, chunk) ?
+            dde.add_data(data, scratch, chunk, offset) : 0;
+        if (!filled) {
+            dde.free_data(data);
+            data = 0;
+            break;
+        }
+        data = filled;
         offset += chunk;
     }
-    result = dde.create_data(id, copy, bytes, 0, item, format, 0);
-done:
-    free(copy);
-    return result;
+    free(scratch);
+    return data;
 }
 
 static HDDEDATA document_guest(int doc, DWORD id, HSZ item, LPCSTR name, WORD format,

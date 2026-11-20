@@ -636,6 +636,10 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
         lstrcpyn(path, image_path, sizeof(path));
     cursor_wait_begin();
 
+    BOOL use_exe_dir = TRUE;
+#ifdef TASK_NE
+    use_exe_dir = task_current()->run != run_ne_app;
+#endif
     win_ez_image img;
     int ne_guest = 0;
 #ifdef TASK_HOST
@@ -660,7 +664,7 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
 #else
     if (win_dos_is_ez(path)) {
         cursor_wait_end();
-        return win_dos_exec(path, args);
+        return win_dos_exec(path, args, use_exe_dir);
     }
     int rc = win_ez_load(path, &img);
     if (!rc && !win_ez_entry_is_app(&img)) {
@@ -690,7 +694,7 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
         default:
             if (win_dos_is_image(path)) {
                 cursor_wait_end();
-                return win_dos_exec(path, args);
+                return win_dos_exec(path, args, use_exe_dir);
             }
             break;
         }
@@ -747,9 +751,7 @@ UINT WINAPI WinExec(LPCSTR cmd, UINT show)
      * child still opens files relative to A:\ (e.g. its setup INF).
      * For a native shell's launch, keep WINN's default working directory
      * of the program file (as for a Program Manager item). */
-#ifdef TASK_NE
-    if (task_current()->run != run_ne_app)
-#endif
+    if (use_exe_dir)
         win_file_task_workdir(t, path);
     /* The hourglass stays while it starts (a Win16 program loads in its
      * own task), as in Windows: until it first waits for input, in its

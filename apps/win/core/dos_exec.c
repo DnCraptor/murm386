@@ -154,19 +154,20 @@ static void save_directories(dos_exec_block *b, uint16_t seg, dos_directories *s
         get_directory(b, seg, i, saved->directory[i]);
 }
 
-static int apply_directories(dos_exec_block *b, uint16_t seg, const dos_directories *saved)
+static int apply_directories(dos_exec_block *b, uint16_t seg, const dos_directories *saved,
+                             unsigned drive, const char *workdir)
 {
     const wtask *t = task_current();
     for (unsigned i = 0; i < DOS_DRIVES; i++) {
-        const char *dir = t->dos_cwd[i];
+        const char *dir = i == drive && workdir ? workdir : t->dos_cwd[i];
         char root[] = { (char)('A' + i), ':', '\\', 0 };
-        if (!dir && (saved->directory[i][0] || i == t->dos_drive))
+        if (!dir && (saved->directory[i][0] || i == drive))
             dir = root;
         if (dir && (!saved->directory[i][0] ||
                     (lstrcmpi(dir, saved->directory[i]) && !change_directory(b, seg, dir))))
             return 0;
     }
-    return set_drive(t->dos_drive) == t->dos_drive;
+    return set_drive(drive) == drive;
 }
 
 static void restore_directories(dos_exec_block *b, uint16_t seg, const dos_directories *saved)
@@ -247,12 +248,19 @@ static UINT execute(uint16_t seg)
     return 33;                         /* launched, independently of DOS ERRORLEVEL */
 }
 
-UINT win_dos_exec(const char *path, const char *args)
+UINT win_dos_exec(const char *path, const char *args, BOOL use_exe_dir)
 {
     if (strlen(path) >= DOS_PATH_BYTES || strlen(args) > 125)
         return 11;
     if (!win_sys.screen_ok)
         return 5;
+    char directory[DOS_PATH_BYTES];
+    int drive = task_current()->dos_drive;
+    if (use_exe_dir) {
+        drive = win_file_exe_dir(path, directory, sizeof(directory));
+        if (drive < 0)
+            return 2;
+    }
     dos_directories *saved = win_alloc(sizeof(*saved));
     if (!saved)
         return 8;
@@ -281,7 +289,8 @@ UINT win_dos_exec(const char *path, const char *args)
     if (mode != 3)
         set_mode(3);
 
-    UINT rc = apply_directories(b, seg, saved) ? execute(seg) : 2;
+    UINT rc = apply_directories(b, seg, saved, (unsigned)drive, use_exe_dir ? directory : NULL)
+              ? execute(seg) : 2;
     restore_directories(b, seg, saved);
     dos_free_low(b);
     win_free(saved);

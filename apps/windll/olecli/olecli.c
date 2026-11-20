@@ -1402,6 +1402,7 @@ typedef struct {
     DDEDISCONNECT disconnect;
     DDECLIENTTRANSACTION transaction;
     DDEGETDATA get_data;
+    DDEGETLASTERROR last_error;
     DDEFREEDATAHANDLE free_data;
 } ole_dde;
 
@@ -1432,6 +1433,7 @@ static BOOL ole_dde_begin(ole_dde *dde)
     DDE_BIND(disconnect, DDEDISCONNECT, "DdeDisconnect");
     DDE_BIND(transaction, DDECLIENTTRANSACTION, "DdeClientTransaction");
     DDE_BIND(get_data, DDEGETDATA, "DdeGetData");
+    DDE_BIND(last_error, DDEGETLASTERROR, "DdeGetLastError");
     DDE_BIND(free_data, DDEFREEDATAHANDLE, "DdeFreeDataHandle");
 #undef DDE_BIND
     dde->inst = 0;                      /* a new DDEML instance */
@@ -1488,14 +1490,26 @@ static OLESTATUS ole_start_server(const ole_dde *dde, HSZ service, LPCSTR cls, H
     return OLE_ERROR_COMM;
 }
 
-static OLESTATUS ole_execute_system(const ole_dde *dde, HCONV conv, LPSTR command,
+static OLESTATUS ole_transaction_error(const ole_dde *dde, DWORD flags, OLESTATUS rejected)
+{
+    UINT error = dde->last_error(dde->inst);
+    if ((flags & DDE_FBUSY) || error == DMLERR_BUSY)
+        return OLE_BUSY;
+    if (error == DMLERR_MEMORY_ERROR || error == DMLERR_LOW_MEMORY)
+        return OLE_ERROR_MEMORY;
+    if (error == DMLERR_NOTPROCESSED || error == DMLERR_NO_ERROR)
+        return rejected;
+    return OLE_ERROR_COMM;
+}
+
+static OLESTATUS ole_execute(const ole_dde *dde, HCONV conv, LPSTR command,
                                      OLESTATUS failure)
 {
     DWORD flags = 0;
     if (dde->transaction((LPBYTE)command, (DWORD)strlen(command) + 1, conv,
                          0, 0, XTYP_EXECUTE, 2000, &flags))
         return OLE_OK;
-    return flags & DDE_FBUSY ? OLE_BUSY : failure;
+    return ole_transaction_error(dde, flags, failure);
 }
 
 static OLESTATUS ole_request_block(const ole_dde *dde, HCONV conv, HSZ item, UINT format, HGLOBAL *out)
@@ -1504,7 +1518,7 @@ static OLESTATUS ole_request_block(const ole_dde *dde, HCONV conv, HSZ item, UIN
         return OLE_ERROR_MEMORY;
     HDDEDATA data = dde->transaction(NULL, 0, conv, item, format, XTYP_REQUEST, 2000, NULL);
     if (!data)
-        return OLE_ERROR_FORMAT;
+        return ole_transaction_error(dde, 0, OLE_ERROR_FORMAT);
 
     DWORD bytes = dde->get_data(data, NULL, 0, 0);
     HGLOBAL block = bytes ? GlobalAlloc(GMEM_MOVEABLE | GMEM_DDESHARE, bytes) : 0;
@@ -1520,6 +1534,15 @@ static OLESTATUS ole_request_block(const ole_dde *dde, HCONV conv, HSZ item, UIN
     else if (block)
         GlobalFree(block);
     return status;
+}
+
+static OLESTATUS ole_close_document(const ole_dde *dde, HCONV sys, HCONV doc, LPCSTR topic)
+{
+    if (doc)
+        return ole_execute(dde, doc, "[StdCloseDocument]", OLE_ERROR_TERMINATE);
+    char command[sizeof("[StdCloseDocument(\"\")]") + 40];
+    wsprintf(command, "[StdCloseDocument(\"%s\")]", topic);
+    return ole_execute(dde, sys, command, OLE_ERROR_TERMINATE);
 }
 
 static OLESTATUS create_server_snapshot(LPCSTR cls, LHCLIENTDOC doc, LPCSTR name,
@@ -1599,7 +1622,7 @@ static OLESTATUS WINAPI OleCreate(LPCSTR protocol, LPOLECLIENT client, LPCSTR cl
     if (status != OLE_OK)
         goto done;
     wsprintf(command, "[StdNewDocument(\"%s\",\"%s\")]", cls, topic);
-    status = ole_execute_system(&dde, sys, command, OLE_ERROR_NEW);
+    status = ole_execute(&dde, sys, command, OLE_ERROR_NEW);
     if (status != OLE_OK)
         goto done;
     created = TRUE;
@@ -1618,16 +1641,15 @@ static OLESTATUS WINAPI OleCreate(LPCSTR protocol, LPOLECLIENT client, LPCSTR cl
     }
     status = OLE_OK;
 done:
-    if (data)
-        dde.disconnect(data);
     if (created) {
-        wsprintf(command, "[StdCloseDocument(\"%s\")]", topic);
-        OLESTATUS closed = ole_execute_system(&dde, sys, command, OLE_ERROR_TERMINATE);
+        OLESTATUS closed = ole_close_document(&dde, sys, data, topic);
         if (closed != OLE_OK && status == OLE_OK)
             status = closed;
     }
+    if (data)
+        dde.disconnect(data);
     if (started && sys && status != OLE_OK)
-        ole_execute_system(&dde, sys, "[StdExit]", OLE_ERROR_TERMINATE);
+        ole_execute(&dde, sys, "[StdExit]", OLE_ERROR_TERMINATE);
     if (sys)
         dde.disconnect(sys);
     if (service)
@@ -1977,7 +1999,7 @@ static void disconnect_session(OLEOBJECT *o)
 static OLESTATUS close_session(OLEOBJECT *o)
 {
     if (o->type == OT_EMBEDDED && session_open(o->session)) {
-        OLESTATUS status = ole_execute_system(&o->session->dde, o->session->conv,
+        OLESTATUS status = ole_execute(&o->session->dde, o->session->conv,
                                              "[StdCloseDocument]", OLE_ERROR_TERMINATE);
         if (status != OLE_OK)
             return status;
@@ -2006,7 +2028,7 @@ static OLESTATUS poke_native(OLEOBJECT *o, const ole_session *s)
                                          XTYP_POKE, 2000, &flags))
             status = OLE_OK;
         else
-            status = flags & DDE_FBUSY ? OLE_BUSY : OLE_ERROR_EDIT;
+            status = format ? ole_transaction_error(&s->dde, flags, OLE_ERROR_EDIT) : OLE_ERROR_MEMORY;
         GlobalUnlock(data);
     } else {
         status = OLE_ERROR_MEMORY;
@@ -2080,19 +2102,17 @@ static OLESTATUS connect_object(OLEOBJECT *o)
         goto done;
 
     wsprintf(command, link ? "[StdOpenDocument(\"%s\")]" : "[StdEditDocument(\"%s\")]", topic);
-    status = ole_execute_system(dde, sys, command, link ? OLE_ERROR_OPEN : OLE_ERROR_EDIT);
+    status = ole_execute(dde, sys, command, link ? OLE_ERROR_OPEN : OLE_ERROR_EDIT);
     if (status != OLE_OK)
         goto done;
     created = !link;
     s->conv = ole_connect(dde, service, topic);
     status = !s->conv ? OLE_ERROR_COMM : link ? OLE_OK : poke_native(o, s);
 done:
-    if (status != OLE_OK && sys && created) {
-        wsprintf(command, "[StdCloseDocument(\"%s\")]", topic);
-        ole_execute_system(dde, sys, command, OLE_ERROR_TERMINATE);
-    }
+    if (status != OLE_OK && sys && created)
+        ole_close_document(dde, sys, s->conv, topic);
     if (status != OLE_OK && sys && started)
-        ole_execute_system(dde, sys, "[StdExit]", OLE_ERROR_TERMINATE);
+        ole_execute(dde, sys, "[StdExit]", OLE_ERROR_TERMINATE);
     if (sys)
         dde->disconnect(sys);
     if (service)
@@ -2129,7 +2149,7 @@ static OLESTATUS WINAPI OleActivate(LPOLEOBJECT object, UINT verb, BOOL show, BO
         char command[320];
         wsprintf(command, "[StdDoVerbItem(\"%s\",%u,%s,%s)]", s->item_name, verb,
                  show ? "TRUE" : "FALSE", focus ? "FALSE" : "TRUE");
-        status = ole_execute_system(&s->dde, s->conv, command, OLE_ERROR_DOVERB);
+        status = ole_execute(&s->dde, s->conv, command, OLE_ERROR_DOVERB);
         if (status != OLE_OK && opened)
             close_session(o);
     }

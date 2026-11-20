@@ -80,8 +80,10 @@ segments, the program's scrambled on disk, its loader in the script;
 `scripts/selfload.txt`).
 
 DOS MZ and COM executables and native FDOS EZ executables can also be launched
-through WinExec. They run full screen through FDOS EXEC, with the
-calling task's working drive and directories. After the DOS child exits,
+through WinExec. They run full screen through FDOS EXEC. A launch from a
+native shell starts in the executable's directory. A launch from a
+guest Windows program inherits the calling task's working drive and
+directories. After the DOS child exits,
 WINN leaves its text output visible and waits for a key before restoring
 the Windows display, palette and input. WinExec returns after that.
 Native DOS executables can use the .EXE, .EZ or .COM extension and require

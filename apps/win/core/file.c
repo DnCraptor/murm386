@@ -553,22 +553,27 @@ int win_file_getcwd(int drive, LPSTR out, int size)
     return len;
 }
 
-void win_file_task_workdir(wtask *task, LPCSTR exe)
+int win_file_exe_dir(LPCSTR exe, LPSTR dir, int size)
 {
-    char full[256];
-    if (!win_file_resolve(exe, full, sizeof(full))) return;
+    if (!win_file_resolve(exe, dir, size)) return -1;
     char *slash = NULL;
-    for (char *p = full; *p; ++p)
+    for (char *p = dir; *p; ++p)
         if (*p == '\\')
             slash = p;
-    if (!slash) return;
-    if (slash > full + 2)
+    if (!slash) return -1;
+    if (slash > dir + 2)
         *slash = 0;
     else
         slash[1] = 0;            /* an executable in C:\\ (drive root) */
-    int drive = dos_letter(full[0]);
+    return dos_letter(dir[0]);
+}
+
+void win_file_task_workdir(wtask *task, LPCSTR exe)
+{
+    char dir[256];
+    int drive = win_file_exe_dir(exe, dir, sizeof(dir));
     if (drive < 0) return;
-    char *copy = win_strdup(full);
+    char *copy = win_strdup(dir);
     if (!copy) return;
     win_free(task->dos_cwd[drive]);
     task->dos_cwd[drive] = copy;
