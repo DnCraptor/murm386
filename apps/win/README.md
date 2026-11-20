@@ -165,8 +165,11 @@ to both Win16 and native callers. Registrations belong to their task.
 Revoking a server closes its documents before releasing their resources
 and the server itself; a document can revoke itself from its Close
 callback, with Release deferred until Close returns.
-OLESVR registers each server class as a DDEML service. Its System and
-OLESystem topics support discovery and dispatch StdOpenDocument,
+OLESVR registers each server class as a DDEML service. An
+OLE_SERVER_MULTI instance with an open document accepts connections to
+that document, leaving System and OLESystem connections to free instances.
+An OLE_SERVER_SINGLE instance can serve several documents.
+The system topics support discovery and dispatch StdOpenDocument,
 StdNewDocument, StdNewFromTemplate, StdEditDocument, StdCloseDocument and StdExit through
 the server's methods. A created or registered document is available
 as a named topic. A request on that topic resolves the entire document

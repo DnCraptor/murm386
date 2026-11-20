@@ -24,6 +24,7 @@ static struct {
     server_owner owner;
     LHSERVER handle;
     LPOLESERVER native;
+    OLE_SERVER_USE use;
     BOOL revoking, exiting, revoke_requested;
     HSZ service;
     char cls[64];
@@ -230,6 +231,7 @@ static OLESTATUS register_server(LPCSTR cls, LPOLESERVER native, uint32_t guest,
     servers[i].owner = (server_owner){ task, guest };
     servers[i].handle = handle;
     servers[i].native = native;
+    servers[i].use = use;
     servers[i].service = service;
     lstrcpyn(servers[i].cls, cls, sizeof(servers[i].cls));
     HDDEDATA registered = already || dde.service(id, service, 0, DNS_REGISTER);
@@ -472,11 +474,24 @@ static OLESTATUS create_native_doc(LPOLESERVER server, unsigned method, LHSERVER
     return OLE_ERROR_COMMAND;
 }
 
+/* A multiple-instance server uses a separate instance for each document.
+ * A document being opened or closed still occupies the instance. */
+static BOOL server_can_open(int server)
+{
+    if (servers[server].use == OLE_SERVER_MULTI)
+        for (int i = 0; i < DOCS; i++)
+            if (docs[i].server == servers[server].handle)
+                return FALSE;
+    return TRUE;
+}
+
 static OLESTATUS system_document(int s, unsigned method, LPCSTR name, LPCSTR template)
 {
     HTASK task = servers[s].owner.task;
     if (service_doc(task, servers[s].service, name) >= 0)
         return method == SERVER_OPEN ? OLE_OK : OLE_ERROR_NAME;
+    if (!server_can_open(s))
+        return OLE_BUSY;
     for (int d = 0; d < DOCS; d++)
         if (docs[d].owner.task == task && docs[d].opening &&
             docs[d].server == servers[s].handle && !lstrcmpi(docs[d].name, name))
@@ -1135,7 +1150,7 @@ static HDDEDATA CALLBACK system_callback(UINT type, UINT fmt, HCONV conv, HSZ to
     if (server < 0)
         return 0;
     if (type == XTYP_CONNECT)
-        return system || service_doc(task, service, name) >= 0;
+        return system ? server_can_open(server) : service_doc(task, service, name) >= 0;
     if (type == XTYP_CONNECT_CONFIRM) {
         int i = system ? -1 : service_doc(task, service, name);
         if (i >= 0)
