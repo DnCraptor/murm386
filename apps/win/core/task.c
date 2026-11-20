@@ -59,6 +59,7 @@ static HTASK shell_task;
 /* The physical stack remains the sender's during synchronous SendMessage.
  * The owner is task-local, so task_yield() cannot leak it to another task. */
 wtask *task_current(void) { return cur->dispatch_owner ? cur->dispatch_owner : cur; }
+int task_in_send_message(void) { return cur->dispatch_owner != NULL; }
 wtask *task_set_dispatch_owner(wtask *owner)
 {
     wtask *previous = cur->dispatch_owner;

@@ -31,6 +31,11 @@ typedef struct request_client {
 
 static request_client *active_client;
 
+typedef struct {
+    HDDEDATA native, picture;
+    UINT native_format;
+} document_snapshot;
+
 static struct {
     server_owner owner;
     LHSERVER handle;
@@ -49,6 +54,7 @@ static struct {
     BOOL closing, revoked, opening, transferring;
     request_client editor;
     uint32_t editor_object;
+    const document_snapshot *snapshot;
     char name[128];
 } docs[DOCS];
 
@@ -341,14 +347,42 @@ static OLESTATUS WINAPI OleRevokeServerDoc(LHSERVERDOC doc)
     return OLE_OK;
 }
 
+static HDDEDATA document_transaction(int doc, DWORD id, HSZ item, UINT format, HDDEDATA incoming);
+
 static OLESTATUS post_document_notice(int i, LPCSTR signal)
 {
     DWORD id = endpoint_of(GetCurrentTask());
     HSZ topic = dde.string(id, docs[i].name, CP_WINANSI);
     HSZ item = dde.string(id, signal, CP_WINANSI);
     OLESTATUS status = OLE_ERROR_MEMORY;
-    if (topic && item)
-        status = dde.post_advise(id, topic, item) ? OLE_OK : OLE_ERROR_COMM;
+    if (topic && item) {
+        LHSERVERDOC handle = docs[i].handle;
+        document_snapshot snapshot = {0};
+        BOOL capture = docs[i].editor_object && !lstrcmpi(signal, "/Close");
+        if (capture) {
+            /* Capture the document while the server owns the call stack.
+             * A warm close advise makes the client request these formats. */
+            snapshot.native_format = RegisterClipboardFormat("Native");
+            if (snapshot.native_format)
+                snapshot.native = document_transaction(i, id, 0, snapshot.native_format, 0);
+            if (snapshot.native && docs[i].handle == handle)
+                snapshot.picture = document_transaction(i, id, 0, CF_DIB, 0);
+        }
+        if (docs[i].handle == handle) {
+            const document_snapshot *previous = docs[i].snapshot;
+            if (capture)
+                docs[i].snapshot = &snapshot;
+            status = dde.post_advise(id, topic, item) ? OLE_OK : OLE_ERROR_COMM;
+            if (docs[i].handle == handle)
+                docs[i].snapshot = previous;
+        } else {
+            status = OLE_ERROR_HANDLE;
+        }
+        if (snapshot.picture)
+            dde.free_data(snapshot.picture);
+        if (snapshot.native)
+            dde.free_data(snapshot.native);
+    }
     if (item)
         dde.free_string(id, item);
     if (topic)
@@ -1224,6 +1258,20 @@ static HDDEDATA document_transaction(int doc, DWORD id, HSZ item, UINT format, H
     if (!memory_format(format) || (item && !dde.query(id, item, name, sizeof(name), CP_WINANSI)))
         return 0;
     LPCSTR object_name = name[0] ? name : NULL;
+    const document_snapshot *snapshot = doc >= 0 ? docs[doc].snapshot : NULL;
+    if (snapshot && !incoming && !object_name &&
+        (format == snapshot->native_format || format == CF_DIB)) {
+        HDDEDATA source = format == CF_DIB ? snapshot->picture : snapshot->native;
+        if (!source)
+            return 0;
+        DWORD bytes;
+        const uint8_t *src = dde.access_data(source, &bytes);
+        if (!src)
+            return 0;
+        HDDEDATA copy = dde.create_data(id, (LPBYTE)src, bytes, 0, item, format, 0);
+        dde.unaccess_data(source);
+        return copy;
+    }
     LHSERVERDOC handle = doc >= 0 ? docs[doc].handle : 0;
     HDDEDATA data = document_call(doc, id, item, object_name, format, incoming, NULL);
     /* Ask for a device-dependent bitmap when the server has no packed DIB.

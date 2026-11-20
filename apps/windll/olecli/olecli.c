@@ -1374,7 +1374,8 @@ static OLESTATUS create_clip_object(LPCSTR protocol, LHCLIENTDOC doc, LPCSTR nam
 typedef struct {
     HINSTANCE dll;
     DWORD inst;
-    DDEUNINITIALIZE uninit;
+    DDEUNINITIALIZE uninit, uninit_quiet;
+    BOOL timed_out;
     DDECREATESTRINGHANDLE string;
     DDEFREESTRINGHANDLE free_string;
     DDECONNECT connect;
@@ -1466,6 +1467,9 @@ static BOOL ole_dde_begin(ole_dde *dde)
     DDE_BIND(last_error, DDEGETLASTERROR, "DdeGetLastError");
     DDE_BIND(free_data, DDEFREEDATAHANDLE, "DdeFreeDataHandle");
 #undef DDE_BIND
+    dde->uninit_quiet = (DDEUNINITIALIZE)(void (*)(void))
+        GetProcAddress(dde->dll, "WinnDdeUninitializeQuiet");
+    dde->timed_out = FALSE;
     dde->inst = 0;                      /* a new DDEML instance */
     if (!init(&dde->inst, ole_dde_callback, APPCMD_CLIENTONLY | CBF_SKIP_ALLNOTIFICATIONS, 0))
         return TRUE;
@@ -1555,10 +1559,19 @@ static OLESTATUS ole_start_server(const ole_dde *dde, HSZ service, LPCSTR cls, H
     return OLE_ERROR_COMM;
 }
 
-static OLESTATUS ole_transaction_error(const ole_dde *dde, DWORD flags, OLESTATUS rejected)
+static OLESTATUS ole_transaction_error(ole_dde *dde, DWORD flags, OLESTATUS rejected)
 {
     UINT error = dde->last_error(dde->inst);
     ole_debug_status("DDE transaction", error, flags);
+    switch (error) {
+    case DMLERR_ADVACKTIMEOUT:
+    case DMLERR_UNADVACKTIMEOUT:
+    case DMLERR_DATAACKTIMEOUT:
+    case DMLERR_EXECACKTIMEOUT:
+    case DMLERR_POKEACKTIMEOUT:
+        dde->timed_out = TRUE;
+        break;
+    }
     if ((flags & DDE_FBUSY) || error == DMLERR_BUSY)
         return OLE_BUSY;
     if (error == DMLERR_MEMORY_ERROR || error == DMLERR_LOW_MEMORY)
@@ -1568,7 +1581,7 @@ static OLESTATUS ole_transaction_error(const ole_dde *dde, DWORD flags, OLESTATU
     return OLE_ERROR_COMM;
 }
 
-static OLESTATUS ole_execute(const ole_dde *dde, HCONV conv, LPSTR command,
+static OLESTATUS ole_execute(ole_dde *dde, HCONV conv, LPSTR command,
                                      OLESTATUS failure)
 {
     DWORD flags = 0;
@@ -1578,7 +1591,7 @@ static OLESTATUS ole_execute(const ole_dde *dde, HCONV conv, LPSTR command,
     return ole_transaction_error(dde, flags, failure);
 }
 
-static OLESTATUS ole_request_block(const ole_dde *dde, HCONV conv, HSZ item, UINT format, HGLOBAL *out)
+static OLESTATUS ole_request_block(ole_dde *dde, HCONV conv, HSZ item, UINT format, HGLOBAL *out)
 {
     if (!format)
         return OLE_ERROR_MEMORY;
@@ -1602,7 +1615,7 @@ static OLESTATUS ole_request_block(const ole_dde *dde, HCONV conv, HSZ item, UIN
     return status;
 }
 
-static OLESTATUS ole_close_document(const ole_dde *dde, HCONV sys, HCONV doc, LPCSTR topic)
+static OLESTATUS ole_close_document(ole_dde *dde, HCONV sys, HCONV doc, LPCSTR topic)
 {
     if (doc)
         return ole_execute(dde, doc, "[StdCloseDocument]", OLE_ERROR_TERMINATE);
@@ -1744,19 +1757,20 @@ static OLESTATUS WINAPI OleCreate(LPCSTR protocol, LPOLECLIENT client, LPCSTR cl
 done:
     if (status != OLE_OK) {
         ole_debug_status(stage, status, 0);
-        if (created)
+        if (created && !dde.timed_out)
             ole_close_document(&dde, sys, data, topic);
-        if (data)
+        if (data && (!dde.timed_out || !dde.uninit_quiet))
             dde.disconnect(data);
-        if (started && sys)
+        if (started && sys && !dde.timed_out)
             ole_execute(&dde, sys, "[StdExit]", OLE_ERROR_TERMINATE);
     }
-    if (sys)
+    if (sys && (status == OLE_OK || !dde.timed_out || !dde.uninit_quiet))
         dde.disconnect(sys);
     if (service)
         dde.free_string(dde.inst, service);
     if (status != OLE_OK) {
-        dde.uninit(dde.inst);
+        DDEUNINITIALIZE uninit = dde.timed_out && dde.uninit_quiet ? dde.uninit_quiet : dde.uninit;
+        uninit(dde.inst);
         FreeLibrary(dde.dll);
     }
     if (image)
@@ -2083,11 +2097,15 @@ static void disconnect_session(OLEOBJECT *o)
     if (!s)
         return;
     o->session = NULL;
-    if (s->conv)
+    DDEUNINITIALIZE quiet = s->dde.timed_out ? s->dde.uninit_quiet : NULL;
+    if (s->conv && !quiet)
         s->dde.disconnect(s->conv);
     if (s->item)
         s->dde.free_string(s->dde.inst, s->item);
-    s->dde.uninit(s->dde.inst);
+    if (quiet)
+        quiet(s->dde.inst);
+    else
+        s->dde.uninit(s->dde.inst);
     FreeLibrary(s->dde.dll);
     free(s);
 }
@@ -2110,9 +2128,9 @@ static OLESTATUS WINAPI OleQueryOpen(LPOLEOBJECT object)
     return !o ? OLE_ERROR_OBJECT : session_open(o->session) ? OLE_OK : OLE_ERROR_NOT_OPEN;
 }
 
-static OLESTATUS send_target_device(const ole_session *s, HGLOBAL device)
+static OLESTATUS send_target_device(ole_session *s, HGLOBAL device)
 {
-    const ole_dde *dde = &s->dde;
+    ole_dde *dde = &s->dde;
     HSZ item = dde->string(dde->inst, "StdTargetDevice", CP_WINANSI);
     UINT format = clipboard_format("Binary", TRUE);
     DWORD bytes = device ? GlobalSize(device) : 0;
@@ -2163,7 +2181,7 @@ static OLESTATUS WINAPI OleSetTargetDevice(LPOLEOBJECT object, HGLOBAL device)
     return status;
 }
 
-static OLESTATUS poke_native(OLEOBJECT *o, const ole_session *s)
+static OLESTATUS poke_native(OLEOBJECT *o, ole_session *s)
 {
     HGLOBAL data = 0;
     OLESTATUS status = stream_data(o, TRUE, &data);
@@ -2263,11 +2281,11 @@ done:
         status = send_target_device(s, o->target_device);
     if (status == OLE_OK && !link)
         subscribe_document_notices(dde, s->conv);
-    if (status != OLE_OK && sys && created)
+    if (status != OLE_OK && sys && created && !dde->timed_out)
         ole_close_document(dde, sys, s->conv, topic);
-    if (status != OLE_OK && sys && started)
+    if (status != OLE_OK && sys && started && !dde->timed_out)
         ole_execute(dde, sys, "[StdExit]", OLE_ERROR_TERMINATE);
-    if (sys)
+    if (sys && (status == OLE_OK || !dde->timed_out || !dde->uninit_quiet))
         dde->disconnect(sys);
     if (service)
         dde->free_string(dde->inst, service);

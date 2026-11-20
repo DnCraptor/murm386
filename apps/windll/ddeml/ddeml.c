@@ -98,6 +98,7 @@ typedef struct {
  * A synchronous transaction retains its slot until the waiting caller resumes. */
 typedef struct {
     DWORD order, id, status;
+    DWORD started, timeout;
     HCONV target, client;
     UINT type, fmt, error;
     HSZ item;
@@ -1122,8 +1123,20 @@ static pending *queue_callback(int inst, HCONV target, UINT type, UINT fmt, HSZ 
     return p;
 }
 
+static BOOL post_pending(int inst, pending *p)
+{
+    p->posted = 1;
+    return PostMessage(insts[inst].hwnd, WM_DDEML_READY, (WPARAM)(p - pend), (LPARAM)p->order);
+}
+
+static UINT timeout_error(UINT type);
+
 static void run_pending(pending *p, int c)
 {
+    if (p->sync && p->timeout && GetTickCount() - p->started >= p->timeout) {
+        cancel_pending(p, timeout_error(p->type));
+        return;
+    }
     conversation *cv = &convs[c];
     HCONV target = p->target;
     int notify = p->type == XTYP_ADVDATA || p->type == XTYP_XACT_COMPLETE;
@@ -1170,8 +1183,7 @@ static void run_pending(pending *p, int c)
     p->type = XTYP_XACT_COMPLETE;
     p->target = p->client;
     p->order = advance(&next_order);
-    p->posted = 1;
-    if (!PostMessage(insts[inst].hwnd, WM_DDEML_READY, (WPARAM)(p - pend), (LPARAM)p->order)) {
+    if (!post_pending(inst, p)) {
         set_error(inst, DMLERR_POSTMSG_FAILED);
         drop_pending(p);
     }
@@ -1322,15 +1334,39 @@ static HDDEDATA client_transaction(int c, HDDEDATA given, HSZ item, UINT fmt, UI
         return 0;
     p->client = conv_handle(c);
     p->sync = sync;
+    /* The queue owns the input until the callback returns, even if the
+     * caller times out and destroys its DDE instance in the meantime. */
+    input = data_of(given);
+    if (input)
+        input->inst = -1;
     DWORD order = p->order, id = sync ? 0 : advance(&next_id);
     p->id = id;
     if (result)
         *result = id;
-    drain_callbacks(convs[server].inst, p->target);
+    int receiver = convs[server].inst;
+    /* A synchronous call inside a borrowed SendMessage stack can be a
+     * reply to the task that owns that stack (OLE /Close advice does this).
+     * Posting it and waiting there would wait on ourselves. */
+    BOOL defer = insts[receiver].task != insts[inst].task &&
+                 (!sync || (timeout && !InSendMessage()));
+    if (defer) {
+        p->started = started;
+        p->timeout = sync ? timeout : 0;
+        if (!post_pending(receiver, p)) {
+            drop_pending(p);
+            if (result)
+                *result = 0;
+            set_error(inst, DMLERR_POSTMSG_FAILED);
+            return 0;
+        }
+    } else {
+        drain_callbacks(receiver, p->target);
+    }
     if (!sync)
         return 1;
 
-    while (p->order == order && p->target && GetTickCount() - started < timeout) {
+    while (p->order == order && p->target && !p->cancelled &&
+           GetTickCount() - started < timeout) {
         MSG msg;
         if (!PeekMessage(&msg, 0, 0, 0, PM_REMOVE))
             continue;
@@ -1344,7 +1380,10 @@ static HDDEDATA client_transaction(int c, HDDEDATA given, HSZ item, UINT fmt, UI
     if (p->order != order)
         return 0;
     HDDEDATA answer = 0;
-    if (p->target) {
+    BOOL timed_out = p->target || (defer && GetTickCount() - started >= timeout);
+    if (p->cancelled) {
+        error = p->error;
+    } else if (timed_out) {
         error = timeout_error(type);
     } else {
         error = p->error;
@@ -1354,8 +1393,13 @@ static HDDEDATA client_transaction(int c, HDDEDATA given, HSZ item, UINT fmt, UI
         }
     }
     if (result)
-        *result = p->status;
-    drop_pending(p);
+        *result = timed_out || p->cancelled ? 0 : p->status;
+    if (p->running) {
+        p->sync = 0;                    /* completion now owns the slot */
+        cancel_pending(p, error);
+    } else {
+        drop_pending(p);
+    }
     if (insts[inst].generation == generation)
         set_error(inst, error);
     return answer;
@@ -1434,7 +1478,7 @@ static BOOL WINAPI DdePostAdvise(DWORD id, HSZ topic, HSZ item)
 
 /* its conversations ended (the others told, when they may be), its data,
  * its services and its window gone */
-static void uninit(int inst, int tell)
+static void uninit(int inst, int tell, int destroy_window)
 {
     instance *in = &insts[inst];
     if (in->closing)
@@ -1457,7 +1501,7 @@ static void uninit(int inst, int tell)
                 tell_others(inst, XTYP_UNREGISTER, service);
             GlobalDeleteAtom((ATOM)service);
         }
-    if (tell && in->hwnd && IsWindow(in->hwnd))
+    if (destroy_window && in->hwnd && IsWindow(in->hwnd))
         DestroyWindow(in->hwnd);
     memset(in, 0, sizeof(*in));
 }
@@ -1466,7 +1510,17 @@ static BOOL WINAPI DdeUninitialize(DWORD id)
 {
     if (!inst_of(id))
         return FALSE;
-    uninit((int)id - 1, 1);
+    uninit((int)id - 1, 1, 1);
+    return TRUE;
+}
+
+/* OLE error recovery after a deadline. Do not call the peer again while
+ * releasing the local instance and its conversation handles. */
+static BOOL WINAPI WinnDdeUninitializeQuiet(DWORD id)
+{
+    if (!inst_of(id))
+        return FALSE;
+    uninit((int)id - 1, 0, 1);
     return TRUE;
 }
 
@@ -1772,14 +1826,14 @@ static void task_end(uint16_t task)
 {
     for (int i = 0; i < INSTS; i++)
         if (insts[i].used && (uint16_t)insts[i].task == task)
-            uninit(i, 0);
+            uninit(i, 0, 0);
 }
 
 static void term(void)
 {
     for (int i = 0; i < INSTS; i++)
         if (insts[i].used)
-            uninit(i, 0);
+            uninit(i, 0, 0);
     if (wnd_class)
         UnregisterClass("WinnDdeml", 0);
     wnd_class = 0;
@@ -1813,6 +1867,7 @@ static const win_dll_export exports[] = {
     { 27, 14, "DdeNameService", (const void *)DdeNameService },
     { 36, 8, "DdeCmpStringHandles", (const void *)DdeCmpStringHandles },
     { 37, 4, "DdeReconnect", (const void *)DdeReconnect },
+    { 0x7ff0, 4, "WinnDdeUninitializeQuiet", (const void *)WinnDdeUninitializeQuiet },
 };
 
 static const win_dll_info info = {

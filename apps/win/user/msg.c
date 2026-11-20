@@ -228,7 +228,7 @@ LRESULT WINAPI CallWindowProc(WNDPROC proc, HWND h, UINT m, WPARAM wp, LPARAM lp
     return proc ? proc(h, m, wp, lp) : 0;
 }
 
-BOOL WINAPI InSendMessage(void) { return FALSE; }
+BOOL WINAPI InSendMessage(void) { return task_in_send_message(); }
 
 /* ---------------------------------------------------------------- keyboard input */
 

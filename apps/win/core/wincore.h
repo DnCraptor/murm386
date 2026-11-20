@@ -464,6 +464,7 @@ typedef struct wtask {
 
 void   task_init(void);
 wtask *task_current(void);
+int     task_in_send_message(void);
 wtask *task_set_dispatch_owner(wtask *owner); /* returns previous owner */
 wtask *task_kernel(void);
 BOOL   task_ne_image_in_use(LPCSTR absolute_path);
