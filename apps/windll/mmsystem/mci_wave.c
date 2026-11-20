@@ -243,7 +243,7 @@ static void stop_play(unsigned abort) {
     wave.nqueued = 0;
     wave.playing = wave.paused = 0;
     wave.mode = MCI_MODE_STOP;
-    if (wave.timer) { KillTimer(0, wave.timer); wave.timer = 0; }
+    if (wave.timer) { KillSystemTimer(0, wave.timer); wave.timer = 0; }
     if (abort) abort_notify(MCI_NOTIFY_ABORTED);
 }
 void winn_mci_wave_close(void) {
@@ -310,7 +310,7 @@ static uint32_t play(uint32_t flags, uint32_t from, uint32_t to, HWND hwnd) {
     wave.notify = (flags & MCI_NOTIFY) ? hwnd : 0;
     wave.playing = 1;
     wave.mode = MCI_MODE_PLAY;
-    wave.timer = SetTimer(0, 0, 5, tick);
+    wave.timer = SetSystemTimer(0, 0, 10, tick);
     if (!wave.timer) { stop_play(1); return MCIERR_DEVICE_NOT_READY; }
     pump();
     if (flags & MCI_WAIT) {
@@ -346,7 +346,7 @@ uint32_t winn_mci_wave_command(win_dll_call *c, uint16_t msg, uint32_t flags, ui
             wave.playing = 0;
             wave.paused = 1;
             wave.mode = MCI_MODE_PAUSE;
-            if (wave.timer) { KillTimer(0, wave.timer); wave.timer = 0; }
+            if (wave.timer) { KillSystemTimer(0, wave.timer); wave.timer = 0; }
         }
         break;
     case MCI_RESUME:
@@ -489,7 +489,7 @@ uint32_t winn_mci_wave_string(const char *op, const char *rest, char *result,
             wave.completed = position_bytes(); wave.cursor = wave.completed;
             wave.driver->stop(); wave.playing = 0; wave.active = 0; wave.nqueued = 0;
             wave.paused = 1; wave.mode = MCI_MODE_PAUSE;
-            if (wave.timer) { KillTimer(0, wave.timer); wave.timer = 0; }
+            if (wave.timer) { KillSystemTimer(0, wave.timer); wave.timer = 0; }
         }
         return 0;
     }

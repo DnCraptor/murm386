@@ -353,7 +353,7 @@ static MMRESULT wave_open(win_dll_call *c)
     output.flags = flags;
     output.callback = NE->arg32(c, 12);
     output.instance = NE->arg32(c, 8);
-    output.timer = SetTimer(0, 0, 10, wave_tick);
+    output.timer = SetSystemTimer(0, 0, 10, wave_tick);
     if (!output.timer) {
         d->close();
         FreeLibrary(h);
@@ -408,7 +408,7 @@ static MMRESULT wave_close(void)
         return WAVERR_STILLPLAYING;
     wave_notify(MM_WOM_CLOSE, 0);
     if (output.timer)
-        KillTimer(0, output.timer);
+        KillSystemTimer(0, output.timer);
     HMODULE h = output.module;
     output.driver->close();
     memset(&output, 0, sizeof(output));
@@ -589,7 +589,7 @@ void winn_wave_task_end(uint16_t task)
     if (output.driver && (uint16_t)output.task == task) {
         wave_reset(0);
         if (output.timer)
-            KillTimer(0, output.timer);
+            KillSystemTimer(0, output.timer);
         output.driver->close();
         /* The core releases this task's DLL references after task_end. */
         memset(&output, 0, sizeof(output));
@@ -601,7 +601,7 @@ void winn_wave_term(void)
     if (output.driver) {
         wave_reset(0);
         if (output.timer)
-            KillTimer(0, output.timer);
+            KillSystemTimer(0, output.timer);
         output.driver->close();
         memset(&output, 0, sizeof(output));
     }

@@ -12,7 +12,6 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define TIMER_AUDIO 1u
 #define ID_FREQUENCY 100u
 #define ID_FREQUENCY_SCROLL 101u
 #define ID_AMP_L 110u
@@ -22,6 +21,7 @@
 #define WAVES_PER_SIDE 4u
 
 static HWND main_window;
+static UINT audio_timer;
 static HWND frequency_edit, frequency_scroll;
 static HWND amp_scroll[2], amp_label[2], run_button;
 static HWND shape_button[2][FGEN_WAVES];
@@ -194,6 +194,14 @@ static void wave_pump(void)
     }
 }
 
+/* Native windowless timer is run at the task's input service point, before
+ * paint/input messages; this does not depend on WM_TIMER dispatch latency. */
+static void CALLBACK audio_tick(HWND hwnd, UINT msg, UINT id, DWORD ticks)
+{
+    (void)hwnd; (void)msg; (void)id; (void)ticks;
+    wave_pump();
+}
+
 static void set_running(int on)
 {
     if (on) {
@@ -245,10 +253,6 @@ static LRESULT CALLBACK FGenProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     switch (msg) {
     case WM_CREATE:
         return 0;
-    case WM_TIMER:
-        if (wp == TIMER_AUDIO)
-            wave_pump();
-        return 0;
     case WM_HSCROLL:
         scroll_changed((HWND)HIWORD(lp), wp, lp);
         return 0;
@@ -268,7 +272,8 @@ static LRESULT CALLBACK FGenProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         return 0;
     case WM_DESTROY:
-        KillTimer(hwnd, TIMER_AUDIO);
+        if (audio_timer)
+            KillSystemTimer(0, audio_timer);
         wave_close();
         mixer_unload();
         PostQuitMessage(0);
@@ -335,7 +340,8 @@ int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
                        BS_PUSHBUTTON | WS_TABSTOP, 214, 257, 102, 25, ID_RUN);
 
     mixer_load();
-    if (!SetTimer(main_window, TIMER_AUDIO, 10, NULL)) {
+    audio_timer = SetSystemTimer(0, 0, 10, audio_tick);
+    if (!audio_timer) {
         MessageBox(main_window, "Cannot start audio timer.",
                    "Function Generator", MB_OK | MB_ICONEXCLAMATION);
     }

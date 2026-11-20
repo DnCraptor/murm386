@@ -48,8 +48,8 @@ cc -std=c11 -Wall -Wextra -Werror -O2 \
 
 ## Known limits
 
-- Playback and GUI handling are tied to WINN's 10-ms window timer, but no
-  extensive guest x86 computations occur between ticks.
+- PCM feeding uses a task-local native system timer serviced ahead of
+  window messages; GUI paint/input cannot starve it while the task runs.
 - The application uses the native `win_wave_driver` interface directly, not
   Win16 `waveOutOpen`, so normal MMSYSTEM device ownership/exclusion remains
   enforced by the driver, not the higher-level waveOut queue.

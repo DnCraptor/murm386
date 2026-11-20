@@ -1278,7 +1278,8 @@ static HDDEDATA CALLBACK system_callback(UINT type, UINT fmt, HCONV conv, HSZ to
             char advise[16];
             return warm && doc_of(document) >= 0 && fmt == RegisterClipboardFormat("Native") &&
                    dde.query(id, item, advise, sizeof(advise), CP_WINANSI) &&
-                   (!lstrcmpi(advise, "/Save") || !lstrcmpi(advise, "/Close"));
+                   (!lstrcmpi(advise, "/Change") || !lstrcmpi(advise, "/Save") ||
+                    !lstrcmpi(advise, "/Close"));
         }
         if (type == XTYP_REQUEST || (type == XTYP_POKE && data))
             return document_transaction(doc_of(document), id, item, fmt,
@@ -1365,13 +1366,19 @@ static int ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *v)
         request_client *p = find_client(NULL, NE->arg32(c, 10));
         *v = p && !p->revoked;
         if (*v) {
-            WORD notice = NE->arg16(c, 8);
-            for (int i = 0; i < DOCS; i++)
-                if (p == &docs[i].editor && !docs[i].transferring && !docs[i].revoked &&
-                    (notice == OLE_CHANGED || notice == OLE_SAVED || notice == OLE_CLOSED)) {
-                    *v = post_document_notice(i, notice == OLE_CLOSED ? "/Close" : "/Save") == OLE_OK;
-                    break;
-                }
+            LPCSTR signal;
+            switch (NE->arg16(c, 8)) {
+            case OLE_CHANGED: signal = "/Change"; break;
+            case OLE_SAVED:   signal = "/Save"; break;
+            case OLE_CLOSED:  signal = "/Close"; break;
+            default:          signal = NULL; break;
+            }
+            if (signal)
+                for (int i = 0; i < DOCS; i++)
+                    if (p == &docs[i].editor && !docs[i].transferring && !docs[i].revoked) {
+                        *v = post_document_notice(i, signal) == OLE_OK;
+                        break;
+                    }
         }
         break;
     }

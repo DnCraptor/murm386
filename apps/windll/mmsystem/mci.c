@@ -388,7 +388,7 @@ static void halt(int report) {
     seq.paused = 0;
     seq.mode = MCI_MODE_STOP;
     if (seq.timer) {
-        KillTimer(0, seq.timer);
+        KillSystemTimer(0, seq.timer);
         seq.timer = 0;
     }
     winn_midi_mci_reset();
@@ -510,7 +510,7 @@ static uint32_t do_play(uint32_t flags, uint32_t from, uint32_t to, HWND callbac
     seq.notify_hwnd = (flags & MCI_NOTIFY) ? callback : 0;
     seq.playing = 1;
     seq.mode = MCI_MODE_PLAY;
-    seq.timer = SetTimer(0, 0, 10, timer);
+    seq.timer = SetSystemTimer(0, 0, 10, timer);
     if (!seq.timer) { halt(0); return MCIERR_DEVICE_NOT_READY; }
     timer(0, 0, 0, 0);
     if (flags & MCI_WAIT) {
@@ -690,7 +690,7 @@ static uint32_t cmd_other(win_dll_call *c, uint16_t id, uint16_t msg,
             seq.playing = 0;
             seq.paused = 1;
             seq.mode = MCI_MODE_PAUSE;
-            if (seq.timer) { KillTimer(0, seq.timer); seq.timer = 0; }
+            if (seq.timer) { KillSystemTimer(0, seq.timer); seq.timer = 0; }
             winn_midi_mci_reset();
         }
         break;
@@ -850,7 +850,7 @@ static uint32_t cmd_string(const char *cmd, char *result, unsigned cap, HWND h) 
     if (same(op, "pause")) { if (seq.playing) {
         seq.position_ms = current_ms(); seq.playing = 0; seq.paused = 1;
         seq.mode = MCI_MODE_PAUSE;
-        if (seq.timer) { KillTimer(0, seq.timer); seq.timer = 0; }
+        if (seq.timer) { KillSystemTimer(0, seq.timer); seq.timer = 0; }
         winn_midi_mci_reset();
     } return 0; }
     if (same(op, "resume")) return do_play(0, 0, 0, 0);

@@ -680,6 +680,33 @@ static int timer_message(MSG *m, HWND filter, HTASK task, int remove, UINT first
     return 0;
 }
 
+/* Windowless native system timers have an immediate (task-local) callback.
+ * Unlike standard WM_TIMER / WM_SYSTIMER messages, multimedia playback
+ * must not be starved behind pending mouse events, posts or WM_PAINT.
+ * The callback runs after the DOS input poll, NOT from an IRQ. */
+static void pump_native_system_timers(void)
+{
+    static int dispatching;
+    if (dispatching)
+        return;
+    dispatching = 1;
+    HTASK task = GetCurrentTask();
+    uint32_t now = now_ms();
+    for (int i = 0; i < NTIMERS; i++) {
+        wtimer *tm = &timers[i];
+        if (!tm->used || !tm->sys || tm->hwnd || !tm->proc ||
+            tm->task != task || (int32_t)(now - tm->due) < 0)
+            continue;
+        /* Advance before the call: the callback may kill or replace itself,
+         * yield, or enter a nested USER message loop. */
+        TIMERPROC proc = tm->proc;
+        UINT id = tm->id;
+        tm->due = now + tm->elapse;
+        proc(0, WM_SYSTIMER, id, now);
+    }
+    dispatching = 0;
+}
+
 /* ---------------------------------------------------------------- retrieval */
 
 static int matches(const MSG *m, HWND h, UINT first, UINT last)
@@ -696,6 +723,7 @@ static void pump_input(void)
     if (win_sys.input)
         win_sys.input->poll();
     last_pump = now_ms();
+    pump_native_system_timers();
     user_caret_tick(last_pump);
     sound_service(last_pump);
     /* an Alt+Tab held back for a busy application: run where the keys
