@@ -29,6 +29,10 @@
 #define WINREG_DATA_BYTES 504u      /* a value's bytes at most */
 #define WINREG_NAME_BYTES 128u      /* a key's path, a value's name */
 
+/* Load the read-only Win16 registry after the Windows directory is set. */
+void winreg_init(void);
+void winreg_shutdown(void);
+
 /* a key (an open one, or a root) and a subkey of it (NULL, "": itself):
  * opened (created, with the keys on the way, with create); *out its
  * handle (the key itself for a root and no subkey) */

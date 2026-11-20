@@ -157,8 +157,16 @@ to both Win16 and native callers. Registrations belong to their task.
 Revoking a server closes its documents before releasing their resources
 and the server itself; a document can revoke itself from its Close
 callback, with Release deferred until Close returns.
-Client connections, server request queues and object notifications are
-still pending.
+OLESVR registers each server class as a DDEML service. Its System and
+OLESystem topics support discovery and dispatch StdOpenDocument,
+StdNewDocument, StdNewFromTemplate, StdEditDocument and StdExit through
+the server's methods. A created or registered document is available
+as a named topic. A request on that topic resolves the entire document
+or the named item through GetObject, copies the GetData result into DDEML,
+and releases the object. This covers global-memory formats including
+Native, DIB and text. Existing conversations retain their document
+identity through rename. GDI-object formats, document pokes and advises,
+server request queues and OleCreate on the client side are still pending.
 OLECLI registers client documents and supports OLE 1.0 static raster
 and metafile pictures. The Static protocol can paste CF_DIB and
 CF_METAFILEPICT, and converts CF_BITMAP when drawing is requested.
@@ -585,9 +593,13 @@ loads the CONTEXT; RtlUnwind calls those above its target frame
 program's SetUnhandledExceptionFilter, then the Application Error. INT 3
 has its own address (as NT), a privileged instruction its code. Win32s' other
 DLLs (`core/pe_dlls.c`): ADVAPI32's registry (WINN's, `core/winreg.c`:
-WINNREG.INI, HKEY_CLASSES_ROOT the Win16 programs' registration database
-too, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE ... keys of their own names
-beside it; values of any type) and GetUserName; COMDLG32, the native
+HKEY_CLASSES_ROOT is shared with Win16. WINN reads the Windows 3.1/3.11
+`REG.DAT` in its Windows directory at startup. `WINNREG.INI` overrides
+individual values and adds keys. Writes and deletions go to
+`WINNREG.INI` only. A missing or invalid `REG.DAT` leaves the INI
+registry available. HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE and the other
+Win32 roots live in the INI and support values of any type) and GetUserName;
+COMDLG32, the native
 COMMDLG.DLL's dialogs (Open, Save, Color, Font, Print; Find and Replace
 modeless, their registered message's lParam the program's FINDREPLACE;
 hooks and templates as Win16 programs', the structures in the hooks'

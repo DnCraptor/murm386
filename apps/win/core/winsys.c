@@ -7,6 +7,7 @@
 #include <string.h>
 #include "wincore.h"
 #include "winmod.h"
+#include "winreg.h"
 
 #define MAX_DRV 4
 
@@ -81,6 +82,9 @@ fail:
 
 void win_shutdown(void)
 {
+#if defined(__arm__) || defined(__thumb__) || defined(WINN_NE_HOST)
+    winreg_shutdown();
+#endif
     if (win_sys.sound)
         win_sys.sound->disable();
     win_sys.sound = NULL;
@@ -138,7 +142,12 @@ int win_boot(const char *exe_path, const win_display_driver *const *disp,
             rc = win_init(disp[i]->name, iname, pass ? 0 : w, pass ? 0 : h, 8);
     if (rc)
         return rc;
-    return user_init();
+    rc = user_init();
+#if defined(__arm__) || defined(__thumb__) || defined(WINN_NE_HOST)
+    if (!rc)
+        winreg_init();
+#endif
+    return rc;
 }
 
 /* Native: description of the display driver in use; returns its colours. */

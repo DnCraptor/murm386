@@ -162,6 +162,25 @@ typedef struct {
 struct WINN_OLESERVER { const OLESERVERVTBL *lpvtbl; };
 struct WINN_OLESERVERDOC { const OLESERVERDOCVTBL *lpvtbl; };
 
+/* Server-owned objects returned by GetObject start with this vtable.
+ * Client objects obtained from OLECLI remain opaque to native callers. */
+typedef struct {
+    int (CALLBACK *CallBack)(LPOLECLIENT, UINT, LPOLEOBJECT);
+} OLECLIENTVTBL;
+
+struct WINN_OLECLIENT { const OLECLIENTVTBL *lpvtbl; };
+
+typedef struct {
+    LPVOID (CALLBACK *QueryProtocol)(LPOLEOBJECT, LPCSTR);
+    OLESTATUS (CALLBACK *Release)(LPOLEOBJECT);
+    OLESTATUS (CALLBACK *Show)(LPOLEOBJECT, BOOL);
+    OLESTATUS (CALLBACK *DoVerb)(LPOLEOBJECT, UINT, BOOL, BOOL);
+    OLESTATUS (CALLBACK *GetData)(LPOLEOBJECT, OLECLIPFORMAT, HANDLE *);
+} OLESERVEROBJECTVTBL;
+
+typedef struct { const OLESERVEROBJECTVTBL *lpvtbl; } OLESERVEROBJECT;
+typedef OLESTATUS (WINAPI *OLEREVOKEOBJECT)(LPOLECLIENT);
+
 typedef OLESTATUS (WINAPI *OLEREGISTERSERVER)(LPCSTR, LPOLESERVER, LHSERVER *, HINSTANCE,
                                               OLE_SERVER_USE);
 typedef OLESTATUS (WINAPI *OLEREVOKESERVER)(LHSERVER);

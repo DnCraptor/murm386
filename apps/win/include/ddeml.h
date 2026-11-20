@@ -146,6 +146,7 @@ typedef HCONVLIST (WINAPI *DDECONNECTLIST)(DWORD inst, HSZ service, HSZ topic, H
                                          PCONVCONTEXT cc);
 typedef HCONV (WINAPI *DDEQUERYNEXTSERVER)(HCONVLIST list, HCONV previous);
 typedef BOOL (WINAPI *DDEDISCONNECTLIST)(HCONVLIST list);
+typedef BOOL (WINAPI *DDESETUSERHANDLE)(HCONV conv, DWORD transaction, DWORD user);
 typedef UINT (WINAPI *DDEQUERYCONVINFO)(HCONV conv, DWORD transaction, PCONVINFO info);
 typedef HCONV (WINAPI *DDECONNECT)(DWORD inst, HSZ service, HSZ topic, PCONVCONTEXT cc);
 typedef BOOL (WINAPI *DDEDISCONNECT)(HCONV conv);
