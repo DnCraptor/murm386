@@ -273,14 +273,48 @@ static void pio_set_x(PIO pio, const int sm, uint32_t v) {
 #if defined(M2P2_HSTX_AUDIO)
 #define ob(x) (*output_buffer++ = (uint8_t)(x))
 #else
-#define ob(x) { register uint8_t c = x; *output_buffer++ = is_hdmi_sync(c) ? (HDMI_CTRL_0 - 1) : c; }
+/* Four 8-bit palette indices are occupied by TMDS control symbols.
+ * A fixed substitution of 251 makes Windows white (255) look yellow.
+ * Resolve those indices to the nearest *actual* DAC colour below 252.
+ * A standard Windows palette has exact duplicates of the static colours
+ * in its colour cube (in particular index 225 is white). */
+static volatile uint8_t hdmi_vga256_remap[4];
+
+void hdmi_update_vga256_remap(const uint8_t *palette)
+{
+    for (unsigned i = HDMI_CTRL_0; i < 256u; ++i) {
+        const int r = palette[i * 3u + 0u];
+        const int g = palette[i * 3u + 1u];
+        const int b = palette[i * 3u + 2u];
+        unsigned best = 0;
+        int best_error = 0x7fffffff;
+        for (unsigned j = 0; j < HDMI_CTRL_0; ++j) {
+            const int dr = r - (int)palette[j * 3u + 0u];
+            const int dg = g - (int)palette[j * 3u + 1u];
+            const int db = b - (int)palette[j * 3u + 2u];
+            const int error = 3 * dr * dr + 4 * dg * dg + 2 * db * db;
+            if (error < best_error) {
+                best_error = error;
+                best = j;
+                if (error == 0)
+                    break;
+            }
+        }
+        hdmi_vga256_remap[i - HDMI_CTRL_0] = (uint8_t)best;
+    }
+}
+
+#define ob(x) do { \
+    const uint8_t c = (uint8_t)(x); \
+    *output_buffer++ = is_hdmi_sync(c) ? hdmi_vga256_remap[c - HDMI_CTRL_0] : c; \
+} while (0)
 #endif
 
 /*
  * Pixel-pair palette (text, OSD, EGA 640): one index carries two 16-colour
  * pixels, (left << 4) | right. Indices 252..255 are the TMDS control
- * symbols, so the pairs (15,12)..(15,15) cannot sit there. ob() showed
- * them as 251 = (15,11): solid white came out as white/light-cyan dots.
+ * symbols, so the pairs (15,12)..(15,15) cannot sit there. Packed
+ * 8bpp uses the nearest-colour remap above; pixel pairs use obp() below.
  *
  * Those four pairs are stored at 0xBC..0xBF instead (pair ^ 0x40), and
  * obp() sends them there. The pairs (11,12)..(11,15) give up their slots:

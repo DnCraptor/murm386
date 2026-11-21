@@ -279,6 +279,9 @@ static inline int c6_to_8(int v)
 }
 
 void graphics_set_palette_hdmi(const uint8_t R, const uint8_t G, const uint8_t B,  uint8_t i);
+#if !defined(M2P2_HSTX_AUDIO)
+void hdmi_update_vga256_remap(const uint8_t *palette);
+#endif
 void graphics_set_palette_hdmi2(
     const uint8_t R1, const uint8_t G1, const uint8_t B1,
     const uint8_t R2, const uint8_t G2, const uint8_t B2,
@@ -1683,6 +1686,10 @@ void vga_hw_set_palette(const uint8_t *palette_data) {
         uint8_t b6 = palette_data[i * 3 + 2];
         vga_color_to_dithered(r6, g6, b6, i);
     }
+#if !defined(M2P2_HSTX_AUDIO)
+    if (!SELECT_VGA)
+        hdmi_update_vga256_remap(palette_data);
+#endif
 }
 
 // Update EGA 16-color palette from AC palette registers
