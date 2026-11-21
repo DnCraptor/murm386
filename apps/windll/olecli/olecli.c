@@ -1439,7 +1439,11 @@ static HDDEDATA CALLBACK ole_dde_callback(UINT type, UINT fmt, HCONV conv, HSZ t
             return DDE_FNOTPROCESSED;
         if (closed)
             o->session->closed = TRUE;
-        notify_client(o, closed ? OLE_CLOSED : OLE_CHANGED);
+        /* A close advise also saves the final data. Report that update
+         * first so clients can commit a newly embedded object. */
+        notify_client(o, OLE_SAVED);
+        if (closed && object_of(o) && o->session && o->session->conv == conv)
+            notify_client(o, OLE_CLOSED);
         return DDE_FACK;
     }
     return DDE_FNOTPROCESSED;

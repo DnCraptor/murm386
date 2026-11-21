@@ -358,10 +358,11 @@ static OLESTATUS post_document_notice(int i, LPCSTR signal)
     if (topic && item) {
         LHSERVERDOC handle = docs[i].handle;
         document_snapshot snapshot = {0};
-        BOOL capture = docs[i].editor_object && !lstrcmpi(signal, "/Close");
+        BOOL capture = docs[i].editor_object &&
+                       (!lstrcmpi(signal, "/Save") || !lstrcmpi(signal, "/Close"));
         if (capture) {
-            /* Capture the document while the server owns the call stack.
-             * A warm close advise makes the client request these formats. */
+            /* Capture the formats before the warm advise makes the client
+             * request them on the borrowed server stack. */
             snapshot.native_format = RegisterClipboardFormat("Native");
             if (snapshot.native_format)
                 snapshot.native = document_transaction(i, id, 0, snapshot.native_format, 0);

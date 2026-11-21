@@ -4,15 +4,14 @@
  * the native DOS I/O port API and conventional guest RAM. No RP2350
  * sound hardware is accessed directly.
  *
- * The blocks go into a ring, one after another, byte after byte; the DMA
- * controller goes round it (auto-initialised), the DSP is given all that
- * is there and not yet given as one transfer, which it ends by itself
- * (auto-init, then exit auto-init after this block: a single-cycle
- * command would drop what the SB16 has buffered of the one before). Its
- * end (the interrupt's status) gives it the next at once, while the SB16
- * still plays what it buffered: the blocks follow without a gap, and the
- * transfer never runs past the samples (the SB16 reads ahead of what it
- * plays). What it has read is silence again.
+ * The DSP stays in auto-init mode for the entire stream.  The 8237 walks
+ * an 8-KiB ring and the DSP raises an IRQ after each 4096 bytes of PCM.
+ * The interrupt acknowledges a consumed half and makes it available for
+ * the producer again; no 16-bit DMA cursor arithmetic or reissued B6/C6
+ * commands are required at PCM block boundaries.  The SB16 emulates a
+ * separate 4-KiB output FIFO, so a completed half is safe to reuse.
+ * Never issue D9/DA between adjacent blocks: doing so stops DMA at every
+ * packet and creates a periodic audio gap when the native task polls it.
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
@@ -30,17 +29,15 @@
 #define SB_DMA       1u
 #define SB_BUFSIZE   8192u              /* the ring */
 #define SB_BLOCK     4096u              /* a block's most */
-#define SB_BLOCKS    4u                 /* blocks in it at the most */
+#define SB_BLOCKS    16u                /* blocks in it at the most */
 
 static void *low_block;
 static uint8_t *buffer;
 static uint32_t physical;
-static int opened, running;
+static int opened, running, prepared;
 static unsigned running_bits, running_rate, running_channels;
-static uint32_t written, read_;          /* bytes put in the ring, played (given and done) */
-static uint32_t given, given_from;      /* given to the DSP: up to, from (its transfer) */
-static int busy;                        /* a transfer of the DSP's on */
-static uint32_t ends[SB_BLOCKS];        /* the blocks', where each ends (as written) */
+static uint32_t written, read_;       /* absolute byte positions; read_ = DMA consumed */
+static uint32_t ends[SB_BLOCKS];     /* completion of each client buffer */
 static unsigned blocks, first, played;  /* in it, the first's, played not yet told */
 
 static int sb_present(void)
@@ -102,11 +99,10 @@ static int sb_open(void)
         return 0;
     }
     opened = 1;
-    running = 0;
+    running = prepared = 0;
     running_bits = 0;
-    busy = 0;
     blocks = first = played = 0;
-    written = read_ = given = given_from = 0;
+    written = read_ = 0;
     return 1;
 }
 
@@ -144,16 +140,16 @@ static void sb_stop(void)
 {
     if (!opened)
         return;
-    if (busy) {
-        dsp_byte(running_bits == 16u ? 0xd9u : 0xdau);  /* auto-init off */
-        dsp_byte(running_bits == 16u ? 0xd5u : 0xd0u);  /* halt the channel */
+    if (running) {
+        dsp_byte(running_bits == 16u ? 0xd9u : 0xdau);  /* exit auto-init */
+        dsp_byte(running_bits == 16u ? 0xd5u : 0xd0u);  /* stop DMA */
     }
     outp(0x0au, 0x04u | SB_DMA);
     outp(0xd4u, 0x05u);            /* mask high-DMA channel 5 */
     ack_irq();
-    running = busy = 0;
+    running = prepared = 0;
     blocks = first = played = 0;
-    written = read_ = given = given_from = 0;
+    written = read_ = 0;
 }
 
 static void sb_close(void)
@@ -200,114 +196,55 @@ static void program_dma(unsigned bits)
     }
 }
 
-/* where in the ring the DMA reads (its current address), bytes */
-static unsigned dma_offset(void)
+/* Start one auto-init stream.  The DSP's 4096-byte block IRQ, NOT the
+ * DMA address, tells the producer which half of the 8192-byte ring is free.
+ * This also avoids the half/whole-ring ambiguity of a polled 8237 cursor. */
+static int start_stream(void)
 {
-    unsigned lo, hi;
-    if (running_bits == 16u) {        /* words */
-        outp(0xd8u, 0);
-        lo = inp(0xc4u);
-        hi = inp(0xc4u);
-        return (((lo | hi << 8) - (unsigned)(physical >> 1)) & 0xffffu) * 2u % SB_BUFSIZE;
-    }
-    outp(0x0cu, 0);
-    lo = inp(0x02u);
-    hi = inp(0x02u);
-    return (((lo | hi << 8) - (unsigned)physical) & 0xffffu) % SB_BUFSIZE;
-}
+    const uint8_t cmd = running_bits == 16u ? 0xb6u : 0xc6u;
+    const uint8_t mode = (running_bits == 16u ? 0x10u : 0u) |
+                         (running_channels == 2u ? 0x20u : 0u);
+    const unsigned count = SB_BLOCK / (running_bits / 8u) - 1u;
 
-static void reverse(unsigned a, unsigned b)    /* the ring's bytes a..b-1 */
-{
-    while (a + 1u < b) {
-        uint8_t t = buffer[a];
-        buffer[a++] = buffer[--b];
-        buffer[b] = t;
-    }
-}
-
-/* The DSP read on past its transfer's end (were it to end before it was
- * told to stop at its end, the transfer would go round once more):
- * the DMA is not where the samples not given yet are. Both stop; those
- * samples go to the ring's start (it turned round), the DMA from there. */
-static void realign(void)
-{
-    dsp_byte(running_bits == 16u ? 0xd9u : 0xdau);
-    dsp_byte(running_bits == 16u ? 0xd5u : 0xd0u);
-    outp(0x0au, 0x04u | SB_DMA);
-    outp(0xd4u, 0x05u);
-    ack_irq();
-    unsigned at = given % SB_BUFSIZE;
-    if (at) {                         /* the ring turned left by at */
-        reverse(0, at);
-        reverse(at, SB_BUFSIZE);
-        reverse(0, SB_BUFSIZE);
-    }
-    for (unsigned i = 0; i < blocks; i++)
-        ends[(first + i) % SB_BLOCKS] -= given;
-    written -= given;
-    read_ = given = given_from = 0;
-    ring_put(written, NULL, SB_BUFSIZE - written, 1);
+    /* The ring already contains the first client buffer and PCM silence
+     * elsewhere.  The DMA controller is configured but remains idle until
+     * the DSP command starts; native pc_service performs the DMA transfers. */
     program_dma(running_bits);
-}
-
-/* what is in the ring and not given yet, to the DSP: 41h the rate, B6h/C6h
- * (16/8-bit, auto-init, FIFO), the mode, its samples less one (auto-init
- * counts the samples of both channels), D9h/DAh (it ends with them) */
-static void give(void)
-{
-    if (busy || written == given)
-        return;
-    unsigned n = written - given;
-    uint8_t cmd = running_bits == 16u ? 0xb6u : 0xc6u;
-    uint8_t mode = (running_bits == 16u ? 0x10u : 0u) | (running_channels == 2u ? 0x20u : 0u);
-    unsigned count = n / (running_bits / 8u) - 1u;
-    /* the DMA channel masked while the DSP is told: it starts reading only
-     * once it knows to stop at the end (DA/D9 after the command) */
-    if (running_bits == 16u)
-        outp(0xd4u, 0x05u);
-    else
-        outp(0x0au, 0x04u | SB_DMA);
+    /* A partially accepted DSP command must also be stopped on failure. */
+    running = 1;
     if (!dsp_byte(0x41u) || !dsp_byte((uint8_t)(running_rate >> 8)) ||
         !dsp_byte((uint8_t)running_rate) || !dsp_byte(cmd) || !dsp_byte(mode) ||
-        !dsp_byte((uint8_t)count) || !dsp_byte((uint8_t)(count >> 8)) ||
-        !dsp_byte(running_bits == 16u ? 0xd9u : 0xdau)) {
+        !dsp_byte((uint8_t)count) || !dsp_byte((uint8_t)(count >> 8))) {
         sb_stop();
-        return;
+        return 0;
     }
-    if (running_bits == 16u)
-        outp(0xd4u, 0x01u);
-    else
-        outp(0x0au, SB_DMA);
-    busy = 1;
-    given_from = given;
-    given = written;
+    return 1;
 }
 
-/* the DSP's transfer ended (its interrupt's status): its samples played,
- * the blocks they end told, the ring silent there again; the next given */
+/* An SB16 block IRQ means that the DMA has consumed one whole half-ring.
+ * PCM already fetched is kept by the emulator's separate output FIFO.
+ * A short application buffer can end within a half; complete it only
+ * after DMA has copied that part.  Neither B6 nor D9 is reissued here. */
 static void advance(void)
 {
     if (!running)
         return;
-    if (busy) {
-        outp(SB_BASE + 4u, 0x82u);
-        if (!(inp(SB_BASE + 5u) & (running_bits == 16u ? 2u : 1u)))
-            return;
-        ack_irq();
-        busy = 0;
-        ring_put(given_from, NULL, given - given_from, 1);
-        read_ = given;
-        while (blocks && (int32_t)(read_ - ends[first]) >= 0) {
-            first = (first + 1u) % SB_BLOCKS;
-            blocks--;
-            played++;
-        }
-        if (dma_offset() != given % SB_BUFSIZE)
-            realign();
+    outp(SB_BASE + 4u, 0x82u);
+    if (!(inp(SB_BASE + 5u) & (running_bits == 16u ? 2u : 1u)))
+        return;
+    ack_irq();
+    ring_put(read_, NULL, SB_BLOCK, 1);
+    read_ += SB_BLOCK;
+    while (blocks && (int32_t)(read_ - ends[first]) >= 0) {
+        first = (first + 1u) % SB_BLOCKS;
+        --blocks;
+        ++played;
     }
-    give();
-    if (!busy && written == read_)    /* none left: what the SB16 has buffered plays out */
-        running = 0;
+    /* A producer that missed an entire half-ring cannot catch up by
+     * writing to memory already read by DMA.  Keep future writes aligned
+     * with the current ring position; the gap is PCM silence. */
+    if ((int32_t)(read_ - written) > 0)
+        written = read_;
 }
 
 static int sb_submit(const uint8_t *data, unsigned n, unsigned rate,
@@ -319,28 +256,30 @@ static int sb_submit(const uint8_t *data, unsigned n, unsigned rate,
         n % frame_bytes || rate < 4000u || rate > 48000u)
         return 0;
     advance();
-    if (running && (bits != running_bits || rate != running_rate ||
-                    channels != running_channels))
-        return 0;                     /* another format: once these are played */
-    if (!running) {                   /* the ring anew, silent, the DMA round it */
+    if (prepared && (bits != running_bits || rate != running_rate ||
+                     channels != running_channels))
+        return 0;                     /* a format change requires closing the stream */
+    if (!prepared) {
         running_bits = bits;
         running_rate = rate;
         running_channels = channels;
-        written = read_ = given = given_from = 0;
+        written = read_ = 0;
         first = blocks = 0;
         ring_put(0, NULL, SB_BUFSIZE, 1);
         ack_irq();
-        program_dma(bits);
-        running = 1;
+        prepared = 1;
     }
     if (blocks == SB_BLOCKS || n > SB_BUFSIZE - (written - read_))
         return 0;
     ring_put(written, data, n, 0);
     written += n;
     ends[(first + blocks) % SB_BLOCKS] = written;
-    blocks++;
-    give();
-    return running;
+    ++blocks;
+    /* Let a burst of submit() calls fill the DMA ring before the DSP can
+     * prefetch the second half as silence.  For short last buffers,
+     * finished() starts a partly filled ring on the next service tick. */
+    if (!running && written - read_ == SB_BUFSIZE && !start_stream())
+        return 0;
     return 1;
 }
 
@@ -349,13 +288,15 @@ static int sb_room(void)
     if (!opened)
         return 0;
     advance();
-    unsigned free = running ? SB_BUFSIZE - (written - read_) : SB_BUFSIZE;
-    unsigned n = free / SB_BLOCK, left = SB_BLOCKS - (running ? blocks : 0);
+    unsigned free = prepared ? SB_BUFSIZE - (written - read_) : SB_BUFSIZE;
+    unsigned n = free / SB_BLOCK, left = SB_BLOCKS - blocks;
     return (int)(n < left ? n : left);
 }
 
 static int sb_finished(void)
 {
+    if (opened && !running && blocks)
+        (void)start_stream();
     advance();
     unsigned n = played;
     played = 0;
@@ -364,7 +305,7 @@ static int sb_finished(void)
 
 static void sb_pause(int paused)
 {
-    if (opened && busy)
+    if (opened && running)
         dsp_byte(paused ? (running_bits == 16u ? 0xd5u : 0xd0u)
                         : (running_bits == 16u ? 0xd6u : 0xd4u));
 }
