@@ -57,6 +57,12 @@ static __time_critical_func() inline bool in_fast_memory(uint32_t address, uint3
     return likely(address < fast_memory_size && address + last_byte < fast_memory_size);
 }
 
+// Wide accesses need only one inclusive upper-bound check. The subtraction checks
+// the size before evaluating the address, so neither comparison can wrap.
+static __time_critical_func() inline bool in_fast_memory_wide(uint32_t address, uint32_t width) {
+    return likely(fast_memory_size >= width && address <= fast_memory_size - width);
+}
+
 static __time_critical_func() inline uint8_t *extended_memory_at(uint32_t address, uint32_t last_byte) {
     const uint32_t offset = address - HMA_START;
     return offset < extended_memory_size && offset + last_byte < extended_memory_size && a20_enabled
@@ -108,14 +114,14 @@ static __time_critical_func() inline uint8_t mem_read8(uint32_t address) {
 }
 
 static __time_critical_func() inline uint16_t mem_read16(uint32_t address) {
-    if (!in_fast_memory(address, 1)) return mem_read16_far(address);
+    if (!in_fast_memory_wide(address, 2)) return mem_read16_far(address);
     uint16_t value;
     memcpy(&value, fast_memory + address, 2);
     return value;
 }
 
 static __time_critical_func() inline uint32_t mem_read32(uint32_t address) {
-    if (!in_fast_memory(address, 3)) return mem_read32_far(address);
+    if (!in_fast_memory_wide(address, 4)) return mem_read32_far(address);
     uint32_t value;
     memcpy(&value, fast_memory + address, 4);
     return value;
@@ -127,12 +133,12 @@ static __time_critical_func() inline void mem_write8(uint32_t address, uint8_t v
 }
 
 static __time_critical_func() inline void mem_write16(uint32_t address, uint16_t value) {
-    if (in_fast_memory(address, 1)) memcpy(fast_memory + address, &value, 2);
+    if (in_fast_memory_wide(address, 2)) memcpy(fast_memory + address, &value, 2);
     else mem_write16_far(address, value);
 }
 
 static __time_critical_func() inline void mem_write32(uint32_t address, uint32_t value) {
-    if (in_fast_memory(address, 3)) memcpy(fast_memory + address, &value, 4);
+    if (in_fast_memory_wide(address, 4)) memcpy(fast_memory + address, &value, 4);
     else mem_write32_far(address, value);
 }
 

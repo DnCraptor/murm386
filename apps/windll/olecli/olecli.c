@@ -74,6 +74,8 @@ enum { DATA_PICTURE, DATA_IDENTITY, DATA_NATIVE, DATA_SLOTS };
 
 typedef struct ole_session ole_session;
 static OLESTATUS close_session(OLEOBJECT *o);
+static void disconnect_session(OLEOBJECT *o);
+static void follow_open_link(OLEOBJECT *o);
 
 typedef struct ole_requested_data {
     struct ole_requested_data *next;
@@ -586,6 +588,8 @@ static OLESTATUS WINAPI OleClone(LPOLEOBJECT object, LPOLECLIENT client, LHCLIEN
         copy->head_bytes = o->head_bytes;
         copy->tail_bytes = o->tail_bytes;
         head = tail = 0;
+        if (client)
+            follow_open_link(copy);
     }
 done:
     if (head)
@@ -1143,8 +1147,10 @@ static OLESTATUS WINAPI OleLoadFromStream(LPOLESTREAM stream, LPCSTR protocol, L
     }
     picture_stream s = { .native = stream };
     OLESTATUS status = load_picture(&s, protocol, doc, name, out);
-    if (status == OLE_OK)
+    if (status == OLE_OK) {
         (*out)->client = client;
+        follow_open_link(*out);
+    }
     return status;
 }
 
@@ -1418,12 +1424,14 @@ struct ole_session {
     ole_dde dde;
     HCONV conv, temporary_server;
     BOOL closed, notifying, temporary_document;
+    BOOL watching;
     HSZ item;
     char item_name[256];
 };
 
 static OLESTATUS update_open_object(OLEOBJECT *o);
 static void reap_closed_sessions(void);
+static OLESTATUS WINAPI OleGetLinkUpdateOptions(LPOLEOBJECT object, OLEOPT_UPDATE *option);
 
 static void notify_client(OLEOBJECT *o, WORD notice)
 {
@@ -1452,7 +1460,8 @@ static HDDEDATA CALLBACK ole_dde_callback(UINT type, UINT fmt, HCONV conv, HSZ t
     if (type != XTYP_ADVDATA || fmt != clipboard_format("Native", FALSE))
         return 0;
     BOOL closed = item == FindAtom("/Close");
-    if (!closed && item != FindAtom("/Save"))
+    BOOL changed = item == FindAtom("/Change");
+    if (!closed && !changed && item != FindAtom("/Save"))
         return DDE_FNOTPROCESSED;
     for (unsigned i = 0; i < OBJECTS; i++) {
         OLEOBJECT *o = &objects[i];
@@ -1460,18 +1469,31 @@ static HDDEDATA CALLBACK ole_dde_callback(UINT type, UINT fmt, HCONV conv, HSZ t
             continue;
         if (o->writing)
             return DDE_FBUSY;
+        BOOL link = o->type == OT_LINK;
+        if (link) {
+            OLEOPT_UPDATE option;
+            if (OleGetLinkUpdateOptions(o, &option) != OLE_OK ||
+                option == oleupdate_oncall ||
+                (option == oleupdate_onsave && (changed || closed))) {
+                if (closed)
+                    o->session->closed = TRUE;
+                return DDE_FACK;
+            }
+        } else if (changed) {
+            return DDE_FNOTPROCESSED;
+        }
         o->writing = TRUE;
         OLESTATUS status = update_open_object(o);
         o->writing = FALSE;
+        if (closed && (link || status == OLE_OK))
+            o->session->closed = TRUE;
         if (status != OLE_OK)
             return DDE_FNOTPROCESSED;
-        if (closed)
-            o->session->closed = TRUE;
         /* A close advise also saves the final data. Report that update
          * first so clients can commit a newly embedded object. */
         o->session->notifying = TRUE;
-        notify_client(o, OLE_SAVED);
-        if (closed && object_of(o) && o->session && o->session->conv == conv)
+        notify_client(o, link ? OLE_CHANGED : OLE_SAVED);
+        if (closed && !link && object_of(o) && o->session && o->session->conv == conv)
             notify_client(o, OLE_CLOSED);
         if (object_of(o) && o->session && o->session->conv == conv)
             o->session->notifying = FALSE;
@@ -1544,13 +1566,13 @@ static void ole_debug_status(LPCSTR operation, DWORD status, DWORD detail)
     OutputDebugString(message);
 }
 
-static void subscribe_document_notices(const ole_dde *dde, HCONV conv)
+static void subscribe_document_notices(const ole_dde *dde, HCONV conv, BOOL link)
 {
     UINT format = clipboard_format("Native", TRUE);
     if (!format)
         return;
-    LPCSTR signals[] = { "/Save", "/Close" };
-    for (unsigned i = 0; i < sizeof(signals) / sizeof(*signals); i++) {
+    LPCSTR signals[] = { "/Change", "/Save", "/Close" };
+    for (unsigned i = link ? 0 : 1; i < sizeof(signals) / sizeof(*signals); i++) {
         HSZ item = dde->string(dde->inst, signals[i], CP_WINANSI);
         if (item) {
             dde->transaction(NULL, 0, conv, item, format,
@@ -1861,7 +1883,7 @@ request_data:
             session->dde = dde;
             session->conv = data;
             object->session = session;
-            subscribe_document_notices(&dde, data);
+            subscribe_document_notices(&dde, data, FALSE);
         }
     } else {
         free(session);
@@ -1927,8 +1949,11 @@ static OLESTATUS WINAPI OleCreateLinkFromFile(LPCSTR protocol, LPOLECLIENT clien
                                                LPCSTR name, LPOLEOBJECT *out,
                                                UINT render, OLECLIPFORMAT format)
 {
-    return create_server_object(protocol, client, cls, doc, name, out, render, format,
-                                 CREATE_FILE_LINK, file, item);
+    OLESTATUS status = create_server_object(protocol, client, cls, doc, name, out, render, format,
+                                            CREATE_FILE_LINK, file, item);
+    if (status == OLE_OK)
+        follow_open_link(*out);
+    return status;
 }
 
 static OLESTATUS WINAPI OleCreateFromClip(LPCSTR protocol, LPOLECLIENT client, LHCLIENTDOC doc,
@@ -1946,8 +1971,10 @@ static OLESTATUS WINAPI OleCreateLinkFromClip(LPCSTR protocol, LPOLECLIENT clien
                                              OLECLIPFORMAT format)
 {
     OLESTATUS status = create_clip_object(protocol, doc, name, out, render, format, TRUE);
-    if (status == OLE_OK)
+    if (status == OLE_OK) {
         (*out)->client = client;
+        follow_open_link(*out);
+    }
     return status;
 }
 
@@ -2249,7 +2276,14 @@ static OLESTATUS WINAPI OleGetLinkUpdateOptions(LPOLEOBJECT object, OLEOPT_UPDAT
 
 static OLESTATUS WINAPI OleSetLinkUpdateOptions(LPOLEOBJECT object, OLEOPT_UPDATE option)
 {
-    return link_update_option(object, &option, TRUE);
+    OLESTATUS status = link_update_option(object, &option, TRUE);
+    if (status != OLE_OK)
+        return status;
+    if (option != oleupdate_oncall)
+        follow_open_link(object);
+    else if (object->session && object->session->watching)
+        disconnect_session(object);
+    return status;
 }
 
 static BOOL session_open(const ole_session *session)
@@ -2531,8 +2565,10 @@ done:
         status = send_environment(s, "StdColorScheme", o->color_scheme);
     if (status == OLE_OK && o->doc_dimensions)
         status = send_environment(s, "StdDocDimensions", o->doc_dimensions);
-    if (status == OLE_OK && !link)
-        subscribe_document_notices(dde, s->conv);
+    if (status == OLE_OK && (!link || mode != CONNECT_SNAPSHOT)) {
+        s->watching = mode == CONNECT_EXISTING;
+        subscribe_document_notices(dde, s->conv, link);
+    }
     if (status != OLE_OK && sys && created && (!link || mode == CONNECT_SNAPSHOT) && !dde->timed_out)
         ole_close_document(dde, sys, link ? 0 : s->conv, topic);
     if (status != OLE_OK && sys && (mode == CONNECT_SNAPSHOT ? owns_server : started) &&
@@ -2632,6 +2668,15 @@ static OLESTATUS WINAPI OleReconnect(LPOLEOBJECT object)
     return status;
 }
 
+static void follow_open_link(OLEOBJECT *o)
+{
+    /* Observing a link must not open the source or replace the cached picture. */
+    OLEOPT_UPDATE option;
+    if (o->type == OT_LINK && OleGetLinkUpdateOptions(o, &option) == OLE_OK &&
+        option != oleupdate_oncall)
+        OleReconnect(o);
+}
+
 static OLESTATUS WINAPI OleActivate(LPOLEOBJECT object, UINT verb, BOOL show, BOOL focus,
                                      HWND window, const RECT *rect)
 {
@@ -2660,7 +2705,9 @@ static OLESTATUS WINAPI OleActivate(LPOLEOBJECT object, UINT verb, BOOL show, BO
         wsprintf(command, "[StdDoVerbItem(\"%s\",%u,%s,%s)]", s->item_name, verb,
                  show ? "TRUE" : "FALSE", focus ? "FALSE" : "TRUE");
         status = ole_execute(&s->dde, s->conv, command, OLE_ERROR_DOVERB);
-        if (status != OLE_OK && opened)
+        if (status == OLE_OK)
+            s->watching = FALSE;
+        else if (opened)
             close_session(o);
     }
     o->writing = FALSE;
@@ -2839,6 +2886,8 @@ static OLESTATUS WINAPI OleUpdate(LPOLEOBJECT object)
     if (temporary)
         disconnect_session(o);
     o->writing = FALSE;
+    if (temporary && status == OLE_OK)
+        follow_open_link(o);
     return status;
 }
 
@@ -3218,8 +3267,10 @@ static OLESTATUS guest_created(win_dll_call *c, uint32_t out, OLESTATUS status, 
         status = OLE_ERROR_ADDRESS;
     if (status != OLE_OK)
         OleDelete(o);
-    else
+    else {
         o->guest_client = NE->arg32(c, client_arg);
+        follow_open_link(o);
+    }
     return status;
 }
 
