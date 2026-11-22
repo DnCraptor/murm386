@@ -560,31 +560,25 @@ static __time_critical_func() uint8_t op_grp2_8(uint8_t cnt, uint8_t oper1b) {
             break;
         }
 
-        case 2: /* RCL r/m8 */
-            for (int shift = 1; shift <= cnt; shift++) {
-                register bool oldcf = cf;
-                if (s & 0x80) {
-                    cf = 1;
-                } else {
-                    cf = 0;
-                }
-
-                s = s << 1;
-                s = s | oldcf;
-            }
-
+        case 2: { /* RCL r/m8: rotate the 9-bit value [operand:CF] */
+            const uint32_t rotate = cnt % 9;
+            const uint32_t ring = ((uint32_t)(uint8_t)s << 1) | cf;
+            const uint32_t shifted = ((ring << rotate) | (ring >> (9 - rotate))) & 0x1FFu;
+            s = shifted >> 1;
+            cf = shifted & 1;
             of = cf ^ ((s >> 7) & 1);
             break;
+        }
 
-        case 3: /* RCR r/m8 */
-            for (int shift = 1; shift <= cnt; shift++) {
-                register uint8_t oldcf = cf;
-                cf = s & 1;
-                s = (s >> 1) | (oldcf << 7);
-            }
-
+        case 3: { /* RCR r/m8: rotate the 9-bit value [CF:operand] */
+            const uint32_t rotate = cnt % 9;
+            const uint32_t ring = ((uint32_t)cf << 8) | (uint8_t)s;
+            const uint32_t shifted = ((ring >> rotate) | (ring << (9 - rotate))) & 0x1FFu;
+            s = shifted & 0xFFu;
+            cf = shifted >> 8;
             of = (s >> 7) ^ ((s >> 6) & 1);
             break;
+        }
 
         case 4:
         case 6: /* SHL r/m8 */
@@ -640,31 +634,25 @@ static __time_critical_func() uint16_t op_grp2_16(uint8_t cnt) {
             break;
         }
 
-        case 2: /* RCL r/m16 */
-            for (int shift = 1; shift <= cnt; shift++) {
-                register bool oldcf = cf;
-                if (s & 0x8000) {
-                    cf = 1;
-                } else {
-                    cf = 0;
-                }
-
-                s = s << 1;
-                s = s | oldcf;
-            }
-
+        case 2: { /* RCL r/m16: rotate the 17-bit value [operand:CF] */
+            const uint32_t rotate = cnt >= 17 ? cnt - 17 : cnt;
+            const uint32_t ring = ((uint32_t)(uint16_t)s << 1) | cf;
+            const uint32_t shifted = ((ring << rotate) | (ring >> (17 - rotate))) & 0x1FFFFu;
+            s = shifted >> 1;
+            cf = shifted & 1;
             of = cf ^ ((s >> 15) & 1);
             break;
+        }
 
-        case 3: /* RCR r/m16 */
-            for (int shift = 1; shift <= cnt; shift++) {
-                register uint32_t oldcf = cf;
-                cf = s & 1;
-                s = (s >> 1) | (oldcf << 15);
-            }
-
+        case 3: { /* RCR r/m16: rotate the 17-bit value [CF:operand] */
+            const uint32_t rotate = cnt >= 17 ? cnt - 17 : cnt;
+            const uint32_t ring = ((uint32_t)cf << 16) | (uint16_t)s;
+            const uint32_t shifted = ((ring >> rotate) | (ring << (17 - rotate))) & 0x1FFFFu;
+            s = shifted & 0xFFFFu;
+            cf = shifted >> 16;
             of = (s >> 15) ^ ((s >> 14) & 1);
             break;
+        }
 
         case 4:
         case 6: /* SHL r/m16 */
