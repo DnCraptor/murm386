@@ -114,6 +114,7 @@ typedef struct {
     uint8_t flags_op; // kind and size of that operation; 0: x86_flags has all the flags
     uint8_t flags_cf; // its CF
     uint8_t a20_enabled;
+    unsigned long retired; // one increment per executed instruction
 } cpu_state_t;
 extern cpu_state_t cpu_state;
 #define ip32 cpu_state.ip32

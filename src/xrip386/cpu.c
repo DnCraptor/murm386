@@ -22,11 +22,11 @@ cpu_state_t cpu_state; // cpu.h
 #define addrsize32 cpu_state.addrsize32
 #define code32 cpu_state.code32
 #define stack32 cpu_state.stack32
+#define retired cpu_state.retired
 static uint8_t cpl; // current privilege level: 0 in real mode, 3 in V86 mode
 // MOV SS, POP SS and STI let one more instruction run before an IRQ (so MOV SS; MOV SP is safe)
 static bool halted;
 static bool pending_trap;
-static unsigned long retired;
 static uint8_t protected_mode;
 static uint16_t segregs[6];
 static uint32_t segment_base[6];
