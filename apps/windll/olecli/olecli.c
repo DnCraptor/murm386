@@ -84,7 +84,7 @@ struct WINN_OLEOBJECT {
     HMETAFILE metafile;
     int map_mode;
     DWORD size, bits, guest;
-    HGLOBAL identity, native, target_device, host_names, color_scheme;
+    HGLOBAL identity, native, target_device, host_names, color_scheme, doc_dimensions;
     DWORD guest_data[DATA_SLOTS];
     SIZE pixels;
     LONG width, height;              /* positive HIMETRIC extents */
@@ -495,6 +495,8 @@ static void free_picture(OLEOBJECT *o, uint16_t task)
         GlobalFree(o->host_names);
     if (o->color_scheme)
         GlobalFree(o->color_scheme);
+    if (o->doc_dimensions)
+        GlobalFree(o->doc_dimensions);
     if (o->metafile)
         DeleteMetaFile(o->metafile);
     if (o->image)
@@ -2300,6 +2302,30 @@ static OLESTATUS WINAPI OleSetTargetDevice(LPOLEOBJECT object, HGLOBAL device)
     return set_environment(o, "StdTargetDevice", &o->target_device, copy);
 }
 
+static OLESTATUS WINAPI OleSetBounds(LPOLEOBJECT object, const RECT *bounds)
+{
+    OLEOBJECT *o = object_of(object);
+    if (!o)
+        return OLE_ERROR_OBJECT;
+    if (!bounds)
+        return OLE_ERROR_ADDRESS;
+    if (o->type == OT_STATIC)
+        return OLE_ERROR_STATIC;
+    if (o->type != OT_EMBEDDED)
+        return OLE_OK;
+    if (o->writing)
+        return OLE_BUSY;
+
+    /* HIMETRIC coordinates increase upwards. The DDE item carries sizes. */
+    int64_t width = (int64_t)bounds->right - bounds->left;
+    int64_t height = (int64_t)bounds->top - bounds->bottom;
+    if (width <= 0 || width > INT16_MAX || height <= 0 || height > INT16_MAX)
+        return OLE_ERROR_SIZE;
+    BYTE data[] = { (BYTE)width, (BYTE)(width >> 8), (BYTE)height, (BYTE)(height >> 8) };
+    HGLOBAL block = copy_block(data, sizeof(data));
+    return block ? set_environment(o, "StdDocDimensions", &o->doc_dimensions, block) : OLE_ERROR_MEMORY;
+}
+
 static OLESTATUS poke_native(OLEOBJECT *o, ole_session *s)
 {
     HGLOBAL data = 0;
@@ -2406,6 +2432,8 @@ done:
         status = send_environment(s, "StdHostNames", o->host_names);
     if (status == OLE_OK && o->color_scheme)
         status = send_environment(s, "StdColorScheme", o->color_scheme);
+    if (status == OLE_OK && o->doc_dimensions)
+        status = send_environment(s, "StdDocDimensions", o->doc_dimensions);
     if (status == OLE_OK && !link)
         subscribe_document_notices(dde, s->conv);
     if (status != OLE_OK && sys && created && !dde->timed_out)
@@ -2837,7 +2865,7 @@ static const struct {
     { 14, 8, "OleQueryType", 0, R_OWN, (const void *)OleQueryType },
     { 15, 12, "OleSetHostNames", 0, R_OWN, (const void *)OleSetHostNames },
     { 16, 6, "OleSetTargetDevice", 0, R_OWN, (const void *)OleSetTargetDevice },
-    { 17, 8, "OleSetBounds", 0, R_OBJECT, NULL },
+    { 17, 8, "OleSetBounds", 0, R_OWN, (const void *)OleSetBounds },
     { 18, 8, "OleQueryBounds", 0, R_OWN, (const void *)OleQueryBounds },
     { 19, 16, "OleDraw", 0, R_OWN, (const void *)OleDraw },
     { 20, 4, "OleQueryOpen", 0, R_OWN, (const void *)OleQueryOpen },
@@ -3260,6 +3288,12 @@ static int ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *v)
         }
         if (copy)
             GlobalFree(copy);
+        return WINDLL_WORD;
+    }
+    case 17: {
+        RECT bounds;
+        *v = get_rect(c, NE->arg32(c, 4), &bounds) ?
+            OleSetBounds(guest_object(NE->arg32(c, 8)), &bounds) : OLE_ERROR_ADDRESS;
         return WINDLL_WORD;
     }
     case 18:

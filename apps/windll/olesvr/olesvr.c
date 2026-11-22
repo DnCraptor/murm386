@@ -311,7 +311,7 @@ static OLESTATUS WINAPI OleRegisterServerDoc(LHSERVER server, LPCSTR name,
 }
 
 enum {
-    DOC_CLOSE = 1, DOC_HOST_NAMES = 2, DOC_RELEASE = 5, DOC_COLOR_SCHEME = 6,
+    DOC_CLOSE = 1, DOC_HOST_NAMES = 2, DOC_DIMENSIONS = 3, DOC_RELEASE = 5, DOC_COLOR_SCHEME = 6,
     SERVER_RELEASE = 5
 };
 
@@ -1236,6 +1236,8 @@ static unsigned environment_method(UINT format, LPCSTR item)
         return 0;
     if (!lstrcmpi(item, "StdHostNames"))
         return DOC_HOST_NAMES;
+    if (!lstrcmpi(item, "StdDocDimensions"))
+        return DOC_DIMENSIONS;
     return !lstrcmpi(item, "StdColorScheme") ? DOC_COLOR_SCHEME : 0;
 }
 
@@ -1270,6 +1272,8 @@ static HDDEDATA document_environment(int i, unsigned slot, HDDEDATA incoming)
         return DDE_FNOTPROCESSED;
 
     DWORD app = 0, name = 0;
+    RECT bounds;
+    BYTE guest_bounds[8] = {0};
     BOOL valid = bytes >= 4 && bytes <= 0x10000u;
     if (valid && slot == DOC_HOST_NAMES) {
         /* String offsets are relative to the byte following the two WORDs. */
@@ -1277,6 +1281,18 @@ static HDDEDATA document_environment(int i, unsigned slot, HDDEDATA incoming)
         name = 4 + (data[2] | data[3] << 8);
         valid = app < bytes && name < bytes && memchr(data + app, 0, bytes - app) &&
                 memchr(data + name, 0, bytes - name);
+    } else if (valid && slot == DOC_DIMENSIONS) {
+        int width = (int16_t)(data[0] | data[1] << 8);
+        int height = (int16_t)(data[2] | data[3] << 8);
+        valid = bytes == 4 && width > 0 && height > 0;
+        if (valid) {
+            bounds = (RECT){0, 0, width, -height};
+            WORD bottom = (WORD)bounds.bottom;
+            guest_bounds[4] = data[0];
+            guest_bounds[5] = data[1];
+            guest_bounds[6] = (BYTE)bottom;
+            guest_bounds[7] = (BYTE)(bottom >> 8);
+        }
     } else if (valid) {
         WORD count = (WORD)(data[2] | data[3] << 8);
         valid = !data[0] && data[1] == 3 && count && bytes == 4 + count * sizeof(PALETTEENTRY);
@@ -1286,11 +1302,15 @@ static HDDEDATA document_environment(int i, unsigned slot, HDDEDATA incoming)
     if (valid) {
         LPOLESERVERDOC doc = docs[i].native;
         if (!doc) {
-            result = environment_guest(docs[i].owner, slot, data, bytes, app, name);
+            result = slot == DOC_DIMENSIONS ?
+                environment_guest(docs[i].owner, slot, guest_bounds, sizeof(guest_bounds), 0, 0) :
+                environment_guest(docs[i].owner, slot, data, bytes, app, name);
         } else if (doc->lpvtbl) {
             if (slot == DOC_HOST_NAMES && doc->lpvtbl->SetHostNames)
                 result = dde_status(doc->lpvtbl->SetHostNames(doc, (LPCSTR)data + app,
                                                                  (LPCSTR)data + name));
+            if (slot == DOC_DIMENSIONS && doc->lpvtbl->SetDocDimensions)
+                result = dde_status(doc->lpvtbl->SetDocDimensions(doc, &bounds));
             if (slot == DOC_COLOR_SCHEME && doc->lpvtbl->SetColorScheme)
                 result = dde_status(doc->lpvtbl->SetColorScheme(doc, (const LOGPALETTE *)data));
         }
@@ -1301,13 +1321,15 @@ static HDDEDATA document_environment(int i, unsigned slot, HDDEDATA incoming)
 
 static HDDEDATA edit_environment_items(int i, DWORD id, HSZ item)
 {
-    char text[sizeof("StdHostNames\tStdColorScheme\tStdTargetDevice")] = "";
+    char text[sizeof("StdHostNames\tStdDocDimensions\tStdColorScheme\tStdTargetDevice")] = "";
     if (i < 0 || docs[i].revoked)
         return 0;
     LPOLESERVERDOC doc = docs[i].native;
     const OLESERVERDOCVTBL *vt = doc ? doc->lpvtbl : NULL;
     if (doc ? vt && vt->SetHostNames : guest_proc(docs[i].owner, DOC_HOST_NAMES) >> 16)
         strcpy(text, "StdHostNames");
+    if (doc ? vt && vt->SetDocDimensions : guest_proc(docs[i].owner, DOC_DIMENSIONS) >> 16)
+        strcat(text, text[0] ? "\tStdDocDimensions" : "StdDocDimensions");
     if (doc ? vt && vt->SetColorScheme : guest_proc(docs[i].owner, DOC_COLOR_SCHEME) >> 16)
         strcat(text, text[0] ? "\tStdColorScheme" : "StdColorScheme");
     if (!doc)
