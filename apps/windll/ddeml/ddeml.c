@@ -983,6 +983,9 @@ static UINT WINAPI DdeQueryConvInfo(HCONV h, DWORD id, PCONVINFO ci)
     info.wStatus |= cv->callback_state;
     info.hConvList = cv->list;
     info.ConvCtxt = cv->context;
+    info.hwnd = insts[cv->inst].hwnd;
+    if (cv->partner >= 0)
+        info.hwndPartner = insts[convs[cv->partner].inst].hwnd;
     if (cv->list)
         info.wStatus |= ST_INLIST;
     info.wConvst = cv->partner >= 0 ? XST_CONNECTED : XST_NULL;

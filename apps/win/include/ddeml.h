@@ -137,6 +137,7 @@ typedef struct tagCONVINFO {
     UINT wFmt, wType, wStatus, wConvst, wLastError;
     HCONVLIST hConvList;
     CONVCONTEXT ConvCtxt;
+    HWND hwnd, hwndPartner; /* native callers; Win16 uses its 58-byte layout */
 } CONVINFO, *PCONVINFO;
 
 /* the functions' types, for GetProcAddress (their names: Windows') */

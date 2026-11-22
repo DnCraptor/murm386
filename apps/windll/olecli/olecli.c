@@ -1416,8 +1416,8 @@ typedef struct {
 
 struct ole_session {
     ole_dde dde;
-    HCONV conv;
-    BOOL closed, notifying;
+    HCONV conv, temporary_server;
+    BOOL closed, notifying, temporary_document;
     HSZ item;
     char item_name[256];
 };
@@ -1530,6 +1530,12 @@ static HCONV ole_connect_system(const ole_dde *dde, HSZ service)
     return conv ? conv : ole_connect(dde, service, "System");
 }
 
+static HWND ole_peer_window(const ole_dde *dde, HCONV conv)
+{
+    CONVINFO info = { .cb = sizeof(info) };
+    return dde->conv_info(conv, QID_SYNC, &info) ? info.hwndPartner : 0;
+}
+
 static void ole_debug_status(LPCSTR operation, DWORD status, DWORD detail)
 {
     char message[96];
@@ -1555,7 +1561,7 @@ static void subscribe_document_notices(const ole_dde *dde, HCONV conv)
 }
 
 static OLESTATUS ole_start_server(const ole_dde *dde, HSZ service, LPCSTR cls, HCONV *out,
-                                  BOOL *started, UINT show)
+                                  UINT *started, UINT show)
 {
     *out = ole_connect_system(dde, service);
     if (*out)
@@ -1569,7 +1575,7 @@ static OLESTATUS ole_start_server(const ole_dde *dde, HSZ service, LPCSTR cls, H
     UINT task = WinExec(command, show);
     if (task < 32)
         return OLE_ERROR_LAUNCH;
-    *started = TRUE;
+    *started = task;
 
     /* The service can be registered before its server can create a document.
      * Let the launched task reach its message loop before starting the
@@ -1651,11 +1657,13 @@ static OLESTATUS ole_request_block(ole_dde *dde, HCONV conv, HSZ item, UINT form
     return status;
 }
 
+enum { OLE_TOPIC_CAPACITY = 256 };
+
 static OLESTATUS ole_close_document(ole_dde *dde, HCONV sys, HCONV doc, LPCSTR topic)
 {
     if (doc)
         return ole_execute(dde, doc, "[StdCloseDocument]", OLE_ERROR_TERMINATE);
-    char command[sizeof("[StdCloseDocument(\"\")]") + sizeof(((OFSTRUCT *)0)->szPathName)];
+    char command[sizeof("[StdCloseDocument(\"\")]") + OLE_TOPIC_CAPACITY];
     wsprintf(command, "[StdCloseDocument(\"%s\")]", topic);
     return ole_execute(dde, sys, command, OLE_ERROR_TERMINATE);
 }
@@ -1771,7 +1779,8 @@ static OLESTATUS create_server_object(LPCSTR protocol, LPOLECLIENT client, LPCST
     HCONV sys = 0, data = 0;
     HGLOBAL native = 0, image = 0;
     OLESTATUS status = OLE_ERROR_MEMORY;
-    BOOL created = FALSE, started = FALSE;
+    BOOL created = FALSE;
+    UINT started = 0;
     LPCSTR stage = "OleCreate service handle";
     docs[d].creating++;
     if (!service)
@@ -2258,9 +2267,17 @@ static void disconnect_session(OLEOBJECT *o)
     if (!s)
         return;
     o->session = NULL;
-    DDEUNINITIALIZE quiet = s->dde.timed_out ? s->dde.uninit_quiet : NULL;
+    ole_dde *dde = &s->dde;
+    if (s->temporary_document && session_open(s) && !dde->timed_out)
+        ole_close_document(dde, s->temporary_server, s->conv, NULL);
+    if (s->temporary_server && !dde->timed_out)
+        ole_execute(dde, s->temporary_server, "[StdExit]", OLE_ERROR_TERMINATE);
+
+    DDEUNINITIALIZE quiet = dde->timed_out ? dde->uninit_quiet : NULL;
     if (s->conv && !quiet)
-        s->dde.disconnect(s->conv);
+        dde->disconnect(s->conv);
+    if (s->temporary_server && !quiet)
+        dde->disconnect(s->temporary_server);
     if (s->item)
         s->dde.free_string(s->dde.inst, s->item);
     if (quiet)
@@ -2418,9 +2435,11 @@ static BOOL session_name(char *out, size_t capacity, const ole_clip_string *fiel
     return !strchr(out, '"');
 }
 
-static OLESTATUS connect_object(OLEOBJECT *o, BOOL show, BOOL existing_only)
+typedef enum { CONNECT_EXISTING, CONNECT_ACTIVATE, CONNECT_SNAPSHOT } ole_connect_mode;
+
+static OLESTATUS connect_object(OLEOBJECT *o, ole_connect_mode mode, BOOL show)
 {
-    char cls[64], topic[256];
+    char cls[64], topic[OLE_TOPIC_CAPACITY];
     ole_session *s = calloc(1, sizeof(*s));
     if (!s)
         return OLE_ERROR_MEMORY;
@@ -2443,7 +2462,10 @@ static OLESTATUS connect_object(OLEOBJECT *o, BOOL show, BOOL existing_only)
     ole_dde *dde = &s->dde;
     HSZ service = dde->string(dde->inst, cls, CP_WINANSI);
     HCONV sys = 0;
-    BOOL created = FALSE, started = FALSE;
+    BOOL created = FALSE;
+    UINT started = 0;
+    HWND server;
+    BOOL owns_server;
     char command[300];
     OLESTATUS status = OLE_ERROR_MEMORY;
     if (!service)
@@ -2459,7 +2481,7 @@ static OLESTATUS connect_object(OLEOBJECT *o, BOOL show, BOOL existing_only)
             status = OLE_OK;
             goto done;
         }
-        if (existing_only) {
+        if (mode == CONNECT_EXISTING) {
             status = OLE_ERROR_NOT_OPEN;
             goto done;
         }
@@ -2481,10 +2503,26 @@ static OLESTATUS connect_object(OLEOBJECT *o, BOOL show, BOOL existing_only)
     status = ole_execute(dde, sys, command, link ? OLE_ERROR_OPEN : OLE_ERROR_EDIT);
     if (status != OLE_OK)
         goto done;
-    created = !link;
+    created = TRUE;
     s->conv = ole_connect(dde, service, topic);
     status = !s->conv ? OLE_ERROR_COMM : link ? OLE_OK : poke_native(o, s);
 done:
+    server = mode == CONNECT_SNAPSHOT && sys ? ole_peer_window(dde, sys) : 0;
+    owns_server = started && server && GetWindowTask(server) == started;
+    if (mode == CONNECT_SNAPSHOT && status == OLE_OK && sys) {
+        /* A different server instance can answer the document connection. */
+        if (created) {
+            HWND source = ole_peer_window(dde, s->conv);
+            if (server && source && server != source)
+                ole_close_document(dde, sys, 0, topic);
+            else
+                s->temporary_document = TRUE;
+        }
+        if (owns_server) {
+            s->temporary_server = sys;
+            sys = 0;
+        }
+    }
     if (status == OLE_OK && o->target_device)
         status = send_environment(s, "StdTargetDevice", o->target_device);
     if (status == OLE_OK && o->host_names)
@@ -2495,9 +2533,10 @@ done:
         status = send_environment(s, "StdDocDimensions", o->doc_dimensions);
     if (status == OLE_OK && !link)
         subscribe_document_notices(dde, s->conv);
-    if (status != OLE_OK && sys && created && !dde->timed_out)
-        ole_close_document(dde, sys, s->conv, topic);
-    if (status != OLE_OK && sys && started && !dde->timed_out)
+    if (status != OLE_OK && sys && created && (!link || mode == CONNECT_SNAPSHOT) && !dde->timed_out)
+        ole_close_document(dde, sys, link ? 0 : s->conv, topic);
+    if (status != OLE_OK && sys && (mode == CONNECT_SNAPSHOT ? owns_server : started) &&
+        !dde->timed_out)
         ole_execute(dde, sys, "[StdExit]", OLE_ERROR_TERMINATE);
     if (sys && (status == OLE_OK || !dde->timed_out || !dde->uninit_quiet))
         dde->disconnect(sys);
@@ -2546,7 +2585,7 @@ static OLESTATUS WINAPI OleCopyFromLink(LPOLEOBJECT object, LPCSTR protocol, LPO
     OLESTATUS status = OLE_OK;
     if (temporary) {
         disconnect_session(o);
-        status = connect_object(o, FALSE, FALSE);
+        status = connect_object(o, CONNECT_SNAPSHOT, FALSE);
     }
     HGLOBAL native = 0, image = 0;
     if (status == OLE_OK) {
@@ -2588,7 +2627,7 @@ static OLESTATUS WINAPI OleReconnect(LPOLEOBJECT object)
 
     o->writing = TRUE;
     disconnect_session(o);
-    OLESTATUS status = connect_object(o, FALSE, TRUE);
+    OLESTATUS status = connect_object(o, CONNECT_EXISTING, FALSE);
     o->writing = FALSE;
     return status;
 }
@@ -2613,7 +2652,7 @@ static OLESTATUS WINAPI OleActivate(LPOLEOBJECT object, UINT verb, BOOL show, BO
     if (opened) {
         if (o->session)
             disconnect_session(o);
-        status = connect_object(o, show, FALSE);
+        status = connect_object(o, CONNECT_ACTIVATE, show);
     }
     if (status == OLE_OK) {
         ole_session *s = o->session;
@@ -2793,7 +2832,7 @@ static OLESTATUS WINAPI OleUpdate(LPOLEOBJECT object)
     OLESTATUS status = OLE_OK;
     if (temporary) {
         disconnect_session(o);
-        status = connect_object(o, FALSE, FALSE);
+        status = connect_object(o, CONNECT_SNAPSHOT, FALSE);
     }
     if (status == OLE_OK)
         status = update_open_object(o);
@@ -2843,7 +2882,7 @@ static OLESTATUS WINAPI OleRequestData(LPOLEOBJECT object, OLECLIPFORMAT format)
     OLESTATUS status = OLE_OK;
     if (temporary) {
         disconnect_session(o);
-        status = connect_object(o, FALSE, FALSE);
+        status = connect_object(o, CONNECT_SNAPSHOT, FALSE);
     }
     HGLOBAL data = 0;
     if (status == OLE_OK) {
