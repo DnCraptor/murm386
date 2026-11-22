@@ -1417,12 +1417,13 @@ typedef struct {
 struct ole_session {
     ole_dde dde;
     HCONV conv;
-    BOOL closed;
+    BOOL closed, notifying;
     HSZ item;
     char item_name[256];
 };
 
 static OLESTATUS update_open_object(OLEOBJECT *o);
+static void reap_closed_sessions(void);
 
 static void notify_client(OLEOBJECT *o, WORD notice)
 {
@@ -1468,9 +1469,12 @@ static HDDEDATA CALLBACK ole_dde_callback(UINT type, UINT fmt, HCONV conv, HSZ t
             o->session->closed = TRUE;
         /* A close advise also saves the final data. Report that update
          * first so clients can commit a newly embedded object. */
+        o->session->notifying = TRUE;
         notify_client(o, OLE_SAVED);
         if (closed && object_of(o) && o->session && o->session->conv == conv)
             notify_client(o, OLE_CLOSED);
+        if (object_of(o) && o->session && o->session->conv == conv)
+            o->session->notifying = FALSE;
         return DDE_FACK;
     }
     return DDE_FNOTPROCESSED;
@@ -1478,6 +1482,7 @@ static HDDEDATA CALLBACK ole_dde_callback(UINT type, UINT fmt, HCONV conv, HSZ t
 
 static BOOL ole_dde_begin(ole_dde *dde)
 {
+    reap_closed_sessions();
     dde->dll = LoadLibrary("DDEML");
     if (dde->dll <= 2)
         return FALSE;
@@ -1569,7 +1574,7 @@ static OLESTATUS ole_start_server(const ole_dde *dde, HSZ service, LPCSTR cls, H
     /* The service can be registered before its server can create a document.
      * Let the launched task reach its message loop before starting the
      * shorter wait for the DDE service. WinExec can return during startup. */
-    if (NE && NE->size >= sizeof(*NE) && NE->task_starting) {
+    if (NE && NE->size >= WIN_DLL_NE_STARTING_SIZE && NE->task_starting) {
         DWORD start = GetTickCount();
         while (NE->task_starting((uint16_t)task)) {
             DWORD elapsed = GetTickCount() - start;
@@ -2264,6 +2269,19 @@ static void disconnect_session(OLEOBJECT *o)
         s->dde.uninit(s->dde.inst);
     FreeLibrary(s->dde.dll);
     free(s);
+}
+
+/* Keep the embedded object and its stored data after its editor exits,
+ * but recycle its DDE instance before allocating another conversation.
+ * A client notification can start another OLE operation synchronously. */
+static void reap_closed_sessions(void)
+{
+    for (unsigned i = 0; i < OBJECTS; i++) {
+        OLEOBJECT *o = &objects[i];
+        if (o->session && !o->writing && !o->session->notifying &&
+            doc_of(o->doc) >= 0 && !session_open(o->session))
+            disconnect_session(o);
+    }
 }
 
 static OLESTATUS close_session(OLEOBJECT *o)

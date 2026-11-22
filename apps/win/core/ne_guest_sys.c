@@ -435,10 +435,17 @@ static int task_starting(uint16_t task)
     return t && t->starting;
 }
 
+static int task_global_resize(uint16_t task, uint16_t handle, uint32_t bytes)
+{
+    ne_user *u = ne_user_of((HTASK)task);
+    return u && u->ctx && win_ne_guest_global_realloc((win_ne_guest_image *)u->ctx->image,
+                                                       handle, bytes, u->ctx->read);
+}
+
 static const win_dll_ne dll_ne = {
     sizeof(win_dll_ne), call_arg16, call_arg32, call_read, call_write, call_string, task_call,
     task_read, task_write, task_global, task_flat, task_message, task_dialog, task_alloc,
-    task_free, task_proc, task_global_size, task_starting,
+    task_free, task_proc, task_global_size, task_starting, task_global_resize,
 };
 
 const win_dll_ne *win_dll_ne_glue(void) { return &dll_ne; }

@@ -255,19 +255,101 @@ static MMRESULT WINAPI time_period(UINT ms) { (void)ms; return 0; }
 
 /* ---------------------------------------------------------------- mmio */
 
-static struct {
+typedef struct {
     int used;
     HTASK task;
     HFILE f;
-} mmios[MMIOS];
+    uint32_t buffer, capacity, position, length, growth;
+    UINT mode;
+} mmio_file;
 
-static int file_of(HMMIO h, HFILE *f)
+static mmio_file mmios[MMIOS];
+
+static mmio_file *mmio_file_of(HMMIO h)
 {
     unsigned i = (unsigned)h - MMIO_HANDLE;
-    if (h < MMIO_HANDLE || i >= MMIOS || !mmios[i].used)
+    if (i >= MMIOS || !mmios[i].used)
+        return NULL;
+    mmio_file *file = &mmios[i];
+    return !file->buffer || file->task == GetCurrentTask() ? file : NULL;
+}
+
+static mmio_file *mmio_alloc(void)
+{
+    for (int i = 0; i < MMIOS; i++)
+        if (!mmios[i].used)
+            return &mmios[i];
+    return NULL;
+}
+
+static HMMIO mmio_handle(const mmio_file *file)
+{
+    return (HMMIO)(MMIO_HANDLE + (file - mmios));
+}
+
+/* Win16 huge pointers carry into the next selector, eight bytes apart. */
+static uint32_t mmio_huge_at(uint32_t buffer, uint32_t offset)
+{
+    uint32_t linear = (uint16_t)buffer + offset;
+    uint32_t selector = (buffer >> 16) + ((linear >> 16) << 3);
+    return selector <= UINT16_MAX ? (selector << 16) | (uint16_t)linear : 0;
+}
+
+static HMMIO mmio_open_memory(const BYTE *info, DWORD flags)
+{
+    /* Win16 MMIOINFO gives the MEM procedure a caller-owned buffer. */
+    uint32_t capacity = rd32(info + 16), buffer = rd32(info + 20);
+    WORD task = (WORD)GetCurrentTask();
+    UINT mode = flags & 3u;
+    if (!capacity || capacity > INT32_MAX || !(buffer >> 16) ||
+        mode > MMIO_READWRITE || (flags & (MMIO_PARSE | MMIO_DELETE | MMIO_EXIST)) ||
+        (NE->size >= offsetof(win_dll_ne, task_message) && NE->task_flat && NE->task_flat(task)))
         return 0;
-    *f = mmios[i].f;
-    return 1;
+    mmio_file *file = mmio_alloc();
+    if (!file)
+        return 0;
+    *file = (mmio_file){ .used = 1, .task = task, .buffer = buffer,
+                         .capacity = capacity, .mode = mode, .growth = rd32(info + 44),
+                         .length = (flags & MMIO_CREATE) || mode == MMIO_WRITE ? 0 : capacity };
+    return mmio_handle(file);
+}
+
+static LONG mmio_memory_transfer(mmio_file *file, void *buffer, uint32_t count, BOOL write)
+{
+    if (write ? file->mode == MMIO_READ : file->mode == MMIO_WRITE)
+        return -1;
+    if (write && count > file->capacity - file->position) {
+        if (!file->growth || (uint16_t)file->buffer || NE->size < sizeof(*NE) ||
+            !NE->task_global_resize)
+            return -1;
+        uint64_t extra = count - (file->capacity - file->position);
+        uint64_t capacity = file->capacity + ((extra + file->growth - 1) / file->growth) * file->growth;
+        if (capacity > INT32_MAX ||
+            !NE->task_global_resize((WORD)file->task, (WORD)(file->buffer >> 16), (uint32_t)capacity))
+            return -1;
+        file->capacity = (uint32_t)capacity;
+    }
+    uint32_t end = write ? file->capacity : file->length;
+    if (file->position >= end)
+        return write && count ? -1 : 0;
+    if (count > end - file->position)
+        count = end - file->position;
+    BYTE *bytes = buffer;
+    uint32_t done = 0;
+    while (done < count) {
+        uint32_t far = mmio_huge_at(file->buffer, file->position);
+        uint32_t chunk = 0x10000u - (uint16_t)far;
+        if (chunk > count - done)
+            chunk = count - done;
+        if (!far || !(write ? NE->task_write((WORD)file->task, far, bytes + done, chunk) :
+                              NE->task_read((WORD)file->task, far, bytes + done, chunk)))
+            return done ? (LONG)done : -1;
+        file->position += chunk;
+        done += chunk;
+        if (write && file->length < file->position)
+            file->length = file->position;
+    }
+    return (LONG)done;
 }
 
 static HMMIO WINAPI mmioOpen(LPSTR name, LPMMIOINFO info, DWORD flags)
@@ -288,25 +370,21 @@ static HMMIO WINAPI mmioOpen(LPSTR name, LPMMIOINFO info, DWORD flags)
             _lclose(f);
         h = f != HFILE_ERROR;
     } else {
-        int i = 0;
-        while (i < MMIOS && mmios[i].used)
-            i++;
+        mmio_file *file = mmio_alloc();
         HFILE f = HFILE_ERROR;
-        if (i < MMIOS && (flags & MMIO_CREATE)) {
+        if (file && (flags & MMIO_CREATE)) {
             f = _lcreat(name, 0);
             if (f != HFILE_ERROR && (flags & 3) != OF_WRITE) {
                 _lclose(f);
                 f = _lopen(name, (int)(flags & 3));
             }
             err = MMIOERR_CANNOTOPEN;
-        } else if (i < MMIOS) {
+        } else if (file) {
             f = _lopen(name, (int)(flags & 3));
         }
         if (f != HFILE_ERROR) {
-            mmios[i].used = 1;
-            mmios[i].task = GetCurrentTask();
-            mmios[i].f = f;
-            h = (HMMIO)(MMIO_HANDLE + (unsigned)i);
+            *file = (mmio_file){ .used = 1, .task = GetCurrentTask(), .f = f };
+            h = mmio_handle(file);
         }
     }
     if (info)
@@ -316,37 +394,53 @@ static HMMIO WINAPI mmioOpen(LPSTR name, LPMMIOINFO info, DWORD flags)
 
 static MMRESULT WINAPI mmioClose(HMMIO h, UINT flags)
 {
-    HFILE f;
     (void)flags;
-    if (!file_of(h, &f))
+    mmio_file *file = mmio_file_of(h);
+    if (!file)
         return MMSYSERR_INVALHANDLE;
-    _lclose(f);
-    mmios[h - MMIO_HANDLE].used = 0;
+    if (!file->buffer)
+        _lclose(file->f);
+    file->used = 0;
     return 0;
 }
 
 static LONG WINAPI mmioRead(HMMIO h, char *buf, LONG n)
 {
-    HFILE f;
-    if (!file_of(h, &f) || n < 0)
+    mmio_file *file = mmio_file_of(h);
+    if (!file || n < 0)
         return -1;
-    UINT r = n ? _lread(f, buf, (UINT)n) : 0;
+    if (file->buffer)
+        return mmio_memory_transfer(file, buf, (uint32_t)n, FALSE);
+    UINT r = n ? _lread(file->f, buf, (UINT)n) : 0;
     return r == (UINT)HFILE_ERROR ? -1 : (LONG)r;
 }
 
 static LONG WINAPI mmioWrite(HMMIO h, const char *buf, LONG n)
 {
-    HFILE f;
-    if (!file_of(h, &f) || n < 0)
+    mmio_file *file = mmio_file_of(h);
+    if (!file || n < 0)
         return -1;
-    UINT r = n ? _lwrite(f, buf, (UINT)n) : 0;
+    if (file->buffer)
+        return mmio_memory_transfer(file, (void *)buf, (uint32_t)n, TRUE);
+    UINT r = n ? _lwrite(file->f, buf, (UINT)n) : 0;
     return r == (UINT)HFILE_ERROR ? -1 : (LONG)r;
 }
 
 static LONG WINAPI mmioSeek(HMMIO h, LONG off, int origin)
 {
-    HFILE f;
-    return file_of(h, &f) ? _llseek(f, off, origin) : -1;
+    mmio_file *file = mmio_file_of(h);
+    if (!file)
+        return -1;
+    if (!file->buffer)
+        return _llseek(file->f, off, origin);
+    if (origin < 0 || origin > 2)
+        return -1;
+    int64_t base = origin == 0 ? 0 : origin == 1 ? file->position : file->length;
+    int64_t position = base + off;
+    if (position < 0 || position > file->capacity)
+        return -1;
+    file->position = (uint32_t)position;
+    return (LONG)position;
 }
 
 static MMRESULT WINAPI mmioFlush(HMMIO h, UINT flags) { (void)h; (void)flags; return 0; }
@@ -375,22 +469,21 @@ static MMRESULT WINAPI mmioRename(LPCSTR from, LPCSTR to, LPMMIOINFO info, DWORD
  * looked for: the file at its data */
 static MMRESULT WINAPI mmioDescend(HMMIO h, LPMMCKINFO ck, const MMCKINFO *parent, UINT flags)
 {
-    HFILE f;
-    if (!file_of(h, &f))
+    if (!mmio_file_of(h))
         return MMSYSERR_INVALHANDLE;
     if (!ck)
         return MMIOERR_CANNOTREAD;
     DWORD end = parent ? parent->dwDataOffset + parent->cksize : 0xffffffffu;
     FOURCC want_id = ck->ckid, want_type = ck->fccType;
     for (;;) {
-        LONG at = _llseek(f, 0, 1);
+        LONG at = mmioSeek(h, 0, 1);
         uint8_t hd[12];
-        if (at < 0 || (DWORD)at + 8 > end || _lread(f, hd, 8) != 8)
+        if (at < 0 || (DWORD)at + 8 > end || mmioRead(h, (char *)hd, 8) != 8)
             return MMIOERR_CHUNKNOTFOUND;
         FOURCC id = rd32(hd), type = 0;
         DWORD size = rd32(hd + 4);
         int list = id == mmioFOURCC('R', 'I', 'F', 'F') || id == mmioFOURCC('L', 'I', 'S', 'T');
-        if (list && _lread(f, hd + 8, 4) == 4)
+        if (list && mmioRead(h, (char *)hd + 8, 4) == 4)
             type = rd32(hd + 8);
         int match = (flags & MMIO_FINDCHUNK) ? id == want_id
                   : (flags & MMIO_FINDRIFF) ? id == mmioFOURCC('R', 'I', 'F', 'F') && type == want_type
@@ -404,7 +497,7 @@ static MMRESULT WINAPI mmioDescend(HMMIO h, LPMMCKINFO ck, const MMCKINFO *paren
             ck->dwFlags = 0;
             return 0;
         }
-        if (_llseek(f, at + 8 + (LONG)((size + 1) & ~1u), 0) < 0)
+        if (mmioSeek(h, at + 8 + (LONG)((size + 1) & ~1u), 0) < 0)
             return MMIOERR_CANNOTSEEK;
     }
 }
@@ -412,46 +505,44 @@ static MMRESULT WINAPI mmioDescend(HMMIO h, LPMMCKINFO ck, const MMCKINFO *paren
 /* after the chunk; one made here gets its size */
 static MMRESULT WINAPI mmioAscend(HMMIO h, LPMMCKINFO ck, UINT flags)
 {
-    HFILE f;
     (void)flags;
-    if (!file_of(h, &f))
+    if (!mmio_file_of(h))
         return MMSYSERR_INVALHANDLE;
     if (!ck)
         return MMIOERR_CANNOTREAD;
     DWORD data = ck->dwDataOffset, size = ck->cksize;
     if (ck->dwFlags & MMIO_DIRTY) {
-        LONG at = _llseek(f, 0, 1);
+        LONG at = mmioSeek(h, 0, 1);
         if (at < 0 || (DWORD)at < data)
             return MMIOERR_CANNOTSEEK;
         size = (DWORD)at - data;
         uint8_t b[4];
         wr32(b, size);
-        if (size & 1)
-            _lwrite(f, "", 1);
-        if (_llseek(f, (LONG)data - 4, 0) < 0 || _lwrite(f, b, 4) != 4)
+        if ((size & 1) && mmioWrite(h, "", 1) != 1)
+            return MMIOERR_CANNOTWRITE;
+        if (mmioSeek(h, (LONG)data - 4, 0) < 0 || mmioWrite(h, (const char *)b, 4) != 4)
             return MMIOERR_CANNOTWRITE;
         ck->cksize = size;
         ck->dwFlags = 0;
     }
-    return _llseek(f, (LONG)(data + ((size + 1) & ~1u)), 0) < 0 ? MMIOERR_CANNOTSEEK : 0;
+    return mmioSeek(h, (LONG)(data + ((size + 1) & ~1u)), 0) < 0 ? MMIOERR_CANNOTSEEK : 0;
 }
 
 static MMRESULT WINAPI mmioCreateChunk(HMMIO h, LPMMCKINFO ck, UINT flags)
 {
-    HFILE f;
     uint8_t hd[12];
-    if (!file_of(h, &f))
+    if (!mmio_file_of(h))
         return MMSYSERR_INVALHANDLE;
     if (!ck)
         return MMIOERR_CANNOTREAD;
-    LONG at = _llseek(f, 0, 1);
+    LONG at = mmioSeek(h, 0, 1);
     FOURCC id = (flags & MMIO_CREATERIFF) ? mmioFOURCC('R', 'I', 'F', 'F')
               : (flags & MMIO_CREATELIST) ? mmioFOURCC('L', 'I', 'S', 'T') : ck->ckid;
     UINT n = (flags & (MMIO_CREATERIFF | MMIO_CREATELIST)) ? 12 : 8;
     wr32(hd, id);
     wr32(hd + 4, ck->cksize);
     wr32(hd + 8, ck->fccType);
-    if (at < 0 || _lwrite(f, hd, n) != n)
+    if (at < 0 || mmioWrite(h, (const char *)hd, n) != n)
         return MMIOERR_CANNOTWRITE;
     ck->ckid = id;
     ck->dwDataOffset = (DWORD)at + 8;
@@ -705,8 +796,16 @@ static int ne_call(win_dll_call *c, uint16_t o, uint32_t *v)
             info.fccIOProc = rd32(mi + 4);
             info.pIOProc = (void *)(uintptr_t)rd32(mi + 8);
         }
+        DWORD flags = NE->arg32(c, 4);
+        if (info.fccIOProc == mmioFOURCC('M', 'E', 'M', ' ') && !info.pIOProc) {
+            BYTE buffer_info[48];
+            *v = NE->read(c, info_far, buffer_info, sizeof(buffer_info)) ?
+                mmio_open_memory(buffer_info, flags) : 0;
+            put16(c, info_far + 12, *v ? 0 : MMIOERR_CANNOTOPEN);
+            return WINDLL_WORD;
+        }
         int named = (name_far >> 16) && NE->string(c, name_far, s1, sizeof(s1));
-        *v = mmioOpen(named ? s1 : NULL, &info, NE->arg32(c, 4));
+        *v = mmioOpen(named ? s1 : NULL, &info, flags);
         if (!*v && (info_far >> 16))
             put16(c, info_far + 12, info.wErrorRet);    /* wErrorRet */
         return WINDLL_WORD;
@@ -717,35 +816,61 @@ static int ne_call(win_dll_call *c, uint16_t o, uint32_t *v)
     case 1212: case 1213: {             /* mmioRead, mmioWrite(HMMIO, HPSTR, LONG) */
         uint32_t buf = NE->arg32(c, 8), n = NE->arg32(c, 4);
         HMMIO h = NE->arg16(c, 12);
-        HFILE f;
-        LONG got = -1;
-        if (file_of(h, &f) && (int32_t)n >= 0) {
-            n = in_segment(buf, n);
-            char *tmp = n ? (char *)malloc(n) : NULL;
-            if (!n)
-                got = 0;
-            else if (tmp && o == 1212) {
-                got = mmioRead(h, tmp, (LONG)n);
-                if (got > 0 && !NE->write(c, buf, tmp, (uint32_t)got))
+        *v = UINT32_MAX;
+        if (!mmio_file_of(h) || (int32_t)n < 0)
+            return WINDLL_DWORD;
+        uint32_t capacity = n < 4096u ? n : 4096u;
+        char *tmp = capacity ? (char *)malloc(capacity) : NULL;
+        if (capacity && !tmp)
+            return WINDLL_DWORD;
+        WORD task = (WORD)GetCurrentTask();
+        BOOL flat = NE->size >= offsetof(win_dll_ne, task_message) && NE->task_flat &&
+                    NE->task_flat(task);
+        uint32_t done = 0;
+        LONG got = 0;
+        while (done < n) {
+            uint32_t far = flat ? buf + done : mmio_huge_at(buf, done);
+            uint32_t count = n - done < capacity ? n - done : capacity;
+            if (!flat)
+                count = in_segment(far, count);
+            got = -1;
+            if (far && o == 1212) {
+                got = mmioRead(h, tmp, (LONG)count);
+                if (got > 0 && !NE->write(c, far, tmp, (uint32_t)got))
                     got = -1;
-            } else if (tmp && NE->read(c, buf, tmp, n)) {
-                got = mmioWrite(h, tmp, (LONG)n);
+            } else if (far && NE->read(c, far, tmp, count)) {
+                got = mmioWrite(h, tmp, (LONG)count);
             }
-            free(tmp);
+            if (got < 0)
+                break;
+            done += (uint32_t)got;
+            if ((uint32_t)got != count)
+                break;
         }
-        *v = (uint32_t)got;
+        *v = done || got >= 0 ? done : UINT32_MAX;
+        free(tmp);
         return WINDLL_DWORD;
     }
     case 1214:                          /* mmioSeek(HMMIO, LONG, int) */
         *v = (uint32_t)mmioSeek(NE->arg16(c, 10), (LONG)NE->arg32(c, 6), (int16_t)NE->arg16(c, 4));
         return WINDLL_DWORD;
-    case 1215: {                        /* mmioGetInfo(HMMIO, MMIOINFO FAR *, UINT): unbuffered */
+    case 1215: {                        /* mmioGetInfo(HMMIO, MMIOINFO FAR *, UINT) */
         uint8_t mi[66];
-        HFILE f;
+        HMMIO h = NE->arg16(c, 10);
+        mmio_file *file = mmio_file_of(h);
         memset(mi, 0, sizeof(mi));
-        wr16(mi + 64, NE->arg16(c, 10));
+        wr16(mi + 64, h);
         *v = MMSYSERR_INVALHANDLE;
-        if (file_of(NE->arg16(c, 10), &f)) {
+        if (file) {
+            if (file->buffer) {
+                wr32(mi + 4, mmioFOURCC('M', 'E', 'M', ' '));
+                wr32(mi + 16, file->capacity);
+                wr32(mi + 20, file->buffer);
+                wr32(mi + 24, mmio_huge_at(file->buffer, file->position));
+                wr32(mi + 28, mmio_huge_at(file->buffer, file->length));
+                wr32(mi + 32, mmio_huge_at(file->buffer, file->capacity));
+                wr32(mi + 44, file->growth);
+            }
             NE->write(c, NE->arg32(c, 6), mi, sizeof(mi));
             *v = 0;
         }
@@ -843,7 +968,7 @@ static void term(void)
             KillTimer(0, timers[i].id);
     memset(timers, 0, sizeof(timers));
     for (int i = 0; i < MMIOS; i++)
-        if (mmios[i].used)
+        if (mmios[i].used && !mmios[i].buffer)
             _lclose(mmios[i].f);
     memset(mmios, 0, sizeof(mmios));
 }
@@ -934,7 +1059,7 @@ static const win_dll_export exports[] = {
     { 501, 0, "waveInGetNumDevs", (const void *)no_devices },
     { 502, 8, "waveInGetDevCaps", NULL },
     { 503, 8, "waveInGetErrorText", (const void *)error_text },
-    { 504, 20, "waveInOpen", NULL },
+    { 504, 22, "waveInOpen", NULL },
     { 505, 2, "waveInClose", NULL },
     { 506, 8, "waveInPrepareHeader", NULL },
     { 507, 8, "waveInUnprepareHeader", NULL },

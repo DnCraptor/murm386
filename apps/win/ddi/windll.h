@@ -84,12 +84,15 @@ typedef struct win_dll_ne {
     uint32_t (*task_global_size)(uint16_t task, uint16_t handle);
     /* WinExec can return on timeout before the task reaches its message loop. */
     int (*task_starting)(uint16_t task);
+    /* Resize a Win16 global block without changing its handle. */
+    int (*task_global_resize)(uint16_t task, uint16_t handle, uint32_t bytes);
 } win_dll_ne;
 
 /* Size of the original interface through task_free. */
 #define WIN_DLL_NE_BASE_SIZE offsetof(win_dll_ne, task_proc)
 #define WIN_DLL_NE_PROC_SIZE offsetof(win_dll_ne, task_global_size)
 #define WIN_DLL_NE_GLOBAL_SIZE offsetof(win_dll_ne, task_starting)
+#define WIN_DLL_NE_STARTING_SIZE offsetof(win_dll_ne, task_global_resize)
 
 typedef struct win_dll_export {
     uint16_t ordinal;               /* Win16's */

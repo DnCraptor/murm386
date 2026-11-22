@@ -542,29 +542,23 @@ static __time_critical_func() uint8_t op_grp2_8(uint8_t cnt, uint8_t oper1b) {
     cnt &= 0x1F; // the 386 uses five bits of the count
     if (!cnt) return s;
     switch (reg) {
-        case 0: /* ROL r/m8 */
-            for (int shift = 1; shift <= cnt; shift++) {
-                if (s & 0x80) {
-                    cf = 1;
-                } else {
-                    cf = 0;
-                }
-
-                s = s << 1;
-                s = s | cf;
-            }
+        case 0: { /* ROL r/m8 */
+            const uint8_t rotate = cnt & 7;
+            s = (uint8_t)((s << rotate) | (s >> ((8 - rotate) & 7)));
+            cf = s & 1;
 
             of = cf ^ ((s >> 7) & 1);
             break;
+        }
 
-        case 1: /* ROR r/m8 */
-            for (int shift = 1; shift <= cnt; shift++) {
-                cf = s & 1;
-                s = (s >> 1) | (cf << 7);
-            }
+        case 1: { /* ROR r/m8 */
+            const uint8_t rotate = cnt & 7;
+            s = (uint8_t)((s >> rotate) | (s << ((8 - rotate) & 7)));
+            cf = s >> 7;
 
             of = (s >> 7) ^ ((s >> 6) & 1);
             break;
+        }
 
         case 2: /* RCL r/m8 */
             for (int shift = 1; shift <= cnt; shift++) {
@@ -594,15 +588,8 @@ static __time_critical_func() uint8_t op_grp2_8(uint8_t cnt, uint8_t oper1b) {
 
         case 4:
         case 6: /* SHL r/m8 */
-            for (int shift = 1; shift <= cnt; shift++) {
-                if (s & 0x80) {
-                    cf = 1;
-                } else {
-                    cf = 0;
-                }
-
-                s = (s << 1) & 0xFF;
-            }
+            cf = cnt <= 8 ? (s >> (8 - cnt)) & 1 : 0;
+            s = ((uint32_t)s << cnt) & 0xFF;
 
             of = cf ^ (s >> 7);
 
@@ -612,20 +599,15 @@ static __time_critical_func() uint8_t op_grp2_8(uint8_t cnt, uint8_t oper1b) {
         case 5: /* SHR r/m8 */
             of = cnt == 1 && (s & 0x80);
 
-            for (int a = 1; a <= cnt; a++) {
-                cf = s & 1;
-                s = s >> 1;
-            }
+            cf = cnt <= 8 ? (s >> (cnt - 1)) & 1 : 0;
+            s >>= cnt;
 
             flag_szp8((uint8_t) s);
             break;
 
         case 7: /* SAR r/m8 */
-            for (int a = 1; a <= cnt; a++) {
-                unsigned int msb = s & 0x80;
-                cf = s & 1;
-                s = (s >> 1) | msb;
-            }
+            cf = (s >> ((cnt <= 8 ? cnt : 8) - 1)) & 1;
+            s = (uint8_t)((int32_t)(int8_t)s >> cnt);
 
             of = 0;
             flag_szp8((uint8_t) s);
@@ -640,29 +622,23 @@ static __time_critical_func() uint16_t op_grp2_16(uint8_t cnt) {
     cnt &= 0x1F; // the 386 uses five bits of the count
     if (!cnt) return s;
     switch (reg) {
-        case 0: /* ROL r/m16 */
-            for (int shift = 1; shift <= cnt; shift++) {
-                if (s & 0x8000) {
-                    cf = 1;
-                } else {
-                    cf = 0;
-                }
-
-                s = s << 1;
-                s = s | cf;
-            }
+        case 0: { /* ROL r/m16 */
+            const uint8_t rotate = cnt & 15;
+            s = ((s << rotate) | (s >> ((16 - rotate) & 15))) & 0xFFFF;
+            cf = s & 1;
 
             of = cf ^ ((s >> 15) & 1);
             break;
+        }
 
-        case 1: /* ROR r/m16 */
-            for (int shift = 1; shift <= cnt; shift++) {
-                cf = s & 1;
-                s = (s >> 1) | (cf << 15);
-            }
+        case 1: { /* ROR r/m16 */
+            const uint8_t rotate = cnt & 15;
+            s = ((s >> rotate) | (s << ((16 - rotate) & 15))) & 0xFFFF;
+            cf = s >> 15;
 
             of = (s >> 15) ^ ((s >> 14) & 1);
             break;
+        }
 
         case 2: /* RCL r/m16 */
             for (int shift = 1; shift <= cnt; shift++) {
@@ -692,15 +668,8 @@ static __time_critical_func() uint16_t op_grp2_16(uint8_t cnt) {
 
         case 4:
         case 6: /* SHL r/m16 */
-            for (unsigned int shift = 1; shift <= cnt; shift++) {
-                if (s & 0x8000) {
-                    cf = 1;
-                } else {
-                    cf = 0;
-                }
-
-                s = (s << 1) & 0xFFFF;
-            }
+            cf = cnt <= 16 ? (s >> (16 - cnt)) & 1 : 0;
+            s = (s << cnt) & 0xFFFF;
 
             of = cf ^ (s >> 15);
 
@@ -710,20 +679,15 @@ static __time_critical_func() uint16_t op_grp2_16(uint8_t cnt) {
         case 5: /* SHR r/m16 */
             of = cnt == 1 && (s & 0x8000);
 
-            for (int shift = 1; shift <= cnt; shift++) {
-                cf = s & 1;
-                s = s >> 1;
-            }
+            cf = cnt <= 16 ? (s >> (cnt - 1)) & 1 : 0;
+            s >>= cnt;
 
             flag_szp16((uint16_t) s);
             break;
 
         case 7: /* SAR r/m16 */
-            for (int shift = 1, msb; shift <= cnt; shift++) {
-                msb = s & 0x8000;
-                cf = s & 1;
-                s = (s >> 1) | msb;
-            }
+            cf = (s >> ((cnt <= 16 ? cnt : 16) - 1)) & 1;
+            s = (uint16_t)((int32_t)(int16_t)s >> cnt);
 
             of = 0;
             flag_szp16((uint16_t) s);
