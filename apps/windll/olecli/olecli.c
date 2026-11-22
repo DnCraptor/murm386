@@ -75,6 +75,13 @@ enum { DATA_PICTURE, DATA_IDENTITY, DATA_NATIVE, DATA_SLOTS };
 typedef struct ole_session ole_session;
 static OLESTATUS close_session(OLEOBJECT *o);
 
+typedef struct ole_requested_data {
+    struct ole_requested_data *next;
+    OLECLIPFORMAT format;
+    HGLOBAL block;
+    DWORD guest;
+} ole_requested_data;
+
 struct WINN_OLEOBJECT {
     LHCLIENTDOC doc;
     HGLOBAL image, descriptor;
@@ -86,6 +93,7 @@ struct WINN_OLEOBJECT {
     DWORD size, bits, guest;
     HGLOBAL identity, native, target_device, host_names, color_scheme, doc_dimensions;
     DWORD guest_data[DATA_SLOTS];
+    ole_requested_data *requested;
     SIZE pixels;
     LONG width, height;              /* positive HIMETRIC extents */
     BOOL writing;
@@ -474,10 +482,23 @@ static OLESTATUS create_clip_picture(LHCLIENTDOC doc, LPCSTR name, LPOLEOBJECT *
     return image ? new_picture(image, 0, doc, name, 0, 0, out) : OLE_ERROR_MEMORY;
 }
 
+static void clear_requested_data(OLEOBJECT *o, uint16_t task)
+{
+    while (o->requested) {
+        ole_requested_data *entry = o->requested;
+        o->requested = entry->next;
+        if (entry->guest)
+            NE->task_free(task, entry->guest);
+        GlobalFree(entry->block);
+        free(entry);
+    }
+}
+
 static void free_picture(OLEOBJECT *o, uint16_t task)
 {
     /* Task teardown also tears down that task's DDE instances. */
     free(o->session);
+    clear_requested_data(o, task);
     for (unsigned i = 0; i < DATA_SLOTS; i++)
         if (o->guest_data[i])
             NE->task_free(task, o->guest_data[i]);
@@ -1962,6 +1983,14 @@ static OLESTATUS stream_data(OLEOBJECT *o, BOOL native, HGLOBAL *out)
     return status;
 }
 
+static ole_requested_data *requested_data(const OLEOBJECT *o, OLECLIPFORMAT format)
+{
+    for (ole_requested_data *entry = o->requested; entry; entry = entry->next)
+        if (entry->format == format)
+            return entry;
+    return NULL;
+}
+
 static void object_formats(const OLEOBJECT *o, OLECLIPFORMAT formats[DATA_SLOTS])
 {
     memset(formats, 0, DATA_SLOTS * sizeof(*formats));
@@ -1988,6 +2017,12 @@ static OLECLIPFORMAT WINAPI OleEnumFormats(LPOLEOBJECT object, OLECLIPFORMAT pre
         if (formats[i] == previous)
             previous = 0;
     }
+    for (ole_requested_data *entry = o->requested; entry; entry = entry->next) {
+        if (!previous)
+            return entry->format;
+        if (entry->format == previous)
+            previous = 0;
+    }
     return 0;
 }
 
@@ -1999,6 +2034,11 @@ static OLESTATUS WINAPI OleGetData(LPOLEOBJECT object, OLECLIPFORMAT fmt, HANDLE
     OLEOBJECT *o = object_of(object);
     if (!o)
         return OLE_ERROR_OBJECT;
+    ole_requested_data *entry = requested_data(o, fmt);
+    if (entry) {
+        *out = entry->block;
+        return OLE_OK;
+    }
     OLECLIPFORMAT formats[DATA_SLOTS];
     object_formats(o, formats);
     if (fmt && (fmt == formats[DATA_IDENTITY] || fmt == formats[DATA_NATIVE])) {
@@ -2105,6 +2145,7 @@ done:
 
 static void invalidate_identity(OLEOBJECT *o)
 {
+    clear_requested_data(o, (uint16_t)GetCurrentTask());
     if (o->identity) {
         GlobalFree(o->identity);
         o->identity = 0;
@@ -2449,6 +2490,72 @@ done:
     return status;
 }
 
+static OLESTATUS WINAPI OleCopyFromLink(LPOLEOBJECT object, LPCSTR protocol, LPOLECLIENT client,
+                                        LHCLIENTDOC doc, LPCSTR name, LPOLEOBJECT *out)
+{
+    if (!out)
+        return OLE_ERROR_ADDRESS;
+    *out = NULL;
+    OLEOBJECT *o = object_of(object);
+    if (!o)
+        return OLE_ERROR_OBJECT;
+    if (o->type != OT_LINK)
+        return OLE_ERROR_NOT_LINK;
+    if (!name)
+        return OLE_ERROR_ADDRESS;
+    if (!protocol || lstrcmpi(protocol, "StdFileEditing"))
+        return OLE_ERROR_PROTOCOL;
+    int dest = doc_of(doc);
+    if (dest < 0)
+        return OLE_ERROR_HANDLE;
+    if (o->writing)
+        return OLE_BUSY;
+
+    char cls[64];
+    const uint8_t *head = GlobalLock(o->stream_head), *tail;
+    ole_clip_string fields[3];
+    DWORD remaining;
+    BOOL valid = head && stream_triplet(head, o->head_bytes, fields, &tail, &remaining) &&
+                 session_name(cls, sizeof(cls), &fields[0]) && cls[0];
+    if (head)
+        GlobalUnlock(o->stream_head);
+    if (!valid)
+        return OLE_ERROR_FORMAT;
+
+    o->writing = TRUE;
+    docs[dest].creating++;
+    BOOL temporary = !session_open(o->session);
+    OLESTATUS status = OLE_OK;
+    if (temporary) {
+        disconnect_session(o);
+        status = connect_object(o, FALSE, FALSE);
+    }
+    HGLOBAL native = 0, image = 0;
+    if (status == OLE_OK) {
+        ole_session *s = o->session;
+        status = ole_request_block(&s->dde, s->conv, s->item,
+                                   clipboard_format("Native", TRUE), &native);
+        if (status == OLE_OK) {
+            status = ole_request_block(&s->dde, s->conv, s->item, CF_DIB, &image);
+            if (status == OLE_ERROR_FORMAT || status == OLE_ERROR_BLANK)
+                status = OLE_OK;
+        }
+    }
+    if (temporary)
+        disconnect_session(o);
+    if (status == OLE_OK) {
+        status = create_server_snapshot(cls, NULL, NULL, doc, name, olerender_draw,
+                                        out, native, image);
+        if (status == OLE_OK)
+            (*out)->client = client;
+    }
+    if (native)
+        GlobalFree(native);
+    docs[dest].creating--;
+    o->writing = FALSE;
+    return status;
+}
+
 static OLESTATUS WINAPI OleReconnect(LPOLEOBJECT object)
 {
     OLEOBJECT *o = object_of(object);
@@ -2553,9 +2660,13 @@ static OLESTATUS install_update(OLEOBJECT *o, HGLOBAL native, HGLOBAL image)
         if (n < 4 || read32(tail) > n - 4)
             goto done;
         prefix = (DWORD)(tail - head) + 4 + read32(tail);
-        status = make_object_header(fields, native, OT_EMBEDDED, &replacement, &used);
-        if (status != OLE_OK)
-            goto done;
+        if (native) {
+            status = make_object_header(fields, native, OT_EMBEDDED, &replacement, &used);
+            if (status != OLE_OK)
+                goto done;
+        } else {
+            used = prefix;
+        }
     } else {
         DWORD hint = link_hint_offset(tail, n);
         if (!hint)
@@ -2580,7 +2691,7 @@ static OLESTATUS install_update(OLEOBJECT *o, HGLOBAL native, HGLOBAL image)
     status = OLE_ERROR_MEMORY;
     if (!dst)
         goto done;
-    memcpy(dst, head, o->type == OT_LINK ? prefix : 8);
+    memcpy(dst, head, native ? 8 : prefix);
     memcpy(dst + used, image ? presentation : head + prefix, presentation_size);
     GlobalUnlock(replacement);
     status = OLE_OK;
@@ -2595,11 +2706,13 @@ done:
     GlobalFree(o->stream_head);
     o->stream_head = replacement;
     o->head_bytes = size;
-    if (o->native) {
-        GlobalFree(o->native);
-        o->native = 0;
+    if (native) {
+        if (o->native) {
+            GlobalFree(o->native);
+            o->native = 0;
+        }
+        clear_guest_data(o, DATA_NATIVE);
     }
-    clear_guest_data(o, DATA_NATIVE);
     if (image) {
         clear_guest_data(o, DATA_PICTURE);
         if (o->descriptor)
@@ -2666,6 +2779,72 @@ static OLESTATUS WINAPI OleUpdate(LPOLEOBJECT object)
     }
     if (status == OLE_OK)
         status = update_open_object(o);
+    if (temporary)
+        disconnect_session(o);
+    o->writing = FALSE;
+    return status;
+}
+
+static OLESTATUS cache_requested_data(OLEOBJECT *o, OLECLIPFORMAT format, HGLOBAL block)
+{
+    ole_requested_data *entry = requested_data(o, format);
+    if (entry) {
+        if (entry->guest)
+            NE->task_free((uint16_t)GetCurrentTask(), entry->guest);
+        GlobalFree(entry->block);
+        entry->guest = 0;
+    } else {
+        entry = calloc(1, sizeof(*entry));
+        if (!entry)
+            return OLE_ERROR_MEMORY;
+        entry->format = format;
+        entry->next = o->requested;
+        o->requested = entry;
+    }
+    entry->block = block;
+    return OLE_OK;
+}
+
+static OLESTATUS WINAPI OleRequestData(LPOLEOBJECT object, OLECLIPFORMAT format)
+{
+    OLEOBJECT *o = object_of(object);
+    if (!o)
+        return OLE_ERROR_OBJECT;
+    if (o->type == OT_STATIC)
+        return OLE_ERROR_STATIC;
+    if (o->writing)
+        return OLE_BUSY;
+    if (!ole_memory_format(format) || format == clipboard_format("OwnerLink", FALSE) ||
+        format == clipboard_format("ObjectLink", FALSE))
+        return OLE_ERROR_FORMAT;
+    BOOL temporary = !session_open(o->session);
+    if (temporary && o->type != OT_LINK)
+        return OLE_ERROR_NOT_OPEN;
+
+    o->writing = TRUE;
+    OLESTATUS status = OLE_OK;
+    if (temporary) {
+        disconnect_session(o);
+        status = connect_object(o, FALSE, FALSE);
+    }
+    HGLOBAL data = 0;
+    if (status == OLE_OK) {
+        ole_session *s = o->session;
+        status = ole_request_block(&s->dde, s->conv, s->item, format, &data);
+    }
+    if (status == OLE_OK) {
+        if (format == CF_DIB) {
+            status = install_update(o, 0, data);
+        } else if (o->type == OT_EMBEDDED && format == clipboard_format("Native", FALSE)) {
+            status = install_update(o, data, 0);
+            GlobalFree(data);
+            data = 0;
+        } else {
+            status = cache_requested_data(o, format, data);
+        }
+    }
+    if (data && status != OLE_OK)
+        GlobalFree(data);
     if (temporary)
         disconnect_session(o);
     o->writing = FALSE;
@@ -2855,7 +3034,7 @@ static const struct {
     { 3, 8, "OleSaveToStream", 0, R_OWN, (const void *)OleSaveToStream },
     { 4, 24, "OleLoadFromStream", 0, R_OWN, (const void *)OleLoadFromStream },
     { 6, 20, "OleClone", 0, R_OWN, (const void *)OleClone },
-    { 7, 24, "OleCopyFromLink", 4, R_CREATE, NULL },
+    { 7, 24, "OleCopyFromLink", 4, R_OWN, (const void *)OleCopyFromLink },
     { 8, 8, "OleEqual", 0, R_OWN, (const void *)OleEqual },
     { 9, 8, "OleQueryLinkFromClip", 0, R_OWN, (const void *)OleQueryLinkFromClip },
     { 10, 8, "OleQueryCreateFromClip", 0, R_OWN, (const void *)OleQueryCreateFromClip },
@@ -2898,7 +3077,7 @@ static const struct {
     { 47, 8, "OleEnumObjects", 0, R_OWN, (const void *)OleEnumObjects },
     { 48, 12, "OleQueryName", 0, R_OWN, (const void *)OleQueryName },
     { 49, 8, "OleSetColorScheme", 0, R_OWN, (const void *)OleSetColorScheme },
-    { 50, 6, "OleRequestData", 0, R_OBJECT, NULL },
+    { 50, 6, "OleRequestData", 0, R_OWN, (const void *)OleRequestData },
     { 54, 8, "OleLockServer", 0, R_OWN, NULL },
     { 55, 4, "OleUnlockServer", 0, R_OWN, NULL },
     { 56, 8, "OleQuerySize", 0, R_OWN, (const void *)OleQuerySize },
@@ -3042,8 +3221,10 @@ static OLESTATUS guest_data(win_dll_call *c, LPOLEOBJECT o, UINT format, uint32_
     unsigned slot = image == o->identity ? DATA_IDENTITY :
                     image == o->native ? DATA_NATIVE : DATA_PICTURE;
     BOOL metafile = format == CF_METAFILEPICT;
-    DWORD n = metafile ? 8 : slot == DATA_PICTURE ? o->size : GlobalSize(image);
-    if (!o->guest_data[slot]) {
+    ole_requested_data *entry = requested_data(o, (OLECLIPFORMAT)format);
+    DWORD *guest = entry ? &entry->guest : &o->guest_data[slot];
+    DWORD n = metafile ? 8 : entry || slot != DATA_PICTURE ? GlobalSize(image) : o->size;
+    if (!*guest) {
         uint16_t task = (uint16_t)GetCurrentTask();
         uint32_t far = NE->task_alloc(task, n);
         if (!far)
@@ -3066,9 +3247,9 @@ static OLESTATUS guest_data(win_dll_call *c, LPOLEOBJECT o, UINT format, uint32_
             NE->task_free(task, far);
             return OLE_ERROR_MEMORY;
         }
-        o->guest_data[slot] = far;
+        *guest = far;
     }
-    return put16(c, out, (uint16_t)(o->guest_data[slot] >> 16)) ? OLE_OK : OLE_ERROR_ADDRESS;
+    return put16(c, out, (uint16_t)(*guest >> 16)) ? OLE_OK : OLE_ERROR_ADDRESS;
 }
 
 static OLESTATUS guest_set_data(win_dll_call *c, LPOLEOBJECT o, WORD format, WORD handle)
@@ -3177,6 +3358,20 @@ static int ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *v)
             OLESTATUS result = OleClone(guest_object(NE->arg32(c, 20)), NULL,
                                         (LHCLIENTDOC)NE->arg32(c, 12), name, &object);
             *v = guest_created(c, out, result, object, 16);
+        }
+        return WINDLL_WORD;
+    }
+    case 7: {
+        char protocol[32], name[128];
+        uint32_t out = NE->arg32(c, 4);
+        LPOLEOBJECT object = NULL;
+        if (!put32(c, out, 0) || !g_str(c, NE->arg32(c, 20), protocol, sizeof(protocol)) ||
+            !g_str(c, NE->arg32(c, 8), name, sizeof(name))) {
+            *v = OLE_ERROR_ADDRESS;
+        } else {
+            OLESTATUS status = OleCopyFromLink(guest_object(NE->arg32(c, 24)), protocol, NULL,
+                                               (LHCLIENTDOC)NE->arg32(c, 12), name, &object);
+            *v = guest_created(c, out, status, object, 16);
         }
         return WINDLL_WORD;
     }
@@ -3472,6 +3667,9 @@ static int ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *v)
         }
         return WINDLL_WORD;
     }
+    case 50:
+        *v = OleRequestData(guest_object(NE->arg32(c, 6)), NE->arg16(c, 4));
+        return WINDLL_WORD;
     case 54:
         *v = OLE_ERROR_CLASS;
         return WINDLL_WORD;

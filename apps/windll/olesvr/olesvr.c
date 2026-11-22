@@ -957,17 +957,6 @@ static OLESTATUS WINAPI OleRevokeObject(LPOLECLIENT client)
     return revoke_object(client, 0);
 }
 
-static BOOL memory_format(UINT format)
-{
-    switch (format) {
-    case CF_TEXT: case CF_SYLK: case CF_DIF: case CF_TIFF: case CF_OEMTEXT:
-    case CF_DIB: case CF_PENDATA: case CF_RIFF: case CF_WAVE: case CF_DSPTEXT:
-        return TRUE;
-    default:
-        return format >= 0xc000u && format <= 0xffffu;
-    }
-}
-
 static HDDEDATA dde_status(OLESTATUS status)
 {
     if (status == OLE_OK)
@@ -1372,7 +1361,7 @@ static HDDEDATA document_call(int i, DWORD id, HSZ item, LPCSTR object_name, UIN
 static HDDEDATA document_transaction(int doc, DWORD id, HSZ item, UINT format, HDDEDATA incoming)
 {
     char name[256] = {0};
-    if (!memory_format(format) || (item && !dde.query(id, item, name, sizeof(name), CP_WINANSI)))
+    if (!ole_memory_format(format) || (item && !dde.query(id, item, name, sizeof(name), CP_WINANSI)))
         return 0;
     if (!incoming && format == CF_TEXT && !lstrcmpi(name, "EditEnvItems"))
         return edit_environment_items(doc, id, item);

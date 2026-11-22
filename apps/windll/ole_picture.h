@@ -4,6 +4,17 @@
 
 #include "windows.h"
 
+static inline BOOL ole_memory_format(UINT format)
+{
+    switch (format) {
+    case CF_TEXT: case CF_SYLK: case CF_DIF: case CF_TIFF: case CF_OEMTEXT:
+    case CF_DIB: case CF_PENDATA: case CF_RIFF: case CF_WAVE: case CF_DSPTEXT:
+        return TRUE;
+    default:
+        return format >= 0xc000u && format <= 0xffffu;
+    }
+}
+
 static HGLOBAL bitmap_to_dib(HBITMAP bitmap, BOOL true_color)
 {
     BITMAPINFO bi = {0};
