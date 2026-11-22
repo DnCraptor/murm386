@@ -310,7 +310,10 @@ static OLESTATUS WINAPI OleRegisterServerDoc(LHSERVER server, LPCSTR name,
     return register_doc(server, name, doc, 0, out);
 }
 
-enum { DOC_CLOSE = 1, DOC_RELEASE = 5, SERVER_RELEASE = 5 };
+enum {
+    DOC_CLOSE = 1, DOC_HOST_NAMES = 2, DOC_RELEASE = 5, DOC_COLOR_SCHEME = 6,
+    SERVER_RELEASE = 5
+};
 
 static void revoke_doc(int i)
 {
@@ -1227,6 +1230,91 @@ done:
     return result;
 }
 
+static unsigned environment_method(UINT format, LPCSTR item)
+{
+    if (!item || format < 0xc000u || format != RegisterClipboardFormat("Binary"))
+        return 0;
+    if (!lstrcmpi(item, "StdHostNames"))
+        return DOC_HOST_NAMES;
+    return !lstrcmpi(item, "StdColorScheme") ? DOC_COLOR_SCHEME : 0;
+}
+
+static HDDEDATA environment_guest(server_owner owner, unsigned slot, const BYTE *data,
+                                  DWORD bytes, DWORD app, DWORD name)
+{
+    DWORD method = guest_proc(owner, slot);
+    if (!(method >> 16) || NE->size < WIN_DLL_NE_BASE_SIZE ||
+        !NE->task_alloc || !NE->task_free || !NE->task_write)
+        return DDE_FNOTPROCESSED;
+    WORD task = (WORD)owner.task;
+    DWORD buf = NE->task_alloc(task, bytes);
+    if (!buf)
+        return DDE_FNOTPROCESSED;
+
+    HDDEDATA result = DDE_FNOTPROCESSED;
+    if (NE->task_write(task, buf, data, bytes)) {
+        WORD args[] = { (WORD)(owner.guest >> 16), (WORD)owner.guest,
+                        (WORD)(buf >> 16), (WORD)(buf + app),
+                        (WORD)(buf >> 16), (WORD)(buf + name) };
+        result = dde_status((WORD)NE->call(task, method, args, slot == DOC_HOST_NAMES ? 6 : 4));
+    }
+    NE->task_free(task, buf);
+    return result;
+}
+
+static HDDEDATA document_environment(int i, unsigned slot, HDDEDATA incoming)
+{
+    DWORD bytes = 0;
+    const BYTE *data = dde.access_data(incoming, &bytes);
+    if (!data)
+        return DDE_FNOTPROCESSED;
+
+    DWORD app = 0, name = 0;
+    BOOL valid = bytes >= 4 && bytes <= 0x10000u;
+    if (valid && slot == DOC_HOST_NAMES) {
+        /* String offsets are relative to the byte following the two WORDs. */
+        app = 4 + (data[0] | data[1] << 8);
+        name = 4 + (data[2] | data[3] << 8);
+        valid = app < bytes && name < bytes && memchr(data + app, 0, bytes - app) &&
+                memchr(data + name, 0, bytes - name);
+    } else if (valid) {
+        WORD count = (WORD)(data[2] | data[3] << 8);
+        valid = !data[0] && data[1] == 3 && count && bytes == 4 + count * sizeof(PALETTEENTRY);
+    }
+
+    HDDEDATA result = DDE_FNOTPROCESSED;
+    if (valid) {
+        LPOLESERVERDOC doc = docs[i].native;
+        if (!doc) {
+            result = environment_guest(docs[i].owner, slot, data, bytes, app, name);
+        } else if (doc->lpvtbl) {
+            if (slot == DOC_HOST_NAMES && doc->lpvtbl->SetHostNames)
+                result = dde_status(doc->lpvtbl->SetHostNames(doc, (LPCSTR)data + app,
+                                                                 (LPCSTR)data + name));
+            if (slot == DOC_COLOR_SCHEME && doc->lpvtbl->SetColorScheme)
+                result = dde_status(doc->lpvtbl->SetColorScheme(doc, (const LOGPALETTE *)data));
+        }
+    }
+    dde.unaccess_data(incoming);
+    return result;
+}
+
+static HDDEDATA edit_environment_items(int i, DWORD id, HSZ item)
+{
+    char text[sizeof("StdHostNames\tStdColorScheme\tStdTargetDevice")] = "";
+    if (i < 0 || docs[i].revoked)
+        return 0;
+    LPOLESERVERDOC doc = docs[i].native;
+    const OLESERVERDOCVTBL *vt = doc ? doc->lpvtbl : NULL;
+    if (doc ? vt && vt->SetHostNames : guest_proc(docs[i].owner, DOC_HOST_NAMES) >> 16)
+        strcpy(text, "StdHostNames");
+    if (doc ? vt && vt->SetColorScheme : guest_proc(docs[i].owner, DOC_COLOR_SCHEME) >> 16)
+        strcat(text, text[0] ? "\tStdColorScheme" : "StdColorScheme");
+    if (!doc)
+        strcat(text, text[0] ? "\tStdTargetDevice" : "StdTargetDevice");
+    return dde.create_data(id, (LPBYTE)text, (DWORD)strlen(text) + 1, 0, item, CF_TEXT, 0);
+}
+
 static HDDEDATA document_call(int i, DWORD id, HSZ item, LPCSTR object_name, UINT format,
                               HDDEDATA incoming, const object_action *action)
 {
@@ -1237,14 +1325,20 @@ static HDDEDATA document_call(int i, DWORD id, HSZ item, LPCSTR object_name, UIN
     if (incoming && docs[i].native && target_device_item(format, object_name))
         return DDE_FNOTPROCESSED;     /* older native server vtables have no such slot */
     LHSERVERDOC handle = docs[i].handle;
-    request_client client = { .native = { &request_client_vt }, .task = GetCurrentTask(),
-                              .next = active_client };
-    active_client = &client;
+    unsigned env = incoming ? environment_method(format, object_name) : 0;
     docs[i].transferring = TRUE;
-    HDDEDATA result = docs[i].native ?
-        document_native(i, id, item, object_name, (WORD)format, incoming, action, &client) :
-        document_guest(i, id, item, object_name, (WORD)format, incoming, action, &client);
-    active_client = client.next;
+    HDDEDATA result;
+    if (env) {
+        result = document_environment(i, env, incoming);
+    } else {
+        request_client client = { .native = { &request_client_vt }, .task = GetCurrentTask(),
+                                  .next = active_client };
+        active_client = &client;
+        result = docs[i].native ?
+            document_native(i, id, item, object_name, (WORD)format, incoming, action, &client) :
+            document_guest(i, id, item, object_name, (WORD)format, incoming, action, &client);
+        active_client = client.next;
+    }
     if (docs[i].handle == handle) {
         docs[i].transferring = FALSE;
         if (docs[i].revoked)
@@ -1258,6 +1352,8 @@ static HDDEDATA document_transaction(int doc, DWORD id, HSZ item, UINT format, H
     char name[256] = {0};
     if (!memory_format(format) || (item && !dde.query(id, item, name, sizeof(name), CP_WINANSI)))
         return 0;
+    if (!incoming && format == CF_TEXT && !lstrcmpi(name, "EditEnvItems"))
+        return edit_environment_items(doc, id, item);
     LPCSTR object_name = name[0] ? name : NULL;
     const document_snapshot *snapshot = doc >= 0 ? docs[doc].snapshot : NULL;
     if (snapshot && !incoming && !object_name &&
