@@ -932,7 +932,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
         if (active_cpu->native_done)
             break;
         if (!protected_mode) XRIP_IP &= 0xffffu;
-        if (unlikely(ifl && active_cpu->intr && !active_cpu->i286_irq_shadow)) {
+        if (unlikely(active_cpu->intr && ifl && !active_cpu->i286_irq_shadow)) {
             uint32_t irq_state = save_and_disable_interrupts();
             active_cpu->intr = false;
             int vector = active_cpu->cb.pic_read_irq(active_cpu->cb.pic);
