@@ -234,7 +234,7 @@ static __time_critical_func() void load_segment_protected(uint8_t segment, uint1
     segregs[segment] = selector;
     segment_base[segment] = descriptor_base(d);
     if (segment == regss) stack32 = is_big(d);
-    if (segment == regcs) code32 = is_big(d);
+    if (segment == regcs) set_code32(is_big(d));
 }
 
 // ---- Control transfers (chapter 6.3) ----------------------------------------------------------
@@ -252,7 +252,7 @@ static __time_critical_func() void set_code_segment(uint16_t selector, descripto
     mark_accessed(selector, &d);
     segregs[regcs] = (selector & ~3u) | privilege;
     segment_base[regcs] = descriptor_base(d);
-    code32 = is_big(d);
+    set_code32(is_big(d));
     cpl = privilege;
     xrip_ip = offset;
 }
@@ -376,7 +376,8 @@ static __time_critical_func() void task_switch(uint16_t selector, uint8_t reason
     protected_mode = !v86;
     if (v86) { // a V86 task: segments as in real mode
         cpl = 3;
-        code32 = stack32 = 0;
+        stack32 = 0;
+        set_code32(0);
         for (int i = 0; i < 6; i++) load_segment(order[i], segments[i]);
         xrip_ip = new_eip & 0xFFFF;
     } else {
@@ -559,7 +560,8 @@ static __time_critical_func() void enter_v86(uint32_t offset, uint16_t selector,
     flags_now()->value = flags & 0x37FD5;
     protected_mode = 0; // segment loads work as in real mode now
     cpl = 3;
-    code32 = stack32 = 0;
+    stack32 = 0;
+    set_code32(0);
     load_segment(regcs, selector);
     load_segment(regss, ss);
     load_segment(reges, es);
@@ -796,7 +798,8 @@ static __time_critical_func() void adjust_rpl(void) {
 
 static __time_critical_func() void reset_protected_mode(void) {
     set_cr0(CR0_ET);
-    code32 = stack32 = 0;
+    stack32 = 0;
+    set_code32(0);
     gdtr = (table_register_t) {0, 0xFFFF};
     idtr = (table_register_t) {0, 0x3FF};
     ldtr = tr = (table_register_t) {0, 0};

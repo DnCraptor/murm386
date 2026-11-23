@@ -21,6 +21,7 @@ cpu_state_t cpu_state; // cpu.h
 #define opsize32 cpu_state.opsize32
 #define addrsize32 cpu_state.addrsize32
 #define code32 cpu_state.code32
+#define code32_pair cpu_state.code32_pair
 #define stack32 cpu_state.stack32
 #define retired cpu_state.retired
 static uint8_t cpl; // current privilege level: 0 in real mode, 3 in V86 mode
@@ -30,6 +31,13 @@ static bool pending_trap;
 static uint8_t protected_mode;
 static uint16_t segregs[6];
 static uint32_t segment_base[6];
+
+/* Keep the 16-bit reset value current when the CS default size changes.
+ * Values are duplicated byte-for-byte, not merely converted to 0/1. */
+static __time_critical_func() inline void set_code32(uint8_t value) {
+    code32 = value;
+    code32_pair = (uint16_t)((uint16_t)value | ((uint16_t)value << 8));
+}
 
 static inline x86_flags_t *flags_now(void) {
     if (flags_op)
@@ -954,7 +962,17 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
         pending_trap = tf;
         reptype = 0;
         segoverride = 0;
+#if defined(__ARM_ARCH_8M_MAIN__) && (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+        /* Both operands are halfword-aligned in cpu_state_t. Avoid the
+         * repeated code32 load and two BFI instructions on every opcode. */
+        uint32_t sizes_pair;
+        __asm volatile(
+            "ldrh %0, [%1, #62]\n\t"
+            "strh %0, [%1, #56]"
+            : "=&r"(sizes_pair) : "r"(&cpu_state) : "memory");
+#else
         opsize32 = addrsize32 = code32;
+#endif
         useseg = DS_BASE;
         firstip = XRIP_IP;
         first_esp = dwordregs[regsp];

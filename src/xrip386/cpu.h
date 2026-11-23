@@ -118,6 +118,7 @@ typedef struct {
     uint8_t flags_op; // kind and size of that operation; 0: x86_flags has all the flags
     uint8_t flags_cf; // its CF
     uint8_t a20_enabled;
+    uint16_t code32_pair; // spare alignment bytes: code32 duplicated for the hot decoder reset
     unsigned long retired; // one increment per executed instruction
 } cpu_state_t;
 /* Declare these before the field-alias macros below. */
@@ -126,7 +127,9 @@ _Static_assert(__builtin_offsetof(cpu_state_t, code32) == 53 &&
                __builtin_offsetof(cpu_state_t, reptype) == 54 &&
                __builtin_offsetof(cpu_state_t, segoverride) == 55 &&
                __builtin_offsetof(cpu_state_t, opsize32) == 56 &&
-               __builtin_offsetof(cpu_state_t, addrsize32) == 57,
+               __builtin_offsetof(cpu_state_t, addrsize32) == 57 &&
+               __builtin_offsetof(cpu_state_t, code32_pair) == 62 &&
+               __builtin_offsetof(cpu_state_t, retired) == 64,
                "XRIP decoder byte-pair alignment changed");
 #endif
 extern cpu_state_t cpu_state;
