@@ -931,7 +931,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
     for (uint32_t loopcount = 0; loopcount < execloops; loopcount++) {
         if (active_cpu->native_done)
             break;
-        if (!protected_mode) XRIP_IP &= 0xffffu;
+        if (unlikely(XRIP_IP > 0xffffu) && !protected_mode) XRIP_IP &= 0xffffu;
         if (unlikely(active_cpu->intr && ifl && !active_cpu->i286_irq_shadow)) {
             uint32_t irq_state = save_and_disable_interrupts();
             active_cpu->intr = false;

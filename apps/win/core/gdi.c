@@ -259,18 +259,30 @@ HBITMAP WINAPI CreateBitmap(int w, int h, UINT planes, UINT bpp, const void *bit
 {
     int depth = (planes * bpp == 1) ? 1 : 8;
     HBITMAP hb = bitmap_new(w, h, depth);
-    if (hb && bits && planes * bpp == (UINT)depth) {
-        wbitmap *bm = (wbitmap *)win_handle_get(hb, WOBJ_BITMAP);
+    wbitmap *bm = (wbitmap *)win_handle_get(hb, WOBJ_BITMAP);
+    if (!bm)
+        return 0;
+    bm->planar4 = planes == 4 && bpp == 1;
+    if (bits && bm->planar4)
+        SetBitmapBits(hb, 4u * gdi_bitmap_pitch(bm->s.width, 1) * bm->s.height, bits);
+    else if (bits && planes * bpp == (UINT)depth)
         memcpy(bm->s.bits, bits, (size_t)bm->s.pitch * (size_t)bm->s.height);
-    }
     return hb;
+}
+
+static int screen_planar4(const wdc *dc)
+{
+    return dc && dc->is_screen && dc->surf->bpp == 8 &&
+           GetDisplayDriverInfoN(NULL, 0) <= 16;
 }
 
 HBITMAP WINAPI CreateCompatibleBitmap(HDC hdc, int w, int h)
 {
     wdc *dc = gdi_dc(hdc);
     int bpp = dc && dc->surf ? dc->surf->bpp : 8;
-    return bitmap_new(w, h, bpp);
+    wbitmap *selected = dc ? (wbitmap *)win_handle_get(dc->bitmap, WOBJ_BITMAP) : NULL;
+    BOOL planar = screen_planar4(dc) || (selected && selected->planar4);
+    return planar ? CreateBitmap(w, h, 4, 1, NULL) : bitmap_new(w, h, bpp);
 }
 
 /* ---------------------------------------------------------------- DIBs */
@@ -552,8 +564,7 @@ HBITMAP WINAPI CreateDIBitmap(HDC h, const BITMAPINFOHEADER *bih, DWORD init, co
         w = (int)bih->biWidth;
         hh = (int)(bih->biHeight < 0 ? -bih->biHeight : bih->biHeight);
     }
-    wdc *dc = gdi_dc(h);
-    HBITMAP hb = bitmap_new(w, hh, dc && dc->surf->bpp == 1 ? 1 : 8);
+    HBITMAP hb = CreateCompatibleBitmap(h, w, hh);
     wbitmap *bm = hb ? (wbitmap *)win_handle_get(hb, WOBJ_BITMAP) : NULL;
     if (!bm)
         return 0;
@@ -694,11 +705,49 @@ HBRUSH WINAPI CreateDIBPatternBrush(HGLOBAL hg, UINT usage)
     return br;
 }
 
+/* DIB palettes put red in bit 0, VGA puts blue there. */
+static unsigned swap_vga_red_blue(unsigned color)
+{
+    return (color & 10) | ((color & 1) << 2) | ((color & 4) >> 2);
+}
+
 LONG WINAPI SetBitmapBits(HBITMAP hb, DWORD count, const void *bits)
 {
     wbitmap *bm = (wbitmap *)win_handle_get(hb, WOBJ_BITMAP);
     if (!bm || !bits)
         return 0;
+    if (bm->planar4) {
+        /* Each plane contains all scanlines, word aligned, top down. */
+        unsigned pitch = (unsigned)gdi_bitmap_pitch(bm->s.width, 1);
+        DWORD plane_size = pitch * (unsigned)bm->s.height;
+        if (count > 4 * plane_size)
+            count = 4 * plane_size;
+        uint8_t index[16];
+        for (unsigned i = 0; i < 16; i++)
+            index[i] = nearest_index(dib16[swap_vga_red_blue(i)]);
+        const uint8_t *src = bits;
+        for (unsigned y = 0; y < (unsigned)bm->s.height; y++) {
+            uint8_t *row = bm->s.bits + y * (unsigned)bm->s.pitch;
+            for (unsigned x = 0; x < (unsigned)bm->s.width; x++) {
+                DWORD at = y * pitch + x / 8;
+                unsigned mask = 0x80u >> (x & 7);
+                unsigned color = 0, supplied = 0;
+                for (unsigned plane = 0; plane < 4 && at < count; plane++, at += plane_size) {
+                    if (src[at] & mask)
+                        color |= 1u << plane;
+                    supplied |= 1u << plane;
+                }
+                if (!supplied)
+                    continue;
+                if (supplied != 15) {
+                    unsigned old = (unsigned)nearest_of(dib16, 16, index_color(&bm->s, row[x]));
+                    color |= swap_vga_red_blue(old) & ~supplied;
+                }
+                row[x] = index[color];
+            }
+        }
+        return (LONG)count;
+    }
     DWORD size = (DWORD)bm->s.pitch * (DWORD)bm->s.height;
     if (count > size)
         count = size;
@@ -711,6 +760,33 @@ LONG WINAPI GetBitmapBits(HBITMAP hb, LONG count, LPVOID bits)
     wbitmap *bm = (wbitmap *)win_handle_get(hb, WOBJ_BITMAP);
     if (!bm || !bits || count <= 0)
         return 0;
+    if (bm->planar4) {
+        unsigned pitch = (unsigned)gdi_bitmap_pitch(bm->s.width, 1);
+        DWORD plane_size = pitch * (unsigned)bm->s.height;
+        if ((DWORD)count > 4 * plane_size)
+            count = (LONG)(4 * plane_size);
+        uint8_t colors[256];
+        memset(colors, 0xff, sizeof(colors));
+        uint8_t *dst = bits;
+        memset(dst, 0, (size_t)count);
+        for (unsigned y = 0; y < (unsigned)bm->s.height; y++) {
+            const uint8_t *row = bm->s.bits + y * (unsigned)bm->s.pitch;
+            for (unsigned x = 0; x < (unsigned)bm->s.width; x++) {
+                unsigned color = colors[row[x]];
+                if (color == 0xff) {
+                    color = (unsigned)nearest_of(dib16, 16, index_color(&bm->s, row[x]));
+                    color = swap_vga_red_blue(color);
+                    colors[row[x]] = (uint8_t)color;
+                }
+                DWORD at = y * pitch + x / 8;
+                unsigned mask = 0x80u >> (x & 7);
+                for (unsigned plane = 0; plane < 4 && at < (DWORD)count; plane++, at += plane_size)
+                    if (color & (1u << plane))
+                        dst[at] |= (uint8_t)mask;
+            }
+        }
+        return count;
+    }
     LONG size = (LONG)bm->s.pitch * bm->s.height;
     if (count > size)
         count = size;
@@ -1217,7 +1293,7 @@ int WINAPI GetDeviceCaps(HDC h, int index)
     const wsurf *s = dc ? dc->surf : &win_sys.screen;
     /* the screen of a 16-colour display (VGA): as Windows' VGA.DRV has it,
      * 4 planes of 1 bit, no palette (the 8 bpp copy is WINN's own) */
-    int planes4 = dc && dc->is_screen && s->bpp == 8 && GetDisplayDriverInfoN(NULL, 0) <= 16;
+    int planes4 = screen_planar4(dc);
     int pv;
     if (dc && dc->prn && print_caps(dc, index, &pv))
         return pv;
@@ -1357,7 +1433,9 @@ int WINAPI GetObject(HGDIOBJ obj, int size, LPVOID buf)
     }
     case WOBJ_BITMAP: {
         wbitmap *bm = (wbitmap *)o;
-        BITMAP b = { 0, bm->s.width, bm->s.height, bm->s.pitch, 1, (BYTE)bm->s.bpp, NULL };
+        BITMAP b = { 0, bm->s.width, bm->s.height,
+                     bm->planar4 ? gdi_bitmap_pitch(bm->s.width, 1) : bm->s.pitch,
+                     bm->planar4 ? 4 : 1, bm->planar4 ? 1 : (BYTE)bm->s.bpp, NULL };
         if (size > (int)sizeof(b)) size = (int)sizeof(b);
         if (buf) memcpy(buf, &b, (size_t)size);
         return size;

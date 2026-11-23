@@ -1975,8 +1975,11 @@ static __attribute__((noinline)) int bitmap_service(args *a, uint16_t service, u
         if (a->bad || wd <= 0 || ht <= 0 || wd > 4096 || ht > 4096)
             return 1;
         int depth = planes * bpp;
-        uint32_t size = (uint32_t)gdi_bitmap_pitch(wd, depth == 1 ? 1 : 8) * (uint32_t)ht;
-        uint8_t *buf = bits && (depth == 1 || depth == 8) && size <= 0x10000u ?
+        BOOL planar = planes == 4 && bpp == 1;
+        uint32_t size = (uint32_t)gdi_bitmap_pitch(wd, depth == 1 || planar ? 1 : 8) * (uint32_t)ht;
+        if (planar)
+            size *= 4;
+        uint8_t *buf = bits && (depth == 1 || depth == 8 || planar) && size <= 0x10000u ?
                        (uint8_t *)win_alloc(size) : NULL;
         if (buf && !rd(a, bits, buf, size)) {
             win_free(buf);

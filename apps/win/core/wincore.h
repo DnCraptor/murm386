@@ -161,6 +161,7 @@ typedef struct wfont {
 
 typedef struct wbitmap {
     wsurf    s;
+    int      planar4;       /* four one-bit DDB planes, expanded in s */
     int      selected;      /* selected into a memory DC */
     int      dim_x, dim_y;  /* SetBitmapDimension's (0.1 mm) */
 } wbitmap;
