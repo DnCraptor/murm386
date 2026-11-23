@@ -26,7 +26,6 @@ static __time_critical_func() uint32_t fetch32(void) {
 
 static __time_critical_func() uint32_t readrm32(uint8_t rmval) {
     if (mode < 3) {
-        getea(rmval);
         return mem_read32(ea);
     }
     return dwordregs[rmval];
@@ -34,7 +33,6 @@ static __time_critical_func() uint32_t readrm32(uint8_t rmval) {
 
 static __time_critical_func() void writerm32(uint8_t rmval, uint32_t value) {
     if (mode < 3) {
-        getea(rmval);
         mem_write32(ea, value);
     } else {
         dwordregs[rmval] = value;
@@ -639,7 +637,12 @@ static __time_critical_func() bool exec386(uint8_t opcode) {
                 cpu_fault(6);
                 return true;
             }
-            writerm32(rm, pop32());
+            /* POP r/m can use the updated ESP as its address base. */
+            {
+                const uint32_t popped = pop32();
+                if (mode < 3) getea(rm);
+                writerm32(rm, popped);
+            }
             return true;
         case 0x91: case 0x92: case 0x93: case 0x94: case 0x95: case 0x96: case 0x97: {
             const uint32_t value = dwordregs[regax];

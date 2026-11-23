@@ -217,6 +217,7 @@ static __time_critical_func() void modregrm() {
     rm = addrbyte & 7;
     if (unlikely(addrsize32)) {
         modregrm32();
+        if (mode != 3) getea32(rm);
         return;
     }
     switch (mode) {
@@ -247,7 +248,23 @@ static __time_critical_func() void modregrm() {
             break;
         default:
             disp16 = 0;
+            return; /* mod=3: register operand, no EA */
     }
+
+    /* For memory operands, fuse EA calculation into ModR/M decoding.
+     * This avoids a separate getea() call for most 16-bit instructions. */
+    uint32_t offset = disp16;
+    switch (rm) {
+        case 0: offset += XRIP_BX + XRIP_SI; break;
+        case 1: offset += XRIP_BX + XRIP_DI; break;
+        case 2: offset += XRIP_BP + XRIP_SI; break;
+        case 3: offset += XRIP_BP + XRIP_DI; break;
+        case 4: offset += XRIP_SI; break;
+        case 5: offset += XRIP_DI; break;
+        case 6: if (mode != 0) offset += XRIP_BP; break;
+        case 7: offset += XRIP_BX; break;
+    }
+    ea = (offset & 0xFFFFu) + useseg;
 }
 
 static __time_critical_func() void getea(uint8_t rmval) {
@@ -338,7 +355,6 @@ static __time_critical_func() INLINE void jump_relative(int32_t displacement) {
 
 static __time_critical_func() INLINE uint16_t readrm16(uint8_t rmval) {
     if (mode < 3) {
-        getea(rmval);
         return mem_read16(ea);
     }
     return getreg16(rmval);
@@ -346,7 +362,6 @@ static __time_critical_func() INLINE uint16_t readrm16(uint8_t rmval) {
 
 static __time_critical_func() INLINE uint8_t readrm8(uint8_t rmval) {
     if (mode < 3) {
-        getea(rmval);
         return mem_read8(ea);
     }
     return getreg8(rmval);
@@ -354,7 +369,6 @@ static __time_critical_func() INLINE uint8_t readrm8(uint8_t rmval) {
 
 static __time_critical_func() INLINE void writerm16(uint8_t rmval, uint16_t value) {
     if (mode < 3) {
-        getea(rmval);
         mem_write16(ea, value);
     } else {
         putreg16(rmval, value);
@@ -363,7 +377,6 @@ static __time_critical_func() INLINE void writerm16(uint8_t rmval, uint16_t valu
 
 static __time_critical_func() INLINE void writerm8(uint8_t rmval, uint8_t value) {
     if (mode < 3) {
-        getea(rmval);
         mem_write8(ea, value);
     } else {
         putreg8(rmval, value);
@@ -1925,8 +1938,13 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                     break;
                 }
 
-                writerm16(rm, pop()
-                );
+                /* With 32-bit addressing, POP [ESP+disp] uses ESP after
+                 * the pop. Re-evaluate just this exceptional EA. */
+                {
+                    const uint16_t popped = pop();
+                    if (mode < 3) getea(rm);
+                    writerm16(rm, popped);
+                }
                 break;
 
             case 0x90: /* 90 NOP */

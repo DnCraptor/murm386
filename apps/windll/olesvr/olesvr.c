@@ -304,10 +304,29 @@ static OLESTATUS register_doc(LHSERVER server, LPCSTR name, LPOLESERVERDOC nativ
     return OLE_ERROR_MEMORY;
 }
 
+static void source_ready(LHSERVERDOC doc)
+{
+    int i = doc_of(doc);
+    int s = i >= 0 ? server_of(docs[i].server) : -1;
+    if (s < 0)
+        return;
+    HMODULE module = GetModuleHandle("OLECLI");
+    if (module) {
+        typedef void (WINAPI *source_ready_fn)(LPCSTR, LPCSTR);
+        source_ready_fn ready = (source_ready_fn)(void (*)(void))
+            GetProcAddress(module, "WinnOleSourceReady");
+        if (ready)
+            ready(servers[s].cls, docs[i].name);
+    }
+}
+
 static OLESTATUS WINAPI OleRegisterServerDoc(LHSERVER server, LPCSTR name,
                                               LPOLESERVERDOC doc, LHSERVERDOC *out)
 {
-    return register_doc(server, name, doc, 0, out);
+    OLESTATUS status = register_doc(server, name, doc, 0, out);
+    if (status == OLE_OK)
+        source_ready(*out);
+    return status;
 }
 
 enum {
@@ -463,6 +482,7 @@ static OLESTATUS WINAPI OleRenameServerDoc(LHSERVERDOC doc, LPCSTR name)
     if (strlen(name) >= sizeof(docs[i].name))
         return OLE_ERROR_NAME;
     lstrcpyn(docs[i].name, name, sizeof(docs[i].name));
+    source_ready(doc);
     return OLE_OK;
 }
 
@@ -1496,7 +1516,8 @@ static int ne_call(win_dll_call *c, uint16_t ordinal, uint32_t *v)
         if (*v == OLE_OK && !put32(c, out, (uint32_t)handle)) {
             memset(&docs[doc_of(handle)], 0, sizeof(docs[0]));
             *v = OLE_ERROR_ADDRESS;
-        }
+        } else if (*v == OLE_OK)
+            source_ready(handle);
         break;
     }
     case 7:

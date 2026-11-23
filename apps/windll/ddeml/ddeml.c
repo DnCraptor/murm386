@@ -683,7 +683,7 @@ static CONVCONTEXT connect_context(const CONVCONTEXT *cc)
     return ctx;
 }
 
-static HCONV WINAPI DdeConnect(DWORD id, HSZ service, HSZ topic, PCONVCONTEXT cc)
+static HCONV connect_task(DWORD id, HSZ service, HSZ topic, PCONVCONTEXT cc, HTASK task)
 {
     instance *in = inst_of(id);
     if (!in || in->closing)
@@ -692,7 +692,7 @@ static HCONV WINAPI DdeConnect(DWORD id, HSZ service, HSZ topic, PCONVCONTEXT cc
     CONVCONTEXT ctx = connect_context(cc);
     DWORD client = in->generation;
     for (int s = 0; s < INSTS; s++) {
-        if (!can_connect(inst, s, service))
+        if ((task && insts[s].task != task) || !can_connect(inst, s, service))
             continue;
         HSZ name = service ? service : first_service(&insts[s]);
         DWORD server = insts[s].generation;
@@ -704,6 +704,16 @@ static HCONV WINAPI DdeConnect(DWORD id, HSZ service, HSZ topic, PCONVCONTEXT cc
     }
     in->error = DMLERR_NO_CONV_ESTABLISHED;
     return 0;
+}
+
+static HCONV WINAPI DdeConnect(DWORD id, HSZ service, HSZ topic, PCONVCONTEXT cc)
+{
+    return connect_task(id, service, topic, cc, 0);
+}
+
+static HCONV WINAPI WinnDdeConnectTask(DWORD id, HSZ service, HSZ topic, HTASK task)
+{
+    return task ? connect_task(id, service, topic, NULL, task) : 0;
 }
 
 static void drop_pending(pending *p)
@@ -1871,6 +1881,7 @@ static const win_dll_export exports[] = {
     { 36, 8, "DdeCmpStringHandles", (const void *)DdeCmpStringHandles },
     { 37, 4, "DdeReconnect", (const void *)DdeReconnect },
     { 0x7ff0, 4, "WinnDdeUninitializeQuiet", (const void *)WinnDdeUninitializeQuiet },
+    { 0x7ff1, 16, "WinnDdeConnectTask", (const void *)WinnDdeConnectTask },
 };
 
 static const win_dll_info info = {

@@ -20,6 +20,8 @@
 static struct {
     uint16_t task;                  /* 0: free */
     unsigned creating;
+    HWND link_window;
+    BOOL link_notice;
     char name[128];
 } docs[DOCS];
 
@@ -28,6 +30,14 @@ static int doc_of(LHCLIENTDOC h)
     unsigned long i = (unsigned long)h - DOC_HANDLE - 1;
     return (unsigned long)h > DOC_HANDLE && i < DOCS &&
            docs[i].task && docs[i].task == (uint16_t)GetCurrentTask() ? (int)i : -1;
+}
+
+static void release_client_doc(int i)
+{
+    HWND window = docs[i].link_window;
+    memset(&docs[i], 0, sizeof(docs[i]));
+    if (window)
+        DestroyWindow(window);
 }
 
 static OLESTATUS WINAPI OleRegisterClientDoc(LPCSTR cls, LPCSTR doc, LONG reserved,
@@ -98,7 +108,7 @@ struct WINN_OLEOBJECT {
     ole_requested_data *requested;
     SIZE pixels;
     LONG width, height;              /* positive HIMETRIC extents */
-    BOOL writing;
+    BOOL writing, reconnect_pending;
     ole_session *session;
     LPOLECLIENT client;
     uint32_t guest_client;
@@ -1164,7 +1174,7 @@ static OLESTATUS WINAPI OleRevokeClientDoc(LHCLIENTDOC h)
     for (int j = 0; j < OBJECTS; j++)
         if (objects[j].doc == h)
             return OLE_ERROR_NOT_EMPTY;
-    docs[i].task = 0;
+    release_client_doc(i);
     return OLE_OK;
 }
 
@@ -1403,6 +1413,8 @@ static OLESTATUS create_clip_object(LPCSTR protocol, LHCLIENTDOC doc, LPCSTR nam
     return finish_stream_object(type, out, head, used);
 }
 
+typedef HCONV (WINAPI *dde_connect_task_fn)(DWORD, HSZ, HSZ, HTASK);
+
 /* DDE library bindings and the instance owned by a client conversation. */
 typedef struct {
     HINSTANCE dll;
@@ -1412,6 +1424,7 @@ typedef struct {
     DDECREATESTRINGHANDLE string;
     DDEFREESTRINGHANDLE free_string;
     DDECONNECT connect;
+    dde_connect_task_fn connect_task;
     DDEQUERYCONVINFO conv_info;
     DDEDISCONNECT disconnect;
     DDECLIENTTRANSACTION transaction;
@@ -1527,6 +1540,8 @@ static BOOL ole_dde_begin(ole_dde *dde)
 #undef DDE_BIND
     dde->uninit_quiet = (DDEUNINITIALIZE)(void (*)(void))
         GetProcAddress(dde->dll, "WinnDdeUninitializeQuiet");
+    dde->connect_task = (dde_connect_task_fn)(void (*)(void))
+        GetProcAddress(dde->dll, "WinnDdeConnectTask");
     dde->timed_out = FALSE;
     dde->inst = 0;                      /* a new DDEML instance */
     if (!init(&dde->inst, ole_dde_callback, APPCMD_CLIENTONLY | CBF_SKIP_ALLNOTIFICATIONS, 0))
@@ -1536,20 +1551,26 @@ failed:
     return FALSE;
 }
 
-static HCONV ole_connect(const ole_dde *dde, HSZ service, LPCSTR topic)
+static HCONV ole_connect_task(const ole_dde *dde, HSZ service, LPCSTR topic, HTASK task)
 {
     HSZ name = dde->string(dde->inst, topic, CP_WINANSI);
     if (!name)
         return 0;
-    HCONV conv = dde->connect(dde->inst, service, name, NULL);
+    HCONV conv = task && dde->connect_task ? dde->connect_task(dde->inst, service, name, task) :
+                                            dde->connect(dde->inst, service, name, NULL);
     dde->free_string(dde->inst, name);
     return conv;
 }
 
-static HCONV ole_connect_system(const ole_dde *dde, HSZ service)
+static HCONV ole_connect(const ole_dde *dde, HSZ service, LPCSTR topic)
 {
-    HCONV conv = ole_connect(dde, service, "OLESystem");
-    return conv ? conv : ole_connect(dde, service, "System");
+    return ole_connect_task(dde, service, topic, 0);
+}
+
+static HCONV ole_connect_system(const ole_dde *dde, HSZ service, HTASK task)
+{
+    HCONV conv = ole_connect_task(dde, service, "OLESystem", task);
+    return conv ? conv : ole_connect_task(dde, service, "System", task);
 }
 
 static HWND ole_peer_window(const ole_dde *dde, HCONV conv)
@@ -1582,13 +1603,9 @@ static void subscribe_document_notices(const ole_dde *dde, HCONV conv, BOOL link
     }
 }
 
-static OLESTATUS ole_start_server(const ole_dde *dde, HSZ service, LPCSTR cls, HCONV *out,
-                                  UINT *started, UINT show)
+static OLESTATUS ole_launch_server(const ole_dde *dde, HSZ service, LPCSTR cls, HCONV *out,
+                                   UINT *started, UINT show, BOOL exclusive)
 {
-    *out = ole_connect_system(dde, service);
-    if (*out)
-        return OLE_OK;
-
     char key[128], command[512 + sizeof(" /Embedding")];
     wsprintf(key, "%s\\protocol\\StdFileEditing\\server", cls);
     if (!WinRegQueryClassStringN(key, command, 512) || !command[0])
@@ -1615,12 +1632,19 @@ static OLESTATUS ole_start_server(const ole_dde *dde, HSZ service, LPCSTR cls, H
 
     DWORD start = GetTickCount();
     do {
-        *out = ole_connect_system(dde, service);
+        *out = ole_connect_system(dde, service, exclusive ? (HTASK)task : 0);
         if (*out)
             return OLE_OK;
     } while (GetTickCount() - start < 2000 && Yield());
     ole_debug_status("system conversation", task, dde->last_error(dde->inst));
     return OLE_ERROR_COMM;
+}
+
+static OLESTATUS ole_start_server(const ole_dde *dde, HSZ service, LPCSTR cls, HCONV *out,
+                                 UINT *started, UINT show)
+{
+    *out = ole_connect_system(dde, service, 0);
+    return *out ? OLE_OK : ole_launch_server(dde, service, cls, out, started, show, FALSE);
 }
 
 static OLESTATUS ole_transaction_error(ole_dde *dde, DWORD flags, OLESTATUS rejected)
@@ -2119,7 +2143,7 @@ static OLESTATUS set_data_status(OLEOBJECT *o, OLECLIPFORMAT format)
         return OLE_ERROR_NOT_OPEN;
     if (o->type != OT_LINK)
         return OLE_ERROR_NOT_LINK;
-    return (o->writing || o->session) ? OLE_BUSY : OLE_OK;
+    return o->writing ? OLE_BUSY : OLE_OK;
 }
 
 /* Locate the update hint after the length-prefixed network name and
@@ -2197,6 +2221,18 @@ static void invalidate_identity(OLEOBJECT *o)
     }
 }
 
+static void link_source_changed(OLEOBJECT *o)
+{
+    /* The old conversation still names the old source even though the
+     * stream header has changed. Leave the source editor running. */
+    o->writing = TRUE;
+    o->reconnect_pending = FALSE;
+    disconnect_session(o);
+    invalidate_identity(o);
+    o->writing = FALSE;
+    follow_open_link(o);
+}
+
 static OLESTATUS WINAPI OleSetData(LPOLEOBJECT object, OLECLIPFORMAT format, HANDLE data)
 {
     OLEOBJECT *o = object_of(object);
@@ -2209,7 +2245,7 @@ static OLESTATUS WINAPI OleSetData(LPOLEOBJECT object, OLECLIPFORMAT format, HAN
     status = replace_link_source(o, bytes, GlobalSize(data));
     GlobalUnlock(data);
     if (status == OLE_OK)
-        invalidate_identity(o);
+        link_source_changed(o);
     return status;
 }
 
@@ -2498,6 +2534,7 @@ static OLESTATUS connect_object(OLEOBJECT *o, ole_connect_mode mode, BOOL show)
     HCONV sys = 0;
     BOOL created = FALSE;
     UINT started = 0;
+    HTASK source_task = 0;
     HWND server;
     BOOL owns_server;
     char command[300];
@@ -2535,10 +2572,22 @@ static OLESTATUS connect_object(OLEOBJECT *o, ole_connect_mode mode, BOOL show)
 
     wsprintf(command, link ? "[StdOpenDocument(\"%s\")]" : "[StdEditDocument(\"%s\")]", topic);
     status = ole_execute(dde, sys, command, link ? OLE_ERROR_OPEN : OLE_ERROR_EDIT);
+    if (link && mode == CONNECT_SNAPSHOT && status == OLE_ERROR_OPEN && !started &&
+        dde->connect_task) {
+        /* Some editors can serve their open document but reject opening
+         * another one. Read the linked file in a separate instance. */
+        dde->disconnect(sys);
+        sys = 0;
+        status = ole_launch_server(dde, service, cls, &sys, &started, SW_HIDE, TRUE);
+        if (status == OLE_OK) {
+            source_task = (HTASK)started;
+            status = ole_execute(dde, sys, command, OLE_ERROR_OPEN);
+        }
+    }
     if (status != OLE_OK)
         goto done;
     created = TRUE;
-    s->conv = ole_connect(dde, service, topic);
+    s->conv = ole_connect_task(dde, service, topic, source_task);
     status = !s->conv ? OLE_ERROR_COMM : link ? OLE_OK : poke_native(o, s);
 done:
     server = mode == CONNECT_SNAPSHOT && sys ? ole_peer_window(dde, sys) : 0;
@@ -2668,13 +2717,83 @@ static OLESTATUS WINAPI OleReconnect(LPOLEOBJECT object)
     return status;
 }
 
+static const char link_window_class[] = "WinnOleLink";
+static ATOM link_class;
+
+static LRESULT CALLBACK link_window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
+{
+    if (message != WM_TIMER)
+        return DefWindowProc(window, message, wparam, lparam);
+    LHCLIENTDOC doc = (LHCLIENTDOC)(DOC_HANDLE + wparam);
+    int d = doc_of(doc);
+    if (d < 0 || docs[d].link_window != window)
+        return 0;
+    KillTimer(window, (UINT)wparam);
+    docs[d].link_notice = FALSE;
+    BOOL retry = FALSE;
+    for (int i = 0; i < OBJECTS; i++) {
+        OLEOBJECT *o = &objects[i];
+        if (o->doc != doc || !o->reconnect_pending)
+            continue;
+        if (o->writing) {
+            retry = TRUE;
+            continue;
+        }
+        o->reconnect_pending = FALSE;
+        follow_open_link(o);
+    }
+    if (retry && docs[d].link_window == window && !docs[d].link_notice)
+        docs[d].link_notice = SetTimer(window, (UINT)wparam, 50, NULL) != 0;
+    return 0;
+}
+
+static void WINAPI WinnOleSourceReady(LPCSTR service, LPCSTR topic)
+{
+    /* OLESVR calls this on the source task. Run the DDE connect later,
+     * on the client task, after registration has returned to the editor. */
+    for (int i = 0; i < OBJECTS; i++) {
+        OLEOBJECT *o = &objects[i];
+        if (!o->doc || o->type != OT_LINK)
+            continue;
+        int d = (unsigned long)o->doc - DOC_HANDLE - 1;
+        HWND window = docs[d].link_window;
+        if (!window)
+            continue;
+        const uint8_t *head = GlobalLock(o->stream_head), *tail;
+        ole_clip_string fields[3];
+        DWORD remaining;
+        BOOL matches = head && stream_triplet(head, o->head_bytes, fields, &tail, &remaining) &&
+                       fields[0].size && fields[1].size &&
+                       !lstrcmpi((LPCSTR)fields[0].text, service) &&
+                       !lstrcmpi((LPCSTR)fields[1].text, topic);
+        if (head)
+            GlobalUnlock(o->stream_head);
+        if (matches) {
+            if (!docs[d].link_notice)
+                docs[d].link_notice = SetTimer(window, (UINT)(d + 1), 10, NULL) != 0;
+            o->reconnect_pending = docs[d].link_notice;
+        }
+    }
+}
+
 static void follow_open_link(OLEOBJECT *o)
 {
     /* Observing a link must not open the source or replace the cached picture. */
     OLEOPT_UPDATE option;
-    if (o->type == OT_LINK && OleGetLinkUpdateOptions(o, &option) == OLE_OK &&
-        option != oleupdate_oncall)
-        OleReconnect(o);
+    if (o->type != OT_LINK || OleGetLinkUpdateOptions(o, &option) != OLE_OK ||
+        option == oleupdate_oncall)
+        return;
+    int d = doc_of(o->doc);
+    if (!docs[d].link_window) {
+        if (!link_class) {
+            WNDCLASS wc = { .lpfnWndProc = link_window_proc, .lpszClassName = link_window_class };
+            link_class = RegisterClass(&wc);
+        }
+        if (link_class)
+            docs[d].link_window = CreateWindow(link_window_class, "", WS_POPUP,
+                                               0, 0, 0, 0, 0, 0, 0, NULL);
+    }
+    OleReconnect(o);
 }
 
 static OLESTATUS WINAPI OleActivate(LPOLEOBJECT object, UINT verb, BOOL show, BOOL focus,
@@ -3195,7 +3314,9 @@ static const struct {
 
 #define NFUNCS (sizeof(funcs) / sizeof(funcs[0]))
 
-static win_dll_export exports[NFUNCS];
+static win_dll_export exports[NFUNCS + 1] = {
+    [NFUNCS] = { 0x7ff0, 8, "WinnOleSourceReady", (const void *)WinnOleSourceReady },
+};
 
 static int g_str(win_dll_call *c, uint32_t far, char *dst, uint32_t cap)
 {
@@ -3383,7 +3504,7 @@ static OLESTATUS guest_set_data(win_dll_call *c, LPOLEOBJECT o, WORD format, WOR
     if (copy)
         GlobalFree(copy);
     if (status == OLE_OK)
-        invalidate_identity(o);
+        link_source_changed(o);
     return status;
 }
 
@@ -3802,7 +3923,7 @@ static void task_end(uint16_t task)
             for (int j = 0; j < OBJECTS; j++)
                 if (objects[j].doc == h)
                     free_picture(&objects[j], task);
-            docs[i].task = 0;
+            release_client_doc(i);
         }
 }
 
@@ -3811,11 +3932,14 @@ static void term(void)
     for (int i = 0; i < DOCS; i++)
         if (docs[i].task)
             task_end(docs[i].task);
+    if (link_class)
+        UnregisterClass(link_window_class, 0);
+    link_class = 0;
 }
 
 static win_dll_info info = {
     WINDLL_VERSION, sizeof(win_dll_info), "OLECLI",
-    exports, NFUNCS, ne_call, task_end, term, NULL,
+    exports, sizeof(exports) / sizeof(exports[0]), ne_call, task_end, term, NULL,
 };
 
 const win_dll_info *WinDllInit(void)
