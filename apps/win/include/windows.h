@@ -985,8 +985,9 @@ void    WINAPI MakeObjectPrivate(HGDIOBJ obj, BOOL priv);
 int     WINAPI Death(HDC hdc);
 int     WINAPI Resurrection(HDC hdc, WORD w1, WORD w2, WORD w3, WORD w4, WORD w5, WORD w6);
 /* a printer port's environment: WINN has no printers */
-int     WINAPI GetEnvironment(LPCSTR port, LPSTR env, UINT size);
-int     WINAPI SetEnvironment(LPCSTR port, LPCSTR env, UINT size);
+/* a port's environment (a printer's DEVMODE, its driver's): bytes copied */
+int     WINAPI GetEnvironment(LPCSTR port, LPVOID env, UINT size);
+int     WINAPI SetEnvironment(LPCSTR port, LPCVOID env, UINT size);
 /* the pens or brushes (OBJ_PEN, OBJ_BRUSH) the device has, a LOGPEN or a
  * LOGBRUSH each, to proc until it returns 0 */
 typedef int (CALLBACK *GOBJENUMPROC)(void *obj, LPARAM lp);
@@ -1058,6 +1059,7 @@ HTASK   WINAPI IsTaskLocked(void);
 HANDLE  WINAPI GetTaskQueue(HTASK task);
 HANDLE  WINAPI SetTaskQueue(HTASK task, HANDLE queue);
 void    WINAPI PostEvent(HTASK task);
+BOOL    WINAPI WaitEvent(HTASK task);
 BOOL    WINAPI IsWinOldApTask(HTASK task);
 BOOL    WINAPI DefineHandleTable(WORD offset);
 void    WINAPI ValidateCodeSegments(void);
@@ -1136,6 +1138,7 @@ int     WINAPI StartPage(HDC hdc);
 int     WINAPI EndPage(HDC hdc);
 int     WINAPI AbortDoc(HDC hdc);
 int     WINAPI SetAbortProc(HDC hdc, ABORTPROC proc);
+BOOL    WINAPI QueryAbort(HDC hdc, int reserved);
 /* A printer's settings (Windows 3.1's DEVMODE, as a Win16 program's: 68
  * bytes): the paper and the orientation; the copies (GDI gives the driver
  * each page as many times) */
@@ -1224,7 +1227,7 @@ int     WINAPI StartSpoolPage(HANDLE job);
 int     WINAPI EndSpoolPage(HANDLE job);
 int     WINAPI CloseJob(HANDLE job);
 int     WINAPI DeleteJob(HANDLE job, int flags);
-int     WINAPI WriteSpool(HANDLE job, LPCSTR data, int cb);
+int     WINAPI WriteSpool(HANDLE job, LPCVOID data, int cb);
 int     WINAPI WriteDialog(HANDLE job, LPCSTR text, int cb);
 int     WINAPI DeleteSpoolPage(HANDLE job);
 LONG    WINAPI GetSpoolJob(int option, LONG param);

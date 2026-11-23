@@ -262,6 +262,23 @@ Yield:
     .ltorg
     .size Yield, .-Yield
 
+    .section .text.winapi.WaitEvent,"ax",%progbits
+    .global WaitEvent
+    .type WaitEvent, %function
+    .thumb_func
+WaitEvent:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #0]
+    ldr  r1, =120
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size WaitEvent, .-WaitEvent
+
     .section .text.winapi.PostEvent,"ax",%progbits
     .global PostEvent
     .type PostEvent, %function
@@ -3661,6 +3678,23 @@ GetNearestColor:
     bx   r12
     .ltorg
     .size GetNearestColor, .-GetNearestColor
+
+    .section .text.winapi.QueryAbort,"ax",%progbits
+    .global QueryAbort
+    .type QueryAbort, %function
+    .thumb_func
+QueryAbort:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #4]
+    ldr  r1, =620
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size QueryAbort, .-QueryAbort
 
     .section .text.winapi.CreateDiscardableBitmap,"ax",%progbits
     .global CreateDiscardableBitmap
@@ -8796,6 +8830,278 @@ TileChildWindows:
     .ltorg
     .size TileChildWindows, .-TileChildWindows
 
+    .section .text.winapi.OpenComm,"ax",%progbits
+    .global OpenComm
+    .type OpenComm, %function
+    .thumb_func
+OpenComm:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =800
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size OpenComm, .-OpenComm
+
+    .section .text.winapi.SetCommState,"ax",%progbits
+    .global SetCommState
+    .type SetCommState, %function
+    .thumb_func
+SetCommState:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =804
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SetCommState, .-SetCommState
+
+    .section .text.winapi.GetCommState,"ax",%progbits
+    .global GetCommState
+    .type GetCommState, %function
+    .thumb_func
+GetCommState:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =808
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetCommState, .-GetCommState
+
+    .section .text.winapi.GetCommError,"ax",%progbits
+    .global GetCommError
+    .type GetCommError, %function
+    .thumb_func
+GetCommError:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =812
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetCommError, .-GetCommError
+
+    .section .text.winapi.ReadComm,"ax",%progbits
+    .global ReadComm
+    .type ReadComm, %function
+    .thumb_func
+ReadComm:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =816
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size ReadComm, .-ReadComm
+
+    .section .text.winapi.WriteComm,"ax",%progbits
+    .global WriteComm
+    .type WriteComm, %function
+    .thumb_func
+WriteComm:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =820
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size WriteComm, .-WriteComm
+
+    .section .text.winapi.TransmitCommChar,"ax",%progbits
+    .global TransmitCommChar
+    .type TransmitCommChar, %function
+    .thumb_func
+TransmitCommChar:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =824
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size TransmitCommChar, .-TransmitCommChar
+
+    .section .text.winapi.CloseComm,"ax",%progbits
+    .global CloseComm
+    .type CloseComm, %function
+    .thumb_func
+CloseComm:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =828
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size CloseComm, .-CloseComm
+
+    .section .text.winapi.SetCommEventMask,"ax",%progbits
+    .global SetCommEventMask
+    .type SetCommEventMask, %function
+    .thumb_func
+SetCommEventMask:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =832
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SetCommEventMask, .-SetCommEventMask
+
+    .section .text.winapi.GetCommEventMask,"ax",%progbits
+    .global GetCommEventMask
+    .type GetCommEventMask, %function
+    .thumb_func
+GetCommEventMask:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =836
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size GetCommEventMask, .-GetCommEventMask
+
+    .section .text.winapi.SetCommBreak,"ax",%progbits
+    .global SetCommBreak
+    .type SetCommBreak, %function
+    .thumb_func
+SetCommBreak:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =840
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size SetCommBreak, .-SetCommBreak
+
+    .section .text.winapi.ClearCommBreak,"ax",%progbits
+    .global ClearCommBreak
+    .type ClearCommBreak, %function
+    .thumb_func
+ClearCommBreak:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =844
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size ClearCommBreak, .-ClearCommBreak
+
+    .section .text.winapi.UngetCommChar,"ax",%progbits
+    .global UngetCommChar
+    .type UngetCommChar, %function
+    .thumb_func
+UngetCommChar:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =848
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size UngetCommChar, .-UngetCommChar
+
+    .section .text.winapi.BuildCommDCB,"ax",%progbits
+    .global BuildCommDCB
+    .type BuildCommDCB, %function
+    .thumb_func
+BuildCommDCB:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =852
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size BuildCommDCB, .-BuildCommDCB
+
+    .section .text.winapi.EscapeCommFunction,"ax",%progbits
+    .global EscapeCommFunction
+    .type EscapeCommFunction, %function
+    .thumb_func
+EscapeCommFunction:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =856
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size EscapeCommFunction, .-EscapeCommFunction
+
+    .section .text.winapi.FlushComm,"ax",%progbits
+    .global FlushComm
+    .type FlushComm, %function
+    .thumb_func
+FlushComm:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =860
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size FlushComm, .-FlushComm
+
     .section .text.winapi.LookupMenuHandle,"ax",%progbits
     .global LookupMenuHandle
     .type LookupMenuHandle, %function
@@ -9101,6 +9407,23 @@ EqualRect:
     bx   r12
     .ltorg
     .size EqualRect, .-EqualRect
+
+    .section .text.winapi.EnableCommNotification,"ax",%progbits
+    .global EnableCommNotification
+    .type EnableCommNotification, %function
+    .thumb_func
+EnableCommNotification:
+    push {r0, r1}
+    ldr  r0, =__win_api
+    ldr  r0, [r0]
+    ldr  r0, [r0, #8]
+    ldr  r1, =980
+    ldr  r0, [r0, r1]
+    mov  r12, r0
+    pop  {r0, r1}
+    bx   r12
+    .ltorg
+    .size EnableCommNotification, .-EnableCommNotification
 
     .section .text.winapi.ExitWindowsExec,"ax",%progbits
     .global ExitWindowsExec

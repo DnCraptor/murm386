@@ -24,6 +24,7 @@ typedef struct wprop {
 
 typedef struct wscroll {
     int min, max, pos;
+    UINT off;                    /* EnableScrollBar's: ESB_DISABLE_LTUP, _RTDN */
 } wscroll;
 
 typedef struct wwnd {
@@ -61,6 +62,7 @@ typedef struct wwnd {
 typedef struct wuser {
     wwnd    *desktop;
     wwnd    *active, *focus, *capture;
+    wwnd    *locked;             /* LockWindowUpdate's: it and its children not drawn */
     uint8_t  keys[256];          /* bit7 down, bit0 toggled */
     int      mouse_x, mouse_y;
     unsigned buttons;
@@ -106,6 +108,11 @@ void    user_bring_to_top(wwnd *w);
 wwnd   *user_root_owner(wwnd *w);
 wwnd   *user_enabled_popup(wwnd *w);
 void    user_switch_to(wwnd *w);
+/* comm.c: the serial ports polled (as input is), a task's closed */
+void    user_comm_poll(void);
+void    user_comm_task_ended(HTASK task);
+/* wnd.c: a system-modal window (SetSysModalWindow) keeps input from w */
+int     user_sysmodal_blocks(const wwnd *w);
 void    user_icon_slot(wwnd *w, RECT *r);     /* free place for w minimized */
 wwnd   *user_window_from_point(int x, int y, int *hit);
 void    user_set_window_rect(wwnd *w, const RECT *rc, UINT flags);

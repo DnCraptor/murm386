@@ -89,8 +89,52 @@ void pe_user_start(win_pe_ctx *ctx)
     ctx->user = u;
 }
 
+/* the printers' AbortProcs of the programs: the DC's, called on its task
+ * (EndPage, QueryAbort) as BOOL WINAPI (HDC, int) */
+#define PE_ABORTS 8
+
+static struct {
+    HDC dc;
+    win_pe_ctx *c;
+    uint32_t proc;
+} pe_aborts[PE_ABORTS];
+
+static BOOL CALLBACK pe_abortproc(HDC dc, int code)
+{
+    for (int i = 0; i < PE_ABORTS; i++)
+        if (pe_aborts[i].dc == dc && pe_aborts[i].proc) {
+            const uint32_t args[2] = { (uint32_t)(uintptr_t)dc, (uint32_t)code };
+            return win_pe_call(pe_aborts[i].c, pe_aborts[i].proc, args, 2, NULL, 0, NULL) != 0;
+        }
+    return TRUE;
+}
+
+static int pe_set_abort(win_pe_ctx *c, HDC dc, uint32_t proc)
+{
+    int slot = -1;
+    for (int i = 0; i < PE_ABORTS; i++) {
+        if (pe_aborts[i].dc == dc)
+            pe_aborts[i].dc = 0;
+        if (!pe_aborts[i].dc && slot < 0)
+            slot = i;
+    }
+    if (proc && slot < 0) {             /* full: the oldest goes */
+        memmove(&pe_aborts[0], &pe_aborts[1], sizeof(pe_aborts[0]) * (PE_ABORTS - 1));
+        slot = PE_ABORTS - 1;
+    }
+    if (proc) {
+        pe_aborts[slot].dc = dc;
+        pe_aborts[slot].c = c;
+        pe_aborts[slot].proc = proc;
+    }
+    return SetAbortProc(dc, proc ? pe_abortproc : NULL);
+}
+
 void pe_user_end(win_pe_ctx *ctx)
 {
+    for (int i = 0; i < PE_ABORTS; i++)
+        if (pe_aborts[i].c == ctx)
+            pe_aborts[i].dc = 0, pe_aborts[i].proc = 0;
     for (pe_user **p = &programs; *p; p = &(*p)->next)
         if (*p == ctx->user) {
             pe_user *u = *p;
@@ -2167,7 +2211,9 @@ static __attribute__((noinline)) int user_win32s(pe_args *a, pe_user *u, uint16_
         v = (uint32_t)t;
         break;
     }
-    case PEF_ExitWindowsEx: v = ExitWindows(0, 0); break;
+    case PEF_ExitWindowsEx:             /* EWX_REBOOT (2): the system started anew */
+        v = ExitWindows((pe_arg(a, 0) & 2u) ? EW_REBOOTSYSTEM : 0, 0);
+        break;
     case PEF_CascadeWindows:
     case PEF_TileWindows:
         if (service == PEF_CascadeWindows)
@@ -2254,8 +2300,27 @@ static __attribute__((noinline)) int user_win32s(pe_args *a, pe_user *u, uint16_
                                                  gm, n, buf, m) : 0xffffffffu;
         break;
     }
-    case PEF_ResetDCA: v = pe_arg(a, 0); break;
-    case PEF_SetAbortProc: v = 1; break;
+    case PEF_ResetDCA: {                /* DEVMODEA: Windows 3.1's 68 bytes first */
+        const DEVMODE *dm = pe_arg(a, 1) ? (const DEVMODE *)pe_buf(a, pe_arg(a, 1), 68) : NULL;
+        v = a->bad ? 0 : (uint32_t)(uintptr_t)ResetDC((HDC)pe_arg(a, 0), dm);
+        break;
+    }
+    case PEF_SetAbortProc:
+        v = (uint32_t)pe_set_abort(ctx, (HDC)pe_arg(a, 0), pe_arg(a, 1));
+        break;
+    case PEF_Escape: {                  /* (HDC, int, int, LPCSTR in, LPVOID out) */
+        HDC h = (HDC)pe_arg(a, 0);
+        int esc = (int)pe_arg(a, 1), n = (int)pe_arg(a, 2);
+        if (esc == SETABORTPROC) {      /* in: the procedure itself */
+            v = pe_set_abort(ctx, h, pe_arg(a, 3)) > 0;
+            break;
+        }
+        const char *in = pe_arg(a, 3) ? (const char *)pe_buf(a, pe_arg(a, 3), n > 0 ? (uint32_t)n : 1u)
+                                      : NULL;
+        void *out = pe_arg(a, 4) ? pe_buf(a, pe_arg(a, 4), 1) : NULL;
+        v = a->bad ? 0 : (uint32_t)Escape(h, esc, n, in, out);
+        break;
+    }
     case PEF_StartDocA: {
         const uint8_t *g = (const uint8_t *)pe_buf(a, pe_arg(a, 1), 12);
         DOCINFO di;

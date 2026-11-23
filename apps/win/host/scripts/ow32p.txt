@@ -1,0 +1,14 @@
+# Printing from a Win32 program (OW32P): SetAbortProc, Escape's
+# SETABORTPROC, ResetDC, the job spooled to LPT1: and despooled:
+#     ./winhost scripts/ow32p.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OW32P
+key RETURN
+wait 700
+snap p_result.ppm
+exit

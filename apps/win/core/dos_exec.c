@@ -248,6 +248,22 @@ static UINT execute(uint16_t seg)
     return 33;                         /* launched, independently of DOS ERRORLEVEL */
 }
 
+UINT win_dos_exec_ended(const char *path, const char *args)
+{
+    if (strlen(path) >= DOS_PATH_BYTES || strlen(args) > 125)
+        return 11;
+    dos_exec_block *b = dos_alloc_low(sizeof(*b));
+    if (!b)
+        return 8;
+    uint16_t seg = dos_ptr_segment(b);
+    prepare_exec(b, seg, path, args);
+    flush_keyboard();
+    UINT rc = execute(seg);
+    dos_free_low(b);
+    flush_keyboard();
+    return rc;
+}
+
 UINT win_dos_exec(const char *path, const char *args, BOOL use_exe_dir)
 {
     if (strlen(path) >= DOS_PATH_BYTES || strlen(args) > 125)

@@ -7,11 +7,22 @@
  * closes it. The page is the paper's printable part in the settings
  * (DEVMODE: the paper, the orientation, the copies; WIN.INI's, the
  * program's), ResetDC changes them between pages. Windows 3.0's escapes (STARTDOC, NEWFRAME, NEXTBAND, ENDDOC
- * ...) the same. No spooler: the output goes to the port as the program
- * prints.
+ * ...) the same.
  *
  * Ports: FILE: asks for a file's name (Windows' "Print To File"), LPTn:,
  * COMn: and PRN are DOS's devices, any other a file of that name.
+ *
+ * The spooler (WIN.INI [windows] Spooler=yes, Windows' default): a job for
+ * a device (LPT1: ...) goes to a file in TEMP (~SPLnnnn.TMP) as it is
+ * printed and, ended, to the queue; WINN copies the queue's jobs to their
+ * ports while the system is idle (print_spool_idle), one at a time, as
+ * Print Manager does. A port that fails asks to retry or cancel. GDI's
+ * spooler functions (OpenJob, WriteSpool, CloseJob, SpoolFile ...: the
+ * printer drivers') make jobs of the same queue. Spooler=no, or FILE: or
+ * a file: straight to the port.
+ *
+ * SetAbortProc's procedure is asked at each page (and by QueryAbort):
+ * FALSE ends the job (SP_APPABORT).
  *
  * Copyright (c) 2026 murm386 contributors. MIT License.
  */
@@ -33,6 +44,8 @@ typedef struct wprinter {
     int in_doc, band;               /* a document begun; NEXTBAND's state */
     int restart;                        /* another paper: the driver told before the page */
     HFILE out;
+    struct spjob *job;                  /* spooled: the queue's job it writes */
+    ABORTPROC abort;                    /* SetAbortProc's */
     int failed;
     unsigned used;
     uint8_t buf[512];
@@ -246,6 +259,17 @@ static void mode_get(const win_printer_driver *d, const char *device, const char
     m->dmPaperSize = (short)prof_int(sec, "PaperSize", d->papers[0].id, profile);
     m->dmCopies = 1;
     mode_fill(d, m);
+    /* the port's environment (SetEnvironment's: a driver's last settings
+     * for it), if of this device */
+    DEVMODE env;
+    char name[CCHDEVICENAME + 1];
+    memset(&env, 0, sizeof(env));
+    int got = GetEnvironment(port, &env, sizeof(env));
+    lstrcpyn(name, env.dmDeviceName, sizeof(name));
+    if (got >= 44 && !lstrcmpi(name, m->dmDeviceName)) {
+        mode_merge(d, m, &env);
+        mode_fill(d, m);
+    }
     mode_merge(d, m, in);
     mode_fill(d, m);
 }
@@ -341,8 +365,10 @@ int WINAPI PrinterDeviceModeN(HWND owner, LPCSTR driver, DEVMODE *out, LPCSTR de
         mode_fill(d, &m);
     }
     if (rc == IDOK) {
-        if (mode & DM_UPDATE)
+        if (mode & DM_UPDATE) {
             mode_put(model, prt, profile, &m);
+            SetEnvironment(prt, &m, sizeof(m));
+        }
         if ((mode & DM_COPY) && out)
             memcpy(out, &m, sizeof(m));
     }
@@ -440,6 +466,9 @@ DWORD WINAPI PrinterCapabilitiesN(LPCSTR driver, LPCSTR device, LPCSTR port, UIN
 
 /* ---------------------------------------------------------------- DCs */
 
+struct spjob;
+static void job_free(struct spjob *j);
+
 /* the paper, the orientation, the copies of its settings: the page's size */
 static void apply_mode(wprinter *p)
 {
@@ -499,7 +528,9 @@ void print_dc_gone(wdc *dc)
     dc->prn = NULL;
     if (p->in_doc) {
         p->drv->end_doc(&p->sink, 1);
-        if (p->out != HFILE_ERROR)
+        if (p->job)
+            job_free(p->job);
+        else if (p->out != HFILE_ERROR)
             _lclose(p->out);
     }
     FreeLibrary(p->module);
@@ -645,13 +676,35 @@ static const DLGITEM_N file_items[] = {
     { 112, 36, 62, 14, IDOK, BS_DEFPUSHBUTTON | WS_TABSTOP | WS_VISIBLE, "BUTTON", "OK" },
 };
 
+/* a device's name as DOS has it: "LPT1:" LPT1, "PRN" PRN; 0 if a file */
+static int device_of(const char *port, char *name, int cap)
+{
+    int n = lstrlen(port);
+    if (n < 2 || n >= cap || port[n - 1] != ':' || !lstrcmpi(port, "FILE:"))
+        return 0;
+    lstrcpyn(name, port, n);             /* without its colon */
+    return 1;
+}
+
+/* a device or a file opened to write */
+static HFILE open_device(const char *port)
+{
+    char name[128];
+    if (device_of(port, name, sizeof(name))) {
+        /* a device takes it as it comes: one job after another (a file
+         * standing for it too) */
+        HFILE f = _lopen(name, OF_WRITE);
+        if (f != HFILE_ERROR)
+            _llseek(f, 0, 2);
+        return f != HFILE_ERROR ? f : _lcreat(name, 0);
+    }
+    return _lcreat(port, 0);
+}
+
 /* the output's file or device: FILE: asks; a DOS device opened as it is */
 static HFILE open_port(const char *port)
 {
-    char name[128];
-    lstrcpyn(name, port, sizeof(name));
-    int n = lstrlen(name);
-    if (!lstrcmpi(name, "FILE:")) {
+    if (!lstrcmpi(port, "FILE:")) {
         if (!file_name[0])
             lstrcpy(file_name, "OUTPUT.PRN");
         if (DialogBoxIndirectN(0, &file_tpl, file_items, GetActiveWindow(), FileProc) != IDOK ||
@@ -659,22 +712,354 @@ static HFILE open_port(const char *port)
             return HFILE_ERROR;
         return _lcreat(file_name, 0);
     }
-    if (n > 1 && name[n - 1] == ':') {   /* LPT1:, COM2:, PRN: DOS's names */
-        name[n - 1] = 0;
-        HFILE f = _lopen(name, OF_WRITE);
-        return f != HFILE_ERROR ? f : _lcreat(name, 0);
+    return open_device(port);
+}
+
+/* ---------------------------------------------------------------- the spooler */
+
+enum { JOB_WRITING, JOB_QUEUED, JOB_PRINTING };
+
+typedef struct spjob {
+    struct spjob *next;
+    int id;
+    int state;
+    int direct;                         /* OpenJob's to a file or unspooled: no queue */
+    HTASK task;                         /* its writer's (one ending leaves no job open) */
+    char title[64], port[128], file[144];
+    HFILE f;                            /* written (JOB_WRITING), read (JOB_PRINTING) */
+    HFILE dev;                          /* its port, printing */
+    LONG page_at;                       /* where its page began (DeleteSpoolPage) */
+    LONG size, done;
+    unsigned have, at;                  /* read from the file, not yet at the port */
+    uint8_t buf[512];
+} spjob;
+
+static spjob *jobs;
+static int job_ids;
+static int despooling;
+
+/* Spooler=no turns it off; FILE: and files are never spooled */
+static int spooled(const char *port)
+{
+    char v[8], name[128];
+    GetProfileString("windows", "Spooler", "yes", v, sizeof(v));
+    return lstrcmpi(v, "no") && lstrcmpi(v, "0") && lstrcmpi(v, "false") &&
+           device_of(port, name, sizeof(name));
+}
+
+static spjob *job_of(HANDLE h)
+{
+    for (spjob *j = jobs; j; j = j->next)
+        if (j->id == (int)(uintptr_t)h && h)
+            return j;
+    return NULL;
+}
+
+static void job_unlink(spjob *j)
+{
+    for (spjob **pp = &jobs; *pp; pp = &(*pp)->next)
+        if (*pp == j) {
+            *pp = j->next;
+            break;
+        }
+}
+
+/* a job gone: its files closed, its spool file deleted */
+static void job_free(spjob *j)
+{
+    job_unlink(j);
+    if (j->f != HFILE_ERROR)
+        _lclose(j->f);
+    if (j->dev != HFILE_ERROR)
+        _lclose(j->dev);
+    if (j->file[0] && !j->direct)
+        DeleteFileN(j->file);
+    win_free(j);
+}
+
+/* a new job, last in the queue: spooled to a file of TEMP's, or (direct)
+ * straight to its port */
+static spjob *job_new(const char *port, const char *title, int direct)
+{
+    spjob *j = (spjob *)win_alloc(sizeof(spjob));
+    if (!j)
+        return NULL;
+    memset(j, 0, sizeof(*j));
+    j->f = j->dev = HFILE_ERROR;
+    j->direct = direct;
+    lstrcpyn(j->port, port, sizeof(j->port));
+    lstrcpyn(j->title, title && *title ? title : "Untitled", sizeof(j->title));
+    if (direct) {
+        j->f = open_port(port);
+    } else if (win_file_temp_name("SPL", 0, j->file)) {
+        j->f = _lcreat(j->file, 0);
+        if (j->f == HFILE_ERROR)
+            DeleteFileN(j->file);
     }
-    return _lcreat(name, 0);
+    if (j->f == HFILE_ERROR) {
+        win_free(j);
+        return NULL;
+    }
+    if (++job_ids > 0x7fff)
+        job_ids = 1;
+    j->id = job_ids;
+    j->state = JOB_WRITING;
+    j->task = GetCurrentTask();
+    spjob **pp = &jobs;
+    while (*pp)
+        pp = &(*pp)->next;
+    *pp = j;
+    return j;
+}
+
+/* written: to the queue (a direct one is done) */
+static int job_close(spjob *j)
+{
+    if (j->direct) {
+        job_free(j);
+        return 1;
+    }
+    j->size = _llseek(j->f, 0, 2);
+    _lclose(j->f);
+    j->f = HFILE_ERROR;
+    j->state = JOB_QUEUED;
+    return 1;
+}
+
+/* the port failed: retry (1) or cancel the job (0) */
+static int port_failed(const spjob *j)
+{
+    char msg[256];
+    wsprintf(msg, "Cannot write to the %.40s port.\n\n\"%.60s\": the printer may be off "
+                  "line, not ready or not there.", j->port, j->title);
+    return MessageBox(0, msg, "Print Manager", MB_RETRYCANCEL | MB_ICONSTOP | MB_SYSTEMMODAL) ==
+           IDRETRY;
+}
+
+/* The system idle: some of the first job to its port. Nothing is waited
+ * for but the port's own writes. */
+void print_spool_idle(void)
+{
+    spjob *j = jobs;
+    while (j && j->state == JOB_WRITING)
+        j = j->next;
+    if (!j || despooling)
+        return;
+    despooling = 1;
+    if (j->state == JOB_QUEUED) {
+        j->f = _lopen(j->file, OF_READ);
+        if (j->f == HFILE_ERROR) {      /* its file gone: nothing to print */
+            job_free(j);
+            despooling = 0;
+            return;
+        }
+        j->dev = open_device(j->port);
+        if (j->dev == HFILE_ERROR) {
+            _lclose(j->f);
+            j->f = HFILE_ERROR;
+            if (!port_failed(j))
+                job_free(j);
+            despooling = 0;
+            return;
+        }
+        j->state = JOB_PRINTING;
+        j->have = j->at = 0;
+    }
+    if (j->at == j->have) {
+        UINT n = _lread(j->f, j->buf, sizeof(j->buf));
+        if (n == (UINT)HFILE_ERROR || !n) { /* all of it printed */
+            win_trace_event("spool-done", (uint32_t)j->id, (uint32_t)j->done);
+            job_free(j);
+            despooling = 0;
+            return;
+        }
+        j->have = n;
+        j->at = 0;
+    }
+    UINT k = j->have - j->at;
+    UINT put = _lwrite(j->dev, j->buf + j->at, k);
+    if (put == (UINT)HFILE_ERROR)
+        put = 0;
+    j->at += put;
+    j->done += (LONG)put;
+    if (put < k && !port_failed(j))
+        job_free(j);
+    despooling = 0;
+}
+
+/* a task gone: the jobs it was writing with it */
+void print_task_ended(HTASK task)
+{
+    for (spjob *j = jobs, *n; j; j = n) {
+        n = j->next;
+        if (j->state == JOB_WRITING && j->task == task)
+            job_free(j);
+    }
+}
+
+int print_spool_jobs(void)
+{
+    int n = 0;
+    for (const spjob *j = jobs; j; j = j->next)
+        n++;
+    return n;
+}
+
+/* GDI's spooler functions: the printer drivers' (and Print Manager's) */
+int WINAPI OpenJob(LPCSTR port, LPCSTR title, HDC hdc)
+{
+    (void)hdc;
+    if (!port || !*port)
+        return SP_ERROR;
+    spjob *j = job_new(port, title, !spooled(port));
+    return j ? j->id : SP_OUTOFDISK;
+}
+
+int WINAPI StartSpoolPage(HANDLE job)
+{
+    spjob *j = job_of(job);
+    if (!j || j->state != JOB_WRITING)
+        return SP_ERROR;
+    j->page_at = _llseek(j->f, 0, 1);
+    return 1;
+}
+
+int WINAPI EndSpoolPage(HANDLE job)
+{
+    spjob *j = job_of(job);
+    return j && j->state == JOB_WRITING ? 1 : SP_ERROR;
+}
+
+/* the page begun last, unwritten: the file cut where it began */
+int WINAPI DeleteSpoolPage(HANDLE job)
+{
+    spjob *j = job_of(job);
+    if (!j || j->state != JOB_WRITING || j->direct)
+        return SP_ERROR;
+    _llseek(j->f, j->page_at, 0);
+    _lwrite(j->f, "", 0);               /* DOS: a write of nothing ends the file there */
+    return 1;
+}
+
+int WINAPI WriteSpool(HANDLE job, LPCVOID data, int cb)
+{
+    spjob *j = job_of(job);
+    if (!j || j->state != JOB_WRITING || cb < 0)
+        return SP_ERROR;
+    if (!cb)
+        return 0;
+    return _lwrite(j->f, data, (UINT)cb) == (UINT)cb ? cb : SP_OUTOFDISK;
+}
+
+int WINAPI CloseJob(HANDLE job)
+{
+    spjob *j = job_of(job);
+    return j && j->state == JOB_WRITING && job_close(j) ? 1 : SP_ERROR;
+}
+
+int WINAPI DeleteJob(HANDLE job, int flags)
+{
+    (void)flags;
+    spjob *j = job_of(job);
+    if (!j || (j->state == JOB_PRINTING && despooling))
+        return SP_ERROR;
+    job_free(j);
+    return 1;
+}
+
+/* the driver's question to the user, as the spooler asks it */
+int WINAPI WriteDialog(HANDLE job, LPCSTR text, int cb)
+{
+    spjob *j = job_of(job);
+    char msg[256];
+    if (!j || !text)
+        return SP_ERROR;
+    if (cb < 0 || cb >= (int)sizeof(msg))
+        cb = sizeof(msg) - 1;
+    memcpy(msg, text, (size_t)cb);
+    msg[cb] = 0;
+    return MessageBox(GetActiveWindow(), msg, "Print Manager",
+                      MB_OKCANCEL | MB_ICONEXCLAMATION | MB_SYSTEMMODAL);
+}
+
+/* SP_QUERYVALIDJOB (30): whether it is one; else the disk's free KB the
+ * spool file can grow by */
+int WINAPI QueryJob(HANDLE job, int what)
+{
+    spjob *j = job_of(job);
+    if (!j)
+        return SP_ERROR;
+    if (what == 30)
+        return 1;
+    DWORD free_bytes = 0, total = 0;
+    int drive = j->file[0] && j->file[1] == ':' ? (j->file[0] | 0x20) - 'a' + 1 : 0;
+    if (!GetDiskFreeSpaceN(drive, &free_bytes, &total))
+        return SP_ERROR;
+    free_bytes >>= 10;
+    return free_bytes > 0x7fffu ? 0x7fff : (int)free_bytes;
+}
+
+/* a driver's file of a whole job queued as it is: printed, then deleted */
+HANDLE WINAPI SpoolFile(LPCSTR printer, LPCSTR port, LPCSTR job, LPCSTR file)
+{
+    (void)printer;
+    if (!port || !*port || !file || !*file)
+        return (HANDLE)(uintptr_t)(UINT)SP_ERROR;
+    HFILE f = _lopen(file, OF_READ);
+    if (f == HFILE_ERROR)
+        return (HANDLE)(uintptr_t)(UINT)SP_ERROR;
+    LONG size = _llseek(f, 0, 2);
+    _lclose(f);
+    spjob *j = (spjob *)win_alloc(sizeof(spjob));
+    if (!j)
+        return (HANDLE)(uintptr_t)(UINT)SP_OUTOFDISK;
+    memset(j, 0, sizeof(*j));
+    j->f = j->dev = HFILE_ERROR;
+    lstrcpyn(j->port, port, sizeof(j->port));
+    lstrcpyn(j->title, job && *job ? job : "Untitled", sizeof(j->title));
+    lstrcpyn(j->file, file, sizeof(j->file));
+    j->size = size;
+    j->state = JOB_QUEUED;
+    if (++job_ids > 0x7fff)
+        job_ids = 1;
+    j->id = job_ids;
+    spjob **pp = &jobs;
+    while (*pp)
+        pp = &(*pp)->next;
+    *pp = j;
+    return (HANDLE)(uintptr_t)(UINT)j->id;
 }
 
 /* ---------------------------------------------------------------- documents */
+
+/* the program's AbortProc asked: FALSE (or the user's cancel) ends it */
+static int go_on(HDC h, wprinter *p, int code)
+{
+    return !p->abort || p->abort(h, code);
+}
+
+BOOL WINAPI QueryAbort(HDC h, int reserved)
+{
+    wdc *dc = gdi_dc(h);
+    wprinter *p = dc ? dc->prn : NULL;
+    return !p || go_on(h, p, reserved);
+}
 
 int WINAPI StartDoc(HDC h, const DOCINFO *di)
 {
     wprinter *p = printer_of(h);
     if (!p || p->in_doc)
         return SP_ERROR;
-    p->out = open_port(di && di->lpszOutput && *di->lpszOutput ? di->lpszOutput : p->port);
+    const char *port = di && di->lpszOutput && *di->lpszOutput ? di->lpszOutput : p->port;
+    p->job = NULL;
+    if (spooled(port)) {
+        p->job = job_new(port, di ? di->lpszDocName : NULL, 0);
+        if (!p->job)
+            return SP_OUTOFDISK;
+        p->out = p->job->f;
+    } else {
+        p->out = open_port(port);
+    }
     if (p->out == HFILE_ERROR)
         return SP_ERROR;
     p->failed = 0;
@@ -685,13 +1070,17 @@ int WINAPI StartDoc(HDC h, const DOCINFO *di)
     p->sink.write = sink_write;
     win_printer_job job = { p->model, p->paper, p->land, p->copies };
     if (!p->drv->start_doc(&p->sink, &job)) {
-        _lclose(p->out);
+        if (p->job)
+            job_free(p->job);
+        else
+            _lclose(p->out);
+        p->job = NULL;
         p->out = HFILE_ERROR;
         return SP_ERROR;
     }
     p->in_doc = 1;
     PatBlt(h, 0, 0, p->pw, p->ph, WHITENESS);
-    return 1;
+    return p->job ? p->job->id : 1;
 }
 
 int WINAPI StartPage(HDC h)
@@ -727,12 +1116,18 @@ static uint8_t *upright(const wsurf *s, int *pitch)
     return o;
 }
 
+static int finish(HDC h, int aborted);
+
 int WINAPI EndPage(HDC h)
 {
     wprinter *p = printer_of(h);
     wdc *dc = gdi_dc(h);
     if (!p || !p->in_doc)
         return SP_ERROR;
+    if (!go_on(h, p, 0)) {              /* the program's: before the page is sent */
+        finish(h, 1);
+        return SP_APPABORT;
+    }
     const wsurf *s = dc->surf;
     int ok = 1, pitch = s->pitch;
     if (p->restart) {                   /* the paper changed (ResetDC): a job of its own */
@@ -744,10 +1139,20 @@ int WINAPI EndPage(HDC h)
     const uint8_t *bits = p->land ? turned : s->bits;
     if (!bits)
         ok = 0;
-    for (int i = 0; ok && i < p->copies; i++)
+    int stop = 0;
+    for (int i = 0; ok && !stop && i < p->copies; i++) {
         ok = p->drv->page(&p->sink, bits, pitch, p->paper->cx, p->paper->cy) && flush(p);
+        if (!ok && p->job)
+            go_on(h, p, SP_OUTOFDISK);  /* the disk full: the program told */
+        if (ok && i + 1 < p->copies)
+            stop = !go_on(h, p, 0);
+    }
     win_free(turned);
     PatBlt(h, 0, 0, p->pw, p->ph, WHITENESS);
+    if (stop) {
+        finish(h, 1);
+        return SP_APPABORT;
+    }
     return ok ? 1 : SP_OUTOFDISK;
 }
 
@@ -757,7 +1162,15 @@ static int finish(HDC h, int aborted)
     if (!p || !p->in_doc)
         return SP_ERROR;
     int ok = p->drv->end_doc(&p->sink, aborted) && flush(p);
-    _lclose(p->out);
+    if (p->job) {                       /* spooled: to the queue, or gone */
+        if (ok && !aborted)
+            job_close(p->job);
+        else
+            job_free(p->job);
+        p->job = NULL;
+    } else {
+        _lclose(p->out);
+    }
     p->out = HFILE_ERROR;
     p->in_doc = 0;
     return ok ? 1 : SP_ERROR;
@@ -766,12 +1179,15 @@ static int finish(HDC h, int aborted)
 int WINAPI EndDoc(HDC h) { return finish(h, 0); }
 int WINAPI AbortDoc(HDC h) { return finish(h, 1); }
 
-/* kept by Windows to ask whether to go on; nothing here takes so long
- * that it would ask */
+/* asked at each page whether to go on (a Win16 or Win32 program's own, its
+ * caller's trampoline) */
 int WINAPI SetAbortProc(HDC h, ABORTPROC proc)
 {
-    (void)proc;
-    return printer_of(h) ? 1 : SP_ERROR;
+    wprinter *p = printer_of(h);
+    if (!p)
+        return SP_ERROR;
+    p->abort = proc;
+    return 1;
 }
 
 int WINAPI Escape(HDC h, int esc, int cb, LPCSTR in, void *out)
@@ -828,7 +1244,9 @@ int WINAPI Escape(HDC h, int esc, int cb, LPCSTR in, void *out)
         if (out)
             *(int *)out = p->copies;
         return 1;
-    case SETABORTPROC: case FLUSHOUTPUT: case DRAFTMODE:
+    case SETABORTPROC:                  /* in: the procedure itself (a native caller's) */
+        return SetAbortProc(h, (ABORTPROC)(void (*)(void))(uintptr_t)in) > 0;
+    case FLUSHOUTPUT: case DRAFTMODE:
         return 1;
     case GETSETPRINTORIENT: {           /* in a DWORD (or none: asked), the one before */
         int was = p->dm.dmOrientation;

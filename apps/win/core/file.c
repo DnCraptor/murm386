@@ -735,6 +735,42 @@ BOOL WINAPI RemoveDirectoryN(LPCSTR path)
 }
 
 /* Free and total bytes of a drive (0 the current one, 1 A:, ...). */
+UINT win_file_temp_name(LPCSTR prefix_in, UINT unique, LPSTR out)
+{
+    char prefix[4], dir[128], path[160];
+    lstrcpyn(prefix, prefix_in ? prefix_in : "", sizeof(prefix));
+    UINT n = GetWindowsDirectory(dir, sizeof(dir));
+    if (!n || n > sizeof(dir) - 7)
+        return 0;
+    if (dir[n - 1] != '\\' && dir[n - 1] != '/')
+        lstrcat(dir, "\\");
+    lstrcat(dir, "TEMP");
+    int attr = win_file_attr(dir, 0, 0);
+    if ((attr < 0 && !CreateDirectoryN(dir)) || (attr >= 0 && !(attr & 0x10)))
+        return 0;
+    lstrcat(dir, "\\");
+    uint16_t num = unique ? (uint16_t)unique : (uint16_t)GetTickCount();
+    for (int tries = 0; tries < 256; tries++, num++) {
+        if (!num)
+            num = 1;
+        wsprintf(path, "%s~%s%04X.TMP", dir, prefix, num);
+        if (unique)
+            break;
+        HFILE f = _lopen(path, OF_READ);
+        if (f != HFILE_ERROR) {
+            _lclose(f);
+            continue;
+        }
+        f = _lcreat(path, 0);
+        if (f == HFILE_ERROR)
+            return 0;
+        _lclose(f);
+        break;
+    }
+    lstrcpyn(out, path, 144);
+    return num;
+}
+
 BOOL WINAPI GetDiskFreeSpaceN(int drive, DWORD *free_bytes, DWORD *total_bytes)
 {
 #ifdef FILE_HOST

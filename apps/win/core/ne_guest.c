@@ -1310,6 +1310,27 @@ static void thunk_bytes(const win_ne_guest_image *g, uint16_t id, uint16_t at,
         p[2] = 0xcb;                       /* retf */
         return;
     }
+    if (id == WIN_NE_SERVICE_WIN87EM + 4 || id == WIN_NE_SERVICE_WIN87EM + 5) {
+        /* __WinEm87Restore, __WinEm87Save(LPVOID, int): the coprocessor's
+         * state (FSAVE's 94 bytes) from or to the buffer; saved, it is
+         * initialized, as FSAVE leaves it */
+        static const uint8_t code[] = {
+            0x89, 0xe3,                    /* mov bx,sp */
+            0x36, 0xc4, 0x5f, 0x06,        /* les bx,ss:[bx+6] */
+            0x26, 0xdd, 0x27,              /* frstor es:[bx] (Save: fnsave es:[bx], fwait) */
+            0x31, 0xc0,                    /* xor ax,ax */
+            0xca, 0x06, 0x00,              /* retf 6 */
+        };
+        int save = id == WIN_NE_SERVICE_WIN87EM + 5, n = 0;
+        memcpy(p, code, 9);
+        n = 9;
+        if (save) {
+            p[8] = 0x37;
+            p[n++] = 0x9b;
+        }
+        memcpy(p + n, code + 9, sizeof(code) - 9);
+        return;
+    }
     if (id == WIN_NE_SERVICE_FPMATH) {
         p[0] = 0xe9;                       /* jmp near */
         put16(p + 1, (uint16_t)(WIN_NE_FPMATH_OFFSET - (at + 3u)));

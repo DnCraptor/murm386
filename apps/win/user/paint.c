@@ -46,9 +46,11 @@ static void dc_place(HDC h, wwnd *w, int whole, const wrgn *limit)
     wrgn vis;
     wrgn_init(&vis);
     user_vis_region(w, !whole, &vis);
-    if (whole && !(w->style & WS_CLIPCHILDREN)) {
-        /* window DC: frame plus client, children not excluded */
-    }
+    for (const wwnd *p = w; U.locked && p; p = p->parent)
+        if (p == U.locked) {            /* LockWindowUpdate's: nothing drawn */
+            wrgn_clear(&vis);
+            break;
+        }
     if (limit)
         wrgn_and(&vis, &vis, limit);
     gdi_set_dc_vis(h, &vis);

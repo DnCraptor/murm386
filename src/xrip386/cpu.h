@@ -119,6 +119,7 @@ typedef struct {
     uint8_t a20_enabled;
     unsigned long retired; // one increment per executed instruction
     uint32_t code32_word; // 0, 0, code32, code32; one aligned reset of four bytes
+    uint32_t segment_base[6]; // keep segment bases in the hot CPU state
 } cpu_state_t;
 /* Declare these before the field-alias macros below. */
 #if defined(__arm__) || defined(__thumb__)
@@ -131,7 +132,8 @@ _Static_assert(__builtin_offsetof(cpu_state_t, code32) == 53 &&
                __builtin_offsetof(cpu_state_t, addrsize32) == 59 &&
                __builtin_offsetof(cpu_state_t, retired) == 64 &&
                __builtin_offsetof(cpu_state_t, code32_word) == 68 &&
-               sizeof(cpu_state_t) == 72,
+               __builtin_offsetof(cpu_state_t, segment_base) == 72 &&
+               sizeof(cpu_state_t) == 96,
                "XRIP decoder word alignment changed");
 #endif
 extern cpu_state_t cpu_state;

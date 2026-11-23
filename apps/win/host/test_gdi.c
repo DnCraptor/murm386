@@ -31,6 +31,14 @@ HFILE WINAPI _lclose(HFILE f) { return HFILE_ERROR; }
 HFILE WINAPI _lcreat(LPCSTR path, int attr) { return HFILE_ERROR; }
 HFILE WINAPI _lopen(LPCSTR path, int mode) { return HFILE_ERROR; }
 UINT WINAPI _lwrite(HFILE f, const void *buf, UINT n) { return 0; }
+UINT WINAPI _lread(HFILE f, void *buf, UINT n) { return 0; }
+LONG WINAPI _llseek(HFILE f, LONG off, int origin) { return -1; }
+BOOL WINAPI DeleteFileN(LPCSTR path) { return FALSE; }
+BOOL WINAPI GetDiskFreeSpaceN(int drive, DWORD *free_bytes, DWORD *total_bytes) { return FALSE; }
+UINT win_file_temp_name(LPCSTR prefix, UINT unique, LPSTR out) { return 0; }   /* no spooler */
+int WINAPI MessageBox(HWND owner, LPCSTR text, LPCSTR caption, UINT type) { return IDCANCEL; }
+void win_trace_event(const char *name, uint32_t a, uint32_t b) {}
+HTASK WINAPI GetCurrentTask(void) { return 0; }
 
 int main(void)
 {

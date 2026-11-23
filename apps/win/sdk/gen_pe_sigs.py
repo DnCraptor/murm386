@@ -115,7 +115,7 @@ GDI32: GetObjectA GetTextMetricsA CreateFontIndirectA TextOutA ExtTextOutA Selec
   GetTextExtentPoint32A GetTextExtentPointA GetStockObject CreateDIBSection
   PolyPolygon CreatePolyPolygonRgn PolyPolyline EnumFontFamiliesA EnumFontsA GetClipRgn
   GetGlyphOutlineA LineDDA ResetDCA SetAbortProc StartDocA SetBrushOrgEx GetDCOrgEx
-  GetTextExtentExPointA CreateDIBPatternBrushPt CreateBitmapIndirect ExtCreateRegion
+  GetTextExtentExPointA CreateDIBPatternBrushPt CreateBitmapIndirect ExtCreateRegion Escape
 '''
 
 # Win32's names of Win16 functions
@@ -130,7 +130,9 @@ ALIAS = {
 # native functions of the name but not for a Win32 program: Win16's files,
 # global blocks (the program's are its own memory)
 EXCLUDE = {'_hread', '_hwrite', 'SetClipboardData', 'GetClipboardData',
-           'CreateDIBPatternBrush'}
+           'CreateDIBPatternBrush',
+           # Win32's take a file's HANDLE (CreateFile "COM1"), not Win16's id
+           'ClearCommBreak', 'EscapeCommFunction', 'SetCommBreak', 'TransmitCommChar'}
 
 # structures of the same layout in Win32 and in WINN: pointers as they are
 COMPAT = {'LOGPALETTE', 'PALETTEENTRY', 'BITMAPINFO', 'BITMAPINFOHEADER', 'LOGPEN',

@@ -59,6 +59,7 @@ void win_ne_user_end(win_ne_guest_api_context *ctx)
                 win_free(p);
             }
             ne_call_end(u);
+            win_ne_abort_task_gone(ctx);
             ne_shell_task_end(u->task);
             ne_more_task_end(u->task);
             win_free(u->local);

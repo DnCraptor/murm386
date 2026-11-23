@@ -1,0 +1,16 @@
+# What were stubs, from a Win16 program (OWREAL): Get/SetEnvironment,
+# PostEvent/WaitEvent, WIN87EM's Info/Save/Restore, LockWindowUpdate,
+# ExitWindowsExec, SetAbortProc, the spooler (StartDoc's and OpenJob's jobs
+# despooled to LPT1), COM1 looped back (the host's):
+#     ./winhost scripts/owreal.txt PROGMAN
+wait 100
+keydown ALT
+key F
+keyup ALT
+key R
+wait 20
+type OWREAL
+key RETURN
+wait 700
+snap real_result.ppm
+exit

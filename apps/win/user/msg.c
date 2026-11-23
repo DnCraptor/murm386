@@ -271,7 +271,8 @@ static int alt_tab_running;
 static int unresponsive(wwnd *w)
 {
     wtask *t = task_from_handle(user_toplevel(w)->task);
-    return t && t->waiting != WTASK_WAIT_MESSAGE && now_ms() - t->queue_time >= 250u;
+    return t && t->waiting != WTASK_WAIT_MESSAGE && t->waiting != WTASK_WAIT_EVENT &&
+           now_ms() - t->queue_time >= 250u;
 }
 
 void win_ddi_key_event(int vk, int sc, int down)
@@ -317,9 +318,12 @@ void win_ddi_key_event(int vk, int sc, int down)
             win_trace_dump();
         return;
     }
+    /* a system-modal window has the keys: it active */
+    if (down && GetSysModalWindow() && user_sysmodal_blocks(U.active))
+        SetActiveWindow(GetSysModalWindow());
     /* Ctrl+Esc (also Ctrl+Shift+Esc) opens the Task List. */
     if (vk == VK_ESCAPE && ctrl && !alt) {
-        if (down && !was && U.desktop)
+        if (down && !was && U.desktop && !GetSysModalWindow())
             user_post(U.desktop->h, WM_SYSCOMMAND, SC_TASKLIST, 0);
         return;
     }
@@ -452,6 +456,11 @@ static void mouse_button(int x, int y, int btn, int down)
         w = user_window_from_point(x, y, &hit);
         if (!w)
             return;
+        if (user_sysmodal_blocks(w)) {  /* a system-modal window's time */
+            if (down)
+                MessageBeep(0);
+            return;
+        }
         if (hit == HTERROR) {
             if (down)
                 MessageBeep(0);
@@ -515,6 +524,8 @@ void win_ddi_mouse_event(int x, int y, unsigned buttons)
             hit = HTCLIENT;
         } else {
             w = user_window_from_point(x, y, &hit);
+            if (w && user_sysmodal_blocks(w))
+                hit = HTERROR;
             if (w && hit != HTERROR)
                 SendMessage(w->h, WM_SETCURSOR, w->h, MAKELPARAM(hit, WM_MOUSEMOVE));
             else if (w)
@@ -726,6 +737,7 @@ static void pump_input(void)
     pump_native_system_timers();
     user_caret_tick(last_pump);
     sound_service(last_pump);
+    user_comm_poll();
     /* an Alt+Tab held back for a busy application: run where the keys
      * that follow come, its task's (its turn's end, a call of its) */
     if (alt_tab_for && last_pump - alt_tab_when >= 1000u)
@@ -972,8 +984,7 @@ static void wait_turn(void)
          * shell (e.g. when Startup launches another task immediately).
          * Complete the splash transition on the first true idle turn. */
         win_logo_end();
-        if (win_sys.input)
-            win_sys.input->idle();
+        task_idle();
     }
     me->waiting = WTASK_WAIT_NONE;
 }
@@ -1048,6 +1059,30 @@ BOOL WINAPI Yield(void)
     return TRUE;
 }
 
+/* the task's event (PostEvent's; a message for it too, as Windows' own
+ * PostMessage posts one): FALSE if there was one, TRUE after waiting */
+BOOL WINAPI WaitEvent(HTASK task)
+{
+    wtask *me = task_current();
+    if (task && task_from_handle(task) != me)
+        return FALSE;
+    if (me->events > 0) {
+        me->events--;
+        return FALSE;
+    }
+    task_started(me);
+    while (!me->events && !user_task_has_work(me->h)) {
+        me->waiting = WTASK_WAIT_EVENT;
+        pump_input();
+        if (!task_yield())
+            task_idle();
+    }
+    me->waiting = WTASK_WAIT_NONE;
+    if (me->events > 0)
+        me->events--;
+    return TRUE;
+}
+
 /* ---------------------------------------------------------------- tasks */
 
 void user_poll_input(void) { pump_input(); }
@@ -1064,10 +1099,9 @@ int user_task_has_work(HTASK task)
 }
 
 /* Ask every top-level window, then end all applications (Windows ends
- * with its shell). */
-BOOL WINAPI ExitWindows(DWORD reserved, UINT code)
+ * with its shell); how it ends noted for WIN.COM (task.c) */
+static BOOL end_session(void)
 {
-    (void)reserved; (void)code;
     if (U.shutting_down)
         return TRUE;
     /* Show progress through potentially slow task queries and SD writes. */
@@ -1089,10 +1123,43 @@ BOOL WINAPI ExitWindows(DWORD reserved, UINT code)
     return TRUE;
 }
 
+/* its low word: EW_RESTARTWINDOWS, EW_REBOOTSYSTEM, else DOS's exit code */
+BOOL WINAPI ExitWindows(DWORD code, UINT reserved)
+{
+    (void)reserved;
+    if (U.shutting_down)
+        return TRUE;
+    if (!end_session())
+        return FALSE;
+    UINT c = LOWORD(code);
+    win_end_set(c == EW_RESTARTWINDOWS ? WIN_END_RESTART : c == EW_REBOOTSYSTEM ? WIN_END_REBOOT :
+                WIN_END_EXIT, NULL, NULL, (int)(c & 0xff));
+    return TRUE;
+}
+
+/* Windows left to run a DOS program (exe found as OpenFile finds it), then
+ * started again (WIN.COM); FALSE if the program is not there or a window
+ * refused to end */
+BOOL WINAPI ExitWindowsExec(LPCSTR exe, LPCSTR params)
+{
+    OFSTRUCT of;
+    if (!exe || !*exe || U.shutting_down)
+        return FALSE;
+    memset(&of, 0, sizeof(of));
+    if (OpenFile(exe, &of, OF_EXIST) == HFILE_ERROR)
+        return FALSE;
+    if (!end_session())
+        return FALSE;
+    win_end_set(WIN_END_EXEC, of.szPathName, params ? params : "", 0);
+    return TRUE;
+}
+
 /* A task ended: its windows, timers and messages go. */
 void user_task_ended(HTASK task)
 {
     user_clipboard_task_ended(task);
+    user_comm_task_ended(task);
+    print_task_ended(task);
     for (int again = 1; again;) {
         again = 0;
         for (wwnd *w = U.desktop->child; w; w = w->next)
@@ -1157,13 +1224,6 @@ void WINAPI UserYield(void)
 {
     pump_input();
     task_yield();
-}
-
-/* the input for one window only (a system-modal one): noted */
-BOOL WINAPI LockInput(HANDLE reserved, HWND h, BOOL lock)
-{
-    (void)reserved; (void)h; (void)lock;
-    return TRUE;
 }
 
 /* a queue of that many messages: WINN's grows as it must */

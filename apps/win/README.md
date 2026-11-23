@@ -298,8 +298,11 @@ linker left the interrupts in, make them the instructions again.
 WIN87EM's `__FPMATH` is a small routine of WINN's in the program's ring 3
 code (by BX: initialize, the control word set and got, pop as a long,
 the status word, clear, "a coprocessor": others return 0);
-`__WinEm87Info`, `__WinEm87Save` and `__WinEm87Restore` do nothing (the
-tasks share the coprocessor, as they share Windows' one).
+`__WinEm87Info` tells its version (3.10), the save area's size (94, FSAVE's)
+and a coprocessor there; `__WinEm87Save` and `__WinEm87Restore` are the
+coprocessor's FSAVE and FRSTOR into and from the program's buffer (code of
+their own in the thunks: the tasks share the coprocessor, as they share
+Windows' one).
 
 The functions a program can call: some 330 go the generic way
 (`core/ne_sigs.h`, made by `sdk/gen_ne_sigs.py` from the native prototypes:
@@ -407,9 +410,11 @@ that moved (KERNEL's Reserved5 lstrcmp, GDI's RectInRegionOld,
 GDISelectPalette, GDIRealizePalette, RealizeDefaultPalette, USER's
 OldExitWindows, OldSetDeskPattern); GDI's priority queues (CreatePQ,
 InsertPQ, MinPQ, ExtractPQ, SizePQ, DeletePQ) and Copy; the spooler's
-OpenJob, WriteSpool, CloseJob, GetSpoolJob ... and the printer drivers'
-data answer as Windows does with no printer (SP_ERROR, no job; Print
-Manager's GetSpoolJob 14h list of queues empty);
+OpenJob, StartSpoolPage, WriteSpool, EndSpoolPage, DeleteSpoolPage,
+CloseJob, DeleteJob, WriteDialog, QueryJob, SpoolFile (see Printers; Print
+Manager's GetSpoolJob, undocumented: its 14h list of queues empty);
+Get/SetEnvironment (a port's environment: a driver's DEVMODE, which
+CreateDC and ExtDeviceMode take when it is of the device);
 palettes, CreateDC and CreateIC, SetSysColors;
 the mapping modes (all of them: the metric and English ones and MM_TWIPS
 at 96 pixels an inch, MM_ISOTROPIC keeping the axes alike; pens, rounded
@@ -468,9 +473,8 @@ GGO_BITMAP, GGO_NATIVE's polygons and quadratic splines, through a MAT2),
 GetFontData, GetCharABCWidths, GetKerningPairs (the kern table's),
 CreateScalableFontResource (a .FOT written), LineDDA, SetTextCharacterExtra; printing
 (see Printers: StartDoc, StartPage, EndPage, EndDoc, AbortDoc, Windows 3.0's
-escapes); no serial or parallel
-ports (OpenComm fails with IE_HARDWARE, the other comm functions with
-their errors); SHELL's ShellExecute (a program, or a document by WIN.INI's
+escapes, SetAbortProc, QueryAbort); the serial and parallel ports (see
+Communications); SHELL's ShellExecute (a program, or a document by WIN.INI's
 [Extensions]), FindExecutable, ShellAbout, ExtractIcon, DragAcceptFiles,
 and no registration database; selectors of its own (AllocSelector,
 AllocCStoDSAlias, AllocDStoCSAlias, PrestoChangoSelector, Get/Set
@@ -564,7 +568,9 @@ structures, DrawEdge, DrawFrameControl, DrawState, Bézier curves),
 `OWMIDI` (Windows 95's MIDI streams), `OWPRINT` (printing on EPSON9),
 `OWLAND` (a printer driver's ExtDeviceMode, DeviceCapabilities, DEVMODE,
 ResetDC), `OWMIXER` (the mixer API), `OWWAVE` (waveOut and MCI's
-waveaudio on HOSTWAVE.DLL)
+waveaudio on HOSTWAVE.DLL), `OWREAL` (what were stubs: the spooler and
+SetAbortProc, Get/SetEnvironment, PostEvent/WaitEvent, LockWindowUpdate,
+WIN87EM's Save/Restore, ExitWindowsExec, the serial port looped back)
 (`make NEFIXTURES` in
 `host/`). All have DOS MZ stubs that explain how to launch them under WINN
 when invoked directly from DOS. `host/test_ne_run` runs them on the
@@ -659,7 +665,8 @@ script; `scripts/ow32.txt`), and `OW32S.EXE`, Win32s' DLLs and functions
 (`scripts/ow32x.txt`), `OW32W.EXE`, WINMM's devices (`scripts/ow32w.txt`),
 `OW32H.EXE`, COMDLG32's hooks and templates (`scripts/ow32h.txt`),
 `OW32D.EXE`, USER32's DDEML (`scripts/ow32d.txt`), `OW32G.EXE`, GDI drawing
-into DIB sections (`scripts/ow32g.txt`).
+into DIB sections (`scripts/ow32g.txt`), `OW32P.EXE`, printing (SetAbortProc,
+ResetDC, the spooler: `scripts/ow32p.txt`).
 
     WIN [:] [program [arguments]]
 
@@ -745,6 +752,19 @@ the copies), which writes it to the port: `FILE:` asks for a file's name
 at each printing, `LPTn:`, `COMn:` are DOS's devices, any other name a
 file.
 
+The spooler (WIN.INI [windows] Spooler=yes, as Windows has it unless
+Spooler=no): a document for a device port (LPT1: ...) is written to a file
+of TEMP's (`~SPLnnnn.TMP`) and, at EndDoc, queued; the queue's jobs go to
+their ports one after another while the system is idle, as Print
+Manager's do (a port that fails: "Cannot write to the LPT1: port", Retry
+or Cancel). FILE: and files are printed straight. GDI's spooler functions
+(OpenJob, WriteSpool, StartSpoolPage, DeleteSpoolPage, CloseJob,
+SpoolFile ...: Windows' printer drivers') queue jobs of the same queue;
+a task's job not closed goes with the task. SetAbortProc's procedure (or
+Escape SETABORTPROC's; a Win16 or a Win32 program's) is asked at each page
+and between copies, SP_OUTOFDISK when the spool file cannot grow: FALSE
+ends the job (EndPage SP_APPABORT).
+
 The printer's settings are Windows 3.1's DEVMODE (the paper, the
 orientation, the copies), GDI's for every driver, kept in WIN.INI's
 `[<device>,<port>]` (Orientation=, PaperSize=). A Win16 program asks the
@@ -769,6 +789,26 @@ inch, 8 inches across (80 columns of continuous paper) on Letter, A4,
 Legal and German fanfold (the length set by ESC C), bands of the
 one-to-one bit image (ESC * 5), blank bands as line feeds. The Control
 Panel's Printers has its Setup... (the driver's dialog).
+
+## Communications
+
+USER's comm functions (`user/comm.c`): COM1-COM4 are the 8250 UARTs at
+3F8h, 2F8h, 3E8h, 2E8h (the emulator's COM1 when it has one: a USB modem
+or serial device), polled as input is: the emulator's UART gives a byte at
+a time and holds the next until it is read, so nothing is lost between
+polls. OpenComm (its id; IE_HARDWARE where no UART answers; WIN.INI's
+[ports] COMn:= setting, 9600,n,8,1 by default) gives the queues asked for;
+what comes in goes to the input queue (ReadComm, UngetCommChar), the
+output queue to the port as it takes it (WriteComm, TransmitCommChar),
+with XON/XOFF both ways and CTS/DSR flow as the DCB asks. BuildCommDCB
+(MODE's syntax), Set/GetCommState (the speed, the frame, DTR and RTS),
+GetCommError (CE_* and COMSTAT), FlushComm, EscapeCommFunction (SETXON ..
+CLRDTR, GETMAXCOM, GETMAXLPT, GETBASEIRQ), Set/ClearCommBreak,
+SetCommEventMask (EV_RXCHAR, EV_RXFLAG, EV_TXEMPTY, EV_CTS, EV_DSR,
+EV_RLSD, EV_RING, EV_BREAK, EV_ERR: a Win16 program's word in its own
+memory), GetCommEventMask, EnableCommNotification (WM_COMMNOTIFY:
+CN_RECEIVE, CN_TRANSMIT, CN_EVENT). LPT1-LPT3 are DOS's devices, written
+through. The host's tests have COM1 looped back.
 
 ## Wave output
 
@@ -959,8 +999,21 @@ realized), `Set/GetSystemPaletteUse`, TrueType's (`GetRasterizerCaps`,
 `GetFontData`, `GetGlyphOutline`, `GetCharABCWidths`,
 `GetOutlineTextMetrics`, `GetKerningPairs`, `CreateScalableFontResource`;
 a raster font has none: GDI_ERROR, 0); KERNEL's `SetPriority`,
-`LockCurrentTask`, `Get/SetTaskQueue`, `PostEvent`, `InitAtomTable`,
-`GetAtomHandle` and the like WINN has no use for, done as asked.
+`LockCurrentTask`, `Get/SetTaskQueue`, `InitAtomTable`,
+`GetAtomHandle` and the like WINN has no use for, done as asked;
+`PostEvent` and `WaitEvent` (a task's events counted: WaitEvent takes one,
+or waits for one, or for a message, as Windows' PostMessage posts one; a
+task starts with one, its start-up code's WaitEvent's); `LockWindowUpdate`
+(the window's DCs and its children's draw nowhere until it is unlocked,
+then it is painted anew); `SetSysModalWindow`, `LockInput` and
+MessageBox's MB_SYSTEMMODAL (the mouse and the keys for that window and
+the windows it owns alone, no Alt+Tab or Task List; MB_TASKMODAL without
+an owner disables the task's windows); `EnableScrollBar` (its arrows grey
+and not pressed); `SetMenuItemBitmaps` (the item's own check marks);
+`ExitWindows` (EW_RESTARTWINDOWS: Windows started again by WIN.COM,
+EW_REBOOTSYSTEM: the machine reset, else the code DOS gets) and
+`ExitWindowsExec` (Windows ends, WIN.COM runs the DOS program, then
+Windows again; FALSE if the program is not found).
 
 A window DC follows its window: one a
 program keeps (`CS_OWNDC`, or a `GetDC` it has not released) is made new
@@ -1104,6 +1157,8 @@ list the links.
     ./winhost scripts/owdlg.txt PROGMAN      # COMMDLG: Color (full), Font, Print (no printer), GetFileTitle
     ./winhost scripts/owhook.txt PROGMAN     # COMMDLG's hooks and templates: Open, Color, Font, Find, Print
     ./winhost scripts/owdde.txt PROGMAN      # DDEML: a server and a client of its own, DdeAccessData
+    ./winhost scripts/owreal.txt PROGMAN     # spooler, AbortProc, events, LockWindowUpdate, COM1 looped back
+    ./winhost scripts/ow32p.txt PROGMAN      # Win32 printing: SetAbortProc, ResetDC, the spooler
     ./winhost scripts/owmisc.txt PROGMAN     # moveable local memory, KEYBOARD, OLECLI
     ./winhost scripts/owsnd.txt PROGMAN      # SOUND (tones on stderr), OLESVR
     ./winhost scripts/ow31.txt PROGMAN       # clipboard viewers, ClipCursor, bounds, EnumObjects...
@@ -1194,8 +1249,8 @@ pointer reads what is there), the FPU's exceptions' own codes, the Unicode
 (W) functions, ADVAPI32 but the registry, WINMM's CALLBACK_EVENT and wave input,
 COMCTL32, OLE32, DDEML's
 Unicode functions; VxDs.
-A spooler and Print Manager's queues (printing goes straight to the port),
-printer drivers of Windows' own (.DRV files: WINN's are native DLLs), a
+Print Manager's own view of the queue (PRINTMAN.EXE's undocumented
+GetSpoolJob), Win32's comm functions (CreateFile "COM1"), printer drivers of Windows' own (.DRV files: WINN's are native DLLs), a
 driver's private DEVMODE data, the mixer's inputs, `.GRP` files (`PROGMAN.INI` holds the groups as text), DLLs (`LoadLibrary`) of native applications;
 Windows 95's and NT's additions to Win16 (WOW, the thunks to Win32,
 paths, enhanced metafiles), BiDi, STRESS.DLL, the

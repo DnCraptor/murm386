@@ -689,11 +689,18 @@ void WINAPI CheckRadioButton(HWND dlg, int first, int last, int check)
 
 /* ---------------------------------------------------------------- MessageBox */
 
+static int box_sysmodal;                /* the next box MB_SYSTEMMODAL's */
+
 static BOOL CALLBACK msgbox_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
     (void)lp;
-    if (msg == WM_INITDIALOG)
+    if (msg == WM_INITDIALOG) {
+        if (box_sysmodal) {
+            box_sysmodal = 0;
+            SetSysModalWindow(h);
+        }
         return TRUE;
+    }
     if (msg == WM_COMMAND && ((wp >= IDOK && wp <= IDNO) || (wp >= 0x100 && wp < 0x103))) {
         EndDialog(h, (int)wp);                  /* SysErrorBox's: 100h.. */
         return TRUE;
@@ -705,7 +712,7 @@ static BOOL CALLBACK msgbox_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
  * asterisk) and nb buttons of these ids and names, def's the default: the
  * id of the one pressed */
 static int text_box(HWND owner, LPCSTR text, LPCSTR caption, int icon, int nb, const int *ids,
-                    const char *const *names, int def)
+                    const char *const *names, int def, UINT modal)
 {
     /* measure the text in pixels, then convert to dialog units */
     HDC dc = GetDC(0);
@@ -749,7 +756,26 @@ static int text_box(HWND owner, LPCSTR text, LPCSTR caption, int icon, int nb, c
      * disabled). */
     wwnd *act = U.active;
     HWND own = owner ? owner : (act && act->task == task_current()->h ? act->h : 0);
-    return DialogBoxIndirectN(0, &t, items, own, msgbox_proc);
+    /* MB_TASKMODAL without an owner: the task's windows all disabled;
+     * MB_SYSTEMMODAL: the box the system's (SetSysModalWindow) */
+    HWND off[32];
+    int noff = 0;
+    if ((modal & MB_TASKMODAL) && !owner)
+        for (wwnd *w = U.desktop->child; w && noff < 32; w = w->next)
+            if (w->task == task_current()->h && !(w->style & WS_DISABLED) && w->h != own) {
+                off[noff++] = w->h;
+                EnableWindow(w->h, FALSE);
+            }
+    HWND was = GetSysModalWindow();
+    box_sysmodal = (modal & MB_SYSTEMMODAL) != 0;
+    int r = DialogBoxIndirectN(0, &t, items, own, msgbox_proc);
+    box_sysmodal = 0;
+    if (modal & MB_SYSTEMMODAL)
+        SetSysModalWindow(was);
+    while (noff > 0)
+        if (IsWindow(off[--noff]))
+            EnableWindow(off[noff], TRUE);
+    return r;
 }
 
 int WINAPI MessageBox(HWND owner, LPCSTR text, LPCSTR caption, UINT type)
@@ -773,7 +799,8 @@ int WINAPI MessageBox(HWND owner, LPCSTR text, LPCSTR caption, UINT type)
     user_event_sound(icon == 1 ? "SystemHand" : icon == 2 ? "SystemQuestion" :
                      icon == 3 ? "SystemExclamation" : icon == 4 ? "SystemAsterisk" :
                      "SystemDefault", 0);
-    int r = text_box(owner, text, caption, icon, sets[set].n, sets[set].ids, sets[set].names, def);
+    int r = text_box(owner, text, caption, icon, sets[set].n, sets[set].ids, sets[set].names, def,
+                     type & (MB_SYSTEMMODAL | MB_TASKMODAL));
     if (r == IDCANCEL && !(set == 1 || set == 3 || set == 5))
         r = sets[set].ids[0];
     return r;
@@ -804,7 +831,7 @@ UINT WINAPI SysErrorBox(LPCSTR text, LPCSTR caption, UINT b1, UINT b2, UINT b3)
         bn[nb++] = names[SEB_OK];
     }
     MessageBeep(MB_ICONHAND);
-    int r = text_box(0, text, caption, 0, nb, ids, bn, def);
+    int r = text_box(0, text, caption, 0, nb, ids, bn, def, MB_SYSTEMMODAL);
     for (int i = 0; i < nb; i++)
         if (r == ids[i])
             return (UINT)which[i];

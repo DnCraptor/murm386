@@ -30,7 +30,7 @@ static bool halted;
 static bool pending_trap;
 static uint8_t protected_mode;
 static uint16_t segregs[6];
-static uint32_t segment_base[6];
+#define segment_base cpu_state.segment_base
 
 /* Cache all four decoder defaults (REP=0, override=0, two copies of
  * code32) when CS's default size changes, not on every x86 instruction. */

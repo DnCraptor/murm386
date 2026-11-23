@@ -17,6 +17,7 @@ extern int GetSystemMetrics(int);
 extern uint32_t GetSysColor(int);
 extern int MessageBox(uint16_t, const char *, const char *, unsigned int);
 extern int wsprintf(char *, const char *, ...);
+extern int WaitEvent(uint16_t);
 
 /* The segment of a selector: one of the program's, its PSP, a global block */
 static const win_ne_guest_segment *lookup_segment(
@@ -449,6 +450,8 @@ __attribute__((weak)) void win_trace_event(const char *name, uint32_t a, uint32_
 /* Optional native-DLL audio service at Win16's safe real-mode yield.
  * Host tests without the DLL manager retain a no-op. */
 __attribute__((weak)) void win_dll_audio_service(void) { }
+/* the tests': an event always there */
+__attribute__((weak)) int WaitEvent(uint16_t task) { (void)task; return 0; }
 /* ... nor global blocks (a self-loading program's loader's stack) */
 __attribute__((weak)) int win_ne_guest_global_free(win_ne_guest_image *g, uint16_t sel)
 {
@@ -604,8 +607,8 @@ int win_ne_guest_api(void *opaque, win_ne_regs *cpu, uint16_t service)
         dword = 1;
         break;
     }
-    case 30:      /* KERNEL.WaitEvent(HTASK): nothing waits */
-        value = 0;
+    case 30:      /* KERNEL.WaitEvent(HTASK): the task's event, waited for */
+        value = read_stack_word(ctx, cpu, 4, &arg) ? (uint16_t)WaitEvent(arg) : 0;
         break;
     case 0x1005:  /* USER.InitApp(HINSTANCE) */
         value = 1;

@@ -14,9 +14,11 @@
  */
 #include <stdio.h>
 #include <string.h>
+#include "conio.h"
 #include "wincore.h"
 #include "ne.h"
 #include "ne_guest.h"
+#include "win_exit.h"
 
 /* the built-in display drivers: VGA 640x480x16 as Windows' own, VBE
  * 640x400x256 when it cannot */
@@ -94,7 +96,20 @@ int main(int argc, char **argv)
                    "Windows", MB_OK | MB_ICONINFORMATION);
     if (started)
         task_kernel_loop();
+    char exe[128], params[128];
+    int code = 0, how = win_end_get(exe, params, &code);
     win_shutdown();
     win_ne_guest_mem_end();         /* the programs' extended memory back */
-    return 0;
+    switch (how) {
+    case WIN_END_EXEC:              /* ExitWindowsExec's program, then Windows again */
+        if (win_dos_exec_ended(exe, params) < 32)
+            printf("Cannot run %s.\n", exe);
+        return WIN_EXIT_RESTART;
+    case WIN_END_RESTART:
+        return WIN_EXIT_RESTART;
+    case WIN_END_REBOOT:            /* the keyboard controller's reset, taken when */
+        outp(0x64, 0xfe);           /* the emulator runs DOS again */
+        break;
+    }
+    return code;
 }

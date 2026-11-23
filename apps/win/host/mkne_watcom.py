@@ -91,7 +91,8 @@ OWAPI2: KERNEL and USER, more: the clipboard (its text and a format of its
     \"clipboard text\" \"own\" 2 formats", "array 1, rights f2, catn abcde,
     code 1", "place 30,30 show 1, props 11, menu 2 11", "cursor 1 icon 1
     copy 1, scrolled 4", "dir: 6 entries, spec *.DLL, first owdll.dll"; then
-    (SPACE) OpenComm, no ports: "OpenComm -10"; then Pen Windows'
+    (SPACE) OpenComm: "OpenComm 0" (the host's COM1; no port there: -10,
+    IE_HARDWARE); then Pen Windows'
     RegisterPenApp, which WINN has not: "OWAPI2.EXE called
     PENWIN.REGISTERPENAPP, which WINN does not have yet."
 
@@ -209,7 +210,7 @@ OW95: the rest of Win16's KERNEL, USER and GDI: SwitchStackTo and
 
 OW95X: entry points WINN added late: old ordinals of functions that moved
     (KERNEL.87 lstrcmp, GDI.181 RectInRegionOld), GDI's priority queues
-    and spooler (no printer), Windows 95's KERNEL (GetShortPathName,
+    and spooler (OpenJob's job, left open: deleted as it ends), Windows 95's KERNEL (GetShortPathName,
     GetFileAttributes, FindFirstFile, profile sections and structures, the
     current directory, free space), GDI (PolyBezier, SetArcDirection,
     GetRegionData, GetTextCharset, GetLayout), USER (FindWindowEx, the
@@ -217,7 +218,7 @@ OW95X: entry points WINN added late: old ordinals of functions that moved
     items, DrawEdge, DrawFrameControl, DrawState, icon directories,
     EDITWNDPROC) and SHELL (ExtractIconEx, InternalExtractIcon): "kernel:
     short 7 WIN.INI, attr 0, ini 1, section 1, struct 1, cwd 1, space 1,
-    old 1", "gdi: pq 2331, spool -1 0 1, rgn 64, old 1, charset 0, layout 0",
+    old 1", "gdi: pq 2331, spool 1 0 1, rgn 64, old 1, charset 0, layout 0",
     "user: find 1, fg 1, scroll 0 50 20, menu Three 103 3 8, default 103,
     dir 12, edit 4", "shell: icons 1 1, internal 1"
 
@@ -279,6 +280,17 @@ OWDDE: DDEML's, as OW32D's (Win32's): a server and a client instance of
     global block of its): "request 1: 'hello from the server' 22, access
     'hello from the server' 22", "poke 1 'poked text', execute 1 '[run(1)]'",
     "info 58: cb 58, topic 1, status 15, requests 1"
+OWREAL: what were stubs, as Windows 3.1's: Get/SetEnvironment, PostEvent
+    and WaitEvent, WIN87EM's __WinEm87Info/Save/Restore, LockWindowUpdate
+    (the red drawn while locked: nowhere), ExitWindowsExec of no program,
+    SetAbortProc (FALSE at the second page: SP_APPABORT), Escape's
+    SETABORTPROC, the jobs spooled (StartDoc's, OpenJob's) and despooled to
+    LPT1 as the system idles, COM1 looped back (OpenComm, BuildCommDCB,
+    Set/GetCommState, WriteComm, WM_COMMNOTIFY, ReadComm, the event word):
+    "environment: set 68, size 68, got 68 same 1, deleted -1, then 0",
+    "abort: set 1, job 1, page 1, page -2, end -1, asked 2", "notify 2 (5):
+    queued 10, error 0, read 10 'HELLO COMM', word 5, mask 5", "despooled:
+    LPT1 590 bytes, raw last 1"
 """
 import sys
 
@@ -11748,6 +11760,454 @@ PROGRAMS = {
             '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
             '0000000000000000000000000000000000000000000000000000e30ce30c0000000000000000000000000000'
             '0000000000000000000000000000000000000000000000209a0a0000'
+        )),
+    'OWREAL': (
+        # wcc -za99 -bt=windows -ms -zW -od owreal.c; wlink @owreal.lnk
+        # ---- owreal.c
+        #     /* OWREAL: what was a stub in WINN, now Windows 3.1's: the spooler (StartDoc's
+        #      * job queued and despooled to LPT1 as the system idles, GDI's OpenJob,
+        #      * WriteSpool, CloseJob, QueryJob), SetAbortProc and Escape(SETABORTPROC)
+        #      * (FALSE ends the job: SP_APPABORT), Get/SetEnvironment, PostEvent and
+        #      * WaitEvent, LockWindowUpdate, WIN87EM's __WinEm87Info/Save/Restore,
+        #      * ExitWindowsExec (a program not there: FALSE), the serial port (COM1
+        #      * looped back on the host: OpenComm, BuildCommDCB, Set/GetCommState,
+        #      * WriteComm, WM_COMMNOTIFY, ReadComm, the event word, GetCommError). */
+        #     #include <windows.h>
+        #     #include <string.h>
+        #
+        #     /* not in Open Watcom's windows.h (imported in owreal.lnk) */
+        #     int FAR PASCAL OpenJob(LPSTR port, LPSTR title, HDC dc);
+        #     int FAR PASCAL StartSpoolPage(int job);
+        #     int FAR PASCAL EndSpoolPage(int job);
+        #     int FAR PASCAL WriteSpool(int job, LPSTR data, int n);
+        #     int FAR PASCAL CloseJob(int job);
+        #     int FAR PASCAL QueryJob(int job, int what);
+        #     void FAR PASCAL PostEvent(HTASK task);
+        #     BOOL FAR PASCAL WaitEvent(HTASK task);
+        #     int FAR PASCAL __WinEm87Info(void FAR *info, int n);
+        #     int FAR PASCAL __WinEm87Save(void FAR *save, int n);
+        #     int FAR PASCAL __WinEm87Restore(void FAR *save, int n);
+        #
+        #     static char lines[12][100];
+        #     static int nlines;
+        #     static int aborts, abort_no = 99;
+        #     static int cid = -1, notes, notified;
+        #     static UINT FAR *evword;
+        #     static HWND main_wnd;
+        #     static int ticks;
+        #     static long want;
+        #
+        #     static void say(LPSTR s)
+        #     {
+        #         if (nlines < 12)
+        #             lstrcpy(lines[nlines++], s);
+        #         if (main_wnd)
+        #             InvalidateRect(main_wnd, NULL, TRUE);
+        #     }
+        #
+        #     BOOL FAR PASCAL __export AbortProc(HDC dc, int code)
+        #     {
+        #         aborts++;
+        #         return aborts != abort_no;
+        #     }
+        #
+        #     static int raw_last;
+        #
+        #     /* its size; whether it ends with the raw job's data */
+        #     static long file_size(LPSTR name)
+        #     {
+        #         OFSTRUCT of;
+        #         char tail[16];
+        #         HFILE f = OpenFile(name, &of, OF_READ);
+        #         long n;
+        #         if (f == HFILE_ERROR)
+        #             return -1;
+        #         n = _llseek(f, 0, 2);
+        #         raw_last = 0;
+        #         if (n >= 16 && _llseek(f, n - 16, 0) == n - 16 && _lread(f, tail, 16) == 16)
+        #             raw_last = !memcmp(tail, "RAW SPOOL DATA\r\n", 16);
+        #         _lclose(f);
+        #         return n;
+        #     }
+        #
+        #     static void print_tests(void)
+        #     {
+        #         char s[100];
+        #         FARPROC proc = MakeProcInstance((FARPROC)AbortProc, GetWindowWord(main_wnd, GWW_HINSTANCE));
+        #         DOCINFO di;
+        #         HDC dc;
+        #         int job, r1, r2, r3, r4, r5;
+        #         WriteProfileString("devices", "Epson LX-350", "EPSON9,LPT1:");
+        #         dc = CreateDC("EPSON9", "Epson LX-350", "LPT1:", NULL);
+        #         /* aborted at its second page */
+        #         abort_no = 2;
+        #         r1 = SetAbortProc(dc, (ABORTPROC)proc);
+        #         di.cbSize = sizeof(di);
+        #         di.lpszDocName = "aborted";
+        #         di.lpszOutput = NULL;
+        #         job = StartDoc(dc, &di);
+        #         TextOut(dc, 100, 100, "page one", 8);
+        #         r2 = EndPage(dc);
+        #         StartPage(dc);
+        #         r3 = EndPage(dc);
+        #         r4 = EndDoc(dc);
+        #         wsprintf(s, "abort: set %d, job %d, page %d, page %d, end %d, asked %d", r1, job > 0, r2, r3,
+        #                  r4, aborts);
+        #         say(s);
+        #         /* printed: its AbortProc through Escape, asked once */
+        #         aborts = 0;
+        #         abort_no = 99;
+        #         r1 = Escape(dc, SETABORTPROC, 0, (LPSTR)proc, NULL);
+        #         di.lpszDocName = "printed";
+        #         job = StartDoc(dc, &di);
+        #         TextOut(dc, 100, 100, "spooled page", 12);
+        #         r2 = EndPage(dc);
+        #         r3 = EndDoc(dc);
+        #         r4 = QueryAbort(dc, 0);
+        #         DeleteDC(dc);
+        #         wsprintf(s, "spool: escape %d, job %d, page %d, end %d, query %d, asked %d", r1, job > 0, r2,
+        #                  r3, r4, aborts);
+        #         say(s);
+        #         /* GDI's own jobs */
+        #         job = OpenJob("LPT1:", "raw", NULL);
+        #         r1 = StartSpoolPage(job);
+        #         r2 = WriteSpool(job, "RAW SPOOL DATA\r\n", 16);
+        #         r3 = EndSpoolPage(job);
+        #         r4 = QueryJob(job, 30);
+        #         r5 = CloseJob(job);
+        #         r1 += 10 * StartSpoolPage(job);     /* closed: SP_ERROR */
+        #         wsprintf(s, "openjob: %d, page %d, write %d, end %d, valid %d, close %d, again %d", job > 0,
+        #                  r1, r2, r3, r4, r5, CloseJob(job));
+        #         say(s);
+        #         want = 16;
+        #     }
+        #
+        #     static void env_tests(void)
+        #     {
+        #         char s[100];
+        #         BYTE dm[68], back[68];
+        #         int r1, r2, r3, r4;
+        #         memset(dm, 0, sizeof(dm));
+        #         lstrcpy((LPSTR)dm, "Epson LX-350");
+        #         dm[36] = 68;
+        #         dm[45] = 2;                         /* landscape */
+        #         r1 = SetEnvironment("LPT2:", dm, sizeof(dm));
+        #         r2 = GetEnvironment("LPT2", NULL, 0);
+        #         memset(back, 0, sizeof(back));
+        #         r3 = GetEnvironment("LPT2:", back, sizeof(back));
+        #         r4 = SetEnvironment("LPT2", NULL, 0);
+        #         wsprintf(s, "environment: set %d, size %d, got %d same %d, deleted %d, then %d", r1, r2, r3,
+        #                  !memcmp(dm, back, 68), r4, GetEnvironment("LPT2", back, 68));
+        #         say(s);
+        #     }
+        #
+        #     static void misc_tests(void)
+        #     {
+        #         char s[100];
+        #         WORD info[6];
+        #         BYTE a[94], b[94];
+        #         int r, r2, i, same = 1;
+        #         PostEvent(0);
+        #         r = WaitEvent(0);
+        #         memset(info, 0, sizeof(info));
+        #         __WinEm87Info(info, sizeof(info));
+        #         __WinEm87Save(a, sizeof(a));
+        #         __WinEm87Restore(a, sizeof(a));
+        #         __WinEm87Save(b, sizeof(b));
+        #         __WinEm87Restore(b, sizeof(b));
+        #         for (i = 0; i < 28; i++)            /* the environment: control, status, tags ... */
+        #             if (i < 6 && a[i] != b[i])
+        #                 same = 0;
+        #         wsprintf(s, "event: wait %d; em87: version %X, save %u, real %u, cw %X, same %d", r, info[0],
+        #                  info[1], info[4], *(WORD *)a, same);
+        #         say(s);
+        #         r = LockWindowUpdate(main_wnd);
+        #         r2 = LockWindowUpdate(GetDesktopWindow());
+        #         {
+        #             HDC dc = GetDC(main_wnd);
+        #             RECT rc;
+        #             HBRUSH red = CreateSolidBrush(RGB(255, 0, 0));
+        #             SetRect(&rc, 0, 0, 600, 300);
+        #             FillRect(dc, &rc, red);         /* drawn nowhere: locked */
+        #             DeleteObject(red);
+        #             ReleaseDC(main_wnd, dc);
+        #         }
+        #         i = LockWindowUpdate(NULL);
+        #         same = LockWindowUpdate(NULL);
+        #         wsprintf(s, "lock: %d, another %d, unlock %d, again %d; exec %d", r, r2, i, same,
+        #                  ExitWindowsExec("NOSUCH.EXE", ""));
+        #         say(s);
+        #     }
+        #
+        #     static void comm_tests(void)
+        #     {
+        #         char s[120];
+        #         DCB dcb, got;
+        #         int r1, r2, r3, r4, r5;
+        #         r5 = OpenComm("COM2", 256, 256);
+        #         cid = OpenComm("COM1:", 1024, 1024);
+        #         r1 = BuildCommDCB("COM1:2400,e,7,1", &dcb);
+        #         r2 = SetCommState(&dcb);
+        #         r3 = GetCommState(cid, &got);
+        #         evword = SetCommEventMask(cid, EV_RXCHAR | EV_TXEMPTY);
+        #         r4 = EnableCommNotification(cid, main_wnd, 10, -1);
+        #         wsprintf(s, "comm: open %d, com2 %d, build %d set %d get %d: %u %d %d %d, max %ld, notify %d",
+        #                  cid, r5, r1, r2, r3, got.BaudRate, got.ByteSize, got.Parity, got.StopBits,
+        #                  EscapeCommFunction(cid, GETMAXCOM), r4);
+        #         say(s);
+        #         wsprintf(s, "write %d", WriteComm(cid, "HELLO COMM", 10));
+        #         say(s);
+        #     }
+        #
+        #     static void comm_read(void)
+        #     {
+        #         char s[100], buf[32];
+        #         COMSTAT st;
+        #         int n, e;
+        #         UINT word = evword ? *evword : 0xffff;
+        #         e = GetCommError(cid, &st);
+        #         n = ReadComm(cid, buf, sizeof(buf) - 1);
+        #         buf[n > 0 ? n : 0] = 0;
+        #         wsprintf(s, "notify %d (%X): queued %u, error %d, read %d '%s', word %X, mask %X", notes,
+        #                  notified, st.cbInQue, e, n, (LPSTR)buf, word, GetCommEventMask(cid, EV_RXCHAR));
+        #         say(s);
+        #         n = CloseComm(cid);
+        #         e = CloseComm(cid);
+        #         wsprintf(s, "then word %X, close %d, closed %d", *evword, n, e);
+        #         say(s);
+        #         cid = -1;
+        #     }
+        #
+        #     long FAR PASCAL __export WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+        #     {
+        #         switch (msg) {
+        #         case WM_PAINT: {
+        #             PAINTSTRUCT ps;
+        #             int i;
+        #             HDC dc = BeginPaint(h, &ps);
+        #             for (i = 0; i < nlines; i++)
+        #                 TextOut(dc, 4, 4 + i * 18, lines[i], lstrlen(lines[i]));
+        #             EndPaint(h, &ps);
+        #             return 0;
+        #         }
+        #         case WM_COMMNOTIFY:
+        #             notes++;
+        #             notified |= LOWORD(lp);
+        #             if (cid >= 0 && (LOWORD(lp) & CN_RECEIVE))
+        #                 comm_read();
+        #             return 0;
+        #         case WM_TIMER: {
+        #             long n = file_size("LPT1");
+        #             char s[80];
+        #             ticks++;
+        #             if ((n > want && raw_last) || ticks > 50) {
+        #                 KillTimer(h, 1);
+        #                 wsprintf(s, "despooled: LPT1 %ld bytes, raw last %d", n, raw_last);
+        #                 say(s);
+        #             }
+        #             return 0;
+        #         }
+        #         case WM_DESTROY:
+        #             PostQuitMessage(0);
+        #             return 0;
+        #         }
+        #         return DefWindowProc(h, msg, wp, lp);
+        #     }
+        #
+        #     int PASCAL WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
+        #     {
+        #         WNDCLASS wc;
+        #         MSG m;
+        #         OFSTRUCT of;
+        #         memset(&wc, 0, sizeof(wc));
+        #         wc.lpfnWndProc = WndProc;
+        #         wc.hInstance = inst;
+        #         wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        #         wc.hbrBackground = GetStockObject(WHITE_BRUSH);
+        #         wc.lpszClassName = "OwReal";
+        #         RegisterClass(&wc);
+        #         OpenFile("LPT1", &of, OF_DELETE);
+        #         main_wnd = CreateWindow("OwReal", "OWREAL - Windows 3.1's, not stubs", WS_OVERLAPPEDWINDOW,
+        #                                 0, 0, 630, 260, NULL, NULL, inst, NULL);
+        #         ShowWindow(main_wnd, show);
+        #         UpdateWindow(main_wnd);
+        #         env_tests();
+        #         misc_tests();
+        #         print_tests();
+        #         comm_tests();
+        #         SetTimer(main_wnd, 1, 100, NULL);
+        #         while (GetMessage(&m, NULL, 0, 0)) {
+        #             TranslateMessage(&m);
+        #             DispatchMessage(&m);
+        #         }
+        #         return 0;
+        #     }
+        # ---- owreal.lnk
+        #     system windows
+        #     name owreal.exe
+        #     file owreal.o
+        #     import OPENJOB GDI.240
+        #     import WRITESPOOL GDI.241
+        #     import CLOSEJOB GDI.243
+        #     import STARTSPOOLPAGE GDI.246
+        #     import ENDSPOOLPAGE GDI.247
+        #     import QUERYJOB GDI.248
+        #     import POSTEVENT KERNEL.31
+        #     import WAITEVENT KERNEL.30
+        #     import __WINEM87INFO WIN87EM.3
+        #     import __WINEM87RESTORE WIN87EM.4
+        #     import __WINEM87SAVE WIN87EM.5
+        bytes.fromhex(
+            '4d5a80000100000004000000ffff0000b8000000000000004000000000000000000000000000000000000000'
+            '00000000000000000000000000000000800000000e1fba0e00b409cd21b8014ccd2154686973206973206120'
+            '57696e646f77732031362d6269742065786563757461626c650d0a240000000000000000000000004e450501'
+            '91000a00000000000203020000040020d40d010000000200020004000e00400050005000700078001b010000'
+            '000001000000020000000000000000039500ce10400dce10bd0a3804410c0009064f575245414c0000094142'
+            '4f525450524f43010007574e4450524f43020000010005000c0014000003474449064b45524e454c0757494e'
+            '3837454d0455534552020111770029560a00000a6f777265616c2e65786500000000ccebfd90909090005589'
+            'e550b81a00e8590d585351565781ec06008946f28956f4833efc080c7d03e90300e92300a1fc08ff06fc08ba'
+            '6400f7eaba380401c28cd85052ff76f4ff76f29affff0000e90000833ef408007503e91300ff36f40831c050'
+            '31c050b80100509affff00008d66f85f5e595b5dc31e5890455589e51e8ed8b81000e8e40c565781ec0400ff'
+            '06f808a1f8083b064c037403e90200eb07c746f80100eb05c746f800008b46f88946f68b46f68d66fa5f5e1f'
+            '5d4dca04005589e550b8be00e8a20c585351565781eca8008946ee8956f0ff76f0ff76ee8cd08d9652ff5052'
+            '31c0509affff00008946f6837ef6ff7503e90200eb0dc746eaffffc746ecffffe9cf00ff76f631c05031c050'
+            'b80200509affff000089c389d0895ef28946f4c706f0080000837ef4007e03e91200837ef4007403e93d0083'
+            '7ef2107303e93400ff76f68b56f283c2f08b46f415ffff505231c0509affff000089c389d08b4ef283c1f08b'
+            '56f483d2ff39d07403e9040039cb7403e91b00ff76f68cd08d56da5052b81000509affff00003d10007503e9'
+            '0300e92600bb1000ba10008d46dae8f60b85c07509c78650ff0100e90600c78650ff00008b8650ffa3f008ff'
+            '76f69affff00008b46f28946ea8b46f48946ece900008b46ea8b56ec8d66f85f5e595b5dc35589e5b8ac00e8'
+            '7b0b535152565781ec8800b8ffffbbffff5053ff36f408b8faff509affff0000509affff000089c389d0895e'
+            'dc8946de8cd8bb3b0050538cd8bb2e0050538cd8bb210050539affff00008cd8bb490050538cd8bb2e005053'
+            '8cd8bb4300505331c05031c0509affff00008946eac7064c030200ff76eaff76deff76dc9affff00008946ec'
+            'c746d20a008c5ed6c746d45000c746d80000c746da0000ff76ea8cd08d5ed250539affff00008946e2ff76ea'
+            'b8640050b86400508cd8bb58005053b80800509affff0000ff76ea9affff00008946e0ff76ea9affff0000ff'
+            '76ea9affff00008946e8ff76ea9affff00008946e6ff36f808ff76e6ff76e8ff76e0837ee2007e03e90200eb'
+            '07c746f00100eb05c746f00000ff76f0ff76ec8cd8ba610050528cd08d966eff50529affff000083c4148cd2'
+            '8d866eff89c389d8e8dbfcc706f8080000c7064c036300ff76eab809005031c050ff76deff76dc31c05031c0'
+            '509affff00008946ec8c5ed6c746d49b00ff76ea8cd08d56d250529affff00008946e2ff76eab8640050b864'
+            '00508cd8baa3005052b80c00509affff0000ff76ea9affff00008946e0ff76ea9affff00008946e8ff76ea31'
+            'c0509affff00008946e6ff76ea9affff0000ff36f808ff76e6ff76e8ff76e0837ee2007e03e90200eb07c746'
+            'ee0100eb05c746ee0000ff76eeff76ec8cd8bab00050528cd08d966eff50529affff000083c4148cd28d866e'
+            'ff89c389d8e802fc8cd8ba430050528cd8baee00505231c0509affff00008946e2ff76e29affff00008946ec'
+            'ff76e28cd8ba10005052b81000509affff00008946e0ff76e29affff00008946e8ff76e2b81e00509affff00'
+            '008946e6ff76e29affff00008946e4ff76e29affff0000ba0a00f7ea0146ecff76e29affff000050ff76e4ff'
+            '76e6ff76e8ff76e0ff76ec837ee2007e03e90200eb07c746f40100eb05c746f40000ff76f48cdabbf2005253'
+            '8cd08d966eff50529affff000083c4168cd28d866eff89c389d8e83dfbc706e8081000c706ea0800008d66f6'
+            '5f5e5a595b5dc35589e5b81a01e88108535152565781ecf800bb440031d28d8662ffe8ba088cd08d9662ff50'
+            '528cd8ba2e0050529affff0000c6468644c6468f028cd8ba370150528cd08d9662ff5052b84400509affff00'
+            '008946ee8cd8ba3d01505231c05031c05031c0509affff00008946f0bb440031d28d46a6e860088cd8ba3701'
+            '50528cd08d56a65052b84400509affff00008946ea8cd8ba3d01505231c05031c05031c0509affff00008946'
+            'f28cd8ba3d0150528cd08d56a65052b84400509affff000050ff76f2bb44008d56a68d8662ffe8ea0785c075'
+            '03e90200eb07c746f40100eb05c746f40000ff76f4ff76eaff76f0ff76ee8cdabb420152538cd08d96fefe50'
+            '529affff000083c4148cd28d86fefe89c389d8e810fa8d66f65f5e5a595b5dc35589e5b86401e86007535152'
+            '565781ec4201c746f0010031c0509affff000031c0509affff00008946f2bb0c0031d28d46e0e882078cd08d'
+            '56e05052b80c00509affff00008cd08d9624ff5052b85e00509affff00008cd08d9624ff5052b85e00509aff'
+            'ff00008cd08d56825052b85e00509affff00008cd08d56825052b85e00509affff0000c746f40000e9000083'
+            '7ef41c7c03e92400837ef4067d128b76f48a8224ff8b76f43a42827403e90200eb05c746f00000ff46f4ebd3'
+            'ff76f0ffb624ffff76e8ff76e2ff76e0ff76f28cd8ba840150528cd08d96c0fe50529affff000083c4148cd2'
+            '8d86c0fe89c389d8e813f9ff36f4089affff00008946f29affff0000509affff00008946ecff36f4089affff'
+            '00008986befe31c050b8ff00509affff00008986bcfe8cd08d96b4fe505231c05031c050b8580250b82c0150'
+            '9affff0000ffb6befe8cd08d96b4fe5052ffb6bcfe9affff0000ffb6bcfe9affff0000ff36f408ffb6befe9a'
+            'ffff000031c0509affff00008946f431c0509affff00008946f08cd8bac80150528cd8bac70150529affff00'
+            '0050ff76f0ff76f4ff76ecff76f28cd8bad30150528cd08d96c0fe50529affff000083c4128cd28d86c0fe89'
+            'c389d8e83cf8e900008d66f65f5e5a595b5dc35589e5b8e600e88905535152565781ecb8008cd8ba06025052'
+            'b8000150b80001509affff00008946f08cd8ba0b025052b8000450b80004509affff0000a34e038cd8ba1102'
+            '50528cd08d56b650529affff00008946ea8cd08d56b650529affff00008946f4ff364e038cd08d56d050529a'
+            'ffff00008946f2ff364e03b80500509affff000089c389d0891eec08a3ee08ff364e03ff36f408b80a0050b8'
+            'ffff509affff00008946eeff76eeff364e03b80900509affff000089c389d050538a46d530e4508a46d430e4'
+            '508a46d330e450ff76d1ff76f2ff76f4ff76eaff76f0ff364e038cd8ba210250528cd08d963eff50529affff'
+            '000083c4208cd28d863eff89c389d8e828f7ff364e038cd8ba71025052b80a00509affff0000508cd8ba7c02'
+            '50528cd08d963eff50529affff000083c40ae900008cd28d863eff89c389d8e8ecf68d66f65f5e5a595b5dc3'
+            '5589e5b8be00e83c04535152565781ec96008b0eec088b1eee0831d231c039c37403e9040039d1740dc41eec'
+            '08268b078946f2e90500c746f2ffff8b46f28946ecff364e038cd08d56e450529affff00008946f0ff364e03'
+            '8cd08d56c45052b81f00509affff00008946ee837eee007e03e90200eb088b5eee895eeaeb05c746ea00008b'
+            '76eac642c400ff364e03b80100509affff000050ff76ec8cd08d56c45052ff76eeff76f0ff76e5ff36fa08ff'
+            '36f6088cd8ba850250528cd08d9660ff50529affff000083c41a8cd28d8660ff89c389d8e80bf6ff364e039a'
+            'ffff00008946eeff364e039affff00008946f0ff76f0ff76eec41eec0826ff378cd8bac90250528cd08d9660'
+            'ff50529affff000083c40e8cd28d8660ff89c389d8e8c2f5c7064e03ffff8d66f65f5e5a595b5dc31e589045'
+            '5589e51e8ed8b89600e80503565781ec7c00837e0c0f7303e91f00837e0c0f7703e92200817e0c13017503e9'
+            'cc00837e0c447503e99600e96e01837e0c027503e95001e96201ff760e8cd08d56d250529affff00008946f8'
+            'c746f600008b46f63b06fc087d03e90300e94500ff76f8b80400508b46f6ba1200f7ea050400508b46f6ba64'
+            '00f7eaba380401c28cd850528b46f6ba6400f7eaba380401c28cd850529affff0000509affff0000ff46f6eb'
+            'acff760e8cd08d56d250529affff0000c746f20000c746f40000e9fc00ff06f6088b46060906fa08833e4e03'
+            '007c09f64606017403e90200eb03e8dffdc746f20000c746f40000e9cf008cdab8eb0289c389d8e85ff589c3'
+            '89d0895ece8946d0ff06f2088b46d03b06ea087e03e915008b46d03b06ea087403e913008b46ce3b06e80876'
+            '0a833ef008007403e90a00833ef208327f03e93d00ff760eb80100509affff0000ff36f008ff76d0ff76ce8c'
+            'dabbf00252538cd28d9e7eff52539affff000083c40e8cd28d867eff89c389d8e82bf4e90000c746f20000c7'
+            '46f40000e9360031c0509affff0000c746f20000c746f40000e92100ff760eff760cff760aff7608ff76069a'
+            'ffff000089c389d0895ef28946f4e900008b46f28b56f48d66fa5f5e1f5d4dca0a005589e5b8dc00e82e0156'
+            '5781ecb600bb1a0031d28d46cee86b01c746d2ffffc746d0ffff8b460c8946d831c05031c050b8007f509aff'
+            'ff00008946dc31c0509affff00008946de8c5ee6c746e417038cd08d56ce50529affff00008cd8baeb025052'
+            '8cd08d9646ff5052b80002509affff00008cd8ba170350528cd8ba1e035052b8cf005031c05031c05031c050'
+            'b8760250b804015031c05031c050ff760c31c05031c0509affff0000a3f408ff36f408ff76049affff0000ff'
+            '36f4089affff0000e8e8f7e806f9e8e8f4e8d7faff36f408b8010050b864005031c05031c0509affff0000e9'
+            '00008cd08d56e8505231c05031c05031c0509affff000085c07403e90300e91a008cd08d56e850529affff00'
+            '008cd08d56e850529affff0000ebc7c746fa00008b46fa8d66fc5f5e5dc20a008c165003c33bc473132bc4f7'
+            'd83b060a0077068cd03b0650037401c30e5ab88d0dbb0100e9e801537461636b204f766572666c6f77210051'
+            '565789d989d789c68cd88ec033c0f3a6740519c083d8ff5f5e59c3515789c789d988d0571e078ae0d1e9f3ab'
+            '13c9f3aa5f89f85f59c3eb0203009affff00000bc0750e5033c0ba0f00e86a0258b44ccd218c065603575606'
+            '535253befe08893671038c1e7303268a078804464384c075f589360a005b2bc0509affff000057579affff00'
+            '00fc1e07b9fe08bf38042bcf32c0f3aab81e0fa36d03b8ffffa36f03b430cd21a25803882659039affff0000'
+            'a25a0388265b0386e0a35c0354583bc475120f01e0a90100740ab001a25e03b003a25f031ebf790357b89000'
+            '509affff0000b87903893e75038c1e7703b8ff00e86b01e8a0fde9f9004f70656e20576174636f6d20432f43'
+            '2b2b31362052756e2d54696d652073797374656d2e20436f7079726967687420286329204f70656e20576174'
+            '636f6d20436f6e7472696275746f727320323030322d323032362e20506f7274696f6e7320436f7079726967'
+            '687420284329205379626173652c20496e632e20313938382d323030322e00c3cb005589e551565781ec8000'
+            '89c689df8d9e7aff8cd98ec2268a0484c074173c0d74138d46f939c3730c268a048ec14626880743ebe031c0'
+            '8ec15026c607001e8d9e7aff531eb840035031c0509affff000089f8e94400515689c189d6e8330185c07506'
+            '89c889f2eb9889d8e92c0000c3c3535289c3833e3004007404ff163004ff160a04baff00b81000e8a800ff16'
+            '0a04ff160c0489d8e928fe5289c2ff160a04ff160c0489d0e918fe5589e5535289c3833f0075078d66fc5a5b'
+            '5dc31eff171febf35589e5535289c38b47028b1785c0750485d274df1eff1f1febd95589e5535152565789c1'
+            '1ee813ffbf380489fabb320489fe88c839fb7316803f02750583c306ebf23a470172f689de8a4701ebef39fe'
+            '74158d4402803c007508e88affc60402ebcbe89bffebf61f8d66f65f5e5a595b5dc35589e55351565789c11e'
+            'e8bcfe88d5bf380489fabb380489fe88c839fb7316803f02750583c306ebf23a470177f689de8a4701ebef39'
+            'fe741c3a6c017305c60402ebd18d4402803c007505e827ffebeee83bffebe91f8d66f85f5eeb9f803e0e0400'
+            '750331c0c35250cceb0657564944454fb8010083c404c3007000030197070400f6000301b8070400a4010301'
+            'fb070400c800030112080400c800030128080400d500030137080400c90003014a080400ca0003015a080400'
+            'd00003017a080400f50003018d080400d6000301cc080400a4010301f0080400cd00030105090400a4010301'
+            '73090400cb0003018a090400cc000301b9090400d1000301e9090400a4010301020a0400cf0003010e0a0400'
+            'cf000301320a0400a4010301ab0a040027000301fc0a02005a000301020b010021000301160b040028000301'
+            'ab0b04000c000301c90b0400a4010301f10b040006000301120c04006b000200510c0100560a0500560c0100'
+            '560a0301690c0400ad000301740c0100570003018b0c040039000301a30c02004a000301da0c040029000301'
+            'e90c04002a000301f20c04007c000301150d04000a0003012d0d04006c000301430d0400710003014f0d0400'
+            '72000301d90d02005b000301180e02001e0003011f0e040005000200390e0100d40d03014a0e020003000301'
+            '7c0e0200310003016c0f0400010003014a000200580003016a0004007d000301ea0002004a00030117010200'
+            '540003015b010200540003018c01020052000301c501020051000200fa01010077000500fd01010077000301'
+            '0a020400850003011002020033000301340202003b00030154020100350003016b0201007d01030194020100'
+            '79010301b202010021000301ba0201007c010301c50201007b010301cd0201007c010301d80201007a010301'
+            '19030400a401030150030100260003016a030100790103018803010021000301900301007c0103019b030100'
+            '7a010301a90301009b000301b403010044000301f2030400a401030118040100f000030123040100f6000301'
+            '39040100f100030144040100f700030153040100f80003015e040100f300030169040100f600030179040100'
+            'f3000301b7040400a40103010f050200580003012f0501008400030147050100850003016c05010085000301'
+            '84050100840003019e05010085000301e4050400a40103011d0602001f000301250602001e00030143060300'
+            '030003015406030005000301650603000400030175060300050003018506030004000301e1060400a4010301'
+            'fa06040026010301020704001e01030108070400260103011407040042000301240701004200030143070400'
+            '48000301580704005100030161070100450003016e0704004400030176070400260103018107040026010000'
+            '00000500000000000000000000005241572053504f4f4c20444154410d0a004550534f4e392c4c5054313a00'
+            '4570736f6e204c582d3335300064657669636573004c5054313a004550534f4e390061626f72746564007061'
+            '6765206f6e650061626f72743a207365742025642c206a6f622025642c20706167652025642c207061676520'
+            '25642c20656e642025642c2061736b6564202564007072696e7465640073706f6f6c65642070616765007370'
+            '6f6f6c3a206573636170652025642c206a6f622025642c20706167652025642c20656e642025642c20717565'
+            '72792025642c2061736b656420256400726177006f70656e6a6f623a2025642c20706167652025642c207772'
+            '6974652025642c20656e642025642c2076616c69642025642c20636c6f73652025642c20616761696e202564'
+            '004c5054323a004c50543200656e7669726f6e6d656e743a207365742025642c2073697a652025642c20676f'
+            '742025642073616d652025642c2064656c657465642025642c207468656e202564006576656e743a20776169'
+            '742025643b20656d38373a2076657273696f6e2025582c20736176652025752c207265616c2025752c206377'
+            '2025582c2073616d6520256400004e4f535543482e455845006c6f636b3a2025642c20616e6f746865722025'
+            '642c20756e6c6f636b2025642c20616761696e2025643b206578656320256400434f4d3200434f4d313a0043'
+            '4f4d313a323430302c652c372c3100636f6d6d3a206f70656e2025642c20636f6d322025642c206275696c64'
+            '20256420736574202564206765742025643a2025752025642025642025642c206d617820256c642c206e6f74'
+            '6966792025640048454c4c4f20434f4d4d007772697465202564006e6f7469667920256420282558293a2071'
+            '75657565642025752c206572726f722025642c207265616420256420272573272c20776f72642025582c206d'
+            '61736b202558007468656e20776f72642025582c20636c6f73652025642c20636c6f736564202564004c5054'
+            '3100646573706f6f6c65643a204c50543120256c642062797465732c20726177206c617374202564004f7752'
+            '65616c004f575245414c202d2057696e646f777320332e3127732c206e6f74207374756273004f70656e2057'
+            '6174636f6d006300ffff0000ffff00000000000000000000000c000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+            '00000000000000000000000000000000000000008f0f8f0f0000000000000000000000000000000000000000'
+            '000000000000000000000000000000000020660d0000'
         )),
 }
 

@@ -829,6 +829,12 @@ BOOL    WINAPI ScrollDC(HDC hdc, int dx, int dy, const RECT *rc, const RECT *cli
 /* EnableScrollBar */
 #define ESB_ENABLE_BOTH     0x0000
 #define ESB_DISABLE_BOTH    0x0003
+#define ESB_DISABLE_LTUP    0x0001
+#define ESB_DISABLE_RTDN    0x0002
+#define ESB_DISABLE_LEFT    0x0001
+#define ESB_DISABLE_RIGHT   0x0002
+#define ESB_DISABLE_UP      0x0001
+#define ESB_DISABLE_DOWN    0x0002
 BOOL    WINAPI EnableScrollBar(HWND hwnd, int bar, UINT arrows);
 HICON   WINAPI CopyIcon(HINSTANCE inst, HICON icon);
 HCURSOR WINAPI CopyCursor(HINSTANCE inst, HCURSOR cursor);
@@ -1184,7 +1190,9 @@ BOOL    WINAPI TranslateMDISysAccel(HWND client, LPMSG msg);
 
 /* ---------------------------------------------------------------- more API */
 
-BOOL    WINAPI ExitWindows(DWORD reserved, UINT code);
+#define EW_RESTARTWINDOWS   0x42
+#define EW_REBOOTSYSTEM     0x43
+BOOL    WINAPI ExitWindows(DWORD code, UINT reserved);
 
 int     WINAPI SetScrollPos(HWND hwnd, int bar, int pos, BOOL redraw);
 int     WINAPI GetScrollPos(HWND hwnd, int bar);
@@ -1546,5 +1554,148 @@ BOOL    WINAPI DestroyIcon32(HICON icon, UINT flags);
 /* WINN native extensions: shared keyboard layout, 0=Latin, 1=Russian. */
 int     WINAPI GetKeyboardLayoutN(void);
 void    WINAPI SetKeyboardLayoutN(int russian);
+
+/* ---------------------------------------------------------------- communications (comm.c) */
+
+#define WM_COMMNOTIFY       0x0044
+#define CN_RECEIVE          0x0001
+#define CN_TRANSMIT         0x0002
+#define CN_EVENT            0x0004
+
+#define IE_BADID            (-1)
+#define IE_OPEN             (-2)
+#define IE_NOPEN            (-3)
+#define IE_MEMORY           (-4)
+#define IE_DEFAULT          (-5)
+#define IE_HARDWARE         (-10)
+#define IE_BYTESIZE         (-11)
+#define IE_BAUDRATE         (-12)
+
+#define CE_RXOVER           0x0001
+#define CE_OVERRUN          0x0002
+#define CE_RXPARITY         0x0004
+#define CE_FRAME            0x0008
+#define CE_BREAK            0x0010
+#define CE_CTSTO            0x0020
+#define CE_DSRTO            0x0040
+#define CE_RLSDTO           0x0080
+#define CE_TXFULL           0x0100
+#define CE_PTO              0x0200
+#define CE_IOE              0x0400
+#define CE_DNS              0x0800
+#define CE_OOP              0x1000
+#define CE_MODE             0x8000
+
+#define EV_RXCHAR           0x0001
+#define EV_RXFLAG           0x0002
+#define EV_TXEMPTY          0x0004
+#define EV_CTS              0x0008
+#define EV_DSR              0x0010
+#define EV_RLSD             0x0020
+#define EV_BREAK            0x0040
+#define EV_ERR              0x0080
+#define EV_RING             0x0100
+#define EV_PERR             0x0200
+
+#define CSTF_CTSHOLD        0x01
+#define CSTF_DSRHOLD        0x02
+#define CSTF_RLSDHOLD       0x04
+#define CSTF_XOFFHOLD       0x08
+#define CSTF_XOFFSENT       0x10
+#define CSTF_EOF            0x20
+#define CSTF_TXIM           0x40
+
+#define NOPARITY            0
+#define ODDPARITY           1
+#define EVENPARITY          2
+#define MARKPARITY          3
+#define SPACEPARITY         4
+#define ONESTOPBIT          0
+#define ONE5STOPBITS        1
+#define TWOSTOPBITS         2
+
+#define CBR_110             0xFF10
+#define CBR_300             0xFF11
+#define CBR_600             0xFF12
+#define CBR_1200            0xFF13
+#define CBR_2400            0xFF14
+#define CBR_4800            0xFF15
+#define CBR_9600            0xFF16
+#define CBR_14400           0xFF17
+#define CBR_19200           0xFF18
+#define CBR_38400           0xFF1B
+#define CBR_56000           0xFF1F
+#define CBR_128000          0xFF23
+#define CBR_256000          0xFF27
+
+#define SETXOFF             1
+#define SETXON              2
+#define SETRTS              3
+#define CLRRTS              4
+#define SETDTR              5
+#define CLRDTR              6
+#define RESETDEV            7
+#define GETMAXLPT           8
+#define GETMAXCOM           9
+#define GETBASEIRQ          10
+
+/* Windows 3.1's DCB (a Win16 program's: 25 bytes, packed) */
+typedef struct tagDCB {
+    BYTE Id;
+    UINT BaudRate;
+    BYTE ByteSize;
+    BYTE Parity;
+    BYTE StopBits;
+    UINT RlsTimeout;
+    UINT CtsTimeout;
+    UINT DsrTimeout;
+    UINT fBinary : 1;
+    UINT fRtsDisable : 1;
+    UINT fParity : 1;
+    UINT fOutxCtsFlow : 1;
+    UINT fOutxDsrFlow : 1;
+    UINT fDummy : 2;
+    UINT fDtrDisable : 1;
+    UINT fOutX : 1;
+    UINT fInX : 1;
+    UINT fPeChar : 1;
+    UINT fNull : 1;
+    UINT fChEvt : 1;
+    UINT fDtrflow : 1;
+    UINT fRtsflow : 1;
+    UINT fDummy2 : 1;
+    char XonChar;
+    char XoffChar;
+    UINT XonLim;
+    UINT XoffLim;
+    char PeChar;
+    char EofChar;
+    char EvtChar;
+    UINT TxDelay;
+} DCB;
+
+typedef struct tagCOMSTAT {
+    BYTE status;                        /* CSTF_* */
+    UINT cbInQue;
+    UINT cbOutQue;
+} COMSTAT;
+
+int     WINAPI OpenComm(LPCSTR name, UINT in_size, UINT out_size);
+int     WINAPI CloseComm(int cid);
+int     WINAPI BuildCommDCB(LPCSTR def, DCB *dcb);
+int     WINAPI SetCommState(const DCB *dcb);
+int     WINAPI GetCommState(int cid, DCB *dcb);
+int     WINAPI ReadComm(int cid, void *buf, int n);
+int     WINAPI WriteComm(int cid, const void *buf, int n);
+int     WINAPI UngetCommChar(int cid, char ch);
+int     WINAPI TransmitCommChar(int cid, char ch);
+int     WINAPI GetCommError(int cid, COMSTAT *stat);
+int     WINAPI FlushComm(int cid, int queue);
+LONG    WINAPI EscapeCommFunction(int cid, int fn);
+int     WINAPI SetCommBreak(int cid);
+int     WINAPI ClearCommBreak(int cid);
+UINT   *WINAPI SetCommEventMask(int cid, UINT mask);
+UINT    WINAPI GetCommEventMask(int cid, int clear);
+BOOL    WINAPI EnableCommNotification(int cid, HWND hwnd, int rx, int tx);
 
 #endif /* MURM_WINUSER_H */

@@ -29,6 +29,7 @@ typedef struct {
     RECT  rc;           /* bar: relative to the bar; popup: popup client */
     int   kind;         /* MK_*: its commands are system commands of target */
     HWND  target;
+    HBITMAP checked, unchecked;     /* SetMenuItemBitmaps': its marks (0 WINN's) */
 } mitem;
 
 typedef struct {
@@ -78,11 +79,37 @@ BOOL WINAPI ChangeMenu(HMENU h, UINT pos, LPCSTR text, UINT id, UINT flags)
 
 DWORD WINAPI GetMenuCheckMarkDimensions(void) { return MAKELONG(CHECK_W, CHECK_W); }
 
-/* bitmaps of its own for an item's check: taken, the check drawn as WINN's */
+static mitem *find_item(HMENU h, UINT key, UINT flags, wmenu **owner, int *index);
+
+/* bitmaps of its own for an item's marks, checked and not (monochrome, as
+ * Windows draws them: black the text's colour); both 0: WINN's check */
 BOOL WINAPI SetMenuItemBitmaps(HMENU h, UINT pos, UINT flags, HBITMAP unchecked, HBITMAP checked)
 {
-    (void)pos; (void)flags; (void)unchecked; (void)checked;
-    return IsMenu(h);
+    mitem *it = find_item(h, pos, flags, NULL, NULL);
+    if (!it)
+        return FALSE;
+    it->checked = checked;
+    it->unchecked = unchecked;
+    return TRUE;
+}
+
+/* an item's mark bitmap in its check column */
+static void draw_mark(HDC dc, HBITMAP bm, const RECT *r, COLORREF fg, COLORREF bg)
+{
+    BITMAP b;
+    if (!GetObject(bm, sizeof(b), &b))
+        return;
+    HDC mem = CreateCompatibleDC(dc);
+    HGDIOBJ old = SelectObject(mem, bm);
+    int w = b.bmWidth < CHECK_W ? b.bmWidth : CHECK_W, hgt = b.bmHeight < r->bottom - r->top ?
+                                                               b.bmHeight : r->bottom - r->top;
+    COLORREF ot = SetTextColor(dc, fg), ob = SetBkColor(dc, bg);
+    BitBlt(dc, r->left + (CHECK_W - w) / 2, r->top + (r->bottom - r->top - hgt) / 2, w, hgt, mem,
+           0, 0, SRCCOPY);
+    SetTextColor(dc, ot);
+    SetBkColor(dc, ob);
+    SelectObject(mem, old);
+    DeleteDC(mem);
 }
 
 BOOL WINAPI DestroyMenu(HMENU h)
@@ -565,7 +592,10 @@ static void draw_item(HDC dc, wmenu *m, int i, int selected, int ox, int oy)
         ar.left = ox + m->accel_x;
         user_draw_text(dc, acc, -1, &ar, DT_SINGLELINE | DT_VCENTER);
     }
-    if (it->flags & MF_CHECKED) {
+    HBITMAP mark = (it->flags & MF_CHECKED) ? it->checked : it->unchecked;
+    if (mark) {
+        draw_mark(dc, mark, &r, tc, GetSysColor(selected ? COLOR_HIGHLIGHT : COLOR_MENU));
+    } else if (it->flags & MF_CHECKED) {
         HPEN p = CreatePen(PS_SOLID, 2, tc);
         HGDIOBJ op = SelectObject(dc, p);
         int cx = r.left + 4, cy = (r.top + r.bottom) / 2;

@@ -209,31 +209,8 @@ int WINAPI DeletePQ(HANDLE h)
     return TRUE;
 }
 
-/* ---------------------------------------------------------------- the spooler */
-
-int WINAPI OpenJob(LPCSTR port, LPCSTR title, HDC hdc)
-{
-    (void)port; (void)title; (void)hdc;
-    return SP_ERROR;
-}
-
-int WINAPI StartSpoolPage(HANDLE job) { (void)job; return SP_ERROR; }
-int WINAPI EndSpoolPage(HANDLE job) { (void)job; return SP_ERROR; }
-int WINAPI CloseJob(HANDLE job) { (void)job; return SP_ERROR; }
-int WINAPI DeleteJob(HANDLE job, int flags) { (void)job; (void)flags; return SP_ERROR; }
-int WINAPI DeleteSpoolPage(HANDLE job) { (void)job; return SP_ERROR; }
-
-int WINAPI WriteSpool(HANDLE job, LPCSTR data, int cb)
-{
-    (void)job; (void)data; (void)cb;
-    return SP_ERROR;
-}
-
-int WINAPI WriteDialog(HANDLE job, LPCSTR text, int cb)
-{
-    (void)job; (void)text; (void)cb;
-    return SP_ERROR;
-}
+/* ---------------------------------------------------------------- the spooler
+ * (OpenJob, WriteSpool ...: print.c) */
 
 /* Print Manager's questions to the spooler (Windows for Workgroups'
  * PRINTMAN asks 14h for the queues, 15h, 19h-1Fh for settings, 20h and 21h
@@ -243,16 +220,4 @@ LONG WINAPI GetSpoolJob(int option, LONG param)
 {
     (void)option; (void)param;
     return 0;
-}
-
-int WINAPI QueryJob(HANDLE job, int what)
-{
-    (void)job; (void)what;
-    return SP_ERROR;
-}
-
-HANDLE WINAPI SpoolFile(LPCSTR printer, LPCSTR port, LPCSTR job, LPCSTR file)
-{
-    (void)printer; (void)port; (void)job; (void)file;
-    return (HANDLE)(uintptr_t)(UINT)SP_ERROR;
 }

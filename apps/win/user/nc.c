@@ -185,15 +185,17 @@ static void draw_scrollbar(HDC dc, wwnd *w, int bar, int pressed_part)
     InflateRect(&t, -1, -1);
     if (s.vert) InflateRect(&t, 0, 1); else InflateRect(&t, 1, 0);
     FillRect(dc, &t, user_sys_brush(COLOR_SCROLLBAR));
-    /* arrows */
+    /* arrows: grey if disabled (EnableScrollBar), no thumb with both */
+    UINT off = bar_info(w, bar)->off;
     draw_button_box(dc, &s.up, pressed_part == 1);
     draw_button_box(dc, &s.down, pressed_part == 2);
     RECT a = s.up, b = s.down;
     if (pressed_part == 1) OffsetRect(&a, 1, 1);
     if (pressed_part == 2) OffsetRect(&b, 1, 1);
-    user_draw_arrow(dc, &a, s.vert ? 0 : 2, RGB(0, 0, 0));
-    user_draw_arrow(dc, &b, s.vert ? 1 : 3, RGB(0, 0, 0));
-    if (!IsRectEmpty(&s.thumb))
+    COLORREF grey = GetSysColor(COLOR_GRAYTEXT);
+    user_draw_arrow(dc, &a, s.vert ? 0 : 2, (off & ESB_DISABLE_LTUP) ? grey : RGB(0, 0, 0));
+    user_draw_arrow(dc, &b, s.vert ? 1 : 3, (off & ESB_DISABLE_RTDN) ? grey : RGB(0, 0, 0));
+    if (!IsRectEmpty(&s.thumb) && off != ESB_DISABLE_BOTH)
         draw_button_box(dc, &s.thumb, 0);
 }
 
@@ -691,6 +693,10 @@ static void scroll_track(wwnd *w, int bar, int x, int y)
         from = w->h;
     }
     int code, part = 0;
+    UINT off = bar_info(w, bar)->off;
+    if (off == ESB_DISABLE_BOTH || (PtInRect(&s.up, q) && (off & ESB_DISABLE_LTUP)) ||
+        (PtInRect(&s.down, q) && (off & ESB_DISABLE_RTDN)))
+        return;                         /* disabled (EnableScrollBar) */
     if (PtInRect(&s.up, q)) { code = SB_LINEUP; part = 1; }
     else if (PtInRect(&s.down, q)) { code = SB_LINEDOWN; part = 2; }
     else if (PtInRect(&s.thumb, q)) code = SB_THUMBTRACK;
@@ -889,7 +895,11 @@ static void alt_tab(wwnd *from)
         user_switch_to(list[sel]);
 }
 
-void user_alt_tab(wwnd *w) { alt_tab(w); }
+void user_alt_tab(wwnd *w)
+{
+    if (!GetSysModalWindow())           /* a system-modal window: none */
+        alt_tab(w);
+}
 
 void user_syscommand(wwnd *w, UINT cmd, int x, int y)
 {
@@ -934,6 +944,8 @@ void user_syscommand(wwnd *w, UINT cmd, int x, int y)
         /* the Task List: the one already open, or SYSTEM.INI [boot]
          * taskman.exe (TASKMAN.EXE) started */
         win_trace_dump();               /* SYSTEM.INI [debug] trace=1 */
+        if (GetSysModalWindow())        /* no switching from it */
+            break;
         HWND tl = FindWindow(NULL, "Task List");
         if (tl && IsWindowVisible(tl)) {
             SetActiveWindow(tl);

@@ -22,6 +22,7 @@ extern void BeginDeferWindowPos(void);
 extern void BeginPaint(void);
 extern void BitBlt(void);
 extern void BringWindowToTop(void);
+extern void BuildCommDCB(void);
 extern void CalcChildScroll(void);
 extern void CallMsgFilter(void);
 extern void CallWindowProc(void);
@@ -37,9 +38,11 @@ extern void ChildWindowFromPointEx(void);
 extern void ChooseColor(void);
 extern void ChooseFont(void);
 extern void Chord(void);
+extern void ClearCommBreak(void);
 extern void ClientToScreen(void);
 extern void ClipCursor(void);
 extern void CloseClipboard(void);
+extern void CloseComm(void);
 extern void CloseJob(void);
 extern void CloseMetaFile(void);
 extern void CloseWindow(void);
@@ -138,6 +141,7 @@ extern void DrawText(void);
 extern void DrawTextEx(void);
 extern void Ellipse(void);
 extern void EmptyClipboard(void);
+extern void EnableCommNotification(void);
 extern void EnableDos(void);
 extern void EnableHardwareInput(void);
 extern void EnableKernel(void);
@@ -163,6 +167,7 @@ extern void EnumWindows(void);
 extern void EqualRect(void);
 extern void EqualRgn(void);
 extern void Escape(void);
+extern void EscapeCommFunction(void);
 extern void ExcludeClipRect(void);
 extern void ExcludeUpdateRgn(void);
 extern void ExcludeVisRect(void);
@@ -185,6 +190,7 @@ extern void FindWindowEx(void);
 extern void FlashWindow(void);
 extern void FloodFill(void);
 extern void FlushCachedFileHandle(void);
+extern void FlushComm(void);
 extern void FrameRect(void);
 extern void FrameRgn(void);
 extern void FreeLibrary(void);
@@ -222,6 +228,9 @@ extern void GetClipboardData(void);
 extern void GetClipboardFormatName(void);
 extern void GetClipboardOwner(void);
 extern void GetClipboardViewer(void);
+extern void GetCommError(void);
+extern void GetCommEventMask(void);
+extern void GetCommState(void);
 extern void GetControlBrush(void);
 extern void GetCurLogFont(void);
 extern void GetCurrentDirectoryN(void);
@@ -473,6 +482,7 @@ extern void OldExitWindows(void);
 extern void OldSetDeskPattern(void);
 extern void OldYield(void);
 extern void OpenClipboard(void);
+extern void OpenComm(void);
 extern void OpenFile(void);
 extern void OpenIcon(void);
 extern void OpenJob(void);
@@ -501,7 +511,9 @@ extern void PrinterNeCallN(void);
 extern void PtInRect(void);
 extern void PtInRegion(void);
 extern void PtVisible(void);
+extern void QueryAbort(void);
 extern void QueryJob(void);
+extern void ReadComm(void);
 extern void RealizeDefaultPalette(void);
 extern void RealizePalette(void);
 extern void RectInRegion(void);
@@ -564,6 +576,9 @@ extern void SetClassWord(void);
 extern void SetClipboardData(void);
 extern void SetClipboardDataBatchN(void);
 extern void SetClipboardViewer(void);
+extern void SetCommBreak(void);
+extern void SetCommEventMask(void);
+extern void SetCommState(void);
 extern void SetCursor(void);
 extern void SetCursorPos(void);
 extern void SetDCHook(void);
@@ -666,6 +681,8 @@ extern void TrackPopupMenu(void);
 extern void TranslateAccelerator(void);
 extern void TranslateMDISysAccel(void);
 extern void TranslateMessage(void);
+extern void TransmitCommChar(void);
+extern void UngetCommChar(void);
 extern void UnionRect(void);
 extern void UnloadInstalledDrivers(void);
 extern void UnrealizeObject(void);
@@ -676,6 +693,7 @@ extern void UserYield(void);
 extern void ValidateCodeSegments(void);
 extern void ValidateRect(void);
 extern void ValidateRgn(void);
+extern void WaitEvent(void);
 extern void WaitMessage(void);
 extern void WinDirListAttrN(void);
 extern void WinDirListN(void);
@@ -685,6 +703,7 @@ extern void WinHelp(void);
 extern void WinRegQueryClassStringN(void);
 extern void WindowFromDC(void);
 extern void WindowFromPoint(void);
+extern void WriteComm(void);
 extern void WriteDialog(void);
 extern void WriteOutProfiles(void);
 extern void WritePrivateProfileString(void);
@@ -724,6 +743,7 @@ static const void *const exports_kernel[422] = {
     [19] = (const void *)GlobalUnlock,
     [20] = (const void *)GlobalSize,
     [29] = (const void *)Yield,
+    [30] = (const void *)WaitEvent,
     [31] = (const void *)PostEvent,
     [32] = (const void *)SetPriority,
     [33] = (const void *)LockCurrentTask,
@@ -927,6 +947,7 @@ static const void *const exports_gdi[1002] = {
     [151] = (const void *)CopyMetaFile,
     [153] = (const void *)CreateIC,
     [154] = (const void *)GetNearestColor,
+    [155] = (const void *)QueryAbort,
     [156] = (const void *)CreateDiscardableBitmap,
     [159] = (const void *)GetMetaFileBits,
     [160] = (const void *)SetMetaFileBits,
@@ -1232,6 +1253,22 @@ static const void *const exports_user[931] = {
     [197] = (const void *)GetTabbedTextExtent,
     [198] = (const void *)CascadeChildWindows,
     [199] = (const void *)TileChildWindows,
+    [200] = (const void *)OpenComm,
+    [201] = (const void *)SetCommState,
+    [202] = (const void *)GetCommState,
+    [203] = (const void *)GetCommError,
+    [204] = (const void *)ReadComm,
+    [205] = (const void *)WriteComm,
+    [206] = (const void *)TransmitCommChar,
+    [207] = (const void *)CloseComm,
+    [208] = (const void *)SetCommEventMask,
+    [209] = (const void *)GetCommEventMask,
+    [210] = (const void *)SetCommBreak,
+    [211] = (const void *)ClearCommBreak,
+    [212] = (const void *)UngetCommChar,
+    [213] = (const void *)BuildCommDCB,
+    [214] = (const void *)EscapeCommFunction,
+    [215] = (const void *)FlushComm,
     [217] = (const void *)LookupMenuHandle,
     [221] = (const void *)ScrollDC,
     [222] = (const void *)GetKeyboardState,
@@ -1250,6 +1287,7 @@ static const void *const exports_user[931] = {
     [238] = (const void *)ExcludeUpdateRgn,
     [243] = (const void *)GetDialogBaseUnits,
     [244] = (const void *)EqualRect,
+    [245] = (const void *)EnableCommNotification,
     [246] = (const void *)ExitWindowsExec,
     [247] = (const void *)GetCursor,
     [248] = (const void *)GetOpenClipboardWindow,

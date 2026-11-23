@@ -492,11 +492,26 @@ LPARAM WINAPI SetMessageExtraInfo(LPARAM info)
     return was;
 }
 
-/* its arrows disabled or enabled: taken, drawn as they are */
+/* its arrows disabled or enabled (ESB_*): grey, not pressed (nc.c);
+ * FALSE if nothing changed */
 BOOL WINAPI EnableScrollBar(HWND h, int bar, UINT arrows)
 {
-    (void)bar; (void)arrows;
-    return IsWindow(h);
+    wwnd *w = user_wnd(h);
+    if (!w || bar < SB_HORZ || bar > SB_BOTH)
+        return FALSE;
+    arrows &= ESB_DISABLE_BOTH;
+    BOOL changed = FALSE;
+    if (bar == SB_HORZ || bar == SB_BOTH) {
+        changed |= w->hs.off != arrows;
+        w->hs.off = arrows;
+    }
+    if (bar == SB_VERT || bar == SB_BOTH || bar == SB_CTL) {
+        changed |= w->vs.off != arrows;
+        w->vs.off = arrows;
+    }
+    if (changed)
+        RedrawWindow(h, NULL, 0, bar == SB_CTL ? RDW_INVALIDATE : RDW_FRAME | RDW_INVALIDATE);
+    return changed;
 }
 
 /* a visible top-level window that has an owner or is a pop-up */
@@ -557,8 +572,19 @@ HWND WINAPI GetLastActivePopup(HWND h)
     return h;
 }
 
-/* drawing is not held back: the window paints as it goes */
-BOOL WINAPI LockWindowUpdate(HWND h) { (void)h; return TRUE; }
+/* One window at a time: its DCs (and its children's) draw nowhere while
+ * it is locked (paint.c); unlocked, it is painted anew. */
+BOOL WINAPI LockWindowUpdate(HWND h)
+{
+    wwnd *w = h ? user_wnd(h) : U.locked;
+    if (!w || (h && U.locked))
+        return FALSE;
+    U.locked = h ? w : NULL;
+    win_sys.vis_gen++;                  /* the DCs in use follow */
+    if (!h)
+        RedrawWindow(w->h, NULL, 0, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
+    return TRUE;
+}
 
 /* the positions of several windows at once: each set as it comes */
 HDWP WINAPI BeginDeferWindowPos(int n) { (void)n; return 1; }
@@ -571,17 +597,45 @@ HDWP WINAPI DeferWindowPos(HDWP d, HWND h, HWND after, int x, int y, int cx, int
 
 BOOL WINAPI EndDeferWindowPos(HDWP d) { return d != 0; }
 
-/* the system-modal window: noted, not enforced */
+/* the system-modal window: the mouse and the keys for it (and the windows
+ * it owns) alone, no switching to another (msg.c, nc.c) */
 static HWND sys_modal;
 
 HWND WINAPI SetSysModalWindow(HWND h)
 {
     HWND old = GetSysModalWindow();
-    sys_modal = h;
+    sys_modal = IsWindow(h) ? h : 0;
+    if (sys_modal)
+        SetActiveWindow(sys_modal);
     return old;
 }
 
 HWND WINAPI GetSysModalWindow(void) { return IsWindow(sys_modal) ? sys_modal : 0; }
+
+/* the input for one window only (and the windows it owns) */
+static HWND input_lock;
+
+BOOL WINAPI LockInput(HANDLE reserved, HWND h, BOOL lock)
+{
+    (void)reserved;
+    if (lock && !IsWindow(h))
+        return FALSE;
+    input_lock = lock ? h : 0;
+    return TRUE;
+}
+
+int user_sysmodal_blocks(const wwnd *w)
+{
+    HWND sm = GetSysModalWindow();
+    if (!sm && IsWindow(input_lock))
+        sm = input_lock;
+    if (!sm || !w || w == U.desktop)
+        return sm != 0;
+    for (const wwnd *t = user_toplevel((wwnd *)w); t; t = t->owner)
+        if (t->h == sm)
+            return 0;
+    return 1;
+}
 
 /* WINHELP.EXE: the running one is sent the request (WINHELP_N), else it
  * is started with it on its command line. HELP_KEY's, HELP_PARTIALKEY's,
@@ -1697,6 +1751,7 @@ static void free_tree(wwnd *w)
     if (U.focus == w) U.focus = NULL;
     if (U.active == w) U.active = NULL;
     if (U.capture == w) U.capture = NULL;
+    if (U.locked == w) U.locked = NULL;
     user_caret_window_gone(h);
     user_kill_window_timers(h);
     user_purge_window(h);
@@ -1966,13 +2021,6 @@ void user_init_windows(void)
     wrgn_set_rect(&r, &d->rc);
     add_update(d, &r, 1);
     wrgn_free(&r);
-}
-
-/* Windows left to run a DOS program and come back: WINN cannot */
-BOOL WINAPI ExitWindowsExec(LPCSTR exe, LPCSTR params)
-{
-    (void)exe; (void)params;
-    return FALSE;
 }
 
 /* the mouse, its left button down at pt (screen), moved far enough to be

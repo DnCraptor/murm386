@@ -230,6 +230,14 @@ typedef struct wdc {
 HDC  print_create_dc(LPCSTR driver, LPCSTR device, LPCSTR port, int ic, const DEVMODE *init);
 void print_dc_gone(wdc *dc);
 int  print_caps(const wdc *dc, int index, int *value);
+/* the spooler's queue to the ports, some at a time as the system idles;
+ * its jobs (queued and printing) */
+void print_spool_idle(void);
+void print_task_ended(HTASK task);    /* the jobs it was writing deleted */
+/* user/comm.c: told of each port's event word as it changes (the Win16
+ * programs' copies of it, ne_guest_kernel.c) */
+void user_comm_event_hook(void (*hook)(int cid, UINT events));
+int  print_spool_jobs(void);
 
 /* Screen and system state shared by GDI and USER. */
 typedef struct wsys {
@@ -257,6 +265,11 @@ extern wsys win_sys;
 /* winsys.c */
 int      win_init(const char *display, const char *input, int want_w, int want_h, int want_bpp);
 void     win_shutdown(void);
+/* task.c: how Windows ends (ExitWindows, ExitWindowsExec): WIN_END_*,
+ * the DOS program and its arguments, the exit code */
+enum { WIN_END_EXIT, WIN_END_RESTART, WIN_END_REBOOT, WIN_END_EXEC };
+void     win_end_set(int how, const char *exe, const char *params, int code);
+int      win_end_get(char *exe, char *params, int *code);    /* 128 bytes each */
 int      win_boot(const char *exe_path, const win_display_driver *const *disp,
                   const win_input_driver *in);
 int      user_init(void);                        /* user/dialog.c */
@@ -265,6 +278,8 @@ int      user_init(void);                        /* user/dialog.c */
 int      win_dos_is_image(const char *path);
 int      win_dos_is_ez(const char *path);
 UINT     win_dos_exec(const char *path, const char *args, BOOL use_exe_dir);
+/* ... with Windows ended (its display off): in the current directory */
+UINT     win_dos_exec_ended(const char *path, const char *args);
 
 /* profile.c */
 void     win_set_home(const char *exe_path);
@@ -432,7 +447,8 @@ HBITMAP  win_ne_bitmap(const char *path, uint16_t id, const char *name);
 enum { WTASK_NEW, WTASK_RUNNING, WTASK_DEAD };
 /* The kernel's normal scheduler wait must not wake for GUI messages;
  * a modal GetMessage on the kernel stack must. */
-enum { WTASK_WAIT_NONE = 0, WTASK_WAIT_IDLE = 1, WTASK_WAIT_MESSAGE = 2 };
+/* WTASK_WAIT_EVENT: WaitEvent's, woken by an event as well */
+enum { WTASK_WAIT_NONE = 0, WTASK_WAIT_IDLE = 1, WTASK_WAIT_MESSAGE = 2, WTASK_WAIT_EVENT = 3 };
 
 struct wtask_ctx;
 
@@ -466,6 +482,7 @@ typedef struct wtask {
     uint32_t  queue_time;       /* when it last looked at its queue (GetTickCount) */
     int       priority;         /* SetPriority's: noted */
     HANDLE    queue;            /* SetTaskQueue's (0: the task) */
+    int       events;           /* PostEvent's, not yet taken by WaitEvent */
 } wtask;
 
 void   task_init(void);
@@ -481,6 +498,7 @@ int    task_yield(void);                 /* 1 if another task ran */
 void   task_run_now(wtask *t);
 void   task_kernel_loop(void);
 void   task_quit_all(void);              /* WM_QUIT for every application */
+void   task_idle(void);                  /* nothing to run: the spooler, the driver's idle */
 HTASK  task_shell(void);                 /* the first task (SYSTEM.INI shell=) */
 /* sound.c: the notes queued for the speaker, played as time goes on
  * (sound_service, from USER's input pump); a beep (MessageBeep) */
@@ -551,6 +569,9 @@ int    win_file_drive(int set);
 int    win_file_attr(LPCSTR path, int set, UINT attr);
 BOOL   win_file_time(HFILE f, int set, WORD *date, WORD *time_);
 int    win_file_environment(char *buf, int size);
+/* GetTempFileName's: the Windows directory's TEMP, ~PRE1234.TMP (unique 0:
+ * a name no file has, made); its number, 0 if none (out: 144 bytes) */
+UINT   win_file_temp_name(LPCSTR prefix, UINT unique, LPSTR out);
 /* gdi_text.c: a character between Windows-1251 (ANSI) and CP866 (OEM) */
 uint8_t win_ansi_to_oem(uint8_t c);
 uint8_t win_oem_to_ansi(uint8_t c);

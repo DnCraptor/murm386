@@ -279,46 +279,14 @@ static uint16_t load_resource(args *a, ne_user *u)
     return sel;
 }
 
-/* GetTempFileName(BYTE drive, LPCSTR prefix, UINT unique, LPSTR): in the
- * Windows directory's TEMP subdirectory, ~PRE1234.TMP.
- * unique 0: a name no file has, made */
+/* GetTempFileName(BYTE drive, LPCSTR prefix, UINT unique, LPSTR) */
 static uint16_t temp_file_name(args *a)
 {
-    uint32_t out = dw(a, 4), prefix_far = dw(a, 10);
-    uint16_t unique = w(a, 8);
-    char prefix[16], dir[128], path[160];
-    if (!str_(a, prefix_far, prefix, sizeof(prefix)))
+    char prefix[16], path[144];
+    if (!str_(a, dw(a, 10), prefix, sizeof(prefix)))
         return 0;
-    prefix[3] = 0;
-    UINT n = GetWindowsDirectory(dir, sizeof(dir));
-    if (!n || n > sizeof(dir) - 7)
-        return 0;
-    if (dir[n - 1] != '\\' && dir[n - 1] != '/')
-        lstrcat(dir, "\\");
-    lstrcat(dir, "TEMP");
-    int attr = win_file_attr(dir, 0, 0);
-    if ((attr < 0 && !CreateDirectoryN(dir)) || (attr >= 0 && !(attr & 0x10)))
-        return 0;
-    lstrcat(dir, "\\");
-    uint16_t num = unique ? unique : (uint16_t)GetTickCount();
-    for (int tries = 0; tries < 256; tries++, num++) {
-        if (!num)
-            num = 1;
-        wsprintf(path, "%s~%s%04X.TMP", dir, prefix, num);
-        if (unique)
-            break;
-        HFILE f = _lopen(path, OF_READ);
-        if (f != HFILE_ERROR) {
-            _lclose(f);
-            continue;
-        }
-        f = _lcreat(path, 0);
-        if (f == HFILE_ERROR)
-            return 0;
-        _lclose(f);
-        break;
-    }
-    return str_out(a, out, path, 144) ? num : 0;
+    uint16_t num = (uint16_t)win_file_temp_name(prefix, w(a, 8), path);
+    return num && str_out(a, dw(a, 4), path, 144) ? num : 0;
 }
 
 /* ShellExecute's and WinExec's command: the program itself, or the one
@@ -675,6 +643,164 @@ static int CALLBACK ne_objproc(void *obj, LPARAM lp)
     const uint16_t words[4] = { (uint16_t)(far >> 16), (uint16_t)far, (uint16_t)(e->lp >> 16),
                                 (uint16_t)e->lp };
     return (int16_t)win_ne_call(e->c, e->proc, words, 4, g, len);
+}
+
+/* the printers' AbortProcs of the programs: the DC's, called on its task
+ * (EndPage, QueryAbort) as BOOL FAR PASCAL (HDC, int) */
+#define NE_ABORTS 8
+
+static struct {
+    HDC dc;
+    win_ne_guest_api_context *c;
+    uint32_t proc;
+} ne_aborts[NE_ABORTS];
+
+static BOOL CALLBACK ne_abortproc(HDC dc, int code)
+{
+    for (int i = 0; i < NE_ABORTS; i++)
+        if (ne_aborts[i].dc == dc && ne_aborts[i].proc) {
+            const uint16_t words[2] = { (uint16_t)(uintptr_t)dc, (uint16_t)code };
+            return (uint16_t)win_ne_call(ne_aborts[i].c, ne_aborts[i].proc, words, 2, NULL, 0) != 0;
+        }
+    return TRUE;
+}
+
+static int ne_set_abort(win_ne_guest_api_context *c, HDC dc, uint32_t proc)
+{
+    int slot = -1;
+    for (int i = 0; i < NE_ABORTS; i++) {
+        if (ne_aborts[i].dc == dc)
+            ne_aborts[i].dc = 0;         /* its last one */
+        if (!ne_aborts[i].dc && slot < 0)
+            slot = i;
+    }
+    if (proc && slot < 0) {             /* full: the oldest goes */
+        memmove(&ne_aborts[0], &ne_aborts[1], sizeof(ne_aborts[0]) * (NE_ABORTS - 1));
+        slot = NE_ABORTS - 1;
+    }
+    if (proc) {
+        ne_aborts[slot].dc = dc;
+        ne_aborts[slot].c = c;
+        ne_aborts[slot].proc = proc;
+    }
+    return SetAbortProc(dc, proc ? ne_abortproc : NULL);
+}
+
+
+/* Win16's DCB: 25 bytes, its flags two bytes of bits */
+static void dcb_in(const uint8_t *b, DCB *d)
+{
+    d->Id = b[0];
+    d->BaudRate = rd16(b + 1);
+    d->ByteSize = b[3];
+    d->Parity = b[4];
+    d->StopBits = b[5];
+    d->RlsTimeout = rd16(b + 6);
+    d->CtsTimeout = rd16(b + 8);
+    d->DsrTimeout = rd16(b + 10);
+    d->fBinary = b[12] & 1;
+    d->fRtsDisable = (b[12] >> 1) & 1;
+    d->fParity = (b[12] >> 2) & 1;
+    d->fOutxCtsFlow = (b[12] >> 3) & 1;
+    d->fOutxDsrFlow = (b[12] >> 4) & 1;
+    d->fDummy = (b[12] >> 5) & 3;
+    d->fDtrDisable = (b[12] >> 7) & 1;
+    d->fOutX = b[13] & 1;
+    d->fInX = (b[13] >> 1) & 1;
+    d->fPeChar = (b[13] >> 2) & 1;
+    d->fNull = (b[13] >> 3) & 1;
+    d->fChEvt = (b[13] >> 4) & 1;
+    d->fDtrflow = (b[13] >> 5) & 1;
+    d->fRtsflow = (b[13] >> 6) & 1;
+    d->fDummy2 = (b[13] >> 7) & 1;
+    d->XonChar = (char)b[14];
+    d->XoffChar = (char)b[15];
+    d->XonLim = rd16(b + 16);
+    d->XoffLim = rd16(b + 18);
+    d->PeChar = (char)b[20];
+    d->EofChar = (char)b[21];
+    d->EvtChar = (char)b[22];
+    d->TxDelay = rd16(b + 23);
+}
+
+static void dcb_out(const DCB *d, uint8_t *b)
+{
+    b[0] = d->Id;
+    wr16(b + 1, (uint16_t)d->BaudRate);
+    b[3] = d->ByteSize;
+    b[4] = d->Parity;
+    b[5] = d->StopBits;
+    wr16(b + 6, (uint16_t)d->RlsTimeout);
+    wr16(b + 8, (uint16_t)d->CtsTimeout);
+    wr16(b + 10, (uint16_t)d->DsrTimeout);
+    b[12] = (uint8_t)(d->fBinary | d->fRtsDisable << 1 | d->fParity << 2 | d->fOutxCtsFlow << 3 |
+                      d->fOutxDsrFlow << 4 | d->fDummy << 5 | d->fDtrDisable << 7);
+    b[13] = (uint8_t)(d->fOutX | d->fInX << 1 | d->fPeChar << 2 | d->fNull << 3 |
+                      d->fChEvt << 4 | d->fDtrflow << 5 | d->fRtsflow << 6 | d->fDummy2 << 7);
+    b[14] = (uint8_t)d->XonChar;
+    b[15] = (uint8_t)d->XoffChar;
+    wr16(b + 16, (uint16_t)d->XonLim);
+    wr16(b + 18, (uint16_t)d->XoffLim);
+    b[20] = (uint8_t)d->PeChar;
+    b[21] = (uint8_t)d->EofChar;
+    b[22] = (uint8_t)d->EvtChar;
+    wr16(b + 23, (uint16_t)d->TxDelay);
+}
+
+/* SetCommEventMask's word in the program's memory (a block of its own for
+ * each port), kept as comm.c's changes */
+#define NE_COMM_IDS 8                   /* COM1-4, LPT1-3 */
+
+static struct {
+    win_ne_guest_api_context *c;
+    uint32_t far;
+} ne_comm_word[NE_COMM_IDS];
+
+static int comm_slot(int cid)
+{
+    int i = (cid & 0x80) ? 4 + (cid & 0x7f) : cid;
+    return i >= 0 && i < NE_COMM_IDS ? i : -1;
+}
+
+static void ne_comm_event(int cid, UINT events)
+{
+    int i = comm_slot(cid);
+    if (i >= 0 && ne_comm_word[i].c && ne_comm_word[i].far) {
+        uint8_t b[2];
+        wr16(b, (uint16_t)events);
+        win_ne_write(ne_comm_word[i].c, (uint16_t)(ne_comm_word[i].far >> 16),
+                     (uint16_t)ne_comm_word[i].far, b, 2);
+    }
+}
+
+static uint32_t ne_comm_events(args *a, int cid, UINT mask)
+{
+    int i = comm_slot(cid);
+    win_ne_guest_image *g = (win_ne_guest_image *)a->ctx->image;
+    if (i < 0 || !g)
+        return 0;
+    if (ne_comm_word[i].c != a->ctx || !ne_comm_word[i].far) {
+        uint16_t sel = win_ne_guest_global_alloc(g, 2);
+        if (!sel)
+            return 0;
+        ne_comm_word[i].c = a->ctx;
+        ne_comm_word[i].far = (uint32_t)sel << 16;
+    }
+    user_comm_event_hook(ne_comm_event);
+    if (!SetCommEventMask(cid, mask))
+        return 0;
+    return ne_comm_word[i].far;
+}
+
+/* a task gone: its AbortProcs, its event words */
+void win_ne_abort_task_gone(win_ne_guest_api_context *c)
+{
+    for (int i = 0; i < NE_ABORTS; i++)
+        if (ne_aborts[i].c == c)
+            ne_aborts[i].dc = 0, ne_aborts[i].proc = 0;
+    for (int i = 0; i < NE_COMM_IDS; i++)
+        if (ne_comm_word[i].c == c)
+            ne_comm_word[i].c = NULL, ne_comm_word[i].far = 0;
 }
 
 /* LineDDA's points to the program's procedure (x, y, LPARAM) */
@@ -1101,15 +1227,15 @@ static __attribute__((noinline)) int gdi_more(args *a, uint16_t service, uint32_
             *v = (uint16_t)StartDoc(w(a, 8), &d);
         return 1;
     }
-    case 0x317d:                        /* SetAbortProc(HDC, ABORTPROC): never asked */
-        *v = (uint16_t)SetAbortProc(w(a, 8), NULL);
+    case 0x317d:                        /* SetAbortProc(HDC, ABORTPROC) */
+        *v = (uint16_t)ne_set_abort(a->ctx, w(a, 8), dw(a, 4));
         return 1;
     case 0x317a: *v = (uint16_t)EndDoc(w(a, 4)); return 1;
     case 0x317b: *v = (uint16_t)StartPage(w(a, 4)); return 1;
     case 0x317c: *v = (uint16_t)EndPage(w(a, 4)); return 1;
     case 0x317e: *v = (uint16_t)AbortDoc(w(a, 4)); return 1;
-    case 0x309b:                        /* QueryAbort(HDC, int): go on */
-        *v = 1;
+    case 0x309b:                        /* QueryAbort(HDC, int): the program's AbortProc */
+        *v = (uint16_t)QueryAbort(w(a, 6), (int16_t)w(a, 4));
         return 1;
     case 0x3026: {                      /* Escape(HDC, esc, cb, LPCSTR in, LPVOID out) */
         HDC dc = w(a, 16);
@@ -1164,6 +1290,9 @@ static __attribute__((noinline)) int gdi_more(args *a, uint16_t service, uint32_
             }
             return 1;
         }
+        case SETABORTPROC:              /* in: the procedure itself */
+            *v = ne_set_abort(a->ctx, dc, in) > 0;
+            return 1;
         case GETTECHNOLOGY:
             *v = (uint16_t)Escape(dc, esc, 0, NULL, s);
             if (*v)
@@ -1768,33 +1897,66 @@ int ne_kernel_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *d
     switch (service) {
     case 50: case 95: case 137: case 166: case 0x10b5:
         return kernel_strings(a, u, service, v, dword);
-    case WIN_NE_SERVICE_WIN87EM + 3:    /* __WinEm87Info, __WinEm87Restore, */
-    case WIN_NE_SERVICE_WIN87EM + 4:    /* __WinEm87Save(LPVOID, int): the */
-    case WIN_NE_SERVICE_WIN87EM + 5:    /* coprocessor is no emulator's */
+    case WIN_NE_SERVICE_WIN87EM + 3: {  /* __WinEm87Info(WinInfoStruct FAR *, int) */
+        /* its version, the save area's size (FSAVE's), its data and code
+         * segments, a coprocessor there (the CPU's own), reserved;
+         * __WinEm87Save and __WinEm87Restore are their thunks' code */
+        uint8_t b[12];
+        int16_t cb = (int16_t)w(a, 4);
+        wr16(b, 0x030a);
+        wr16(b + 2, 94);
+        wr16(b + 4, 0);
+        wr16(b + 6, g ? g->thunk3_selector : 0);
+        wr16(b + 8, 1);
+        wr16(b + 10, 0);
         *v = 0;
+        if (cb > 0)
+            wr_(a, dw(a, 6), b, cb < 12 ? (uint32_t)cb : 12u);
         return 1;
+    }
     }
     if (gdi_more(a, service, v, dword))
         return 1;
     switch (service) {
-    /* the serial and parallel ports: none (USER's comm functions) */
-    case 0x10c8:                        /* OpenComm(LPCSTR, UINT, UINT) */
-        *v = (uint16_t)-10;             /* IE_HARDWARE */
+    /* the serial and parallel ports (comm.c): the structures as Win16's */
+    case 0x10c9:                        /* SetCommState(const DCB FAR *) */
+    case 0x10ca:                        /* GetCommState(int, DCB FAR *) */
+    case 0x10d5: {                      /* BuildCommDCB(LPCSTR, DCB FAR *) */
+        uint8_t b[25];
+        DCB d;
+        char def[64];
+        memset(&d, 0, sizeof(d));
+        *v = (uint16_t)IE_BADID;
+        if (service == 0x10c9) {
+            if (rd_(a, dw(a, 4), b, sizeof(b))) {
+                dcb_in(b, &d);
+                *v = (uint16_t)SetCommState(&d);
+            }
+            return 1;
+        }
+        int r = service == 0x10ca ? GetCommState((int16_t)w(a, 8), &d) :
+                str_(a, dw(a, 8), def, sizeof(def)) ? BuildCommDCB(def, &d) : IE_BADID;
+        *v = (uint16_t)r;
+        if (!r) {
+            dcb_out(&d, b);
+            wr_(a, dw(a, 4), b, sizeof(b));
+        }
         return 1;
-    case 0x10cb:                        /* GetCommError(int, COMSTAT FAR *) */
-        *v = 0x8000;                    /* CE_MODE: no such device */
+    }
+    case 0x10cb: {                      /* GetCommError(int, COMSTAT FAR *): 5 bytes */
+        COMSTAT st;
+        uint8_t b[5];
+        *v = (uint16_t)GetCommError((int16_t)w(a, 8), &st);
+        if (dw(a, 4)) {
+            b[0] = st.status;
+            wr16(b + 1, (uint16_t)st.cbInQue);
+            wr16(b + 3, (uint16_t)st.cbOutQue);
+            wr_(a, dw(a, 4), b, sizeof(b));
+        }
         return 1;
-    case 0x10d0: case 0x10d1:           /* SetCommEventMask: no event word, GetCommEventMask */
-    case 0x10f5:                        /* EnableCommNotification: FALSE */
-        *v = 0;
-        *dword = service == 0x10d0;
-        return 1;
-    case 0x10c9: case 0x10ca: case 0x10cc: case 0x10cd: case 0x10ce: case 0x10cf:
-    case 0x10d2: case 0x10d3: case 0x10d4: case 0x10d5: case 0x10d7:
-        *v = (uint16_t)-1;              /* the rest of them: an error */
-        return 1;
-    case 0x10d6:                        /* EscapeCommFunction: a LONG */
-        *v = 0xffffffffu;
+    }
+    case 0x10d0:                        /* SetCommEventMask(int, UINT): the event word's FAR * */
+        *v = ne_comm_events(a, (int16_t)w(a, 6), w(a, 4));
         *dword = 1;
         return 1;
     case 25: case 169:                  /* GlobalCompact(DWORD), GetFreeSpace(UINT) */

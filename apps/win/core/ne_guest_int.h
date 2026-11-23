@@ -214,6 +214,8 @@ int ne_win95_service(args *a, ne_user *u, uint16_t service, uint32_t *v, int *dw
 uint16_t ne_register_class(args *a, ne_user *u, uint32_t p);
 uint16_t ne_class_info(args *a, ne_user *u, uint16_t inst, uint32_t name_far, uint32_t out);
 uint16_t ne_load_image(args *a, ne_user *u, uint16_t service, uint16_t inst, uint32_t far);
+/* ne_guest_kernel.c: a program's printers' AbortProcs forgotten */
+void win_ne_abort_task_gone(win_ne_guest_api_context *ctx);
 void ne_more_task_end(HTASK task);
 /* ne_guest_kernel.c: KERNEL's modules, resources and the rest, GDI's and
  * USER's few left, SHELL; 1 if it is one of them */

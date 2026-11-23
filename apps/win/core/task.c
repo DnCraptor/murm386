@@ -294,6 +294,7 @@ wtask *task_create(const char *name, int (*run)(wtask *), uint32_t stack_size)
     if (!t)
         return NULL;
     t->ctx = (struct wtask_ctx *)(t + 1);
+    t->events = 1;                      /* Windows' to start it: InitTask, WaitEvent */
     if (stack_size < 8192)
         stack_size = 8192;
     t->stack_size = stack_size;
@@ -337,7 +338,8 @@ static int has_work(wtask *t)
      * (a callback that yields: PeekMessage, a modal loop). */
     if (t->state == WTASK_DEAD || t->lent)
         return 0;
-    if (t->state == WTASK_NEW || !t->waiting)
+    if (t->state == WTASK_NEW || !t->waiting ||
+        (t->waiting == WTASK_WAIT_EVENT && t->events > 0))
         return 1;
     /* The kernel task normally runs its scheduler without fetching GUI
      * messages. But it may itself own a modal dialog (e.g. an error from
@@ -389,6 +391,15 @@ static void reap(void)
     }
 }
 
+/* Nothing to run: the spooler's queue to its ports (some of it), then the
+ * driver's idle time */
+void task_idle(void)
+{
+    print_spool_idle();
+    if (win_sys.input)
+        win_sys.input->idle();
+}
+
 /* The kernel task: runs the others until the shell (the first task) ends,
  * then ends the rest. */
 void task_kernel_loop(void)
@@ -401,8 +412,7 @@ void task_kernel_loop(void)
         user_poll_input();
         if (!task_yield()) {
             win_logo_end();             /* the shell has painted behind the logo */
-            if (win_sys.input)
-                win_sys.input->idle();
+            task_idle();
         }
     }
     /* the shell is gone: Windows ends, every task gets WM_QUIT */
@@ -417,6 +427,27 @@ void task_kernel_loop(void)
 }
 
 HTASK task_shell(void) { return shell_task; }
+
+static struct {
+    int how, code;
+    char exe[128], params[128];
+} ending;
+
+void win_end_set(int how, const char *exe, const char *params, int code)
+{
+    ending.how = how;
+    ending.code = code;
+    lstrcpyn(ending.exe, exe ? exe : "", sizeof(ending.exe));
+    lstrcpyn(ending.params, params ? params : "", sizeof(ending.params));
+}
+
+int win_end_get(char *exe, char *params, int *code)
+{
+    lstrcpyn(exe, ending.exe, 128);
+    lstrcpyn(params, ending.params, 128);
+    *code = ending.code;
+    return ending.how;
+}
 
 void task_quit_all(void)
 {
@@ -811,7 +842,13 @@ HANDLE WINAPI SetTaskQueue(HTASK task, HANDLE queue)
     return old;
 }
 
-void WINAPI PostEvent(HTASK task) { (void)task; }
+/* an event for the task (0: this one), which its WaitEvent takes */
+void WINAPI PostEvent(HTASK task)
+{
+    wtask *t = task ? task_from_handle(task) : task_current();
+    if (t)
+        t->events++;
+}
 BOOL WINAPI IsWinOldApTask(HTASK task) { (void)task; return FALSE; }
 
 /* ---------------------------------------------------------------- Windows 3.1's own */

@@ -3561,16 +3561,72 @@ int WINAPI Resurrection(HDC hdc, WORD w1, WORD w2, WORD w3, WORD w4, WORD w5, WO
     return gdi_dc(hdc) ? 1 : 0;
 }
 
-int WINAPI GetEnvironment(LPCSTR port, LPSTR env, UINT size)
+/* the ports' environments (a printer driver's settings for the port, its
+ * DEVMODE: SetEnvironment's, kept while Windows runs); "LPT1:" and "LPT1"
+ * the same port */
+#define ENVIRONMENTS 8
+
+static struct {
+    char port[32];
+    uint8_t *data;
+    UINT size;
+} environments[ENVIRONMENTS];
+
+static int environment_of(LPCSTR port, int make)
 {
-    (void)port; (void)env; (void)size;
-    return 0;
+    char p[32];
+    if (!port || !*port)
+        return -1;
+    lstrcpyn(p, port, sizeof(p));
+    int n = lstrlen(p);
+    if (n > 1 && p[n - 1] == ':')
+        p[n - 1] = 0;
+    int free_slot = -1;
+    for (int i = 0; i < ENVIRONMENTS; i++) {
+        if (environments[i].data && !lstrcmpi(environments[i].port, p))
+            return i;
+        if (!environments[i].data && free_slot < 0)
+            free_slot = i;
+    }
+    if (make && free_slot >= 0)
+        lstrcpy(environments[free_slot].port, p);
+    return make ? free_slot : -1;
 }
 
-int WINAPI SetEnvironment(LPCSTR port, LPCSTR env, UINT size)
+int WINAPI GetEnvironment(LPCSTR port, LPVOID env, UINT size)
 {
-    (void)port; (void)env; (void)size;
-    return -1;
+    int i = environment_of(port, 0);
+    if (i < 0)
+        return 0;
+    if (!env)                           /* its size */
+        return (int)environments[i].size;
+    UINT n = size < environments[i].size ? size : environments[i].size;
+    memcpy(env, environments[i].data, n);
+    return (int)n;
+}
+
+/* size 0 deletes it (-1) */
+int WINAPI SetEnvironment(LPCSTR port, LPCVOID env, UINT size)
+{
+    int i = environment_of(port, size != 0);
+    if (!size) {
+        if (i < 0)
+            return 0;
+        win_free(environments[i].data);
+        environments[i].data = NULL;
+        environments[i].size = 0;
+        return -1;
+    }
+    if (i < 0 || !env || size > 0x8000u)
+        return 0;
+    uint8_t *d = (uint8_t *)win_alloc(size);
+    if (!d)
+        return 0;
+    memcpy(d, env, size);
+    win_free(environments[i].data);
+    environments[i].data = d;
+    environments[i].size = size;
+    return (int)size;
 }
 
 BOOL WINAPI GetRasterizerCaps(void *status, int size)
