@@ -342,7 +342,6 @@ static __time_critical_func() void bit_test(uint8_t operation, uint32_t offset, 
         value = getreg_sized(rm);
         offset &= bits - 1;
     } else {
-        getea(rm);
         if (immediate) {
             offset &= bits - 1;
         } else {
@@ -423,12 +422,10 @@ static __time_critical_func() __attribute__((noinline)) bool op_0f_386(uint8_t o
         case 0xBA: // BT group, imm8
             modregrm();
             if (reg < 4) return false;
-            if (mode < 3) getea(rm); // the displacement comes before the immediate
             bit_test(reg, fetch8(), true);
             return true;
         case 0xA4: case 0xAC: // SHLD / SHRD r/m, reg, imm8
             modregrm();
-            if (mode < 3) getea(rm);
             double_shift(opcode == 0xA4, fetch8());
             return true;
         case 0xA5: case 0xAD: // SHLD / SHRD r/m, reg, CL
@@ -453,7 +450,6 @@ static __time_critical_func() __attribute__((noinline)) bool op_0f_386(uint8_t o
                 cpu_fault(6);
                 return true;
             }
-            getea(rm);
             const uint32_t offset = opsize32 ? mem_read32(ea) : mem_read16(ea);
             const uint16_t selector = mem_read16(ea + (opsize32 ? 4 : 2));
             putreg_sized(reg, offset);
@@ -579,7 +575,6 @@ static __time_critical_func() bool exec386(uint8_t opcode) {
                 cpu_fault(6);
                 return true;
             }
-            getea(rm);
             const int32_t index = (int32_t) dwordregs[reg];
             if (index < (int32_t) mem_read32(ea) || index > (int32_t) mem_read32(ea + 4)) cpu_fault(5);
             return true;
@@ -618,7 +613,6 @@ static __time_critical_func() bool exec386(uint8_t opcode) {
             } else if (mode == 3) {
                 dwordregs[rm] = segregs[reg];
             } else {
-                getea(rm);
                 mem_write16(ea, segregs[reg]);
             }
             return true;
@@ -628,7 +622,6 @@ static __time_critical_func() bool exec386(uint8_t opcode) {
                 cpu_fault(6);
                 return true;
             }
-            getea(rm);
             dwordregs[reg] = ea - useseg;
             return true;
         case 0x8F: // POP r/m32
@@ -639,8 +632,9 @@ static __time_critical_func() bool exec386(uint8_t opcode) {
             }
             /* POP r/m can use the updated ESP as its address base. */
             {
+                const uint32_t old_esp = dwordregs[regsp];
                 const uint32_t popped = pop32();
-                if (mode < 3) getea(rm);
+                fix_pop_ea(old_esp);
                 writerm32(rm, popped);
             }
             return true;
@@ -683,7 +677,6 @@ static __time_critical_func() bool exec386(uint8_t opcode) {
                 cpu_fault(6);
                 return true;
             }
-            getea(rm);
             dwordregs[reg] = mem_read32(ea); // m16:32: offset, then selector
             load_segment(opcode == 0xC4 ? reges : regds, mem_read16(ea + 4));
             return true;
@@ -693,7 +686,6 @@ static __time_critical_func() bool exec386(uint8_t opcode) {
                 cpu_fault(6);
                 return true;
             }
-            if (mode < 3) getea(rm); // the displacement comes before the immediate
             {
                 const uint32_t immediate = fetch32();
                 if (mode < 3) mem_write32(ea, immediate);
@@ -758,12 +750,10 @@ static __time_critical_func() bool exec386(uint8_t opcode) {
                     return true;
                 }
                 case 3: // CALL far m16:32
-                    getea(rm);
                     far_call(mem_read16(ea + 4), mem_read32(ea), true);
                     return true;
                 case 4: xrip_ip = readrm32(rm); return true;
                 case 5: // JMP far m16:32
-                    getea(rm);
                     far_jump(mem_read16(ea + 4), mem_read32(ea));
                     return true;
                 case 6: push32(readrm32(rm)); return true;

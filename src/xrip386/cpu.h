@@ -136,4 +136,3 @@ extern cpu_state_t cpu_state;
 #define XRIP_DH    byteregs[regdh]
 
 static void modregrm(void);
-static void getea(uint8_t rmval);

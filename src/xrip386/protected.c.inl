@@ -709,7 +709,6 @@ static __time_critical_func() bool group7(void) {
         case 0:
         case 1: { // SGDT, SIDT: 16-bit limit, 32-bit base
             if (mode == 3) return false;
-            getea(rm);
             const table_register_t *table = reg ? &idtr : &gdtr;
             mem_write16(ea, (uint16_t) table->limit);
             mem_write32(ea + 2, table->base);
@@ -719,7 +718,6 @@ static __time_critical_func() bool group7(void) {
         case 3: { // LGDT, LIDT: a 16-bit operand size loads a 24-bit base
             if (mode == 3) return false;
             privileged();
-            getea(rm);
             table_register_t *table = reg == 3 ? &idtr : &gdtr;
             table->limit = mem_read16(ea);
             table->base = mem_read32(ea + 2) & (opsize32 ? 0xFFFFFFFFu : 0x00FFFFFFu);

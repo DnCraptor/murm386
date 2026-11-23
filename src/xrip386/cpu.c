@@ -288,57 +288,16 @@ static __time_critical_func() void modregrm() {
     ea = (offset & 0xFFFFu) + useseg;
 }
 
-static __time_critical_func() void getea(uint8_t rmval) {
-    if (unlikely(addrsize32)) {
-        getea32(rmval);
-        return;
+/* EA is computed once in modregrm(). POP r/m is the only exception:
+ * the 32-bit ESP base must reflect the increment performed by POP.
+ * Match getea32(): XRIP scales the base when SIB index=4. */
+static __time_critical_func() inline void fix_pop_ea(uint32_t old_esp) {
+    if (mode < 3 && addrsize32 && rm == 4 && (sib & 7) == 4) {
+        uint32_t delta = dwordregs[regsp] - old_esp;
+        if (((sib >> 3) & 7) == 4)
+            delta <<= sib >> 6;
+        ea += delta;
     }
-    register uint32_t tempea = 0;
-    switch (mode) {
-        case 0:
-            switch (rmval) {
-                case 0: tempea = XRIP_BX + XRIP_SI;
-                    break;
-                case 1: tempea = XRIP_BX + XRIP_DI;
-                    break;
-                case 2: tempea = XRIP_BP + XRIP_SI;
-                    break;
-                case 3: tempea = XRIP_BP + XRIP_DI;
-                    break;
-                case 4: tempea = XRIP_SI;
-                    break;
-                case 5: tempea = XRIP_DI;
-                    break;
-                case 6: tempea = disp16;
-                    break;
-                case 7: tempea = XRIP_BX;
-                    break;
-            }
-            break;
-
-        case 1:
-        case 2:
-            switch (rmval) {
-                case 0: tempea = XRIP_BX + XRIP_SI + disp16;
-                    break;
-                case 1: tempea = XRIP_BX + XRIP_DI + disp16;
-                    break;
-                case 2: tempea = XRIP_BP + XRIP_SI + disp16;
-                    break;
-                case 3: tempea = XRIP_BP + XRIP_DI + disp16;
-                    break;
-                case 4: tempea = XRIP_SI + disp16;
-                    break;
-                case 5: tempea = XRIP_DI + disp16;
-                    break;
-                case 6: tempea = XRIP_BP + disp16;
-                    break;
-                case 7: tempea = XRIP_BX + disp16;
-                    break;
-            }
-            break;
-    }
-    ea = (tempea & 0xFFFF) + useseg;
 }
 
 // The stack uses SP, or ESP when SS is a 32-bit (B) segment.
@@ -912,7 +871,6 @@ static __time_critical_func() void op_grp5() {
             break;
 
         case 3: /* CALL Mp */
-            getea(rm);
             far_call(mem_read16(ea + 2), mem_read16(ea), false);
             break;
 
@@ -921,7 +879,6 @@ static __time_critical_func() void op_grp5() {
             break;
 
         case 5: /* JMP Mp */
-            getea(rm);
             far_jump(mem_read16(ea + 2), mem_read16(ea));
             break;
 
@@ -951,7 +908,6 @@ static void xrip_fpu(uint8_t opcode) {
         if (mode == 3) {
             fpu_exec1(active_cpu->fpu, active_cpu, opcode - 0xd8, reg, rm);
         } else {
-            getea(rm);
             fpu_exec2(active_cpu->fpu, active_cpu, !opsize32, opcode - 0xd8, reg, 0, ea);
         }
     }
@@ -1693,7 +1649,6 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                     cpu_fault(6);
                     break;
                 }
-                getea(rm);
                 const int16_t index = (int16_t) getreg16(reg);
                 if (index < (int16_t) mem_read16(ea) || index > (int16_t) mem_read16(ea + 2)) {
                     cpu_fault(5); // returns to the BOUND instruction
@@ -1932,7 +1887,6 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                     cpu_fault(6);
                     break;
                 }
-                getea(rm);
                 putreg16(reg, ea
                          -
                          useseg
@@ -1962,8 +1916,9 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 /* With 32-bit addressing, POP [ESP+disp] uses ESP after
                  * the pop. Re-evaluate just this exceptional EA. */
                 {
+                    const uint32_t old_esp = dwordregs[regsp];
                     const uint16_t popped = pop();
-                    if (mode < 3) getea(rm);
+                    fix_pop_ea(old_esp);
                     writerm16(rm, popped);
                 }
                 break;
@@ -2528,7 +2483,6 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                     cpu_fault(6);
                     break;
                 }
-                getea(rm);
                 putreg16(reg, mem_read16(ea));
                 load_segment(reges, mem_read16(ea + 2));
                 break;
@@ -2539,7 +2493,6 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                     cpu_fault(6);
                     break;
                 }
-                getea(rm);
                 putreg16(reg, mem_read16(ea));
                 load_segment(regds, mem_read16(ea + 2));
                 break;
