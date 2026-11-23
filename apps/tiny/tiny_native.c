@@ -7,16 +7,29 @@
 #include "ez.h"
 #include "dos_api_version.h"
 #include "stdio.h"
+#include "native_process.h"
 
-/* The EZ loader defaults to a 4 KiB native ARM stack.  TINY's startup
- * retains drawing/animation frames across DOS BIOS and IRQ servicing;
- * request an explicit stack budget, as the other substantial native apps do.
- */
+/* Same process requirements as apps/doom (i_process.c): 64 KiB ARM stack,
+ * 4 KiB DOS stack for nested BIOS/DOS callbacks.  Both records are provided,
+ * as doom does, so the EZ header and the DOS process record agree. */
 const native_ez_process_requirements __native_ez_process_requirements = {
-    32u * 1024u,  /* ARM stack in the native PSRAM stack arena */
+    64u * 1024u,  /* ARM stack in the native PSRAM stack arena */
      4u * 1024u,  /* DOS stack for nested BIOS/DOS callbacks */
     DOS_API_VERSION,
 };
+
+static native_dos_process_requirements tiny_process_requirements = {
+    sizeof(native_dos_process_requirements),
+    64u * 1024u,  /* native ARM stack */
+     4u * 1024u,  /* guest DOS stack */
+    0,
+    0
+};
+
+native_dos_process_requirements *__native_dos_process_requirements(void)
+{
+    return &tiny_process_requirements;
+}
 
 #define SCREEN_W 80
 #define SCREEN_H 25

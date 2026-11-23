@@ -75,36 +75,10 @@ static void load_table(FILE *fp, Table *t, int rows, int cols)
         fail("a table in TINY.BIN is too big for DOS.");
     t->scale = (float *)get_memory((unsigned)rows * sizeof(float));
     t->w = (signed char *)get_memory((unsigned)rows * (unsigned)cols);
-#ifdef TINY_NATIVE
-    /* A DOS read crosses the ARM/DOS boundary. Reading each 4-byte scale
-       separately makes thousands of nested INT 21h calls during startup.
-       Read contiguous on-disk rows in blocks, then de-interleave in PSRAM. */
-    {
-        static unsigned char block[4096];
-        unsigned stride = (unsigned)cols + 4u;
-        unsigned capacity = (unsigned)sizeof(block) / stride;
-        for (r = 0; r < rows; ) {
-            unsigned count = (unsigned)(rows - r);
-            unsigned i;
-            if (count > capacity) count = capacity;
-            if (fread(block, 1, count * stride, fp) != count * stride)
-                damaged();
-            for (i = 0; i < count; i++) {
-                unsigned char *row = block + i * stride;
-                memcpy(&t->scale[r + (int)i], row, 4);
-                memcpy(t->w + (unsigned)(r + (int)i) * cols,
-                       row + 4, (unsigned)cols);
-            }
-            r += (int)count;
-            (void)dos_yield();
-        }
-    }
-#else
     for (r = 0; r < rows; r++)
         if (fread(&t->scale[r], 4, 1, fp) != 1 ||
             fread(t->w + (unsigned)r * cols, 1, cols, fp) != (unsigned)cols)
             damaged();
-#endif
     tables_done++;
     if (on_load)
         on_load(tables_done, tables_total);
@@ -1435,10 +1409,9 @@ int main(int argc, char **argv)
 #endif
     }
 #ifdef TINY_NATIVE
+    /* Same I/O buffer as apps/doom/i_main.c. */
+    (void)dos_set_io_buffer_size(32768);
     dos_malloc_set_policy(DOS_MALLOC_POLICY_RETURN_NULL);
-    /* The native DOS I/O buffer defaults to 512 bytes. Large transfers
-       reduce repeated guest INT 21h calls while streaming TINY.BIN. */
-    (void)dos_set_io_buffer_size(4096);
     tiny_init_screen();
 #endif
     srand((unsigned)time(NULL));
