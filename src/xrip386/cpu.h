@@ -108,14 +108,27 @@ typedef struct {
     uint32_t flags_result, flags_dst, flags_src; // the last ALU operation, for its flags (cpu.c)
     uint16_t disp16;
     uint8_t mode, reg, rm; // the ModR/M byte
+    /* Keep the two hot-path byte pairs halfword aligned. The previous layout
+     * put both STRH stores at odd addresses (#53 and #55), with the second
+     * crossing a 32-bit SRAM word boundary. */
+    uint8_t code32; // D bit of CS (default operand and address size)
     uint8_t reptype, segoverride;
     uint8_t opsize32, addrsize32; // operand and address size of the current instruction: 1 = 32-bit
-    uint8_t code32, stack32; // D bit of CS (default size) and B bit of SS (the stack uses ESP)
+    uint8_t stack32; // B bit of SS (the stack uses ESP)
     uint8_t flags_op; // kind and size of that operation; 0: x86_flags has all the flags
     uint8_t flags_cf; // its CF
     uint8_t a20_enabled;
     unsigned long retired; // one increment per executed instruction
 } cpu_state_t;
+/* Declare these before the field-alias macros below. */
+#if defined(__arm__) || defined(__thumb__)
+_Static_assert(__builtin_offsetof(cpu_state_t, code32) == 53 &&
+               __builtin_offsetof(cpu_state_t, reptype) == 54 &&
+               __builtin_offsetof(cpu_state_t, segoverride) == 55 &&
+               __builtin_offsetof(cpu_state_t, opsize32) == 56 &&
+               __builtin_offsetof(cpu_state_t, addrsize32) == 57,
+               "XRIP decoder byte-pair alignment changed");
+#endif
 extern cpu_state_t cpu_state;
 #define ip32 cpu_state.ip32
 #define fast_memory cpu_state.fast_memory
