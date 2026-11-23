@@ -41,6 +41,12 @@ static __time_critical_func() void writerm32(uint8_t rmval, uint32_t value) {
     }
 }
 
+/* RMW uses ea saved by readrm32; MOV and POP keep writerm32. */
+static __time_critical_func() __attribute__((noinline)) void writerm32_rmw(uint8_t rmval, uint32_t value) {
+    if (mode < 3) mem_write32(ea, value);
+    else dwordregs[rmval] = value;
+}
+
 static __time_critical_func() void push32(uint32_t value) {
     stack_add(-4);
     mem_write32(SS_BASE + stack_top(), value);
@@ -149,10 +155,10 @@ static __time_critical_func() void group3_32(void) {
             alu32(4, value, fetch32());
             break;
         case 2: // NOT
-            writerm32(rm, ~value);
+            writerm32_rmw(rm, ~value);
             break;
         case 3: // NEG
-            writerm32(rm, alu32(5, 0, value));
+            writerm32_rmw(rm, alu32(5, 0, value));
             cf = value != 0;
             break;
         case 4: { // MUL
@@ -512,7 +518,7 @@ static __time_critical_func() bool exec386(uint8_t opcode) {
             case 1:
                 modregrm();
                 result = alu32(operation, readrm32(rm), dwordregs[reg]);
-                if (operation != 7) writerm32(rm, result);
+                if (operation != 7) writerm32_rmw(rm, result);
                 break;
             case 3:
                 modregrm();
@@ -592,14 +598,14 @@ static __time_critical_func() bool exec386(uint8_t opcode) {
             const uint32_t value = readrm32(rm);
             const uint32_t immediate = opcode == 0x81 ? fetch32() : (uint32_t) (int32_t) (int8_t) fetch8();
             const uint32_t result = alu32(reg, value, immediate);
-            if (reg != 7) writerm32(rm, result);
+            if (reg != 7) writerm32_rmw(rm, result);
             return true;
         }
         case 0x85: modregrm(); alu32(4, readrm32(rm), dwordregs[reg]); return true;
         case 0x87: {
             modregrm();
             const uint32_t value = readrm32(rm);
-            writerm32(rm, dwordregs[reg]);
+            writerm32_rmw(rm, dwordregs[reg]);
             dwordregs[reg] = value;
             return true;
         }
@@ -656,9 +662,9 @@ static __time_critical_func() bool exec386(uint8_t opcode) {
         case 0xB8: case 0xB9: case 0xBA: case 0xBB: case 0xBC: case 0xBD: case 0xBE: case 0xBF:
             dwordregs[opcode & 7] = fetch32();
             return true;
-        case 0xC1: modregrm(); { const uint32_t value = readrm32(rm); writerm32(rm, shift32(value, fetch8())); } return true;
-        case 0xD1: modregrm(); writerm32(rm, shift32(readrm32(rm), 1)); return true;
-        case 0xD3: modregrm(); writerm32(rm, shift32(readrm32(rm), XRIP_CL)); return true;
+        case 0xC1: modregrm(); { const uint32_t value = readrm32(rm); writerm32_rmw(rm, shift32(value, fetch8())); } return true;
+        case 0xD1: modregrm(); writerm32_rmw(rm, shift32(readrm32(rm), 1)); return true;
+        case 0xD3: modregrm(); writerm32_rmw(rm, shift32(readrm32(rm), XRIP_CL)); return true;
         case 0xC2: { // RET imm16, 32-bit return address
             const uint16_t release = fetch16();
             xrip_ip = pop32();
@@ -738,8 +744,8 @@ static __time_critical_func() bool exec386(uint8_t opcode) {
         case 0xFF: {
             modregrm();
             switch (reg) {
-                case 0: writerm32(rm, inc_dec(readrm32(rm), false, 32)); return true;
-                case 1: writerm32(rm, inc_dec(readrm32(rm), true, 32)); return true;
+                case 0: writerm32_rmw(rm, inc_dec(readrm32(rm), false, 32)); return true;
+                case 1: writerm32_rmw(rm, inc_dec(readrm32(rm), true, 32)); return true;
                 case 2: { // CALL near r/m32
                     const uint32_t target = readrm32(rm);
                     push32(xrip_ip);

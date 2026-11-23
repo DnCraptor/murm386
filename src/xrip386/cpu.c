@@ -370,6 +370,18 @@ static __time_critical_func() INLINE void writerm8(uint8_t rmval, uint8_t value)
     }
 }
 
+/* RMW: the memory address was resolved by readrm8/readrm16. */
+/* Keep the writeback out of run_instructions (and MOV/POP unchanged). */
+static __time_critical_func() __attribute__((noinline)) void writerm8_rmw(uint8_t rmval, uint8_t value) {
+    if (mode < 3) mem_write8(ea, value);
+    else putreg8(rmval, value);
+}
+
+static __time_critical_func() __attribute__((noinline)) void writerm16_rmw(uint8_t rmval, uint16_t value) {
+    if (mode < 3) mem_write16(ea, value);
+    else putreg16(rmval, value);
+}
+
 __time_critical_func() uint16_t makeflagsword(void) {
     return 2 | (flags_now()->value & 0x7FD5); // the 386 keeps IOPL and NT (bits 12-14) in real mode
 }
@@ -1018,7 +1030,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 oper1b = readrm8(rm);
                 oper2b = getreg8(reg);
                 op_add8();
-                writerm8(rm, res8);
+                writerm8_rmw(rm, res8);
                 break;
 
             case 0x1: /* 01 ADD Ev Gv */
@@ -1027,7 +1039,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                     register uint32_t oper1 = readrm16(rm);
                     register uint32_t oper2 = getreg16(reg);
                     op_add16();
-                    writerm16(rm, res16);
+                    writerm16_rmw(rm, res16);
                 }
                 break;
 
@@ -1079,7 +1091,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 oper1b = readrm8(rm);
                 oper2b = getreg8(reg);
                 op_or8();
-                writerm8(rm, res8
+                writerm8_rmw(rm, res8
                 );
                 break;
 
@@ -1089,7 +1101,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 oper1 = readrm16(rm);
                 oper2 = getreg16(reg);
                 op_or16();
-                writerm16(rm, res16
+                writerm16_rmw(rm, res16
                 );
                 break;
 
@@ -1152,7 +1164,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 oper1b = readrm8(rm);
                 oper2b = getreg8(reg);
                 op_adc8();
-                writerm8(rm, res8);
+                writerm8_rmw(rm, res8);
                 break;
 
             case 0x11: /* 11 ADC Ev Gv */
@@ -1161,7 +1173,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 oper1 = readrm16(rm);
                 oper2 = getreg16(reg);
                 op_adc16();
-                writerm16(rm, res16);
+                writerm16_rmw(rm, res16);
                 break;
 
             case 0x12: /* 12 ADC Gb Eb */
@@ -1214,7 +1226,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 oper1b = readrm8(rm);
                 oper2b = getreg8(reg);
                 op_sbb8();
-                writerm8(rm, res8);
+                writerm8_rmw(rm, res8);
                 break;
 
             case 0x19: /* 19 SBB Ev Gv */
@@ -1222,7 +1234,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 oper1 = readrm16(rm);
                 oper2 = getreg16(reg);
                 op_sbb16();
-                writerm16(rm, res16);
+                writerm16_rmw(rm, res16);
                 break;
 
             case 0x1A: /* 1A SBB Gb Eb */
@@ -1273,7 +1285,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 oper1b = readrm8(rm);
                 oper2b = getreg8(reg);
                 op_and8();
-                writerm8(rm, res8);
+                writerm8_rmw(rm, res8);
                 break;
 
             case 0x21: /* 21 AND Ev Gv */
@@ -1282,7 +1294,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 oper1 = readrm16(rm);
                 oper2 = getreg16(reg);
                 op_and16();
-                writerm16(rm, res16
+                writerm16_rmw(rm, res16
                 );
                 break;
 
@@ -1338,7 +1350,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 oper1b = readrm8(rm);
                 oper2b = getreg8(reg);
                 op_sub8();
-                writerm8(rm, res8
+                writerm8_rmw(rm, res8
                 );
                 break;
 
@@ -1352,7 +1364,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 cf = (dst & 0xFFFF0000) != 0;
                 of = ((dst ^ oper1) & (oper1 ^ oper2) & 0x8000) != 0;
                 af = ((oper1 ^ oper2 ^ dst) & 0x10) != 0;
-                writerm16(rm, (uint16_t) dst);
+                writerm16_rmw(rm, (uint16_t) dst);
                 break;
             }
             case 0x2A: /* 2A SUB Gb Eb */
@@ -1416,7 +1428,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 oper1b = readrm8(rm);
                 oper2b = getreg8(reg);
                 op_xor8();
-                writerm8(rm, res8
+                writerm8_rmw(rm, res8
                 );
                 break;
 
@@ -1426,7 +1438,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 oper1 = readrm16(rm);
                 oper2 = getreg16(reg);
                 op_xor16();
-                writerm16(rm, res16
+                writerm16_rmw(rm, res16
                 );
                 break;
 
@@ -1753,7 +1765,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 }
 
                 if (reg < 7) {
-                    writerm8(rm, res8
+                    writerm8_rmw(rm, res8
                     );
                 }
                 break;
@@ -1802,7 +1814,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 }
 
                 if (reg < 7) {
-                    writerm16(rm, res16
+                    writerm16_rmw(rm, res16
                     );
                 }
                 break;
@@ -1828,14 +1840,14 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
             case 0x86: /* 86 XCHG Gb Eb: the memory address may use the register, so write it last */
                 modregrm();
                 oper1b = readrm8(rm);
-                writerm8(rm, getreg8(reg));
+                writerm8_rmw(rm, getreg8(reg));
                 putreg8(reg, oper1b);
                 break;
 
             case 0x87: /* 87 XCHG Gv Ev: the memory address may use the register, so write it last */
                 modregrm();
                 oper1 = readrm16(rm);
-                writerm16(rm, getreg16(reg));
+                writerm16_rmw(rm, getreg16(reg));
                 putreg16(reg, oper1);
                 break;
 
@@ -2444,7 +2456,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 oper1b = readrm8(rm);
                 oper2b = getmem8(CS_BASE, XRIP_IP);
                 StepIP(1);
-                writerm8(rm, op_grp2_8(oper2b, oper1b));
+                writerm8_rmw(rm, op_grp2_8(oper2b, oper1b));
                 break;
 
             case 0xC1: /* C1 GRP2 word imm8 (80186+) */
@@ -2453,7 +2465,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 oper1 = readrm16(rm);
                 oper2 = getmem8(CS_BASE, XRIP_IP);
                 StepIP(1);
-                writerm16(rm, op_grp2_16((uint8_t) oper2)
+                writerm16_rmw(rm, op_grp2_16((uint8_t) oper2)
                 );
                 break;
 
@@ -2579,28 +2591,28 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 modregrm();
 
                 oper1b = readrm8(rm);
-                writerm8(rm, op_grp2_8(1, oper1b));
+                writerm8_rmw(rm, op_grp2_8(1, oper1b));
                 break;
 
             case 0xD1: /* D1 GRP2 Ev 1 */
                 modregrm();
 
                 oper1 = readrm16(rm);
-                writerm16(rm, op_grp2_16(1));
+                writerm16_rmw(rm, op_grp2_16(1));
                 break;
 
             case 0xD2: /* D2 GRP2 Eb XRIP_CL */
                 modregrm();
 
                 oper1b = readrm8(rm);
-                writerm8(rm, op_grp2_8(XRIP_CL, oper1b));
+                writerm8_rmw(rm, op_grp2_8(XRIP_CL, oper1b));
                 break;
 
             case 0xD3: /* D3 GRP2 Ev XRIP_CL */
                 modregrm();
 
                 oper1 = readrm16(rm);
-                writerm16(rm, op_grp2_16(XRIP_CL)
+                writerm16_rmw(rm, op_grp2_16(XRIP_CL)
                 );
                 break;
 
@@ -2878,7 +2890,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
 
             case 0xFE: /* FE GRP4 Eb */
                 modregrm();
-                writerm8(rm, inc_dec(readrm8(rm), reg != 0, 8));
+                writerm8_rmw(rm, inc_dec(readrm8(rm), reg != 0, 8));
                 break;
 
             case 0xFF: /* FF GRP5 Ev */
