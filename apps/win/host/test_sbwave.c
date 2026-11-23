@@ -112,6 +112,7 @@ void outp(uint16_t p, uint8_t v)
         if (ncmd == need) { if (cmdbuf[0] != 0x41) dsp_cmd(); need = 0; }
         break;
     case 0x224: mixidx = v; break;
+    case 0x226: if (v & 1) { ap = aq; dsp_on = 0; } break;     /* reset: the FIFO flushed */
     case 0x0a: if ((v & 3) == 1) { masked = v & 4 ? masked | 1 : masked & ~1u; if (!(v & 4)) dma_run(); } break;
     case 0xd4: if ((v & 3) == 1) { masked = v & 4 ? masked | 2 : masked & ~2u; if (!(v & 4)) dma_run(); } break;
     case 0x0c: ff8 = 0; break;

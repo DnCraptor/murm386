@@ -88,7 +88,10 @@ int main(int argc, char **argv)
         else if (ends_with(f, "NESTACK.EXE"))     /* #UD with SP 0: the frame in ring 0 */
             assert(rc == WIN_NE_EXEC_FAULT && r.fault.vector == 6 && r.fault.segment == 1 &&
                    (r.fault.cs & 3) == 3 && r.fault.ip == 7);
-        else if (ends_with(f, "NECLI.EXE") || ends_with(f, "NEOUT.EXE") ||
+        else if (ends_with(f, "NECLI.EXE"))      /* CLI: the task's virtual IF; the UD2 */
+            assert(rc == WIN_NE_EXEC_FAULT && r.fault.vector == 6 && r.fault.segment == 1 &&
+                   (r.fault.cs & 3) == 3 && r.fault.ip == 6);
+        else if (ends_with(f, "NEOUT.EXE") ||
                  ends_with(f, "NECR0.EXE") || ends_with(f, "NEHLT.EXE"))  /* #GP */
             assert(rc == WIN_NE_EXEC_FAULT && r.fault.vector == 13 && r.fault.segment == 1 &&
                    (r.fault.cs & 3) == 3 &&

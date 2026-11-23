@@ -602,8 +602,10 @@ call), messages (Win32's parameters converted to and from Windows 3.1's:
 WM_COMMAND's, the scroll bars', WM_CTLCOLOR*, the controls' messages'
 numbers; a CREATESTRUCT, WINDOWPOS, DRAWITEMSTRUCT as copies of its
 layout), painting, wsprintf, TEXTMETRIC, GetObject; DIB sections
-(CreateDIBSection: the bits in its memory, given to the bitmap before it is
-blitted), WinG (WING32.DLL: its DCs, top-down 8-bit bitmaps as DIB
+(CreateDIBSection, 1 to 32 bits: the bits in its memory, given to the
+bitmap before it is blitted and before GDI draws into its DC; the pixels
+the drawing changed given back, the others left as the program wrote
+them, whatever its colour table), WinG (WING32.DLL: its DCs, top-down 8-bit bitmaps as DIB
 sections, WinGBitBlt and WinGStretchBlt); WINMM, the native MMSYSTEM.DLL's
 functions (the time, MCI's strings, sounds, mmio, multimedia timers); its
 devices (waveOut, midiOut, aux, mciSendCommand ...), which MMSYSTEM.DLL has
@@ -656,7 +658,8 @@ script; `scripts/ow32.txt`), and `OW32S.EXE`, Win32s' DLLs and functions
 (`scripts/ow32s.txt`), `OW32X.EXE`, structured exceptions
 (`scripts/ow32x.txt`), `OW32W.EXE`, WINMM's devices (`scripts/ow32w.txt`),
 `OW32H.EXE`, COMDLG32's hooks and templates (`scripts/ow32h.txt`),
-`OW32D.EXE`, USER32's DDEML (`scripts/ow32d.txt`).
+`OW32D.EXE`, USER32's DDEML (`scripts/ow32d.txt`), `OW32G.EXE`, GDI drawing
+into DIB sections (`scripts/ow32g.txt`).
 
     WIN [:] [program [arguments]]
 
@@ -1188,8 +1191,7 @@ Cyrillic; TrueType fonts map the characters to Unicode themselves.
 
 Win32: threads (CreateThread fails), access violations (no paging: a bad
 pointer reads what is there), the FPU's exceptions' own codes, the Unicode
-(W) functions, what GDI draws into a DIB section (its bits are not brought
-back), ADVAPI32 but the registry, WINMM's CALLBACK_EVENT and wave input,
+(W) functions, ADVAPI32 but the registry, WINMM's CALLBACK_EVENT and wave input,
 COMCTL32, OLE32, DDEML's
 Unicode functions; VxDs.
 A spooler and Print Manager's queues (printing goes straight to the port),

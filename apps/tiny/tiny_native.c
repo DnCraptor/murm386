@@ -4,7 +4,19 @@
 #include "tiny_native.h"
 #include "dos_video.h"
 #include "dos_phys.h"
+#include "ez.h"
+#include "dos_api_version.h"
 #include "stdio.h"
+
+/* The EZ loader defaults to a 4 KiB native ARM stack.  TINY's startup
+ * retains drawing/animation frames across DOS BIOS and IRQ servicing;
+ * request an explicit stack budget, as the other substantial native apps do.
+ */
+const native_ez_process_requirements __native_ez_process_requirements = {
+    32u * 1024u,  /* ARM stack in the native PSRAM stack arena */
+     4u * 1024u,  /* DOS stack for nested BIOS/DOS callbacks */
+    DOS_API_VERSION,
+};
 
 #define SCREEN_W 80
 #define SCREEN_H 25
@@ -15,31 +27,35 @@ static int left = 1, top = 1, right = SCREEN_W, bottom = SCREEN_H;
 static int cx = 1, cy = 1, attr = 7;
 static uint32_t rng = 1;
 
-/* Caller switches to BIOS mode 3 before using the direct text backing store.
- * Keep a physical VGA-aperture fallback if a smaller backing store is exposed. */
+/* The VGA text renderer reads each cell from bytes 4*n, 4*n+1 of
+ * gfx_buffer (see vga_text_refresh), not from a packed 2-byte array.
+ * The other two bytes belong to the unused planes. */
 static void refresh_video(void)
 {
     uint32_t bytes = 0;
     uint8_t *buffer = dos_video_get_buffer(&bytes);
-    video = (buffer && bytes >= SCREEN_W * SCREEN_H * 2) ? buffer : 0;
+    video = (buffer && bytes >= SCREEN_W * SCREEN_H * 4) ? buffer : 0;
 }
 
 static uint16_t cell_at(int x, int y)
 {
-    uint32_t off = ((uint32_t)(y - 1) * SCREEN_W + (unsigned)(x - 1)) * 2u;
-    if (video)
+    uint32_t cell = (uint32_t)(y - 1) * SCREEN_W + (unsigned)(x - 1);
+    if (video) {
+        uint32_t off = cell * 4u;
         return (uint16_t)(video[off] | ((uint16_t)video[off + 1] << 8));
-    return dos_phys_read16(TEXT_BASE + off);
+    }
+    return dos_phys_read16(TEXT_BASE + cell * 2u);
 }
 
 static void set_cell(int x, int y, uint16_t cell)
 {
-    uint32_t off = ((uint32_t)(y - 1) * SCREEN_W + (unsigned)(x - 1)) * 2u;
+    uint32_t index = (uint32_t)(y - 1) * SCREEN_W + (unsigned)(x - 1);
     if (video) {
+        uint32_t off = index * 4u;
         video[off] = (uint8_t)cell;
         video[off + 1] = (uint8_t)(cell >> 8);
     } else {
-        dos_phys_write16(TEXT_BASE + off, cell);
+        dos_phys_write16(TEXT_BASE + index * 2u, cell);
     }
 }
 

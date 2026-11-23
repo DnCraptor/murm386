@@ -147,6 +147,12 @@ static void sb_stop(void)
     outp(0x0au, 0x04u | SB_DMA);
     outp(0xd4u, 0x05u);            /* mask high-DMA channel 5 */
     ack_irq();
+    /* The stream ran on past its samples: the SB16's output FIFO holds the
+     * ring's silence it read ahead, of this stream's format. An auto-init
+     * command does not flush it, so the next stream (another format: 8-bit
+     * silence as 16-bit samples, a click) would play it first; a reset does. */
+    if (running && dsp_reset())
+        dsp_byte(0xd1u);           /* the speaker on again */
     running = prepared = 0;
     blocks = first = played = 0;
     written = read_ = 0;

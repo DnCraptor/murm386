@@ -2672,7 +2672,7 @@ done:
     }
     if (status != OLE_OK && sys && created && (!link || mode == CONNECT_SNAPSHOT) && !dde->timed_out)
         ole_close_document(dde, sys, link ? 0 : s->conv, topic);
-    if (status != OLE_OK && sys && (mode == CONNECT_SNAPSHOT ? owns_server : started) &&
+    if (status != OLE_OK && sys && (mode == CONNECT_SNAPSHOT ? owns_server : started != 0) &&
         !dde->timed_out)
         ole_execute(dde, sys, "[StdExit]", OLE_ERROR_TERMINATE);
     ole_disconnect(dde, sys);

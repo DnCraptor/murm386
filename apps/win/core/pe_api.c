@@ -3213,6 +3213,34 @@ static int winmm(pe_args *a, unsigned i, uint32_t *eax)
 
 /* ---------------------------------------------------------------- the dispatcher */
 
+/* GDI32's and USER32's functions that draw into the DC of their first
+ * argument (a DIB section there gets what they drew) */
+static int draws(uint16_t service)
+{
+    static const char *const names[] = {
+        "Arc", "BitBlt", "Chord", "DrawFocusRect", "DrawIcon", "DrawTextA", "Ellipse",
+        "ExtFloodFill", "ExtTextOutA", "FillRect", "FillRgn", "FloodFill", "FrameRect",
+        "FrameRgn", "GrayStringA", "InvertRect", "InvertRgn", "LineTo", "PaintRgn", "PatBlt",
+        "Pie", "PolyBezier", "PolyBezierTo", "PolyPolygon", "PolyPolyline", "Polygon",
+        "Polyline", "PolylineTo", "Rectangle", "RoundRect", "SetDIBitsToDevice", "SetPixel",
+        "StretchBlt", "StretchDIBits", "TabbedTextOutA", "TextOutA", "DrawEdge",
+        "DrawFrameControl", "DrawIconEx",
+    };
+    static uint8_t known[2048 / 8], set[2048 / 8];
+    if (service >= NFNS || service >= 2048u)
+        return 0;
+    uint8_t bit = (uint8_t)(1u << (service & 7));
+    if (!(known[service >> 3] & bit)) {
+        known[service >> 3] |= bit;
+        const win_pe_fn *f = &win_pe_fns[service];
+        if (f->module == PE_GDI32 || f->module == PE_USER32)
+            for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+                if (!strcmp(f->name, names[i]))
+                    set[service >> 3] |= bit;
+    }
+    return (set[service >> 3] & bit) != 0;
+}
+
 int win_pe_api(win_pe_ctx *ctx, uint32_t esp, uint16_t service, uint32_t *eax)
 {
     pe_args a = { ctx, esp, 0 };
@@ -3277,6 +3305,7 @@ int win_pe_api(win_pe_ctx *ctx, uint32_t esp, uint16_t service, uint32_t *eax)
     if (service >= NFNS)
         return 0;
     const win_pe_fn *f = &win_pe_fns[service];
+    void *dib = draws(service) ? win_pe_dib_begin(ctx, (HDC)pe_arg(&a, 0)) : NULL;
     if (f->sig) {
         r = generic(&a, f, eax);
     } else {
@@ -3284,6 +3313,7 @@ int win_pe_api(win_pe_ctx *ctx, uint32_t esp, uint16_t service, uint32_t *eax)
         if (r < 0)
             r = pe_user_api(&a, service, eax);
     }
+    win_pe_dib_end(ctx, dib);
     if (a.bad)
         ctx->invalid_args = 1;
     if (r <= 0) {

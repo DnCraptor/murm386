@@ -320,7 +320,7 @@ int gdi_dib_parse(const uint8_t *d, uint32_t n, int halves, gdi_dib *out)
     } else {
         return 0;
     }
-    if (bpp != 1 && bpp != 4 && bpp != 8 && bpp != 24)
+    if (bpp != 1 && bpp != 4 && bpp != 8 && bpp != 16 && bpp != 24 && bpp != 32)
         return 0;
     if (h == INT32_MIN)
         return 0;
@@ -361,8 +361,9 @@ DWORD WINAPI GetPackedDIBInfoN(const void *dib, DWORD size, SIZE *pixels, DWORD 
     return bits + (DWORD)image.pitch * (DWORD)image.h;
 }
 
-/* the raw value (a palette index, or 0xRRGGBB for 24 bits) of the pixel at
- * x, y (y from the top) of the half (0 the XOR image, 1 the AND mask) */
+/* the raw value (a palette index, or 0xRRGGBB for 16, 24 and 32 bits: 16's
+ * 5-5-5) of the pixel at x, y (y from the top) of the half (0 the XOR
+ * image, 1 the AND mask) */
 uint32_t gdi_dib_value(const gdi_dib *b, int half, int x, int y)
 {
     int bpp = half ? 1 : b->bpp;
@@ -374,6 +375,12 @@ uint32_t gdi_dib_value(const gdi_dib *b, int half, int x, int y)
     case 1: return (r[x >> 3] >> (7 - (x & 7))) & 1;
     case 4: return (r[x >> 1] >> (x & 1 ? 0 : 4)) & 15;
     case 8: return r[x];
+    case 16: {
+        unsigned p = r[2 * x] | r[2 * x + 1] << 8, c5[3] = { p >> 10 & 31, p >> 5 & 31, p & 31 };
+        return (uint32_t)(c5[0] << 3 | c5[0] >> 2) << 16 | (uint32_t)(c5[1] << 3 | c5[1] >> 2) << 8 |
+               (c5[2] << 3 | c5[2] >> 2);
+    }
+    case 32: return (uint32_t)r[4 * x + 2] << 16 | (uint32_t)r[4 * x + 1] << 8 | r[4 * x];
     default: return (uint32_t)r[3 * x + 2] << 16 | (uint32_t)r[3 * x + 1] << 8 | r[3 * x];
     }
 }
@@ -382,7 +389,7 @@ uint32_t gdi_dib_value(const gdi_dib *b, int half, int x, int y)
 COLORREF gdi_dib_pixel(const gdi_dib *b, int x, int y)
 {
     uint32_t v = gdi_dib_value(b, 0, x, y);
-    if (b->bpp == 24)
+    if (b->bpp > 8)
         return RGB(v >> 16, (v >> 8) & 255, v & 255);
     if ((int)v >= b->colors)
         return 0;
@@ -676,6 +683,87 @@ int WINAPI GetDIBits(HDC h, HBITMAP hb, UINT start, UINT lines, void *bits, BITM
         n++;
     }
     return n;
+}
+
+/* A DIB section's bitmap around a drawing (the Win32 layer's): a copy of
+ * its pixels before; after, the pixels the drawing changed given to the
+ * section's bits (bi's format, a bottom-up or top-down DIB, a colour table
+ * for 8 bits and fewer: its nearest colour), the others left as they are */
+uint8_t *gdi_bitmap_snapshot(HBITMAP hb)
+{
+    wbitmap *bm = (wbitmap *)win_handle_get(hb, WOBJ_BITMAP);
+    size_t n = bm ? (size_t)bm->s.pitch * (size_t)bm->s.height : 0;
+    uint8_t *p = n ? (uint8_t *)win_alloc(n) : NULL;
+    if (p)
+        memcpy(p, bm->s.bits, n);
+    return p;
+}
+
+int gdi_bitmap_changes(HBITMAP hb, const uint8_t *before, void *bits, const BITMAPINFO *bi)
+{
+    wbitmap *bm = (wbitmap *)win_handle_get(hb, WOBJ_BITMAP);
+    const BITMAPINFOHEADER *hd = bi ? &bi->bmiHeader : NULL;
+    if (!bm || !before || !bits || !hd)
+        return 0;
+    int bpp = hd->biBitCount, w = bm->s.width, hh = bm->s.height;
+    if (bpp != 1 && bpp != 4 && bpp != 8 && bpp != 16 && bpp != 24 && bpp != 32)
+        return 0;
+    if (w > (int)hd->biWidth)
+        w = (int)hd->biWidth;
+    int top_down = hd->biHeight < 0;
+    int ncol = bpp <= 8 ? (hd->biClrUsed && hd->biClrUsed < (1u << bpp) ? (int)hd->biClrUsed :
+                           1 << bpp) : 0;
+    const RGBQUAD *table = (const RGBQUAD *)((const uint8_t *)bi + hd->biSize);
+    COLORREF cols[256];
+    for (int i = 0; i < ncol; i++)
+        cols[i] = RGB(table[i].rgbRed, table[i].rgbGreen, table[i].rgbBlue);
+    int16_t map[256];                   /* the bitmap's value: the DIB's index */
+    for (int i = 0; i < 256; i++)
+        map[i] = -1;
+    size_t pitch = (size_t)((hd->biWidth * bpp + 31) / 32 * 4);
+    int changed = 0;
+    for (int y = 0; y < hh; y++) {
+        const uint8_t *row = bm->s.bits + (size_t)y * (size_t)bm->s.pitch;
+        const uint8_t *was = before + (size_t)y * (size_t)bm->s.pitch;
+        if (!memcmp(row, was, (size_t)bm->s.pitch))
+            continue;
+        uint8_t *out = (uint8_t *)bits + (size_t)(top_down ? y : hh - 1 - y) * pitch;
+        for (int x = 0; x < w; x++) {
+            uint8_t v = dib_get_pixel(&bm->s, x, y);
+            if (bm->s.bpp == 8 ? row[x] == was[x]
+                               : ((row[x >> 3] ^ was[x >> 3]) & (0x80 >> (x & 7))) == 0)
+                continue;
+            COLORREF c = index_color(&bm->s, v);
+            changed++;
+            if (bpp <= 8) {
+                if (map[v] < 0)
+                    map[v] = (int16_t)(ncol ? nearest_of(cols, ncol, c) : 0);
+                unsigned k = (unsigned)map[v];
+                if (bpp == 8) {
+                    out[x] = (uint8_t)k;
+                } else if (bpp == 4) {
+                    int sh = x & 1 ? 0 : 4;
+                    out[x >> 1] = (uint8_t)((out[x >> 1] & ~(0x0f << sh)) | (k & 0x0f) << sh);
+                } else {
+                    uint8_t m = (uint8_t)(0x80 >> (x & 7));
+                    out[x >> 3] = (uint8_t)(k & 1 ? out[x >> 3] | m : out[x >> 3] & ~m);
+                }
+            } else if (bpp == 16) {         /* 5-5-5 */
+                unsigned p = (unsigned)(GetRValue(c) >> 3) << 10 |
+                             (unsigned)(GetGValue(c) >> 3) << 5 | (unsigned)(GetBValue(c) >> 3);
+                out[2 * x] = (uint8_t)p;
+                out[2 * x + 1] = (uint8_t)(p >> 8);
+            } else {
+                uint8_t *o = out + (size_t)x * (size_t)(bpp / 8);
+                o[0] = GetBValue(c);
+                o[1] = GetGValue(c);
+                o[2] = GetRValue(c);
+                if (bpp == 32)
+                    o[3] = 0;
+            }
+        }
+    }
+    return changed;
 }
 
 /* a pattern brush of a packed DIB (a global block's) */

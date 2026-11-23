@@ -542,7 +542,7 @@ static MMRESULT WINAPI mmioCreateChunk(HMMIO h, LPMMCKINFO ck, UINT flags)
     wr32(hd, id);
     wr32(hd + 4, ck->cksize);
     wr32(hd + 8, ck->fccType);
-    if (at < 0 || mmioWrite(h, (const char *)hd, n) != n)
+    if (at < 0 || mmioWrite(h, (const char *)hd, (LONG)n) != (LONG)n)
         return MMIOERR_CANNOTWRITE;
     ck->ckid = id;
     ck->dwDataOffset = (DWORD)at + 8;

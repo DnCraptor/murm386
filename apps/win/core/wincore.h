@@ -102,6 +102,11 @@ int  dib_rop2_to_rop3(int rop2);          /* pen/brush as P, ignores S */
 void dib_fill_rect(wsurf *s, const wclip *c, const RECT *rc, const wfill *f, int rop3);
 void dib_set_pixel(wsurf *s, const wclip *c, int x, int y, uint8_t color, int rop2);
 uint8_t dib_get_pixel(const wsurf *s, int x, int y);
+/* gdi.c: a DIB section's bitmap around a drawing: its pixels copied
+ * (win_free them), and the pixels changed since given to the section's
+ * bits in its format; the number changed */
+uint8_t *gdi_bitmap_snapshot(HBITMAP hb);
+int gdi_bitmap_changes(HBITMAP hb, const uint8_t *before, void *bits, const BITMAPINFO *bi);
 void dib_hline(wsurf *s, const wclip *c, int x0, int x1, int y, uint8_t color, int rop2);
 void dib_line(wsurf *s, const wclip *c, int x0, int y0, int x1, int y1,
               uint8_t color, int rop2, int style, int skip_last);

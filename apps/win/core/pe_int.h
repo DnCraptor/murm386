@@ -314,6 +314,11 @@ void win_pe_dlls_end(win_pe_ctx *ctx);
 int win_pe_dialog_native(pe_args *a, uint32_t inst, uint32_t tpl, int handle, HWND owner,
                          DLGPROC proc, int modeless);
 uint32_t win_pe_message(win_pe_ctx *ctx, uint32_t proc, HWND h, UINT msg, WPARAM wp, LPARAM lp);
+/* pe_user.c: a drawing into a DC with a DIB section of the program's in it
+ * (NULL: none): the section's bits given the bitmap before, the pixels the
+ * drawing changed given back after */
+void *win_pe_dib_begin(win_pe_ctx *ctx, HDC dc);
+void win_pe_dib_end(win_pe_ctx *ctx, void *token);
 void pe_user_start(win_pe_ctx *ctx);
 void pe_user_end(win_pe_ctx *ctx);
 /* the instance of the program's task for native functions */

@@ -75,10 +75,36 @@ static void load_table(FILE *fp, Table *t, int rows, int cols)
         fail("a table in TINY.BIN is too big for DOS.");
     t->scale = (float *)get_memory((unsigned)rows * sizeof(float));
     t->w = (signed char *)get_memory((unsigned)rows * (unsigned)cols);
+#ifdef TINY_NATIVE
+    /* A DOS read crosses the ARM/DOS boundary. Reading each 4-byte scale
+       separately makes thousands of nested INT 21h calls during startup.
+       Read contiguous on-disk rows in blocks, then de-interleave in PSRAM. */
+    {
+        static unsigned char block[4096];
+        unsigned stride = (unsigned)cols + 4u;
+        unsigned capacity = (unsigned)sizeof(block) / stride;
+        for (r = 0; r < rows; ) {
+            unsigned count = (unsigned)(rows - r);
+            unsigned i;
+            if (count > capacity) count = capacity;
+            if (fread(block, 1, count * stride, fp) != count * stride)
+                damaged();
+            for (i = 0; i < count; i++) {
+                unsigned char *row = block + i * stride;
+                memcpy(&t->scale[r + (int)i], row, 4);
+                memcpy(t->w + (unsigned)(r + (int)i) * cols,
+                       row + 4, (unsigned)cols);
+            }
+            r += (int)count;
+            (void)dos_yield();
+        }
+    }
+#else
     for (r = 0; r < rows; r++)
         if (fread(&t->scale[r], 4, 1, fp) != 1 ||
             fread(t->w + (unsigned)r * cols, 1, cols, fp) != (unsigned)cols)
             damaged();
+#endif
     tables_done++;
     if (on_load)
         on_load(tables_done, tables_total);
@@ -280,6 +306,11 @@ static void step(int tok, int p, float *score)
         matvec(&f2[l], bm, bt);
         for (i = 0; i < D; i++)
             bx[i] += bt[i];
+#ifdef TINY_NATIVE
+        /* Each layer is CPU-intensive; keep core0 devices serviced while
+           the ARM app runs outside the outer x86 emulation loop. */
+        (void)dos_yield();
+#endif
     }
     norm(bx, gf, bh);
     matvec(&emb, bh, score);
@@ -892,7 +923,10 @@ static int wait_or_key(unsigned ms)
 /* falling green letters, like a film computer */
 static void rain(void)
 {
-    int col[SCRW], spd[SCRW], f, x, y;
+    /* Keep these 640 bytes out of the ARM stack while dos_yield() and
+       INT 16h can re-enter the emulator during the opening animation. */
+    static int col[SCRW], spd[SCRW];
+    int f, x, y;
     for (x = 0; x < SCRW; x++) { col[x] = -(rand() % 25); spd[x] = 1 + rand() % 2; }
     for (f = 0; f < 46; f++) {
         for (x = 0; x < SCRW - 1; x += 2) {
@@ -1324,11 +1358,8 @@ static int ui_main(void)
     on_fail = restore_screen;
     if (dump) sndlog = fopen("SOUND.LOG", "w");
     boot();
-    if (!demo && !dump) {
-        put_at(29, boot_y + 3, C_DIM, "press any key to begin");
-        while (!kbhit()) ;
-        if (key() == K_ESC) { restore_screen(); return 0; }
-    }
+    /* Enter the interactive UI as soon as the model has loaded: holding
+       native core0 in a separate keyboard wait adds no useful functionality. */
     sweep(300, 1400, 120);
     frame();
     cursor(1);
@@ -1405,6 +1436,9 @@ int main(int argc, char **argv)
     }
 #ifdef TINY_NATIVE
     dos_malloc_set_policy(DOS_MALLOC_POLICY_RETURN_NULL);
+    /* The native DOS I/O buffer defaults to 512 bytes. Large transfers
+       reduce repeated guest INT 21h calls while streaming TINY.BIN. */
+    (void)dos_set_io_buffer_size(4096);
     tiny_init_screen();
 #endif
     srand((unsigned)time(NULL));

@@ -5,7 +5,7 @@ program in ring 3 may not do, each a fault WINN recovers from:
   --stack  NESTACK.EXE: SP 0, then the UD2: the CPU's ring 0 stack takes
            the exception frame (pushed on the program's own, it would land
            below offset 0: the emulated CPU checks no segment limits)
-  --cli    NECLI.EXE: CLI, #GP (IOPL 0)
+  --cli    NECLI.EXE: CLI (not a fault: the task's virtual IF), then the UD2
   --out    NEOUT.EXE: the bridge's EXIT by an OUT of its own, #GP
   --cr0    NECR0.EXE: MOV EAX,CR0 (to leave protected mode), #GP
   --hlt    NEHLT.EXE: HLT (the CPU for ever, IF clear), #GP

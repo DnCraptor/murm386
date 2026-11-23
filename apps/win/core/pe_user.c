@@ -1129,7 +1129,9 @@ static void textmetric(const TEXTMETRIC *t, uint8_t *g)
 
 /* A DIB section is a bitmap of WINN's and the bits in the program's
  * memory it writes: they are given to the bitmap (SetDIBits) before it is
- * the source of a BitBlt. What GDI draws into it does not come back. */
+ * the source of a BitBlt, and before GDI draws into the DC it is in; what
+ * the drawing changed comes back to the bits (the pixels it did not touch
+ * keep the program's values, whatever its colour table) */
 static struct pe_dib *dib_of_dc(pe_user *u, HDC dc)
 {
     for (int i = 0; dc && i < PE_DIBS; i++)
@@ -1155,6 +1157,42 @@ static void dib_sync(pe_user *u, HDC dc)
     if (bits)
         SetDIBits(dc, d->h, 0, (UINT)dib_height(d), bits, (const BITMAPINFO *)d->info,
                   DIB_RGB_COLORS);
+}
+
+/* a drawing into a DC (its first argument): the DIB section in it, its
+ * pixels before (NULL: none there) */
+typedef struct { struct pe_dib *d; uint8_t *before; } dib_draw;
+
+void *win_pe_dib_begin(win_pe_ctx *ctx, HDC dc)
+{
+    pe_user *u = ctx ? user_of(ctx->task) : NULL;
+    struct pe_dib *d = u ? dib_of_dc(u, dc) : NULL;
+    if (!d)
+        return NULL;
+    dib_sync(u, dc);
+    dib_draw *t = (dib_draw *)win_alloc(sizeof(dib_draw));
+    if (t && (t->before = gdi_bitmap_snapshot(d->h)) == NULL) {
+        win_free(t);
+        t = NULL;
+    }
+    if (t)
+        t->d = d;
+    return t;
+}
+
+void win_pe_dib_end(win_pe_ctx *ctx, void *token)
+{
+    dib_draw *t = (dib_draw *)token;
+    if (!t)
+        return;
+    struct pe_dib *d = t->d;
+    const BITMAPINFOHEADER *bih = (const BITMAPINFOHEADER *)d->info;
+    uint32_t stride = (((uint32_t)bih->biWidth * bih->biBitCount + 31u) / 32u) * 4u;
+    void *bits = d->h ? win_pe_ptr(ctx->img, d->bits, stride * (uint32_t)dib_height(d)) : NULL;
+    if (bits)
+        gdi_bitmap_changes(d->h, t->before, bits, (const BITMAPINFO *)d->info);
+    win_free(t->before);
+    win_free(t);
 }
 
 /* the bitmap: its bits zeroed in the program's heap, their address at
@@ -2819,7 +2857,8 @@ int pe_user_api(pe_args *a, uint16_t service, uint32_t *eax)
         HDC dc = (HDC)pe_arg(a, 0);
         HGDIOBJ obj = (HGDIOBJ)pe_arg(a, 1);
         v = SelectObject(dc, obj);
-        for (int i = 0; v && i < PE_DIBS; i++) {
+        int bitmap = win_handle_type(obj) == WOBJ_BITMAP;   /* (a pen, a brush ...: not) */
+        for (int i = 0; v && bitmap && i < PE_DIBS; i++) {
             if (u->dib[i].h && u->dib[i].dc == dc)
                 u->dib[i].dc = 0;           /* another one there now */
             if (u->dib[i].h && u->dib[i].h == obj)

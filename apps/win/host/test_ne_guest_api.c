@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "../core/ne_guest_api.h"
+#include "../core/ne_boot.h"
 
 #define BASE 0x30000u
 static uint8_t mem[256];
