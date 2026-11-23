@@ -59,9 +59,11 @@ static __time_critical_func() uint32_t pop32(void) {
 }
 
 static __time_critical_func() void flag_szp32(uint32_t value) {
-    zf = value == 0;
-    sf = value >> 31;
-    pf = parity[value & 255];
+    x86_flags_t *const f = flags_now();
+    const uint32_t szp = (value == 0 ? 0x40u : 0u) |
+                         ((value >> 24) & 0x80u) |
+                         ((uint32_t)parity[value & 255] << 2);
+    f->value = (f->value & ~0xC4u) | szp;
 }
 
 // The ALU group by its 386 number: 0 ADD, 1 OR, 2 ADC, 3 SBB, 4 AND, 5 SUB, 6 XOR, 7 CMP.

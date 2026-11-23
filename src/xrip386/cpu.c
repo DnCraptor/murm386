@@ -419,15 +419,19 @@ static __time_critical_func() void intcall86(uint8_t vector) {
 }
 
 static __time_critical_func() inline void flag_szp8(uint8_t value) {
-    zf = value == 0;
-    sf = value >> 7;
-    pf = parity[value];
+    x86_flags_t *const f = flags_now();
+    const uint32_t szp = (value == 0 ? 0x40u : 0u) |
+                         ((uint32_t)value & 0x80u) |
+                         ((uint32_t)parity[value] << 2);
+    f->value = (f->value & ~0xC4u) | szp;
 }
 
 static __time_critical_func() inline void flag_szp16(uint16_t value) {
-    zf = value == 0;
-    sf = value >> 15;
-    pf = parity[value & 255];
+    x86_flags_t *const f = flags_now();
+    const uint32_t szp = (value == 0 ? 0x40u : 0u) |
+                         (((uint32_t)value >> 8) & 0x80u) |
+                         ((uint32_t)parity[value & 255] << 2);
+    f->value = (f->value & ~0xC4u) | szp;
 }
 
 // Lazy flags: ADD, SUB, CMP, AND, OR, XOR, TEST, INC and DEC keep CF (flags_cf), the operands and
