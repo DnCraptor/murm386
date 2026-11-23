@@ -1414,9 +1414,12 @@ static OLESTATUS create_clip_object(LPCSTR protocol, LHCLIENTDOC doc, LPCSTR nam
 }
 
 typedef HCONV (WINAPI *dde_connect_task_fn)(DWORD, HSZ, HSZ, HTASK);
+typedef struct ole_endpoint ole_endpoint;
 
-/* DDE library bindings and the instance owned by a client conversation. */
+/* Conversations on the same client task share one DDEML instance. The
+ * timeout state belongs to each conversation, not the shared instance. */
 typedef struct {
+    ole_endpoint *endpoint;
     HINSTANCE dll;
     DWORD inst;
     DDEUNINITIALIZE uninit, uninit_quiet;
@@ -1426,12 +1429,21 @@ typedef struct {
     DDECONNECT connect;
     dde_connect_task_fn connect_task;
     DDEQUERYCONVINFO conv_info;
-    DDEDISCONNECT disconnect;
+    DDEDISCONNECT disconnect, disconnect_quiet;
     DDECLIENTTRANSACTION transaction;
     DDEGETDATA get_data;
     DDEGETLASTERROR last_error;
     DDEFREEDATAHANDLE free_data;
 } ole_dde;
+
+struct ole_endpoint {
+    ole_endpoint *next;
+    HTASK task;
+    unsigned refs;
+    ole_dde dde;
+};
+
+static ole_endpoint *ole_endpoints;
 
 struct ole_session {
     ole_dde dde;
@@ -1515,9 +1527,9 @@ static HDDEDATA CALLBACK ole_dde_callback(UINT type, UINT fmt, HCONV conv, HSZ t
     return DDE_FNOTPROCESSED;
 }
 
-static BOOL ole_dde_begin(ole_dde *dde)
+static BOOL ole_dde_init(ole_dde *dde)
 {
-    reap_closed_sessions();
+    memset(dde, 0, sizeof(*dde));
     dde->dll = LoadLibrary("DDEML");
     if (dde->dll <= 2)
         return FALSE;
@@ -1542,13 +1554,65 @@ static BOOL ole_dde_begin(ole_dde *dde)
         GetProcAddress(dde->dll, "WinnDdeUninitializeQuiet");
     dde->connect_task = (dde_connect_task_fn)(void (*)(void))
         GetProcAddress(dde->dll, "WinnDdeConnectTask");
-    dde->timed_out = FALSE;
-    dde->inst = 0;                      /* a new DDEML instance */
+    dde->disconnect_quiet = (DDEDISCONNECT)(void (*)(void))
+        GetProcAddress(dde->dll, "WinnDdeDisconnectQuiet");
     if (!init(&dde->inst, ole_dde_callback, APPCMD_CLIENTONLY | CBF_SKIP_ALLNOTIFICATIONS, 0))
         return TRUE;
 failed:
     FreeLibrary(dde->dll);
     return FALSE;
+}
+
+static BOOL ole_dde_begin(ole_dde *dde)
+{
+    reap_closed_sessions();
+    HTASK task = GetCurrentTask();
+    for (ole_endpoint *e = ole_endpoints; e; e = e->next)
+        if (e->task == task) {
+            e->refs++;
+            *dde = e->dde;
+            return TRUE;
+        }
+    if (!ole_dde_init(dde))
+        return FALSE;
+    /* Older DDEML builds can only clean up a timeout at instance scope. */
+    if (dde->disconnect_quiet) {
+        ole_endpoint *e = malloc(sizeof(*e));
+        if (e) {
+            dde->endpoint = e;
+            *e = (ole_endpoint){ .next = ole_endpoints, .task = task, .refs = 1, .dde = *dde };
+            ole_endpoints = e;
+        }
+    }
+    return TRUE;
+}
+
+static void ole_dde_end(const ole_dde *dde)
+{
+    ole_endpoint *e = dde->endpoint;
+    if (e) {
+        if (--e->refs)
+            return;
+        ole_endpoint **link = &ole_endpoints;
+        while (*link != e)
+            link = &(*link)->next;
+        *link = e->next;
+        free(e);
+    }
+    DDEUNINITIALIZE finish = dde->timed_out && dde->uninit_quiet ?
+                             dde->uninit_quiet : dde->uninit;
+    finish(dde->inst);
+    FreeLibrary(dde->dll);
+}
+
+static void ole_disconnect(const ole_dde *dde, HCONV conv)
+{
+    if (!conv)
+        return;
+    if (!dde->timed_out || !dde->uninit_quiet)
+        dde->disconnect(conv);
+    else if (dde->disconnect_quiet)
+        dde->disconnect_quiet(conv);
 }
 
 static HCONV ole_connect_task(const ole_dde *dde, HSZ service, LPCSTR topic, HTASK task)
@@ -1920,22 +1984,17 @@ done:
     if (status != OLE_OK || from_file) {
         if (created && !dde.timed_out)
             ole_close_document(&dde, sys, data, topic);
-        if (data && (!dde.timed_out || !dde.uninit_quiet))
-            dde.disconnect(data);
+        ole_disconnect(&dde, data);
         if (started && sys && (status != OLE_OK || created) && !dde.timed_out)
             ole_execute(&dde, sys, "[StdExit]", OLE_ERROR_TERMINATE);
     }
-    if (sys && ((status == OLE_OK && !from_file) || !dde.timed_out || !dde.uninit_quiet))
-        dde.disconnect(sys);
+    ole_disconnect(&dde, sys);
     if (service)
         dde.free_string(dde.inst, service);
     if (item_handle)
         dde.free_string(dde.inst, item_handle);
-    if (status != OLE_OK || from_file) {
-        DDEUNINITIALIZE uninit = dde.timed_out && dde.uninit_quiet ? dde.uninit_quiet : dde.uninit;
-        uninit(dde.inst);
-        FreeLibrary(dde.dll);
-    }
+    if (status != OLE_OK || from_file)
+        ole_dde_end(&dde);
     if (image)
         GlobalFree(image);
     if (native)
@@ -2343,23 +2402,16 @@ static void disconnect_session(OLEOBJECT *o)
     if (s->temporary_server && !dde->timed_out)
         ole_execute(dde, s->temporary_server, "[StdExit]", OLE_ERROR_TERMINATE);
 
-    DDEUNINITIALIZE quiet = dde->timed_out ? dde->uninit_quiet : NULL;
-    if (s->conv && !quiet)
-        dde->disconnect(s->conv);
-    if (s->temporary_server && !quiet)
-        dde->disconnect(s->temporary_server);
+    ole_disconnect(dde, s->conv);
+    ole_disconnect(dde, s->temporary_server);
     if (s->item)
         s->dde.free_string(s->dde.inst, s->item);
-    if (quiet)
-        quiet(s->dde.inst);
-    else
-        s->dde.uninit(s->dde.inst);
-    FreeLibrary(s->dde.dll);
+    ole_dde_end(dde);
     free(s);
 }
 
-/* Keep the embedded object and its stored data after its editor exits,
- * but recycle its DDE instance before allocating another conversation.
+/* Keep the object and its stored data after its editor exits,
+ * but recycle the closed DDE conversation before making another one.
  * A client notification can start another OLE operation synchronously. */
 static void reap_closed_sessions(void)
 {
@@ -2623,8 +2675,7 @@ done:
     if (status != OLE_OK && sys && (mode == CONNECT_SNAPSHOT ? owns_server : started) &&
         !dde->timed_out)
         ole_execute(dde, sys, "[StdExit]", OLE_ERROR_TERMINATE);
-    if (sys && (status == OLE_OK || !dde->timed_out || !dde->uninit_quiet))
-        dde->disconnect(sys);
+    ole_disconnect(dde, sys);
     if (service)
         dde->free_string(dde->inst, service);
     if (status != OLE_OK)
@@ -3925,6 +3976,18 @@ static void task_end(uint16_t task)
                     free_picture(&objects[j], task);
             release_client_doc(i);
         }
+    /* DDEML closes this task's instances itself. Drop our references to
+     * them even when the application exited without deleting its objects. */
+    ole_endpoint **link = &ole_endpoints;
+    while (*link) {
+        ole_endpoint *e = *link;
+        if (e->task == task) {
+            *link = e->next;
+            free(e);
+        } else {
+            link = &e->next;
+        }
+    }
 }
 
 static void term(void)

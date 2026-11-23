@@ -31,7 +31,7 @@
 #include "windll.h"
 
 #define INSTS     16
-#define CONVS     32
+#define CONVS     72   /* two ends per conversation, including temporary OLE exchanges */
 #define LISTS     16
 #define LINKS     8
 #define DATAS     64
@@ -78,7 +78,7 @@ typedef struct {
     HCONVLIST list;
     CONVCONTEXT context;
     DWORD user;
-    advise_link links[LINKS];       /* a server's */
+    advise_link *links;             /* allocated on the server's first advise */
 } conversation;
 
 typedef struct {
@@ -746,9 +746,13 @@ static void drop_conversation_pending(HCONV h)
 
 static void drop_links(conversation *cv)
 {
+    if (!cv->links)
+        return;
     for (int i = 0; i < LINKS; i++)
         if (cv->links[i].item)
             GlobalDeleteAtom((ATOM)cv->links[i].item);
+    free(cv->links);
+    cv->links = NULL;
 }
 
 static void conv_end(int c, int tell)
@@ -797,6 +801,15 @@ static BOOL WINAPI DdeDisconnect(HCONV h)
     if (c < 0 || convs[c].closing)
         return FALSE;
     conv_end(c, 1);
+    return TRUE;
+}
+
+static BOOL WINAPI WinnDdeDisconnectQuiet(HCONV h)
+{
+    int c = conv_index(h);
+    if (c < 0 || convs[c].closing)
+        return FALSE;
+    conv_end(c, 0);
     return TRUE;
 }
 
@@ -849,7 +862,7 @@ static HCONV WINAPI DdeReconnect(HCONV h)
         return 0;
     }
 
-    for (int i = 0; i < LINKS; i++) {
+    for (int i = 0; old_server->links && i < LINKS; i++) {
         int next = conv_index(fresh);
         if (next < 0)
             return 0;
@@ -1004,7 +1017,7 @@ static UINT WINAPI DdeQueryConvInfo(HCONV h, DWORD id, PCONVINFO ci)
         int p = cv->partner >= 0 ? cv->partner : cv->reconnect_from - 1;
         server = p >= 0 ? &convs[p] : NULL;
     }
-    for (int k = 0; server && k < LINKS; k++)
+    for (int k = 0; server && server->links && k < LINKS; k++)
         if (server->links[k].item)
             info.wStatus |= ST_ADVISE;
     DWORD n = ci->cb && ci->cb < sizeof(info) ? ci->cb : sizeof(info);
@@ -1017,6 +1030,8 @@ static UINT WINAPI DdeQueryConvInfo(HCONV h, DWORD id, PCONVINFO ci)
 
 static int advise_slot(const conversation *server, HSZ item, UINT fmt)
 {
+    if (!server->links)
+        return 0;
     int free_slot = -1;
     for (int i = 0; i < LINKS; i++) {
         const advise_link *link = &server->links[i];
@@ -1075,8 +1090,10 @@ static HDDEDATA transact(int c, HDDEDATA given, HSZ item, UINT fmt, UINT type, D
             break;
         HDDEDATA answer = callback(s, type, fmt, sh, cv->topic, item, 0, 0, 0);
         if (answer && answer != CBR_BLOCK && conv_index(sh) == p) {
+            if (!convs[p].links)
+                convs[p].links = calloc(LINKS, sizeof(*convs[p].links));
             int k = advise_slot(&convs[p], item, fmt);
-            if (k >= 0) {
+            if (convs[p].links && k >= 0) {
                 advise_link *link = &convs[p].links[k];
                 if (link->item)
                     GlobalDeleteAtom((ATOM)link->item);
@@ -1092,14 +1109,16 @@ static HDDEDATA transact(int c, HDDEDATA given, HSZ item, UINT fmt, UINT type, D
         break;
     }
     case XTYP_ADVSTOP:
-        for (int k = 0; k < LINKS; k++)
+        for (int k = 0; convs[p].links && k < LINKS; k++)
             if (convs[p].links[k].item == item && item && convs[p].links[k].fmt == fmt) {
                 if (callback(s, XTYP_ADVSTOP, fmt, sh, cv->topic, item, 0, 0, 0) == CBR_BLOCK)
                     return CBR_BLOCK;
-                advise_link *link = &convs[p].links[k];
-                if (conv_index(sh) == p && link->item == item && link->fmt == fmt) {
-                    memset(link, 0, sizeof(*link));
-                    GlobalDeleteAtom((ATOM)item);
+                if (conv_index(sh) == p) {
+                    advise_link *link = &convs[p].links[k];
+                    if (link->item == item && link->fmt == fmt) {
+                        memset(link, 0, sizeof(*link));
+                        GlobalDeleteAtom((ATOM)item);
+                    }
                 }
                 *status = DDE_FACK;
                 r = 1;
@@ -1446,7 +1465,7 @@ static BOOL WINAPI DdePostAdvise(DWORD id, HSZ topic, HSZ item)
     BOOL ok = TRUE;
     for (int c = 0; c < CONVS; c++) {
         conversation *cv = &convs[c];
-        if (!cv->used || cv->client || cv->partner < 0 || cv->inst != inst ||
+        if (!cv->used || cv->client || !cv->links || cv->partner < 0 || cv->inst != inst ||
             (topic && cv->topic != topic))
             continue;
         HCONV h = conv_handle(c);
@@ -1882,6 +1901,7 @@ static const win_dll_export exports[] = {
     { 37, 4, "DdeReconnect", (const void *)DdeReconnect },
     { 0x7ff0, 4, "WinnDdeUninitializeQuiet", (const void *)WinnDdeUninitializeQuiet },
     { 0x7ff1, 16, "WinnDdeConnectTask", (const void *)WinnDdeConnectTask },
+    { 0x7ff2, 4, "WinnDdeDisconnectQuiet", (const void *)WinnDdeDisconnectQuiet },
 };
 
 static const win_dll_info info = {

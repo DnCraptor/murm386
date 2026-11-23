@@ -70,13 +70,34 @@ static __time_critical_func() inline uint8_t *extended_memory_at(uint32_t addres
                : NULL;
 }
 
+/* Upper memory C0000-FFFFF is direct PSRAM outside the VGA aperture.
+ * Do not bypass the EMS page frame in configurations which enable it.
+ * The conventional RAM path gets no extra branch; paging clears
+ * fast_memory_size and therefore disables this shortcut. */
+static __time_critical_func() inline uint8_t *far_direct_at(uint32_t address, uint32_t last_byte) {
+    uint8_t *direct = extended_memory_at(address, last_byte);
+    if (direct) return direct;
+#if defined(NO_PAGING)
+    /* Unsigned range check also rejects addresses below C0000. */
+    if (fast_memory_size && phys_mem_size >= 0x100000u &&
+        (address - 0xC0000u) < (0x40000u - last_byte)) {
+#if EMULATE_LTEMS
+        if (EMS_WINDOW(address) || EMS_WINDOW(address + last_byte))
+            return NULL;
+#endif
+        return fast_memory + address;
+    }
+#endif
+    return NULL;
+}
+
 static __time_critical_func() __attribute__((noinline)) uint8_t mem_read8_far(uint32_t address) {
-    const uint8_t *direct = extended_memory_at(address, 0);
+    const uint8_t *direct = far_direct_at(address, 0);
     return direct ? *direct : read86(address);
 }
 
 static __time_critical_func() __attribute__((noinline)) uint16_t mem_read16_far(uint32_t address) {
-    const uint8_t *direct = extended_memory_at(address, 1);
+    const uint8_t *direct = far_direct_at(address, 1);
     if (!direct) return readw86(address);
     uint16_t value;
     memcpy(&value, direct, 2);
@@ -84,7 +105,7 @@ static __time_critical_func() __attribute__((noinline)) uint16_t mem_read16_far(
 }
 
 static __time_critical_func() __attribute__((noinline)) uint32_t mem_read32_far(uint32_t address) {
-    const uint8_t *direct = extended_memory_at(address, 3);
+    const uint8_t *direct = far_direct_at(address, 3);
     if (!direct) return readdw86(address);
     uint32_t value;
     memcpy(&value, direct, 4);
@@ -92,19 +113,19 @@ static __time_critical_func() __attribute__((noinline)) uint32_t mem_read32_far(
 }
 
 static __time_critical_func() __attribute__((noinline)) void mem_write8_far(uint32_t address, uint8_t value) {
-    uint8_t *direct = extended_memory_at(address, 0);
+    uint8_t *direct = far_direct_at(address, 0);
     if (direct) *direct = value;
     else write86(address, value);
 }
 
 static __time_critical_func() __attribute__((noinline)) void mem_write16_far(uint32_t address, uint16_t value) {
-    uint8_t *direct = extended_memory_at(address, 1);
+    uint8_t *direct = far_direct_at(address, 1);
     if (direct) memcpy(direct, &value, 2);
     else writew86(address, value);
 }
 
 static __time_critical_func() __attribute__((noinline)) void mem_write32_far(uint32_t address, uint32_t value) {
-    uint8_t *direct = extended_memory_at(address, 3);
+    uint8_t *direct = far_direct_at(address, 3);
     if (direct) memcpy(direct, &value, 4);
     else writedw86(address, value);
 }
