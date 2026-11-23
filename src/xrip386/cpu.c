@@ -928,6 +928,11 @@ static const bool __not_in_flash("cpu.prefix") is_prefix[256] = {
 #define XRIP_INTERPRETER_CODE __time_critical_func()
 #endif
 static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uint32_t execloops) {
+    /* step_cpu() fixes active_cpu for this entire interpreter burst.
+     * Reuse that CPU pointer rather than reloading the global after
+     * every opcode helper call. Limit the alias to this function. */
+    CPU *const run_cpu = active_cpu;
+#define active_cpu run_cpu
     for (uint32_t loopcount = 0; loopcount < execloops; loopcount++) {
         if (active_cpu->native_done)
             break;
@@ -2909,6 +2914,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
             external_interrupt(1);
         }
     }
+#undef active_cpu
 }
 
 #include "murm_adapter.inl"
