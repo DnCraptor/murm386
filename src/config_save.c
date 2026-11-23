@@ -24,7 +24,6 @@
 #include "sb16.h"
 
 // Current configuration values (minimal storage)
-static int cfg_cpu_gen = EMU_CPU_GEN;
 static int cfg_fpu = 0;
 static char *cfg_bios = NULL;  /* NULL = Native BIOS */
 static int cfg_native_dos = 1;   /* Native BIOS boots native FreeDOS by default */
@@ -103,14 +102,6 @@ bool config_ensure_data_dir(void) {
 void config_init_from_current(void) {
     // These will be set from PCConfig in main.c
     cfg_changed = false;
-}
-
-int config_get_cpu_gen(void) { return cfg_cpu_gen; }
-void config_set_cpu_gen(int gen) {
-    if (cfg_cpu_gen != gen) {
-        cfg_cpu_gen = gen;
-        cfg_changed = true;
-    }
 }
 
 int config_get_fpu(void) { return cfg_fpu; }
@@ -595,10 +586,6 @@ bool config_save_all(void) {
 //    snprintf(line, sizeof(line), "vga_mem=%dK\n", cfg_vga_kb);
 //    write_line(&fp, line);
 
-    // CPU
-    snprintf(line, sizeof(line), "cpu=%d\r\n", cfg_cpu_gen);
-    write_line(&fp, line);
-
     // BIOS files
     if (cfg_bios)
         write_file_key_value(&fp, "bios=", cfg_bios);
@@ -633,8 +620,6 @@ bool config_save_all(void) {
 
     // FPU (separate section)
     write_line(&fp, "\n[cpu]\n");
-    snprintf(line, sizeof(line), "gen=%d\r\n", cfg_cpu_gen);
-    write_line(&fp, line);
     snprintf(line, sizeof(line), "fpu=%d\r\n", cfg_fpu);
     write_line(&fp, line);
 

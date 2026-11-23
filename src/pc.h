@@ -140,7 +140,6 @@ typedef struct {
 	const char *fdd[2];
 	int width;
 	int height;
-	int cpu_gen;
 	int fpu;
 	int enable_serial;
 	int vga_force_8dm;

@@ -1421,7 +1421,7 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	pcram_len = 0xc0000 - 0xa0000;
 #endif
 	phys_mem_size = conf->mem_size;
-	pc->cpu = cpu_new(conf->cpu_gen, &cb);
+	pc->cpu = cpu_new(3, &cb);
 	pc->fpu_enabled = conf->fpu ? 1 : 0;
 	if (conf->fpu)
 		enable_fpu(pc->cpu);
@@ -1811,34 +1811,7 @@ static void bios_post_components(PC *pc, size_t psram_size)
     char serial[40], parallel[40];
     char hdd[6][40];
 
-#if I386_MODE
-	switch(pc->cpu->gen) {
-		case 4:
-    		snprintf(left, sizeof(left), "CPU      : i486");
-			break;
-		case 5:
-    		snprintf(left, sizeof(left), "CPU      : Am5x86"); // TODO: ensure
-			break;
-		case 6:
-    		snprintf(left, sizeof(left), "CPU      : Cx6x86");
-			break;
-		default:
-    		snprintf(left, sizeof(left), "CPU      : 80386");
-			break;
-	}
-#else
-	switch(pc->cpu->gen) {
-		case 0:
-    		snprintf(left, sizeof(left), "CPU      : 8086 ");
-			break;
-		case 1:
-    		snprintf(left, sizeof(left), "CPU      : 80186");
-			break;
-		default:
-    		snprintf(left, sizeof(left), "CPU      : 80286");
-			break;
-	}
-#endif
+    snprintf(left, sizeof(left), "CPU      : 80386");
     snprintf(right, sizeof(right), "FPU      : %s",
              pc->fpu_enabled ? "80387" : "not installed");
 
@@ -2531,8 +2504,6 @@ int parse_conf_ini(void* user, const char* section,
 			conf->vga_bios = strdup(value);
 		} else if (NAME("mem_size") || NAME("mem")) {
 			/* Obsolete: physical PSRAM size is detected at boot. */
-		} else if (NAME("cpu")) {
-			conf->cpu_gen = atoi(value);
 		} else if (NAME("raw_sd_hdd")) {
             int mode = atoi(value);
             conf->raw_sd_hdd = (mode == RAW_SD_HDD_FIRST || mode == RAW_SD_HDD_LAST)
@@ -2577,9 +2548,7 @@ int parse_conf_ini(void* user, const char* section,
 			conf->height = atoi(value);
 		}
 	} else if (SEC("cpu")) {
-		if (NAME("gen")) {
-			conf->cpu_gen = atoi(value);
-		} else if (NAME("fpu")) {
+		if (NAME("fpu")) {
 			conf->fpu = atoi(value);
 		}
 	}

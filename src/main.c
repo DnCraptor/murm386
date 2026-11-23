@@ -1198,7 +1198,6 @@ static void load_default_config(void) {
     config.vga_mem_size = EMU_VGA_MEM_SIZE_KB * 1024;
 
     // CPU configuration
-    config.cpu_gen = EMU_CPU_GEN;
     /* config_save.c owns the user-visible defaults.  pc_new() consumes
        PCConfig before the two copies are synchronized below. */
     config.fpu = config_get_fpu();
@@ -1992,7 +1991,7 @@ static bool init_emulator(void) {
     DBG_PRINT("\nEmulator configuration:\n");
     DBG_PRINT("  Memory: %ld MB\n", config.mem_size / (1024 * 1024));
     DBG_PRINT("  VGA Memory: %ld KB\n", config.vga_mem_size / 1024);
-    DBG_PRINT("  CPU: %d86\n", config.cpu_gen);
+    DBG_PRINT("  CPU: 80386 (XRIP)\n");
     DBG_PRINT("  BIOS: %s\n", config.bios ? config.bios : "(none)");
     DBG_PRINT("  VGA BIOS: %s\n", config.vga_bios ? config.vga_bios : "(none)");
     DBG_PRINT("  Floppy A: %s\n", config.fdd[0] ? config.fdd[0] : "(none)");
@@ -2105,7 +2104,6 @@ static bool init_emulator(void) {
 
     // Initialize config save module with current values from PCConfig
     // (these override INI values if not present in [murm-286] section)
-    config_set_cpu_gen(config.cpu_gen);
     config_set_fpu(config.fpu);
     config_set_bios_file(config.bios);
     config_set_raw_sd_hdd(config.raw_sd_hdd);

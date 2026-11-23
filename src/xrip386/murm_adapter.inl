@@ -383,3 +383,7 @@ bool bios_15h_89h(CPU *cpu)
 
 bool cpu_pending_trap(void) { return pending_trap; }
 void cpu_pending_trap_set(bool value) { pending_trap = value; }
+
+/* XRIP owns IRQ shadow after the legacy 286 object is removed. */
+bool cpu_irq_shadow(const CPU *cpu) { return cpu->i286_irq_shadow; }
+void cpu_irq_shadow_set(CPU *cpu, bool value) { cpu->i286_irq_shadow = value; }

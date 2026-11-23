@@ -107,22 +107,69 @@ int tiny_fgetc(FILE *fp)
     return fread(&c, 1, 1, fp) == 1 ? c : EOF;
 }
 
-/* Plain mode uses DOS STDIN (including redirected input), not a FILE* stdin,
- * which is absent from the native stdio interface. */
+/* DOS AH=3Fh on CON enters FreeDOS read_line()->read_char_sft_dev().
+ * The device-busy loop only calls DosIdle_int() for AH < 0Dh; with AH=3Fh
+ * it blocks core0 without polling the host keyboard. Use the native
+ * cooperative BIOS keyboard API for CON, preserving DOS read() for redirected
+ * STDIN (files/pipes). INT 21h/AX=4400h reports bit 7 for character devices. */
+static int tiny_stdin_is_device(void)
+{
+    union REGS r = {0};
+    r.w.ax = 0x4400;
+    r.w.bx = 0;                  /* STDIN handle */
+    int386(0x21, &r, &r);
+    return !r.x.cflag && (r.w.dx & 0x0080u) != 0;
+}
+
 char *tiny_fgets(char *dst, size_t len)
 {
+    static int stdin_device = -1;
     size_t n = 0;
-    char c;
-    int rc;
-    if (!dst || len < 2) return 0;
-    while (n < len - 1) {
-        rc = read(0, &c, 1);
-        if (rc <= 0) break;
-        if (c == '\r') continue;
-        dst[n++] = c;
-        if (c == '\n') break;
+
+    if (!dst || len < 2)
+        return NULL;
+    if (stdin_device < 0)
+        stdin_device = tiny_stdin_is_device();
+
+    if (!stdin_device) {
+        char c;
+        int rc;
+        while (n < len - 1) {
+            rc = read(0, &c, 1);
+            if (rc <= 0) break;
+            if (c == '\r') continue;
+            dst[n++] = c;
+            if (c == '\n') break;
+        }
+    } else {
+        /* getch() polls kbhit(), which calls dos_yield() while idle. */
+        while (n < len - 1) {
+            int c = getch();
+            if (c == 0) {            /* discard extended scan code */
+                (void)getch();
+                continue;
+            }
+            if (c == 3 || c == 26)  /* Ctrl+C / Ctrl+Z */
+                return NULL;
+            if (c == '\b') {
+                if (n != 0) {
+                    --n;
+                    fputs("\b \b", stdout);
+                }
+                continue;
+            }
+            if (c == '\r' || c == '\n') {
+                dst[n++] = '\n';
+                putchar('\n');
+                break;
+            }
+            if (c >= 32 && c <= 126) {
+                dst[n++] = (char)c;
+                putchar(c);
+            }
+        }
     }
-    if (!n) return 0;
+    if (!n) return NULL;
     dst[n] = 0;
     return dst;
 }

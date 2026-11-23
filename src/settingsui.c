@@ -35,7 +35,6 @@ typedef enum {
     SETTING_VIDEO,
     SETTING_STRETCH_350,
     SETTING_SVGA_REFRESH,
-    SETTING_CPU,
     SETTING_FPU,
     SETTING_PCSPEAKER,
     SETTING_ADLIB,
@@ -66,15 +65,6 @@ typedef enum {
 // Option values
 static const int vol_options[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
 static const int vol_option_count = 17;
-
-#if !defined(XRIP386_CORE)
-#ifndef I386_MODE
-static const int cpu_options[] = { 0, 1, 2 };
-#else
-static const int cpu_options[] = { 3, 4, 5 };
-#endif
-static const int cpu_option_count = 3;
-#endif
 
 static const int cpu_freq_options[] = { 252, 378, 504, 524, 564 };
 static const int cpu_freq_option_count = 5;
@@ -132,7 +122,7 @@ static void ensure_marker_dirs(void) {
 }
 
 // Original values (to detect changes)
-static int orig_cpu, orig_fpu, orig_video_adapter;
+static int orig_fpu, orig_video_adapter;
 static int orig_pcspeaker, orig_adlib, orig_soundblaster, orig_tandy, orig_covox, orig_dss, orig_mouse, orig_nes_mouse, orig_nes_joystick, orig_mpu401;
 static int orig_cpu_freq, orig_psram_freq, orig_flash_freq, orig_volume, orig_voltage, orig_mouse_invert_y, orig_mouse_sensitivity, orig_usb_modem;
 static int orig_audio_output;
@@ -258,7 +248,6 @@ void settingsui_open(void) {
     if (settings_state != SETTINGS_CLOSED) return;
 
     // Store original values
-    orig_cpu = config_get_cpu_gen();
     orig_video_adapter = config_get_video_adapter();
     orig_fpu = config_get_fpu();
     orig_pcspeaker = config_get_pcspeaker();
@@ -296,7 +285,6 @@ void settingsui_open(void) {
 void settingsui_close(void) {
     // Restore original values if not confirmed
     if (settings_state == SETTINGS_MAIN && settingsui_has_changes()) {
-        config_set_cpu_gen(orig_cpu);
         config_set_video_adapter(orig_video_adapter);
         config_set_fpu(orig_fpu);
         config_set_cpu_freq(orig_cpu_freq);
@@ -369,16 +357,6 @@ static void cycle_option(int direction) {
             idx = (idx + direction + count) % count;
             audio_set_volume(options[idx]);
             config_set_volume(options[idx]);
-            break;
-
-        case SETTING_CPU:
-#if !defined(XRIP386_CORE)
-            options = cpu_options;
-            count = cpu_option_count;
-            idx = find_option_index(options, count, config_get_cpu_gen());
-            idx = (idx + direction + count) % count;
-            config_set_cpu_gen(options[idx]);
-#endif
             break;
 
         case SETTING_FPU:
@@ -563,7 +541,6 @@ static void draw_settings_menu(void) {
         "Video adapter:",
         "Stretch 350-line modes:",
         "800x600 refresh:",
-        "CPU Type:",
         "FPU (387):",
         "PC Speaker:",
         "AdLib:",
@@ -618,17 +595,6 @@ static void draw_settings_menu(void) {
                 break;
             case SETTING_VOL:
                 snprintf(value, sizeof(value), "< %d >", audio_get_volume());
-                break;
-            case SETTING_CPU:
-#if defined(XRIP386_CORE)
-                snprintf(value, sizeof(value), "80386 (pico-286)");
-#else
-                if (!config_get_cpu_gen()) {
-                    snprintf(value, sizeof(value), "< i8086 >");
-                } else {
-                    snprintf(value, sizeof(value), "< 80%d86 >", config_get_cpu_gen());
-                }
-#endif
                 break;
             case SETTING_FPU:
                 snprintf(value, sizeof(value), "< %s >", config_get_fpu() ? "Enabled" : "Disabled");

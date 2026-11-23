@@ -15,7 +15,7 @@ endif()
 cmake_minimum_required(VERSION 3.13)
 
 # Board configuration variant (M1, M2, PC, Z2 or C2)
-set(BOARD "M2" CACHE STRING "Board variant: M1, M2, PC, Z2 or C2")
+set(BOARD "M1" CACHE STRING "Board variant: M1, M2, PC, Z2 or C2")
 # Alias for backwards compatibility
 if(DEFINED BOARD_VARIANT AND NOT DEFINED BOARD)
     set(BOARD ${BOARD_VARIANT})
@@ -85,31 +85,15 @@ else()
     set(PICO_BOARD pico2 CACHE STRING "Pico board type")
 endif()
 
-# CPU target selects the interpreter and the firmware name.
-set(CPU_TARGET "386_XRIP" CACHE STRING "Emulated CPU core: 286, 386 or 386_XRIP")
-set_property(CACHE CPU_TARGET PROPERTY STRINGS 286 386 386_XRIP)
-if(NOT CPU_TARGET STREQUAL "286" AND NOT CPU_TARGET STREQUAL "386" AND NOT CPU_TARGET STREQUAL "386_XRIP")
-    message(FATAL_ERROR "CPU_TARGET must be 286, 386 or 386_XRIP, got '${CPU_TARGET}'")
-endif()
-set(BUILD_NAME "${CPU_TARGET}-${VIDEO_MODE}")
+# XRIP is the only guest CPU. A stale -DCPU_TARGET cache entry cannot
+# select the removed 286 or original 386 interpreters.
+set(CPU_TARGET "386")
+set(BUILD_NAME "386-${VIDEO_MODE}")
 option(MIDI_GM_DLS "Load a General MIDI wavetable bank from SD into PSRAM" OFF)
 if(MIDI_GM_DLS)
     string(APPEND BUILD_NAME "-GMDLS")
 endif()
-#
-# NOTE: the tree previously shipped with I386_MODE commented out, so the
-# binary named "386" was in fact a 286-mode core. This switch now makes
-# the two agree. Defaulting CPU_TARGET to 386 therefore selects the real
-# i386 core - a behavioural change from the old default. Configure with
-#   -DCPU_TARGET=286
-# to reproduce the previous (286-mode) build exactly.
-if(CPU_TARGET STREQUAL "386_XRIP")
-    message(STATUS "CPU target: 386_XRIP (pico-286 i386 core)")
-elseif(CPU_TARGET STREQUAL "386")
-    message(STATUS "CPU target: 386 (I386_MODE=1, full i386 core)")
-else()
-    message(STATUS "CPU target: 286 (I386_MODE off, 8086/186/286 core)")
-endif()
+message(STATUS "CPU target: 386 (XRIP)")
 
 # Firmware version string (set by release.sh or manually)
 # FIRMWARE_VERSION is derived from version.txt after parsing (see below)
@@ -369,20 +353,13 @@ endif()
 #=============================================================================
 # Core 386 Emulator Sources
 #=============================================================================
-if(CPU_TARGET STREQUAL "386_XRIP")
-    set(CPU_SOURCES src/xrip386/cpu.c)
-    set_source_files_properties(src/xrip386/cpu.c PROPERTIES COMPILE_OPTIONS "-O2;-fno-strict-aliasing")
-else()
-    set(CPU_SOURCES src/i386.c src/i386_arm.S)
-endif()
+set(CPU_SOURCES src/xrip386/cpu.c)
+set_source_files_properties(src/xrip386/cpu.c PROPERTIES COMPILE_OPTIONS "-O2;-fno-strict-aliasing")
 set(EMU_CORE_SOURCES
     # CPU and core
     ${CPU_SOURCES}
     src/pc.c
     src/video_profile.c
-
-    src/286/cpu.c
-    src/286/fpu.c
 
     # RP2350 SeaBIOS BIOS port
     src/bios/bios_00h.c
@@ -555,13 +532,7 @@ if(EMM)
         EMS_END=0xE0000ul
     )
 endif()
-if(CPU_TARGET STREQUAL "386_XRIP")
-    target_compile_definitions(${BUILD_NAME} PRIVATE I386_MODE=1 XRIP386_CORE=1 EMU_CPU_GEN=3)
-elseif(CPU_TARGET STREQUAL "386")
-    target_compile_definitions(${BUILD_NAME} PRIVATE I386_MODE=1 EMU_CPU_GEN=3)
-else()
-    target_compile_definitions(${BUILD_NAME} PRIVATE EMU_CPU_GEN=2)
-endif()
+target_compile_definitions(${BUILD_NAME} PRIVATE I386_MODE=1 XRIP386_CORE=1 EMU_CPU_GEN=3)
 
 # --- Нативный стек core0 -----------------------------------------------
 target_compile_definitions(${BUILD_NAME} PRIVATE
@@ -573,12 +544,8 @@ target_compile_definitions(${BUILD_NAME} PRIVATE
 # ARM-тулчейна (build/**/*.su после сборки).
 target_compile_options(${BUILD_NAME} PRIVATE -fstack-usage)
 
-# Both 386 cores share the BIOS, disk images and config on the SD card.
-if(CPU_TARGET STREQUAL "286")
-    set(SD_CPU_DIR 286)
-else()
-    set(SD_CPU_DIR 386)
-endif()
+# The single 386 core stores its data under /386.
+set(SD_CPU_DIR 386)
 target_compile_definitions(${BUILD_NAME} PRIVATE
     SD_DATA_DIR="${SD_CPU_DIR}"
     SD_DATA_DIR_SLASH="${SD_CPU_DIR}/")
@@ -657,13 +624,9 @@ if(FORCE_VGA)
     target_compile_definitions(video_driver PRIVATE FORCE_VGA=1)
 endif()
 
-# Add I386_PROFILE if profiling enabled
+# The removed original i386 backend owned I386_PROFILE.
 if(PROFILE_ENABLED)
-    if(CPU_TARGET STREQUAL "386_XRIP")
-        message(STATUS "Instruction profiling is only available with the original 386 core")
-    else()
-        target_compile_definitions(${BUILD_NAME} PRIVATE I386_PROFILE=1)
-    endif()
+    message(WARNING "I386_PROFILE is unavailable for the XRIP interpreter")
 endif()
 
 # On-device diagnostics: core0 hardfault/stack-overflow/hang catcher.
@@ -801,11 +764,6 @@ set_source_files_properties(${FDOS_WARN_SOURCES} PROPERTIES
     COMPILE_OPTIONS "-Wall;-Wextra;-Wno-unused-parameter;-Wno-sign-compare"
 )
 set_source_files_properties(src/fdos/fcom/fcom.c PROPERTIES LANGUAGE CXX)
-
-# ARM assembly flags for Cortex-M33
-set_source_files_properties(src/i386_arm.S PROPERTIES
-    COMPILE_FLAGS "-mcpu=cortex-m33 -mthumb"
-)
 
 target_link_libraries(${BUILD_NAME}
     pico_stdlib
