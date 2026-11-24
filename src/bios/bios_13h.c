@@ -192,77 +192,53 @@ static bool int13_transfer_lba(CPU* cpu, const BiosDisk *d, uint32_t lba, uint16
         return true;
     }
 
-    if (d->raw_sd || d->raw_usb) {
-        uint8_t *buf = disk_sector_buffer();
-
-        for (uint16_t i = 0; i < count; i++) {
-            uint32_t mem = addr + (uint32_t)i * 512u;
-
-            if (write) {
-                for (uint16_t j = 0; j < 512; j++)
-                    buf[j] = read86(mem + j);
-                if (!bios_hdd_write(d->hdd_index, lba + i, buf, 1)) {
-                    CPU_AL = (uint8_t)i;
-                    int13_set_status(cpu, drive, INT13_ST_CONTROLLER);
-                    return true;
-                }
-            } else {
-                if (!bios_hdd_read(d->hdd_index, lba + i, buf, 1)) {
-                    CPU_AL = (uint8_t)i;
-                    int13_set_status(cpu, drive, INT13_ST_CONTROLLER);
-                    return true;
-                }
-                if (!verify) {
-                    for (uint16_t j = 0; j < 512; j++)
-                        write86(mem + j, buf[j]);
-                }
-            }
-        }
-
-        if (write && !bios_hdd_sync(d->hdd_index)) {
-            int13_set_status(cpu, drive, INT13_ST_CONTROLLER);
-            return true;
-        }
-
-        CPU_AL = (uint8_t)count;
-        int13_set_status(cpu, drive, INT13_ST_OK);
-        return true;
-    }
-
-    if (!d->f || f_lseek(d->f, lba * 512u) != FR_OK) {
+    const UINT sector_size = 512u;
+    bool raw = d->raw_sd || d->raw_usb;
+    if (!raw && (!d->f || f_lseek(d->f, (FSIZE_t)lba * sector_size) != FR_OK)) {
         int13_set_status(cpu, drive, INT13_ST_SEEK_FAILED);
         return true;
     }
 
-    uint8_t buf[16];
-    for (uint16_t i = 0; i < count; i++) {
-        uint32_t mem = addr + (uint32_t)i * 512u;
-        for (uint16_t off = 0; off < 512; off += sizeof(buf)) {
+    uint8_t *buf = disk_sector_buffer();
+    for (uint16_t i = 0; i < count; i++, addr += sector_size) {
+        if (write)
+            guest_read_block(addr, buf, sector_size);
+
+        bool ok;
+        if (raw) {
+            ok = write ? bios_hdd_write(d->hdd_index, lba + i, buf, 1)
+                       : bios_hdd_read(d->hdd_index, lba + i, buf, 1);
+        } else {
             UINT done = 0;
-            if (write) {
-                for (uint16_t j = 0; j < sizeof(buf); j++)
-                    buf[j] = read86(mem + off + j);
-                if (f_write(d->f, buf, sizeof(buf), &done) != FR_OK || done != sizeof(buf)) {
-                    CPU_AL = (uint8_t)i;
-                    int13_set_status(cpu, drive, INT13_ST_CONTROLLER);
-                    return true;
-                }
+            FRESULT res = write ? f_write(d->f, buf, sector_size, &done)
+                                : f_read(d->f, buf, sector_size, &done);
+            ok = res == FR_OK && done == sector_size;
+        }
+        if (!ok) {
+            CPU_AL = (uint8_t)i;
+            int13_set_status(cpu, drive, INT13_ST_CONTROLLER);
+            return true;
+        }
+
+        if (!write && !verify) {
+            /* Preserve byte I/O for VGA, including transfers crossing its edge. */
+            if (VGA_WINDOW(addr) || VGA_WINDOW(addr + sector_size - 1u)) {
+                for (UINT j = 0; j < sector_size; j++)
+                    write86(addr + j, buf[j]);
             } else {
-                if (f_read(d->f, buf, sizeof(buf), &done) != FR_OK || done != sizeof(buf)) {
-                    CPU_AL = (uint8_t)i;
-                    int13_set_status(cpu, drive, INT13_ST_CONTROLLER);
-                    return true;
-                }
-                if (!verify) {
-                    for (uint16_t j = 0; j < sizeof(buf); j++)
-                        write86(mem + off + j, buf[j]);
-                }
+                guest_write_block(addr, buf, sector_size);
             }
         }
     }
 
-    if (write)
-        f_sync(d->f);
+    if (write) {
+        if (!raw) {
+            f_sync(d->f);
+        } else if (!bios_hdd_sync(d->hdd_index)) {
+            int13_set_status(cpu, drive, INT13_ST_CONTROLLER);
+            return true;
+        }
+    }
 
     CPU_AL = (uint8_t)count;
     int13_set_status(cpu, drive, INT13_ST_OK);

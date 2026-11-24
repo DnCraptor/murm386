@@ -146,7 +146,8 @@ struct VGAState {
     
     /* text mode state */
     uint32_t last_palette[16];
-#ifndef FULL_UPDATE
+#if !defined(RP2350_BUILD) && !defined(FULL_UPDATE)
+    /* Only the software text renderer needs a previous frame to diff against. */
     uint16_t last_ch_attr[MAX_TEXT_WIDTH * MAX_TEXT_HEIGHT];
 #endif
     uint32_t last_width;

@@ -648,6 +648,7 @@ static void vbe_update_vgaregs(VGAState *s)
     s->cr[VGA_CRTC_MAX_SCAN] &= ~0x9f; /* no double scan */
 }
 
+#ifndef RP2350_BUILD
 /* the text refresh is just for debugging and initial boot message, so
    it is very incomplete */
 static void vga_text_refresh(VGAState *s,
@@ -882,6 +883,7 @@ static void vga_text_refresh(VGAState *s,
 #endif
     redraw_func(opaque, 0, 0, fb_dev->width, fb_dev->height);
 }
+#endif
 
 static void vga_graphic_refresh(VGAState *s,
                                 SimpleFBDrawFunc *redraw_func, void *opaque,
