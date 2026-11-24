@@ -286,6 +286,49 @@ CPU *cpu_new(int gen, CPU_CB **cb);
 #ifdef I386_MODE
 unsigned long cpui386_get_cycle(const CPU *cpu);
 #endif
+#if defined(XRIP386_CORE)
+/* Direct firmware entry points. Keep the accessor table for native ABI clients. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+void xrip_enable_fpu(CPU *cpu);
+void xrip_reset_cpu(CPU *cpu);
+void xrip_step_cpu(CPU *cpu, int count);
+void xrip_set_exception(CPU *cpu, int exception, uword error);
+void xrip_set_cpu_flags(CPU *cpu, uword set, uword clear);
+uint32_t xrip_get_flags(CPU *cpu, u32 mask);
+void xrip_abort_cpu(CPU *cpu, int code);
+uint16_t xrip_get_seg16(const CPU *cpu, u8 index);
+void xrip_set_seg16(CPU *cpu, u8 index, u16 selector);
+#ifdef __cplusplus
+}
+#endif
+
+inline static void enable_fpu(CPU *cpu) {
+	xrip_enable_fpu(cpu);
+}
+inline static void cpu_reset(CPU *cpu) {
+	xrip_reset_cpu(cpu);
+}
+inline static void cpu_step(CPU *cpu, int stepcount) {
+	xrip_step_cpu(cpu, stepcount);
+}
+inline static void cpu_raise_irq(CPU *cpu) {
+	cpu->intr = true;
+}
+inline static void cpu_setexc(CPU *cpu, int excno, uword excerr) {
+	xrip_set_exception(cpu, excno, excerr);
+}
+inline static void cpu_setflags(CPU *cpu, uword set_mask, uword clear_mask) {
+	xrip_set_cpu_flags(cpu, set_mask, clear_mask);
+}
+inline static uword cpu_getflags(CPU *cpu) {
+	return xrip_get_flags(cpu, ~0u);
+}
+inline static void cpu_abort(CPU *cpu, int code) {
+	xrip_abort_cpu(cpu, code);
+}
+#else
 inline static void enable_fpu(CPU *cpu) {
 	cpu->ext_accessors->enable_fpu(cpu);
 }
@@ -310,6 +353,7 @@ inline static uword cpu_getflags(CPU *cpu) {
 inline static void cpu_abort(CPU *cpu, int code) {
 	cpu->ext_accessors->abort(cpu, code);
 }
+#endif
 
 // Register accessors for disk/BIOS emulation
 // 8-bit registers

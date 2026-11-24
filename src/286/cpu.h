@@ -68,6 +68,17 @@
 void modregrm(CPU* cpu);
 void getea(CPU* cpu, uint8_t rmval);
 
+#if defined(XRIP386_CORE)
+#define CPU_ES xrip_get_seg16(cpu, SEG_ES)
+#define CPU_CS xrip_get_seg16(cpu, SEG_CS)
+#define CPU_SS xrip_get_seg16(cpu, SEG_SS)
+#define CPU_DS xrip_get_seg16(cpu, SEG_DS)
+
+#define SET_ES(x) xrip_set_seg16(cpu, SEG_ES, (x))
+#define SET_CS(x) xrip_set_seg16(cpu, SEG_CS, (x))
+#define SET_SS(x) xrip_set_seg16(cpu, SEG_SS, (x))
+#define SET_DS(x) xrip_set_seg16(cpu, SEG_DS, (x))
+#else
 #define CPU_ES cpu->ext_accessors->get_seg16(cpu, SEG_ES)
 #define CPU_CS cpu->ext_accessors->get_seg16(cpu, SEG_CS)
 #define CPU_SS cpu->ext_accessors->get_seg16(cpu, SEG_SS)
@@ -77,6 +88,7 @@ void getea(CPU* cpu, uint8_t rmval);
 #define SET_CS(x) cpu->ext_accessors->set_seg16(cpu, SEG_CS, (x))
 #define SET_SS(x) cpu->ext_accessors->set_seg16(cpu, SEG_SS, (x))
 #define SET_DS(x) cpu->ext_accessors->set_seg16(cpu, SEG_DS, (x))
+#endif
 
 #if I386_MODE
 #define SET_IP(x) do { cpu->ip = (x); cpu->next_ip = (x); PREFETCH_RESET } while(0)

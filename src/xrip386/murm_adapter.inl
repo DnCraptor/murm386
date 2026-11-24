@@ -123,13 +123,13 @@ static void reset86(void)
     active_cpu->ip = active_cpu->next_ip = XRIP_IP = 0xfff0;
 }
 
-static void reset_cpu(CPU *cpu)
+void xrip_reset_cpu(CPU *cpu)
 {
     active_cpu = cpu;
     reset86();
 }
 
-static void __time_critical_func(step_cpu)(CPU *cpu, int count)
+void __time_critical_func(xrip_step_cpu)(CPU *cpu, int count)
 {
     active_cpu = cpu;
     XRIP_IP = cpu->next_ip;
@@ -170,37 +170,37 @@ static void set_reg8(CPU *cpu, u8 index, u8 value)
 }
 static void set_reg16(CPU *cpu, u8 index, u16 value) { cpu->gprx[index].r16 = value; }
 static void set_reg32(CPU *cpu, u8 index, u32 value) { cpu->gprx[index].r32 = value; }
-static uint16_t get_seg16(const CPU *cpu, u8 index)
+uint16_t xrip_get_seg16(const CPU *cpu, u8 index)
 {
     (void)cpu;
     return segregs[index];
 }
-static void set_seg16(CPU *cpu, u8 index, u16 selector)
+void xrip_set_seg16(CPU *cpu, u8 index, u16 selector)
 {
     (void)cpu;
     load_segment(index, selector);
 }
-static uint32_t get_flags(CPU *cpu, u32 mask)
+uint32_t xrip_get_flags(CPU *cpu, u32 mask)
 {
     flags_now();
     return cpu->flags.value & mask;
 }
-static void set_cpu_flags(CPU *cpu, uword set, uword clear)
+void xrip_set_cpu_flags(CPU *cpu, uword set, uword clear)
 {
     flags_now();
     cpu->flags.value = ((cpu->flags.value | set) & ~clear & cpu->flags_mask) | 2;
 }
 static void set_flag(CPU *cpu, u32 mask, bool value)
 {
-    set_cpu_flags(cpu, value ? mask : 0, value ? 0 : mask);
+    xrip_set_cpu_flags(cpu, value ? mask : 0, value ? 0 : mask);
 }
-static void enable_cpu_fpu(CPU *cpu)
+void xrip_enable_fpu(CPU *cpu)
 {
     if (cpu->fpu) fpu_delete(cpu->fpu);
     cpu->fpu = fpu_new();
 }
 static void raise_irq(CPU *cpu) { cpu->intr = true; }
-static void set_exception(CPU *cpu, int exception, uword error)
+void xrip_set_exception(CPU *cpu, int exception, uword error)
 {
     cpu->excno = exception;
     cpu->excerr = error;
@@ -209,7 +209,7 @@ static void set_exception(CPU *cpu, int exception, uword error)
         raise_fault((uint8_t)exception, pushes_error ? (int32_t)error : NO_ERROR_CODE);
     }
 }
-static void abort_cpu(CPU *cpu, int code)
+void xrip_abort_cpu(CPU *cpu, int code)
 {
     (void)cpu;
     panic("XRIP 386 abort %d", code);
@@ -220,10 +220,10 @@ CPU *cpu_new(int gen, CPU_CB **callbacks)
     static CPU_ext_accessors_t accessors = {
         .get_reg8 = get_reg8, .get_reg16 = get_reg16, .get_reg32 = get_reg32,
         .set_reg8 = set_reg8, .set_reg16 = set_reg16, .set_reg32 = set_reg32,
-        .get_seg16 = get_seg16, .set_seg16 = set_seg16, .get_flags = get_flags,
-        .set_flag = set_flag, .set_flags = set_cpu_flags, .enable_fpu = enable_cpu_fpu,
-        .reset = reset_cpu, .step = step_cpu, .raise_irq = raise_irq,
-        .setexc = set_exception, .abort = abort_cpu,
+        .get_seg16 = xrip_get_seg16, .set_seg16 = xrip_set_seg16, .get_flags = xrip_get_flags,
+        .set_flag = set_flag, .set_flags = xrip_set_cpu_flags, .enable_fpu = xrip_enable_fpu,
+        .reset = xrip_reset_cpu, .step = xrip_step_cpu, .raise_irq = raise_irq,
+        .setexc = xrip_set_exception, .abort = xrip_abort_cpu,
     };
     (void)gen;
     CPU *cpu = calloc(1, sizeof(*cpu));
@@ -238,7 +238,7 @@ CPU *cpu_new(int gen, CPU_CB **callbacks)
     writew86 = bus_write16;
     writedw86 = bus_write32;
     cpu_set_a20(cpu, 1);
-    reset_cpu(cpu);
+    xrip_reset_cpu(cpu);
     if (callbacks) *callbacks = &cpu->cb;
     return cpu;
 }

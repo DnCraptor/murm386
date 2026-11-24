@@ -133,8 +133,8 @@ void cpu_err_msg(CPU* cpu, const char* msg) {
     snprintf(buf, sizeof(buf), "CS:IP=%04X:%04X  SS:SP=%04X:%04X ",
              CPU_CS, CPU_IP, CPU_SS, CPU_SP); print_line(buf, 4);
     snprintf(buf, sizeof(buf), "DS=%04X ES=%04X FS=%04X GS=%04X ",
-             CPU_DS, CPU_ES, cpu->ext_accessors->get_seg16(cpu, SEG_FS),
-             cpu->ext_accessors->get_seg16(cpu, SEG_GS)); print_line(buf, 5);
+             CPU_DS, CPU_ES, xrip_get_seg16(cpu, SEG_FS),
+             xrip_get_seg16(cpu, SEG_GS)); print_line(buf, 5);
 
     snprintf(buf, sizeof(buf), "FLAGS=%04X %c%c%c%c%c%c%c%c%c ",
              fw,

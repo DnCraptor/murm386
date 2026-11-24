@@ -1186,7 +1186,7 @@ bool fpu_exec1(FPU *fpu, void *cpu, int op, int group, unsigned int i)
 		case 4:
 			if (i == 0) { // FNSTSW
 				u16 sw = getsw(fpu);
-				((CPU*)cpu)->ext_accessors->set_reg16((CPU*)cpu, AX_REG_IDX, sw);
+				((CPU*)cpu)->gprx[AX_REG_IDX].r16 = sw;
 			} else {
 				cpu_setexc(cpu, 6, 0);
 				return false;
