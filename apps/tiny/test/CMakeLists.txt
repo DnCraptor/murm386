@@ -4,16 +4,16 @@ if(WIN32)
 else()
     set(USERHOME $ENV{HOME})
 endif()
-set(sdkVersion 2.3.1)
-set(toolchainVersion 15_2_Rel1)
-set(picotoolVersion 2.3.1)
+set(sdkVersion 2.2.0)
+set(toolchainVersion 14_2_Rel1)
+set(picotoolVersion 2.2.0)
 set(picoVscode ${USERHOME}/.pico-sdk/cmake/pico-vscode.cmake)
 if (EXISTS ${picoVscode})
     include(${picoVscode})
 endif()
 # ====================================================================================
 cmake_minimum_required(VERSION 3.22)
-set(PICO_BOARD pico2 CACHE STRING "RP2350 target")
+set(PICO_BOARD pico CACHE STRING "Board type")
 include(${CMAKE_CURRENT_LIST_DIR}/../pico_sdk_import.cmake)
 project(tiny_test C ASM)
 pico_sdk_init()
@@ -57,8 +57,8 @@ pico_set_program_name(tiny_test "TEST.EXE - TINY startup probes")
 
 add_custom_command(TARGET tiny_test POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${COMPILED}"
-    COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:tiny_test>" "${COMPILED}/TEST.crt"
-    COMMAND "${ELF2EZ}" /y "${COMPILED}/TEST.crt"
-    COMMAND "${CMAKE_COMMAND}" -E rm -f "${COMPILED}/TEST.crt"
+    COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:tiny_test>" "${COMPILED}/TTEST.crt"
+    COMMAND "${ELF2EZ}" /y "${COMPILED}/TTEST.crt"
+    COMMAND "${CMAKE_COMMAND}" -E rm -f "${COMPILED}/TTEST.crt"
     VERBATIM
 )
