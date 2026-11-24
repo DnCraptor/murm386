@@ -98,9 +98,13 @@ static void __time_critical_func(make_audio_packet)(const hstx_audio_timing_t *a
         d[4] = (uint8_t)(sample >> 16);
         d[5] = (uint8_t)(sample >> 24);
         d[6] = (uint8_t)(parity8(d[1] ^ d[2]) << 3 | parity8(d[4] ^ d[5]) << 7);
-        uint8_t v = hstx_bch_table[0];
-        for (int i = 1; i < 7; i++) v = hstx_bch_table[d[i] ^ v];
-        d[7] = v;
+        // The 16-bit stereo packet has zero bytes at d[0] and d[3].
+        uint8_t v = hstx_bch_table[d[1]];
+        v = hstx_bch_table[d[2] ^ v];
+        v = hstx_bch_table[v];
+        v = hstx_bch_table[d[4] ^ v];
+        v = hstx_bch_table[d[5] ^ v];
+        d[7] = hstx_bch_table[d[6] ^ v];
     }
     __atomic_store_n(&buffer_tail, tail, __ATOMIC_RELEASE);
 
