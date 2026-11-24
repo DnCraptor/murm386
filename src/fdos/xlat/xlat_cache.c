@@ -25,7 +25,10 @@ typedef struct {
     uint32_t lo, span;
     uint16_t cs;
     uint16_t n_runs;
+    uint16_t ip;           /* the entry point it was built from */
     uint8_t live;
+    uint32_t entries;
+    uint32_t exits[XLAT_EXIT_COUNT];
 } region_t;
 
 typedef struct {
@@ -49,7 +52,17 @@ typedef struct {
     hot_t hot[XLAT_HOT_SLOTS];
     xlat_region_out_t out;  /* translator output, kept here to spare the stack */
     void *ctx;              /* translator working memory */
+#if XLAT_LOG
+    char *log;              /* text kept until the next safe point (xlat_log_write) */
+    uint32_t log_len;
+    uint32_t log_lost;      /* bytes that did not fit */
+#endif
 } state_t;
+
+#ifndef XLAT_LOG
+#define XLAT_LOG 0
+#endif
+#define XLAT_LOG_SIZE (XLAT_LOG ? 16384u : 0u)
 
 #define ALIGN8(n) (((n) + 7u) & ~(size_t)7u)
 
@@ -119,8 +132,74 @@ static uint32_t hash32(uint32_t key)
     return key * 0x9e3779b1u;
 }
 
+#if XLAT_LOG
+#include <stdarg.h>
+#include <stdio.h>
+
+static void log_printf(const char *fmt, ...)
+{
+    char line[160];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+    if (n < 0)
+        return;
+    if (n > (int)sizeof(line) - 1)
+        n = (int)sizeof(line) - 1;
+    if (st->log_len + (uint32_t)n > XLAT_LOG_SIZE) {
+        st->log_lost += (uint32_t)n;
+        return;
+    }
+    memcpy(st->log + st->log_len, line, (size_t)n);
+    st->log_len += (uint32_t)n;
+}
+
+/* x86 bytes of a region, as the translator saw them: replayable offline. */
+static void log_region_code(const region_t *r)
+{
+    log_printf("T %04X:%04X lo=%05lX span=%lu runs=%u\r\n", r->cs, r->ip,
+               (unsigned long)r->lo, (unsigned long)r->span, r->n_runs);
+    const uint8_t *d = st->arena.base + r->data_off;
+    for (unsigned k = 0; k < r->n_runs; ++k) {
+        uint32_t linear;
+        memcpy(&linear, d, 4);
+        const uint32_t len = d[4] | (uint32_t)d[5] << 8;
+        const uint8_t *b = d + 8;
+        for (uint32_t i = 0; i < len; i += 16) {
+            char hex[16 * 3 + 1];
+            uint32_t n = len - i < 16 ? len - i : 16;
+            for (uint32_t j = 0; j < n; ++j) {
+                static const char digits[] = "0123456789ABCDEF";
+                hex[j * 3] = ' ';
+                hex[j * 3 + 1] = digits[b[i + j] >> 4];
+                hex[j * 3 + 2] = digits[b[i + j] & 15];
+            }
+            hex[n * 3] = 0;
+            log_printf("  %04X:%04X%s\r\n", r->cs, (unsigned)(linear - r->cs_base + i), hex);
+        }
+        d += 8 + ((len + 3u) & ~3u);
+    }
+}
+
+static void log_region_counts(void)
+{
+    for (int k = 0; k < st->n_regions; ++k) {
+        const region_t *r = &st->region[k];
+        log_printf("C %04X:%04X entries=%lu exit branch/budget/side=%lu/%lu/%lu%s\r\n", r->cs, r->ip,
+                   (unsigned long)r->entries, (unsigned long)r->exits[0],
+                   (unsigned long)r->exits[1], (unsigned long)r->exits[2],
+                   r->live ? "" : " (invalidated)");
+    }
+}
+#else
+#define log_region_code(r) ((void)0)
+#define log_region_counts() ((void)0)
+#endif
+
 static void reset_tables(void)
 {
+    log_region_counts();    /* the regions are about to go */
     memset(st->region, 0, sizeof(st->region));
     memset(st->entry, 0, sizeof(st->entry));
     for (int k = 0; k < XLAT_HOT_SLOTS; ++k)
@@ -139,7 +218,8 @@ static __attribute__((noinline)) bool ready(void)
         return false;
     const size_t ctx_off = ALIGN8(sizeof(state_t));
     const size_t arena_off = ALIGN8(ctx_off + xlat_translate_ctx_size());
-    uint8_t *block = (uint8_t *)XLAT_ALLOC(arena_off + XLAT_ARENA_SIZE);
+    const size_t log_off = arena_off + XLAT_ARENA_SIZE;
+    uint8_t *block = (uint8_t *)XLAT_ALLOC(log_off + XLAT_LOG_SIZE);
     if (!block) {
         disabled = true;
         xlat_stats.alloc_failed = 1;
@@ -150,6 +230,9 @@ static __attribute__((noinline)) bool ready(void)
     st->ctx = block + ctx_off;
     st->arena.base = block + arena_off;
     st->arena.size = XLAT_ARENA_SIZE;
+#if XLAT_LOG
+    st->log = (char *)block + log_off;
+#endif
     reset_tables();
     return true;
 }
@@ -259,6 +342,7 @@ static bool translate_here(const xlat_rt_t *rt)
     const int idx = st->n_regions++;
     region_t *r = &st->region[idx];
     r->cs = rt->cs;
+    r->ip = (uint16_t)rt->ip;
     r->cs_base = rt->seg_base[1];
     r->lo = out->lo;
     r->span = out->span;
@@ -282,6 +366,7 @@ static bool translate_here(const xlat_rt_t *rt)
         insert((uint32_t)rt->cs << 16 | out->entries[k].ip, (uint8_t)idx,
                out->entries[k].code_off);
     xlat_sync_code(st->arena.base + out->code_off, out->code_len);
+    log_region_code(r);
     xlat_stats.translations++;
     xlat_stats.code_bytes = st->arena.code_top + (st->arena.size - st->arena.data_bottom);
     return true;
@@ -351,8 +436,11 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
         tramp(rt, (uint32_t)(uintptr_t)(st->arena.base + e->code_off) | 1u);
         ran = true;
         xlat_stats.entries++;
-        if (rt->exit_kind < XLAT_EXIT_COUNT)
+        r->entries++;
+        if (rt->exit_kind < XLAT_EXIT_COUNT) {
             xlat_stats.exits[rt->exit_kind]++;
+            r->exits[rt->exit_kind]++;
+        }
         if (rt->budget <= 0 || *rt->intr)
             break;
     }
@@ -398,3 +486,44 @@ uint32_t XLAT_HOT_FN(xlat_rt_cond)(const xlat_rt_t *rt, uint32_t cc)
     }
     return result != (cc & 1u);
 }
+
+#if XLAT_LOG
+#include "ff.h"
+
+/* Called by DOS when a program has ended: no guest code and no FatFs call in
+ * progress, so the SD card can be written here. Appends what was collected
+ * since the previous call to SD_DATA_DIR/xlat.log. */
+void xlat_log_write(uint16_t psp, const char *name)
+{
+    static FIL lf;
+    static int state;      /* 0 unopened, 1 open, 2 failed */
+    static uint32_t last_translations, last_entries;
+    if (!st || state == 2)
+        return;
+    if (xlat_stats.translations == last_translations && xlat_stats.entries == last_entries &&
+        !st->log_len)
+        return;
+    last_translations = xlat_stats.translations;
+    last_entries = xlat_stats.entries;
+    log_printf("== exit PSP %04X %s ==\r\n", psp, name);
+    log_region_counts();
+    log_printf("S translations=%lu rejects=%lu entries=%lu invalid=%lu flushes=%lu "
+               "exit b/bu/s=%lu/%lu/%lu native=%lu code=%lu stack_skips=%lu lost=%lu\r\n",
+               (unsigned long)xlat_stats.translations, (unsigned long)xlat_stats.rejects,
+               (unsigned long)xlat_stats.entries, (unsigned long)xlat_stats.invalidations,
+               (unsigned long)xlat_stats.flushes, (unsigned long)xlat_stats.exits[0],
+               (unsigned long)xlat_stats.exits[1], (unsigned long)xlat_stats.exits[2],
+               (unsigned long)xlat_stats.guest_insns, (unsigned long)xlat_stats.code_bytes,
+               (unsigned long)xlat_stats.stack_skips, (unsigned long)st->log_lost);
+    if (state == 0)
+        state = f_open(&lf, SD_DATA_DIR_SLASH "xlat.log",
+                       FA_WRITE | FA_OPEN_APPEND | FA_OPEN_ALWAYS) == FR_OK ? 1 : 2;
+    if (state == 1) {
+        UINT bw = 0;
+        f_write(&lf, st->log, st->log_len, &bw);
+        f_sync(&lf);
+    }
+    st->log_len = 0;
+    st->log_lost = 0;
+}
+#endif

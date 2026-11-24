@@ -39,6 +39,9 @@ extern volatile uint32_t dos_diag_kernel_code;
 #include "sdcard.h"
 #include "psram_layout.h"
 #include "psram_alloc.h"
+#if XLAT
+#include "xlat/xlat.h"
+#endif
 
 /*
  * Keep this dependency narrow.  Including ../pc.h here pulls host stdio
@@ -5155,6 +5158,22 @@ static COUNT exec_run_process(const struct exec_process_start *start)
     }
   }
 
+#if XLAT && XLAT_LOG
+  {
+    /* Program name from its MCB (DOS 4+ owner name), before it is freed. */
+    char name[9];
+    const uint32_t mcb = ((uint32_t)start->child_psp - 1u) << 4;
+    unsigned k = 0;
+    for (; k < 8; ++k) {
+      const UBYTE ch = pload8(mcb + 8u + k);
+      if (ch < 0x20 || ch >= 0x7f)
+        break;
+      name[k] = (char)ch;
+    }
+    name[k] = '\0';
+    xlat_log_write(start->child_psp, name);
+  }
+#endif
   exec_leave_child(saved_linear, start->child_psp);
   return SUCCESS;
 }

@@ -118,6 +118,10 @@ void xlat_flush(void);
  * table): forget it; the next hot spot allocates a new one. */
 void xlat_release(void);
 
+/* XLAT_LOG builds: append the collected regions and counters to
+ * SD_DATA_DIR/xlat.log. Only at a safe point (a DOS program has ended). */
+void xlat_log_write(uint16_t psp, const char *name);
+
 /* Helper called by generated code: x86 condition code cc on the lazy flags. */
 uint32_t xlat_rt_cond(const xlat_rt_t *rt, uint32_t cc);
 

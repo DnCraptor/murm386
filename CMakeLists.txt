@@ -646,6 +646,9 @@ if(CONTROL_STACK)
 endif()
 
 set(XLAT_ARENA_KB 16 CACHE STRING "Translator code arena, KiB (max 64)")
+# Diagnostics: at each DOS program exit append the translated regions (their
+# x86 bytes), per-region entry/exit counts and totals to <SD_DATA_DIR>/xlat.log.
+option(XLAT_LOG "Log translated regions to the SD card" ON)
 if(XLAT)
     math(EXPR XLAT_ARENA_BYTES "${XLAT_ARENA_KB} * 1024")
     target_sources(${BUILD_NAME} PRIVATE
@@ -655,6 +658,9 @@ if(XLAT)
         src/fdos/xlat/xlat_cache.c
     )
     target_compile_definitions(${BUILD_NAME} PRIVATE XLAT=1 XLAT_ARENA_SIZE=${XLAT_ARENA_BYTES}u)
+    if(XLAT_LOG)
+        target_compile_definitions(${BUILD_NAME} PRIVATE XLAT_LOG=1)
+    endif()
 endif()
 
 # Statistical PC sampling of core 0 via SysTick. See src/pcsample.c.

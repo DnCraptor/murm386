@@ -10,6 +10,7 @@
  * Registers (all 32 bits), resolved flags and memory must match.
  *
  *   xlat_test [programs] [first-seed]
+ *   xlat_test --replay xlat.log [states]   regions logged by an XLAT_LOG firmware
  */
 #include <stdbool.h>
 #include <stdint.h>
@@ -630,8 +631,138 @@ static void setup_state(ref_t *s, uint32_t seed_regs)
     s->ip = 0;
 }
 
+/* ---------------------------------------------------------------------- */
+/* Replay of regions logged by the firmware (XLAT_LOG xlat.log)           */
+/* ---------------------------------------------------------------------- */
+
+#define REPLAY_SPAN 0x50000u   /* code and data used by replay stay below this */
+
+typedef struct {
+    uint16_t cs, ip;
+    int nlines;
+    struct { uint16_t ip; uint8_t n; uint8_t b[16]; } line[64];
+} replay_region_t;
+
+static int replay_parse(const char *path, replay_region_t *out, int max)
+{
+    FILE *f = fopen(path, "r");
+    char buf[256];
+    int n = -1;
+    if (!f) { perror(path); return 0; }
+    while (fgets(buf, sizeof(buf), f)) {
+        unsigned cs, ip;
+        if (buf[0] == 'T' && sscanf(buf, "T %x:%x", &cs, &ip) == 2) {
+            if (n + 1 >= max) break;
+            ++n;
+            out[n].cs = (uint16_t)cs; out[n].ip = (uint16_t)ip; out[n].nlines = 0;
+        } else if (n >= 0 && buf[0] == ' ' && buf[1] == ' ' &&
+                   sscanf(buf + 2, "%x:%x", &cs, &ip) == 2 && out[n].nlines < 64) {
+            char *p = strchr(buf + 2, ':') + 5;
+            int k = 0;
+            unsigned v;
+            int used;
+            while (k < 16 && sscanf(p, " %2x%n", &v, &used) == 1) { out[n].line[out[n].nlines].b[k++] = (uint8_t)v; p += used; }
+            out[n].line[out[n].nlines].ip = (uint16_t)ip;
+            out[n].line[out[n].nlines].n = (uint8_t)k;
+            out[n].nlines++;
+        }
+    }
+    fclose(f);
+    return n + 1;
+}
+
+static int replay(const char *path, int states)
+{
+    static replay_region_t reg[256];
+    static uint8_t base_mem[REPLAY_SPAN], before_mem[REPLAY_SPAN], after_mem[REPLAY_SPAN];
+    const int nreg = replay_parse(path, reg, 256);
+    int bad = 0, untranslated = 0, checked = 0;
+    for (uint32_t k = 0; k < REPLAY_SPAN; ++k) base_mem[k] = (uint8_t)rnd();
+    for (int r = 0; r < nreg; ++r) {
+        int ran_states = 0, fails = 0;
+        for (int t = 0; t < states && fails < 3; ++t) {
+            /* memory: random data, the region's segment filled with HLT and its code */
+            memcpy(mem, base_mem, REPLAY_SPAN);
+            const uint32_t cs_base = (uint32_t)reg[r].cs << 4;
+            memset(mem + cs_base, 0xf4, 0x10000);
+            for (int l = 0; l < reg[r].nlines; ++l)
+                memcpy(mem + cs_base + reg[r].line[l].ip, reg[r].line[l].b, reg[r].line[l].n);
+            for (int k = 0; k < 64; ++k) mem[rn(REPLAY_SPAN)] = (uint8_t)rn(4);   /* small values */
+            memset(&R, 0, sizeof(R));
+            for (int i = 0; i < 8; ++i) R.gpr[i] = rn(3) ? rnd() : (rnd() & 0xffff0000u) | rn(8);
+            R.gpr[1] = (R.gpr[1] & 0xffff0000u) | (rn(2) ? rn(40) : (uint16_t)rnd());
+            R.cs = reg[r].cs;
+            R.seg_base[1] = cs_base;
+            for (int k = 0; k < 4; ++k)
+                if (k != 1) R.seg_base[k] = rn(4) == 0 ? cs_base : rn(0x3000) << 4;
+            R.ip = reg[r].ip;
+            R.eflags = 2 | (rnd() & 0x8d5u);
+            if (rn(2)) { uint16_t r16; alu16((int)(rn(2) ? 0 : 5 + rn(3)), (uint16_t)rnd(), (uint16_t)rnd(), &r16); }
+            const ref_t before = R;
+            memcpy(before_mem, mem, REPLAY_SPAN);
+            xlat_flush();
+            bool ran = false;
+            xlat_rt_t rt;
+            for (int attempt = 0; attempt < 4 && !ran; ++attempt) {
+                rt.mem = mem; rt.mem_size = 0xa0000u;
+                memcpy(rt.seg_base, R.seg_base, sizeof(rt.seg_base));
+                rt.budget = 1 + (int32_t)rn(300);
+                rt.intr = &zero_byte; rt.gpr = R.gpr;
+                rt.lazy_result = R.flags_result; rt.lazy_dst = R.flags_dst; rt.lazy_src = R.flags_src;
+                rt.eflags = R.eflags; rt.lazy_op = R.flags_op; rt.lazy_cf = R.flags_cf;
+                rt.cs = R.cs; rt.ip = R.ip;
+                ran = xlat_run(&rt);
+            }
+            if (!ran) continue;
+            ran_states++;
+            R.ip = (uint16_t)rt.ip;
+            R.flags_result = rt.lazy_result; R.flags_dst = rt.lazy_dst; R.flags_src = rt.lazy_src;
+            R.flags_op = rt.lazy_op; R.flags_cf = rt.lazy_cf;
+            ref_t after = R;
+            memcpy(after_mem, mem, REPLAY_SPAN);
+            /* the reference from 'before' must reach the same registers, flags and memory */
+            memcpy(mem, before_mem, REPLAY_SPAN);
+            R = before;
+            bool found = false;
+            for (int k = 0; k < 40000 && !R.halted; ++k) {
+                if (k) ref_step();
+                if (R.ip == after.ip && !memcmp(R.gpr, after.gpr, sizeof(R.gpr))) {
+                    ref_t a = after, b = R;
+                    R = a; flags_now(); a = R;
+                    R = b; flags_now(); b = R;
+                    if ((a.eflags & 0x8d5u) == (b.eflags & 0x8d5u) && !memcmp(mem, after_mem, REPLAY_SPAN)) {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            checked++;
+            if (!found) {
+                fails++;
+                bad++;
+                printf("MISMATCH region %04X:%04X state %d: entry %04X exit %04X kind %u\n",
+                       reg[r].cs, reg[r].ip, t, before.ip, after.ip, rt.exit_kind);
+            }
+        }
+        if (!ran_states) {
+            untranslated++;
+            printf("not translated here: %04X:%04X\n", reg[r].cs, reg[r].ip);
+        }
+    }
+    printf("replay: regions %d, states checked %d, mismatches %d, untranslated %d\n",
+           nreg, checked, bad, untranslated);
+    printf("stats: translations %u entries %u exits b/budget/side %u/%u/%u native insns %u\n",
+           xlat_stats.translations, xlat_stats.entries, xlat_stats.exits[0], xlat_stats.exits[1],
+           xlat_stats.exits[2], xlat_stats.guest_insns);
+    return bad ? 1 : 0;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc > 2 && !strcmp(argv[1], "--replay")) {
+        rng = 0x12345u;
+        return replay(argv[2], argc > 3 ? atoi(argv[3]) : 300);
+    }
     const int programs = argc > 1 ? atoi(argv[1]) : 2000;
     uint32_t seed = argc > 2 ? (uint32_t)strtoul(argv[2], NULL, 0) : 1;
     int run = 0, skipped = 0, failures = 0;
