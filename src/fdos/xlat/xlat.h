@@ -93,7 +93,8 @@ typedef struct xlat_stats {
     uint32_t exits[XLAT_EXIT_COUNT];
     uint32_t guest_insns;       /* approximate guest instructions run natively */
     uint32_t code_bytes;        /* current code-cache use */
-    uint32_t alloc_failed;      /* the lazy arena allocation failed: translator off */
+    uint32_t alloc_failed;      /* no PSRAM span for the cache: translator off */
+    uint32_t stack_skips;       /* translations postponed: core-0 stack too low */
 } xlat_stats_t;
 
 extern xlat_stats_t xlat_stats;
@@ -112,6 +113,10 @@ bool xlat_run(xlat_rt_t *rt);
 
 /* Drop every translation (e.g. after a program terminates). */
 void xlat_flush(void);
+
+/* The memory block was taken away (machine reset clears the PSRAM span
+ * table): forget it; the next hot spot allocates a new one. */
+void xlat_release(void);
 
 /* Helper called by generated code: x86 condition code cc on the lazy flags. */
 uint32_t xlat_rt_cond(const xlat_rt_t *rt, uint32_t cc);

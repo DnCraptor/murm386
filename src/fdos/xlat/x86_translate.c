@@ -25,7 +25,6 @@
  * Exits are always at an x86 instruction boundary with all registers written
  * back, so XRIP continues exactly there.
  */
-#include <stdlib.h>
 #include <string.h>
 
 #include "xlat_internal.h"
@@ -72,6 +71,7 @@ typedef struct {
     int n;
     x86_insn_t in[XLAT_MAX_INSNS];
     uint64_t in_set[XLAT_MAX_INSNS], out_set[XLAT_MAX_INSNS], cf_in[XLAT_MAX_INSNS];
+    uint64_t cf_out[XLAT_MAX_INSNS];
     int8_t fall_idx[XLAT_MAX_INSNS], tgt_idx[XLAT_MAX_INSNS];
     int8_t pfp[XLAT_MAX_INSNS];
     uint8_t leader[XLAT_MAX_INSNS], mat[XLAT_MAX_INSNS], need_cf[XLAT_MAX_INSNS];
@@ -177,7 +177,10 @@ static bool discover(tctx_t *c, uint16_t start)
     /* Edges, leaders, loop check. */
     bool loop = false;
     memset(c->leader, 0, sizeof(c->leader));
-    c->leader[find_insn(c, start)] = 1;
+    const int first = find_insn(c, start);
+    if (first < 0)
+        return false;
+    c->leader[first] = 1;
     c->lo = UINT32_MAX;
     uint32_t hi = 0;
     for (int i = 0; i < c->n; ++i) {
@@ -232,7 +235,8 @@ static void dataflow(tctx_t *c)
     memset(c->in_set, 0, sizeof(c->in_set));
     memset(c->out_set, 0, sizeof(c->out_set));
     memset(c->cf_in, 0, sizeof(c->cf_in));
-    uint64_t cf_out[XLAT_MAX_INSNS] = {0};
+    memset(c->cf_out, 0, sizeof(c->cf_out));
+    uint64_t *const cf_out = c->cf_out;
     bool changed = true;
     while (changed) {
         changed = false;
@@ -887,13 +891,16 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     return true;
 }
 
+size_t xlat_translate_ctx_size(void)
+{
+    return sizeof(tctx_t);
+}
+
 bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip,
-                    xlat_region_out_t *out, bool *full)
+                    xlat_region_out_t *out, bool *full, void *ctx_mem)
 {
     *full = false;
-    tctx_t *c = (tctx_t *)malloc(sizeof(tctx_t));
-    if (!c)
-        return false;
+    tctx_t *const c = (tctx_t *)ctx_mem;
     bool ok = false;
     c->rt = rt;
     c->cs_base = rt->seg_base[1];
@@ -958,6 +965,5 @@ bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip,
     a->code_top = (c->e.pos + 3u) & ~3u;
     ok = true;
 done:
-    free(c);
     return ok;
 }

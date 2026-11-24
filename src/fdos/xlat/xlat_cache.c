@@ -1,16 +1,18 @@
 /*
  * murm386 xlat: resident translation cache and burst-boundary dispatcher.
  *
- * Everything is allocated on first use (one block: tables + code arena), so a
- * firmware that never runs a hot loop pays nothing in SRAM. When the arena,
- * the region table or the entry table fills up, the whole cache is dropped.
+ * Everything lives in one block allocated on first use: tables, the
+ * translator's working context and the code arena. On the device the block is
+ * a native PSRAM span (the pool ELF applications run from), not heap: the
+ * SRAM heap is small and pico malloc() panics instead of returning NULL. If no
+ * span is available the translator stays off. When the arena, the region
+ * table or the entry table fills up, the whole cache is dropped.
  *
  * Hot spots are found by sampling: xlat_run() is called at the start of every
  * XRIP burst, and an entry point seen there XLAT_HOT_THRESHOLD times in a row
  * (same hash slot) is translated. A region that ran to its budget stops at a
  * back edge, i.e. at a region entry, so the next burst re-enters it at once.
  */
-#include <stdlib.h>
 #include <string.h>
 
 #include "xlat_internal.h"
@@ -46,8 +48,10 @@ typedef struct {
     entry_t entry[XLAT_ENTRY_SLOTS];
     hot_t hot[XLAT_HOT_SLOTS];
     xlat_region_out_t out;  /* translator output, kept here to spare the stack */
-    uint32_t code[];        /* arena (word aligned) */
+    void *ctx;              /* translator working memory */
 } state_t;
+
+#define ALIGN8(n) (((n) + 7u) & ~(size_t)7u)
 
 #if XLAT_ARENA_SIZE > 0x10000
 #error "entry_t.code_off is 16-bit"
@@ -59,9 +63,43 @@ static bool disabled;
 #if defined(XLAT_HOST_TEST)
 void *xlat_test_calloc(size_t size);   /* executable, zeroed */
 #define XLAT_ALLOC(size) xlat_test_calloc(size)
+#define stack_free() 0xffffffffu
 #else
-#define XLAT_ALLOC(size) calloc(1, size)
+#include "core0_stack.h"
+#include "board_config.h"
+#include "../psram_alloc.h"
+#include "../psram_layout.h"
+
+/* Span owner: not a segment any DOS process can have. */
+#define XLAT_SPAN_OWNER 0xffffu
+
+static void *XLAT_ALLOC(size_t size)
+{
+    fdos_psram_span *span =
+        fdos_native_span_reserve(XLAT_SPAN_OWNER, (uint32_t)((size + 1023u) & ~(size_t)1023u));
+    if (!span)
+        return NULL;
+    return (void *)((uintptr_t)PSRAM_BASE_ADDR + FDOS_XMS_EMB_BASE_PHYS + span->base);
+}
+
+/* Native stack left below SP, as native_stack_free() in task.c: the core-0
+ * stack bounds, or MSPLIM where native DOS/WINN switched stacks. */
+static uint32_t stack_free(void)
+{
+    uint32_t sp, floor = (uint32_t)core0_stack_floor_runtime;
+    __asm volatile("mov %0, sp" : "=r"(sp));
+    if (sp < floor || sp > core0_stack_top_runtime) {
+        __asm volatile("mrs %0, msplim" : "=r"(floor));
+        if (!floor)
+            return 0;
+    }
+    return sp > floor ? sp - floor : 0;
+}
 #endif
+
+/* Translating needs about 0.5 KiB of stack beyond xlat_run(); keep the same
+ * margin the DOS EXEC guard keeps for whatever runs after us. */
+#define XLAT_STACK_NEEDED 1024u
 
 void xlat_sync_code(void *start, uint32_t len)
 {
@@ -93,22 +131,33 @@ static void reset_tables(void)
     xlat_stats.code_bytes = st->arena.code_top;
 }
 
-static bool ready(void)
+static __attribute__((noinline)) bool ready(void)
 {
     if (st)
         return true;
     if (disabled)
         return false;
-    st = (state_t *)XLAT_ALLOC(sizeof(state_t) + XLAT_ARENA_SIZE);
-    if (!st) {
+    const size_t ctx_off = ALIGN8(sizeof(state_t));
+    const size_t arena_off = ALIGN8(ctx_off + xlat_translate_ctx_size());
+    uint8_t *block = (uint8_t *)XLAT_ALLOC(arena_off + XLAT_ARENA_SIZE);
+    if (!block) {
         disabled = true;
         xlat_stats.alloc_failed = 1;
         return false;
     }
-    st->arena.base = (uint8_t *)st->code;
+    st = (state_t *)block;
+    memset(st, 0, sizeof(*st));
+    st->ctx = block + ctx_off;
+    st->arena.base = block + arena_off;
     st->arena.size = XLAT_ARENA_SIZE;
     reset_tables();
     return true;
+}
+
+void xlat_release(void)
+{
+    st = NULL;
+    disabled = false;
 }
 
 void xlat_flush(void)
@@ -200,7 +249,7 @@ static bool translate_here(const xlat_rt_t *rt)
             xlat_flush();
             continue;
         }
-        if (xlat_translate(&st->arena, rt, (uint16_t)rt->ip, out, &full))
+        if (xlat_translate(&st->arena, rt, (uint16_t)rt->ip, out, &full, st->ctx))
             break;
         if (!full || attempt)
             return false;
@@ -252,6 +301,10 @@ static __attribute__((noinline)) bool sample(const xlat_rt_t *rt)
     if (h->reject || ++h->count < XLAT_HOT_THRESHOLD)
         return false;
     h->count = 0;
+    if (stack_free() < XLAT_STACK_NEEDED) {
+        xlat_stats.stack_skips++;   /* try again when it is hot at a shallower depth */
+        return false;
+    }
     /* Inside an existing region but not at one of its entries: the region is
      * entered at its loop head once a burst ends there. */
     if (covered(rt) || !translate_here(rt)) {
@@ -264,8 +317,18 @@ static __attribute__((noinline)) bool sample(const xlat_rt_t *rt)
 
 bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
 {
-    if (!ready())
-        return false;
+    if (!st) {
+        /* Nothing is allocated until some entry point is seen twice in a
+         * row at a burst start (no allocation during BIOS POST etc.). */
+        static uint32_t first_key = UINT32_MAX;
+        const uint32_t key = (uint32_t)rt->cs << 16 | (rt->ip & 0xffffu);
+        if (disabled || key != first_key) {
+            first_key = key;
+            return false;
+        }
+        if (!ready())
+            return false;
+    }
     const int32_t start = rt->budget;
     const xlat_tramp_fn tramp = (xlat_tramp_fn)(uintptr_t)(st->arena.base + 1);
     bool ran = false, built = false;

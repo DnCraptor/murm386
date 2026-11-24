@@ -137,7 +137,9 @@ static xlat_rt_t xlat_state;
 
 /* Translated code is entered only here, at the start of a burst: one lookup
  * per burst, nothing in run_instructions(). Returns the guest instructions
- * accounted to translated code (0: nothing ran, the state is untouched). */
+ * accounted to translated code (0: nothing ran, the state is untouched).
+ * DOS programs run in nested bursts (exec_run_process() inside INT 21h), so
+ * nested bursts are included; xlat_run() checks the stack before translating. */
 static __time_critical_func() uint32_t xlat_enter(CPU *cpu, uint32_t count)
 {
     if (protected_mode || (cr0 & CR0_PE) || code32 || !fast_memory_size || tf || halted ||

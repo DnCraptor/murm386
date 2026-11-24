@@ -8,6 +8,9 @@
 #include "psram_alloc.h"
 #include "psram_init.h"
 #include "../mem.h"
+#if XLAT
+#include "xlat/xlat.h"
+#endif
 
 #define XMS_VERSION 0x00
 #define REQUEST_HMA 0x01
@@ -444,6 +447,9 @@ void reset_umb() {
     xms_handles = 0;
     native_spans = NULL;
     native_span_count = 0;
+#if XLAT
+    xlat_release();     /* its PSRAM span is gone with the table */
+#endif
     xms_update_ff_qspi_floor(0);
     native_update_ff_qspi_floor();
 }

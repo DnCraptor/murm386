@@ -24,7 +24,7 @@
 /* ---------------------------------------------------------------------- */
 
 #ifndef XLAT_ARENA_SIZE
-#define XLAT_ARENA_SIZE      (16u * 1024u)   /* code + source copies, lazily allocated */
+#define XLAT_ARENA_SIZE      (16u * 1024u)   /* code + source copies, allocated on first use */
 #endif
 #define XLAT_MAX_INSNS       63              /* per region; bit 63 of a set is "entry state" */
 #define XLAT_MAX_REGIONS     32
@@ -176,9 +176,11 @@ bool xlat_emit_trampoline(xlat_arena_t *arena);
 
 /* Translate the region reachable from cs:ip. Code is appended to the arena.
  * Returns false (arena unchanged) when no worthwhile region exists or the
- * arena is full (*full set). */
+ * arena is full (*full set). ctx_mem: xlat_translate_ctx_size() bytes of
+ * working memory, word aligned (kept off the small core-0 stack and heap). */
+size_t xlat_translate_ctx_size(void);
 bool xlat_translate(xlat_arena_t *arena, const xlat_rt_t *rt, uint16_t ip,
-                    xlat_region_out_t *out, bool *full);
+                    xlat_region_out_t *out, bool *full, void *ctx_mem);
 
 typedef void (*xlat_tramp_fn)(xlat_rt_t *rt, uint32_t target);
 
