@@ -933,7 +933,9 @@ static const bool __not_in_flash("cpu.prefix") is_prefix[256] = {
 /* Startup copies this section into RAM_4_EXT, below the core 0 stack. */
 #define XRIP_INTERPRETER_CODE __attribute__((section(".ram_4_ext_code.xrip_interpreter")))
 #else
-#define XRIP_INTERPRETER_CODE __time_critical_func()
+/* Paging can use RAM_4_EXT for the guest page cache. Execute this large
+ * loop from flash so it does not compete with the startup heap in RAM. */
+#define XRIP_INTERPRETER_CODE
 #endif
 static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uint32_t execloops) {
     /* step_cpu() fixes active_cpu for this entire interpreter burst.
