@@ -16,24 +16,59 @@ cmake_minimum_required(VERSION 3.13)
 
 # Board configuration variant (M1, M2, PC, Z2 or C2)
 set(BOARD "M1" CACHE STRING "Board variant: M1, M2, PC, Z2 or C2")
+# Enable LTEMM support (performance degradation is expected)
+option(EMM "Enable LTEMM support" OFF)
+option(NO_PAGING "Disable guest-RAM paging and use direct QSPI PSRAM access" ON)
+# Video adapter profile: one mutually exclusive build mode.
+set(VIDEO_MODE "VGA256" CACHE STRING "Video adapter: RUNTIME, MCGA, EGA128, VGA128 or VGA256")
+# x86 -> Thumb-2 translation of hot real-mode loops (src/fdos/xlat,
+# docs/FDOS-JIT-architecture.md). Off by default: with XLAT=OFF the XRIP
+# interpreter is built exactly as before. The arena (code + source copies)
+# and tables are allocated from the heap on first use.
+option(XLAT "Translate hot real-mode x86 loops to ARM code" ON)
+# CPU overclock configuration (252, 378, 504 MHz)
+# 252 - very basic overclock, 378 = stable overclock, 504 = high overclock
+set(CPU_SPEED "504" CACHE STRING "CPU clock in MHz: 378, 504")
+# PSRAM speed configuration (133, 166 MHz target)
+set(PSRAM_SPEED "66" CACHE STRING "PSRAM max frequency in MHz: 66, 84, 100, 133, 166")
+# USB role is selected at runtime (HOST by default, DEVICE via config.ini).
+# Both TinyUSB roles are compiled into every firmware image.
+# Force HDMI output (skip VGA/HDMI pin auto-detection)
+option(FORCE_HDMI "Force HDMI output instead of VGA" OFF)
+# Force VGA output (skip auto-detection). Takes precedence over FORCE_HDMI.
+option(FORCE_VGA "Force VGA output instead of HDMI" OFF)
+# Debug output (disabled by default for cleaner console)
+option(DEBUG_ENABLED "Enable verbose debug output" OFF)
+# Profiling (for performance analysis)
+option(PROFILE_ENABLED "Enable i386 instruction profiling" OFF)
+option(DIAG_ENABLED "Enable on-device core0 fault/hang catcher (src/diag.c)" OFF)
+# Refuse a new EXEC level (task.c DosExec) and refuse opening the OSD dialogs
+# (main.c Win+F11/F12) when the core0 native stack is too close to its floor.
+option(CONTROL_STACK "Guard core0 stack: refuse deep EXEC / OSD when stack low" ON)
+# Coarse per-subsystem cycle accounting on core 0 (docs/C2_SPLIT_PLAN.md).
+# Distinct from PROFILE_ENABLED, which profiles instructions.
+option(SUBSYS_PROFILE "Enable core-0 subsystem cycle profiling" OFF)
+# MIDI GM DLS
+option(MIDI_GM_DLS "Load a General MIDI wavetable bank from SD into PSRAM" OFF)
+# Ignore cpu_freq/psram_freq from the SD card's config.ini. Needed for any
+# clock-scaling measurement, since config.ini otherwise pins this board to
+# 504 MHz regardless of what the build asked for.
+option(PIN_CLOCKS "Ignore config.ini clock settings" OFF)
+# Guest code footprint measurement, for JIT cache sizing. See codeprofile.h.
+option(CODE_PROFILE "Measure the guest code working set" OFF)
+
+
 # Alias for backwards compatibility
 if(DEFINED BOARD_VARIANT AND NOT DEFINED BOARD)
     set(BOARD ${BOARD_VARIANT})
 endif()
 
-# Enable LTEMM support (performance degradation is expected)
-option(EMM "Enable LTEMM support" OFF)
-
-option(NO_PAGING "Disable guest-RAM paging and use direct QSPI PSRAM access" ON)
 if(NO_PAGING)
     add_compile_definitions(NO_PAGING=1)
 endif()
 
-# Video adapter profile: one mutually exclusive build mode.
-set(VIDEO_MODE "VGA256" CACHE STRING "Video adapter: RUNTIME, MCGA, EGA128, VGA128 or VGA256")
 set_property(CACHE VIDEO_MODE PROPERTY STRINGS RUNTIME MCGA EGA128 VGA128 VGA256)
 string(TOUPPER "${VIDEO_MODE}" VIDEO_MODE)
-
 
 if(VIDEO_MODE STREQUAL "RUNTIME")
     if(NO_PAGING)
@@ -89,7 +124,6 @@ endif()
 # select the removed 286 or original 386 interpreters.
 set(CPU_TARGET "386")
 set(BUILD_NAME "386-${VIDEO_MODE}")
-option(MIDI_GM_DLS "Load a General MIDI wavetable bank from SD into PSRAM" OFF)
 if(MIDI_GM_DLS)
     string(APPEND BUILD_NAME "-GMDLS")
 endif()
@@ -97,22 +131,6 @@ message(STATUS "CPU target: 386 (XRIP)")
 
 # Firmware version string (set by release.sh or manually)
 # FIRMWARE_VERSION is derived from version.txt after parsing (see below)
-
-# CPU overclock configuration (252, 378, 504 MHz)
-# 252 - very basic overclock, 378 = stable overclock, 504 = high overclock
-set(CPU_SPEED "504" CACHE STRING "CPU clock in MHz: 378, 504")
-
-# PSRAM speed configuration (133, 166 MHz target)
-set(PSRAM_SPEED "66" CACHE STRING "PSRAM max frequency in MHz: 66, 84, 100, 133, 166")
-
-# USB role is selected at runtime (HOST by default, DEVICE via config.ini).
-# Both TinyUSB roles are compiled into every firmware image.
-
-# Force HDMI output (skip VGA/HDMI pin auto-detection)
-option(FORCE_HDMI "Force HDMI output instead of VGA" OFF)
-
-# Force VGA output (skip auto-detection). Takes precedence over FORCE_HDMI.
-option(FORCE_VGA "Force VGA output instead of HDMI" OFF)
 
 if(BOARD STREQUAL "M2")
     option(M2P2_HSTX_AUDIO "Use HSTX VGA or HDMI with audio on M2P2" ON)
@@ -125,20 +143,6 @@ if(M2P2_HSTX_AUDIO)
     endif()
     string(APPEND BUILD_NAME "-HSTX")
 endif()
-
-# Debug output (disabled by default for cleaner console)
-option(DEBUG_ENABLED "Enable verbose debug output" OFF)
-
-# Profiling (for performance analysis)
-option(PROFILE_ENABLED "Enable i386 instruction profiling" OFF)
-option(DIAG_ENABLED "Enable on-device core0 fault/hang catcher (src/diag.c)" OFF)
-# Refuse a new EXEC level (task.c DosExec) and refuse opening the OSD dialogs
-# (main.c Win+F11/F12) when the core0 native stack is too close to its floor.
-option(CONTROL_STACK "Guard core0 stack: refuse deep EXEC / OSD when stack low" ON)
-
-# Coarse per-subsystem cycle accounting on core 0 (docs/C2_SPLIT_PLAN.md).
-# Distinct from PROFILE_ENABLED, which profiles instructions.
-option(SUBSYS_PROFILE "Enable core-0 subsystem cycle profiling" OFF)
 
 if(BOARD STREQUAL "M1")
     SET(BUILD_NAME "m1p2-${BUILD_NAME}")
@@ -641,13 +645,17 @@ if(CONTROL_STACK)
     target_compile_definitions(${BUILD_NAME} PRIVATE CONTROL_STACK=1)
 endif()
 
-# Ignore cpu_freq/psram_freq from the SD card's config.ini. Needed for any
-# clock-scaling measurement, since config.ini otherwise pins this board to
-# 504 MHz regardless of what the build asked for.
-option(PIN_CLOCKS "Ignore config.ini clock settings" OFF)
-
-# Guest code footprint measurement, for JIT cache sizing. See codeprofile.h.
-option(CODE_PROFILE "Measure the guest code working set" OFF)
+set(XLAT_ARENA_KB 16 CACHE STRING "Translator code arena, KiB (max 64)")
+if(XLAT)
+    math(EXPR XLAT_ARENA_BYTES "${XLAT_ARENA_KB} * 1024")
+    target_sources(${BUILD_NAME} PRIVATE
+        src/fdos/xlat/arm_emit.c
+        src/fdos/xlat/x86_decode.c
+        src/fdos/xlat/x86_translate.c
+        src/fdos/xlat/xlat_cache.c
+    )
+    target_compile_definitions(${BUILD_NAME} PRIVATE XLAT=1 XLAT_ARENA_SIZE=${XLAT_ARENA_BYTES}u)
+endif()
 
 # Statistical PC sampling of core 0 via SysTick. See src/pcsample.c.
 # Scripted keystrokes for unattended benchmarking. See src/autotype.h.

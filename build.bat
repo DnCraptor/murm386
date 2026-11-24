@@ -20,6 +20,7 @@ set "DEBUG=OFF"
 set "DIAG=OFF"
 set "EMM=OFF"
 set "NO_PAGING=OFF"
+set "XLAT=OFF"
 
 :parse
 if "%~1"=="" goto validate
@@ -33,6 +34,7 @@ if /I "%~1"=="--debug" set "DEBUG=ON"& shift& goto parse
 if /I "%~1"=="--diag" set "DIAG=ON"& shift& goto parse
 if /I "%~1"=="--emm" set "EMM=ON"& shift& goto parse
 if /I "%~1"=="--no-paging" set "NO_PAGING=ON"& shift& goto parse
+if /I "%~1"=="--xlat" set "XLAT=ON"& shift& goto parse
 
 if /I "%~1"=="-M1" set "BOARD=M1"& shift& goto parse
 if /I "%~1"=="-M2" set "BOARD=M2"& shift& goto parse
@@ -130,12 +132,13 @@ echo   RP2350     : !CPU_SPEED! MHz
 echo   PSRAM max  : !PSRAM_SPEED! MHz
 echo   EMM        : !EMM!
 echo   NO_PAGING  : !NO_PAGING!
+echo   XLAT       : !XLAT!
 echo   Build type : !BUILD_TYPE!
 echo   Build dir  : !BUILD_DIR!
 echo   Ninja      : !NINJA_EXE!
 echo.
 
-cmake -G Ninja "-DCMAKE_MAKE_PROGRAM:FILEPATH=!NINJA_EXE!" -S "%ROOT%." -B "!BUILD_DIR!" -DCMAKE_BUILD_TYPE=!BUILD_TYPE! -DBOARD=!BOARD! -DVIDEO_MODE=!VIDEO_MODE! -DCPU_SPEED=!CPU_SPEED! -DPSRAM_SPEED=!PSRAM_SPEED! -DFORCE_HDMI=!FORCE_HDMI! -DFORCE_VGA=!FORCE_VGA! -DDEBUG_ENABLED=!DEBUG! -DDIAG_ENABLED=!DIAG! -DEMM=!EMM! -DNO_PAGING=!NO_PAGING!
+cmake -G Ninja "-DCMAKE_MAKE_PROGRAM:FILEPATH=!NINJA_EXE!" -S "%ROOT%." -B "!BUILD_DIR!" -DCMAKE_BUILD_TYPE=!BUILD_TYPE! -DBOARD=!BOARD! -DVIDEO_MODE=!VIDEO_MODE! -DCPU_SPEED=!CPU_SPEED! -DPSRAM_SPEED=!PSRAM_SPEED! -DFORCE_HDMI=!FORCE_HDMI! -DFORCE_VGA=!FORCE_VGA! -DDEBUG_ENABLED=!DEBUG! -DDIAG_ENABLED=!DIAG! -DEMM=!EMM! -DNO_PAGING=!NO_PAGING! -DXLAT=!XLAT!
 if errorlevel 1 exit /b %errorlevel%
 if defined JOBS (
     cmake --build "!BUILD_DIR!" --config "!BUILD_TYPE!" --parallel !JOBS!
@@ -162,7 +165,7 @@ echo   -v, --video RUNTIME^|MCGA^|EGA128^|VGA128^|VGA256
 echo   -c, --clock MHz
 echo   -p, --psram MHz
 echo       --hdmi / --vga
-echo       --debug / --diag / --emm / --no-paging
+echo       --debug / --diag / --emm / --no-paging / --xlat
 echo       --build-type TYPE
 echo       --build-dir DIR
 echo   -j, --jobs N

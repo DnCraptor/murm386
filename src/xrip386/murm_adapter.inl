@@ -129,6 +129,55 @@ void xrip_reset_cpu(CPU *cpu)
     reset86();
 }
 
+#if XLAT
+#include "../fdos/xlat/xlat.h"
+
+static uint8_t xlat_no_irq;   /* stays 0; RAM, read by generated code */
+static xlat_rt_t xlat_state;
+
+/* Translated code is entered only here, at the start of a burst: one lookup
+ * per burst, nothing in run_instructions(). Returns the guest instructions
+ * accounted to translated code (0: nothing ran, the state is untouched). */
+static __time_critical_func() uint32_t xlat_enter(CPU *cpu, uint32_t count)
+{
+    if (protected_mode || (cr0 & CR0_PE) || code32 || !fast_memory_size || tf || halted ||
+        pending_trap || cpu->i286_irq_shadow || cpu->native_done || XRIP_IP > 0xffffu ||
+        (cpu->intr && ifl))
+        return 0;
+    xlat_rt_t *const rt = &xlat_state;
+    rt->mem = fast_memory;
+    rt->mem_size = fast_memory_size;
+    rt->seg_base[0] = segment_base[reges];
+    rt->seg_base[1] = segment_base[regcs];
+    rt->seg_base[2] = segment_base[regss];
+    rt->seg_base[3] = segment_base[regds];
+    rt->budget = (int32_t)count;
+    /* With IF clear an IRQ cannot be taken: the back edges need not stop. */
+    rt->intr = ifl ? (const volatile uint8_t *)&cpu->intr : &xlat_no_irq;
+    rt->gpr = (uint32_t *)cpu->gprx;
+    rt->lazy_result = flags_result;
+    rt->lazy_dst = flags_dst;
+    rt->lazy_src = flags_src;
+    rt->lazy_op = flags_op;
+    rt->lazy_cf = flags_cf;
+    rt->eflags = x86_flags.value;
+    rt->cs = segregs[regcs];
+    rt->ip = XRIP_IP;
+    if (!xlat_run(rt))
+        return 0;
+    XRIP_IP = rt->ip & 0xffffu;
+    flags_result = rt->lazy_result;
+    flags_dst = rt->lazy_dst;
+    flags_src = rt->lazy_src;
+    flags_op = rt->lazy_op;
+    flags_cf = rt->lazy_cf;
+    const uint32_t left = rt->budget > 0 ? (uint32_t)rt->budget : 0;
+    const uint32_t used = count - (left < count ? left : count);
+    retired += used;
+    return used;
+}
+#endif
+
 void __time_critical_func(xrip_step_cpu)(CPU *cpu, int count)
 {
     active_cpu = cpu;
@@ -145,14 +194,22 @@ void __time_critical_func(xrip_step_cpu)(CPU *cpu, int count)
         extended_memory_size = direct && phys_mem_size > HMA_START
                                ? phys_mem_size - HMA_START : 0;
     }
+#if XLAT
+    const uint32_t xlat_used = xlat_enter(cpu, (uint32_t)count);
+#endif
 
     void *context[5];
     void **const outer_fault_point = fault_point;
     fault_point = context;
     if (__builtin_setjmp(context))
         deliver_fault();
+#if XLAT
+    else if (xlat_used < (uint32_t)count)
+        run_instructions((uint32_t)count - xlat_used);
+#else
     else
         run_instructions((uint32_t)count);
+#endif
     fault_point = outer_fault_point;
     flags_now();
     cpu->ip = cpu->next_ip = XRIP_IP;

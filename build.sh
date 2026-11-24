@@ -20,6 +20,7 @@ DEBUG="OFF"
 DIAG="OFF"
 EMM="OFF"
 NO_PAGING="OFF"
+XLAT="OFF"
 
 usage() {
     cat <<'USAGE'
@@ -39,6 +40,7 @@ Main options:
       --diag                        Enable DIAG_ENABLED
       --emm                         Enable EMM
       --no-paging                   Disable guest-RAM paging (VGA256 only)
+      --xlat                        Enable the x86 -> ARM loop translator
       --build-type TYPE             CMake build type (default: Release)
       --build-dir DIR               Build directory (default: ./build)
   -j, --jobs N                      Parallel build jobs
@@ -84,6 +86,7 @@ while [[ $# -gt 0 ]]; do
         --diag) DIAG="ON"; shift ;;
         --emm) EMM="ON"; shift ;;
         --no-paging) NO_PAGING="ON"; shift ;;
+        --xlat) XLAT="ON"; shift ;;
         --clean|-clean) CLEAN=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -126,6 +129,7 @@ CMAKE_ARGS=(
     "-DDIAG_ENABLED=$DIAG"
     "-DEMM=$EMM"
     "-DNO_PAGING=$NO_PAGING"
+    "-DXLAT=$XLAT"
 )
 
 printf 'murm386 build\n'
@@ -136,6 +140,7 @@ printf '  RP2350     : %s MHz\n' "$CPU_SPEED"
 printf '  PSRAM max  : %s MHz\n' "$PSRAM_SPEED"
 printf '  EMM        : %s\n' "$EMM"
 printf '  NO_PAGING  : %s\n' "$NO_PAGING"
+printf '  XLAT       : %s\n' "$XLAT"
 printf '  Build type : %s\n' "$BUILD_TYPE"
 printf '  Build dir  : %s\n\n' "$BUILD_DIR"
 
