@@ -58,50 +58,60 @@ void* g_pc;
  *   0x102 – write sectors: same args, then REP OUTSB
  * -------------------------------------------------------------------------*/
 
+/* One sector of device state, separate from the shared disk I/O bounce buffer.
+ * Keep it outside PC to preserve the DOS API layout. */
+static uint8_t emulink_sector[512];
+static uint32_t emulink_lba;
+
+static void emulink_fail(PC *pc)
+{
+	pc->emulink.cmd = -1;
+	pc->emulink.status = 0x80;
+	pc->emulink.dataleft = 0;
+}
+
 static void emulink_exec(PC *pc)
 {
 	switch (pc->emulink.cmd) {
 	case 0x000:
 		pc->emulink.status = 0xaa55ff00;
-		pc->emulink.cmd    = -1;
-		break;
-	case 0x100:
-		pc->emulink.status = fdds_types(); 
 		pc->emulink.cmd = -1;
 		break;
-	case 0x101: /* read */
-	case 0x102: /* write */
-		if (pc->emulink.argi == 3) {
-			uint8_t  drv  = (uint8_t)pc->emulink.args[0];
-			uint32_t chs  = pc->emulink.args[1];
-			uint32_t cnt  = pc->emulink.args[2];
-			if (drv >= 2 || !fdd_is_inserted(drv)) {
-				pc->emulink.status = 0x80; /* error */
-				pc->emulink.cmd    = -1;
-				break;
-			}
-			int c = (int)(chs >> 16);
-			int h = (int)((chs >> 8) & 0xff);
-			int s = (int)(chs & 0xff);
-			uint16_t heads = fdd_get_heads(drv);
-			uint16_t sects = fdd_get_sects(drv);
-			if (heads == 0 || sects == 0) {
-				pc->emulink.status = 0x80;
-				pc->emulink.cmd    = -1;
-				break;
-			}
-			uint32_t lba = (uint32_t)(c * heads + h) * sects + (uint32_t)(s - 1);
-			FIL *fil = fdd_get_file(drv);
-			FRESULT fr = f_lseek(fil, lba * 512u);
-			if (fr != FR_OK) {
-				pc->emulink.status = 0x80;
-				pc->emulink.cmd    = -1;
-			} else {
-				pc->emulink.status    = 0;
-				pc->emulink.dataleft  = (int)(cnt * 512u);
-			}
-		}
+	case 0x100:
+		pc->emulink.status = fdds_types();
+		pc->emulink.cmd = -1;
 		break;
+	case 0x101:
+	case 0x102: {
+		if (pc->emulink.argi != 3)
+			break;
+		uint32_t drive = pc->emulink.args[0];
+		uint32_t chs = pc->emulink.args[1];
+		uint32_t count = pc->emulink.args[2];
+		if (drive >= 2 || !fdd_is_inserted(drive)) {
+			emulink_fail(pc);
+			break;
+		}
+		uint32_t cylinder = chs >> 16;
+		uint32_t head = (chs >> 8) & 0xff;
+		uint32_t sector = chs & 0xff;
+		uint32_t cylinders = fdd_get_cyls(drive);
+		uint32_t heads = fdd_get_heads(drive);
+		uint32_t sectors = fdd_get_sects(drive);
+		if (cylinder >= cylinders || head >= heads || sector == 0 || sector > sectors) {
+			emulink_fail(pc);
+			break;
+		}
+		uint32_t lba = (cylinder * heads + head) * sectors + sector - 1;
+		if (count == 0 || count > cylinders * heads * sectors - lba) {
+			emulink_fail(pc);
+			break;
+		}
+		emulink_lba = lba;
+		pc->emulink.dataleft = count * sizeof(emulink_sector);
+		pc->emulink.status = 0;
+		break;
+	}
 	default:
 		break;
 	}
@@ -114,81 +124,72 @@ static uint32_t emulink_read32(PC *pc)
 
 static void emulink_cmd_write(PC *pc, uint32_t val)
 {
-	pc->emulink.cmd  = (int)val;
+	pc->emulink.cmd = val;
 	pc->emulink.argi = 0;
+	pc->emulink.dataleft = 0;
 	emulink_exec(pc);
 }
 
 static void emulink_arg_write(PC *pc, uint32_t val)
 {
-	if (pc->emulink.argi < 4)
+	if (pc->emulink.argi < 3) {
 		pc->emulink.args[pc->emulink.argi++] = val;
-	emulink_exec(pc);
+		emulink_exec(pc);
+	}
 }
 
-/* bulk read: called from pc_io_read_string for port 0xF1F4 */
-static int emulink_data_read(PC *pc, uint32_t addr, int size, int count)
+static bool emulink_sector_io(PC *pc, bool write)
 {
-	if (pc->emulink.cmd == 0x101 && pc->emulink.argi == 3) {
-		uint8_t drv = (uint8_t)pc->emulink.args[0];
-		if (!fdd_is_inserted(drv)) goto err;
-		int len = size * count;
-		if (len > pc->emulink.dataleft) goto err;
-		FIL *fil = fdd_get_file(drv);
-        UINT br = 0;
-        uint8_t *buf = guest_bulk_buf;   /* общий bounce, не на стеке */
-        for (int i = 0; i < len; i += 512) {
-            UINT l = len - i;
-            if (l > 512) l = 512;
-            FRESULT fr = f_read(fil, buf, l, &br);
-			if (fr != FR_OK || (int)br != l) goto err;
-            for (int j = 0; j < l; ++j) {
-                pstore8(addr + i + j, buf[j]);
-            }
-        }
-		pc->emulink.dataleft -= len;
-		if (pc->emulink.dataleft == 0) {
-			pc->emulink.cmd    = -1;
-			pc->emulink.status = 0;
-		}
-		return count;
-	}
-err:
-	pc->emulink.cmd    = -1;
-	pc->emulink.status = 0x80;
-	return count;
+	uint8_t drive = pc->emulink.args[0];
+	if (!fdd_is_inserted(drive))
+		return false;
+	FIL *fil = fdd_get_file(drive);
+	if (f_lseek(fil, (FSIZE_t)emulink_lba * sizeof(emulink_sector)) != FR_OK)
+		return false;
+	UINT done;
+	FRESULT result = write
+		? f_write(fil, emulink_sector, sizeof(emulink_sector), &done)
+		: f_read(fil, emulink_sector, sizeof(emulink_sector), &done);
+	return result == FR_OK && done == sizeof(emulink_sector);
 }
 
-/* bulk write: called from pc_io_write_string for port 0xF1F4 */
-static int emulink_data_write(PC *pc, uint32_t addr, int size, int count)
+/* Byte PIO and the optional string callbacks use the same device state. */
+static bool emulink_transfer_byte(PC *pc, bool write, uint8_t *value)
 {
-	if (pc->emulink.cmd == 0x102 && pc->emulink.argi == 3) {
-		uint8_t drv = (uint8_t)pc->emulink.args[0];
-		if (!fdd_is_inserted(drv)) goto err;
-		int len = size * count;
-		if (len > pc->emulink.dataleft) goto err;
-		FIL *fil = fdd_get_file(drv);
-		UINT bw = 0;
-        uint8_t *buf = guest_bulk_buf;   /* общий bounce, не на стеке */
-        for (int i = 0; i < len; i += 512) {
-            UINT l = len - i;
-            if (l > 512) l = 512;
-            for (int j = 0; j < l; ++j) {
-                buf[j] = pload8(addr + i + j);
-            }
-            FRESULT fr = f_write(fil, buf, l, &bw);
-			if (fr != FR_OK || (int)bw != l) goto err;
-        }
-		pc->emulink.dataleft -= len;
-		if (pc->emulink.dataleft == 0) {
-			pc->emulink.cmd    = -1;
-			pc->emulink.status = 0;
-		}
+	if (pc->emulink.cmd != (write ? 0x102u : 0x101u) || pc->emulink.dataleft <= 0)
+		return false;
+
+	unsigned offset = (-(unsigned)pc->emulink.dataleft) & (sizeof(emulink_sector) - 1);
+	if (write)
+		emulink_sector[offset] = *value;
+	bool sector_end = offset == sizeof(emulink_sector) - 1;
+	if ((write ? sector_end : offset == 0) && !emulink_sector_io(pc, write)) {
+		emulink_fail(pc);
+		return false;
+	}
+	if (!write)
+		*value = emulink_sector[offset];
+	if (sector_end)
+		++emulink_lba;
+	if (--pc->emulink.dataleft == 0)
+		pc->emulink.cmd = -1;
+	return true;
+}
+
+static int emulink_data_string(PC *pc, uint32_t addr, int size, int count, bool write)
+{
+	if (pc->emulink.cmd != (write ? 0x102u : 0x101u) ||
+	    count > pc->emulink.dataleft / size) {
+		emulink_fail(pc);
 		return count;
 	}
-err:
-	pc->emulink.cmd    = -1;
-	pc->emulink.status = 0x80;
+	for (int i = 0; i < size * count; ++i) {
+		uint8_t value = write ? pload8(addr + i) : 0;
+		if (!emulink_transfer_byte(pc, write, &value))
+			break;
+		if (!write)
+			pstore8(addr + i, value);
+	}
 	return count;
 }
 
@@ -325,9 +326,10 @@ static __always_inline u8 _pc_io_read(void *o, int addr)
 		val = i8257_read_chan(pc->isa_dma, addr - 0x00, 1);
 		return val;
 	case 0xf1f4: {
-		/* emulink: single-byte read (BIOS probes this way too) */
-		uint32_t v32 = emulink_read32(pc);
-		return (u8)(v32 & 0xff);
+		uint8_t data;
+		if (emulink_transfer_byte(pc, false, &data))
+			return data;
+		return (u8)emulink_read32(pc);
 	}
 	case 0x08: case 0x09: case 0x0a: case 0x0b:
 	case 0x0c: case 0x0d: case 0x0e: case 0x0f:
@@ -523,7 +525,7 @@ static int pc_io_read_string(void *o, int addr, uint32_t buf, int size, int coun
 	case 0x170:
 		return ide_data_read_string(pc->ide2, buf, size, count);
 	case 0xf1f4:
-		return emulink_data_read(pc, buf, size, count);
+		return emulink_data_string(pc, buf, size, count, false);
 	}
 	return 0;
 }
@@ -795,6 +797,9 @@ static void pc_io_write(void *o, int addr, u8 val)
 	case 0x3dc: case 0x3dd: case 0x3de: case 0x3df:
 		vga_ioport_write(pc->vga, addr, val);
 		return;
+	case 0xf1f4:
+		(void)emulink_transfer_byte(pc, true, &val);
+		return;
 	case 0x402:
 		return;
 	case 0x92:
@@ -1062,7 +1067,7 @@ static int pc_io_write_string(void *o, int addr, uint32_t buf, int size, int cou
 	case 0x170:
 		return ide_data_write_string(pc->ide2, buf, size, count);
 	case 0xf1f4:
-		return emulink_data_write(pc, buf, size, count);
+		return emulink_data_string(pc, buf, size, count, true);
 	}
 	return 0;
 }
@@ -1356,8 +1361,12 @@ static void cmos_floppy_update(uint8_t ta, uint8_t tb) {
 
 static PC *_pc_for_fdc = NULL;
 static void fdc_mediachange_notify(int drive) {
-    if (_pc_for_fdc && _pc_for_fdc->fdc)
-        fdc_media_changed(_pc_for_fdc->fdc, drive);
+    if (_pc_for_fdc) {
+        if (_pc_for_fdc->fdc)
+            fdc_media_changed(_pc_for_fdc->fdc, drive);
+        if (_pc_for_fdc->emulink.dataleft && _pc_for_fdc->emulink.args[0] == (uint32_t)drive)
+            emulink_fail(_pc_for_fdc);
+    }
 
     /* disk.c has a single media-change callback slot.  Once the hardware FDC
        callback replaces bios_13h_init()'s early callback, explicitly keep the
