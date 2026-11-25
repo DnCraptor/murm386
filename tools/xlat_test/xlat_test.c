@@ -21,6 +21,7 @@
 #include <sys/mman.h>
 
 #include "xlat.h"
+#include "fpu_glue.h"
 
 #define MEM_BYTES 0x110100u
 
@@ -94,6 +95,12 @@ static void undo_apply(void)
 static uint8_t rd8(uint32_t a) { return mem[a]; }
 static uint16_t rd16(uint32_t a) { return (uint16_t)(mem[a] | mem[a + 1] << 8); }
 static void wr8(uint32_t a, uint8_t v) { undo_note(a); mem[a] = v; }
+/* x87 stores (fpu_glue.c) into the test memory */
+void tfpu_note_write(uint32_t a, uint32_t n)
+{
+    if (tfpu_mem == mem)
+        for (uint32_t k = 0; k < n; ++k) undo_note(a + k);
+}
 static void wr16(uint32_t a, uint16_t v) { undo_note(a); undo_note(a + 1); mem[a] = (uint8_t)v; mem[a + 1] = (uint8_t)(v >> 8); }
 
 static void lazy_flags(uint8_t kind, uint8_t bits, uint32_t dst, uint32_t src, uint32_t result)
@@ -688,12 +695,44 @@ static void ref_step(void)
         if (reg > 1) break;
         writerm16((uint16_t)inc_dec(readrm16(), reg != 0, 16)); return;
     case 0x8f: modregrm(); if (reg) break; { const uint16_t v = ref_pop(); writerm16(v); } return;
+    case 0x9b: return;   /* FWAIT (CR0.MP/TS clear) */
+    case 0xd8: case 0xd9: case 0xda: case 0xdb: case 0xdc: case 0xdd: case 0xde: case 0xdf: {
+        /* XRIP's xrip_fpu(): fpu.c (CR0.EM/TS clear); the forms with the CPU
+         * flags (FCOMI, FCMOV) are not generated */
+        modregrm();
+        const int fop = op - 0xd8;
+        if (mode == 3 && ((fop == 2 && reg < 4) || (fop == 3 && (reg < 4 || reg == 5 || reg == 6)) ||
+                          (fop == 7 && (reg == 5 || reg == 6))))
+            break;
+        const int exc = tfpu_exceptions;
+        uint16_t ax = getreg16(0);
+        tfpu_exec(fop, reg, rm, mode != 3, ea, &ax);
+        putreg16(0, ax);
+        if (tfpu_exceptions != exc) break;
+        return;
+    }
     default:
         if (op >= 0xb0 && op <= 0xb7) { putreg8(op & 7, fetch8()); return; }
         if (op >= 0xb8 && op <= 0xbf) { putreg16(op & 7, fetch16()); return; }
         break;
     }
     R.bad = R.halted = true;
+}
+
+/* The test's xlat_rt_fpu(): fpu.c as the core's; every 7th call refuses
+ * (as with CR0.EM set): XRIP (the reference) does that one. */
+static unsigned long fpu_calls;
+uint32_t xlat_rt_fpu(xlat_rt_t *rt, uint32_t ctl, uint32_t addr)
+{
+    if (++fpu_calls % 7 == 0)
+        return 0;
+    if (ctl & XLAT_FPU_WAIT)
+        return 1;
+    uint16_t ax = (uint16_t)rt->gpr[0];
+    tfpu_exec((int)(ctl & 7u), (int)((ctl >> 3) & 7u), (int)((ctl >> 6) & 7u), (ctl & XLAT_FPU_MEM) != 0,
+              addr, &ax);
+    rt->gpr[0] = (rt->gpr[0] & 0xffff0000u) | ax;
+    return 1;
 }
 
 /* The test's xlat_interp_one(): the reference interpreter is the "XRIP". */
@@ -789,6 +828,50 @@ static void put_modrm(ginsn_t *g, int regf, bool word, bool dst)
         uint16_t d = (uint16_t)rnd();
         g->b[g->len++] = (uint8_t)d;
         g->b[g->len++] = (uint8_t)(d >> 8);
+    }
+}
+
+static void put_mem_modrm(ginsn_t *g, int regf)
+{
+    const int m = (int)rn(3), r = (int)rn(8);
+    g->b[g->len++] = (uint8_t)(m << 6 | regf << 3 | r);
+    if ((m == 0 && r == 6) || m == 2) {
+        const uint16_t d = (uint16_t)rnd();
+        g->b[g->len++] = (uint8_t)d;
+        g->b[g->len++] = (uint8_t)(d >> 8);
+    } else if (m == 1) {
+        g->b[g->len++] = (uint8_t)rnd();
+    }
+}
+
+/* x87 forms (the translator's lists, and some it leaves to XRIP) */
+static void gen_x87(ginsn_t *g)
+{
+    static const uint8_t memok[8] = {0xff, 0xbd, 0xff, 0xad, 0xff, 0xdd, 0xff, 0xfd};  /* + env/save */
+    static const uint8_t regok_d9_4 = 0x33;   /* FCHS FABS FTST FXAM */
+    if (allow_mem && rn(2)) {
+        int op, grp;
+        do { op = (int)rn(8); grp = (int)rn(8); } while (!(memok[op] >> grp & 1));
+        if (rn(4) == 0) g->b[g->len++] = rn(2) ? 0x26 : 0x2e;
+        g->b[g->len++] = (uint8_t)(0xd8 + op);
+        put_mem_modrm(g, grp);
+        return;
+    }
+    for (;;) {
+        const int op = (int)rn(8), grp = (int)rn(8), rm = (int)rn(8);
+        bool ok;
+        switch (op) {
+        case 0: case 4: case 6: ok = true; break;
+        case 1: ok = grp == 2 ? rm == 0 : grp == 4 ? (regok_d9_4 >> rm & 1) : grp == 5 ? rm != 7 : true; break;
+        case 2: ok = grp == 5 && rm == 1; break;
+        case 3: ok = grp == 4 && (rm == 2 || rm == 3); break;
+        case 5: ok = grp <= 5; break;
+        default: ok = grp <= 3 || (grp == 4 && rm == 0); break;
+        }
+        if (!ok) continue;
+        g->b[g->len++] = (uint8_t)(0xd8 + op);
+        g->b[g->len++] = (uint8_t)(0xc0 | grp << 3 | rm);
+        return;
     }
 }
 
@@ -933,8 +1016,13 @@ static void gen_one(ginsn_t *g, int index, int total)
         break;
     }
     case 14: {                     /* instructions the translator leaves to the interpreter */
-        const int t = rn(18);
-        if (t == 15) {           /* LAHF / SAHF */
+        const int t = rn(20);
+        if (t == 18) {           /* x87 */
+            gen_x87(g);
+        } else if (t == 19) {    /* FWAIT, FNSTSW AX */
+            if (rn(2)) g->b[g->len++] = 0x9b;
+            else { g->b[g->len++] = 0xdf; g->b[g->len++] = 0xe0; }
+        } else if (t == 15) {    /* LAHF / SAHF */
             g->b[g->len++] = rn(2) ? 0x9f : 0x9e;
         } else if (t == 16 && allow_mem) {   /* XLAT */
             if (rn(3) == 0) g->b[g->len++] = rn(2) ? 0x26 : 0x2e;
@@ -1243,6 +1331,28 @@ static int replay_parse(const char *path, replay_region_t *out, int max)
 
 static volatile uint32_t test_clock = 12345u;   /* a stopped microsecond clock */
 
+/* A random x87 state: FNINIT, a few integers loaded, the control word's
+ * rounding random. */
+static void fpu_random_state(uint8_t *image)
+{
+    static uint8_t scratch[16];
+    uint8_t *const m = tfpu_mem;
+    uint16_t ax = 0;
+    tfpu_mem = scratch;
+    tfpu_exec(3, 4, 3, 0, 0, &ax);                       /* FNINIT */
+    const int n = (int)rn(6);
+    for (int k = 0; k < n; ++k) {
+        const uint16_t v = (uint16_t)(rn(3) ? rn(200) - 100 : rnd());
+        memcpy(scratch, &v, 2);
+        tfpu_exec(7, 0, 0, 1, 0, &ax);                   /* FILD m16 */
+    }
+    const uint16_t cw = (uint16_t)(0x037f | (rn(4) << 10));
+    memcpy(scratch, &cw, 2);
+    tfpu_exec(1, 5, 0, 1, 0, &ax);                       /* FLDCW */
+    tfpu_mem = m;
+    tfpu_state(image, 1);
+}
+
 static int replay(const char *path, int states)
 {
     static replay_region_t reg[256];
@@ -1272,6 +1382,9 @@ static int replay(const char *path, int states)
             if (rn(2)) { uint16_t r16; alu16((int)(rn(2) ? 0 : 5 + rn(3)), (uint16_t)rnd(), (uint16_t)rnd(), &r16); }
             const ref_t before = R;
             memcpy(before_mem, mem, REPLAY_SPAN);
+            static uint8_t rfpu_before[94], rfpu_after[94], rfpu_now[94];
+            fpu_random_state(rfpu_before);
+            tfpu_state(rfpu_before, 0);
             undo_n = 0;
             undo_from = REPLAY_SPAN;
             xlat_flush();
@@ -1302,6 +1415,8 @@ static int replay(const char *path, int states)
             R.flags_op = rt.lazy_op; R.flags_cf = rt.lazy_cf; R.eflags = rt.eflags;
             ref_t after = R;
             memcpy(after_mem, mem, REPLAY_SPAN);
+            tfpu_state(rfpu_after, 1);
+            tfpu_state(rfpu_before, 0);
             /* the reference from 'before' must reach the same registers, flags and memory */
             memcpy(mem, before_mem, REPLAY_SPAN);
             undo_apply();
@@ -1315,7 +1430,9 @@ static int replay(const char *path, int states)
                     ref_t a = after, b = R;
                     R = a; flags_now(); a = R;
                     R = b; flags_now(); b = R;
-                    if ((a.eflags & 0xcd5u) == (b.eflags & 0xcd5u) && !memcmp(mem, after_mem, REPLAY_SPAN)) {
+                    tfpu_state(rfpu_now, 1);
+                    if ((a.eflags & 0xcd5u) == (b.eflags & 0xcd5u) && !memcmp(mem, after_mem, REPLAY_SPAN) &&
+                        !memcmp(rfpu_now, rfpu_after, 94)) {
                         found = true;
                         break;
                     }
@@ -1432,11 +1549,129 @@ static int shift_check(void)
     return bad != 0 || mbad != 0;
 }
 
+/* Regions entered one after another in one xlat_run() are not compared
+ * with their x86 bytes again unless something may have written x86 code
+ * (st->epoch). Region A writes into region B's code (a MOV the translated
+ * code leaves to XRIP: xlat_code_map) and then jumps to B in the same run:
+ * B must notice. Also a near CALL whose callee ends in RETF to this CS and
+ * a JMP CX back to the caller (stack probe) stay inside one region. */
+static int chain_check(void)
+{
+    static const struct { uint16_t ip; uint8_t n; uint8_t b[20]; } code[] = {
+        /* B: mov ax,1; add bx,ax; dec si; jnz B; jmp A */
+        {0x0900, 11, {0xb8, 0x01, 0x00, 0x01, 0xc3, 0x4e, 0x75, 0xf8, 0xe9, 0xf5, 0xf8}},
+        /* A (out of reach of B): mov [0901],cl; dec dx; jnz A; mov dx,2; mov si,3;
+         * dec cx; jz +3; jmp B; hlt. B -> A -> B ... in one xlat_run(). */
+        {0x0200, 20, {0x88, 0x0e, 0x01, 0x09, 0x4a, 0x75, 0xf9, 0xba, 0x02, 0x00, 0xbe, 0x03,
+                      0x00, 0x49, 0x74, 0x03, 0xe9, 0xed, 0x06, 0xf4}},
+        /* C: push cs; call F; inc si; dec cx; jnz C; hlt;  F: add di,3; call P; retf;
+         * P (probe): pop dx; inc bp; jmp dx */
+        {0x0300, 11, {0x0e, 0xe8, 0x06, 0x00, 0x46, 0x49, 0x75, 0xf8, 0xf4, 0x90, 0x90}},
+        {0x030a, 7, {0x83, 0xc7, 0x03, 0xe8, 0x01, 0x00, 0xcb}},
+        {0x0311, 3, {0x5a, 0x45, 0xff}},
+        {0x0314, 1, {0xe2}},
+        /* D: call G; dec cx; jnz D; hlt;  G: pop bx; push 2000h; push bx; retf
+         * (a RETF to an IP that is a return site here, but in another CS) */
+        {0x0400, 8, {0xe8, 0x05, 0x00, 0x49, 0x75, 0xfa, 0xf4, 0x90}},
+        {0x0408, 6, {0x5b, 0x68, 0x00, 0x20, 0x53, 0xcb}},
+        /* E: mov ax,1234h; add bx,ax; fld1; fistp word [si] (SI = 0501h: the
+         * MOV's immediate); dec di; jnz E; hlt (an x87 store into the code) */
+        {0x0500, 13, {0xb8, 0x34, 0x12, 0x01, 0xc3, 0xd9, 0xe8, 0xdf, 0x1c, 0x4f, 0x75, 0xf4, 0xf4}},
+    };
+    int bad = 0;
+    for (int test = 0; test < 4; ++test) {
+        const uint16_t cs = 0x1000;
+        ref_t init;
+        memset(&init, 0, sizeof(init));
+        init.cs = cs;
+        init.seg_base[0] = init.seg_base[1] = init.seg_base[3] = (uint32_t)cs << 4;
+        init.seg_base[2] = 0x30000;
+        init.gpr[1] = test ? 40 : 6;   /* CX */
+        init.gpr[2] = 2;               /* DX */
+        init.gpr[6] = test == 3 ? 0x0501 : 2;   /* SI */
+        init.gpr[7] = 6;               /* DI */
+        init.gpr[4] = 0xfff0;          /* SP */
+        init.eflags = 2;
+        memset(mem, 0, MEM_BYTES);
+        for (size_t k = 0; k < sizeof(code) / sizeof(code[0]); ++k)
+            memcpy(mem + ((uint32_t)cs << 4) + code[k].ip, code[k].b, code[k].n);
+        mem[0x20403] = 0xf4;   /* 2000:0403: HLT */
+        memcpy(mem_init, mem, MEM_BYTES);
+        xlat_flush();
+        /* make the regions: entries seen at burst starts, run on scratch state */
+        static const uint16_t entries[4][2] = {{0x0900, 0x0200}, {0x0300, 0x0300}, {0x0400, 0x0400},
+                                               {0x0500, 0x0500}};
+        static const uint16_t starts[4] = {0x0900, 0x0300, 0x0400, 0x0500};
+        for (int e = 0; e < 2; ++e)
+            for (int k = 0; k < 4; ++k) {
+                R = init;
+                R.ip = entries[test][e];
+                xlat_rt_t rt;
+                memset(&rt, 0, sizeof(rt));
+                rt.mem = mem; rt.mem_size = 0xa0000;
+                memcpy(rt.seg_base, R.seg_base, sizeof(rt.seg_base));
+                rt.budget = 50; rt.clock = &test_clock; rt.deadline = test_clock;
+                rt.intr = &zero_byte; rt.gpr = R.gpr; rt.eflags = R.eflags;
+                rt.cs = R.cs; rt.ip = R.ip;
+                xlat_run(&rt);
+                memcpy(mem, mem_init, MEM_BYTES);
+            }
+        const unsigned long translations = xlat_stats.translations;
+        /* reference */
+        R = init;
+        R.ip = starts[test];
+        while (!R.halted) ref_step();
+        const ref_t want = R;
+        static uint8_t want_mem[MEM_BYTES];
+        memcpy(want_mem, mem, MEM_BYTES);
+        /* translated, XRIP (the reference) where it stops */
+        memcpy(mem, mem_init, MEM_BYTES);
+        R = init;
+        R.ip = starts[test];
+        const unsigned long entries0 = xlat_stats.entries;
+        for (int guard = 0; guard < 10000 && !R.halted; ++guard) {
+            xlat_rt_t rt;
+            memset(&rt, 0, sizeof(rt));
+            rt.mem = mem; rt.mem_size = 0xa0000;
+            memcpy(rt.seg_base, R.seg_base, sizeof(rt.seg_base));
+            rt.budget = 1000; rt.clock = &test_clock; rt.deadline = test_clock + 1000u;
+            rt.intr = &zero_byte; rt.gpr = R.gpr;
+            rt.lazy_result = R.flags_result; rt.lazy_dst = R.flags_dst; rt.lazy_src = R.flags_src;
+            rt.eflags = R.eflags; rt.lazy_op = R.flags_op; rt.lazy_cf = R.flags_cf;
+            rt.cs = R.cs; rt.ip = R.ip;
+            if (xlat_run(&rt)) {
+                R.ip = (uint16_t)rt.ip; R.cs = rt.cs;
+                memcpy(R.seg_base, rt.seg_base, sizeof(R.seg_base));
+                R.flags_result = rt.lazy_result; R.flags_dst = rt.lazy_dst; R.flags_src = rt.lazy_src;
+                R.flags_op = rt.lazy_op; R.flags_cf = rt.lazy_cf; R.eflags = rt.eflags;
+            }
+            if (!R.halted) ref_step();
+        }
+        const bool ok = !memcmp(want.gpr, R.gpr, sizeof(R.gpr)) && want.ip == R.ip && want.cs == R.cs &&
+                        !memcmp(want_mem, mem, MEM_BYTES);
+        printf("chain test %d: translations %lu, entries %lu, %s\n", test, translations,
+               xlat_stats.entries - entries0, ok ? "ok" : "MISMATCH");
+        if (!ok) {
+            for (int i = 0; i < 8; ++i)
+                if (want.gpr[i] != R.gpr[i])
+                    printf("  gpr%d want %08x got %08x\n", i, want.gpr[i], R.gpr[i]);
+            bad++;
+        }
+        if (translations < (test != 1 ? 2u : 1u) - (test == 2)) {
+            printf("  chain test %d: regions not translated\n", test);
+            bad++;
+        }
+    }
+    return bad;
+}
+
 int main(int argc, char **argv)
 {
+    tfpu_mem = mem;
     if (argc > 1 && !strcmp(argv[1], "--shift")) {
         rng = 0x9e3779b9u;
-        return shift_check();
+        const int r = shift_check();
+        return chain_check() || r;
     }
     if (argc > 2 && !strcmp(argv[1], "--replay")) {
         rng = 0x12345u;
@@ -1472,8 +1707,12 @@ int main(int argc, char **argv)
             init = R;
         }
 
+        static uint8_t fpu_init[94], fpu_want[94], fpu_got[94];
+        fpu_random_state(fpu_init);
+
         /* reference */
         memcpy(mem, mem_init, MEM_BYTES);
+        tfpu_state(fpu_init, 0);
         R = init;
         long steps = 0;
         while (!R.halted && steps < 200000) { ref_step(); steps++; }
@@ -1486,9 +1725,11 @@ int main(int argc, char **argv)
         ref_t want = R;
         static uint8_t want_mem[MEM_BYTES];
         memcpy(want_mem, mem, MEM_BYTES);
+        tfpu_state(fpu_want, 1);
 
         /* translated */
         memcpy(mem, mem_init, MEM_BYTES);
+        tfpu_state(fpu_init, 0);
         R = init;
         if (!reuse_cs && rn(8)) xlat_flush();
         const uint32_t mem_size = rn(3) ? 0xa0000u : 0x20000u + rn(0x80000);
@@ -1513,8 +1754,8 @@ int main(int argc, char **argv)
             rt.ip = R.ip;
             rt.exit_kind = 0xff;
             ref_t before = R;
-            static uint8_t before_mem[MEM_BYTES];
-            if (lockstep) memcpy(before_mem, mem, MEM_BYTES);
+            static uint8_t before_mem[MEM_BYTES], fpu_before[94], fpu_after[94], fpu_now[94];
+            if (lockstep) { memcpy(before_mem, mem, MEM_BYTES); tfpu_state(fpu_before, 1); }
             if (getenv("XLAT_TRACE2")) printf("  run? ip %04x sp %04x cx %04x\n", R.ip, getreg16(4), getreg16(1));
             if (xlat_run(&rt)) {
                 if (rt.ip > 0xffffu) {   /* XRIP takes rt->ip as it is */
@@ -1537,6 +1778,8 @@ int main(int argc, char **argv)
                     static uint8_t after_mem[MEM_BYTES];
                     memcpy(after_mem, mem, MEM_BYTES);
                     memcpy(mem, before_mem, MEM_BYTES);
+                    tfpu_state(fpu_after, 1);
+                    tfpu_state(fpu_before, 0);
                     R = before;
                     bool found = false;
                     /* a run past its budget (deadline not reached) did up to extra more */
@@ -1549,7 +1792,11 @@ int main(int argc, char **argv)
                             ref_t a = after, b = R;
                             R = a; flags_now(); a = R;
                             R = b; flags_now(); b = R;
-                            if ((a.eflags & 0xcd5u) == (b.eflags & 0xcd5u)) { found = true; break; }
+                            tfpu_state(fpu_now, 1);
+                            if ((a.eflags & 0xcd5u) == (b.eflags & 0xcd5u) && !memcmp(fpu_now, fpu_after, 94)) {
+                                found = true;
+                                break;
+                            }
                             printf("  lockstep: ip %04x regs match, flags want %03x got %03x (k=%ld)\n",
                                    after.ip, b.eflags & 0x8d5u, a.eflags & 0x8d5u, k);
                             printf("  got lazy op %02x res %08x dst %08x src %08x cf %d; want op %02x res %08x dst %08x src %08x cf %d\n",
@@ -1584,6 +1831,7 @@ int main(int argc, char **argv)
                         break;
                     }
                     memcpy(mem, after_mem, MEM_BYTES);
+                    tfpu_state(fpu_after, 0);
                     R = after;
                 }
             }
@@ -1596,11 +1844,13 @@ int main(int argc, char **argv)
         const bool flags_ok = (want.eflags & 0xcd5u) == (R.eflags & 0xcd5u);
         const bool ip_ok = want.ip == R.ip && want.cs == R.cs && R.halted;
         const bool mem_ok = !memcmp(want_mem, mem, MEM_BYTES);
-        if (!(regs_ok && flags_ok && ip_ok && mem_ok) || R.bad) {
+        tfpu_state(fpu_got, 1);
+        const bool fpu_ok = !memcmp(fpu_want, fpu_got, sizeof(fpu_got));
+        if (!(regs_ok && flags_ok && ip_ok && mem_ok && fpu_ok) || R.bad) {
             failures++;
-            printf("FAIL seed %u: regs %d flags %d (want %03x got %03x) ip %d (%04x/%04x) mem %d\n",
+            printf("FAIL seed %u: regs %d flags %d (want %03x got %03x) ip %d (%04x/%04x) mem %d x87 %d\n",
                    seed, regs_ok, flags_ok, want.eflags & 0x8d5u, R.eflags & 0x8d5u, ip_ok,
-                   want.ip, R.ip, mem_ok);
+                   want.ip, R.ip, mem_ok, fpu_ok);
             for (int i = 0; i < 8; ++i)
                 if (want.gpr[i] != R.gpr[i])
                     printf("  gpr%d want %08x got %08x\n", i, want.gpr[i], R.gpr[i]);

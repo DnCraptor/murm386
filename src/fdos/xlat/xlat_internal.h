@@ -33,7 +33,7 @@
 #define XLAT_HOT_THRESHOLD   2               /* burst-start samples before translating */
 #define XLAT_ENTRY_COST      8               /* budget charged per region entry */
 #define XLAT_INTERP_RATIO    8               /* at most 1/8 of a region interpreted */
-#define XLAT_SPAN_WINDOW     2048u           /* region code within +-1 KiB of the entry */
+#define XLAT_SPAN_WINDOW     2048u           /* code within +-1 KiB of the entry or of a called function */
 #define XLAT_COLD_ENTRIES    512             /* entries before a region is judged */
 #define XLAT_COLD_INSNS      8               /* loop instructions per entry to keep it */
 #ifndef XLAT_ARENA_SRAM
@@ -80,6 +80,7 @@ void arm_mov32(arm_emit_t *e, int rd, uint32_t value);  /* never touches flags *
 void arm_mov(arm_emit_t *e, int rd, int rm);            /* MOV.W, flags unchanged */
 void arm_lsl(arm_emit_t *e, int rd, int rm, int amount);/* flags unchanged */
 void arm_lsr(arm_emit_t *e, int rd, int rm, int amount);/* flags unchanged */
+void arm_lsr_reg(arm_emit_t *e, int rd, int rn, int rm);   /* LSR.W rd, rn, rm; flags unchanged */
 void arm_bfi(arm_emit_t *e, int rd, int rn, int lsb, int width);
 void arm_ubfx(arm_emit_t *e, int rd, int rn, int lsb, int width);
 void arm_uxth(arm_emit_t *e, int rd, int rm);
@@ -99,7 +100,7 @@ bool arm_patch_branch(arm_emit_t *e, uint32_t at, uint32_t target, int cond);
 /* ---------------------------------------------------------------------- */
 
 enum { XO_ALU = 1, XO_INCDEC, XO_MOV, XO_LEA, XO_XCHG, XO_NOP, XO_JCC, XO_JMP, XO_LOOP,
-       XO_JCXZ, XO_PUSH, XO_POP, XO_CALL, XO_RET, XO_INTERP, XO_STR, XO_SHIFT, XO_MULDIV, XO_MISC, XO_SEG, XO_FAR, XO_IND, XO_STK,
+       XO_JCXZ, XO_PUSH, XO_POP, XO_CALL, XO_RET, XO_INTERP, XO_STR, XO_SHIFT, XO_MULDIV, XO_MISC, XO_SEG, XO_FAR, XO_IND, XO_STK, XO_FPU,
        XO_FLAG, XO_LOOPCC };
 
 /* XO_FAR (real mode): CALL / JMP ptr16:16 (target = offset, a.imm = selector,
@@ -117,6 +118,12 @@ enum { STK_PUSHA = 0, STK_POPA = 1, STK_ENTER0 = 2, STK_ENTER1 = 3, STK_LEAVE = 
 enum { FL_CLC = 0, FL_STC = 1, FL_CMC = 2, FL_LAHF = 3, FL_SAHF = 4, FL_PUSHF = 5 };
 
 /* XO_LOOPCC: sub 0 LOOPNZ (E0), 1 LOOPZ (E1). */
+
+/* XO_FPU: an x87 instruction (D8..DF, sub = opcode - D8, sreg = the ModR/M
+ * reg field, a.reg = rm for a register form, b = the memory operand, size =
+ * its bytes) or FWAIT (sub = FPU_WAIT). Only forms fpu.c does without an
+ * exception and without the CPU flags (no FCOMI, FCMOV, FLDENV, FSAVE...). */
+#define FPU_WAIT 8
 
 /* XO_SEG (real mode: selector = base >> 4; ES and DS only are written):
  * PUSH sreg (b.reg = sreg), POP ES/DS, MOV ES/DS <- r/m16 (b), MOV r/m16 <- sreg
@@ -190,6 +197,42 @@ static inline bool x86_is_stack_op(const x86_insn_t *in)
            (in->op == XO_FAR && in->sub != FAR_JMP && in->sub != FAR_JMPM) ||
            (in->op == XO_IND && in->sub == IND_CALL) || in->op == XO_STK ||
            (in->op == XO_FLAG && in->sub == FL_PUSHF);
+}
+
+/* The x87 memory forms done natively: operand bytes, or 0 (XRIP does it).
+ * *write: the instruction stores to memory. */
+static inline int x86_fpu_mem_bytes(int op, int group, bool *write)
+{
+    static const int8_t bytes[8][8] = {
+        {4, 4, 4, 4, 4, 4, 4, 4},       /* D8: arith m32real */
+        {4, 0, 4, 4, 0, 2, 0, 2},       /* D9: FLD FST FSTP m32, FLDCW, FNSTCW */
+        {4, 4, 4, 4, 4, 4, 4, 4},       /* DA: arith m32int */
+        {4, 0, 4, 4, 0, 10, 0, 10},     /* DB: FILD FIST FISTP m32, FLD FSTP m80 */
+        {8, 8, 8, 8, 8, 8, 8, 8},       /* DC: arith m64real */
+        {8, 0, 8, 8, 0, 0, 0, 2},       /* DD: FLD FST FSTP m64, FNSTSW m16 */
+        {2, 2, 2, 2, 2, 2, 2, 2},       /* DE: arith m16int */
+        {2, 0, 2, 2, 10, 8, 10, 8},     /* DF: FILD FIST FISTP m16, FBLD, FILD m64, FBSTP, FISTP m64 */
+    };
+    *write = (op & 1) && (group == 2 || group == 3 || group == 7 || (op == 7 && group == 6));
+    return bytes[op][group];
+}
+
+/* The x87 register forms done natively (fpu_exec1 without cpu_setexc and
+ * without the CPU flags). */
+static inline bool x86_fpu_reg_ok(int op, int group, int rm)
+{
+    switch (op) {
+    case 0: case 4: case 6: return true;            /* arith st, st(i) */
+    case 1:
+        if (group == 2) return rm == 0;             /* FNOP */
+        if (group == 4) return rm == 0 || rm == 1 || rm == 4 || rm == 5;
+        if (group == 5) return rm != 7;
+        return true;                                /* FLD FXCH FSTP, D9 F0..FF */
+    case 2: return group == 5 && rm == 1;           /* FUCOMPP */
+    case 3: return group == 4 && (rm == 2 || rm == 3); /* FNCLEX, FNINIT */
+    case 5: return group <= 5;                      /* FFREE FXCH FST FSTP FUCOM(P) */
+    default: return group <= 3 || (group == 4 && rm == 0); /* DF: ..., FNSTSW AX */
+    }
 }
 
 /* Pushes a near return address: its return site is reached through RET. */

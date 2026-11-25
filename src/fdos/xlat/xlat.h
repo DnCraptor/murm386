@@ -44,6 +44,7 @@ typedef struct xlat_rt {
     const volatile uint32_t *clock;  /* microseconds, the clock of get_uticks() */
     uint32_t deadline;             /* the burst ends once *clock reaches it */
     uint32_t extra;                /* budget added at clock checks (instructions) */
+    const uint8_t *code_map;       /* xlat_code_map (set by xlat_run) */
 } xlat_rt_t;
 
 #define XLAT_RT_MEM          0
@@ -64,6 +65,7 @@ typedef struct xlat_rt {
 #define XLAT_RT_CLOCK       64
 #define XLAT_RT_DEADLINE    68
 #define XLAT_RT_EXTRA       72
+#define XLAT_RT_CODE_MAP    76
 
 #if UINTPTR_MAX == 0xffffffffu
 _Static_assert(__builtin_offsetof(xlat_rt_t, mem_size) == XLAT_RT_MEM_SIZE &&
@@ -82,7 +84,8 @@ _Static_assert(__builtin_offsetof(xlat_rt_t, mem_size) == XLAT_RT_MEM_SIZE &&
                __builtin_offsetof(xlat_rt_t, exit_kind) == XLAT_RT_EXIT_KIND &&
                __builtin_offsetof(xlat_rt_t, clock) == XLAT_RT_CLOCK &&
                __builtin_offsetof(xlat_rt_t, deadline) == XLAT_RT_DEADLINE &&
-               __builtin_offsetof(xlat_rt_t, extra) == XLAT_RT_EXTRA,
+               __builtin_offsetof(xlat_rt_t, extra) == XLAT_RT_EXTRA &&
+               __builtin_offsetof(xlat_rt_t, code_map) == XLAT_RT_CODE_MAP,
                "xlat_rt_t layout is used by generated code");
 #endif
 
@@ -188,6 +191,14 @@ uint32_t xlat_stack_free(void);
  * A set bit ends the interpreter burst early so the adapter can enter the
  * translated code (xrip_step_cpu); a false hit only costs a lookup.
  */
+/* Translated x86 code by 64-byte block of fast memory (bit set: some live
+ * or dropped region's bytes, or the 15 bytes before them, are there). A
+ * write by translated code into a marked block leaves by a side exit: XRIP
+ * does it and the regions are checked again. Cleared by a flush. */
+#define XLAT_CODE_BLOCK_SHIFT 6u
+#define XLAT_CODE_MAP_BYTES (0xa0000u >> (XLAT_CODE_BLOCK_SHIFT + 3u))
+extern uint8_t xlat_code_map[XLAT_CODE_MAP_BYTES];
+
 #define XLAT_MAP_BITS 8192u
 extern uint8_t xlat_entry_map[XLAT_MAP_BITS / 8];
 static inline uint32_t xlat_map_index(uint32_t linear)
@@ -226,6 +237,15 @@ uint64_t xlat_rt_muldiv(xlat_rt_t *rt, uint32_t ctl, uint32_t operand, uint32_t 
 /* Helper called by generated code (PUSHF, LAHF, SAHF): resolves the lazy
  * flags in rt as XRIP's flags_now() and returns rt->eflags. */
 uint32_t xlat_rt_resolve(xlat_rt_t *rt);
+
+/* Helper called by generated code for an x87 instruction (and FWAIT), the
+ * memory operand's linear address already checked (fast memory, no
+ * translated code there). Provided by the CPU core (fpu_exec1/2 as XRIP's
+ * escape): returns 0 when XRIP must do it instead (CR0.EM/TS: #NM); nothing
+ * is done then. FNSTSW AX writes rt->gpr[0]'s low half. */
+#define XLAT_FPU_MEM   0x200u     /* ctl: op | group << 3 | rm << 6 | ... */
+#define XLAT_FPU_WAIT  0x400u
+uint32_t xlat_rt_fpu(xlat_rt_t *rt, uint32_t ctl, uint32_t addr);
 
 #ifdef __cplusplus
 }

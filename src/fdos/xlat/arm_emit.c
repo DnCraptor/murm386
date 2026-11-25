@@ -130,6 +130,11 @@ void arm_lsr(arm_emit_t *e, int rd, int rm, int amount)
     arm_dp_reg(e, DP_ORR, 0, rd, A_PC, rm, SH_LSR, amount);
 }
 
+void arm_lsr_reg(arm_emit_t *e, int rd, int rn, int rm)
+{
+    arm_e32(e, (uint16_t)(0xfa20u | (unsigned)rn), (uint16_t)(0xf000u | (unsigned)rd << 8 | (unsigned)rm));
+}
+
 void arm_bfi(arm_emit_t *e, int rd, int rn, int lsb, int width)
 {
     const unsigned l = (unsigned)lsb, msb = (unsigned)(lsb + width - 1);

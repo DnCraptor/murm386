@@ -167,6 +167,30 @@ static __time_critical_func() inline void xlat_segs_to_xrip(const xlat_rt_t *rt)
         load_segment(regds, (uint16_t)(rt->seg_base[3] >> 4));
 }
 
+/* Called by translated code (xlat.h) for an x87 instruction or FWAIT, as
+ * xrip_fpu() and op 9B: fpu.c with the operand decoded at translation and
+ * its linear address checked by the code. The forms are those fpu.c does
+ * without cpu_setexc (no fault_point here). 0: XRIP must do it (#NM). */
+uint32_t __time_critical_func(xlat_rt_fpu)(xlat_rt_t *rt, uint32_t ctl, uint32_t addr)
+{
+    (void)rt;
+    if (ctl & XLAT_FPU_WAIT)
+        return (cr0 & 0x0a) != 0x0a;
+    if (cr0 & 0x0c)
+        return 0;
+    if (xlat_stack_free() < XLAT_STACK_NEEDED)
+        return 0;
+    CPU *const cpu = active_cpu;    /* rt->gpr is cpu->gprx: FNSTSW AX */
+    if (!cpu->fpu)
+        return 1;
+    const int op = (int)(ctl & 7u), group = (int)((ctl >> 3) & 7u);
+    if (ctl & XLAT_FPU_MEM)
+        fpu_exec2(cpu->fpu, cpu, true, op, group, 0, addr);
+    else
+        fpu_exec1(cpu->fpu, cpu, op, group, (ctl >> 6) & 7u);
+    return 1;
+}
+
 /* Called by translated code (xlat.h): XRIP executes the one instruction at
  * rt->ip. The registers are in cpu->gprx already; the lazy flags come from
  * and go back to rt. */

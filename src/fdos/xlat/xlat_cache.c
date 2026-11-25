@@ -33,6 +33,7 @@ typedef struct {
     uint32_t insns;        /* instructions charged at its back edges */
     uint32_t us;           /* time inside it (rt->clock), entries included */
     uint32_t exits[XLAT_EXIT_COUNT];
+    uint32_t epoch;        /* st->epoch when its bytes were last compared */
 } region_t;
 
 typedef struct {
@@ -62,6 +63,7 @@ typedef struct {
     xlat_arena_t arena;
     region_t region[XLAT_MAX_REGIONS];
     int n_regions;
+    uint32_t epoch;         /* changes whenever x86 code may have been written */
     entry_t entry[XLAT_ENTRY_SLOTS];
     hot_t hot[XLAT_HOT_SLOTS];
     xlat_region_out_t out;  /* translator output, kept here to spare the stack */
@@ -90,6 +92,7 @@ static state_t *st;
 static bool disabled;
 
 uint8_t xlat_entry_map[XLAT_MAP_BITS / 8];
+uint8_t xlat_code_map[XLAT_CODE_MAP_BYTES];
 
 #if defined(XLAT_HOST_TEST)
 void *xlat_test_calloc(size_t size);   /* executable, zeroed */
@@ -308,6 +311,7 @@ static void reset_tables(void)
         st->hot[k].reject = 0;
     st->n_regions = 0;
     memset(xlat_entry_map, 0, sizeof(xlat_entry_map));
+    memset(xlat_code_map, 0, sizeof(xlat_code_map));
     xlat_emit_trampoline(&st->arena);
     xlat_sync_code(st->arena.base, st->arena.code_top);
     xlat_stats.code_bytes = st->arena.code_top;
@@ -355,6 +359,7 @@ static __attribute__((noinline)) bool ready(void)
 void xlat_release(void)
 {
     memset(xlat_entry_map, 0, sizeof(xlat_entry_map));
+    memset(xlat_code_map, 0, sizeof(xlat_code_map));
     st = NULL;
     disabled = false;
 }
@@ -428,13 +433,24 @@ static bool XLAT_HOT_FN(region_valid)(const region_t *r, const xlat_rt_t *rt)
     return true;
 }
 
+/* rt->cs:ip is in the x86 code of a live or dropped region (its runs: a
+ * region may take code from far apart, e.g. called functions). */
 static bool covered(const xlat_rt_t *rt)
 {
     const uint32_t linear = rt->seg_base[1] + (rt->ip & 0xffffu);
     for (int k = 0; k < st->n_regions; ++k) {
         const region_t *r = &st->region[k];
-        if ((r->live || r->cold) && linear - r->lo < r->span)
-            return true;
+        if (!(r->live || r->cold) || linear - r->lo >= r->span)
+            continue;
+        const uint8_t *d = st->arena.base + r->data_off;
+        for (unsigned j = 0; j < r->n_runs; ++j) {
+            uint32_t at;
+            memcpy(&at, d, 4);
+            const uint32_t len = d[4] | (uint32_t)d[5] << 8;
+            if (linear - at < len)
+                return true;
+            d += 8 + ((len + 3u) & ~3u);
+        }
     }
     return false;
 }
@@ -475,9 +491,15 @@ static bool translate_here(const xlat_rt_t *rt)
         d[6] = d[7] = 0;
         for (uint32_t i = 0; i < len; ++i)
             d[8 + i] = rt->mem[linear + i];
+        /* the blocks a write may reach the run from (up to 16 bytes long) */
+        const uint32_t from = linear >= 15u ? linear - 15u : 0u;
+        for (uint32_t b = from >> XLAT_CODE_BLOCK_SHIFT;
+             b <= (linear + len - 1u) >> XLAT_CODE_BLOCK_SHIFT && b < XLAT_CODE_MAP_BYTES * 8u; ++b)
+            xlat_code_map[b >> 3] |= (uint8_t)(1u << (b & 7u));
         d += 8 + ((len + 3u) & ~3u);
     }
     r->live = 1;
+    r->epoch = st->epoch;
     for (unsigned k = 0; k < out->n_entries; ++k) {
         insert((uint32_t)rt->cs << 16 | out->entries[k].ip, (uint8_t)idx,
                out->entries[k].code_off);
@@ -542,6 +564,9 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
             return false;
     }
     const int32_t start = rt->budget;
+    rt->code_map = xlat_code_map;
+    /* XRIP ran since the last call: compare each region's bytes once */
+    st->epoch++;
     const xlat_tramp_fn tramp = (xlat_tramp_fn)(uintptr_t)(st->arena.base + 1);
     bool ran = false, built = false;
     for (;;) {
@@ -556,10 +581,15 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
             continue;
         }
         region_t *r = &st->region[e->region];
-        if (!region_valid(r, rt)) {
-            r->live = 0;
-            xlat_stats.invalidations++;
-            break;
+        if (r->epoch != st->epoch) {
+            /* Since then XRIP may have written anywhere; translated code
+             * cannot write into translated x86 code (xlat_code_map). */
+            if (!region_valid(r, rt)) {
+                r->live = 0;
+                xlat_stats.invalidations++;
+                break;
+            }
+            r->epoch = st->epoch;
         }
         rt->budget -= XLAT_ENTRY_COST;
         const int32_t b0 = rt->budget, x0 = (int32_t)rt->extra;
@@ -932,8 +962,12 @@ void xlat_note_service(uint32_t us)
 bool XLAT_HOT_FN(xlat_region_still_valid)(const xlat_rt_t *rt)
 {
     region_t *r = cur_region;
-    if (!r || region_valid(r, rt))
+    st->epoch++;            /* the other regions are compared at their next entry */
+    if (!r || region_valid(r, rt)) {
+        if (r)
+            r->epoch = st->epoch;
         return true;
+    }
     r->live = 0;
     xlat_stats.invalidations++;
     return false;

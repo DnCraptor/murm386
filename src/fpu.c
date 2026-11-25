@@ -357,7 +357,7 @@ static bool fpstorei16(void *cpu, int seg, uword addr, double val)
 
 static bool fpstorei32(void *cpu, int seg, uword addr, double val)
 {
-	s32 v = val < 2147483648.0 && val >= -2147483648.0 ? (s32) val : 0x80000000;
+	s32 v = val < 2147483648.0 && val >= -2147483648.0 ? (s32) val : INT32_MIN;
 	if (!cpu_store32(cpu, seg, addr, v))
 		return false;
 	return true;
@@ -366,7 +366,7 @@ static bool fpstorei32(void *cpu, int seg, uword addr, double val)
 static bool fpstorei64(void *cpu, int seg, uword addr, double val)
 {
 	int64_t v = val < 9223372036854775808.0 && val >= -9223372036854775808.0 ?
-		(int64_t) val : 0x8000000000000000ll;
+		(int64_t) val : INT64_MIN;
 	if (!cpu_store32(cpu, seg, addr, v))
 		return false;
 	if (!cpu_store32(cpu, seg, addr + 4, v >> 32))
@@ -377,7 +377,7 @@ static bool fpstorei64(void *cpu, int seg, uword addr, double val)
 static bool fpstorebcd(void *cpu, int seg, uword addr, double val)
 {
 	int64_t v = val < 9223372036854775808.0 && val >= -9223372036854775808.0 ?
-		(int64_t) val : 0x8000000000000000ll;
+		(int64_t) val : INT64_MIN;
 	int sign = 0;
 	if (v < 0) {
 		sign = 1;
@@ -805,6 +805,7 @@ bool fpu_exec2(FPU *fpu, void *cpu, bool opsz16, int op, int group, int seg, uin
 
 static bool cmov_cond(FPU *fpu, void *cpu, int i)
 {
+	(void)fpu;
 	uword flags = cpu_getflags(cpu);
 	switch(i) {
 	case 0x0: return flags & CF;

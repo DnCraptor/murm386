@@ -82,7 +82,8 @@ typedef struct {
     uint8_t local_jcc[XLAT_MAX_INSNS];
     int16_t side_stub[XLAT_MAX_INSNS][2];
     uint32_t label[XLAT_MAX_INSNS];
-    uint16_t queue[2 * XLAT_MAX_INSNS + 2];
+    uint32_t queue[2 * XLAT_MAX_INSNS + 2];   /* root << 16 | ip */
+    uint16_t deferred[XLAT_MAX_INSNS];        /* CALL targets, searched last */
     uint16_t seen[4 * XLAT_MAX_INSNS];
     int n_seen;
     stub_t stub[MAX_STUBS];
@@ -187,8 +188,8 @@ static bool has_cycle(const tctx_t *c, int first)
                 succ = c->fall_idx[i];
             else if (k == 1)
                 succ = c->tgt_idx[i];
-            else if (in->op == XO_CALL && c->tgt_idx[i] >= 0)
-                succ = find_insn(c, (uint16_t)(in->ip + in->len));
+            else if ((in->op == XO_CALL || in->op == XO_FAR) && c->tgt_idx[i] >= 0)
+                succ = find_insn(c, (uint16_t)(in->ip + in->len));   /* CALL, local far CALL */
         }
         if (succ < 0) {
             color[i] = 2;
@@ -204,21 +205,32 @@ static bool has_cycle(const tctx_t *c, int first)
     return false;
 }
 
-/* XLAT_RJ_NONE when a region with a loop was found, else the reason. */
+/* XLAT_RJ_NONE when a region with a loop was found, else the reason.
+ * Breadth first from the entry, within XLAT_SPAN_WINDOW of it; the code of
+ * called functions (CALL, PUSH CS + CALL, a far CALL into this CS) comes
+ * after that, each within the window of its own start, as long as room is
+ * left: the loop itself is found first, and a loop whose calls do not fit
+ * leaves the region on every pass (has_cycle rejects it). */
 static int discover(tctx_t *c, uint16_t start)
 {
-    int head = 0, tail = 0;
+    int head = 0, tail = 0, dhead = 0, dtail = 0;
     const int qcap = (int)(sizeof(c->queue) / sizeof(c->queue[0]));
-    c->queue[tail++] = start;
+    const int dcap = (int)(sizeof(c->deferred) / sizeof(c->deferred[0]));
+    c->queue[tail++] = (uint32_t)start << 16 | start;
     c->n = 0;
     c->n_seen = 0;
-    while (head < tail) {
-        const uint16_t ip = c->queue[head++];
-        if (seen_before(c, ip) || c->n >= XLAT_MAX_INSNS)
-            continue;
-        /* Stay near the entry point: far CALL targets leave the region, so
-         * the range checked for writes into the code stays small. */
-        if ((uint16_t)(ip - start + XLAT_SPAN_WINDOW / 2) >= XLAT_SPAN_WINDOW)
+    for (;;) {
+        if (head == tail) {
+            if (dhead == dtail || c->n >= XLAT_MAX_INSNS)
+                break;
+            head = tail = 0;
+            const uint16_t f = c->deferred[dhead++];
+            c->queue[tail++] = (uint32_t)f << 16 | f;
+        }
+        const uint32_t item = c->queue[head++];
+        const uint16_t ip = (uint16_t)item, root = (uint16_t)(item >> 16);
+        if ((uint16_t)(ip - root + XLAT_SPAN_WINDOW / 2) >= XLAT_SPAN_WINDOW ||
+            c->n >= XLAT_MAX_INSNS || seen_before(c, ip))
             continue;
         const uint32_t linear = c->cs_base + ip;
         if (linear + 16u > c->rt->mem_size)
@@ -232,9 +244,15 @@ static int discover(tctx_t *c, uint16_t start)
             in.local = 1;
         c->in[c->n++] = in;
         if ((falls_through(&in) || x86_is_call(&in)) && tail < qcap)
-            c->queue[tail++] = (uint16_t)(ip + in.len);
-        if (is_branch(&in) && tail < qcap)
-            c->queue[tail++] = in.target;
+            c->queue[tail++] = (uint32_t)root << 16 | (uint16_t)(ip + in.len);
+        if (is_branch(&in)) {
+            if (x86_is_call(&in)) {
+                if (dtail < dcap)
+                    c->deferred[dtail++] = in.target;
+            } else if (tail < qcap) {
+                c->queue[tail++] = (uint32_t)root << 16 | in.target;
+            }
+        }
     }
     if (!c->n || c->in[0].ip != start)
         return XLAT_RJ_START;
@@ -488,7 +506,7 @@ static void plan(tctx_t *c)
     }
     for (int i = 0; i < c->n; ++i) {
         const x86_insn_t *in = &c->in[i];
-        if (x86_accesses_mem(in))
+        if (x86_accesses_mem(in) || in->op == XO_FPU)
             plan_sync(c, c->in_set[i], side_producer(c, i));  /* side exit */
         if (dyn_exit(in))
             plan_sync(c, c->out_set[i], edge_producer(c, i)); /* exit to the popped IP */
@@ -700,7 +718,8 @@ static void emit_offset(tctx_t *c, const x86_insn_t *in)
 }
 
 /* r0 = linear address; branches to the side exit when the access is not in
- * fast memory or (for writes) may touch this region's x86 code. */
+ * fast memory or (for writes) may touch translated x86 code (xlat_code_map;
+ * bytes <= 16). */
 static void emit_checks(tctx_t *c, int i, int bytes, bool write);
 
 static void emit_mem_access(tctx_t *c, int i, int bytes, bool write)
@@ -746,12 +765,16 @@ static void emit_checks(tctx_t *c, int i, int bytes, bool write)
     emit_branch(c, side_dest(c, i, 0), C_CS);
 
     if (write) {
-        /* (addr - (lo - (bytes-1))) < span + bytes - 1: overlaps the code. */
-        arm_mov32(e, A_R12, c->lo - (uint32_t)(bytes - 1));
-        arm_dp_reg(e, DP_SUB, 0, A_LR, A_R0, A_R12, SH_LSL, 0);
-        arm_mov32(e, A_R12, c->span + (uint32_t)(bytes - 1));
-        arm_dp_reg(e, DP_SUB, 1, A_PC, A_LR, A_R12, SH_LSL, 0);
-        emit_branch(c, side_dest(c, i, 1), C_CC);
+        /* the 64-byte block of addr holds (or is right before) translated
+         * x86 code of any region: xlat_code_map bit addr >> 6 */
+        arm_lsr(e, A_R12, A_R0, XLAT_CODE_BLOCK_SHIFT + 3);
+        arm_ls_imm(e, LS_LDR, A_LR, A_R11, XLAT_RT_CODE_MAP);
+        arm_ls_reg(e, LS_LDRB, A_R12, A_LR, A_R12);
+        arm_lsr(e, A_LR, A_R0, XLAT_CODE_BLOCK_SHIFT);
+        arm_dp_imm(e, DP_AND, 0, A_LR, A_LR, 7);
+        arm_lsr_reg(e, A_R12, A_R12, A_LR);
+        arm_dp_imm(e, DP_AND, 1, A_PC, A_R12, 1);                    /* TST #1 */
+        emit_branch(c, side_dest(c, i, 1), C_NE);
     }
 }
 
@@ -984,6 +1007,34 @@ static void emit_store_sp(tctx_t *c)
     arm_ls_imm(&c->e, LS_STRH, A_R1, A_R12, 16);
 }
 
+/* A transfer to the IP in register ipreg (16 bits, CS unchanged) whose
+ * flags are in rt already: when it is the return site of a CALL in this
+ * region (a leader), go on there (a back edge charges the budget). RET,
+ * RETF into this CS, JMP r/m16 (a stack probe's JMP CX). Uses r12. */
+static void emit_site_dispatch(tctx_t *c, int i, int ipreg)
+{
+    arm_emit_t *e = &c->e;
+    for (int j = 0; j < c->n; ++j) {
+        if (!x86_is_call(&c->in[j]))
+            continue;
+        const int site = find_insn(c, (uint16_t)(c->in[j].ip + c->in[j].len));
+        if (site < 0)
+            continue;
+        arm_mov32(e, A_R12, c->in[site].ip);
+        arm_dp_reg(e, DP_SUB, 1, A_PC, ipreg, A_R12, SH_LSL, 0);
+        if (site > i) {
+            emit_branch(c, (dest_t){D_INSN, (int16_t)site}, C_EQ);
+        } else {
+            const int ex = exit_stub(c, c->in[site].ip, XLAT_EXIT_BUDGET, -1);
+            const int b = new_stub(c, ST_BACK);
+            c->stub[b].target = (int16_t)site;
+            c->stub[b].exit_stub = (int16_t)ex;
+            c->stub[b].budget_n = (uint8_t)(i - site + 1);
+            emit_branch(c, (dest_t){D_STUB, (int16_t)b}, C_EQ);
+        }
+    }
+}
+
 /* PUSH / CALL: the 16-bit value in register v is pushed; checks first, so a
  * side exit leaves SP alone. */
 static void emit_push_value(tctx_t *c, int i, int v)
@@ -1054,25 +1105,7 @@ static void emit_stack_op(tctx_t *c, int i)
         if (r >= 0)
             emit_recon(c, r);
         emit_pop_value(c, i, in->b.imm);
-        for (int j = 0; j < c->n; ++j) {
-            if (!x86_is_near_call(&c->in[j]))
-                continue;
-            const int site = find_insn(c, (uint16_t)(c->in[j].ip + c->in[j].len));
-            if (site < 0)
-                continue;
-            arm_mov32(e, A_R12, c->in[site].ip);
-            arm_dp_reg(e, DP_SUB, 1, A_PC, A_R2, A_R12, SH_LSL, 0);
-            if (site > i) {
-                emit_branch(c, (dest_t){D_INSN, (int16_t)site}, C_EQ);
-            } else {
-                const int ex = exit_stub(c, c->in[site].ip, XLAT_EXIT_BUDGET, -1);
-                const int b = new_stub(c, ST_BACK);
-                c->stub[b].target = (int16_t)site;
-                c->stub[b].exit_stub = (int16_t)ex;
-                c->stub[b].budget_n = (uint8_t)(i - site + 1);
-                emit_branch(c, (dest_t){D_STUB, (int16_t)b}, C_EQ);
-            }
-        }
+        emit_site_dispatch(c, i, A_R2);
         arm_ls_imm(e, LS_STR, A_R2, A_R11, XLAT_RT_IP);
         const int k = exit_stub(c, 0, XLAT_EXIT_BRANCH, -1);
         c->stub[k].dyn = 1;
@@ -1591,6 +1624,13 @@ static void emit_far(tctx_t *c, int i)
             arm_dp_reg(e, DP_ADD, 0, A_R1, A_R1, A_R12, SH_LSL, 0);
         }
         emit_store_sp(c);                    /* the low 16 bits */
+        {   /* back into this CS: a return site here goes on directly */
+            arm_mov32(e, A_R12, c->rt->cs);
+            arm_dp_reg(e, DP_SUB, 1, A_PC, A_R3, A_R12, SH_LSL, 0);
+            const uint32_t other = arm_branch_slot(e);
+            emit_site_dispatch(c, i, A_R2);
+            local_patch(c, other, C_NE);
+        }
         emit_far_exit(c);
         break;
     default:    /* CALL / JMP m16:16: offset at [m], selector at [m+2] */
@@ -1624,6 +1664,8 @@ static void emit_ind(tctx_t *c, int i)
     if (in->sub == IND_CALL) {
         arm_mov32(e, A_R2, (uint16_t)(in->ip + in->len));
         emit_push_value(c, i, A_R2);
+    } else {
+        emit_site_dispatch(c, i, A_R3);
     }
     arm_ls_imm(e, LS_STR, A_R3, A_R11, XLAT_RT_IP);
     emit_dyn_exit(c);
@@ -1808,6 +1850,40 @@ static void emit_loopcc(tctx_t *c, int i)
     local_patch(c, skip, in->sub ? zcond ^ 1 : zcond);
 }
 
+/* x87: fpu.c through xlat_rt_fpu (no flags, no x86 registers but FNSTSW
+ * AX); a 0 from it (CR0.EM/TS) leaves the instruction to XRIP. */
+static void emit_fpu(tctx_t *c, int i)
+{
+    arm_emit_t *e = &c->e;
+    const x86_insn_t *in = &c->in[i];
+    uint32_t ctl;
+    if (in->sub == FPU_WAIT) {
+        ctl = XLAT_FPU_WAIT;
+    } else {
+        ctl = in->sub | (uint32_t)in->sreg << 3;
+        if (in->b.kind == OPD_MEM) {
+            bool write;
+            x86_fpu_mem_bytes(in->sub, in->sreg, &write);
+            emit_mem_access(c, i, in->size, write);
+            arm_mov(e, A_R2, A_R0);
+            ctl |= XLAT_FPU_MEM;
+        } else {
+            ctl |= (uint32_t)in->a.reg << 6;
+        }
+    }
+    arm_mov32(e, A_R1, ctl);
+    arm_mov(e, A_R0, A_R11);
+    arm_mov32(e, A_R12, (uint32_t)(uintptr_t)&xlat_rt_fpu);
+    arm_blx(e, A_R12);
+    arm_dp_imm(e, DP_SUB, 1, A_PC, A_R0, 0);
+    emit_branch(c, side_dest(c, i, 0), C_EQ);
+    if (in->sub == 7 && in->sreg == 4 && in->b.kind != OPD_MEM) {   /* FNSTSW AX */
+        arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_GPR);
+        arm_ls_imm(e, LS_LDRH, A_R12, A_R12, 0);
+        arm_bfi(e, A_R4, A_R12, 0, 16);
+    }
+}
+
 static void emit_insn(tctx_t *c, int i)
 {
     arm_emit_t *e = &c->e;
@@ -1887,6 +1963,9 @@ static void emit_insn(tctx_t *c, int i)
         break;
     case XO_LOOPCC:
         emit_loopcc(c, i);
+        break;
+    case XO_FPU:
+        emit_fpu(c, i);
         break;
     }
     if (falls_through(in) && c->fall_idx[i] != i + 1)

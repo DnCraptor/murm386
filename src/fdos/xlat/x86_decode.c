@@ -435,6 +435,28 @@ bool x86_decode(const uint8_t *code, uint16_t ip, x86_insn_t *in)
         in->size = 8;
         in->b.kind = OPD_MEM;
         in->mem_seg = seg >= 0 ? (uint8_t)seg : SEG_DS;
+    } else if (op >= 0xd8 && op <= 0xdf) {
+        const uint8_t m = code[pos];
+        const int grp = (m >> 3) & 7, sub = op - 0xd8;
+        if ((m >> 6) == 3) {
+            if (!x86_fpu_reg_ok(sub, grp, m & 7))
+                return false;
+            pos++;
+            in->a.reg = m & 7;
+        } else {
+            bool w;
+            const int bytes = x86_fpu_mem_bytes(sub, grp, &w);
+            if (!bytes)
+                return false;
+            decode_modrm(code, &pos, seg, in, &in->b, &g);
+            in->size = (uint8_t)bytes;
+        }
+        in->op = XO_FPU;
+        in->sub = (uint8_t)sub;
+        in->sreg = (uint8_t)grp;
+    } else if (op == 0x9b) {
+        in->op = XO_FPU;                                  /* FWAIT */
+        in->sub = FPU_WAIT;
     } else if (op == 0xe0 || op == 0xe1) {
         in->op = XO_LOOPCC;                               /* LOOPNZ / LOOPZ */
         in->sub = op & 1;
