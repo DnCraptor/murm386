@@ -160,6 +160,50 @@ static bool seen_before(tctx_t *c, uint16_t ip)
     return false;
 }
 
+/* The region has a loop that runs without leaving it: a cycle through fall
+ * through and branch edges reachable from the entry. A near CALL into the
+ * region continues at its return site (RET there is dispatched inside the
+ * region); a far CALL, a CALL / JMP r/m, RET / RETF or a CALL out of the
+ * region leave it, and their return sites are entries, not loop paths. (A
+ * branch backwards alone is not enough: a loop body that calls into another
+ * CS exits on every pass.) */
+static bool has_cycle(const tctx_t *c, int first)
+{
+    uint8_t color[XLAT_MAX_INSNS];         /* 0 new, 1 on the path, 2 done */
+    int8_t stack[XLAT_MAX_INSNS];
+    uint8_t next[XLAT_MAX_INSNS];          /* successor tried next */
+    memset(color, 0, sizeof(color));
+    int sp = 0;
+    stack[sp++] = (int8_t)first;
+    color[first] = 1;
+    next[first] = 0;
+    while (sp) {
+        const int i = stack[sp - 1];
+        const x86_insn_t *in = &c->in[i];
+        int succ = -1;
+        while (succ < 0 && next[i] < 3) {
+            const int k = next[i]++;
+            if (k == 0)
+                succ = c->fall_idx[i];
+            else if (k == 1)
+                succ = c->tgt_idx[i];
+            else if (in->op == XO_CALL && c->tgt_idx[i] >= 0)
+                succ = find_insn(c, (uint16_t)(in->ip + in->len));
+        }
+        if (succ < 0) {
+            color[i] = 2;
+            --sp;
+        } else if (color[succ] == 1) {
+            return true;
+        } else if (!color[succ]) {
+            color[succ] = 1;
+            next[succ] = 0;
+            stack[sp++] = (int8_t)succ;
+        }
+    }
+    return false;
+}
+
 /* XLAT_RJ_NONE when a region with a loop was found, else the reason. */
 static int discover(tctx_t *c, uint16_t start)
 {
@@ -210,7 +254,6 @@ static int discover(tctx_t *c, uint16_t start)
             return XLAT_RJ_OVERLAP;   /* overlapping instructions: leave it to XRIP */
 
     /* Edges, leaders, loop check. */
-    bool loop = false;
     memset(c->leader, 0, sizeof(c->leader));
     const int first = find_insn(c, start);
     if (first < 0)
@@ -222,11 +265,8 @@ static int discover(tctx_t *c, uint16_t start)
         const x86_insn_t *in = &c->in[i];
         c->fall_idx[i] = falls_through(in) ? (int8_t)find_insn(c, (uint16_t)(in->ip + in->len)) : -1;
         c->tgt_idx[i] = is_branch(in) ? (int8_t)find_insn(c, in->target) : -1;
-        if (c->tgt_idx[i] >= 0) {
+        if (c->tgt_idx[i] >= 0)
             c->leader[c->tgt_idx[i]] = 1;
-            if (c->tgt_idx[i] <= i)
-                loop = true;
-        }
         if (x86_is_call(in)) {
             const int ret = find_insn(c, (uint16_t)(in->ip + in->len));
             if (ret >= 0)
@@ -247,7 +287,7 @@ static int discover(tctx_t *c, uint16_t start)
     c->n_interp = interp;
     if (interp * XLAT_INTERP_RATIO > c->n)
         return XLAT_RJ_INTERP;
-    return loop ? XLAT_RJ_NONE : XLAT_RJ_NOLOOP;
+    return has_cycle(c, first) ? XLAT_RJ_NONE : XLAT_RJ_NOLOOP;
 }
 
 /* ---------------------------------------------------------------------- */
