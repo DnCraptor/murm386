@@ -36,7 +36,7 @@
 /* x86 16-bit register index -> ARM register; SP (4) is not cached. */
 static const int8_t arm_reg16[8] = {A_R4, A_R5, A_R6, A_R7, -1, A_R8, A_R9, A_R10};
 
-enum { ST_EXIT = 0, ST_BACK = 1 };
+enum { ST_EXIT = 0, ST_BACK = 1, ST_SIDE = 2 };
 enum { D_INSN = 0, D_STUB = 1 };
 
 typedef struct {
@@ -50,6 +50,9 @@ typedef struct {
     int16_t target;      /* ST_BACK: instruction to continue at */
     int16_t exit_stub;   /* ST_BACK: stub taken when the budget is used up */
     uint8_t budget_n;    /* ST_BACK: guest instructions charged */
+    uint8_t dyn;         /* ST_EXIT: rt->ip already stored by the code */
+    uint8_t mw;          /* ST_SIDE: the access may hit the region's code */
+    int16_t insn;        /* ST_SIDE: the instruction to interpret */
     uint32_t pos;
 } stub_t;
 
@@ -76,7 +79,7 @@ typedef struct {
     int8_t pfp[XLAT_MAX_INSNS];
     uint8_t leader[XLAT_MAX_INSNS], mat[XLAT_MAX_INSNS], need_cf[XLAT_MAX_INSNS];
     uint8_t local_jcc[XLAT_MAX_INSNS];
-    int16_t side_stub[XLAT_MAX_INSNS];
+    int16_t side_stub[XLAT_MAX_INSNS][2];
     uint32_t label[XLAT_MAX_INSNS];
     uint16_t queue[2 * XLAT_MAX_INSNS + 2];
     uint16_t seen[4 * XLAT_MAX_INSNS];
@@ -111,12 +114,17 @@ static int find_insn(const tctx_t *c, uint16_t ip)
 
 static bool is_branch(const x86_insn_t *in)
 {
-    return in->op == XO_JCC || in->op == XO_JMP || in->op == XO_LOOP || in->op == XO_JCXZ;
+    return in->op == XO_JCC || in->op == XO_JMP || in->op == XO_LOOP || in->op == XO_JCXZ ||
+           in->op == XO_CALL;
 }
 
+/* Control reaches the next instruction directly. A CALL does not: its return
+ * site is reached through RET and the dispatcher, so it is an entry point. */
 static bool falls_through(const x86_insn_t *in)
 {
-    return in->op != XO_JMP;
+    if (in->op == XO_INTERP)
+        return !(in->sub & XI_NO_FALL);
+    return in->op != XO_JMP && in->op != XO_CALL && in->op != XO_RET;
 }
 
 static bool is_producer(const x86_insn_t *in)
@@ -145,14 +153,19 @@ static bool discover(tctx_t *c, uint16_t start)
         const uint16_t ip = c->queue[head++];
         if (seen_before(c, ip) || c->n >= XLAT_MAX_INSNS)
             continue;
+        /* Stay near the entry point: far CALL targets leave the region, so
+         * the range checked for writes into the code stays small. */
+        if ((uint16_t)(ip - start + XLAT_SPAN_WINDOW / 2) >= XLAT_SPAN_WINDOW)
+            continue;
         const uint32_t linear = c->cs_base + ip;
         if (linear + 16u > c->rt->mem_size)
             continue;
         x86_insn_t in;
-        if (!x86_decode(c->rt->mem + linear, ip, &in))
+        if (!x86_decode(c->rt->mem + linear, ip, &in) &&
+            !x86_decode_interp(c->rt->mem + linear, ip, &in))
             continue;
         c->in[c->n++] = in;
-        if (falls_through(&in) && tail < qcap)
+        if ((falls_through(&in) || in.op == XO_CALL) && tail < qcap)
             c->queue[tail++] = (uint16_t)(ip + in.len);
         if (is_branch(&in) && tail < qcap)
             c->queue[tail++] = in.target;
@@ -192,6 +205,11 @@ static bool discover(tctx_t *c, uint16_t start)
             if (c->tgt_idx[i] <= i)
                 loop = true;
         }
+        if (in->op == XO_CALL) {
+            const int ret = find_insn(c, (uint16_t)(in->ip + in->len));
+            if (ret >= 0)
+                c->leader[ret] = 1;
+        }
         const uint32_t l = c->cs_base + in->ip;
         if (l < c->lo)
             c->lo = l;
@@ -199,6 +217,13 @@ static bool discover(tctx_t *c, uint16_t start)
             hi = l + in->len;
     }
     c->span = hi - c->lo;
+    /* Each instruction run by the interpreter costs a register spill and a
+     * call: keep regions mostly native. */
+    int interp = 0;
+    for (int i = 0; i < c->n; ++i)
+        interp += c->in[i].op == XO_INTERP;
+    if (interp * XLAT_INTERP_RATIO > c->n)
+        return false;
     return loop;
 }
 
@@ -221,7 +246,7 @@ static bool recon_ok(const x86_insn_t *in)
 {
     if (in->op == XO_INCDEC)
         return in->a.kind == OPD_REG;
-    if (in->op != XO_ALU || in->a.kind != OPD_REG ||
+    if (in->op != XO_ALU || x86_is_carry_op(in) || in->a.kind != OPD_REG ||
         (in->b.kind != OPD_REG && in->b.kind != OPD_IMM))
         return false;
     if ((in->sub == ALU_ADD || in->sub == ALU_SUB) && in->b.kind == OPD_REG &&
@@ -249,8 +274,10 @@ static void dataflow(tctx_t *c)
                 }
             }
             const x86_insn_t *x = &c->in[i];
-            const uint64_t out = is_producer(x) ? 1ull << i : in;
-            const uint64_t cfout = is_producer(x) && x->op != XO_INCDEC ? 1ull << i : cfin;
+            /* after the interpreter the flags are in rt, as at an entry */
+            const uint64_t out = x->op == XO_INTERP ? NONE_BIT : is_producer(x) ? 1ull << i : in;
+            const uint64_t cfout = x->op == XO_INTERP ? NONE_BIT
+                                   : is_producer(x) && x->op != XO_INCDEC ? 1ull << i : cfin;
             if (in != c->in_set[i] || out != c->out_set[i] || cfin != c->cf_in[i] ||
                 cfout != cf_out[i]) {
                 c->in_set[i] = in;
@@ -347,7 +374,9 @@ static int edge_producer(const tctx_t *c, int i)
     const x86_insn_t *in = &c->in[i];
     if (is_producer(in))
         return i;
-    if (in->op == XO_JCC || in->op == XO_JMP || in->op == XO_JCXZ)
+    /* these leave AX..DI alone, so a reconstruction after them is still valid */
+    if (in->op == XO_JCC || in->op == XO_JMP || in->op == XO_JCXZ || in->op == XO_PUSH ||
+        in->op == XO_CALL || in->op == XO_RET)
         return c->pfp[i];
     return -1;
 }
@@ -368,13 +397,18 @@ static void plan(tctx_t *c)
         if (in->op == XO_JCC && c->pfp[i] >= 0) {
             const x86_insn_t *p = &c->in[c->pfp[i]];
             jstep_t s[2];
-            c->local_jcc[i] = jcc_map(x86_flag_kind(p), p->op == XO_INCDEC, in->sub, s) >= 0;
+            c->local_jcc[i] = !x86_is_carry_op(p) &&
+                              jcc_map(x86_flag_kind(p), p->op == XO_INCDEC, in->sub, s) >= 0;
         }
     }
     for (int i = 0; i < c->n; ++i) {
         const x86_insn_t *in = &c->in[i];
-        if (x86_has_mem(in) && in->op != XO_LEA)
+        if (x86_accesses_mem(in))
             plan_sync(c, c->in_set[i], c->pfp[i]);            /* side exit */
+        if (in->op == XO_RET)
+            plan_sync(c, c->out_set[i], edge_producer(c, i)); /* exit to the popped IP */
+        if (in->op == XO_INTERP)
+            plan_sync(c, c->in_set[i], c->pfp[i]);            /* the interpreter reads rt */
         if (in->op == XO_JCC && !c->local_jcc[i])
             plan_sync(c, c->in_set[i], c->pfp[i]);            /* helper Jcc */
         const int ep = edge_producer(c, i);
@@ -383,8 +417,15 @@ static void plan(tctx_t *c)
         if (is_branch(in) && edge_needs_sync(i, c->tgt_idx[i]))
             plan_sync(c, c->out_set[i], ep);
     }
-    /* INC/DEC whose flags reach rt read CF from rt: the CF producers that
-     * reach them must have stored it. */
+    /* ADC/SBB always store their flags and read CF from rt. INC/DEC whose
+     * flags reach rt read CF from rt too. The CF producers that reach them
+     * must have stored it. */
+    for (int i = 0; i < c->n; ++i) {
+        if (x86_is_carry_op(&c->in[i])) {
+            c->mat[i] = 1;
+            c->need_cf[i] = 1;
+        }
+    }
     for (int i = 0; i < c->n; ++i)
         if (c->need_cf[i])
             for (int k = 0; k < c->n; ++k)
@@ -562,6 +603,8 @@ static void emit_offset(tctx_t *c, const x86_insn_t *in)
 
 /* r0 = linear address; branches to the side exit when the access is not in
  * fast memory or (for writes) may touch this region's x86 code. */
+static void emit_checks(tctx_t *c, int i, int bytes, bool write);
+
 static void emit_mem_access(tctx_t *c, int i, int bytes, bool write)
 {
     arm_emit_t *e = &c->e;
@@ -569,11 +612,31 @@ static void emit_mem_access(tctx_t *c, int i, int bytes, bool write)
     emit_offset(c, in);
     arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_SEG_BASE + 4u * in->mem_seg);
     arm_dp_reg(e, DP_ADD, 0, A_R0, A_R0, A_R12, SH_LSL, 0);
+    emit_checks(c, i, bytes, write);
+}
 
-    if (c->side_stub[i] < 0)
-        c->side_stub[i] = (int16_t)exit_stub(c, in->ip, XLAT_EXIT_SIDE,
-                                             sync_recon(c, c->in_set[i], c->pfp[i]));
-    const dest_t side = {D_STUB, c->side_stub[i]};
+/* The stub that runs instruction i in the interpreter when its access cannot
+ * be done here: outside fast memory (mw 0), or onto the region's code (mw 1). */
+static dest_t side_dest(tctx_t *c, int i, int mw)
+{
+    int k = c->side_stub[i][mw];
+    if (k < 0 || c->stub[k].nsites >= 2) {
+        k = new_stub(c, ST_SIDE);
+        c->stub[k].ip = c->in[i].ip;
+        c->stub[k].insn = (int16_t)i;
+        c->stub[k].mw = (uint8_t)mw;
+        c->stub[k].exit_kind = XLAT_EXIT_SIDE;
+        const int r = sync_recon(c, c->in_set[i], c->pfp[i]);
+        c->stub[k].recon = (int8_t)(r >= 0 ? r : -1);
+        c->side_stub[i][mw] = (int16_t)k;
+    }
+    return (dest_t){D_STUB, (int16_t)k};
+}
+
+/* r0 = linear address of an access by instruction i. Uses r12, lr only. */
+static void emit_checks(tctx_t *c, int i, int bytes, bool write)
+{
+    arm_emit_t *e = &c->e;
 
     arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_MEM_SIZE);
     if (bytes > 1) {
@@ -582,7 +645,7 @@ static void emit_mem_access(tctx_t *c, int i, int bytes, bool write)
     } else {
         arm_dp_reg(e, DP_SUB, 1, A_PC, A_R0, A_R12, SH_LSL, 0);
     }
-    emit_branch(c, side, C_CS);
+    emit_branch(c, side_dest(c, i, 0), C_CS);
 
     if (write) {
         /* (addr - (lo - (bytes-1))) < span + bytes - 1: overlaps the code. */
@@ -590,23 +653,17 @@ static void emit_mem_access(tctx_t *c, int i, int bytes, bool write)
         arm_dp_reg(e, DP_SUB, 0, A_LR, A_R0, A_R12, SH_LSL, 0);
         arm_mov32(e, A_R12, c->span + (uint32_t)(bytes - 1));
         arm_dp_reg(e, DP_SUB, 1, A_PC, A_LR, A_R12, SH_LSL, 0);
-        /* side has at most two sites; a second access check reuses a new stub */
-        if (c->stub[side.idx].nsites >= 2) {
-            const dest_t s2 = {D_STUB, (int16_t)exit_stub(c, in->ip, XLAT_EXIT_SIDE,
-                                                          sync_recon(c, c->in_set[i], c->pfp[i]))};
-            emit_branch(c, s2, C_CC);
-        } else {
-            emit_branch(c, side, C_CC);
-        }
+        emit_branch(c, side_dest(c, i, 1), C_CC);
     }
 }
+
+static void emit_lazy_values(tctx_t *c, int kind, int size);
 
 /* Store the lazy flags of an operation: r2 = dst << s, r3 = src << s,
  * r1 = result << s. Clobbers r12, lr and the ARM flags. */
 static void emit_lazy(tctx_t *c, int kind, int size, bool incdec)
 {
     arm_emit_t *e = &c->e;
-    const int s = 32 - size;
     if (incdec) {
         /* CF stays: if the lazy state is resolved, take CF from FLAGS. */
         arm_ls_imm(e, LS_LDRB, A_R12, A_R11, XLAT_RT_OP);
@@ -630,6 +687,14 @@ static void emit_lazy(tctx_t *c, int kind, int size, bool incdec)
             arm_dp_imm(e, DP_EOR, 0, A_R12, A_R12, 1);
         arm_ls_imm(e, LS_STRB, A_R12, A_R11, XLAT_RT_CF);
     }
+    emit_lazy_values(c, kind, size);
+}
+
+/* The lazy fields other than CF: r1 result, r2 dst, r3 src (all << s). */
+static void emit_lazy_values(tctx_t *c, int kind, int size)
+{
+    arm_emit_t *e = &c->e;
+    const int s = 32 - size;
     arm_ls_imm(e, LS_STR, A_R1, A_R11, XLAT_RT_RESULT);
     if (kind == FK_LOGIC) {
         arm_ls_imm(e, LS_STR, A_R1, A_R11, XLAT_RT_DST);
@@ -684,6 +749,48 @@ static void emit_recon(tctx_t *c, int p)
     emit_lazy(c, kind, size, false);
 }
 
+/* r12 = CF from the lazy state in rt (0 or 1). Clobbers the ARM flags. */
+static void emit_carry_in(tctx_t *c)
+{
+    arm_emit_t *e = &c->e;
+    arm_ls_imm(e, LS_LDRB, A_R12, A_R11, XLAT_RT_OP);
+    arm_dp_imm(e, DP_SUB, 1, A_PC, A_R12, 0);
+    arm_ls_imm(e, LS_LDRB, A_R12, A_R11, XLAT_RT_CF);   /* flags_op != 0: flags_cf */
+    const uint32_t done = arm_branch_slot(e);
+    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_EFLAGS);
+    arm_dp_imm(e, DP_AND, 0, A_R12, A_R12, 1);
+    local_patch(c, done, C_NE);
+}
+
+/* ADC/SBB on r2 = dst << s, r3 = src << s; r1 = result << s, flags stored.
+ * The carry is brought into bit s through the low bits: ADC adds
+ * (2^s - 1) and 1 below the operands, SBB subtracts 1 below the source. */
+static void emit_carry_op(tctx_t *c, const x86_insn_t *in)
+{
+    arm_emit_t *e = &c->e;
+    const int size = in->size, s = 32 - size;
+    emit_carry_in(c);
+    if (in->sub == ALU_ADC) {
+        arm_lsl(e, A_LR, A_R12, s);
+        arm_dp_reg(e, DP_SUB, 0, A_LR, A_LR, A_R12, SH_LSL, 0);
+        arm_dp_reg(e, DP_ORR, 0, A_LR, A_LR, A_R2, SH_LSL, 0);
+        arm_dp_reg(e, DP_ORR, 0, A_R12, A_R12, A_R3, SH_LSL, 0);
+        arm_dp_reg(e, DP_ADD, 1, A_R1, A_LR, A_R12, SH_LSL, 0);
+        arm_mov32(e, A_R12, 0);
+        arm_dp_imm(e, DP_ADC, 0, A_R12, A_R12, 0);           /* CF = carry */
+    } else {
+        arm_dp_reg(e, DP_ORR, 0, A_R12, A_R12, A_R3, SH_LSL, 0);
+        arm_dp_reg(e, DP_SUB, 1, A_R1, A_R2, A_R12, SH_LSL, 0);
+        arm_mov32(e, A_R12, 0);
+        arm_dp_imm(e, DP_ADC, 0, A_R12, A_R12, 0);
+        arm_dp_imm(e, DP_EOR, 0, A_R12, A_R12, 1);           /* CF = borrow */
+        arm_lsr(e, A_R1, A_R1, s);
+        arm_lsl(e, A_R1, A_R1, s);
+    }
+    arm_ls_imm(e, LS_STRB, A_R12, A_R11, XLAT_RT_CF);
+    emit_lazy_values(c, x86_flag_kind(in), size);
+}
+
 static void emit_alu(tctx_t *c, int i)
 {
     arm_emit_t *e = &c->e;
@@ -698,6 +805,13 @@ static void emit_alu(tctx_t *c, int i)
         emit_mem_access(c, i, size / 8, in->a.kind == OPD_MEM && writes);
 
     get_shifted(c, &in->a, size, A_R2);
+    if (x86_is_carry_op(in)) {
+        get_shifted(c, &in->b, size, A_R3);
+        emit_carry_op(c, in);
+        arm_lsr(e, A_R12, A_R1, 32 - size);
+        put_raw(c, &in->a, size, A_R12);
+        return;
+    }
     if (incdec) {
         arm_mov32(e, A_R3, 1u << (32 - size));
         dp = in->sub ? DP_SUB : DP_ADD;
@@ -741,6 +855,152 @@ static void emit_xchg(tctx_t *c, int i)
     const int rb = get_raw(c, &in->b, in->size, A_R2);
     put_raw(c, &in->a, in->size, rb);
     put_raw(c, &in->b, in->size, A_R1);
+}
+
+/* r1 = (SP + delta) & 0xffff, r0 = SS base + r1. */
+static void emit_stack_addr(tctx_t *c, int delta)
+{
+    arm_emit_t *e = &c->e;
+    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_GPR);
+    arm_ls_imm(e, LS_LDRH, A_R1, A_R12, 16);
+    if (delta < 0)
+        arm_subw(e, A_R1, A_R1, (uint32_t)-delta);
+    if (delta)
+        arm_uxth(e, A_R1, A_R1);
+    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_SEG_BASE + 4u * 2u);
+    arm_dp_reg(e, DP_ADD, 0, A_R0, A_R1, A_R12, SH_LSL, 0);
+}
+
+static void emit_store_sp(tctx_t *c)
+{
+    arm_ls_imm(&c->e, LS_LDR, A_R12, A_R11, XLAT_RT_GPR);
+    arm_ls_imm(&c->e, LS_STRH, A_R1, A_R12, 16);
+}
+
+/* PUSH / CALL: the 16-bit value in register v is pushed; checks first, so a
+ * side exit leaves SP alone. */
+static void emit_push_value(tctx_t *c, int i, int v)
+{
+    arm_emit_t *e = &c->e;
+    emit_stack_addr(c, -2);
+    emit_checks(c, i, 2, true);
+    arm_ls_imm(e, LS_LDR, A_LR, A_R11, XLAT_RT_MEM);
+    arm_ls_reg(e, LS_STRH, v, A_LR, A_R0);
+    emit_store_sp(c);
+}
+
+/* POP / RET: r2 = popped word, SP += 2 + release. */
+static void emit_pop_value(tctx_t *c, int i, uint32_t release)
+{
+    arm_emit_t *e = &c->e;
+    emit_stack_addr(c, 0);
+    emit_checks(c, i, 2, false);
+    arm_ls_imm(e, LS_LDR, A_LR, A_R11, XLAT_RT_MEM);
+    arm_ls_reg(e, LS_LDRH, A_R2, A_LR, A_R0);
+    if (release + 2u <= 0xfffu) {
+        arm_addw(e, A_R1, A_R1, release + 2u);
+    } else {
+        arm_mov32(e, A_R12, release + 2u);
+        arm_dp_reg(e, DP_ADD, 0, A_R1, A_R1, A_R12, SH_LSL, 0);
+    }
+    arm_uxth(e, A_R1, A_R1);
+    emit_store_sp(c);
+}
+
+static void emit_stack_op(tctx_t *c, int i)
+{
+    arm_emit_t *e = &c->e;
+    const x86_insn_t *in = &c->in[i];
+    switch (in->op) {
+    case XO_PUSH: {
+        if (in->b.kind == OPD_MEM)
+            emit_mem_access(c, i, 2, false);     /* reading first changes nothing */
+        const int v = get_raw(c, &in->b, 16, A_R2);
+        emit_push_value(c, i, v);
+        break;
+    }
+    case XO_POP:
+        if (in->a.kind == OPD_MEM) {
+            /* both addresses are checked before SP or memory change */
+            emit_mem_access(c, i, 2, true);
+            arm_mov(e, A_R3, A_R0);
+            emit_pop_value(c, i, 0);
+            arm_ls_imm(e, LS_LDR, A_LR, A_R11, XLAT_RT_MEM);
+            arm_ls_reg(e, LS_STRH, A_R2, A_LR, A_R3);
+        } else {
+            emit_pop_value(c, i, 0);
+            put_raw(c, &in->a, 16, A_R2);
+        }
+        break;
+    case XO_CALL:
+        arm_mov32(e, A_R2, (uint16_t)(in->ip + in->len));
+        emit_push_value(c, i, A_R2);
+        emit_branch(c, make_dest(c, i, in->target), C_AL);
+        break;
+    default: {  /* RET: leave for the popped IP; the dispatcher continues there */
+        emit_pop_value(c, i, in->b.imm);
+        arm_ls_imm(e, LS_STR, A_R2, A_R11, XLAT_RT_IP);
+        const int k = exit_stub(c, 0, XLAT_EXIT_BRANCH,
+                                sync_recon(c, c->out_set[i], edge_producer(c, i)));
+        c->stub[k].dyn = 1;
+        emit_branch(c, (dest_t){D_STUB, (int16_t)k}, C_AL);
+        break;
+    }
+    }
+}
+
+#define GPR_LIST(x) x(A_R4, 0) x(A_R5, 4) x(A_R6, 8) x(A_R7, 12) x(A_R8, 20) x(A_R9, 24) x(A_R10, 28)
+
+static void emit_gpr_transfer(arm_emit_t *e, int kind)
+{
+    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_GPR);
+#define MOVE(r, off) arm_ls_imm(e, kind, r, A_R12, off);
+    GPR_LIST(MOVE)
+#undef MOVE
+}
+
+/* Run instruction i in XRIP (xlat_interp_one) with the registers written
+ * back and reloaded after. Leaves with rt as it stands if XRIP must take
+ * over (stop) or, when cont is false or the instruction did not fall
+ * through, at its new IP (branch_kind). Otherwise execution goes on after the
+ * code emitted here. flags: XI_* bits passed on to the helper. */
+static void emit_interp_call(tctx_t *c, int i, uint32_t flags, bool cont, uint8_t branch_kind)
+{
+    arm_emit_t *e = &c->e;
+    const x86_insn_t *in = &c->in[i];
+    emit_gpr_transfer(e, LS_STR);
+    arm_movw(e, A_R12, in->ip);
+    arm_ls_imm(e, LS_STR, A_R12, A_R11, XLAT_RT_IP);
+    arm_mov(e, A_R0, A_R11);
+    arm_mov32(e, A_R1, flags);
+    arm_mov32(e, A_R12, (uint32_t)(uintptr_t)&xlat_interp_one);
+    arm_blx(e, A_R12);
+    emit_gpr_transfer(e, LS_LDR);
+    int k = exit_stub(c, 0, XLAT_EXIT_STOP, -1);
+    c->stub[k].dyn = 1;
+    arm_dp_imm(e, DP_SUB, 1, A_PC, A_R0, 0);
+    emit_branch(c, (dest_t){D_STUB, (int16_t)k}, C_EQ);      /* state no longer runnable */
+    k = exit_stub(c, 0, branch_kind, -1);
+    c->stub[k].dyn = 1;
+    if (!cont) {
+        emit_branch(c, (dest_t){D_STUB, (int16_t)k}, C_AL);
+        return;
+    }
+    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_IP);
+    arm_mov32(e, A_LR, (uint16_t)(in->ip + in->len));
+    arm_dp_reg(e, DP_SUB, 1, A_PC, A_R12, A_LR, SH_LSL, 0);
+    emit_branch(c, (dest_t){D_STUB, (int16_t)k}, C_NE);      /* it jumped: dispatcher */
+}
+
+/* An instruction the translator does not handle: XRIP executes it, and the
+ * region goes on when it fell through to the next instruction. */
+static void emit_interp(tctx_t *c, int i)
+{
+    const x86_insn_t *in = &c->in[i];
+    const int r = sync_recon(c, c->in_set[i], c->pfp[i]);
+    if (r >= 0)
+        emit_recon(c, r);
+    emit_interp_call(c, i, in->sub & XI_MAY_WRITE, !(in->sub & XI_NO_FALL), XLAT_EXIT_BRANCH);
 }
 
 static void emit_jcc(tctx_t *c, int i)
@@ -814,6 +1074,15 @@ static void emit_insn(tctx_t *c, int i)
         arm_dp_reg(e, DP_ORR, 1, A_R12, A_PC, A_R5, SH_LSL, 16);
         emit_branch(c, make_dest(c, i, in->target), C_EQ);
         break;
+    case XO_PUSH:
+    case XO_POP:
+    case XO_CALL:
+    case XO_RET:
+        emit_stack_op(c, i);
+        break;
+    case XO_INTERP:
+        emit_interp(c, i);
+        break;
     }
     if (falls_through(in) && c->fall_idx[i] != i + 1)
         emit_branch(c, make_dest(c, i, (uint16_t)(in->ip + in->len)), C_AL);
@@ -826,7 +1095,7 @@ static void emit_stubs(tctx_t *c)
     for (int pass = 0; pass < 2; ++pass) {
         for (int k = 0; k < c->n_stubs; ++k) {
             stub_t *s = &c->stub[k];
-            if (s->type != (pass ? ST_EXIT : ST_BACK))
+            if (pass ? s->type == ST_BACK : s->type != ST_BACK)
                 continue;
             s->pos = e->pos;
             for (int j = 0; j < s->nsites; ++j)
@@ -845,11 +1114,28 @@ static void emit_stubs(tctx_t *c)
                 const uint32_t site = arm_branch_slot(e);
                 if (!arm_patch_branch(e, site, c->label[s->target], C_AL))
                     c->overflow = true;
+            } else if (s->type == ST_SIDE) {
+                /* The access cannot be done here: XRIP executes the whole
+                 * instruction. A MOV, PUSH or POP sets no flags, so the code
+                 * after it may go on; anything else leaves after it. */
+                const int i = s->insn;
+                const x86_insn_t *in = &c->in[i];
+                const bool cont = falls_through(in) && !is_producer(in) && c->fall_idx[i] >= 0;
+                if (s->recon >= 0)
+                    emit_recon(c, s->recon);
+                emit_interp_call(c, i, (s->mw ? XI_MAY_WRITE : 0u) | XI_SIDE, cont, XLAT_EXIT_SIDE);
+                if (cont) {
+                    const uint32_t site = arm_branch_slot(e);
+                    if (!arm_patch_branch(e, site, c->label[c->fall_idx[i]], C_AL))
+                        c->overflow = true;
+                }
             } else {
                 if (s->recon >= 0)
                     emit_recon(c, s->recon);
-                arm_movw(e, A_R12, s->ip);
-                arm_ls_imm(e, LS_STR, A_R12, A_R11, XLAT_RT_IP);
+                if (!s->dyn) {
+                    arm_movw(e, A_R12, s->ip);
+                    arm_ls_imm(e, LS_STR, A_R12, A_R11, XLAT_RT_IP);
+                }
                 arm_mov32(e, A_R12, s->exit_kind);
                 arm_ls_imm(e, LS_STR, A_R12, A_R11, XLAT_RT_EXIT_KIND);
                 const uint32_t site = arm_branch_slot(e);
@@ -863,8 +1149,6 @@ static void emit_stubs(tctx_t *c)
 /* ---------------------------------------------------------------------- */
 /* Trampoline and entry point                                             */
 /* ---------------------------------------------------------------------- */
-
-#define GPR_LIST(x) x(A_R4, 0) x(A_R5, 4) x(A_R6, 8) x(A_R7, 12) x(A_R8, 20) x(A_R9, 24) x(A_R10, 28)
 
 bool xlat_emit_trampoline(xlat_arena_t *a)
 {
@@ -935,7 +1219,7 @@ bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip,
 
     c->e = (arm_emit_t){a->base, a->code_top, a->data_bottom - data, false};
     for (int i = 0; i < c->n; ++i)
-        c->side_stub[i] = -1;
+        c->side_stub[i][0] = c->side_stub[i][1] = -1;
     for (int i = 0; i < c->n; ++i)
         emit_insn(c, i);
     emit_stubs(c);

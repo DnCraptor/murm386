@@ -50,6 +50,7 @@ typedef struct {
 } ref_t;
 
 static ref_t R;
+static unsigned long interp_calls, side_calls;
 
 enum { FLAGS_ADD = 1, FLAGS_SUB, FLAGS_LOGIC };
 
@@ -278,6 +279,18 @@ static bool alu16(int op, uint16_t a, uint16_t b, uint16_t *res)
     }
 }
 
+static void ref_push(uint16_t v)
+{
+    putreg16(4, getreg16(4) - 2);
+    wr16(R.seg_base[2] + getreg16(4), v);
+}
+static uint16_t ref_pop(void)
+{
+    const uint16_t v = rd16(R.seg_base[2] + getreg16(4));
+    putreg16(4, getreg16(4) + 2);
+    return v;
+}
+
 static void ref_step(void)
 {
     if (R.halted) return;
@@ -316,6 +329,18 @@ static void ref_step(void)
         if (condition(op)) R.ip = (uint16_t)(R.ip + d);
         return;
     }
+    if (op >= 0x50 && op <= 0x57) { ref_push(getreg16(op & 7)); return; }
+    if (op >= 0x58 && op <= 0x5f) { const uint16_t v = ref_pop(); putreg16(op & 7, v); return; }
+    if (op == 0x0f) {
+        const uint8_t op2 = fetch8();
+        if (op2 >= 0x80 && op2 <= 0x8f) {
+            const uint16_t d = fetch16();
+            if (condition(op2)) R.ip = (uint16_t)(R.ip + d);
+            return;
+        }
+        R.bad = R.halted = true;
+        return;
+    }
     switch (op) {
     case 0x80: modregrm(); { uint8_t i = fetch8(); if (alu8(reg, readrm8(), i, &r8)) writerm8(r8); } return;
     case 0x81: modregrm(); { uint16_t a = readrm16(); uint16_t i = fetch16(); if (alu16(reg, a, i, &r16)) writerm16(r16); } return;
@@ -328,8 +353,13 @@ static void ref_step(void)
     case 0x89: modregrm(); writerm16(getreg16(reg)); return;
     case 0x8a: modregrm(); putreg8(reg, readrm8()); return;
     case 0x8b: modregrm(); putreg16(reg, readrm16()); return;
-    case 0x8d: modregrm(); putreg16(reg, (uint16_t)(ea - useseg)); return;
+    case 0x8d: modregrm(); if (mode == 3) break; /* #UD; XRIP uses a stale EA */ putreg16(reg, (uint16_t)(ea - useseg)); return;
     case 0x90: return;
+    case 0x68: ref_push(fetch16()); return;
+    case 0x6a: ref_push((uint16_t)(int16_t)(int8_t)fetch8()); return;
+    case 0xe8: { uint16_t d = fetch16(); ref_push(R.ip); R.ip = (uint16_t)(R.ip + d); return; }
+    case 0xc3: R.ip = ref_pop(); return;
+    case 0xc2: { uint16_t n = fetch16(); R.ip = ref_pop(); putreg16(4, getreg16(4) + n); return; }
     case 0x91: case 0x92: case 0x93: case 0x94: case 0x95: case 0x96: case 0x97: {
         uint16_t t = getreg16(0); putreg16(0, getreg16(op & 7)); putreg16(op & 7, t); return;
     }
@@ -347,18 +377,74 @@ static void ref_step(void)
     case 0xeb: { int8_t d = (int8_t)fetch8(); R.ip = (uint16_t)(R.ip + d); return; }
     case 0xf4: R.ip--; R.halted = true; return;
     case 0xf5: SETF(0, !CF()); return;
-    case 0xf6: modregrm(); if (reg) break; logic_flags(8, readrm8() & fetch8()); return;
-    case 0xf7: modregrm(); if (reg) break; { uint16_t a = readrm16(); logic_flags(16, a & fetch16()); } return;
+    case 0xf6:
+        modregrm();
+        if (reg == 0) { logic_flags(8, readrm8() & fetch8()); return; }
+        if (reg == 2) { writerm8((uint8_t)~readrm8()); return; }
+        if (reg == 3) { const uint8_t v = readrm8(); sub_flags(8, 0, v); writerm8((uint8_t)-v); return; }
+        break;
+    case 0xf7:
+        modregrm();
+        if (reg == 0) { uint16_t a = readrm16(); logic_flags(16, a & fetch16()); return; }
+        if (reg == 2) { writerm16((uint16_t)~readrm16()); return; }
+        if (reg == 3) { const uint16_t v = readrm16(); sub_flags(16, 0, v); writerm16((uint16_t)-v); return; }
+        if (reg == 4) {   /* MUL: CF = OF = (DX != 0); the rest as after a logic op */
+            const uint32_t r = (uint32_t)getreg16(0) * readrm16();
+            putreg16(0, (uint16_t)r); putreg16(2, (uint16_t)(r >> 16));
+            logic_flags(16, (uint16_t)r);
+            SETF(0, r >> 16); SETF(11, r >> 16);
+            return;
+        }
+        break;
+    case 0x98: putreg16(0, (uint16_t)(int16_t)(int8_t)getreg8(0)); return;
+    case 0x99: putreg16(2, (getreg16(0) & 0x8000) ? 0xffff : 0); return;
+    case 0xfc: R.eflags &= ~0x400u; return;
+    case 0xfd: R.eflags |= 0x400u; return;
+    case 0xaa: case 0xab: case 0xac: case 0xad: case 0xa4: case 0xa5: {
+        const int w = op & 1, step = (R.eflags & 0x400u ? -1 : 1) * (w ? 2 : 1);
+        const uint32_t src = useseg + getreg16(6), dst = R.seg_base[0] + getreg16(7);
+        if (op <= 0xa5) { if (w) wr16(dst, rd16(src)); else wr8(dst, rd8(src)); }
+        else if (op <= 0xab) { if (w) wr16(dst, getreg16(0)); else wr8(dst, getreg8(0)); }
+        else { if (w) putreg16(0, rd16(src)); else putreg8(0, rd8(src)); }
+        if (op <= 0xa5 || op >= 0xac) putreg16(6, (uint16_t)(getreg16(6) + step));
+        if (op <= 0xab) putreg16(7, (uint16_t)(getreg16(7) + step));
+        return;
+    }
     case 0xf8: SETF(0, 0); return;
     case 0xf9: SETF(0, 1); return;
     case 0xfe: modregrm(); if (reg > 1) break; writerm8((uint8_t)inc_dec(readrm8(), reg != 0, 8)); return;
-    case 0xff: modregrm(); if (reg > 1) break; writerm16((uint16_t)inc_dec(readrm16(), reg != 0, 16)); return;
+    case 0xff: modregrm();
+        if (reg == 6) { ref_push(readrm16()); return; }
+        if (reg > 1) break;
+        writerm16((uint16_t)inc_dec(readrm16(), reg != 0, 16)); return;
+    case 0x8f: modregrm(); if (reg) break; { const uint16_t v = ref_pop(); writerm16(v); } return;
     default:
         if (op >= 0xb0 && op <= 0xb7) { putreg8(op & 7, fetch8()); return; }
         if (op >= 0xb8 && op <= 0xbf) { putreg16(op & 7, fetch16()); return; }
         break;
     }
     R.bad = R.halted = true;
+}
+
+/* The test's xlat_interp_one(): the reference interpreter is the "XRIP". */
+uint32_t xlat_interp_one(xlat_rt_t *rt, uint32_t flags)
+{
+    const uint32_t may_write = flags & 1u;
+    if (flags & 4u)
+        side_calls++;
+    R.ip = (uint16_t)rt->ip;
+    R.flags_result = rt->lazy_result; R.flags_dst = rt->lazy_dst; R.flags_src = rt->lazy_src;
+    R.flags_op = rt->lazy_op; R.flags_cf = rt->lazy_cf; R.eflags = rt->eflags;
+    ref_step();
+    rt->ip = R.ip;
+    rt->lazy_result = R.flags_result; rt->lazy_dst = R.flags_dst; rt->lazy_src = R.flags_src;
+    rt->lazy_op = R.flags_op; rt->lazy_cf = R.flags_cf; rt->eflags = R.eflags;
+    interp_calls++;
+    if (R.halted)
+        return 0;
+    if (may_write && !xlat_region_still_valid(rt))
+        return 0;
+    return 1;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -375,7 +461,14 @@ static uint32_t rnd(void)
 }
 static uint32_t rn(uint32_t n) { return rnd() % n; }
 
-typedef struct { uint8_t b[8]; uint8_t len; int8_t fwd; } ginsn_t;   /* fwd: rel8 patch target (index) */
+typedef struct { uint8_t b[12]; uint8_t len; int8_t fwd; uint8_t rel16; int8_t call; } ginsn_t;
+/* fwd: branch target (body index) patched as rel8 / rel16 in the last bytes;
+ * call: subroutine number, rel16 patched after the subroutines are laid out */
+
+#define MAX_SUBS 4
+static int nsubs;
+static struct { uint32_t pos; int sub; } call_fix[64];
+static int ncall_fix;
 
 static ginsn_t body[64];
 static int nbody;
@@ -419,6 +512,27 @@ static void gen_one(ginsn_t *g, int index, int total)
 {
     memset(g, 0, sizeof(*g));
     g->fwd = -1;
+    g->call = -1;
+    if (total > 0 && rn(14) == 0) {    /* stack: PUSH/POP, CALL to a subroutine */
+        const int t = rn(5);
+        if (t == 0 && nsubs) {
+            g->b[g->len++] = 0xe8; g->b[g->len++] = 0; g->b[g->len++] = 0;
+            g->call = (int8_t)rn((uint32_t)nsubs);
+        } else if (t == 1) {
+            g->b[g->len++] = rn(2) ? 0x68 : 0x6a;
+            g->b[g->len++] = (uint8_t)rnd();
+            if (g->b[0] == 0x68) g->b[g->len++] = (uint8_t)rnd();
+        } else if (t == 2) {
+            g->b[g->len++] = (uint8_t)(0x58 | pick_reg16_dst());
+        } else if (t == 3 && allow_mem) {   /* PUSH / POP r/m16 */
+            const bool pop = rn(2);
+            g->b[g->len++] = pop ? 0x8f : 0xff;
+            put_modrm(g, pop ? 0 : 6, true, true);
+        } else {
+            g->b[g->len++] = (uint8_t)(0x50 | rn(8));
+        }
+        return;
+    }
     if (rn(12) == 0) {
         static const uint8_t seg[] = {0x26, 0x2e, 0x36, 0x3e};
         g->b[g->len++] = seg[rn(4)];
@@ -502,14 +616,40 @@ static void gen_one(ginsn_t *g, int index, int total)
         }
         break;
     }
-    case 14: {                     /* flag ops XRIP runs */
-        static const uint8_t f[] = {0xf8, 0xf9, 0xf5};
-        g->b[g->len++] = f[rn(3)];
+    case 14: {                     /* instructions the translator leaves to the interpreter */
+        const int t = rn(9);
+        if (t < 3) {
+            static const uint8_t f[] = {0xf8, 0xf9, 0xf5};
+            g->b[g->len++] = f[t];
+        } else if (t == 3) {
+            g->b[g->len++] = rn(2) ? 0x98 : 0x99;
+        } else if (t == 4) {
+            g->b[g->len++] = rn(2) ? 0xfc : 0xfd;
+        } else if (t == 5 && allow_mem) {
+            static const uint8_t str[] = {0xaa, 0xab, 0xac, 0xad, 0xa4, 0xa5};
+            g->b[g->len++] = str[rn(6)];
+        } else if (t == 6) {     /* NOT / NEG / MUL */
+            const int sub = 2 + (int)rn(3);
+            g->b[g->len++] = (uint8_t)(sub == 4 ? 0xf7 : 0xf6 | word);
+            put_modrm(g, sub, sub == 4 || word, true);
+        } else if (t == 7) {     /* SP arithmetic: add/sub sp, imm8 */
+            g->b[g->len++] = 0x83;
+            g->b[g->len++] = rn(2) ? 0xc4 : 0xec;
+            g->b[g->len++] = (uint8_t)(rn(4) * 2);
+        } else {
+            g->b[g->len++] = 0xf8;
+        }
         break;
     }
     default: {                     /* forward branch */
         if (index + 1 >= total) { g->b[g->len++] = 0x90; break; }
-        const int t = rn(6);
+        const int t = rn(7);
+        if (t == 6) {   /* Jcc rel16 */
+            g->b[g->len++] = 0x0f;
+            g->b[g->len++] = (uint8_t)(0x80 | rn(16));
+            g->b[g->len++] = 0;
+            g->rel16 = 1;
+        } else
         g->b[g->len++] = t < 4 ? (uint8_t)(0x70 | rn(16)) : t == 4 ? 0xeb : 0xe3;
         if (t < 4 && rn(2)) {   /* compare then branch */
             ginsn_t c;
@@ -521,7 +661,7 @@ static void gen_one(ginsn_t *g, int index, int total)
             memcpy(g->b, c.b, c.len);
             g->len += c.len;
         }
-        g->b[g->len++] = 0;
+        if (!g->rel16) g->b[g->len++] = 0;
         g->fwd = (int8_t)(index + 1 + rn((uint32_t)(total - index)));   /* may be total: past body */
         break;
     }
@@ -530,7 +670,6 @@ static void gen_one(ginsn_t *g, int index, int total)
 
 static uint32_t layout(uint8_t *code, uint16_t at_ip)
 {
-    (void)at_ip;
     uint32_t pos[65];
     uint32_t p = 0;
     for (int i = 0; i < nbody; ++i) {
@@ -543,8 +682,18 @@ static uint32_t layout(uint8_t *code, uint16_t at_ip)
         memcpy(code + p, body[i].b, body[i].len);
         if (body[i].fwd >= 0) {
             int32_t rel = (int32_t)pos[body[i].fwd] - (int32_t)(pos[i] + body[i].len);
-            if (rel > 127) rel = 0;
-            code[p + body[i].len - 1] = (uint8_t)rel;
+            if (body[i].rel16) {
+                code[p + body[i].len - 2] = (uint8_t)rel;
+                code[p + body[i].len - 1] = (uint8_t)(rel >> 8);
+            } else {
+                if (rel > 127) rel = 0;
+                code[p + body[i].len - 1] = (uint8_t)rel;
+            }
+        }
+        if (body[i].call >= 0 && ncall_fix < 64) {
+            call_fix[ncall_fix].pos = at_ip + p + body[i].len - 2;
+            call_fix[ncall_fix].sub = body[i].call;
+            ncall_fix++;
         }
         p += body[i].len;
     }
@@ -556,6 +705,8 @@ static uint32_t layout(uint8_t *code, uint16_t at_ip)
 static uint32_t gen_program(uint8_t *code)
 {
     uint32_t p = 0;
+    nsubs = rn(3) ? 1 + (int)rn(MAX_SUBS) : 0;
+    ncall_fix = 0;
     int nprologue = rn(4);
     for (int k = 0; k < nprologue; ++k) {
         ginsn_t g;
@@ -575,7 +726,7 @@ static uint32_t gen_program(uint8_t *code)
         nbody = 1 + rn(14);
         for (int i = 0; i < nbody; ++i)
             gen_one(&body[i], i, nbody);
-        p += layout(code + p, 0);
+        p += layout(code + p, (uint16_t)p);
         const int ctl = rn(3);
         int32_t rel;
         if (ctl == 0) { code[p++] = 0x49; code[p++] = 0x75; rel = (int32_t)head - (int32_t)(p + 1); }
@@ -585,6 +736,32 @@ static uint32_t gen_program(uint8_t *code)
         code[p++] = (uint8_t)rel;
     }
     code[p++] = 0xf4;
+    /* subroutines: straight-line code and RET (sometimes RET n) */
+    uint32_t sub_at[MAX_SUBS];
+    for (int k = 0; k < nsubs; ++k) {
+        sub_at[k] = p;
+        const int n = (int)rn(6);
+        for (int j = 0; j < n; ++j) {
+            ginsn_t g;
+            gen_one(&g, 0, 0);
+            if (g.fwd >= 0 || g.call >= 0)
+                continue;
+            if (g.len == 1 && (g.b[0] & 0xf0) == 0x50)
+                continue;   /* no PUSH/POP inside: keep the return address */
+            memcpy(code + p, g.b, g.len);
+            p += g.len;
+        }
+        if (rn(4)) {
+            code[p++] = 0xc3;
+        } else {
+            code[p++] = 0xc2; code[p++] = (uint8_t)(rn(3) * 2); code[p++] = 0;
+        }
+    }
+    for (int k = 0; k < ncall_fix; ++k) {
+        const int32_t rel = (int32_t)sub_at[call_fix[k].sub] - (int32_t)(call_fix[k].pos + 2);
+        code[call_fix[k].pos] = (uint8_t)rel;
+        code[call_fix[k].pos + 1] = (uint8_t)(rel >> 8);
+    }
     return p;
 }
 
@@ -681,10 +858,10 @@ static int replay(const char *path, int states)
     for (int r = 0; r < nreg; ++r) {
         int ran_states = 0, fails = 0;
         for (int t = 0; t < states && fails < 3; ++t) {
-            /* memory: random data, the region's segment filled with HLT and its code */
+            /* memory: random data, the region's segment filled with F1 and its code */
             memcpy(mem, base_mem, REPLAY_SPAN);
             const uint32_t cs_base = (uint32_t)reg[r].cs << 4;
-            memset(mem + cs_base, 0xf4, 0x10000);
+            memset(mem + cs_base, 0xf1, 0x10000);   /* F1: decoded by neither decoder */
             for (int l = 0; l < reg[r].nlines; ++l)
                 memcpy(mem + cs_base + reg[r].line[l].ip, reg[r].line[l].b, reg[r].line[l].n);
             for (int k = 0; k < 64; ++k) mem[rn(REPLAY_SPAN)] = (uint8_t)rn(4);   /* small values */
@@ -717,7 +894,7 @@ static int replay(const char *path, int states)
             ran_states++;
             R.ip = (uint16_t)rt.ip;
             R.flags_result = rt.lazy_result; R.flags_dst = rt.lazy_dst; R.flags_src = rt.lazy_src;
-            R.flags_op = rt.lazy_op; R.flags_cf = rt.lazy_cf;
+            R.flags_op = rt.lazy_op; R.flags_cf = rt.lazy_cf; R.eflags = rt.eflags;
             ref_t after = R;
             memcpy(after_mem, mem, REPLAY_SPAN);
             /* the reference from 'before' must reach the same registers, flags and memory */
@@ -730,7 +907,7 @@ static int replay(const char *path, int states)
                     ref_t a = after, b = R;
                     R = a; flags_now(); a = R;
                     R = b; flags_now(); b = R;
-                    if ((a.eflags & 0x8d5u) == (b.eflags & 0x8d5u) && !memcmp(mem, after_mem, REPLAY_SPAN)) {
+                    if ((a.eflags & 0xcd5u) == (b.eflags & 0xcd5u) && !memcmp(mem, after_mem, REPLAY_SPAN)) {
                         found = true;
                         break;
                     }
@@ -834,14 +1011,16 @@ int main(int argc, char **argv)
             ref_t before = R;
             static uint8_t before_mem[MEM_BYTES];
             if (lockstep) memcpy(before_mem, mem, MEM_BYTES);
+            if (getenv("XLAT_TRACE2")) printf("  run? ip %04x sp %04x cx %04x\n", R.ip, getreg16(4), getreg16(1));
             if (xlat_run(&rt)) {
+                if (getenv("XLAT_TRACE2")) printf("  ran -> ip %04x kind %u sp %04x cx %04x\n", rt.ip, rt.exit_kind, getreg16(4), getreg16(1));
                 R.ip = (uint16_t)rt.ip;
                 R.flags_result = rt.lazy_result;
                 R.flags_dst = rt.lazy_dst;
                 R.flags_src = rt.lazy_src;
                 R.flags_op = rt.lazy_op;
                 R.flags_cf = rt.lazy_cf;
-                if (rt.eflags != R.eflags) { printf("seed %u: eflags changed\n", seed); failures++; break; }
+                R.eflags = rt.eflags;
                 if (lockstep) {
                     /* the reference must reach the same state from 'before' */
                     ref_t after = R;
@@ -857,7 +1036,7 @@ int main(int argc, char **argv)
                             ref_t a = after, b = R;
                             R = a; flags_now(); a = R;
                             R = b; flags_now(); b = R;
-                            if ((a.eflags & 0x8d5u) == (b.eflags & 0x8d5u)) { found = true; break; }
+                            if ((a.eflags & 0xcd5u) == (b.eflags & 0xcd5u)) { found = true; break; }
                             printf("  lockstep: ip %04x regs match, flags want %03x got %03x (k=%d)\n",
                                    after.ip, b.eflags & 0x8d5u, a.eflags & 0x8d5u, k);
                             printf("  got lazy op %02x res %08x dst %08x src %08x cf %d; want op %02x res %08x dst %08x src %08x cf %d\n",
@@ -866,9 +1045,26 @@ int main(int argc, char **argv)
                             R = b;
                         }
                     }
+                    if (!found && getenv("XLAT_TRACE3")) {
+                        memcpy(mem, before_mem, MEM_BYTES);
+                        R = before;
+                        for (int k = 0; k < 300 && !R.halted; ++k) {
+                            printf("   r %04x: %02x %02x %02x %02x  ax %04x cx %04x dx %04x bx %04x sp %04x bp %04x si %04x di %04x\n",
+                                   R.ip, mem[R.seg_base[1] + R.ip], mem[R.seg_base[1] + R.ip + 1], mem[R.seg_base[1] + R.ip + 2], mem[R.seg_base[1] + R.ip + 3],
+                                   getreg16(0), getreg16(1), getreg16(2), getreg16(3), getreg16(4), getreg16(5), getreg16(6), getreg16(7));
+                            ref_step();
+                        }
+                        printf("   jit final: ax %04x cx %04x dx %04x bx %04x sp %04x bp %04x si %04x di %04x\n",
+                               (uint16_t)after.gpr[0], (uint16_t)after.gpr[1], (uint16_t)after.gpr[2], (uint16_t)after.gpr[3], (uint16_t)after.gpr[4], (uint16_t)after.gpr[5], (uint16_t)after.gpr[6], (uint16_t)after.gpr[7]);
+                    }
                     if (!found) {
                         printf("seed %u: lockstep divergence entering at %04x, exit %04x kind %u; before op %02x res %08x dst %08x src %08x cf %d efl %03x\n",
                                seed, before.ip, after.ip, rt.exit_kind, before.flags_op, before.flags_result, before.flags_dst, before.flags_src, before.flags_cf, before.eflags);
+                        printf("  code at entry:");
+                        for (int k = 0; k < 48; ++k) printf(" %02x", before_mem[before.seg_base[1] + ((before.ip + k) & 0xffff)]);
+                        printf("\n  regs before:");
+                        for (int k = 0; k < 8; ++k) printf(" %08x", before.gpr[k]);
+                        printf("\n  segs ES CS SS DS: %05x %05x %05x %05x\n", before.seg_base[0], before.seg_base[1], before.seg_base[2], before.seg_base[3]);
                         failures++;
                         memcpy(mem, after_mem, MEM_BYTES);
                         R = after;
@@ -879,11 +1075,11 @@ int main(int argc, char **argv)
                 }
             }
             const int n = (int)rn(40);
-            for (int k = 0; k < n && !R.halted; ++k) ref_step();
+            for (int k = 0; k < n && !R.halted; ++k) { if (getenv("XLAT_TRACE2")) printf("  ref %04x sp %04x\n", R.ip, getreg16(4)); ref_step(); }
         }
         flags_now();
         const bool regs_ok = !memcmp(want.gpr, R.gpr, sizeof(R.gpr));
-        const bool flags_ok = (want.eflags & 0x8d5u) == (R.eflags & 0x8d5u);
+        const bool flags_ok = (want.eflags & 0xcd5u) == (R.eflags & 0xcd5u);
         const bool ip_ok = want.ip == R.ip && R.halted;
         const bool mem_ok = !memcmp(want_mem, mem, MEM_BYTES);
         if (!(regs_ok && flags_ok && ip_ok && mem_ok) || R.bad) {
@@ -903,9 +1099,9 @@ int main(int argc, char **argv)
         memset(mem_init + init.seg_base[1], 0, len);
     }
     printf("programs %d, skipped %d, failures %d\n", run, skipped, failures);
-    printf("stats: translations %u rejects %u entries %u invalid %u flushes %u exits b/budget/side %u/%u/%u native insns %u\n",
+    printf("stats: translations %u rejects %u entries %u invalid %u flushes %u exits b/budget/side/stop %u/%u/%u/%u native insns %u interp %lu side %lu\n",
            xlat_stats.translations, xlat_stats.rejects, xlat_stats.entries, xlat_stats.invalidations,
            xlat_stats.flushes, xlat_stats.exits[0], xlat_stats.exits[1], xlat_stats.exits[2],
-           xlat_stats.guest_insns);
+           xlat_stats.exits[3], xlat_stats.guest_insns, interp_calls, side_calls);
     return failures ? 1 : 0;
 }

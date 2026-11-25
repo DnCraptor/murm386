@@ -76,7 +76,10 @@ static bool disabled;
 #if defined(XLAT_HOST_TEST)
 void *xlat_test_calloc(size_t size);   /* executable, zeroed */
 #define XLAT_ALLOC(size) xlat_test_calloc(size)
-#define stack_free() 0xffffffffu
+static uint32_t stack_free(void)
+{
+    return 0xffffffffu;
+}
 #else
 #include "core0_stack.h"
 #include "board_config.h"
@@ -111,8 +114,15 @@ static uint32_t stack_free(void)
 #endif
 
 /* Translating needs about 0.5 KiB of stack beyond xlat_run(); keep the same
- * margin the DOS EXEC guard keeps for whatever runs after us. */
-#define XLAT_STACK_NEEDED 1024u
+ * margin the DOS EXEC guard keeps for whatever runs after us
+ * (XLAT_STACK_NEEDED, xlat.h). */
+uint32_t xlat_stack_free(void)
+{
+    return stack_free();
+}
+
+/* The region running now (for xlat_region_still_valid). */
+static region_t *cur_region;
 
 void xlat_sync_code(void *start, uint32_t len)
 {
@@ -186,9 +196,10 @@ static void log_region_counts(void)
 {
     for (int k = 0; k < st->n_regions; ++k) {
         const region_t *r = &st->region[k];
-        log_printf("C %04X:%04X entries=%lu exit branch/budget/side=%lu/%lu/%lu%s\r\n", r->cs, r->ip,
-                   (unsigned long)r->entries, (unsigned long)r->exits[0],
+        log_printf("C %04X:%04X entries=%lu exit branch/budget/side/stop=%lu/%lu/%lu/%lu%s\r\n",
+                   r->cs, r->ip, (unsigned long)r->entries, (unsigned long)r->exits[0],
                    (unsigned long)r->exits[1], (unsigned long)r->exits[2],
+                   (unsigned long)r->exits[3],
                    r->live ? "" : " (invalidated)");
     }
 }
@@ -433,7 +444,9 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
             break;
         }
         rt->budget -= XLAT_ENTRY_COST;
+        cur_region = r;
         tramp(rt, (uint32_t)(uintptr_t)(st->arena.base + e->code_off) | 1u);
+        cur_region = NULL;
         ran = true;
         xlat_stats.entries++;
         r->entries++;
@@ -441,7 +454,9 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
             xlat_stats.exits[rt->exit_kind]++;
             r->exits[rt->exit_kind]++;
         }
-        if (rt->budget <= 0 || *rt->intr)
+        /* STOP: XRIP must run the next instruction. SIDE (left after an
+         * interpreted access): never re-enter at once without progress. */
+        if (rt->budget <= 0 || *rt->intr || rt->exit_kind == XLAT_EXIT_STOP)
             break;
     }
     if (ran && start > rt->budget)
@@ -508,13 +523,14 @@ void xlat_log_write(uint16_t psp, const char *name)
     log_printf("== exit PSP %04X %s ==\r\n", psp, name);
     log_region_counts();
     log_printf("S translations=%lu rejects=%lu entries=%lu invalid=%lu flushes=%lu "
-               "exit b/bu/s=%lu/%lu/%lu native=%lu code=%lu stack_skips=%lu lost=%lu\r\n",
+               "exit b/bu/s/st=%lu/%lu/%lu/%lu native=%lu code=%lu stack_skips=%lu interp=%lu side=%lu lost=%lu\r\n",
                (unsigned long)xlat_stats.translations, (unsigned long)xlat_stats.rejects,
                (unsigned long)xlat_stats.entries, (unsigned long)xlat_stats.invalidations,
                (unsigned long)xlat_stats.flushes, (unsigned long)xlat_stats.exits[0],
                (unsigned long)xlat_stats.exits[1], (unsigned long)xlat_stats.exits[2],
-               (unsigned long)xlat_stats.guest_insns, (unsigned long)xlat_stats.code_bytes,
-               (unsigned long)xlat_stats.stack_skips, (unsigned long)st->log_lost);
+               (unsigned long)xlat_stats.exits[3], (unsigned long)xlat_stats.guest_insns, (unsigned long)xlat_stats.code_bytes,
+               (unsigned long)xlat_stats.stack_skips, (unsigned long)xlat_stats.interp,
+               (unsigned long)xlat_stats.side_interp, (unsigned long)st->log_lost);
     if (state == 0)
         state = f_open(&lf, SD_DATA_DIR_SLASH "xlat.log",
                        FA_WRITE | FA_OPEN_APPEND | FA_OPEN_ALWAYS) == FR_OK ? 1 : 2;
@@ -527,3 +543,15 @@ void xlat_log_write(uint16_t psp, const char *name)
     st->log_lost = 0;
 }
 #endif
+
+/* Called through xlat_interp_one() after an instruction that may have
+ * written memory: the running region must still match its x86 bytes. */
+bool XLAT_HOT_FN(xlat_region_still_valid)(const xlat_rt_t *rt)
+{
+    region_t *r = cur_region;
+    if (!r || region_valid(r, rt))
+        return true;
+    r->live = 0;
+    xlat_stats.invalidations++;
+    return false;
+}

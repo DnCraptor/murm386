@@ -81,7 +81,8 @@ enum {
     XLAT_EXIT_BRANCH = 0,   /* control left the region (target not translated) */
     XLAT_EXIT_BUDGET = 1,   /* burst budget used up or IRQ pending, at a back edge */
     XLAT_EXIT_SIDE = 2,     /* memory operand outside fast memory, or a write to the region's code */
-    XLAT_EXIT_COUNT = 3
+    XLAT_EXIT_STOP = 3,     /* after an interpreted instruction the state needs XRIP (mode, CS, IRQ...) */
+    XLAT_EXIT_COUNT = 4
 };
 
 typedef struct xlat_stats {
@@ -95,6 +96,8 @@ typedef struct xlat_stats {
     uint32_t code_bytes;        /* current code-cache use */
     uint32_t alloc_failed;      /* no PSRAM span for the cache: translator off */
     uint32_t stack_skips;       /* translations postponed: core-0 stack too low */
+    uint32_t interp;            /* instructions run by XRIP from inside a region */
+    uint32_t side_interp;       /* of those: accesses outside fast memory or onto the code */
 } xlat_stats_t;
 
 extern xlat_stats_t xlat_stats;
@@ -121,6 +124,24 @@ void xlat_release(void);
 /* XLAT_LOG builds: append the collected regions and counters to
  * SD_DATA_DIR/xlat.log. Only at a safe point (a DOS program has ended). */
 void xlat_log_write(uint16_t psp, const char *name);
+
+/* Provided by the CPU adapter (and by tools/xlat_test): execute the one
+ * instruction at rt->cs:rt->ip with the interpreter, rt->gpr and the lazy
+ * flags in rt being the current state, and update rt (IP, flags, FLAGS image,
+ * segment bases, IRQ pointer). flags bit 0: the instruction may write
+ * memory, recheck the region's code; bit 2: statistics only (a side access).
+ * Returns nonzero if translated code may go on; 0 if XRIP must take over
+ * (mode, CS, TF, IRQ, HLT, stack low, or the region's code changed). */
+uint32_t xlat_interp_one(xlat_rt_t *rt, uint32_t flags);
+
+/* For xlat_interp_one(): the x86 bytes of the running region are unchanged
+ * (if not, the region is dropped). */
+bool xlat_region_still_valid(const xlat_rt_t *rt);
+
+/* Native stack left (bytes) and the margin needed before translating or
+ * interpreting from translated code. */
+uint32_t xlat_stack_free(void);
+#define XLAT_STACK_NEEDED 1024u
 
 /* Helper called by generated code: x86 condition code cc on the lazy flags. */
 uint32_t xlat_rt_cond(const xlat_rt_t *rt, uint32_t cc);

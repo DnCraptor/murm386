@@ -134,6 +134,64 @@ void xrip_reset_cpu(CPU *cpu)
 
 static uint8_t xlat_no_irq;   /* stays 0; RAM, read by generated code */
 static xlat_rt_t xlat_state;
+/* xlat_state is in use: a native handler run by an interpreted instruction
+ * may run nested bursts; those stay in XRIP. */
+static bool xlat_busy;
+
+/* Translated execution needs real mode with 16-bit code and stack, no trap,
+ * no HLT, no IRQ shadow, no pending IRQ with IF set, direct fast memory. */
+static __time_critical_func() bool xlat_state_ok(const CPU *cpu)
+{
+    return !(protected_mode || (cr0 & CR0_PE) || code32 || stack32 || !fast_memory_size || tf ||
+             halted || pending_trap || cpu->i286_irq_shadow || cpu->native_done ||
+             XRIP_IP > 0xffffu || (cpu->intr && ifl));
+}
+
+/* Called by translated code (xlat.h): XRIP executes the one instruction at
+ * rt->ip. The registers are in cpu->gprx already; the lazy flags come from
+ * and go back to rt. */
+uint32_t __time_critical_func(xlat_interp_one)(xlat_rt_t *rt, uint32_t flags)
+{
+    CPU *const cpu = active_cpu;
+    if (xlat_stack_free() < XLAT_STACK_NEEDED)
+        return 0;   /* XRIP runs it after the exit, from a shallower stack */
+    xlat_stats.interp++;
+    if (flags & 4u)
+        xlat_stats.side_interp++;
+    XRIP_IP = rt->ip;
+    flags_result = rt->lazy_result;
+    flags_dst = rt->lazy_dst;
+    flags_src = rt->lazy_src;
+    flags_op = rt->lazy_op;
+    flags_cf = rt->lazy_cf;
+
+    void *context[5];
+    void **const outer_fault_point = fault_point;
+    fault_point = context;
+    if (__builtin_setjmp(context))
+        deliver_fault();
+    else
+        run_instructions(1);
+    fault_point = outer_fault_point;
+
+    rt->ip = XRIP_IP;
+    rt->lazy_result = flags_result;
+    rt->lazy_dst = flags_dst;
+    rt->lazy_src = flags_src;
+    rt->lazy_op = flags_op;
+    rt->lazy_cf = flags_cf;
+    rt->eflags = x86_flags.value;
+    rt->seg_base[0] = segment_base[reges];
+    rt->seg_base[2] = segment_base[regss];
+    rt->seg_base[3] = segment_base[regds];
+    rt->intr = ifl ? (const volatile uint8_t *)&cpu->intr : &xlat_no_irq;
+    if (segregs[regcs] != rt->cs || segment_base[regcs] != rt->seg_base[1] ||
+        fast_memory_size != rt->mem_size || !xlat_state_ok(cpu))
+        return 0;
+    if ((flags & 1u) && !xlat_region_still_valid(rt))
+        return 0;
+    return 1;
+}
 
 /* Translated code is entered only here, at the start of a burst: one lookup
  * per burst, nothing in run_instructions(). Returns the guest instructions
@@ -142,9 +200,7 @@ static xlat_rt_t xlat_state;
  * nested bursts are included; xlat_run() checks the stack before translating. */
 static __time_critical_func() uint32_t xlat_enter(CPU *cpu, uint32_t count)
 {
-    if (protected_mode || (cr0 & CR0_PE) || code32 || !fast_memory_size || tf || halted ||
-        pending_trap || cpu->i286_irq_shadow || cpu->native_done || XRIP_IP > 0xffffu ||
-        (cpu->intr && ifl))
+    if (xlat_busy || !xlat_state_ok(cpu))
         return 0;
     xlat_rt_t *const rt = &xlat_state;
     rt->mem = fast_memory;
@@ -165,9 +221,14 @@ static __time_critical_func() uint32_t xlat_enter(CPU *cpu, uint32_t count)
     rt->eflags = x86_flags.value;
     rt->cs = segregs[regcs];
     rt->ip = XRIP_IP;
-    if (!xlat_run(rt))
+    xlat_busy = true;
+    const bool ran = xlat_run(rt);
+    xlat_busy = false;
+    if (!ran)
         return 0;
-    XRIP_IP = rt->ip & 0xffffu;
+    /* x86_flags, segment registers and CS:IP changed by interpreted
+     * instructions are XRIP's own state already. */
+    XRIP_IP = rt->ip;
     flags_result = rt->lazy_result;
     flags_dst = rt->lazy_dst;
     flags_src = rt->lazy_src;

@@ -32,6 +32,8 @@
 #define XLAT_HOT_SLOTS       64              /* power of two */
 #define XLAT_HOT_THRESHOLD   2               /* burst-start samples before translating */
 #define XLAT_ENTRY_COST      8               /* budget charged per region entry */
+#define XLAT_INTERP_RATIO    8               /* at most 1/8 of a region interpreted */
+#define XLAT_SPAN_WINDOW     2048u           /* region code within +-1 KiB of the entry */
 
 /* ---------------------------------------------------------------------- */
 /* Thumb-2 emitter (arm_emit.c)                                           */
@@ -91,11 +93,16 @@ bool arm_patch_branch(arm_emit_t *e, uint32_t at, uint32_t target, int cond);
 /* ---------------------------------------------------------------------- */
 
 enum { XO_ALU = 1, XO_INCDEC, XO_MOV, XO_LEA, XO_XCHG, XO_NOP, XO_JCC, XO_JMP, XO_LOOP,
-       XO_JCXZ };
+       XO_JCXZ, XO_PUSH, XO_POP, XO_CALL, XO_RET, XO_INTERP };
+
+/* XO_INTERP flags (in sub): the interpreter runs the instruction. */
+#define XI_MAY_WRITE 1u   /* may write memory: recheck the region's code after it */
+#define XI_NO_FALL   2u   /* never continues at the next instruction */
+#define XI_SIDE      4u   /* helper flag: an access the region could not do (statistics) */
 
 /* ALU operations, numbered as the x86 /reg field of 80-83; TEST is extra. */
-enum { ALU_ADD = 0, ALU_OR = 1, ALU_AND = 4, ALU_SUB = 5, ALU_XOR = 6, ALU_CMP = 7,
-       ALU_TEST = 8 };
+enum { ALU_ADD = 0, ALU_OR = 1, ALU_ADC = 2, ALU_SBB = 3, ALU_AND = 4, ALU_SUB = 5,
+       ALU_XOR = 6, ALU_CMP = 7, ALU_TEST = 8 };
 
 /* Flag kinds as XRIP's lazy flags_op kind. */
 enum { FK_NONE = 0, FK_ADD = 1, FK_SUB = 2, FK_LOGIC = 3 };
@@ -124,10 +131,23 @@ typedef struct x86_insn {
 
 /* Decode one instruction from code[0..15]. False: not in the supported subset. */
 bool x86_decode(const uint8_t *code, uint16_t ip, x86_insn_t *out);
+/* Any other instruction whose length is known: an XO_INTERP placeholder. */
+bool x86_decode_interp(const uint8_t *code, uint16_t ip, x86_insn_t *out);
 
 static inline bool x86_has_mem(const x86_insn_t *in)
 {
     return in->a.kind == OPD_MEM || in->b.kind == OPD_MEM;
+}
+
+static inline bool x86_is_stack_op(const x86_insn_t *in)
+{
+    return in->op == XO_PUSH || in->op == XO_POP || in->op == XO_CALL || in->op == XO_RET;
+}
+
+/* Reads or writes guest memory (so it may leave by a side exit). */
+static inline bool x86_accesses_mem(const x86_insn_t *in)
+{
+    return (x86_has_mem(in) && in->op != XO_LEA) || x86_is_stack_op(in);
 }
 
 static inline int x86_flag_kind(const x86_insn_t *in)
@@ -137,10 +157,16 @@ static inline int x86_flag_kind(const x86_insn_t *in)
     if (in->op != XO_ALU)
         return FK_NONE;
     switch (in->sub) {
-    case ALU_ADD: return FK_ADD;
-    case ALU_SUB: case ALU_CMP: return FK_SUB;
+    case ALU_ADD: case ALU_ADC: return FK_ADD;
+    case ALU_SUB: case ALU_SBB: case ALU_CMP: return FK_SUB;
     default: return FK_LOGIC;
     }
+}
+
+/* ADC/SBB: read CF and always store their flags (XRIP resolves them). */
+static inline bool x86_is_carry_op(const x86_insn_t *in)
+{
+    return in->op == XO_ALU && (in->sub == ALU_ADC || in->sub == ALU_SBB);
 }
 
 /* ---------------------------------------------------------------------- */
