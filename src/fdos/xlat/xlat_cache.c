@@ -36,11 +36,10 @@ typedef struct {
     uint16_t n_runs;
     uint16_t ip;           /* the entry point it was built from */
     uint8_t held;          /* the slot holds a chunk (live, cold or invalidated) */
-    uint32_t last;         /* st->seq at the last entry (take_slot) */
     uint8_t live;
     uint8_t cold;          /* dropped: too little runs per entry (see xlat_run) */
-    uint8_t fn;            /* a function region (no loop, built at a hot CALL target):
-                              the fewest native instructions an entry runs */
+    uint8_t fn;            /* a region without a loop (trace): the fewest native
+                              instructions an entry runs (charged on entry) */
     uint32_t entries;
     uint32_t insns;        /* instructions charged at its back edges */
     uint32_t us;           /* time inside it (rt->clock), entries included */
@@ -78,12 +77,16 @@ typedef struct {
 typedef struct {
     xlat_arena_t arena;
     region_t region[XLAT_MAX_REGIONS];
-    uint32_t seq;           /* region entries so far (region_t.last) */
+    uint32_t last[XLAT_MAX_REGIONS];  /* st->seq at each region's last entry (take_slot);
+                                         written by the dispatcher too (rt->last) */
+    xlat_link_t link[XLAT_LINK_SLOTS];  /* entries the dispatcher may make (rt->link) */
+    uint32_t seq;           /* xlat_run() region entries so far */
     uint32_t ring_lo;       /* first byte after the trampoline */
     uint32_t head;          /* where the next chunk goes */
     uint32_t epoch;         /* changes whenever x86 code may have been written */
     entry_t entry[XLAT_ENTRY_SLOTS];
-    hot_t hot[XLAT_HOT_SLOTS];
+    hot_t hot[XLAT_HOT_SLOTS];       /* burst-start samples */
+    hot_t exit_hot[XLAT_HOT_SLOTS];  /* untranslated region exit targets */
     xlat_region_out_t out;  /* translator output, kept here to spare the stack */
     void *ctx;              /* translator working memory */
 #if XLAT_LOG
@@ -167,8 +170,8 @@ uint32_t xlat_stack_free(void)
     return stack_free();
 }
 
-/* The region running now (for xlat_region_still_valid). */
-static region_t *cur_region;
+/* rt->cur when no region runs */
+#define NO_REGION UINT32_MAX
 
 void xlat_sync_code(void *start, uint32_t len)
 {
@@ -350,7 +353,11 @@ static void reset_tables(void)
 {
     log_region_counts();    /* the regions are about to go */
     memset(st->region, 0, sizeof(st->region));
+    memset(st->last, 0, sizeof(st->last));
+    for (unsigned k = 0; k < XLAT_LINK_SLOTS; ++k)
+        st->link[k].key = UINT32_MAX;
     memset(st->entry, 0, sizeof(st->entry));
+    memset(st->exit_hot, 0, sizeof(st->exit_hot));
     for (int k = 0; k < XLAT_HOT_SLOTS; ++k)
         st->hot[k].reject = 0;
     memset(xlat_entry_map, 0, sizeof(xlat_entry_map));
@@ -505,6 +512,14 @@ static bool covered(const xlat_rt_t *rt)
     return false;
 }
 
+/* The dispatcher no longer enters region k (dropped, cold or evicted). */
+static void unlink_region(int k)
+{
+    for (unsigned j = 0; j < XLAT_LINK_SLOTS; ++j)
+        if (st->link[j].region == k)
+            st->link[j].key = UINT32_MAX;   /* no IP is 0xffff with CS 0xffff here */
+}
+
 /* Drop region k: its entries go (the chunk is reused when the head comes
  * to it). The maps are rebuilt by the caller (rebuild_maps). */
 static void evict(int k)
@@ -512,6 +527,7 @@ static void evict(int k)
     region_t *r = &st->region[k];
     if (log_dump_room())
         log_region_count(r);
+    unlink_region(k);
     for (int j = 0; j < XLAT_ENTRY_SLOTS; ++j) {
         entry_t *e = &st->entry[j];
         if (e->used >= E_LIVE && e->region == k)
@@ -590,7 +606,7 @@ static int take_slot(bool *evicted)
         const region_t *r = &st->region[k];
         if (!r->held)
             return k;
-        const uint32_t age = st->seq - r->last;
+        const uint32_t age = st->seq - st->last[k];
         const uint32_t d = !r->live && !r->cold ? 0u : UINT32_MAX - age;
         if (d < best_d) {
             best_d = d;
@@ -602,7 +618,7 @@ static int take_slot(bool *evicted)
     return best;
 }
 
-static bool translate_here(const xlat_rt_t *rt)
+static bool translate_here(const xlat_rt_t *rt, int trace_min)
 {
     xlat_region_out_t *out = &st->out;
     xlat_arena_t *const a = &st->arena;
@@ -626,7 +642,7 @@ static bool translate_here(const xlat_rt_t *rt)
             evicted |= evict_range(st->head, hi);
         a->code_top = st->head;
         a->data_bottom = window_end();
-        if (xlat_translate(a, rt, (uint16_t)rt->ip, out, &full, st->ctx))
+        if (xlat_translate(a, rt, (uint16_t)rt->ip, trace_min, out, &full, st->ctx))
             goto built;
         if (!full)
             break;
@@ -645,7 +661,7 @@ built:;
     r->span = out->span;
     r->n_runs = out->n_runs;
     r->fn = out->fn;
-    r->last = st->seq;      /* new: as if entered now */
+    st->last[idx] = st->seq;    /* new: as if entered now */
     xlat_stats.fn_regions += out->fn != 0;
     /* the copies follow the code (xlat_translate keeps code_top + data
      * below data_bottom) */
@@ -721,12 +737,47 @@ static __attribute__((noinline)) bool sample(const xlat_rt_t *rt)
     /* Inside an existing region but not at one of its entries: the region is
      * entered at its loop head once a burst ends there. */
     const bool inside = covered(rt);
-    if (inside || !translate_here(rt)) {
+    if (inside || !translate_here(rt, fn ? XLAT_TRACE_MIN : 0)) {
         h->reject = 1;
         xlat_stats.rejects++;
         note_reject(rt, key, inside ? XLAT_RJ_COVERED : st->out.reject);
         return false;
     }
+    return true;
+}
+
+/* Called when a region left (BRANCH) for rt->cs:ip and no translation is
+ * there. A target reached so XLAT_EXIT_HOT times in a row (same slot) is
+ * translated, without a loop too (XLAT_LINK_MIN): the exits to it then go on
+ * there through the link table instead of returning to XRIP. Unlike a burst
+ * start it may lie inside another region's code (a return site, a branch
+ * target in the middle): the code is translated again from there. */
+static __attribute__((noinline)) bool sample_exit(const xlat_rt_t *rt)
+{
+    if (!XLAT_TRACES)
+        return false;
+    const uint32_t key = (uint32_t)rt->cs << 16 | (rt->ip & 0xffffu);
+    hot_t *h = &st->exit_hot[hash32(key) >> (32 - 6)];
+    if (h->key != key) {
+        h->key = key;
+        h->count = 1;
+        h->reject = 0;
+        return false;
+    }
+    if (h->reject || ++h->count < XLAT_EXIT_HOT)
+        return false;
+    h->count = 0;
+    if (stack_free() < XLAT_STACK_NEEDED) {
+        xlat_stats.stack_skips++;
+        return false;
+    }
+    if (!translate_here(rt, XLAT_LINK_MIN)) {
+        h->reject = 1;
+        xlat_stats.rejects++;
+        note_reject(rt, key, st->out.reject);
+        return false;
+    }
+    xlat_stats.exit_built++;
     return true;
 }
 
@@ -753,6 +804,10 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
         st->epoch++;
     }
     const xlat_tramp_fn tramp = (xlat_tramp_fn)(uintptr_t)(st->arena.base + 1);
+    rt->link = st->link;
+    rt->last = st->last;
+    rt->cur = NO_REGION;
+    rt->links = 0;
     bool ran = false, built = false;
     for (;;) {
         const uint32_t key = (uint32_t)rt->cs << 16 | (rt->ip & 0xffffu);
@@ -760,7 +815,9 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
         if (!e || !st->region[e->region].live) {
             if (e && st->region[e->region].cold)
                 break;      /* XRIP runs it: entering costs more than it saves */
-            if (ran || built || !sample(rt))
+            /* one translation per call: at the burst start, or where a
+             * region left for code without a region */
+            if (built || !(ran ? rt->exit_kind == XLAT_EXIT_BRANCH && sample_exit(rt) : sample(rt)))
                 break;
             built = true;
             continue;
@@ -771,26 +828,38 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
              * cannot write into translated x86 code (xlat_code_map). */
             if (!region_valid(r, rt)) {
                 r->live = 0;
+                unlink_region(e->region);
                 xlat_stats.invalidations++;
                 break;
             }
             r->epoch = st->epoch;
         }
-        rt->budget -= XLAT_ENTRY_COST;
+        /* A region without a loop has no back edge charging the budget:
+         * at least r->fn instructions run. */
+        const uint32_t charge = XLAT_ENTRY_COST + r->fn;
+        const uint32_t code = (uint32_t)(uintptr_t)(st->arena.base + e->code_off) | 1u;
+        /* the exits that reach this entry from now on go on here at once */
+        xlat_link_t *l = &st->link[xlat_link_hash(key)];
+        l->key = key;
+        l->code = code;
+        l->epoch = st->epoch;
+        l->charge = (uint16_t)charge;
+        l->region = e->region;
+        rt->epoch = st->epoch;
+        rt->budget -= (int32_t)charge;
         const int32_t b0 = rt->budget, x0 = (int32_t)rt->extra;
         const uint32_t t0 = *rt->clock;
-        cur_region = r;
-        r->last = ++st->seq;
-        tramp(rt, (uint32_t)(uintptr_t)(st->arena.base + e->code_off) | 1u);
-        cur_region = NULL;
-        /* A region without a loop has no back edge charging the budget:
-         * at least r->fn instructions ran. */
-        rt->budget -= r->fn;
+        rt->cur = e->region;
+        st->last[e->region] = rt->seq = ++st->seq;
+        tramp(rt, code);
+        /* the region it left from (entered through the link table, maybe) */
+        region_t *const x = &st->region[rt->cur];
+        rt->cur = NO_REGION;
         r->us += *rt->clock - t0;
         ran = true;
         xlat_stats.entries++;
         r->entries++;
-        r->insns += (uint32_t)((b0 - rt->budget) + ((int32_t)rt->extra - x0));
+        r->insns += (uint32_t)((b0 - rt->budget) + ((int32_t)rt->extra - x0)) + r->fn;
         /* A region left before its loops run (a loop body that calls or
          * jumps out every time) costs an entry and an exit per pass: after
          * XLAT_COLD_ENTRIES entries with fewer than XLAT_COLD_INSNS loop
@@ -799,11 +868,12 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
         if (r->entries == XLAT_COLD_ENTRIES && r->insns < XLAT_COLD_ENTRIES * XLAT_COLD_INSNS) {
             r->live = 0;
             r->cold = 1;
+            unlink_region(e->region);
             xlat_stats.cold++;
         }
         if (rt->exit_kind < XLAT_EXIT_COUNT) {
             xlat_stats.exits[rt->exit_kind]++;
-            r->exits[rt->exit_kind]++;
+            x->exits[rt->exit_kind]++;
         }
         /* STOP: XRIP must run the next instruction. */
         if (*rt->intr || rt->exit_kind == XLAT_EXIT_STOP)
@@ -819,6 +889,8 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
     }
     if (ran)
         xlat_stats.guest_insns += (uint32_t)(start + (int32_t)rt->extra - rt->budget);
+    xlat_stats.links += rt->links;
+    xlat_stats.entries += rt->links;
     return ran;
 }
 
@@ -1080,7 +1152,7 @@ void xlat_log_write(uint16_t psp, const char *name)
     log_region_counts();
     log_rejects();
     log_printf("S translations=%lu rejects=%lu entries=%lu invalid=%lu flushes=%lu evict=%lu "
-               "exit b/bu/s/st=%lu/%lu/%lu/%lu native=%lu code=%lu stack_skips=%lu interp=%lu side=%lu cuts=%lu/%lu cold=%lu fn=%lu lost=%lu skipped=%lu\r\n",
+               "exit b/bu/s/st=%lu/%lu/%lu/%lu native=%lu code=%lu stack_skips=%lu interp=%lu side=%lu cuts=%lu/%lu cold=%lu fn=%lu xb=%lu links=%lu lost=%lu skipped=%lu\r\n",
                (unsigned long)xlat_stats.translations, (unsigned long)xlat_stats.rejects,
                (unsigned long)xlat_stats.entries, (unsigned long)xlat_stats.invalidations,
                (unsigned long)xlat_stats.flushes, (unsigned long)xlat_stats.evictions,
@@ -1090,7 +1162,8 @@ void xlat_log_write(uint16_t psp, const char *name)
                (unsigned long)xlat_stats.stack_skips, (unsigned long)xlat_stats.interp,
                (unsigned long)xlat_stats.side_interp, (unsigned long)xlat_stats.cut_entries,
                (unsigned long)xlat_stats.cuts, (unsigned long)xlat_stats.cold,
-               (unsigned long)xlat_stats.fn_regions, (unsigned long)st->log_lost,
+               (unsigned long)xlat_stats.fn_regions, (unsigned long)xlat_stats.exit_built,
+               (unsigned long)xlat_stats.links, (unsigned long)st->log_lost,
                (unsigned long)st->log_skipped);
     /* CPU bursts: averages and histograms (xlat_stats_t), XRIP only / with
      * translated code; device service after the bursts. XLAT_SLICE_US is
@@ -1151,16 +1224,19 @@ void xlat_note_service(uint32_t us)
 
 /* Called through xlat_interp_one() after an instruction that may have
  * written memory: the running region must still match its x86 bytes. */
-bool XLAT_HOT_FN(xlat_region_still_valid)(const xlat_rt_t *rt)
+bool XLAT_HOT_FN(xlat_region_still_valid)(xlat_rt_t *rt)
 {
-    region_t *r = cur_region;
-    st->epoch++;            /* the other regions are compared at their next entry */
+    region_t *r = rt->cur < XLAT_MAX_REGIONS ? &st->region[rt->cur] : NULL;
+    /* the other regions are compared at their next entry (through
+     * xlat_run(): the link table entries are for the old epoch) */
+    rt->epoch = ++st->epoch;
     if (!r || region_valid(r, rt)) {
         if (r)
             r->epoch = st->epoch;
         return true;
     }
     r->live = 0;
+    unlink_region((int)rt->cur);
     xlat_stats.invalidations++;
     return false;
 }

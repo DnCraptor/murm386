@@ -92,9 +92,9 @@ typedef struct {
     int n_fix;
     bool overflow;
     arm_emit_t e;
-    uint32_t epilogue, interp_thunk;
-    uint8_t fn_ok;                 /* entry at rt->fn_entry: a region without a loop may do */
-    uint8_t fn;                    /* built so: min_native_path (>= XLAT_TRACE_MIN), else 0 */
+    uint32_t epilogue, interp_thunk, dispatch;
+    uint8_t trace_min;             /* a region without a loop may do (xlat_translate) */
+    uint8_t fn;                    /* built so: min_native_path (>= trace_min), else 0 */
     int n_interp;
 } tctx_t;
 
@@ -375,9 +375,9 @@ static int discover(tctx_t *c, uint16_t start)
         return XLAT_RJ_INTERP;
     if (has_cycle(c, first))
         return XLAT_RJ_NONE;
-    if (c->fn_ok) {
+    if (c->trace_min) {
         const int len = min_native_path(c, first);
-        if (len >= XLAT_TRACE_MIN) {
+        if (len >= c->trace_min) {
             c->fn = (uint8_t)(len < 255 ? len : 255);
             return XLAT_RJ_NONE;
         }
@@ -2209,8 +2209,11 @@ static void emit_stubs(tctx_t *c)
                 }
                 arm_mov32(e, A_R12, s->exit_kind);
                 arm_ls_imm(e, LS_STR, A_R12, A_R11, XLAT_RT_EXIT_KIND);
+                /* a BRANCH exit goes on in the region at its target, if any
+                 * (the dispatcher leaves through the epilogue otherwise) */
                 const uint32_t site = arm_branch_slot(e);
-                if (!arm_patch_branch(e, site, c->epilogue, C_AL))
+                if (!arm_patch_branch(e, site, s->exit_kind == XLAT_EXIT_BRANCH ? c->dispatch
+                                                                               : c->epilogue, C_AL))
                     c->overflow = true;
             }
         }
@@ -2239,6 +2242,53 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     GPR_LIST(STORE)
 #undef STORE
     arm_pop(&e, 0x8ff8u);                      /* r3-r11, pc */
+
+    /* Dispatcher, reached by B from a BRANCH exit stub: rt->ip and
+     * exit_kind stored, the lazy flags in rt, the GPRs still in r4-r10 (as
+     * at a region entry). The region at rt->cs:ip is entered at once when
+     * the link table has it for the current epoch, no IRQ is pending and
+     * the budget covers the entry; else the epilogue returns to xlat_run(),
+     * which decides (and fills the entry). r0-r3, r12 are free here. */
+    a->dispatch = e.pos;
+    arm_ls_imm(&e, LS_LDR, A_R0, A_R11, XLAT_RT_INTR);
+    arm_ls_imm(&e, LS_LDRB, A_R0, A_R0, 0);
+    arm_dp_imm(&e, DP_SUB, 1, A_PC, A_R0, 0);                 /* CMP r0, #0 */
+    const uint32_t miss1 = arm_branch_slot(&e);
+    arm_ls_imm(&e, LS_LDRH, A_R1, A_R11, XLAT_RT_CS);
+    arm_ls_imm(&e, LS_LDRH, A_R2, A_R11, XLAT_RT_IP);         /* ip & 0xffff */
+    arm_dp_reg(&e, DP_ORR, 0, A_R1, A_R2, A_R1, SH_LSL, 16);  /* key */
+    arm_dp_reg(&e, DP_EOR, 0, A_R2, A_R1, A_R1, SH_LSR, 7);   /* xlat_link_hash */
+    arm_dp_reg(&e, DP_EOR, 0, A_R2, A_R2, A_R1, SH_LSR, 16);
+    arm_dp_imm(&e, DP_AND, 0, A_R2, A_R2, XLAT_LINK_SLOTS - 1u);
+    arm_ls_imm(&e, LS_LDR, A_R3, A_R11, XLAT_RT_LINK);
+    arm_dp_reg(&e, DP_ADD, 0, A_R3, A_R3, A_R2, SH_LSL, 4);
+    arm_ls_imm(&e, LS_LDR, A_R0, A_R3, 0);
+    arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R0, A_R1, SH_LSL, 0);   /* CMP key */
+    const uint32_t miss2 = arm_branch_slot(&e);
+    arm_ls_imm(&e, LS_LDR, A_R0, A_R3, 8);
+    arm_ls_imm(&e, LS_LDR, A_R2, A_R11, XLAT_RT_EPOCH);
+    arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R0, A_R2, SH_LSL, 0);   /* CMP epoch */
+    const uint32_t miss3 = arm_branch_slot(&e);
+    arm_ls_imm(&e, LS_LDR, A_R0, A_R11, XLAT_RT_BUDGET);
+    arm_ls_imm(&e, LS_LDRH, A_R2, A_R3, 12);
+    arm_dp_reg(&e, DP_SUB, 1, A_R0, A_R0, A_R2, SH_LSL, 0);   /* SUBS budget, charge */
+    const uint32_t miss4 = arm_branch_slot(&e);
+    arm_ls_imm(&e, LS_STR, A_R0, A_R11, XLAT_RT_BUDGET);
+    arm_ls_imm(&e, LS_LDRB, A_R2, A_R3, 14);
+    arm_ls_imm(&e, LS_STR, A_R2, A_R11, XLAT_RT_CUR);
+    arm_ls_imm(&e, LS_LDR, A_R0, A_R11, XLAT_RT_LAST);
+    arm_dp_reg(&e, DP_ADD, 0, A_R0, A_R0, A_R2, SH_LSL, 2);
+    arm_ls_imm(&e, LS_LDR, A_R1, A_R11, XLAT_RT_SEQ);
+    arm_ls_imm(&e, LS_STR, A_R1, A_R0, 0);                    /* last[region] = seq */
+    arm_ls_imm(&e, LS_LDR, A_R0, A_R11, XLAT_RT_LINKS);
+    arm_dp_imm(&e, DP_ADD, 0, A_R0, A_R0, 1);
+    arm_ls_imm(&e, LS_STR, A_R0, A_R11, XLAT_RT_LINKS);
+    arm_ls_imm(&e, LS_LDR, A_R0, A_R3, 4);
+    arm_bx(&e, A_R0);
+    if (e.full ||
+        !arm_patch_branch(&e, miss1, a->epilogue, C_NE) || !arm_patch_branch(&e, miss2, a->epilogue, C_NE) ||
+        !arm_patch_branch(&e, miss3, a->epilogue, C_NE) || !arm_patch_branch(&e, miss4, a->epilogue, C_LE))
+        return false;
 
     /* Interpreter call, reached by BL from region code (emit_interp_call):
      * r12 = IP of the instruction, r1 = XI_* flags, r2 = IP it falls
@@ -2293,7 +2343,7 @@ size_t xlat_translate_ctx_size(void)
     return sizeof(tctx_t);
 }
 
-bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip,
+bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int trace_min,
                     xlat_region_out_t *out, bool *full, void *ctx_mem)
 {
     *full = false;
@@ -2305,9 +2355,10 @@ bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip,
     c->overflow = false;
     c->epilogue = a->epilogue;
     c->interp_thunk = a->interp_thunk;
+    c->dispatch = a->dispatch;
     c->n_interp = 0;
     out->reject = XLAT_RJ_NONE;
-    c->fn_ok = rt->fn_entry == c->cs_base + ip;
+    c->trace_min = (uint8_t)(trace_min > 0 ? (trace_min < 255 ? trace_min : 255) : 0);
     c->fn = 0;
 
     const int why = discover(c, ip);

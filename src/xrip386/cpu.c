@@ -378,8 +378,14 @@ static __time_critical_func() INLINE void xlat_call_seen(void) {
     }
 }
 #define XLAT_CALL_SEEN() xlat_call_seen()
+/* After a near RET: a return site with a region (a trace built at a hot
+ * region exit, xlat_run) ends the burst there, as a taken branch does. */
+#define XLAT_RET_SEEN() do { \
+        if (xlat_armed && xlat_map_test(segment_base[regcs] + xrip_ip)) xlat_cut = true; \
+    } while (0)
 #else
 #define XLAT_CALL_SEEN() ((void)0)
+#define XLAT_RET_SEEN() ((void)0)
 #endif
 
 // Near relative jump; with a 16-bit operand size EIP wraps at 64K.
@@ -2551,10 +2557,12 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 oper1 = getmem16(CS_BASE, XRIP_IP);
                 XRIP_IP = pop();
                 stack_add(oper1);
+                XLAT_RET_SEEN();
                 break;
 
             case 0xC3: /* C3 RET */
                 XRIP_IP = pop();
+                XLAT_RET_SEEN();
                 break;
 
             case 0xC4: /* C4 LES Gv Mp */

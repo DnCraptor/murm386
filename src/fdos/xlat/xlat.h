@@ -47,6 +47,16 @@ typedef struct xlat_rt {
     const uint8_t *code_map;       /* xlat_code_map (set by xlat_run) */
     uint32_t fn_entry;             /* linear address of a hot CALL target XRIP stopped at
                                       (xlat_call_hot), else ~0 */
+    /* Set by xlat_run() (the caller need not): the link table the region
+     * exits look the next region up in (xlat_emit_trampoline), the epoch
+     * its entries must carry, the stamp written to last[region] on a linked
+     * entry, the running region (index) and the linked entries made. */
+    const void *link;
+    uint32_t epoch;
+    uint32_t seq;
+    uint32_t *last;
+    uint32_t cur;
+    uint32_t links;
 } xlat_rt_t;
 
 #define XLAT_RT_MEM          0
@@ -68,6 +78,12 @@ typedef struct xlat_rt {
 #define XLAT_RT_DEADLINE    68
 #define XLAT_RT_EXTRA       72
 #define XLAT_RT_CODE_MAP    76
+#define XLAT_RT_LINK        84
+#define XLAT_RT_EPOCH       88
+#define XLAT_RT_SEQ         92
+#define XLAT_RT_LAST        96
+#define XLAT_RT_CUR        100
+#define XLAT_RT_LINKS      104
 
 #if UINTPTR_MAX == 0xffffffffu
 _Static_assert(__builtin_offsetof(xlat_rt_t, mem_size) == XLAT_RT_MEM_SIZE &&
@@ -87,7 +103,13 @@ _Static_assert(__builtin_offsetof(xlat_rt_t, mem_size) == XLAT_RT_MEM_SIZE &&
                __builtin_offsetof(xlat_rt_t, clock) == XLAT_RT_CLOCK &&
                __builtin_offsetof(xlat_rt_t, deadline) == XLAT_RT_DEADLINE &&
                __builtin_offsetof(xlat_rt_t, extra) == XLAT_RT_EXTRA &&
-               __builtin_offsetof(xlat_rt_t, code_map) == XLAT_RT_CODE_MAP,
+               __builtin_offsetof(xlat_rt_t, code_map) == XLAT_RT_CODE_MAP &&
+               __builtin_offsetof(xlat_rt_t, link) == XLAT_RT_LINK &&
+               __builtin_offsetof(xlat_rt_t, epoch) == XLAT_RT_EPOCH &&
+               __builtin_offsetof(xlat_rt_t, seq) == XLAT_RT_SEQ &&
+               __builtin_offsetof(xlat_rt_t, last) == XLAT_RT_LAST &&
+               __builtin_offsetof(xlat_rt_t, cur) == XLAT_RT_CUR &&
+               __builtin_offsetof(xlat_rt_t, links) == XLAT_RT_LINKS,
                "xlat_rt_t layout is used by generated code");
 #endif
 
@@ -106,7 +128,9 @@ typedef struct xlat_stats {
     uint32_t invalidations;     /* regions dropped because their x86 bytes changed */
     uint32_t flushes;           /* whole-cache resets */
     uint32_t evictions;         /* regions dropped to make room (ring) */
-    uint32_t fn_regions;        /* regions without a loop built at hot CALL targets */
+    uint32_t fn_regions;        /* regions without a loop (traces, function regions) */
+    uint32_t exit_built;        /* of those: built at a hot region exit target */
+    uint32_t links;             /* region entries through the link table (no C) */
     uint32_t exits[XLAT_EXIT_COUNT];
     uint32_t guest_insns;       /* approximate guest instructions run natively */
     uint32_t code_bytes;        /* current code-cache use */
@@ -182,7 +206,7 @@ uint32_t xlat_interp_one(xlat_rt_t *rt, uint32_t flags);
 
 /* For xlat_interp_one(): the x86 bytes of the running region are unchanged
  * (if not, the region is dropped). */
-bool xlat_region_still_valid(const xlat_rt_t *rt);
+bool xlat_region_still_valid(xlat_rt_t *rt);
 
 /* Native stack left (bytes) and the margin needed before translating or
  * interpreting from translated code. */
@@ -220,9 +244,11 @@ static inline void xlat_note_write(uint32_t linear)
 /* Hot CALL targets (near, far, r/m) seen by XRIP: a target reaching
  * XLAT_CALL_HOT calls in its slot stops the burst there once (the caller
  * sets rt->fn_entry), so a function without a loop can get a region; later
- * calls reach it through xlat_entry_map. Cleared with the cache. */
-#ifndef XLAT_FN_REGIONS
-#define XLAT_FN_REGIONS 0       /* CMake XLAT_FN_REGIONS */
+ * calls reach it through xlat_entry_map, its return sites get regions as hot
+ * region exit targets (xlat_run). Cleared with the cache. XLAT_TRACES: CMake
+ * XLAT_TRACES (regions without a loop, xlat_internal.h). */
+#ifndef XLAT_TRACES
+#define XLAT_TRACES 1
 #endif
 #define XLAT_CALL_SLOTS 128u
 #define XLAT_CALL_HOT   16u
@@ -230,7 +256,7 @@ extern uint32_t xlat_call_key[XLAT_CALL_SLOTS];
 extern uint8_t xlat_call_count[XLAT_CALL_SLOTS];
 static inline bool xlat_call_hot(uint32_t linear)
 {
-    if (!XLAT_FN_REGIONS)
+    if (!XLAT_TRACES)
         return false;
     const uint32_t h = (linear * 0x9e3779b1u) >> 25;
     if (xlat_call_key[h] != linear) {

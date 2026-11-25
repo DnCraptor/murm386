@@ -38,7 +38,11 @@ option(XLAT_LOG "Log translated regions to the SD card" ON)
 # Regions without a loop at hot CALL targets (docs §27). Off: in 10.x each
 # call from XRIP-run code bounced XRIP -> region -> XRIP and cost more than
 # it saved (CheckIt WS halved).
-option(XLAT_FN_REGIONS "Translate hot functions without loops (experiment)" OFF)
+option(XLAT_FN_REGIONS "Translate hot functions without loops (experiment)" ON)
+# Regions without a loop at hot CALL targets and at hot region exit targets
+# (return sites...), linked to the regions that reach them
+# (docs/FDOS-JIT-architecture.md, 28)
+option(XLAT_TRACES "Translate hot code without loops (traces)" ON)
 # Real-time length of a CPU burst with translated code (XRIP: 4096 instructions).
 set(XLAT_SLICE_US 400 CACHE STRING "Translator burst length, microseconds")
 # CPU overclock configuration (252, 378, 504 MHz)
@@ -680,8 +684,10 @@ if(XLAT)
     if(XLAT_ARENA_SRAM)
         target_compile_definitions(${BUILD_NAME} PRIVATE XLAT_ARENA_SRAM=1)
     endif()
-    if(XLAT_FN_REGIONS)
-        target_compile_definitions(${BUILD_NAME} PRIVATE XLAT_FN_REGIONS=1)
+    if(XLAT_TRACES)
+        target_compile_definitions(${BUILD_NAME} PRIVATE XLAT_TRACES=1)
+    else()
+        target_compile_definitions(${BUILD_NAME} PRIVATE XLAT_TRACES=0)
     endif()
 endif()
 

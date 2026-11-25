@@ -30,13 +30,40 @@
 #ifndef XLAT_MAX_REGIONS
 #define XLAT_MAX_REGIONS     64              /* region slots (entry_t.region is 8 bits) */
 #endif
-/* A region without a loop is built only at a hot CALL target (rt->fn_entry)
- * and only when every path from the entry runs at least this many native
- * instructions before it can leave (a REP string instruction counts as
- * XLAT_TRACE_MIN): entering costs about that. */
+/* Regions without a loop (traces, XLAT_TRACES): built at a hot CALL target
+ * (rt->fn_entry) when every path from the entry runs at least XLAT_TRACE_MIN
+ * native instructions before it can leave (a REP string instruction counts
+ * as XLAT_TRACE_MIN): entering from XRIP costs about that. At a region exit
+ * target seen XLAT_EXIT_HOT times XLAT_LINK_MIN do: the exits reach it
+ * through the link table. (A burst start in the middle of straight code is
+ * rarely entered again: loops only there.) */
 #ifndef XLAT_TRACE_MIN
 #define XLAT_TRACE_MIN       8
 #endif
+#ifndef XLAT_LINK_MIN
+#define XLAT_LINK_MIN        4
+#endif
+#ifndef XLAT_EXIT_HOT
+#define XLAT_EXIT_HOT        4               /* region exits to a target before translating there */
+#endif
+/* Link table: a region exit (BRANCH) looks its target up here, in the
+ * trampoline's dispatcher, and goes on without returning to xlat_run().
+ * xlat_run() fills an entry at each region entry it makes. */
+#define XLAT_LINK_BITS       8
+#define XLAT_LINK_SLOTS      (1u << XLAT_LINK_BITS)
+typedef struct xlat_link {
+    uint32_t key;          /* cs << 16 | ip */
+    uint32_t code;         /* entry label address | 1 */
+    uint32_t epoch;        /* rt->epoch it is good for */
+    uint16_t charge;       /* budget charged on entry: XLAT_ENTRY_COST + region fn */
+    uint8_t region;
+    uint8_t pad;
+} xlat_link_t;
+_Static_assert(sizeof(xlat_link_t) == 16, "xlat_link_t is indexed << 4 by generated code");
+static inline uint32_t xlat_link_hash(uint32_t key)
+{
+    return (key ^ (key >> 7) ^ (key >> 16)) & (XLAT_LINK_SLOTS - 1u);
+}
 #ifndef XLAT_RING_WANT
 #define XLAT_RING_WANT       2048u           /* bytes evicted ahead of the ring head when a region does not fit */
 #endif
@@ -348,17 +375,20 @@ typedef struct xlat_arena {
     uint32_t data_bottom;  /* end of the free space: code + source copies stay below */
     uint32_t epilogue;     /* offset of the common exit sequence */
     uint32_t interp_thunk; /* offset of the common xlat_interp_one() call */
+    uint32_t dispatch;     /* offset of the link-table dispatcher (BRANCH exits) */
 } xlat_arena_t;
 
 /* Build the trampoline (entry/exit sequences) at the start of the arena. */
 bool xlat_emit_trampoline(xlat_arena_t *arena);
 
 /* Translate the region reachable from cs:ip. Code is appended to the arena.
+ * trace_min: a region without a loop is built when every path from the
+ * entry runs at least that many native instructions (0: loops only).
  * Returns false (arena unchanged) when no worthwhile region exists or the
  * arena is full (*full set). ctx_mem: xlat_translate_ctx_size() bytes of
  * working memory, word aligned (kept off the small core-0 stack and heap). */
 size_t xlat_translate_ctx_size(void);
-bool xlat_translate(xlat_arena_t *arena, const xlat_rt_t *rt, uint16_t ip,
+bool xlat_translate(xlat_arena_t *arena, const xlat_rt_t *rt, uint16_t ip, int trace_min,
                     xlat_region_out_t *out, bool *full, void *ctx_mem);
 
 typedef void (*xlat_tramp_fn)(xlat_rt_t *rt, uint32_t target);

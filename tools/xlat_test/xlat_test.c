@@ -1865,9 +1865,16 @@ static int chain_check(void)
         /* E: mov ax,1234h; add bx,ax; fld1; fistp word [si] (SI = 0501h: the
          * MOV's immediate); dec di; jnz E; hlt (an x87 store into the code) */
         {0x0500, 13, {0xb8, 0x34, 0x12, 0x01, 0xc3, 0xd9, 0xe8, 0xdf, 0x1c, 0x4f, 0x75, 0xf4, 0xf4}},
+        /* L (no loop in reach: a trace, as at a hot CALL target): inc ax; add bx,ax; inc bx; inc si; inc di;
+         * add si,ax; dec cx; jz +3; jmp X; hlt.  X (beyond the window): add di,bx;
+         * inc bp; inc bp; add si,bx; jmp L. X is built at L's hot exit and both
+         * are linked: L -> X -> L ... in one xlat_run(). */
+        {0x0600, 15, {0x40, 0x01, 0xc3, 0x43, 0x46, 0x47, 0x01, 0xc6, 0x49, 0x74, 0x03, 0xe9, 0xf2,
+                      0x07, 0xf4}},
+        {0x0e00, 9, {0x01, 0xdf, 0x45, 0x45, 0x01, 0xde, 0xe9, 0xf7, 0xf7}},
     };
     int bad = 0;
-    for (int test = 0; test < 4; ++test) {
+    for (int test = 0; test < (XLAT_TRACES ? 5 : 4); ++test) {
         const uint16_t cs = 0x1000;
         ref_t init;
         memset(&init, 0, sizeof(init));
@@ -1888,9 +1895,9 @@ static int chain_check(void)
         memcpy(mem_init, mem, MEM_BYTES);
         xlat_flush();
         /* make the regions: entries seen at burst starts, run on scratch state */
-        static const uint16_t entries[4][2] = {{0x0900, 0x0200}, {0x0300, 0x0300}, {0x0400, 0x0400},
-                                               {0x0500, 0x0500}};
-        static const uint16_t starts[4] = {0x0900, 0x0300, 0x0400, 0x0500};
+        static const uint16_t entries[5][2] = {{0x0900, 0x0200}, {0x0300, 0x0300}, {0x0400, 0x0400},
+                                               {0x0500, 0x0500}, {0x0600, 0x0600}};
+        static const uint16_t starts[5] = {0x0900, 0x0300, 0x0400, 0x0500, 0x0600};
         for (int e = 0; e < 2; ++e)
             for (int k = 0; k < 4; ++k) {
                 R = init;
@@ -1902,6 +1909,7 @@ static int chain_check(void)
                 rt.budget = 50; rt.clock = &test_clock; rt.deadline = test_clock;
                 rt.intr = &zero_byte; rt.gpr = R.gpr; rt.eflags = R.eflags;
                 rt.cs = R.cs; rt.ip = R.ip;
+                rt.fn_entry = test == 4 ? R.seg_base[1] + R.ip : UINT32_MAX;   /* L: as a hot CALL target */
                 xlat_run(&rt);
                 xlat_dirty = true, memcpy(mem, mem_init, MEM_BYTES);
             }
@@ -1917,7 +1925,7 @@ static int chain_check(void)
         xlat_dirty = true, memcpy(mem, mem_init, MEM_BYTES);
         R = init;
         R.ip = starts[test];
-        const unsigned long entries0 = xlat_stats.entries;
+        const unsigned long entries0 = xlat_stats.entries, links0 = xlat_stats.links;
         for (int guard = 0; guard < 10000 && !R.halted; ++guard) {
             xlat_rt_t rt = {.fn_entry = UINT32_MAX};
             memset(&rt, 0, sizeof(rt));
@@ -1946,7 +1954,12 @@ static int chain_check(void)
                     printf("  gpr%d want %08x got %08x\n", i, want.gpr[i], R.gpr[i]);
             bad++;
         }
-        if (translations < (test != 1 ? 2u : 1u) - (test == 2)) {
+        if (test == 4 && (!xlat_stats.exit_built || xlat_stats.links - links0 < 20)) {
+            printf("  chain test 4: exit target not built or not linked (links %lu)\n",
+                   xlat_stats.links - links0);
+            bad++;
+        }
+        if (translations < (test != 1 && test != 4 ? 2u : 1u) - (test == 2)) {
             printf("  chain test %d: regions not translated\n", test);
             bad++;
         }
@@ -1954,9 +1967,46 @@ static int chain_check(void)
     return bad;
 }
 
+/* --dump HEX [out.bin]: translate the x86 bytes HEX (at 1000:0100, as a
+ * trace too) and write the Thumb code for a disassembler:
+ * arm-none-eabi-objdump -D -b binary -marm -Mforce-thumb out.bin */
+#include "xlat_internal.h"
+static int dump_region(const char *hex, const char *path)
+{
+    static uint32_t ctx[64 * 1024];
+    memset(mem, 0xf1, MEM_BYTES);
+    uint32_t n = 0;
+    for (const char *p = hex; p[0] && p[1]; p += 2) {
+        unsigned v;
+        if (sscanf(p, "%2x", &v) != 1) return 1;
+        mem[0x10100 + n++] = (uint8_t)v;
+    }
+    xlat_arena_t a = {xlat_test_calloc(0x10000), 0x10000, 0, 0, 0, 0, 0};
+    if (!a.base || !xlat_emit_trampoline(&a) || xlat_translate_ctx_size() > sizeof(ctx)) return 1;
+    const uint32_t tramp = a.code_top;
+    a.data_bottom = a.size;
+    xlat_rt_t rt = {.mem = mem, .mem_size = 0xa0000, .cs = 0x1000, .fn_entry = UINT32_MAX};
+    rt.seg_base[1] = 0x10000;
+    static xlat_region_out_t out;
+    bool full;
+    if (!xlat_translate(&a, &rt, 0x100, XLAT_LINK_MIN, &out, &full, ctx)) {
+        printf("not translated: reason %u (insns %u)\n", out.reject, out.n_insns);
+        return 1;
+    }
+    printf("trampoline %u bytes; region: %u x86 instructions, %u code bytes at %u, %u entries\n",
+           tramp, out.n_insns, out.code_len, out.code_off, out.n_entries);
+    FILE *f = fopen(path, "wb");
+    if (!f) return 1;
+    fwrite(a.base + out.code_off, 1, out.code_len, f);
+    fclose(f);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     tfpu_mem = mem;
+    if (argc > 2 && !strcmp(argv[1], "--dump"))
+        return dump_region(argv[2], argc > 3 ? argv[3] : "region.bin");
     if (argc > 1 && !strcmp(argv[1], "--shift")) {
         rng = 0x9e3779b9u;
         const int r = shift_check();
@@ -2163,8 +2213,9 @@ int main(int argc, char **argv)
         memset(mem_init + init.seg_base[1], 0, len);
     }
     printf("programs %d, skipped %d, failures %d\n", run, skipped, failures);
-    printf("stats: translations %u (fn %u) rejects %u entries %u invalid %u flushes %u evictions %u exits b/budget/side/stop %u/%u/%u/%u native insns %u interp %lu side %lu\n",
-           xlat_stats.translations, xlat_stats.fn_regions, xlat_stats.rejects, xlat_stats.entries, xlat_stats.invalidations,
+    printf("stats: translations %u (fn %u, at exits %u) links %u rejects %u entries %u invalid %u flushes %u evictions %u exits b/budget/side/stop %u/%u/%u/%u native insns %u interp %lu side %lu\n",
+           xlat_stats.translations, xlat_stats.fn_regions, xlat_stats.exit_built, xlat_stats.links,
+           xlat_stats.rejects, xlat_stats.entries, xlat_stats.invalidations,
            xlat_stats.flushes, xlat_stats.evictions, xlat_stats.exits[0], xlat_stats.exits[1],
            xlat_stats.exits[2], xlat_stats.exits[3], xlat_stats.guest_insns, interp_calls, side_calls);
     return failures ? 1 : 0;
