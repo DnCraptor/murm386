@@ -107,9 +107,15 @@ typedef struct xlat_stats {
     uint32_t stack_skips;       /* translations postponed: core-0 stack too low */
     uint32_t interp;            /* instructions run by XRIP from inside a region */
     uint32_t side_interp;       /* of those: accesses outside fast memory or onto the code */
-    /* XLAT_LOG: CPU bursts timed by the adapter (time in us, instructions). */
+    /* XLAT_LOG: CPU bursts timed by the adapter (time in us, instructions),
+     * without bursts that ran nested bursts (native INT handlers); and the
+     * device service after each burst (pc_service_impl). Histograms by
+     * duration: < 50, 100, 200, 400, 800, 1600, 3200 us, longer. */
     uint32_t xrip_bursts, xlat_bursts;   /* XRIP only / with translated code */
     uint64_t xrip_us, xrip_insns, xlat_us, xlat_insns;
+    uint32_t xrip_hist[8], xlat_hist[8];
+    uint32_t svc_n, svc_max, svc_hist[8];
+    uint64_t svc_us;
 } xlat_stats_t;
 
 extern xlat_stats_t xlat_stats;
@@ -172,6 +178,18 @@ bool xlat_region_still_valid(const xlat_rt_t *rt);
  * interpreting from translated code. */
 uint32_t xlat_stack_free(void);
 #define XLAT_STACK_NEEDED 1024u
+
+/* XLAT_LOG: histogram bucket of a duration in us (see xlat_stats_t). */
+static inline uint32_t xlat_us_bucket(uint32_t us)
+{
+    uint32_t b = 0;
+    for (uint32_t lim = 50; b < 7 && us >= lim; lim <<= 1)
+        ++b;
+    return b;
+}
+
+/* XLAT_LOG: the device service after a CPU burst took us microseconds. */
+void xlat_note_service(uint32_t us);
 
 /* Helper called by generated code: x86 condition code cc on the lazy flags. */
 uint32_t xlat_rt_cond(const xlat_rt_t *rt, uint32_t cc);

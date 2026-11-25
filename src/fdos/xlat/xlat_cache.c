@@ -44,6 +44,16 @@ typedef struct {
     uint8_t reject;
 } hot_t;
 
+/* XLAT_LOG: hot entry points that got no region, the most often seen kept. */
+#define XLAT_REJ_SLOTS 16
+#define XLAT_REJ_BYTES 32
+typedef struct {
+    uint32_t key;
+    uint32_t hits;          /* bursts that started there afterwards */
+    uint8_t why, n, n_interp, used;
+    uint8_t b[XLAT_REJ_BYTES];
+} rej_t;
+
 typedef struct {
     xlat_arena_t arena;
     region_t region[XLAT_MAX_REGIONS];
@@ -56,6 +66,8 @@ typedef struct {
     char *log;              /* text kept until the next safe point (xlat_log_write) */
     uint32_t log_len;
     uint32_t log_lost;      /* bytes that did not fit */
+    rej_t rej[XLAT_REJ_SLOTS];
+    uint32_t rej_why[XLAT_RJ_COUNT];
 #endif
 } state_t;
 
@@ -203,9 +215,82 @@ static void log_region_counts(void)
                    r->live ? "" : " (invalidated)");
     }
 }
+
+static void note_reject(const xlat_rt_t *rt, uint32_t key, int why)
+{
+    st->rej_why[why]++;
+    rej_t *slot = &st->rej[0];
+    for (int k = 0; k < XLAT_REJ_SLOTS; ++k) {
+        rej_t *q = &st->rej[k];
+        if (q->used && q->key == key) {
+            slot = q;
+            break;
+        }
+        if (!q->used || q->hits < slot->hits)
+            slot = q;
+        if (!q->used)
+            break;
+    }
+    if (slot->used && slot->key == key) {
+        slot->why = (uint8_t)why;
+        return;
+    }
+    slot->key = key;
+    slot->hits = 0;
+    slot->used = 1;
+    slot->why = (uint8_t)why;
+    slot->n = st->out.n_insns;
+    slot->n_interp = st->out.n_interp;
+    if (why == XLAT_RJ_COVERED)
+        slot->n = slot->n_interp = 0;
+    const uint32_t linear = rt->seg_base[1] + (rt->ip & 0xffffu);
+    for (uint32_t i = 0; i < XLAT_REJ_BYTES; ++i)
+        slot->b[i] = linear + i < rt->mem_size ? rt->mem[linear + i] : 0;
+}
+
+/* A burst started at a rejected entry point again. */
+static void note_reject_hit(uint32_t key)
+{
+    for (int k = 0; k < XLAT_REJ_SLOTS; ++k)
+        if (st->rej[k].used && st->rej[k].key == key) {
+            st->rej[k].hits++;
+            return;
+        }
+}
+
+static void log_rejects(void)
+{
+    static const char *const names[XLAT_RJ_COUNT] = {
+        "none", "covered", "start", "overlap", "interp", "noloop", "emit", "full"};
+    log_printf("J covered=%lu start=%lu overlap=%lu interp=%lu noloop=%lu emit=%lu full=%lu\r\n",
+               (unsigned long)st->rej_why[1], (unsigned long)st->rej_why[2],
+               (unsigned long)st->rej_why[3], (unsigned long)st->rej_why[4],
+               (unsigned long)st->rej_why[5], (unsigned long)st->rej_why[6],
+               (unsigned long)st->rej_why[7]);
+    for (int k = 0; k < XLAT_REJ_SLOTS; ++k) {
+        const rej_t *q = &st->rej[k];
+        if (!q->used)
+            continue;
+        char hex[XLAT_REJ_BYTES * 3 + 1];
+        for (int j = 0; j < XLAT_REJ_BYTES; ++j) {
+            static const char digits[] = "0123456789ABCDEF";
+            hex[j * 3] = ' ';
+            hex[j * 3 + 1] = digits[q->b[j] >> 4];
+            hex[j * 3 + 2] = digits[q->b[j] & 15];
+        }
+        hex[XLAT_REJ_BYTES * 3] = 0;
+        log_printf("R %04X:%04X why=%s n=%u interp=%u hits=%lu%s\r\n", (unsigned)(q->key >> 16),
+                   (unsigned)(q->key & 0xffffu), names[q->why < XLAT_RJ_COUNT ? q->why : 0], q->n,
+                   q->n_interp, (unsigned long)q->hits, hex);
+    }
+    memset(st->rej, 0, sizeof(st->rej));
+    memset(st->rej_why, 0, sizeof(st->rej_why));
+}
 #else
 #define log_region_code(r) ((void)0)
 #define log_region_counts() ((void)0)
+#define note_reject(rt, key, why) ((void)0)
+#define note_reject_hit(key) ((void)0)
 #endif
 
 static void reset_tables(void)
@@ -406,7 +491,11 @@ static __attribute__((noinline)) bool sample(const xlat_rt_t *rt)
         h->reject = 0;
         return false;
     }
-    if (h->reject || ++h->count < XLAT_HOT_THRESHOLD)
+    if (h->reject) {
+        note_reject_hit(key);
+        return false;
+    }
+    if (++h->count < XLAT_HOT_THRESHOLD)
         return false;
     h->count = 0;
     if (stack_free() < XLAT_STACK_NEEDED) {
@@ -415,9 +504,11 @@ static __attribute__((noinline)) bool sample(const xlat_rt_t *rt)
     }
     /* Inside an existing region but not at one of its entries: the region is
      * entered at its loop head once a burst ends there. */
-    if (covered(rt) || !translate_here(rt)) {
+    const bool inside = covered(rt);
+    if (inside || !translate_here(rt)) {
         h->reject = 1;
         xlat_stats.rejects++;
+        note_reject(rt, key, inside ? XLAT_RJ_COVERED : st->out.reject);
         return false;
     }
     return true;
@@ -541,6 +632,7 @@ void xlat_log_write(uint16_t psp, const char *name)
     last_entries = xlat_stats.entries;
     log_printf("== exit PSP %04X %s ==\r\n", psp, name);
     log_region_counts();
+    log_rejects();
     log_printf("S translations=%lu rejects=%lu entries=%lu invalid=%lu flushes=%lu "
                "exit b/bu/s/st=%lu/%lu/%lu/%lu native=%lu code=%lu stack_skips=%lu interp=%lu side=%lu lost=%lu\r\n",
                (unsigned long)xlat_stats.translations, (unsigned long)xlat_stats.rejects,
@@ -550,8 +642,9 @@ void xlat_log_write(uint16_t psp, const char *name)
                (unsigned long)xlat_stats.exits[3], (unsigned long)xlat_stats.guest_insns, (unsigned long)xlat_stats.code_bytes,
                (unsigned long)xlat_stats.stack_skips, (unsigned long)xlat_stats.interp,
                (unsigned long)xlat_stats.side_interp, (unsigned long)st->log_lost);
-    /* CPU bursts: average us and instructions, XRIP only / with translated
-     * code (XLAT_SLICE_US is meant to match XRIP's us per 4096). */
+    /* CPU bursts: averages and histograms (xlat_stats_t), XRIP only / with
+     * translated code; device service after the bursts. XLAT_SLICE_US is
+     * meant to match the usual XRIP burst. */
     const xlat_stats_t *const b = &xlat_stats;
     log_printf("B xrip n=%lu us=%lu insns=%lu us/4096=%lu  xlat n=%lu us=%lu insns=%lu slice=%u\r\n",
                (unsigned long)b->xrip_bursts,
@@ -562,8 +655,25 @@ void xlat_log_write(uint16_t psp, const char *name)
                (unsigned long)(b->xlat_bursts ? (uint32_t)(b->xlat_us / b->xlat_bursts) : 0),
                (unsigned long)(b->xlat_bursts ? (uint32_t)(b->xlat_insns / b->xlat_bursts) : 0),
                (unsigned)XLAT_SLICE_US);
+    static const char *const hist_names[3] = {"xrip", "xlat", "svc"};
+    const uint32_t *const hists[3] = {b->xrip_hist, b->xlat_hist, b->svc_hist};
+    for (int k = 0; k < 3; ++k) {
+        const uint32_t *h = hists[k];
+        log_printf("H %s <50:%lu <100:%lu <200:%lu <400:%lu <800:%lu <1600:%lu <3200:%lu more:%lu\r\n",
+                   hist_names[k], (unsigned long)h[0], (unsigned long)h[1], (unsigned long)h[2],
+                   (unsigned long)h[3], (unsigned long)h[4], (unsigned long)h[5],
+                   (unsigned long)h[6], (unsigned long)h[7]);
+    }
+    log_printf("V svc n=%lu us=%lu max=%lu\r\n", (unsigned long)b->svc_n,
+               (unsigned long)(b->svc_n ? (uint32_t)(b->svc_us / b->svc_n) : 0),
+               (unsigned long)b->svc_max);
     xlat_stats.xrip_bursts = xlat_stats.xlat_bursts = 0;
     xlat_stats.xrip_us = xlat_stats.xrip_insns = xlat_stats.xlat_us = xlat_stats.xlat_insns = 0;
+    memset(xlat_stats.xrip_hist, 0, sizeof(xlat_stats.xrip_hist));
+    memset(xlat_stats.xlat_hist, 0, sizeof(xlat_stats.xlat_hist));
+    memset(xlat_stats.svc_hist, 0, sizeof(xlat_stats.svc_hist));
+    xlat_stats.svc_n = xlat_stats.svc_max = 0;
+    xlat_stats.svc_us = 0;
     if (state == 0)
         state = f_open(&lf, SD_DATA_DIR_SLASH "xlat.log",
                        FA_WRITE | FA_OPEN_APPEND | FA_OPEN_ALWAYS) == FR_OK ? 1 : 2;
@@ -574,6 +684,17 @@ void xlat_log_write(uint16_t psp, const char *name)
     }
     st->log_len = 0;
     st->log_lost = 0;
+}
+#endif
+
+#if XLAT_LOG
+void xlat_note_service(uint32_t us)
+{
+    xlat_stats.svc_n++;
+    xlat_stats.svc_us += us;
+    if (us > xlat_stats.svc_max)
+        xlat_stats.svc_max = us;
+    xlat_stats.svc_hist[xlat_us_bucket(us)]++;
 }
 #endif
 

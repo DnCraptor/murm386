@@ -27,9 +27,11 @@ set(VIDEO_MODE "VGA256" CACHE STRING "Video adapter: RUNTIME, MCGA, EGA128, VGA1
 # and tables are allocated from the heap on first use.
 option(XLAT "Translate hot real-mode x86 loops to ARM code" ON)
 set(XLAT_ARENA_KB 32 CACHE STRING "Translator code arena, KiB (max 64)")
-# Experiment: code arena in a static SRAM buffer (XLAT_ARENA_KB of SRAM!)
-# instead of the PSRAM span, to measure the XIP-cache contention.
-option(XLAT_ARENA_SRAM "Translator code arena in SRAM (experiment)" OFF)
+# Experiment: code arena in a static SRAM buffer of XLAT_SRAM_ARENA_KB instead
+# of the PSRAM span, to measure the XIP-cache contention. The buffer comes out
+# of the heap, which the emulator needs at run time: keep it small.
+option(XLAT_ARENA_SRAM "Translator code arena in SRAM (experiment)" ON)
+set(XLAT_SRAM_ARENA_KB 8 CACHE STRING "SRAM code arena with XLAT_ARENA_SRAM, KiB")
 # Diagnostics: at each DOS program exit append the translated regions (their
 # x86 bytes), per-region entry/exit counts and totals to <SD_DATA_DIR>/xlat.log.
 option(XLAT_LOG "Log translated regions to the SD card" ON)
@@ -655,7 +657,11 @@ if(CONTROL_STACK)
 endif()
 
 if(XLAT)
-    math(EXPR XLAT_ARENA_BYTES "${XLAT_ARENA_KB} * 1024")
+    if(XLAT_ARENA_SRAM)
+        math(EXPR XLAT_ARENA_BYTES "${XLAT_SRAM_ARENA_KB} * 1024")
+    else()
+        math(EXPR XLAT_ARENA_BYTES "${XLAT_ARENA_KB} * 1024")
+    endif()
     target_sources(${BUILD_NAME} PRIVATE
         src/fdos/xlat/arm_emit.c
         src/fdos/xlat/x86_decode.c

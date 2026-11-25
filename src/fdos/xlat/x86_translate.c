@@ -91,6 +91,7 @@ typedef struct {
     bool overflow;
     arm_emit_t e;
     uint32_t epilogue, interp_thunk;
+    int n_interp;
 } tctx_t;
 
 /* ---------------------------------------------------------------------- */
@@ -142,7 +143,8 @@ static bool seen_before(tctx_t *c, uint16_t ip)
     return false;
 }
 
-static bool discover(tctx_t *c, uint16_t start)
+/* XLAT_RJ_NONE when a region with a loop was found, else the reason. */
+static int discover(tctx_t *c, uint16_t start)
 {
     int head = 0, tail = 0;
     const int qcap = (int)(sizeof(c->queue) / sizeof(c->queue[0]));
@@ -171,7 +173,7 @@ static bool discover(tctx_t *c, uint16_t start)
             c->queue[tail++] = in.target;
     }
     if (!c->n || c->in[0].ip != start)
-        return false;
+        return XLAT_RJ_START;
 
     /* Sort by IP (insertion sort, n <= 63). */
     for (int i = 1; i < c->n; ++i) {
@@ -185,14 +187,14 @@ static bool discover(tctx_t *c, uint16_t start)
     }
     for (int i = 0; i + 1 < c->n; ++i)
         if ((uint32_t)c->in[i].ip + c->in[i].len > c->in[i + 1].ip)
-            return false;   /* overlapping instructions: leave it to XRIP */
+            return XLAT_RJ_OVERLAP;   /* overlapping instructions: leave it to XRIP */
 
     /* Edges, leaders, loop check. */
     bool loop = false;
     memset(c->leader, 0, sizeof(c->leader));
     const int first = find_insn(c, start);
     if (first < 0)
-        return false;
+        return XLAT_RJ_START;
     c->leader[first] = 1;
     c->lo = UINT32_MAX;
     uint32_t hi = 0;
@@ -222,9 +224,10 @@ static bool discover(tctx_t *c, uint16_t start)
     int interp = 0;
     for (int i = 0; i < c->n; ++i)
         interp += c->in[i].op == XO_INTERP;
+    c->n_interp = interp;
     if (interp * XLAT_INTERP_RATIO > c->n)
-        return false;
-    return loop;
+        return XLAT_RJ_INTERP;
+    return loop ? XLAT_RJ_NONE : XLAT_RJ_NOLOOP;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -1229,9 +1232,16 @@ bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip,
     c->overflow = false;
     c->epilogue = a->epilogue;
     c->interp_thunk = a->interp_thunk;
+    c->n_interp = 0;
+    out->reject = XLAT_RJ_NONE;
 
-    if (!discover(c, ip))
+    const int why = discover(c, ip);
+    out->n_insns = (uint8_t)c->n;
+    out->n_interp = (uint8_t)c->n_interp;
+    if (why != XLAT_RJ_NONE) {
+        out->reject = (uint8_t)why;
         goto done;
+    }
     dataflow(c);
     plan(c);
 
@@ -1252,6 +1262,7 @@ bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip,
         data += 8u + ((out->runs[r].len + 3u) & ~3u);
     if (a->code_top + data >= a->data_bottom) {
         *full = true;
+        out->reject = XLAT_RJ_FULL;
         goto done;
     }
 
@@ -1266,10 +1277,13 @@ bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip,
             c->overflow = true;
     if (c->e.full) {
         *full = true;
+        out->reject = XLAT_RJ_FULL;
         goto done;
     }
-    if (c->overflow)
+    if (c->overflow) {
+        out->reject = XLAT_RJ_EMIT;
         goto done;
+    }
 
     out->code_off = a->code_top;
     out->code_len = c->e.pos - a->code_top;

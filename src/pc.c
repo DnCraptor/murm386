@@ -1083,6 +1083,10 @@ void pc_vga_step(void *o)
 
 static uint32_t pc_last_device_service;
 
+#if XLAT && XLAT_LOG
+#include "fdos/xlat/xlat.h"
+#endif
+
 static void __not_in_flash_func(pc_service_impl)(PC *pc)
 {
     /*
@@ -1128,6 +1132,9 @@ static void __not_in_flash_func(pc_service_impl)(PC *pc)
         }
         PROF_ADD(t_refresh, refresh);
     }
+#if XLAT && XLAT_LOG
+    xlat_note_service(get_uticks() - pc_last_device_service);
+#endif
 }
 
 void __not_in_flash_func(pc_service)(PC *pc)

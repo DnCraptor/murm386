@@ -190,7 +190,22 @@ typedef struct xlat_region_out {
     uint16_t n_runs;
     struct { uint16_t ip, len; } runs[XLAT_MAX_INSNS];
     uint32_t data_size;                /* arena bytes the caller stores the runs in */
+    uint8_t reject;                    /* XLAT_RJ_* when no region was built */
+    uint8_t n_insns, n_interp;         /* what discovery found (for the log) */
 } xlat_region_out_t;
+
+/* Why a hot entry point got no region (XLAT_LOG "R" lines). */
+enum {
+    XLAT_RJ_NONE = 0,
+    XLAT_RJ_COVERED,    /* inside a live region, not one of its entries */
+    XLAT_RJ_START,      /* the entry instruction is not decoded */
+    XLAT_RJ_OVERLAP,    /* overlapping instructions */
+    XLAT_RJ_INTERP,     /* more than 1/XLAT_INTERP_RATIO interpreted */
+    XLAT_RJ_NOLOOP,     /* no back edge in the reachable code */
+    XLAT_RJ_EMIT,       /* stubs, fix-ups or branch range exceeded */
+    XLAT_RJ_FULL,       /* does not fit an empty arena */
+    XLAT_RJ_COUNT
+};
 
 /* Arena layout shared by translator and cache. */
 typedef struct xlat_arena {

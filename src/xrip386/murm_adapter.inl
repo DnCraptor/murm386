@@ -271,6 +271,9 @@ void __time_critical_func(xrip_step_cpu)(CPU *cpu, int count)
     }
 #if XLAT
 #if XLAT_LOG
+    static uint32_t burst_seq;   /* changes if this burst runs nested bursts */
+    const uint32_t seq0 = ++burst_seq;
+    const uint32_t svc0 = xlat_stats.svc_n;
     const unsigned long retired0 = retired;
 #endif
     const uint32_t t0 = timer_hw->timerawl;
@@ -294,14 +297,19 @@ void __time_critical_func(xrip_step_cpu)(CPU *cpu, int count)
     {
         const uint32_t us = timer_hw->timerawl - t0;
         const uint32_t n = (uint32_t)(retired - retired0);
-        if (xlat_used) {
+        if (burst_seq != seq0 || xlat_stats.svc_n != svc0) {
+            /* nested bursts or device service: a native handler ran guest
+             * code or waited (the burst is not CPU time) */
+        } else if (xlat_used) {
             xlat_stats.xlat_bursts++;
             xlat_stats.xlat_us += us;
             xlat_stats.xlat_insns += n;
+            xlat_stats.xlat_hist[xlat_us_bucket(us)]++;
         } else if (n == (uint32_t)count) {   /* full XRIP bursts only */
             xlat_stats.xrip_bursts++;
             xlat_stats.xrip_us += us;
             xlat_stats.xrip_insns += n;
+            xlat_stats.xrip_hist[xlat_us_bucket(us)]++;
         }
     }
 #endif
