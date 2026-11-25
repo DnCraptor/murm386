@@ -85,6 +85,8 @@ typedef struct {
 static state_t *st;
 static bool disabled;
 
+uint8_t xlat_entry_map[XLAT_MAP_BITS / 8];
+
 #if defined(XLAT_HOST_TEST)
 void *xlat_test_calloc(size_t size);   /* executable, zeroed */
 #define XLAT_ALLOC(size) xlat_test_calloc(size)
@@ -301,6 +303,7 @@ static void reset_tables(void)
     for (int k = 0; k < XLAT_HOT_SLOTS; ++k)
         st->hot[k].reject = 0;
     st->n_regions = 0;
+    memset(xlat_entry_map, 0, sizeof(xlat_entry_map));
     xlat_emit_trampoline(&st->arena);
     xlat_sync_code(st->arena.base, st->arena.code_top);
     xlat_stats.code_bytes = st->arena.code_top;
@@ -347,6 +350,7 @@ static __attribute__((noinline)) bool ready(void)
 
 void xlat_release(void)
 {
+    memset(xlat_entry_map, 0, sizeof(xlat_entry_map));
     st = NULL;
     disabled = false;
 }
@@ -470,9 +474,14 @@ static bool translate_here(const xlat_rt_t *rt)
         d += 8 + ((len + 3u) & ~3u);
     }
     r->live = 1;
-    for (unsigned k = 0; k < out->n_entries; ++k)
+    for (unsigned k = 0; k < out->n_entries; ++k) {
         insert((uint32_t)rt->cs << 16 | out->entries[k].ip, (uint8_t)idx,
                out->entries[k].code_off);
+        if (out->entries[k].mark) {
+            const uint32_t m = xlat_map_index(r->cs_base + out->entries[k].ip);
+            xlat_entry_map[m >> 3] |= (uint8_t)(1u << (m & 7u));
+        }
+    }
     xlat_sync_code(st->arena.base + out->code_off, out->code_len);
     log_region_code(r);
     xlat_stats.translations++;
@@ -634,14 +643,15 @@ void xlat_log_write(uint16_t psp, const char *name)
     log_region_counts();
     log_rejects();
     log_printf("S translations=%lu rejects=%lu entries=%lu invalid=%lu flushes=%lu "
-               "exit b/bu/s/st=%lu/%lu/%lu/%lu native=%lu code=%lu stack_skips=%lu interp=%lu side=%lu lost=%lu\r\n",
+               "exit b/bu/s/st=%lu/%lu/%lu/%lu native=%lu code=%lu stack_skips=%lu interp=%lu side=%lu cuts=%lu/%lu lost=%lu\r\n",
                (unsigned long)xlat_stats.translations, (unsigned long)xlat_stats.rejects,
                (unsigned long)xlat_stats.entries, (unsigned long)xlat_stats.invalidations,
                (unsigned long)xlat_stats.flushes, (unsigned long)xlat_stats.exits[0],
                (unsigned long)xlat_stats.exits[1], (unsigned long)xlat_stats.exits[2],
                (unsigned long)xlat_stats.exits[3], (unsigned long)xlat_stats.guest_insns, (unsigned long)xlat_stats.code_bytes,
                (unsigned long)xlat_stats.stack_skips, (unsigned long)xlat_stats.interp,
-               (unsigned long)xlat_stats.side_interp, (unsigned long)st->log_lost);
+               (unsigned long)xlat_stats.side_interp, (unsigned long)xlat_stats.cut_entries,
+               (unsigned long)xlat_stats.cuts, (unsigned long)st->log_lost);
     /* CPU bursts: averages and histograms (xlat_stats_t), XRIP only / with
      * translated code; device service after the bursts. XLAT_SLICE_US is
      * meant to match the usual XRIP burst. */

@@ -32,6 +32,17 @@ static uint8_t protected_mode;
 static uint16_t segregs[6];
 #define segment_base cpu_state.segment_base
 
+#if XLAT
+#include "../fdos/xlat/xlat.h"
+/* Taken branches to a translated loop head end the burst (xrip_step_cpu
+ * enters the translated code). Armed only while that may succeed. */
+static bool xlat_armed;
+static bool xlat_cut;
+#define XLAT_CUT_PENDING() xlat_cut
+#else
+#define XLAT_CUT_PENDING() false
+#endif
+
 /* Cache all four decoder defaults (REP=0, override=0, two copies of
  * code32) when CS's default size changes, not on every x86 instruction. */
 static __time_critical_func() inline void set_code32(uint8_t value) {
@@ -339,6 +350,10 @@ static __time_critical_func() INLINE uint16_t pop() {
 static __time_critical_func() INLINE void jump_relative(int32_t displacement) {
     xrip_ip += displacement;
     if (!opsize32) xrip_ip &= 0xFFFF;
+#if XLAT
+    if (xlat_armed && xlat_map_test(segment_base[regcs] + xrip_ip))
+        xlat_cut = true;
+#endif
 }
 
 static __time_critical_func() INLINE uint16_t readrm16(uint8_t rmval) {
@@ -944,7 +959,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
     CPU *const run_cpu = active_cpu;
 #define active_cpu run_cpu
     for (uint32_t loopcount = 0; loopcount < execloops; loopcount++) {
-        if (active_cpu->native_done)
+        if (active_cpu->native_done || XLAT_CUT_PENDING())
             break;
         if (unlikely(XRIP_IP > 0xffffu) && !protected_mode) XRIP_IP &= 0xffffu;
         if (unlikely(active_cpu->intr && ifl && !active_cpu->i286_irq_shadow)) {

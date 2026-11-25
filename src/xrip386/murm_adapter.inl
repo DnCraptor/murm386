@@ -138,6 +138,8 @@ static xlat_rt_t xlat_state;
 /* xlat_state is in use: a native handler run by an interpreted instruction
  * may run nested bursts; those stay in XRIP. */
 static bool xlat_busy;
+/* This burst ran translated code (statistics). */
+static bool xlat_burst_native;
 
 /* Translated execution needs real mode with 16-bit code and stack, no trap,
  * no HLT, no IRQ shadow, no pending IRQ with IF set, direct fast memory. */
@@ -207,8 +209,11 @@ uint32_t __time_critical_func(xlat_interp_one)(xlat_rt_t *rt, uint32_t flags)
  * nested bursts are included; xlat_run() checks the stack before translating. */
 static __time_critical_func() uint32_t xlat_enter(CPU *cpu, uint32_t count, uint32_t t0)
 {
-    if (xlat_busy || !xlat_state_ok(cpu))
+    if (xlat_busy || !xlat_state_ok(cpu)) {
+        xlat_armed = false;
         return 0;
+    }
+    xlat_armed = true;
     xlat_rt_t *const rt = &xlat_state;
     rt->mem = fast_memory;
     rt->mem_size = fast_memory_size;
@@ -277,7 +282,8 @@ void __time_critical_func(xrip_step_cpu)(CPU *cpu, int count)
     const unsigned long retired0 = retired;
 #endif
     const uint32_t t0 = timer_hw->timerawl;
-    const uint32_t xlat_used = xlat_enter(cpu, (uint32_t)count, t0);
+    uint32_t xlat_used = xlat_enter(cpu, (uint32_t)count, t0);
+    xlat_burst_native = xlat_used != 0;
 #endif
 
     void *context[5];
@@ -286,8 +292,35 @@ void __time_critical_func(xrip_step_cpu)(CPU *cpu, int count)
     if (__builtin_setjmp(context))
         deliver_fault();
 #if XLAT
-    else if (xlat_used < (uint32_t)count)
-        run_instructions((uint32_t)count - xlat_used);
+    else {
+        /* XRIP runs what is left of the burst. A taken branch to a marked
+         * loop head (xlat_entry_map) stops it there: translated code goes
+         * on, then XRIP again. Translated code that cannot be entered there
+         * disarms the check for the rest of the burst. */
+        uint32_t left = (uint32_t)count;
+        for (;;) {
+            left = xlat_used >= left ? 0 : left - xlat_used;
+            if (!left)
+                break;
+            xlat_cut = false;
+            const unsigned long r0 = retired;
+            run_instructions(left);
+            const uint32_t ran = (uint32_t)(retired - r0);
+            left = ran >= left ? 0 : left - ran;
+            if (!xlat_cut || !left)
+                break;
+            xlat_stats.cuts++;
+            xlat_used = xlat_enter(cpu, left, t0);
+            if (xlat_used) {
+                xlat_stats.cut_entries++;
+                xlat_burst_native = true;
+            } else {
+                xlat_armed = false;
+            }
+        }
+        xlat_cut = false;
+    }
+    xlat_armed = false;
 #else
     else
         run_instructions((uint32_t)count);
@@ -300,7 +333,7 @@ void __time_critical_func(xrip_step_cpu)(CPU *cpu, int count)
         if (burst_seq != seq0 || xlat_stats.svc_n != svc0) {
             /* nested bursts or device service: a native handler ran guest
              * code or waited (the burst is not CPU time) */
-        } else if (xlat_used) {
+        } else if (xlat_burst_native) {
             xlat_stats.xlat_bursts++;
             xlat_stats.xlat_us += us;
             xlat_stats.xlat_insns += n;

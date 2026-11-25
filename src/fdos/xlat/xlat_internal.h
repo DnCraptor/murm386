@@ -179,6 +179,7 @@ static inline bool x86_is_carry_op(const x86_insn_t *in)
 
 typedef struct xlat_entry_point {
     uint16_t ip;
+    uint8_t mark;        /* loop head or the region's entry: XRIP branches there stop the burst */
     uint32_t code_off;
 } xlat_entry_point_t;
 

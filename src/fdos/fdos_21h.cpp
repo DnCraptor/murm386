@@ -1020,8 +1020,9 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         write_char_stdout(R_AL);
         break;
 
+      /* Display Output: the character is in DL (AL is only the result) */
       case 0x02:
-        write_char_stdout(R_AL);
+        write_char_stdout(R_DL);
         R_AL = (R_DL == HT) ? (UBYTE)' ' : (UBYTE)R_DL;
         break;
 

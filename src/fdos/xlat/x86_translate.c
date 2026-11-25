@@ -1292,7 +1292,13 @@ bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip,
     out->n_entries = 0;
     for (int i = 0; i < c->n; ++i) {
         if (c->leader[i]) {
+            /* Loop heads (targets of back edges) and the entry point are
+             * marked for XRIP's taken branches (xlat_entry_map). */
+            bool head = c->in[i].ip == ip;
+            for (int j = i; j < c->n && !head; ++j)
+                head = c->tgt_idx[j] == i;
             out->entries[out->n_entries].ip = c->in[i].ip;
+            out->entries[out->n_entries].mark = head;
             out->entries[out->n_entries].code_off = c->label[i];
             out->n_entries++;
         }

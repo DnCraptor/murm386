@@ -107,6 +107,8 @@ typedef struct xlat_stats {
     uint32_t stack_skips;       /* translations postponed: core-0 stack too low */
     uint32_t interp;            /* instructions run by XRIP from inside a region */
     uint32_t side_interp;       /* of those: accesses outside fast memory or onto the code */
+    uint32_t cuts;              /* XRIP bursts ended at a marked branch target */
+    uint32_t cut_entries;       /* of those: translated code was entered */
     /* XLAT_LOG: CPU bursts timed by the adapter (time in us, instructions),
      * without bursts that ran nested bursts (native INT handlers); and the
      * device service after each burst (pc_service_impl). Histograms by
@@ -178,6 +180,24 @@ bool xlat_region_still_valid(const xlat_rt_t *rt);
  * interpreting from translated code. */
 uint32_t xlat_stack_free(void);
 #define XLAT_STACK_NEEDED 1024u
+
+/*
+ * Entry points XRIP's taken branches (jump_relative: Jcc, JMP, CALL, LOOP)
+ * look up: a hashed bit per linear address of a loop head or region entry.
+ * A set bit ends the interpreter burst early so the adapter can enter the
+ * translated code (xrip_step_cpu); a false hit only costs a lookup.
+ */
+#define XLAT_MAP_BITS 8192u
+extern uint8_t xlat_entry_map[XLAT_MAP_BITS / 8];
+static inline uint32_t xlat_map_index(uint32_t linear)
+{
+    return (linear ^ (linear >> 13)) & (XLAT_MAP_BITS - 1u);
+}
+static inline bool xlat_map_test(uint32_t linear)
+{
+    const uint32_t i = xlat_map_index(linear);
+    return (xlat_entry_map[i >> 3] >> (i & 7u)) & 1u;
+}
 
 /* XLAT_LOG: histogram bucket of a duration in us (see xlat_stats_t). */
 static inline uint32_t xlat_us_bucket(uint32_t us)
