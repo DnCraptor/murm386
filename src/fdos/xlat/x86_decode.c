@@ -9,7 +9,6 @@
 #define SEG_CS 1
 #define SEG_SS 2
 #define SEG_DS 3
-#define REG_SP 4
 
 static uint16_t rd16(const uint8_t *p)
 {
@@ -52,22 +51,17 @@ static bool decode_modrm(const uint8_t *code, unsigned *pos, int seg_override,
     return true;
 }
 
-static bool reg16_ok(const x86_opd_t *o, int size)
-{
-    return o->kind != OPD_REG || size != 16 || o->reg != REG_SP;
-}
-
 bool x86_decode(const uint8_t *code, uint16_t ip, x86_insn_t *in)
 {
     unsigned pos = 0;
     int seg = -1;
-    bool rep = false;
+    uint8_t rep = 0;
     uint8_t g;
 
     for (;;) {
         const uint8_t p = code[pos];
         if ((p == 0xf2 || p == 0xf3) && !rep) {
-            rep = true;     /* only string moves accept it (below) */
+            rep = p == 0xf3 ? 1 : 2;   /* only string instructions accept it (below) */
             ++pos;
             continue;
         }
@@ -94,21 +88,26 @@ bool x86_decode(const uint8_t *code, uint16_t ip, x86_insn_t *in)
     in->mem_seg = SEG_DS;
     in->disp = 0;
     in->rep = 0;
+    in->sreg = 0;
+    in->local = 0;
 
-    if (rep && !(op == 0xa4 || op == 0xa5 || op == 0xaa || op == 0xab || op == 0xac || op == 0xad))
+    const bool str = (op >= 0xa4 && op <= 0xa7) || (op >= 0xaa && op <= 0xaf);
+    if (rep && !str)
         return false;
-    if (op == 0xa4 || op == 0xa5 || op == 0xaa || op == 0xab || op == 0xac || op == 0xad) {
-        /* MOVS / STOS / LODS: DS:SI (override allowed) and ES:DI, step by DF */
+    if (str) {
+        /* MOVS / CMPS / STOS / LODS / SCAS: DS:SI (override allowed) and
+         * ES:DI, step by DF */
         in->op = XO_STR;
-        in->sub = op <= 0xa5 ? STR_MOVS : op <= 0xab ? STR_STOS : STR_LODS;
+        in->sub = op <= 0xa5 ? STR_MOVS : op <= 0xa7 ? STR_CMPS : op <= 0xab ? STR_STOS :
+                  op <= 0xad ? STR_LODS : STR_SCAS;
         in->size = (op & 1) ? 16 : 8;
         in->rep = rep;
         in->mem_seg = seg >= 0 ? (uint8_t)seg : SEG_DS;
-        if (in->sub == STR_STOS)
+        if (in->sub == STR_STOS || in->sub == STR_SCAS)
             in->a.kind = OPD_MEM;
         else
             in->b.kind = OPD_MEM;
-        if (in->sub == STR_MOVS)
+        if (in->sub == STR_MOVS || in->sub == STR_CMPS)
             in->a.kind = OPD_MEM;
     } else if (op == 0xc0 || op == 0xc1 || (op >= 0xd0 && op <= 0xd3)) {
         /* group 2 shifts and rotates: count imm8, 1 or CL */
@@ -198,6 +197,20 @@ bool x86_decode(const uint8_t *code, uint16_t ip, x86_insn_t *in)
         const uint16_t rel = rd16(code + pos);
         pos += 2;
         in->target = (uint16_t)(ip + pos + rel);
+    } else if (op == 0x0f && (code[pos] == 0xb6 || code[pos] == 0xbe ||
+                              code[pos] == 0xb7 || code[pos] == 0xbf)) {
+        /* MOVZX / MOVSX r16, r/m8; with r/m16 (16-bit operand) a plain MOV */
+        const uint8_t op2 = code[pos++];
+        decode_modrm(code, &pos, seg, in, &in->b, &g);
+        in->a.kind = OPD_REG;
+        in->a.reg = g;
+        if (op2 & 1) {
+            in->op = XO_MOV;
+        } else {
+            in->op = XO_MISC;
+            in->sub = op2 == 0xb6 ? MISC_MOVZX : MISC_MOVSX;
+            in->size = 8;
+        }
     } else if (op == 0x80 || op == 0x81 || op == 0x83) {
         decode_modrm(code, &pos, seg, in, &in->a, &g);
         in->op = XO_ALU;
@@ -311,6 +324,63 @@ bool x86_decode(const uint8_t *code, uint16_t ip, x86_insn_t *in)
         const uint16_t rel = rd16(code + pos);
         pos += 2;
         in->target = (uint16_t)(ip + pos + rel);
+    } else if (op == 0x06 || op == 0x0e || op == 0x16 || op == 0x1e) {
+        in->op = XO_SEG;                                  /* PUSH sreg */
+        in->sub = SEG_PUSH;
+        in->sreg = (uint8_t)(op >> 3);
+    } else if (op == 0x07 || op == 0x1f) {
+        in->op = XO_SEG;                                  /* POP ES / DS */
+        in->sub = SEG_POP;
+        in->sreg = (uint8_t)(op >> 3);
+    } else if (op == 0x8e && (((code[pos] >> 3) & 7) == 0 || ((code[pos] >> 3) & 7) == 3)) {
+        decode_modrm(code, &pos, seg, in, &in->b, &g);   /* MOV ES / DS, r/m16 */
+        in->op = XO_SEG;
+        in->sub = SEG_LOAD;
+        in->sreg = g;
+    } else if (op == 0x8c && ((code[pos] >> 3) & 7) < 4) {
+        decode_modrm(code, &pos, seg, in, &in->a, &g);   /* MOV r/m16, sreg */
+        in->op = XO_SEG;
+        in->sub = SEG_STORE;
+        in->sreg = g;
+    } else if ((op == 0xc4 || op == 0xc5) && (code[pos] >> 6) != 3) {
+        decode_modrm(code, &pos, seg, in, &in->b, &g);   /* LES / LDS r16, m16:16 */
+        in->op = XO_SEG;
+        in->sub = op == 0xc4 ? SEG_LES : SEG_LDS;
+        in->sreg = op == 0xc4 ? SEG_ES : SEG_DS;
+        in->a.kind = OPD_REG;
+        in->a.reg = g;
+    } else if (op == 0x98 || op == 0x99 || op == 0xfc || op == 0xfd) {
+        in->op = XO_MISC;
+        in->sub = op == 0x98 ? MISC_CBW : op == 0x99 ? MISC_CWD : op == 0xfc ? MISC_CLD : MISC_STD;
+    } else if ((op == 0xf6 || op == 0xf7) && ((code[pos] >> 3) & 7) == 2) {
+        decode_modrm(code, &pos, seg, in, &in->a, &g);   /* NOT r/m */
+        in->op = XO_MISC;
+        in->sub = MISC_NOT;
+        in->size = op == 0xf6 ? 8 : 16;
+    } else if ((op == 0xf6 || op == 0xf7) && ((code[pos] >> 3) & 7) == 3) {
+        decode_modrm(code, &pos, seg, in, &in->a, &g);   /* NEG r/m */
+        in->op = XO_ALU;
+        in->sub = ALU_NEG;
+        in->size = op == 0xf6 ? 8 : 16;
+    } else if ((op == 0xf6 || op == 0xf7) && ((code[pos] >> 3) & 7) >= 4) {
+        /* MUL / IMUL / DIV / IDIV r/m: AX (DX) implicit */
+        decode_modrm(code, &pos, seg, in, &in->b, &g);
+        in->op = XO_MULDIV;
+        in->sub = g;
+        in->size = op == 0xf6 ? 8 : 16;
+    } else if (op == 0x69 || op == 0x6b) {
+        /* IMUL r16, r/m16, imm16 / imm8 (sign-extended) */
+        decode_modrm(code, &pos, seg, in, &in->b, &g);
+        in->op = XO_MULDIV;
+        in->sub = MULDIV_IMUL3;
+        in->a.kind = OPD_REG;
+        in->a.reg = g;
+        if (op == 0x69) {
+            in->a.imm = rd16(code + pos);
+            pos += 2;
+        } else {
+            in->a.imm = (uint16_t)(int16_t)(int8_t)code[pos++];
+        }
     } else if (op == 0xf6 || op == 0xf7) {
         decode_modrm(code, &pos, seg, in, &in->a, &g);
         if (g != 0)
@@ -325,6 +395,51 @@ bool x86_decode(const uint8_t *code, uint16_t ip, x86_insn_t *in)
             in->b.imm = rd16(code + pos);
             pos += 2;
         }
+    } else if (op == 0xff && (((code[pos] >> 3) & 7) == 2 || ((code[pos] >> 3) & 7) == 4)) {
+        decode_modrm(code, &pos, seg, in, &in->b, &g);   /* CALL / JMP r/m16 */
+        in->op = XO_IND;
+        in->sub = g == 2 ? IND_CALL : IND_JMP;
+    } else if (op == 0xff && (((code[pos] >> 3) & 7) == 3 || ((code[pos] >> 3) & 7) == 5) &&
+               (code[pos] >> 6) != 3) {
+        decode_modrm(code, &pos, seg, in, &in->b, &g);   /* CALL / JMP m16:16 */
+        in->op = XO_FAR;
+        in->sub = g == 3 ? FAR_CALLM : FAR_JMPM;
+    } else if (op == 0x9a || op == 0xea) {
+        in->op = XO_FAR;                                  /* CALL / JMP ptr16:16 */
+        in->sub = op == 0x9a ? FAR_CALL : FAR_JMP;
+        in->target = rd16(code + pos);
+        in->a.imm = rd16(code + pos + 2);
+        pos += 4;
+    } else if (op == 0xcb || op == 0xca) {
+        in->op = XO_FAR;                                  /* RETF [imm16] */
+        in->sub = FAR_RET;
+        if (op == 0xca) {
+            in->b.imm = rd16(code + pos);
+            pos += 2;
+        }
+    } else if (op == 0x60 || op == 0x61 || op == 0xc9) {
+        in->op = XO_STK;
+        in->sub = op == 0x60 ? STK_PUSHA : op == 0x61 ? STK_POPA : STK_LEAVE;
+    } else if (op == 0xc8 && (code[pos + 2] & 0x1f) < 2) {
+        in->op = XO_STK;                                  /* ENTER imm16, 0 / 1 */
+        in->sub = (code[pos + 2] & 0x1f) ? STK_ENTER1 : STK_ENTER0;
+        in->b.imm = rd16(code + pos);
+        pos += 3;
+    } else if (op == 0xf8 || op == 0xf9 || op == 0xf5 || op == 0x9f || op == 0x9e || op == 0x9c) {
+        in->op = XO_FLAG;
+        in->sub = op == 0xf8 ? FL_CLC : op == 0xf9 ? FL_STC : op == 0xf5 ? FL_CMC :
+                  op == 0x9f ? FL_LAHF : op == 0x9e ? FL_SAHF : FL_PUSHF;
+    } else if (op == 0xd7) {
+        in->op = XO_MISC;                                 /* XLAT: AL = [BX + AL] */
+        in->sub = MISC_XLAT;
+        in->size = 8;
+        in->b.kind = OPD_MEM;
+        in->mem_seg = seg >= 0 ? (uint8_t)seg : SEG_DS;
+    } else if (op == 0xe0 || op == 0xe1) {
+        in->op = XO_LOOPCC;                               /* LOOPNZ / LOOPZ */
+        in->sub = op & 1;
+        const int8_t rel = (int8_t)code[pos++];
+        in->target = (uint16_t)(ip + pos + rel);
     } else if (op == 0xff && ((code[pos] >> 3) & 7) == 6) {
         decode_modrm(code, &pos, seg, in, &in->b, &g);   /* PUSH r/m16 */
         in->op = XO_PUSH;
@@ -345,8 +460,6 @@ bool x86_decode(const uint8_t *code, uint16_t ip, x86_insn_t *in)
     /* 8-bit immediates of 8-bit operations stay 8-bit. */
     if (in->size == 8 && in->b.kind == OPD_IMM)
         in->b.imm &= 0xffu;
-    if (!reg16_ok(&in->a, in->size) || !reg16_ok(&in->b, in->size))
-        return false;   /* SP stays in memory: not handled yet */
     /* No instruction may run past the 64 KiB code segment. */
     if ((uint32_t)ip + pos > 0x10000u)
         return false;

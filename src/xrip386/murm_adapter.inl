@@ -147,7 +147,24 @@ static __time_critical_func() bool xlat_state_ok(const CPU *cpu)
 {
     return !(protected_mode || (cr0 & CR0_PE) || code32 || stack32 || !fast_memory_size || tf ||
              halted || pending_trap || cpu->i286_irq_shadow || cpu->native_done ||
-             XRIP_IP > 0xffffu || (cpu->intr && ifl));
+             XRIP_IP > 0xffffu || (cpu->intr && ifl)) &&
+           /* plain real-mode segments: translated code takes selector = base >> 4 */
+           segment_base[reges] == (uint32_t)segregs[reges] << 4 &&
+           segment_base[regcs] == (uint32_t)segregs[regcs] << 4 &&
+           segment_base[regss] == (uint32_t)segregs[regss] << 4 &&
+           segment_base[regds] == (uint32_t)segregs[regds] << 4;
+}
+
+/* ES and DS loaded by translated code (rt->seg_base) become XRIP's, and CS
+ * after a far CALL / JMP / RETF there (rt->cs). */
+static __time_critical_func() inline void xlat_segs_to_xrip(const xlat_rt_t *rt)
+{
+    if (segregs[regcs] != rt->cs)
+        load_segment(regcs, rt->cs);
+    if (segment_base[reges] != rt->seg_base[0])
+        load_segment(reges, (uint16_t)(rt->seg_base[0] >> 4));
+    if (segment_base[regds] != rt->seg_base[3])
+        load_segment(regds, (uint16_t)(rt->seg_base[3] >> 4));
 }
 
 /* Called by translated code (xlat.h): XRIP executes the one instruction at
@@ -167,6 +184,8 @@ uint32_t __time_critical_func(xlat_interp_one)(xlat_rt_t *rt, uint32_t flags)
     flags_src = rt->lazy_src;
     flags_op = rt->lazy_op;
     flags_cf = rt->lazy_cf;
+    x86_flags.value = rt->eflags;   /* the shift / MUL helpers write the image */
+    xlat_segs_to_xrip(rt);          /* MOV ES / DS, LES, LDS, POP ES / DS, far CS */
 
     void *context[5];
     void **const outer_fault_point = fault_point;
@@ -245,9 +264,13 @@ static __time_critical_func() uint32_t xlat_enter(CPU *cpu, uint32_t count, uint
     xlat_armed = true;
     if (!ran)
         return 0;
-    /* x86_flags, segment registers and CS:IP changed by interpreted
-     * instructions are XRIP's own state already. */
+    /* Segment registers changed by interpreted instructions are XRIP's own
+     * state already. The FLAGS image comes back from rt: interpreted
+     * instructions keep the two equal, and the shift / MUL / DIV helpers
+     * (xlat_rt_shift, xlat_rt_muldiv) write their flags only there. */
     XRIP_IP = rt->ip;
+    x86_flags.value = rt->eflags;
+    xlat_segs_to_xrip(rt);
     flags_result = rt->lazy_result;
     flags_dst = rt->lazy_dst;
     flags_src = rt->lazy_src;

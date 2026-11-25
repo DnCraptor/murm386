@@ -16,6 +16,7 @@
 #include <string.h>
 
 #include "xlat_internal.h"
+#include <limits.h>
 
 xlat_stats_t xlat_stats;
 
@@ -30,6 +31,7 @@ typedef struct {
     uint8_t cold;          /* dropped: too little runs per entry (see xlat_run) */
     uint32_t entries;
     uint32_t insns;        /* instructions charged at its back edges */
+    uint32_t us;           /* time inside it (rt->clock), entries included */
     uint32_t exits[XLAT_EXIT_COUNT];
 } region_t;
 
@@ -212,10 +214,10 @@ static void log_region_counts(void)
 {
     for (int k = 0; k < st->n_regions; ++k) {
         const region_t *r = &st->region[k];
-        log_printf("C %04X:%04X entries=%lu exit branch/budget/side/stop=%lu/%lu/%lu/%lu%s\r\n",
+        log_printf("C %04X:%04X entries=%lu exit branch/budget/side/stop=%lu/%lu/%lu/%lu ins=%lu us=%lu%s\r\n",
                    r->cs, r->ip, (unsigned long)r->entries, (unsigned long)r->exits[0],
                    (unsigned long)r->exits[1], (unsigned long)r->exits[2],
-                   (unsigned long)r->exits[3],
+                   (unsigned long)r->exits[3], (unsigned long)r->insns, (unsigned long)r->us,
                    r->live ? "" : r->cold ? " (cold)" : " (invalidated)");
     }
 }
@@ -561,9 +563,11 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
         }
         rt->budget -= XLAT_ENTRY_COST;
         const int32_t b0 = rt->budget, x0 = (int32_t)rt->extra;
+        const uint32_t t0 = *rt->clock;
         cur_region = r;
         tramp(rt, (uint32_t)(uintptr_t)(st->arena.base + e->code_off) | 1u);
         cur_region = NULL;
+        r->us += *rt->clock - t0;
         ran = true;
         xlat_stats.entries++;
         r->entries++;
@@ -571,7 +575,8 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
         /* A region left before its loops run (a loop body that calls or
          * jumps out every time) costs an entry and an exit per pass: after
          * XLAT_COLD_ENTRIES entries with fewer than XLAT_COLD_INSNS loop
-         * instructions per entry, XRIP keeps it. */
+         * instructions per entry, XRIP keeps it. (The time per instruction
+         * is logged only: a REP string instruction counts as one.) */
         if (r->entries == XLAT_COLD_ENTRIES && r->insns < XLAT_COLD_ENTRIES * XLAT_COLD_INSNS) {
             r->live = 0;
             r->cold = 1;
@@ -656,6 +661,12 @@ static void resolve_rt(xlat_rt_t *rt)
         v |= (carries >> shift) & 0x10u;
     rt->eflags = (rt->eflags & ~0x8d5u) | v;
     rt->lazy_op = 0;
+}
+
+uint32_t XLAT_HOT_FN(xlat_rt_resolve)(xlat_rt_t *rt)
+{
+    resolve_rt(rt);
+    return rt->eflags;
 }
 
 static uint32_t szp(uint32_t value, int bits)
@@ -744,6 +755,88 @@ uint32_t XLAT_HOT_FN(xlat_rt_shift)(xlat_rt_t *rt, uint32_t value, uint32_t ctl)
     }
     rt->eflags = f;
     return s;
+}
+
+/* MUL / IMUL / DIV / IDIV (F6, F7 /4-/7) and IMUL r, r/m, imm (69, 6B) as
+ * XRIP. ctl: bits 0-3 the operation (4-7 as /reg, 8 the three-operand IMUL),
+ * bit 4 16-bit. axdx: AX | DX << 16, or the immediate for IMUL r, r/m, imm.
+ * Returns the new AX | DX << 16 (the destination for the three-operand form)
+ * in the low word; the high word is 1 when DIV / IDIV fault (#DE: nothing
+ * changed, XRIP runs the instruction). DIV / IDIV leave the flags alone. */
+uint64_t XLAT_HOT_FN(xlat_rt_muldiv)(xlat_rt_t *rt, uint32_t ctl, uint32_t operand, uint32_t axdx)
+{
+    const uint32_t op = ctl & 15u;
+    const bool w = (ctl & 16u) != 0;
+    uint32_t ax = axdx & 0xffffu, dx = axdx >> 16, out;
+    bool cfof;
+    switch (op) {
+    case 4:     /* MUL */
+        if (w) {
+            const uint32_t t = (operand & 0xffffu) * ax;
+            out = t;
+            resolve_rt(rt);
+            rt->eflags = (rt->eflags & ~0xc4u) | szp(t & 0xffffu, 16);
+            cfof = (t >> 16) != 0;
+        } else {
+            const uint32_t t = (operand & 0xffu) * (ax & 0xffu);
+            out = t | dx << 16;
+            resolve_rt(rt);
+            rt->eflags = (rt->eflags & ~0xc4u) | szp(t & 0xffu, 8);
+            cfof = (t >> 8) != 0;
+        }
+        break;
+    case 5:     /* IMUL */
+        if (w) {
+            const int32_t t = (int32_t)(int16_t)ax * (int32_t)(int16_t)operand;
+            out = (uint32_t)t;
+            cfof = t != (int32_t)(int16_t)t;
+        } else {
+            const int32_t t = (int32_t)(int8_t)ax * (int32_t)(int8_t)operand;
+            out = ((uint32_t)t & 0xffffu) | dx << 16;
+            cfof = (int16_t)t != (int16_t)(int8_t)t;
+        }
+        resolve_rt(rt);
+        break;
+    case 6:     /* DIV */
+        if (w) {
+            const uint32_t v = ax | dx << 16, d = operand & 0xffffu;
+            if (!d || v / d > 0xffffu)
+                return 1ull << 32;
+            return (uint64_t)((v / d) | (v % d) << 16);
+        } else {
+            const uint32_t d = operand & 0xffu;
+            if (!d || ax / d > 0xffu)
+                return 1ull << 32;
+            return (uint64_t)((ax / d) | (ax % d) << 8 | dx << 16);
+        }
+    case 7:     /* IDIV */
+        if (w) {
+            const int32_t v = (int32_t)(ax | dx << 16), d = (int16_t)operand;
+            if (!d || (v == INT32_MIN && d == -1))
+                return 1ull << 32;
+            const int32_t q = v / d, r = v % d;
+            if (q < -32768 || q > 32767)
+                return 1ull << 32;
+            return (uint64_t)(((uint32_t)q & 0xffffu) | ((uint32_t)r & 0xffffu) << 16);
+        } else {
+            const int32_t v = (int16_t)ax, d = (int8_t)operand;
+            if (!d)
+                return 1ull << 32;
+            const int32_t q = v / d, r = v % d;
+            if (q < -128 || q > 127)
+                return 1ull << 32;
+            return (uint64_t)(((uint32_t)q & 0xffu) | ((uint32_t)r & 0xffu) << 8 | dx << 16);
+        }
+    default: {  /* IMUL r16, r/m16, imm */
+        const int32_t t = (int32_t)(int16_t)operand * (int32_t)(int16_t)axdx;
+        out = (uint32_t)t & 0xffffu;
+        cfof = t != (int32_t)(int16_t)t;
+        resolve_rt(rt);
+        break;
+    }
+    }
+    rt->eflags = cfof ? rt->eflags | 0x801u : rt->eflags & ~0x801u;
+    return out;
 }
 
 #if XLAT_LOG

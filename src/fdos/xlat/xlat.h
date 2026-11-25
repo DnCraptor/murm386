@@ -219,6 +219,14 @@ uint32_t xlat_rt_cond(const xlat_rt_t *rt, uint32_t cc);
  * XRIP's flag results in rt. ctl = operation | 16-bit << 3 | count << 8. */
 uint32_t xlat_rt_shift(xlat_rt_t *rt, uint32_t value, uint32_t ctl);
 
+/* Helper called by generated code: MUL / IMUL / DIV / IDIV as XRIP; see
+ * xlat_cache.c for ctl and axdx. High word of the result: 1 on #DE. */
+uint64_t xlat_rt_muldiv(xlat_rt_t *rt, uint32_t ctl, uint32_t operand, uint32_t axdx);
+
+/* Helper called by generated code (PUSHF, LAHF, SAHF): resolves the lazy
+ * flags in rt as XRIP's flags_now() and returns rt->eflags. */
+uint32_t xlat_rt_resolve(xlat_rt_t *rt);
+
 #ifdef __cplusplus
 }
 #endif

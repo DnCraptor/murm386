@@ -99,10 +99,41 @@ bool arm_patch_branch(arm_emit_t *e, uint32_t at, uint32_t target, int cond);
 /* ---------------------------------------------------------------------- */
 
 enum { XO_ALU = 1, XO_INCDEC, XO_MOV, XO_LEA, XO_XCHG, XO_NOP, XO_JCC, XO_JMP, XO_LOOP,
-       XO_JCXZ, XO_PUSH, XO_POP, XO_CALL, XO_RET, XO_INTERP, XO_STR, XO_SHIFT };
+       XO_JCXZ, XO_PUSH, XO_POP, XO_CALL, XO_RET, XO_INTERP, XO_STR, XO_SHIFT, XO_MULDIV, XO_MISC, XO_SEG, XO_FAR, XO_IND, XO_STK,
+       XO_FLAG, XO_LOOPCC };
+
+/* XO_FAR (real mode): CALL / JMP ptr16:16 (target = offset, a.imm = selector,
+ * local: the selector is the region's CS, so it is a near transfer that
+ * pushes CS too), RETF [b.imm], CALL / JMP m16:16 (b = the memory operand). */
+enum { FAR_CALL = 0, FAR_JMP = 1, FAR_RET = 2, FAR_CALLM = 3, FAR_JMPM = 4 };
+
+/* XO_IND: near CALL / JMP r/m16 (b). */
+enum { IND_CALL = 0, IND_JMP = 1 };
+
+/* XO_STK: PUSHA, POPA, ENTER b.imm, 0 / 1 (the nesting level), LEAVE. */
+enum { STK_PUSHA = 0, STK_POPA = 1, STK_ENTER0 = 2, STK_ENTER1 = 3, STK_LEAVE = 4 };
+
+/* XO_FLAG: they read or write the flags in rt (synchronized before). */
+enum { FL_CLC = 0, FL_STC = 1, FL_CMC = 2, FL_LAHF = 3, FL_SAHF = 4, FL_PUSHF = 5 };
+
+/* XO_LOOPCC: sub 0 LOOPNZ (E0), 1 LOOPZ (E1). */
+
+/* XO_SEG (real mode: selector = base >> 4; ES and DS only are written):
+ * PUSH sreg (b.reg = sreg), POP ES/DS, MOV ES/DS <- r/m16 (b), MOV r/m16 <- sreg
+ * (a), LES / LDS r16, m16:16 (a = register, b = memory). sreg: 0 ES 1 CS 2 SS 3 DS */
+enum { SEG_PUSH = 0, SEG_POP = 1, SEG_LOAD = 2, SEG_STORE = 3, SEG_LES = 4, SEG_LDS = 5 };
+
+/* XO_MISC operations (no arithmetic flags): */
+enum { MISC_CBW = 0, MISC_CWD = 1, MISC_CLD = 2, MISC_STD = 3, MISC_NOT = 4,
+       MISC_XLAT = 5,     /* b: [BX + AL] in DS or the override segment */
+       MISC_MOVZX = 6, MISC_MOVSX = 7 };  /* r16 (a) <- r/m8 (b), size 8 */
+
+/* XO_MULDIV: sub 4-7 as F6/F7 /reg (b = the r/m operand); 8 IMUL r, r/m, imm
+ * (a = destination register, a.imm = the immediate, b = r/m). */
+#define MULDIV_IMUL3 8
 
 /* XO_STR operations (sub); rep: REP prefix (CX times, MOVS/STOS/LODS). */
-enum { STR_MOVS = 0, STR_STOS = 1, STR_LODS = 2 };
+enum { STR_MOVS = 0, STR_STOS = 1, STR_LODS = 2, STR_CMPS = 3, STR_SCAS = 4 };
 
 /* XO_INTERP flags (in sub): the interpreter runs the instruction. */
 #define XI_MAY_WRITE 1u   /* may write memory: recheck the region's code after it */
@@ -111,7 +142,8 @@ enum { STR_MOVS = 0, STR_STOS = 1, STR_LODS = 2 };
 
 /* ALU operations, numbered as the x86 /reg field of 80-83; TEST is extra. */
 enum { ALU_ADD = 0, ALU_OR = 1, ALU_ADC = 2, ALU_SBB = 3, ALU_AND = 4, ALU_SUB = 5,
-       ALU_XOR = 6, ALU_CMP = 7, ALU_TEST = 8 };
+       ALU_XOR = 6, ALU_CMP = 7, ALU_TEST = 8,
+       ALU_NEG = 9 };    /* a = 0 - a: SUB flags with destination 0 */
 
 /* Flag kinds as XRIP's lazy flags_op kind. */
 enum { FK_NONE = 0, FK_ADD = 1, FK_SUB = 2, FK_LOGIC = 3 };
@@ -135,7 +167,9 @@ typedef struct x86_insn {
     /* memory operand (at most one per instruction) */
     uint8_t mem_mod, mem_rm, mem_seg;  /* mod 0..2; rm; 0 ES 1 CS 2 SS 3 DS */
     uint8_t mem_direct;                /* moffs / mod 0 rm 6: offset is disp only */
-    uint8_t rep;                       /* XO_STR: REP / REPE / REPNE prefix */
+    uint8_t rep;                       /* XO_STR: 0, 1 REP / REPE (F3), 2 REPNE (F2) */
+    uint8_t sreg;                      /* XO_SEG: segment register (0 ES 1 CS 2 SS 3 DS) */
+    uint8_t local;                     /* XO_FAR CALL / JMP to the region's own CS */
     uint16_t disp;
 } x86_insn_t;
 
@@ -151,7 +185,30 @@ static inline bool x86_has_mem(const x86_insn_t *in)
 
 static inline bool x86_is_stack_op(const x86_insn_t *in)
 {
-    return in->op == XO_PUSH || in->op == XO_POP || in->op == XO_CALL || in->op == XO_RET;
+    return in->op == XO_PUSH || in->op == XO_POP || in->op == XO_CALL || in->op == XO_RET ||
+           (in->op == XO_SEG && (in->sub == SEG_PUSH || in->sub == SEG_POP)) ||
+           (in->op == XO_FAR && in->sub != FAR_JMP && in->sub != FAR_JMPM) ||
+           (in->op == XO_IND && in->sub == IND_CALL) || in->op == XO_STK ||
+           (in->op == XO_FLAG && in->sub == FL_PUSHF);
+}
+
+/* Pushes a near return address: its return site is reached through RET. */
+static inline bool x86_is_near_call(const x86_insn_t *in)
+{
+    return in->op == XO_CALL || (in->op == XO_IND && in->sub == IND_CALL);
+}
+
+/* Pushes a return address (near or far). */
+static inline bool x86_is_call(const x86_insn_t *in)
+{
+    return x86_is_near_call(in) ||
+           (in->op == XO_FAR && (in->sub == FAR_CALL || in->sub == FAR_CALLM));
+}
+
+/* CMPS / SCAS: string compares leave the SUB flags in rt. */
+static inline bool x86_str_flags(const x86_insn_t *in)
+{
+    return in->op == XO_STR && (in->sub == STR_CMPS || in->sub == STR_SCAS);
 }
 
 /* Reads or writes guest memory (so it may leave by a side exit). */
@@ -168,7 +225,7 @@ static inline int x86_flag_kind(const x86_insn_t *in)
         return FK_NONE;
     switch (in->sub) {
     case ALU_ADD: case ALU_ADC: return FK_ADD;
-    case ALU_SUB: case ALU_SBB: case ALU_CMP: return FK_SUB;
+    case ALU_SUB: case ALU_SBB: case ALU_CMP: case ALU_NEG: return FK_SUB;
     default: return FK_LOGIC;
     }
 }

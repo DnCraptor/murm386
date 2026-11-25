@@ -8,8 +8,8 @@
  *
  * Register convention inside a region:
  *   r4 AX, r5 CX, r6 DX, r7 BX, r8 BP, r9 SI, r10 DI (full 32-bit values;
- *   16-bit writes use BFI), SP stays in rt->gpr (instructions using it are
- *   not translated yet), r11 = xlat_rt_t *, r0-r3, r12, lr scratch.
+ *   16-bit writes use BFI), SP stays in rt->gpr (read and written there),
+ *   r11 = xlat_rt_t *, r0-r3, r12, lr scratch.
  *
  * Flags. XRIP keeps the arithmetic flags lazily (flags_op/result/dst/src/cf);
  * rt holds a copy of that state. An instruction setting flags computes them
@@ -35,6 +35,7 @@
 
 /* x86 16-bit register index -> ARM register; SP (4) is not cached. */
 static const int8_t arm_reg16[8] = {A_R4, A_R5, A_R6, A_R7, -1, A_R8, A_R9, A_R10};
+#define REG16_SP 4   /* SP lives in rt->gpr only: read and written there */
 
 enum { ST_EXIT = 0, ST_BACK = 1, ST_SIDE = 2 };
 enum { D_INSN = 0, D_STUB = 1 };
@@ -116,7 +117,7 @@ static int find_insn(const tctx_t *c, uint16_t ip)
 static bool is_branch(const x86_insn_t *in)
 {
     return in->op == XO_JCC || in->op == XO_JMP || in->op == XO_LOOP || in->op == XO_JCXZ ||
-           in->op == XO_CALL;
+           in->op == XO_CALL || in->op == XO_LOOPCC || (in->op == XO_FAR && in->local);
 }
 
 /* Control reaches the next instruction directly. A CALL does not: its return
@@ -125,7 +126,23 @@ static bool falls_through(const x86_insn_t *in)
 {
     if (in->op == XO_INTERP)
         return !(in->sub & XI_NO_FALL);
-    return in->op != XO_JMP && in->op != XO_CALL && in->op != XO_RET;
+    return in->op != XO_JMP && in->op != XO_CALL && in->op != XO_RET && in->op != XO_FAR &&
+           in->op != XO_IND;
+}
+
+/* Leaves for an IP known only at run time (stored to rt->ip): RET, RETF,
+ * CALL / JMP r/m, far transfers to another CS. */
+static bool dyn_exit(const x86_insn_t *in)
+{
+    return in->op == XO_RET || in->op == XO_IND || (in->op == XO_FAR && !in->local);
+}
+
+/* After it the flags are in rt (a helper or the interpreter left them there,
+ * or the instruction works on rt), as at an entry. */
+static bool flags_in_rt(const x86_insn_t *in)
+{
+    return in->op == XO_INTERP || in->op == XO_SHIFT || in->op == XO_MULDIV ||
+           in->op == XO_FLAG || x86_str_flags(in);
 }
 
 static bool is_producer(const x86_insn_t *in)
@@ -166,8 +183,11 @@ static int discover(tctx_t *c, uint16_t start)
         if (!x86_decode(c->rt->mem + linear, ip, &in) &&
             !x86_decode_interp(c->rt->mem + linear, ip, &in))
             continue;
+        /* a far CALL / JMP into this CS is a near one that pushes CS too */
+        if (in.op == XO_FAR && (in.sub == FAR_CALL || in.sub == FAR_JMP) && in.a.imm == c->rt->cs)
+            in.local = 1;
         c->in[c->n++] = in;
-        if ((falls_through(&in) || in.op == XO_CALL) && tail < qcap)
+        if ((falls_through(&in) || x86_is_call(&in)) && tail < qcap)
             c->queue[tail++] = (uint16_t)(ip + in.len);
         if (is_branch(&in) && tail < qcap)
             c->queue[tail++] = in.target;
@@ -207,7 +227,7 @@ static int discover(tctx_t *c, uint16_t start)
             if (c->tgt_idx[i] <= i)
                 loop = true;
         }
-        if (in->op == XO_CALL) {
+        if (x86_is_call(in)) {
             const int ret = find_insn(c, (uint16_t)(in->ip + in->len));
             if (ret >= 0)
                 c->leader[ret] = 1;
@@ -245,11 +265,20 @@ static int pred_fall_producer(const tctx_t *c, int i)
     return i - 1;
 }
 
+static bool is_sp(const x86_opd_t *o, int size)
+{
+    return o->kind == OPD_REG && size == 16 && o->reg == REG16_SP;
+}
+
 static bool recon_ok(const x86_insn_t *in)
 {
+    /* SP changes with every PUSH / POP / CALL / RET in between: no rebuild
+     * from it (the producer stores its flags itself) */
+    if (is_sp(&in->a, in->size) || is_sp(&in->b, in->size))
+        return false;
     if (in->op == XO_INCDEC)
         return in->a.kind == OPD_REG;
-    if (in->op != XO_ALU || x86_is_carry_op(in) || in->a.kind != OPD_REG ||
+    if (in->op != XO_ALU || x86_is_carry_op(in) || in->sub == ALU_NEG || in->a.kind != OPD_REG ||
         (in->b.kind != OPD_REG && in->b.kind != OPD_IMM))
         return false;
     if ((in->sub == ALU_ADD || in->sub == ALU_SUB) && in->b.kind == OPD_REG &&
@@ -277,10 +306,9 @@ static void dataflow(tctx_t *c)
                 }
             }
             const x86_insn_t *x = &c->in[i];
-            /* after the interpreter the flags are in rt, as at an entry */
-            /* after the interpreter or the shift helper the flags are in rt,
-             * as at an entry */
-            const bool in_rt = x->op == XO_INTERP || x->op == XO_SHIFT;
+            /* after the interpreter or a helper the flags are in rt, as at
+             * an entry */
+            const bool in_rt = flags_in_rt(x);
             const uint64_t out = in_rt ? NONE_BIT : is_producer(x) ? 1ull << i : in;
             const uint64_t cfout = in_rt ? NONE_BIT
                                    : is_producer(x) && x->op != XO_INCDEC ? 1ull << i : cfin;
@@ -382,7 +410,7 @@ static int edge_producer(const tctx_t *c, int i)
         return i;
     /* these leave AX..DI alone, so a reconstruction after them is still valid */
     if (in->op == XO_JCC || in->op == XO_JMP || in->op == XO_JCXZ || in->op == XO_PUSH ||
-        in->op == XO_CALL || in->op == XO_RET)
+        in->op == XO_CALL || in->op == XO_RET || in->op == XO_FAR || in->op == XO_IND)
         return c->pfp[i];
     return -1;
 }
@@ -409,23 +437,25 @@ static void plan(tctx_t *c)
         const x86_insn_t *in = &c->in[i];
         c->pfp[i] = (int8_t)pred_fall_producer(c, i);
         c->local_jcc[i] = 0;
-        if (in->op == XO_JCC && c->pfp[i] >= 0) {
+        if ((in->op == XO_JCC || in->op == XO_LOOPCC) && c->pfp[i] >= 0) {
             const x86_insn_t *p = &c->in[c->pfp[i]];
             jstep_t s[2];
+            /* LOOPZ / LOOPNZ test ZF: the condition code 4 (JZ) */
+            const int cc = in->op == XO_JCC ? in->sub : 4;
             c->local_jcc[i] = !x86_is_carry_op(p) &&
-                              jcc_map(x86_flag_kind(p), p->op == XO_INCDEC, in->sub, s) >= 0;
+                              jcc_map(x86_flag_kind(p), p->op == XO_INCDEC, cc, s) >= 0;
         }
     }
     for (int i = 0; i < c->n; ++i) {
         const x86_insn_t *in = &c->in[i];
         if (x86_accesses_mem(in))
             plan_sync(c, c->in_set[i], side_producer(c, i));  /* side exit */
-        if (in->op == XO_RET)
+        if (dyn_exit(in))
             plan_sync(c, c->out_set[i], edge_producer(c, i)); /* exit to the popped IP */
-        if (in->op == XO_INTERP || in->op == XO_SHIFT)
+        if (flags_in_rt(in))
             plan_sync(c, c->in_set[i], c->pfp[i]);            /* the helper reads rt */
-        if (in->op == XO_JCC && !c->local_jcc[i])
-            plan_sync(c, c->in_set[i], c->pfp[i]);            /* helper Jcc */
+        if ((in->op == XO_JCC || in->op == XO_LOOPCC) && !c->local_jcc[i])
+            plan_sync(c, c->in_set[i], c->pfp[i]);            /* helper condition */
         const int ep = edge_producer(c, i);
         if (falls_through(in) && edge_needs_sync(i, c->fall_idx[i]))
             plan_sync(c, c->out_set[i], ep);
@@ -533,7 +563,11 @@ static void get_shifted(tctx_t *c, const x86_opd_t *o, int size, int rd)
     const int s = 32 - size;
     switch (o->kind) {
     case OPD_REG:
-        if (size == 16) {
+        if (size == 16 && o->reg == REG16_SP) {
+            arm_ls_imm(e, LS_LDR, rd, A_R11, XLAT_RT_GPR);
+            arm_ls_imm(e, LS_LDRH, rd, rd, 16);
+            arm_lsl(e, rd, rd, 16);
+        } else if (size == 16) {
             arm_lsl(e, rd, arm_reg16[o->reg], 16);
         } else if (o->reg < 4) {
             arm_lsl(e, rd, arm_reg16[o->reg], 24);
@@ -559,6 +593,11 @@ static int get_raw(tctx_t *c, const x86_opd_t *o, int size, int scratch)
     arm_emit_t *e = &c->e;
     switch (o->kind) {
     case OPD_REG:
+        if (size == 16 && o->reg == REG16_SP) {
+            arm_ls_imm(e, LS_LDR, scratch, A_R11, XLAT_RT_GPR);
+            arm_ls_imm(e, LS_LDRH, scratch, scratch, 16);
+            return scratch;
+        }
         if (size == 16 || o->reg < 4)
             return arm_reg16[o->reg];
         arm_ubfx(e, scratch, arm_reg16[o->reg - 4], 8, 8);
@@ -579,6 +618,10 @@ static void put_raw(tctx_t *c, const x86_opd_t *o, int size, int src)
     if (o->kind == OPD_MEM) {
         arm_ls_imm(e, LS_LDR, A_LR, A_R11, XLAT_RT_MEM);
         arm_ls_reg(e, size == 16 ? LS_STRH : LS_STRB, src, A_LR, A_R0);
+    } else if (size == 16 && o->reg == REG16_SP) {
+        const int t = src == A_LR ? A_R12 : A_LR;
+        arm_ls_imm(e, LS_LDR, t, A_R11, XLAT_RT_GPR);
+        arm_ls_imm(e, LS_STRH, src, t, 16);
     } else if (size == 16) {
         arm_bfi(e, arm_reg16[o->reg], src, 0, 16);
     } else if (o->reg < 4) {
@@ -819,7 +862,12 @@ static void emit_alu(tctx_t *c, int i)
     if (x86_has_mem(in))
         emit_mem_access(c, i, size / 8, in->a.kind == OPD_MEM && writes);
 
-    get_shifted(c, &in->a, size, A_R2);
+    if (in->op == XO_ALU && in->sub == ALU_NEG) {
+        get_shifted(c, &in->a, size, A_R3);
+        arm_mov32(e, A_R2, 0);
+    } else {
+        get_shifted(c, &in->a, size, A_R2);
+    }
     if (x86_is_carry_op(in)) {
         get_shifted(c, &in->b, size, A_R3);
         emit_carry_op(c, in);
@@ -830,6 +878,8 @@ static void emit_alu(tctx_t *c, int i)
     if (incdec) {
         arm_mov32(e, A_R3, 1u << (32 - size));
         dp = in->sub ? DP_SUB : DP_ADD;
+    } else if (in->sub == ALU_NEG) {
+        dp = DP_SUB;                        /* 0 - operand */
     } else {
         get_shifted(c, &in->b, size, A_R3);
         switch (in->sub) {
@@ -872,7 +922,7 @@ static void emit_xchg(tctx_t *c, int i)
     put_raw(c, &in->b, in->size, A_R1);
 }
 
-/* r1 = (SP + delta) & 0xffff, r0 = SS base + r1. */
+/* r1 = (SP + delta) & 0xffff, r0 = SS base + r1. Uses r12. */
 static void emit_stack_addr(tctx_t *c, int delta)
 {
     arm_emit_t *e = &c->e;
@@ -880,6 +930,8 @@ static void emit_stack_addr(tctx_t *c, int delta)
     arm_ls_imm(e, LS_LDRH, A_R1, A_R12, 16);
     if (delta < 0)
         arm_subw(e, A_R1, A_R1, (uint32_t)-delta);
+    else if (delta > 0)
+        arm_addw(e, A_R1, A_R1, (uint32_t)delta);
     if (delta)
         arm_uxth(e, A_R1, A_R1);
     arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_SEG_BASE + 4u * 2u);
@@ -963,7 +1015,7 @@ static void emit_stack_op(tctx_t *c, int i)
             emit_recon(c, r);
         emit_pop_value(c, i, in->b.imm);
         for (int j = 0; j < c->n; ++j) {
-            if (c->in[j].op != XO_CALL)
+            if (!x86_is_near_call(&c->in[j]))
                 continue;
             const int site = find_insn(c, (uint16_t)(c->in[j].ip + c->in[j].len));
             if (site < 0)
@@ -1093,6 +1145,230 @@ static void emit_shift(tctx_t *c, int i)
     }
 }
 
+/* Segment register moves (real mode): the selector is base >> 4, a load
+ * stores selector << 4 into rt->seg_base, which the adapter gives back to
+ * XRIP (and before each interpreted instruction). Only ES and DS change. */
+static void emit_seg(tctx_t *c, int i)
+{
+    arm_emit_t *e = &c->e;
+    const x86_insn_t *in = &c->in[i];
+    const uint32_t seg_off = XLAT_RT_SEG_BASE + 4u * in->sreg;
+    switch (in->sub) {
+    case SEG_PUSH:
+        arm_ls_imm(e, LS_LDR, A_R2, A_R11, seg_off);
+        arm_lsr(e, A_R2, A_R2, 4);
+        emit_push_value(c, i, A_R2);
+        break;
+    case SEG_POP:
+        emit_pop_value(c, i, 0);
+        arm_lsl(e, A_R2, A_R2, 4);
+        arm_ls_imm(e, LS_STR, A_R2, A_R11, seg_off);
+        break;
+    case SEG_LOAD: {
+        if (in->b.kind == OPD_MEM)
+            emit_mem_access(c, i, 2, false);
+        const int v = get_raw(c, &in->b, 16, A_R1);
+        arm_uxth(e, A_R12, v);
+        arm_lsl(e, A_R12, A_R12, 4);
+        arm_ls_imm(e, LS_STR, A_R12, A_R11, seg_off);
+        break;
+    }
+    case SEG_STORE:
+        if (in->a.kind == OPD_MEM)
+            emit_mem_access(c, i, 2, true);
+        arm_ls_imm(e, LS_LDR, A_R1, A_R11, seg_off);
+        arm_lsr(e, A_R1, A_R1, 4);
+        put_raw(c, &in->a, 16, A_R1);
+        break;
+    default: {  /* LES / LDS: offset to the register, selector to ES / DS */
+        emit_mem_access(c, i, 4, false);
+        arm_ls_imm(e, LS_LDR, A_LR, A_R11, XLAT_RT_MEM);
+        arm_ls_reg(e, LS_LDRH, A_R1, A_LR, A_R0);
+        arm_addw(e, A_R12, A_R0, 2);
+        arm_ls_reg(e, LS_LDRH, A_R2, A_LR, A_R12);
+        arm_lsl(e, A_R2, A_R2, 4);
+        put_raw(c, &in->a, 16, A_R1);
+        arm_ls_imm(e, LS_STR, A_R2, A_R11, seg_off);
+        break;
+    }
+    }
+}
+
+/* CBW, CWD, CLD, STD, NOT, XLAT, MOVZX, MOVSX: no arithmetic flags. DF lives in rt->eflags (the
+ * image goes back to XRIP at the exit). */
+static void emit_misc(tctx_t *c, int i)
+{
+    arm_emit_t *e = &c->e;
+    const x86_insn_t *in = &c->in[i];
+    switch (in->sub) {
+    case MISC_CBW:
+        arm_lsl(e, A_R12, A_R4, 24);
+        arm_dp_reg(e, DP_ORR, 0, A_R12, A_PC, A_R12, SH_ASR, 24);   /* ASR #24 */
+        arm_bfi(e, A_R4, A_R12, 0, 16);
+        break;
+    case MISC_CWD:
+        arm_lsl(e, A_R12, A_R4, 16);
+        arm_dp_reg(e, DP_ORR, 0, A_R12, A_PC, A_R12, SH_ASR, 31);   /* ASR #31 */
+        arm_bfi(e, A_R6, A_R12, 0, 16);
+        break;
+    case MISC_CLD:
+    case MISC_STD:
+        arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_EFLAGS);
+        arm_dp_imm(e, in->sub == MISC_STD ? DP_ORR : DP_BIC, 0, A_R12, A_R12, 0x400u);
+        arm_ls_imm(e, LS_STR, A_R12, A_R11, XLAT_RT_EFLAGS);
+        break;
+    case MISC_XLAT:     /* AL = [seg:(BX + AL) & 0xffff] */
+        arm_ubfx(e, A_R12, A_R4, 0, 8);
+        arm_dp_reg(e, DP_ADD, 0, A_R0, A_R7, A_R12, SH_LSL, 0);
+        arm_uxth(e, A_R0, A_R0);
+        arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_SEG_BASE + 4u * in->mem_seg);
+        arm_dp_reg(e, DP_ADD, 0, A_R0, A_R0, A_R12, SH_LSL, 0);
+        emit_checks(c, i, 1, false);
+        arm_ls_imm(e, LS_LDR, A_LR, A_R11, XLAT_RT_MEM);
+        arm_ls_reg(e, LS_LDRB, A_R1, A_LR, A_R0);
+        arm_bfi(e, A_R4, A_R1, 0, 8);
+        break;
+    case MISC_MOVZX:
+    case MISC_MOVSX: {  /* r16 <- r/m8, zero / sign extended */
+        if (in->b.kind == OPD_MEM)
+            emit_mem_access(c, i, 1, false);
+        const int v = get_raw(c, &in->b, 8, A_R1);
+        if (in->sub == MISC_MOVZX) {
+            arm_ubfx(e, A_R1, v, 0, 8);
+        } else {
+            arm_lsl(e, A_R1, v, 24);
+            arm_dp_reg(e, DP_ORR, 0, A_R1, A_PC, A_R1, SH_ASR, 24);  /* ASR #24 */
+        }
+        put_raw(c, &in->a, 16, A_R1);
+        break;
+    }
+    default: {  /* NOT r/m */
+        if (in->a.kind == OPD_MEM)
+            emit_mem_access(c, i, in->size / 8, true);
+        const int v = get_raw(c, &in->a, in->size, A_R1);
+        arm_dp_reg(e, DP_ORN, 0, A_R1, A_PC, v, SH_LSL, 0);         /* MVN */
+        put_raw(c, &in->a, in->size, A_R1);
+        break;
+    }
+    }
+}
+
+/* MUL / IMUL / DIV / IDIV through xlat_rt_muldiv(): flags to rt first, as
+ * for the shift helper. #DE (division by zero or overflow) leaves by the side
+ * exit before anything changed: XRIP runs the instruction and the fault. */
+static void emit_muldiv(tctx_t *c, int i)
+{
+    arm_emit_t *e = &c->e;
+    const x86_insn_t *in = &c->in[i];
+    const int r = sync_recon(c, c->in_set[i], c->pfp[i]);
+    if (r >= 0)
+        emit_recon(c, r);
+    const bool imul3 = in->sub == MULDIV_IMUL3;
+    const int size = imul3 ? 16 : in->size;
+    if (in->b.kind == OPD_MEM)
+        emit_mem_access(c, i, size / 8, false);
+    const int v = get_raw(c, &in->b, size, A_R2);
+    if (v != A_R2)
+        arm_mov(e, A_R2, v);
+    arm_mov32(e, A_R1, in->sub | (size == 16 ? 16u : 0u));
+    if (imul3) {
+        arm_mov32(e, A_R3, in->a.imm);
+    } else {
+        arm_uxth(e, A_R3, A_R4);                                   /* AX */
+        arm_dp_reg(e, DP_ORR, 0, A_R3, A_R3, A_R6, SH_LSL, 16);    /* | DX << 16 */
+    }
+    arm_mov(e, A_R0, A_R11);
+    arm_mov32(e, A_R12, (uint32_t)(uintptr_t)&xlat_rt_muldiv);
+    arm_blx(e, A_R12);
+    if (in->sub >= 6 && !imul3) {
+        arm_dp_imm(e, DP_SUB, 1, A_PC, A_R1, 0);
+        emit_branch(c, side_dest(c, i, 0), C_NE);                  /* #DE */
+    }
+    if (imul3) {
+        put_raw(c, &in->a, 16, A_R0);
+    } else {
+        arm_bfi(e, A_R4, A_R0, 0, 16);                             /* AX */
+        if (size == 16) {
+            arm_lsr(e, A_R12, A_R0, 16);
+            arm_bfi(e, A_R6, A_R12, 0, 16);                        /* DX */
+        }
+    }
+}
+
+/* r0 = linear address of [rm-base] with segment seg (string operands). */
+static void emit_str_addr(tctx_t *c, int i, int rm, int seg, int bytes, bool write)
+{
+    arm_emit_t *e = &c->e;
+    x86_insn_t t = c->in[i];
+    t.mem_mod = 0;
+    t.mem_direct = 0;
+    t.disp = 0;
+    t.mem_rm = (uint8_t)rm;
+    emit_offset(c, &t);
+    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_SEG_BASE + 4u * (uint32_t)seg);
+    arm_dp_reg(e, DP_ADD, 0, A_R0, A_R0, A_R12, SH_LSL, 0);
+    emit_checks(c, i, bytes, write);
+}
+
+/* r0 = string step (bytes, or -bytes with DF). */
+static void emit_str_step(tctx_t *c, int bytes)
+{
+    arm_emit_t *e = &c->e;
+    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_EFLAGS);
+    arm_ubfx(e, A_R12, A_R12, 10, 1);
+    arm_mov32(e, A_R0, (uint32_t)bytes);
+    arm_dp_reg(e, DP_SUB, 0, A_R0, A_R0, A_R12, SH_LSL, bytes == 2 ? 2 : 1);
+}
+
+/* CMPS / SCAS, with REPE / REPNE: the lazy SUB flags of each element go to
+ * rt (as XRIP's sub_flags), then SI / DI step, CX counts down, and REPE
+ * stops on ZF clear, REPNE on ZF set. Checks come before the changes. */
+static void emit_string_cmp(tctx_t *c, int i)
+{
+    arm_emit_t *e = &c->e;
+    const x86_insn_t *in = &c->in[i];
+    const int bytes = in->size / 8, s = 32 - in->size;
+    uint32_t top = 0, done = 0;
+    if (in->rep) {
+        top = e->pos;
+        arm_dp_reg(e, DP_ORR, 1, A_R12, A_PC, A_R5, SH_LSL, 16);   /* Z = (CX == 0) */
+        done = arm_branch_slot(e);
+    }
+    if (in->sub == STR_CMPS) {
+        emit_str_addr(c, i, 4, in->mem_seg, bytes, false);          /* DS:[SI] */
+        arm_mov(e, A_R3, A_R0);
+        emit_str_addr(c, i, 5, 0, bytes, false);                    /* ES:[DI] */
+        arm_ls_imm(e, LS_LDR, A_LR, A_R11, XLAT_RT_MEM);
+        arm_ls_reg(e, bytes == 2 ? LS_LDRH : LS_LDRB, A_R2, A_LR, A_R3);
+        arm_ls_reg(e, bytes == 2 ? LS_LDRH : LS_LDRB, A_R3, A_LR, A_R0);
+        arm_lsl(e, A_R2, A_R2, s);
+    } else {
+        emit_str_addr(c, i, 5, 0, bytes, false);                    /* ES:[DI] */
+        arm_ls_imm(e, LS_LDR, A_LR, A_R11, XLAT_RT_MEM);
+        arm_ls_reg(e, bytes == 2 ? LS_LDRH : LS_LDRB, A_R3, A_LR, A_R0);
+        arm_lsl(e, A_R2, A_R4, s);                                  /* AL / AX */
+    }
+    arm_lsl(e, A_R3, A_R3, s);
+    arm_dp_reg(e, DP_SUB, 0, A_R1, A_R2, A_R3, SH_LSL, 0);
+    emit_lazy(c, FK_SUB, in->size, false);                          /* r1 stays */
+    emit_str_step(c, bytes);
+    if (in->sub == STR_CMPS) {
+        arm_dp_reg(e, DP_ADD, 0, A_R12, A_R9, A_R0, SH_LSL, 0);
+        arm_bfi(e, A_R9, A_R12, 0, 16);
+    }
+    arm_dp_reg(e, DP_ADD, 0, A_R12, A_R10, A_R0, SH_LSL, 0);
+    arm_bfi(e, A_R10, A_R12, 0, 16);
+    if (in->rep) {
+        arm_subw(e, A_R12, A_R5, 1);
+        arm_bfi(e, A_R5, A_R12, 0, 16);
+        arm_dp_imm(e, DP_SUB, 1, A_PC, A_R1, 0);                    /* Z = ZF */
+        const uint32_t again = arm_branch_slot(e);
+        if (!arm_patch_branch(e, again, top, in->rep == 1 ? C_EQ : C_NE))
+            c->overflow = true;
+        local_patch(c, done, C_EQ);
+    }
+}
+
 /* MOVS / STOS / LODS, with REP: the element loop runs here while CX != 0.
  * All checks of an element come before its changes, so a side exit runs the
  * (restartable) instruction in XRIP with the current SI, DI and CX. */
@@ -1160,6 +1436,338 @@ static void emit_string(tctx_t *c, int i)
     }
 }
 
+/* ---------------------------------------------------------------------- */
+/* Far and indirect transfers, stack frames, flag instructions (iter. 7)   */
+/* ---------------------------------------------------------------------- */
+
+/* The lazy flags reach rt before a transfer to a run-time IP (as for RET). */
+static void emit_dyn_recon(tctx_t *c, int i)
+{
+    const int r = sync_recon(c, c->out_set[i], edge_producer(c, i));
+    if (r >= 0)
+        emit_recon(c, r);
+}
+
+/* Leave for rt->ip (stored by the code) through a BRANCH exit. */
+static void emit_dyn_exit(tctx_t *c)
+{
+    const int k = exit_stub(c, 0, XLAT_EXIT_BRANCH, -1);
+    c->stub[k].dyn = 1;
+    emit_branch(c, (dest_t){D_STUB, (int16_t)k}, C_AL);
+}
+
+/* Far transfer: r2 = IP, r3 = selector (16 bits each). rt->cs and the CS
+ * base change here; the adapter loads CS into XRIP (xlat_segs_to_xrip). */
+static void emit_far_exit(tctx_t *c)
+{
+    arm_emit_t *e = &c->e;
+    arm_ls_imm(e, LS_STRH, A_R3, A_R11, XLAT_RT_CS);
+    arm_lsl(e, A_R12, A_R3, 4);
+    arm_ls_imm(e, LS_STR, A_R12, A_R11, XLAT_RT_SEG_BASE + 4u);
+    arm_ls_imm(e, LS_STR, A_R2, A_R11, XLAT_RT_IP);
+    emit_dyn_exit(c);
+}
+
+/* Two pushes: v1 to SP-2, v2 to SP-4 (each address wraps at 64 KiB). Both
+ * are checked before anything changes. A register number < 0 means the
+ * constant (put in r2 right before its store). v1, v2 not r0, r1, r12, lr. */
+static void emit_push2(tctx_t *c, int i, int v1, uint32_t c1, int v2, uint32_t c2)
+{
+    arm_emit_t *e = &c->e;
+    emit_stack_addr(c, -2);
+    emit_checks(c, i, 2, true);
+    arm_subw(e, A_R1, A_R1, 2);
+    arm_uxth(e, A_R1, A_R1);                                     /* r1 = new SP */
+    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_SEG_BASE + 4u * 2u);
+    arm_dp_reg(e, DP_ADD, 0, A_R0, A_R1, A_R12, SH_LSL, 0);
+    emit_checks(c, i, 2, true);
+    arm_ls_imm(e, LS_LDR, A_LR, A_R11, XLAT_RT_MEM);
+    if (v2 < 0) {
+        arm_mov32(e, A_R2, c2);
+        v2 = A_R2;
+    }
+    arm_ls_reg(e, LS_STRH, v2, A_LR, A_R0);
+    arm_addw(e, A_R0, A_R1, 2);
+    arm_uxth(e, A_R0, A_R0);
+    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_SEG_BASE + 4u * 2u);
+    arm_dp_reg(e, DP_ADD, 0, A_R0, A_R0, A_R12, SH_LSL, 0);
+    if (v1 < 0) {
+        arm_mov32(e, A_R2, c1);
+        v1 = A_R2;
+    }
+    arm_ls_reg(e, LS_STRH, v1, A_LR, A_R0);
+    emit_store_sp(c);
+}
+
+/* CALL / JMP ptr16:16, RETF, CALL / JMP m16:16 (real mode: base = selector
+ * << 4, as XRIP's far_call / far_jump / far_return). Into the region's own
+ * CS (local) they are near transfers; otherwise the region leaves with the
+ * new CS and the dispatcher goes on there. */
+static void emit_far(tctx_t *c, int i)
+{
+    arm_emit_t *e = &c->e;
+    const x86_insn_t *in = &c->in[i];
+    const uint16_t ret_ip = (uint16_t)(in->ip + in->len);
+    if (!in->local)
+        emit_dyn_recon(c, i);
+    switch (in->sub) {
+    case FAR_CALL:
+        emit_push2(c, i, -1, c->rt->cs, -1, ret_ip);
+        if (in->local) {
+            emit_branch(c, make_dest(c, i, in->target), C_AL);
+        } else {
+            arm_mov32(e, A_R2, in->target);
+            arm_mov32(e, A_R3, in->a.imm);
+            emit_far_exit(c);
+        }
+        break;
+    case FAR_JMP:
+        if (in->local) {
+            emit_branch(c, make_dest(c, i, in->target), C_AL);
+        } else {
+            arm_mov32(e, A_R2, in->target);
+            arm_mov32(e, A_R3, in->a.imm);
+            emit_far_exit(c);
+        }
+        break;
+    case FAR_RET:
+        /* IP at SP, CS at SP+2: both checked, then SP += 4 + release */
+        emit_stack_addr(c, 0);
+        emit_checks(c, i, 2, false);
+        arm_addw(e, A_R3, A_R1, 2);
+        arm_uxth(e, A_R3, A_R3);
+        arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_SEG_BASE + 4u * 2u);
+        arm_dp_reg(e, DP_ADD, 0, A_R0, A_R3, A_R12, SH_LSL, 0);
+        emit_checks(c, i, 2, false);
+        arm_ls_imm(e, LS_LDR, A_LR, A_R11, XLAT_RT_MEM);
+        arm_ls_reg(e, LS_LDRH, A_R3, A_LR, A_R0);
+        arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_SEG_BASE + 4u * 2u);
+        arm_dp_reg(e, DP_ADD, 0, A_R0, A_R1, A_R12, SH_LSL, 0);
+        arm_ls_reg(e, LS_LDRH, A_R2, A_LR, A_R0);
+        if (in->b.imm + 4u <= 0xfffu) {
+            arm_addw(e, A_R1, A_R1, in->b.imm + 4u);
+        } else {
+            arm_mov32(e, A_R12, in->b.imm + 4u);
+            arm_dp_reg(e, DP_ADD, 0, A_R1, A_R1, A_R12, SH_LSL, 0);
+        }
+        emit_store_sp(c);                    /* the low 16 bits */
+        emit_far_exit(c);
+        break;
+    default:    /* CALL / JMP m16:16: offset at [m], selector at [m+2] */
+        emit_mem_access(c, i, 4, false);
+        arm_ls_imm(e, LS_LDR, A_LR, A_R11, XLAT_RT_MEM);
+        arm_ls_reg(e, LS_LDRH, A_R2, A_LR, A_R0);
+        arm_addw(e, A_R12, A_R0, 2);
+        arm_ls_reg(e, LS_LDRH, A_R3, A_LR, A_R12);
+        if (in->sub == FAR_CALLM) {
+            /* the offset waits in rt->ip: a side exit stores rt->ip itself */
+            arm_ls_imm(e, LS_STR, A_R2, A_R11, XLAT_RT_IP);
+            emit_push2(c, i, -1, c->rt->cs, -1, ret_ip);
+            arm_ls_imm(e, LS_LDR, A_R2, A_R11, XLAT_RT_IP);
+        }
+        emit_far_exit(c);
+        break;
+    }
+}
+
+/* CALL / JMP r/m16: the operand is read first (CALL SP, CALL [SP-relative]
+ * use the old SP), then the return address is pushed. */
+static void emit_ind(tctx_t *c, int i)
+{
+    arm_emit_t *e = &c->e;
+    const x86_insn_t *in = &c->in[i];
+    emit_dyn_recon(c, i);
+    if (in->b.kind == OPD_MEM)
+        emit_mem_access(c, i, 2, false);
+    const int v = get_raw(c, &in->b, 16, A_R3);
+    arm_uxth(e, A_R3, v);
+    if (in->sub == IND_CALL) {
+        arm_mov32(e, A_R2, (uint16_t)(in->ip + in->len));
+        emit_push_value(c, i, A_R2);
+    }
+    arm_ls_imm(e, LS_STR, A_R3, A_R11, XLAT_RT_IP);
+    emit_dyn_exit(c);
+}
+
+/* PUSHA / POPA (one 16-byte block, SP must not wrap inside it: otherwise
+ * XRIP runs it), ENTER n, 0 / 1, LEAVE. */
+static void emit_stk(tctx_t *c, int i)
+{
+    arm_emit_t *e = &c->e;
+    const x86_insn_t *in = &c->in[i];
+    static const int8_t pusha[8] = {A_R10, A_R9, A_R8, -1, A_R7, A_R6, A_R5, A_R4};
+    switch (in->sub) {
+    case STK_PUSHA:
+        emit_stack_addr(c, 0);
+        arm_dp_imm(e, DP_SUB, 1, A_PC, A_R1, 16);
+        emit_branch(c, side_dest(c, i, 0), C_CC);                    /* SP < 16 */
+        arm_subw(e, A_R0, A_R0, 16);
+        emit_checks(c, i, 16, true);
+        arm_ls_imm(e, LS_LDR, A_LR, A_R11, XLAT_RT_MEM);
+        arm_dp_reg(e, DP_ADD, 0, A_LR, A_LR, A_R0, SH_LSL, 0);
+        for (int k = 7; k >= 0; --k)          /* AX at SP-2 ... DI at SP-16 */
+            arm_ls_imm(e, LS_STRH, pusha[k] >= 0 ? pusha[k] : A_R1, A_LR, 2u * (uint32_t)k);
+        arm_subw(e, A_R1, A_R1, 16);
+        emit_store_sp(c);
+        break;
+    case STK_POPA:
+        emit_stack_addr(c, 0);
+        arm_addw(e, A_R12, A_R1, 16);
+        arm_dp_imm(e, DP_SUB, 1, A_PC, A_R12, 0x10000u);
+        emit_branch(c, side_dest(c, i, 0), C_HI);                    /* SP > 0xfff0 */
+        emit_checks(c, i, 16, false);
+        arm_ls_imm(e, LS_LDR, A_LR, A_R11, XLAT_RT_MEM);
+        arm_dp_reg(e, DP_ADD, 0, A_LR, A_LR, A_R0, SH_LSL, 0);
+        for (int k = 0; k < 8; ++k) {         /* DI, SI, BP, (SP), BX, DX, CX, AX */
+            if (pusha[k] < 0)
+                continue;
+            arm_ls_imm(e, LS_LDRH, A_R12, A_LR, 2u * (uint32_t)k);
+            arm_bfi(e, pusha[k], A_R12, 0, 16);
+        }
+        arm_addw(e, A_R1, A_R1, 16);
+        emit_store_sp(c);
+        break;
+    case STK_LEAVE:
+        /* SP = BP, then BP = pop */
+        arm_uxth(e, A_R1, A_R8);
+        arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_SEG_BASE + 4u * 2u);
+        arm_dp_reg(e, DP_ADD, 0, A_R0, A_R1, A_R12, SH_LSL, 0);
+        emit_checks(c, i, 2, false);
+        arm_ls_imm(e, LS_LDR, A_LR, A_R11, XLAT_RT_MEM);
+        arm_ls_reg(e, LS_LDRH, A_R2, A_LR, A_R0);
+        arm_addw(e, A_R1, A_R1, 2);
+        emit_store_sp(c);
+        arm_bfi(e, A_R8, A_R2, 0, 16);
+        break;
+    default: {  /* ENTER size, 0 / 1 */
+        emit_stack_addr(c, -2);                                      /* r1 = frame */
+        emit_checks(c, i, 2, true);
+        if (in->sub == STK_ENTER1) {
+            /* level 1 also pushes the new frame pointer at SP-4 */
+            arm_subw(e, A_R2, A_R1, 2);
+            arm_uxth(e, A_R2, A_R2);
+            arm_mov(e, A_R3, A_R0);
+            arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_SEG_BASE + 4u * 2u);
+            arm_dp_reg(e, DP_ADD, 0, A_R0, A_R2, A_R12, SH_LSL, 0);
+            emit_checks(c, i, 2, true);
+            arm_ls_imm(e, LS_LDR, A_LR, A_R11, XLAT_RT_MEM);
+            arm_ls_reg(e, LS_STRH, A_R1, A_LR, A_R0);
+            arm_ls_reg(e, LS_STRH, A_R8, A_LR, A_R3);
+        } else {
+            arm_ls_imm(e, LS_LDR, A_LR, A_R11, XLAT_RT_MEM);
+            arm_ls_reg(e, LS_STRH, A_R8, A_LR, A_R0);
+            arm_mov(e, A_R2, A_R1);
+        }
+        arm_bfi(e, A_R8, A_R1, 0, 16);                               /* BP = frame */
+        arm_mov(e, A_R1, A_R2);
+        if (in->b.imm <= 0xfffu) {
+            arm_subw(e, A_R1, A_R1, in->b.imm);
+        } else {
+            arm_mov32(e, A_R12, in->b.imm);
+            arm_dp_reg(e, DP_SUB, 0, A_R1, A_R1, A_R12, SH_LSL, 0);
+        }
+        emit_store_sp(c);                    /* the low 16 bits */
+        break;
+    }
+    }
+}
+
+/* r0 = rt->eflags with the lazy flags resolved (xlat_rt_resolve). */
+static void emit_resolve(tctx_t *c)
+{
+    arm_emit_t *e = &c->e;
+    arm_mov(e, A_R0, A_R11);
+    arm_mov32(e, A_R12, (uint32_t)(uintptr_t)&xlat_rt_resolve);
+    arm_blx(e, A_R12);
+}
+
+/* CLC / STC / CMC, LAHF, SAHF, PUSHF on the flags in rt. XRIP resolves the
+ * lazy flags for these; CLC / STC / CMC here change CF where it is (the
+ * lazy CF or the image), the same flags. */
+static void emit_flag(tctx_t *c, int i)
+{
+    arm_emit_t *e = &c->e;
+    const x86_insn_t *in = &c->in[i];
+    const int r = sync_recon(c, c->in_set[i], c->pfp[i]);
+    if (r >= 0)
+        emit_recon(c, r);
+    switch (in->sub) {
+    case FL_CLC:
+    case FL_STC:
+    case FL_CMC: {
+        arm_ls_imm(e, LS_LDRB, A_R12, A_R11, XLAT_RT_OP);
+        arm_dp_imm(e, DP_SUB, 1, A_PC, A_R12, 0);
+        const uint32_t resolved = arm_branch_slot(e);
+        if (in->sub == FL_CMC) {
+            arm_ls_imm(e, LS_LDRB, A_R12, A_R11, XLAT_RT_CF);
+            arm_dp_imm(e, DP_EOR, 0, A_R12, A_R12, 1);
+        } else {
+            arm_mov32(e, A_R12, in->sub == FL_STC);
+        }
+        arm_ls_imm(e, LS_STRB, A_R12, A_R11, XLAT_RT_CF);
+        const uint32_t done = arm_branch_slot(e);
+        local_patch(c, resolved, C_EQ);
+        arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_EFLAGS);
+        arm_dp_imm(e, in->sub == FL_CLC ? DP_BIC : in->sub == FL_STC ? DP_ORR : DP_EOR, 0,
+                   A_R12, A_R12, 1);
+        arm_ls_imm(e, LS_STR, A_R12, A_R11, XLAT_RT_EFLAGS);
+        local_patch(c, done, C_AL);
+        break;
+    }
+    case FL_LAHF:   /* AH = (2 | FLAGS & 0xd5) */
+        emit_resolve(c);
+        arm_dp_imm(e, DP_AND, 0, A_R12, A_R0, 0xd5u);
+        arm_dp_imm(e, DP_ORR, 0, A_R12, A_R12, 2u);
+        arm_bfi(e, A_R4, A_R12, 8, 8);
+        break;
+    case FL_SAHF:   /* SF ZF AF PF CF from AH */
+        emit_resolve(c);
+        arm_ubfx(e, A_R12, A_R4, 8, 8);
+        arm_dp_imm(e, DP_AND, 0, A_R12, A_R12, 0xd5u);
+        arm_dp_imm(e, DP_BIC, 0, A_R0, A_R0, 0xd5u);
+        arm_dp_reg(e, DP_ORR, 0, A_R0, A_R0, A_R12, SH_LSL, 0);
+        arm_ls_imm(e, LS_STR, A_R0, A_R11, XLAT_RT_EFLAGS);
+        break;
+    default:        /* PUSHF: 2 | (FLAGS & 0x7fd5), as XRIP's makeflagsword() */
+        emit_resolve(c);
+        arm_mov32(e, A_R12, 0x7fd5u);
+        arm_dp_reg(e, DP_AND, 0, A_R2, A_R0, A_R12, SH_LSL, 0);
+        arm_dp_imm(e, DP_ORR, 0, A_R2, A_R2, 2u);
+        emit_push_value(c, i, A_R2);
+        break;
+    }
+}
+
+/* LOOPNZ / LOOPZ: CX - 1, then taken when CX != 0 and ZF is clear / set.
+ * ZF comes from the ARM flags of the producer right before (local) or
+ * from rt (xlat_rt_cond). */
+static void emit_loopcc(tctx_t *c, int i)
+{
+    arm_emit_t *e = &c->e;
+    const x86_insn_t *in = &c->in[i];
+    int zcond;          /* ARM condition that holds when ZF = 1 */
+    if (c->local_jcc[i]) {
+        zcond = C_EQ;
+    } else {
+        const int r = sync_recon(c, c->in_set[i], c->pfp[i]);
+        if (r >= 0)
+            emit_recon(c, r);
+        arm_mov(e, A_R0, A_R11);
+        arm_mov32(e, A_R1, 4);                                       /* JZ */
+        arm_mov32(e, A_R12, (uint32_t)(uintptr_t)&xlat_rt_cond);
+        arm_blx(e, A_R12);
+        arm_dp_imm(e, DP_SUB, 1, A_PC, A_R0, 0);
+        zcond = C_NE;
+    }
+    arm_subw(e, A_R12, A_R5, 1);                                     /* no flags */
+    arm_bfi(e, A_R5, A_R12, 0, 16);
+    /* LOOPNZ skips when ZF = 1, LOOPZ when ZF = 0 */
+    const uint32_t skip = arm_branch_slot(e);
+    arm_dp_reg(e, DP_ORR, 1, A_R12, A_PC, A_R5, SH_LSL, 16);         /* Z = (CX == 0) */
+    emit_branch(c, make_dest(c, i, in->target), C_NE);
+    local_patch(c, skip, in->sub ? zcond ^ 1 : zcond);
+}
+
 static void emit_insn(tctx_t *c, int i)
 {
     arm_emit_t *e = &c->e;
@@ -1208,14 +1816,58 @@ static void emit_insn(tctx_t *c, int i)
         emit_interp(c, i);
         break;
     case XO_STR:
-        emit_string(c, i);
+        if (x86_str_flags(in))
+            emit_string_cmp(c, i);
+        else
+            emit_string(c, i);
         break;
     case XO_SHIFT:
         emit_shift(c, i);
         break;
+    case XO_MULDIV:
+        emit_muldiv(c, i);
+        break;
+    case XO_MISC:
+        emit_misc(c, i);
+        break;
+    case XO_SEG:
+        emit_seg(c, i);
+        break;
+    case XO_FAR:
+        emit_far(c, i);
+        break;
+    case XO_IND:
+        emit_ind(c, i);
+        break;
+    case XO_STK:
+        emit_stk(c, i);
+        break;
+    case XO_FLAG:
+        emit_flag(c, i);
+        break;
+    case XO_LOOPCC:
+        emit_loopcc(c, i);
+        break;
     }
     if (falls_through(in) && c->fall_idx[i] != i + 1)
         emit_branch(c, make_dest(c, i, (uint16_t)(in->ip + in->len)), C_AL);
+}
+
+/* An instruction with more than one access: when one of them cannot be done
+ * here, XRIP does all, and a write among the others may hit this region's
+ * code (MOVS reading outside fast memory and writing into it, PUSH [m],
+ * PUSHA with SP wrapping, ...). The region is checked after it then. */
+static bool side_writes_more(const x86_insn_t *in)
+{
+    switch (in->op) {
+    case XO_STR:  return in->sub == STR_MOVS;
+    case XO_PUSH: return in->b.kind == OPD_MEM;
+    case XO_POP:  return in->a.kind == OPD_MEM;
+    case XO_IND:  return in->sub == IND_CALL && in->b.kind == OPD_MEM;
+    case XO_FAR:  return in->sub == FAR_CALL || in->sub == FAR_CALLM;
+    case XO_STK:  return in->sub == STK_PUSHA || in->sub == STK_ENTER1;
+    default:      return false;
+    }
 }
 
 static void emit_stubs(tctx_t *c)
@@ -1271,7 +1923,8 @@ static void emit_stubs(tctx_t *c)
                 const bool cont = falls_through(in) && !is_producer(in) && c->fall_idx[i] >= 0;
                 if (s->recon >= 0)
                     emit_recon(c, s->recon);
-                emit_interp_call(c, i, (s->mw ? XI_MAY_WRITE : 0u) | XI_SIDE, cont);
+                emit_interp_call(c, i, (s->mw || side_writes_more(in) ? XI_MAY_WRITE : 0u) | XI_SIDE,
+                                 cont);
                 if (cont) {
                     const uint32_t site = arm_branch_slot(e);
                     if (!arm_patch_branch(e, site, c->label[c->fall_idx[i]], C_AL))
