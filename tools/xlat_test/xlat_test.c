@@ -449,6 +449,115 @@ static uint16_t ref_pop(void)
     return v;
 }
 
+/* 66h in 16-bit code: XRIP's exec386() (cpu386.c.inl) for the forms the
+ * generator makes; anything else makes the program unusable. */
+static uint32_t rd32(uint32_t a) { return rd16(a) | (uint32_t)rd16(a + 2) << 16; }
+static void wr32(uint32_t a, uint32_t v) { wr16(a, (uint16_t)v); wr16(a + 2, (uint16_t)(v >> 16)); }
+static uint32_t fetch32(void) { const uint32_t lo = fetch16(); return lo | (uint32_t)fetch16() << 16; }
+static uint32_t readrm32(void) { return mode < 3 ? rd32(ea) : R.gpr[rm]; }
+static void writerm32(uint32_t v) { if (mode < 3) wr32(ea, v); else R.gpr[rm] = v; }
+static bool alu32(int op, uint32_t a, uint32_t b, uint32_t *res)
+{
+    switch (op) {
+    case 0: *res = a + b; add_flags(32, a, b); return true;
+    case 1: *res = a | b; logic_flags(32, *res); return true;
+    case 4: *res = a & b; logic_flags(32, *res); return true;
+    case 5: *res = a - b; sub_flags(32, a, b); return true;
+    case 6: *res = a ^ b; logic_flags(32, *res); return true;
+    case 7: sub_flags(32, a, b); return false;
+    default: R.bad = R.halted = true; return false;   /* ADC / SBB: not generated */
+    }
+}
+static bool ref_step32(uint8_t op, int rep)
+{
+    uint32_t r32;
+    if (op < 0x40 && (op & 7) < 6 && !(op & 1))
+        return false;   /* byte operation: 66h does nothing */
+    if (op < 0x40 && (op & 7) < 6 && (op & 1)) {
+        const int alu = op >> 3;
+        switch (op & 7) {
+        case 1: modregrm(); if (alu32(alu, readrm32(), R.gpr[reg], &r32)) writerm32(r32); return true;
+        case 3: modregrm(); if (alu32(alu, R.gpr[reg], readrm32(), &r32)) R.gpr[reg] = r32; return true;
+        default: { const uint32_t i = fetch32(); if (alu32(alu, R.gpr[0], i, &r32)) R.gpr[0] = r32; return true; }
+        }
+    }
+    if (op >= 0x40 && op <= 0x4f) { R.gpr[op & 7] = inc_dec(R.gpr[op & 7], op >= 0x48, 32); return true; }
+    if (op >= 0xb8 && op <= 0xbf) { R.gpr[op & 7] = fetch32(); return true; }
+    if (op >= 0x91 && op <= 0x97) { const uint32_t t = R.gpr[0]; R.gpr[0] = R.gpr[op & 7]; R.gpr[op & 7] = t; return true; }
+    switch (op) {
+    case 0x0f: {
+        const uint8_t op2 = fetch8();
+        modregrm();
+        switch (op2) {
+        case 0xb6: R.gpr[reg] = readrm8(); return true;
+        case 0xbe: R.gpr[reg] = (uint32_t)(int32_t)(int8_t)readrm8(); return true;
+        case 0xb7: R.gpr[reg] = readrm16(); return true;
+        case 0xbf: R.gpr[reg] = (uint32_t)(int32_t)(int16_t)readrm16(); return true;
+        default: break;
+        }
+        break;
+    }
+    case 0x81: case 0x83: {
+        modregrm();
+        const uint32_t v = readrm32();
+        const uint32_t i = op == 0x81 ? fetch32() : (uint32_t)(int32_t)(int8_t)fetch8();
+        if (alu32(reg, v, i, &r32)) writerm32(r32);
+        return true;
+    }
+    case 0x85: modregrm(); alu32(4, readrm32(), R.gpr[reg], &r32); return true;
+    case 0x87: modregrm(); { const uint32_t v = readrm32(); writerm32(R.gpr[reg]); R.gpr[reg] = v; } return true;
+    case 0x89: modregrm(); writerm32(R.gpr[reg]); return true;
+    case 0x8b: modregrm(); R.gpr[reg] = readrm32(); return true;
+    case 0x98: R.gpr[0] = (uint32_t)(int32_t)(int16_t)getreg16(0); return true;
+    case 0x99: R.gpr[2] = (int32_t)R.gpr[0] < 0 ? 0xffffffffu : 0; return true;
+    case 0xa1: R.gpr[0] = rd32(useseg + fetch16()); return true;
+    case 0xa3: wr32(useseg + fetch16(), R.gpr[0]); return true;
+    case 0xa9: alu32(4, R.gpr[0], fetch32(), &r32); return true;
+    case 0xc7: modregrm(); if (reg) break; { const uint32_t i = fetch32(); writerm32(i); } return true;
+    case 0xf7:
+        modregrm();
+        if (reg == 0) { const uint32_t a = readrm32(); alu32(4, a, fetch32(), &r32); return true; }
+        if (reg == 2) { writerm32(~readrm32()); return true; }
+        if (reg == 3) { const uint32_t v = readrm32(); sub_flags(32, 0, v); writerm32(0u - v); return true; }
+        break;
+    case 0xa5: case 0xab: case 0xad: {
+        const int step = R.eflags & 0x400u ? -4 : 4;
+        while (!rep || getreg16(1)) {
+            const uint32_t src = useseg + getreg16(6), dst = R.seg_base[0] + getreg16(7);
+            if (op == 0xa5) wr32(dst, rd32(src));
+            else if (op == 0xab) wr32(dst, R.gpr[0]);
+            else R.gpr[0] = rd32(src);
+            if (op != 0xab) putreg16(6, (uint16_t)(getreg16(6) + step));
+            if (op != 0xad) putreg16(7, (uint16_t)(getreg16(7) + step));
+            if (!rep) break;
+            putreg16(1, (uint16_t)(getreg16(1) - 1));
+        }
+        return true;
+    }
+    case 0xa7: case 0xaf: {
+        const int step = R.eflags & 0x400u ? -4 : 4;
+        while (!rep || getreg16(1)) {
+            const uint32_t dst = R.seg_base[0] + getreg16(7);
+            if (op == 0xa7) {
+                sub_flags(32, rd32(useseg + getreg16(6)), rd32(dst));
+                putreg16(6, (uint16_t)(getreg16(6) + step));
+            } else {
+                sub_flags(32, R.gpr[0], rd32(dst));
+            }
+            putreg16(7, (uint16_t)(getreg16(7) + step));
+            if (!rep) break;
+            putreg16(1, (uint16_t)(getreg16(1) - 1));
+            if (rep == 1 ? !get_zf() : get_zf()) break;
+        }
+        return true;
+    }
+    default:
+        break;
+    }
+    R.bad = R.halted = true;
+    return true;
+}
+
 static void ref_step(void)
 {
     if (R.halted) return;
@@ -456,8 +565,10 @@ static void ref_step(void)
     segoverride = false;
     uint8_t op = fetch8();
     int rep = 0;   /* 1 REP / REPE (F3), 2 REPNE (F2) */
+    bool o32 = false;
     for (;;) {
         if (op == 0xf2 || op == 0xf3) { rep = op == 0xf3 ? 1 : 2; op = fetch8(); continue; }
+        if (op == 0x66) { o32 = true; op = fetch8(); continue; }
         if (op == 0x26) useseg = R.seg_base[0];
         else if (op == 0x2e) useseg = R.seg_base[1];
         else if (op == 0x36) useseg = R.seg_base[2];
@@ -466,6 +577,7 @@ static void ref_step(void)
         segoverride = true;
         op = fetch8();
     }
+    if (o32 && ref_step32(op, rep)) return;
     uint8_t r8;
     uint16_t r16;
     if (op < 0x40 && (op & 7) < 6) {
@@ -844,11 +956,120 @@ static void put_mem_modrm(ginsn_t *g, int regf)
     }
 }
 
+static void put_imm32(ginsn_t *g)
+{
+    const uint32_t v = rn(3) ? rn(16) : (rn(2) ? 0xffffffffu - rn(4) : ((uint32_t)rnd() << 16 | rnd()));
+    for (int k = 0; k < 4; ++k)
+        g->b[g->len++] = (uint8_t)(v >> 8 * k);
+}
+
+/* 66h forms: the ones x86_decode makes native, and a few it leaves to XRIP */
+static void gen_o32(ginsn_t *g)
+{
+    static const uint8_t alus[6] = {0, 1, 4, 5, 6, 7};   /* no ADC / SBB (XRIP: eager flags) */
+    const int alu = alus[rn(6)];
+    const int t = (int)rn(14);
+    if (t == 13) {   /* string, REP with a small count */
+        static const uint8_t str[] = {0xa5, 0xab, 0xad, 0xa7, 0xaf};
+        const uint8_t op = str[rn(5)];
+        bool reps = rn(2);
+        if (rn(3) == 0)
+            g->b[g->len++] = rn(2) ? 0xfd : 0xfc;   /* STD / CLD */
+        if (reps) {
+            g->b[g->len++] = 0xb9;
+            g->b[g->len++] = (uint8_t)rn(5);
+            g->b[g->len++] = 0;
+        }
+        if (reps && rn(2)) { g->b[g->len++] = op == 0xa7 || op == 0xaf ? (rn(2) ? 0xf3 : 0xf2) : 0xf3; reps = false; }
+        g->b[g->len++] = 0x66;
+        if (reps) g->b[g->len++] = op == 0xa7 || op == 0xaf ? (rn(2) ? 0xf3 : 0xf2) : 0xf3;
+        g->b[g->len++] = op;
+        return;
+    }
+    g->b[g->len++] = 0x66;
+    switch (t) {
+    case 0: case 1: {   /* ALU E,G / G,E */
+        const bool to_g = rn(2);
+        g->b[g->len++] = (uint8_t)(alu << 3 | (to_g ? 3 : 1));
+        const int gr = to_g && alu != 7 ? pick_reg16_dst() : (int)rn(8);
+        put_modrm(g, gr, true, !to_g && alu != 7);
+        break;
+    }
+    case 2:             /* ALU EAX, imm32 */
+        g->b[g->len++] = (uint8_t)(alu << 3 | 5);
+        put_imm32(g);
+        break;
+    case 3: {           /* 81 / 83 */
+        const bool i8 = rn(2);
+        g->b[g->len++] = i8 ? 0x83 : 0x81;
+        put_modrm(g, alu, true, alu != 7);
+        if (i8) g->b[g->len++] = (uint8_t)rnd(); else put_imm32(g);
+        break;
+    }
+    case 4: {           /* TEST */
+        const int k = (int)rn(3);
+        if (k == 0) { g->b[g->len++] = 0x85; put_modrm(g, rn(8), true, false); }
+        else if (k == 1) { g->b[g->len++] = 0xa9; put_imm32(g); }
+        else { g->b[g->len++] = 0xf7; put_modrm(g, 0, true, false); put_imm32(g); }
+        break;
+    }
+    case 5:             /* INC / DEC */
+        g->b[g->len++] = (uint8_t)((rn(2) ? 0x48 : 0x40) | pick_reg16_dst());
+        break;
+    case 6: {           /* MOV */
+        const int k = (int)rn(4);
+        if (k == 0) { g->b[g->len++] = (uint8_t)(0xb8 | pick_reg16_dst()); put_imm32(g); }
+        else if (k == 1 && allow_mem) { g->b[g->len++] = rn(2) ? 0xa1 : 0xa3; uint16_t d = (uint16_t)rnd(); g->b[g->len++] = (uint8_t)d; g->b[g->len++] = (uint8_t)(d >> 8); }
+        else if (k == 2) { g->b[g->len++] = 0xc7; put_modrm(g, 0, true, true); put_imm32(g); }
+        else {
+            const bool to_g = rn(2);
+            g->b[g->len++] = to_g ? 0x8b : 0x89;
+            put_modrm(g, to_g ? pick_reg16_dst() : (int)rn(8), true, !to_g);
+        }
+        break;
+    }
+    case 7: {           /* XCHG */
+        if (rn(2)) { const int r = pick_reg16_dst(); g->b[g->len++] = (uint8_t)(r ? 0x90 | r : 0x87); if (!r) g->b[g->len++] = 0xc0 | 3 << 3 | 2; }
+        else { g->b[g->len++] = 0x87; g->b[g->len++] = (uint8_t)(0xc0 | pick_reg16_dst() << 3 | pick_reg16_dst()); }
+        break;
+    }
+    case 8:             /* CWDE / CDQ */
+        g->b[g->len++] = rn(2) ? 0x98 : 0x99;
+        break;
+    case 9: {           /* NOT / NEG */
+        g->b[g->len++] = 0xf7;
+        put_modrm(g, rn(2) ? 2 : 3, true, true);
+        break;
+    }
+    case 10: {          /* MOVZX / MOVSX r32 */
+        static const uint8_t m[4] = {0xb6, 0xb7, 0xbe, 0xbf};
+        const uint8_t op2 = m[rn(4)];
+        g->b[g->len++] = 0x0f;
+        g->b[g->len++] = op2;
+        put_modrm(g, pick_reg16_dst(), op2 & 1, false);
+        break;
+    }
+    default: {          /* left to XRIP: ADD with a byte operand size (66 00) */
+        g->b[g->len++] = 0x00;
+        put_modrm(g, pick_reg8_dst(), false, true);
+        break;
+    }
+    }
+}
+
 /* x87 forms (the translator's lists, and some it leaves to XRIP) */
 static void gen_x87(ginsn_t *g)
 {
     static const uint8_t memok[8] = {0xff, 0xbd, 0xff, 0xad, 0xff, 0xdd, 0xff, 0xfd};  /* + env/save */
     static const uint8_t regok_d9_4 = 0x33;   /* FCHS FABS FTST FXAM */
+    if (rn(3) == 0) {   /* emulator fix-up padding, folded by x86_decode */
+        static const uint8_t pads[4][3] = {{0x90}, {0x9b}, {0x90, 0x9b}, {0x9b, 0x90, 0x90}};
+        const int k = (int)rn(4);
+        for (int j = 0; j < 3 && pads[k][j]; ++j)
+            g->b[g->len++] = pads[k][j];
+        if (rn(4) == 0)
+            return;     /* a lone wait run (90 9B before other code) */
+    }
     if (allow_mem && rn(2)) {
         int op, grp;
         do { op = (int)rn(8); grp = (int)rn(8); } while (!(memok[op] >> grp & 1));
@@ -935,6 +1156,10 @@ static void gen_one(ginsn_t *g, int index, int total)
     if (rn(12) == 0) {
         static const uint8_t seg[] = {0x26, 0x2e, 0x36, 0x3e};
         g->b[g->len++] = seg[rn(4)];
+    }
+    if (rn(8) == 0) {
+        gen_o32(g);
+        return;
     }
     const int kind = rn(20);
     const bool word = rn(2);
@@ -1681,6 +1906,8 @@ int main(int argc, char **argv)
     uint32_t seed = argc > 2 ? (uint32_t)strtoul(argv[2], NULL, 0) : 1;
     int run = 0, skipped = 0, failures = 0;
     lockstep = getenv("XLAT_LOCKSTEP") != NULL;
+    /* XLAT_KEEP: no flush between programs (the ring evicts instead) */
+    const bool keep_cache = getenv("XLAT_KEEP") != NULL;
     static uint8_t code[4096];
 
     for (int prog = 0; prog < programs; ++prog, ++seed) {
@@ -1731,7 +1958,7 @@ int main(int argc, char **argv)
         memcpy(mem, mem_init, MEM_BYTES);
         tfpu_state(fpu_init, 0);
         R = init;
-        if (!reuse_cs && rn(8)) xlat_flush();
+        if (!reuse_cs && rn(8) && !keep_cache) xlat_flush();
         const uint32_t mem_size = rn(3) ? 0xa0000u : 0x20000u + rn(0x80000);
         long guard = 0;
         while (!R.halted && guard++ < 400000) {
@@ -1863,9 +2090,9 @@ int main(int argc, char **argv)
         memset(mem_init + init.seg_base[1], 0, len);
     }
     printf("programs %d, skipped %d, failures %d\n", run, skipped, failures);
-    printf("stats: translations %u rejects %u entries %u invalid %u flushes %u exits b/budget/side/stop %u/%u/%u/%u native insns %u interp %lu side %lu\n",
+    printf("stats: translations %u rejects %u entries %u invalid %u flushes %u evictions %u exits b/budget/side/stop %u/%u/%u/%u native insns %u interp %lu side %lu\n",
            xlat_stats.translations, xlat_stats.rejects, xlat_stats.entries, xlat_stats.invalidations,
-           xlat_stats.flushes, xlat_stats.exits[0], xlat_stats.exits[1], xlat_stats.exits[2],
-           xlat_stats.exits[3], xlat_stats.guest_insns, interp_calls, side_calls);
+           xlat_stats.flushes, xlat_stats.evictions, xlat_stats.exits[0], xlat_stats.exits[1],
+           xlat_stats.exits[2], xlat_stats.exits[3], xlat_stats.guest_insns, interp_calls, side_calls);
     return failures ? 1 : 0;
 }

@@ -27,7 +27,12 @@
 #define XLAT_ARENA_SIZE      (16u * 1024u)   /* code + source copies, allocated on first use */
 #endif
 #define XLAT_MAX_INSNS       63              /* per region; bit 63 of a set is "entry state" */
+#ifndef XLAT_MAX_REGIONS
 #define XLAT_MAX_REGIONS     32
+#endif
+#ifndef XLAT_RING_WANT
+#define XLAT_RING_WANT       2048u           /* bytes evicted ahead of the ring head when a region does not fit */
+#endif
 #define XLAT_ENTRY_SLOTS     256             /* power of two */
 #define XLAT_HOT_SLOTS       64              /* power of two */
 #define XLAT_HOT_THRESHOLD   2               /* burst-start samples before translating */
@@ -133,7 +138,8 @@ enum { SEG_PUSH = 0, SEG_POP = 1, SEG_LOAD = 2, SEG_STORE = 3, SEG_LES = 4, SEG_
 /* XO_MISC operations (no arithmetic flags): */
 enum { MISC_CBW = 0, MISC_CWD = 1, MISC_CLD = 2, MISC_STD = 3, MISC_NOT = 4,
        MISC_XLAT = 5,     /* b: [BX + AL] in DS or the override segment */
-       MISC_MOVZX = 6, MISC_MOVSX = 7 };  /* r16 (a) <- r/m8 (b), size 8 */
+       MISC_MOVZX = 6, MISC_MOVSX = 7 };  /* r16 (a) <- r/m8 (b), size 8; with
+                                             local: r32 <- r/m8 or r/m16 (size) */
 
 /* XO_MULDIV: sub 4-7 as F6/F7 /reg (b = the r/m operand); 8 IMUL r, r/m, imm
  * (a = destination register, a.imm = the immediate, b = r/m). */
@@ -157,10 +163,12 @@ enum { FK_NONE = 0, FK_ADD = 1, FK_SUB = 2, FK_LOGIC = 3 };
 
 enum { OPD_NONE = 0, OPD_REG, OPD_MEM, OPD_IMM };
 
+#define REG16_SP 4   /* SP lives in rt->gpr only: read and written there */
+
 typedef struct x86_opd {
     uint8_t kind;      /* OPD_* */
-    uint8_t reg;       /* register index (8-bit: AL..BH, 16-bit: AX..DI) */
-    uint16_t imm;
+    uint8_t reg;       /* register index (8-bit: AL..BH, 16/32-bit: AX..DI) */
+    uint32_t imm;
 } x86_opd_t;
 
 typedef struct x86_insn {
@@ -169,7 +177,7 @@ typedef struct x86_insn {
     uint8_t len;
     uint8_t op;        /* XO_* */
     uint8_t sub;       /* ALU_* / 0 INC 1 DEC / condition code */
-    uint8_t size;      /* 8 or 16 */
+    uint8_t size;      /* 8, 16 or 32 (66h: see x86_decode) */
     x86_opd_t a, b;    /* a = destination / first operand */
     /* memory operand (at most one per instruction) */
     uint8_t mem_mod, mem_rm, mem_seg;  /* mod 0..2; rm; 0 ES 1 CS 2 SS 3 DS */
@@ -177,6 +185,7 @@ typedef struct x86_insn {
     uint8_t rep;                       /* XO_STR: 0, 1 REP / REPE (F3), 2 REPNE (F2) */
     uint8_t sreg;                      /* XO_SEG: segment register (0 ES 1 CS 2 SS 3 DS) */
     uint8_t local;                     /* XO_FAR CALL / JMP to the region's own CS */
+    uint8_t pad;                       /* NOP / FWAIT bytes taken in front (x86_decode) */
     uint16_t disp;
 } x86_insn_t;
 
@@ -184,6 +193,9 @@ typedef struct x86_insn {
 bool x86_decode(const uint8_t *code, uint16_t ip, x86_insn_t *out);
 /* Any other instruction whose length is known: an XO_INTERP placeholder. */
 bool x86_decode_interp(const uint8_t *code, uint16_t ip, x86_insn_t *out);
+/* The first n NOP / FWAIT bytes of a padded instruction as one instruction
+ * (FWAIT if one of them is), for an entry after them (discover). */
+void x86_decode_pad(const uint8_t *code, uint16_t ip, unsigned n, x86_insn_t *out);
 
 static inline bool x86_has_mem(const x86_insn_t *in)
 {
@@ -318,8 +330,8 @@ enum {
 typedef struct xlat_arena {
     uint8_t *base;
     uint32_t size;
-    uint32_t code_top;     /* code grows up from 0 */
-    uint32_t data_bottom;  /* source copies grow down from size */
+    uint32_t code_top;     /* where xlat_translate puts the code */
+    uint32_t data_bottom;  /* end of the free space: code + source copies stay below */
     uint32_t epilogue;     /* offset of the common exit sequence */
     uint32_t interp_thunk; /* offset of the common xlat_interp_one() call */
 } xlat_arena_t;

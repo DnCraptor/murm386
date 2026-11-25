@@ -5,8 +5,15 @@
  * translator's working context and the code arena. On the device the block is
  * a native PSRAM span (the pool ELF applications run from), not heap: the
  * SRAM heap is small and pico malloc() panics instead of returning NULL. If no
- * span is available the translator stays off. When the arena, the region
- * table or the entry table fills up, the whole cache is dropped.
+ * span is available the translator stays off.
+ *
+ * The arena after the trampoline is a ring: each region takes one chunk (its
+ * code, then the copies of its x86 bytes), placed at the ring head. Before a
+ * translation the regions in the XLAT_RING_WANT bytes ahead of the head are
+ * evicted (as jit_make_room() in frank-386's jit16); a translation that does
+ * not fit evicts up to the end of the arena, then wraps to the ring start.
+ * Evicting a region drops its entries and rebuilds the entry and code maps
+ * from the regions left. Only xlat_flush() drops everything.
  *
  * Hot spots are found by sampling: xlat_run() is called at the start of every
  * XRIP burst, and an entry point seen there XLAT_HOT_THRESHOLD times in a row
@@ -22,11 +29,13 @@ xlat_stats_t xlat_stats;
 
 typedef struct {
     uint32_t cs_base;
+    uint32_t chunk_lo, chunk_hi;   /* arena bytes held: code, then data_off.. */
     uint32_t data_off;
     uint32_t lo, span;
     uint16_t cs;
     uint16_t n_runs;
     uint16_t ip;           /* the entry point it was built from */
+    uint8_t held;          /* the slot holds a chunk (live, cold or invalidated) */
     uint8_t live;
     uint8_t cold;          /* dropped: too little runs per entry (see xlat_run) */
     uint32_t entries;
@@ -40,8 +49,12 @@ typedef struct {
     uint32_t key;          /* cs << 16 | ip */
     uint16_t code_off;     /* arena offset of the entry label */
     uint8_t region;
-    uint8_t used;
+    uint8_t used;          /* E_* */
 } entry_t;
+
+/* entry_t.used: E_FREE ends a probe chain, E_DEAD (an evicted region's
+ * entry) does not; E_MARK: set in xlat_entry_map. */
+enum { E_FREE = 0, E_DEAD = 1, E_LIVE = 2, E_MARK = 4 };
 
 typedef struct {
     uint32_t key;
@@ -62,7 +75,8 @@ typedef struct {
 typedef struct {
     xlat_arena_t arena;
     region_t region[XLAT_MAX_REGIONS];
-    int n_regions;
+    uint32_t ring_lo;       /* first byte after the trampoline */
+    uint32_t head;          /* where the next chunk goes */
     uint32_t epoch;         /* changes whenever x86 code may have been written */
     entry_t entry[XLAT_ENTRY_SLOTS];
     hot_t hot[XLAT_HOT_SLOTS];
@@ -213,16 +227,22 @@ static void log_region_code(const region_t *r)
     }
 }
 
-static void log_region_counts(void)
+static void log_region_count(const region_t *r)
 {
-    for (int k = 0; k < st->n_regions; ++k) {
-        const region_t *r = &st->region[k];
+    {
         log_printf("C %04X:%04X entries=%lu exit branch/budget/side/stop=%lu/%lu/%lu/%lu ins=%lu us=%lu%s\r\n",
                    r->cs, r->ip, (unsigned long)r->entries, (unsigned long)r->exits[0],
                    (unsigned long)r->exits[1], (unsigned long)r->exits[2],
                    (unsigned long)r->exits[3], (unsigned long)r->insns, (unsigned long)r->us,
                    r->live ? "" : r->cold ? " (cold)" : " (invalidated)");
     }
+}
+
+static void log_region_counts(void)
+{
+    for (int k = 0; k < XLAT_MAX_REGIONS; ++k)
+        if (st->region[k].held)
+            log_region_count(&st->region[k]);
 }
 
 static void note_reject(const xlat_rt_t *rt, uint32_t key, int why)
@@ -298,6 +318,7 @@ static void log_rejects(void)
 #else
 #define log_region_code(r) ((void)0)
 #define log_region_counts() ((void)0)
+#define log_region_count(r) ((void)0)
 #define note_reject(rt, key, why) ((void)0)
 #define note_reject_hit(key) ((void)0)
 #endif
@@ -309,11 +330,11 @@ static void reset_tables(void)
     memset(st->entry, 0, sizeof(st->entry));
     for (int k = 0; k < XLAT_HOT_SLOTS; ++k)
         st->hot[k].reject = 0;
-    st->n_regions = 0;
     memset(xlat_entry_map, 0, sizeof(xlat_entry_map));
     memset(xlat_code_map, 0, sizeof(xlat_code_map));
     xlat_emit_trampoline(&st->arena);
     xlat_sync_code(st->arena.base, st->arena.code_top);
+    st->ring_lo = st->head = (st->arena.code_top + 7u) & ~7u;
     xlat_stats.code_bytes = st->arena.code_top;
 }
 
@@ -377,24 +398,26 @@ static entry_t *XLAT_HOT_FN(lookup)(uint32_t key)
     const uint32_t h = hash32(key) >> (32 - 8);
     for (uint32_t k = 0; k < 8; ++k) {
         entry_t *e = &st->entry[(h + k) & (XLAT_ENTRY_SLOTS - 1)];
-        if (!e->used)
+        if (e->used == E_FREE)
             return NULL;
-        if (e->key == key)
+        if (e->key == key && e->used != E_DEAD)
             return e;
     }
     return NULL;
 }
 
-static bool insert(uint32_t key, uint8_t region, uint32_t code_off)
+static bool insert(uint32_t key, uint8_t region, uint32_t code_off, bool mark)
 {
     const uint32_t h = hash32(key) >> (32 - 8);
     for (uint32_t k = 0; k < 8; ++k) {
         entry_t *e = &st->entry[(h + k) & (XLAT_ENTRY_SLOTS - 1)];
-        if (!e->used || e->key == key || !st->region[e->region].live) {
+        if (e->used <= E_DEAD || e->key == key || !st->region[e->region].live) {
+            /* an entry of the same key further on is shadowed (lookup takes
+             * the first); it comes back if this region is evicted */
             e->key = key;
             e->code_off = (uint16_t)code_off;
             e->region = region;
-            e->used = 1;
+            e->used = (uint8_t)(E_LIVE | (mark ? E_MARK : 0));
             return true;
         }
     }
@@ -438,7 +461,7 @@ static bool XLAT_HOT_FN(region_valid)(const region_t *r, const xlat_rt_t *rt)
 static bool covered(const xlat_rt_t *rt)
 {
     const uint32_t linear = rt->seg_base[1] + (rt->ip & 0xffffu);
-    for (int k = 0; k < st->n_regions; ++k) {
+    for (int k = 0; k < XLAT_MAX_REGIONS; ++k) {
         const region_t *r = &st->region[k];
         if (!(r->live || r->cold) || linear - r->lo >= r->span)
             continue;
@@ -455,23 +478,140 @@ static bool covered(const xlat_rt_t *rt)
     return false;
 }
 
+/* Drop region k: its entries go (the chunk is reused when the head comes
+ * to it). The maps are rebuilt by the caller (rebuild_maps). */
+static void evict(int k)
+{
+    region_t *r = &st->region[k];
+    log_region_count(r);
+    for (int j = 0; j < XLAT_ENTRY_SLOTS; ++j) {
+        entry_t *e = &st->entry[j];
+        if (e->used >= E_LIVE && e->region == k)
+            e->used = E_DEAD;
+    }
+    memset(r, 0, sizeof(*r));
+    xlat_stats.evictions++;
+}
+
+/* xlat_entry_map and xlat_code_map from the regions left. */
+static void rebuild_maps(void)
+{
+    memset(xlat_entry_map, 0, sizeof(xlat_entry_map));
+    memset(xlat_code_map, 0, sizeof(xlat_code_map));
+    for (int j = 0; j < XLAT_ENTRY_SLOTS; ++j) {
+        const entry_t *e = &st->entry[j];
+        if ((e->used & (E_LIVE | E_MARK)) == (E_LIVE | E_MARK)) {
+            const uint32_t m =
+                xlat_map_index(st->region[e->region].cs_base + (e->key & 0xffffu));
+            xlat_entry_map[m >> 3] |= (uint8_t)(1u << (m & 7u));
+        }
+    }
+    for (int k = 0; k < XLAT_MAX_REGIONS; ++k) {
+        const region_t *r = &st->region[k];
+        if (!r->live)
+            continue;
+        const uint8_t *d = st->arena.base + r->data_off;
+        for (unsigned j = 0; j < r->n_runs; ++j) {
+            uint32_t linear;
+            memcpy(&linear, d, 4);
+            const uint32_t len = d[4] | (uint32_t)d[5] << 8;
+            /* the blocks a write may reach the run from (up to 16 bytes long) */
+            const uint32_t from = linear >= 15u ? linear - 15u : 0u;
+            for (uint32_t b = from >> XLAT_CODE_BLOCK_SHIFT;
+                 b <= (linear + len - 1u) >> XLAT_CODE_BLOCK_SHIFT && b < XLAT_CODE_MAP_BYTES * 8u;
+                 ++b)
+                xlat_code_map[b >> 3] |= (uint8_t)(1u << (b & 7u));
+            d += 8 + ((len + 3u) & ~3u);
+        }
+    }
+}
+
+/* Evict the regions whose chunks meet [lo, hi). */
+static bool evict_range(uint32_t lo, uint32_t hi)
+{
+    bool any = false;
+    for (int k = 0; k < XLAT_MAX_REGIONS; ++k) {
+        const region_t *r = &st->region[k];
+        if (r->held && r->chunk_lo < hi && r->chunk_hi > lo) {
+            evict(k);
+            any = true;
+        }
+    }
+    return any;
+}
+
+/* End of the free space from the head: the next chunk, or the arena end. */
+static uint32_t window_end(void)
+{
+    uint32_t end = st->arena.size;
+    for (int k = 0; k < XLAT_MAX_REGIONS; ++k) {
+        const region_t *r = &st->region[k];
+        if (r->held && r->chunk_lo >= st->head && r->chunk_lo < end)
+            end = r->chunk_lo;
+    }
+    return end;
+}
+
+/* A free region slot: an empty one, else an invalidated one, else the
+ * region whose chunk comes next after the head (the oldest in ring order). */
+static int take_slot(bool *evicted)
+{
+    int best = -1;
+    uint32_t best_d = UINT32_MAX;
+    for (int k = 0; k < XLAT_MAX_REGIONS; ++k) {
+        const region_t *r = &st->region[k];
+        if (!r->held)
+            return k;
+        uint32_t d = r->chunk_lo - st->head;   /* ring distance ahead */
+        if (r->chunk_lo < st->head)
+            d += st->arena.size - st->ring_lo;
+        if (!r->live && !r->cold)
+            d = 0;
+        if (d < best_d) {
+            best_d = d;
+            best = k;
+        }
+    }
+    evict(best);
+    *evicted = true;
+    return best;
+}
+
 static bool translate_here(const xlat_rt_t *rt)
 {
     xlat_region_out_t *out = &st->out;
-    bool full;
-    for (int attempt = 0; attempt < 2; ++attempt) {
-        if (st->n_regions >= XLAT_MAX_REGIONS) {
-            xlat_flush();
-            continue;
+    xlat_arena_t *const a = &st->arena;
+    bool full, evicted = false;
+    /* First the free space at the head as it is (a region rejected for
+     * another reason evicts nothing). When it does not fit: evict
+     * XLAT_RING_WANT bytes ahead of the head (from the ring start when the
+     * arena ends sooner), then up to the arena end, then the whole ring. */
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        uint32_t hi = a->size;
+        if (attempt == 1) {
+            if (st->head + XLAT_RING_WANT > a->size)
+                st->head = st->ring_lo;
+            hi = st->head + XLAT_RING_WANT < a->size ? st->head + XLAT_RING_WANT : a->size;
+        } else if (attempt == 3) {
+            if (st->head == st->ring_lo)
+                break;          /* attempt 2 had the whole ring */
+            st->head = st->ring_lo;
         }
-        if (xlat_translate(&st->arena, rt, (uint16_t)rt->ip, out, &full, st->ctx))
+        if (attempt)
+            evicted |= evict_range(st->head, hi);
+        a->code_top = st->head;
+        a->data_bottom = window_end();
+        if (xlat_translate(a, rt, (uint16_t)rt->ip, out, &full, st->ctx))
+            goto built;
+        if (!full)
             break;
-        if (!full || attempt)
-            return false;
-        xlat_flush();
     }
+    if (evicted)
+        rebuild_maps();
+    return false;
 
-    const int idx = st->n_regions++;
+built:;
+    const int idx = take_slot(&evicted);   /* not in the new chunk: it was free */
     region_t *r = &st->region[idx];
     r->cs = rt->cs;
     r->ip = (uint16_t)rt->ip;
@@ -479,8 +619,13 @@ static bool translate_here(const xlat_rt_t *rt)
     r->lo = out->lo;
     r->span = out->span;
     r->n_runs = out->n_runs;
-    st->arena.data_bottom -= out->data_size;
-    r->data_off = st->arena.data_bottom;
+    /* the copies follow the code (xlat_translate keeps code_top + data
+     * below data_bottom) */
+    r->chunk_lo = out->code_off;
+    r->data_off = a->code_top;
+    r->chunk_hi = r->data_off + out->data_size;
+    st->head = (r->chunk_hi + 7u) & ~7u;
+    r->held = 1;
     uint8_t *d = st->arena.base + r->data_off;
     for (unsigned k = 0; k < out->n_runs; ++k) {
         const uint32_t linear = r->cs_base + out->runs[k].ip;
@@ -500,9 +645,11 @@ static bool translate_here(const xlat_rt_t *rt)
     }
     r->live = 1;
     r->epoch = st->epoch;
+    if (evicted)
+        rebuild_maps();    /* before the new marks: they are set below */
     for (unsigned k = 0; k < out->n_entries; ++k) {
         insert((uint32_t)rt->cs << 16 | out->entries[k].ip, (uint8_t)idx,
-               out->entries[k].code_off);
+               out->entries[k].code_off, out->entries[k].mark);
         if (out->entries[k].mark) {
             const uint32_t m = xlat_map_index(r->cs_base + out->entries[k].ip);
             xlat_entry_map[m >> 3] |= (uint8_t)(1u << (m & 7u));
@@ -511,7 +658,11 @@ static bool translate_here(const xlat_rt_t *rt)
     xlat_sync_code(st->arena.base + out->code_off, out->code_len);
     log_region_code(r);
     xlat_stats.translations++;
-    xlat_stats.code_bytes = st->arena.code_top + (st->arena.size - st->arena.data_bottom);
+    uint32_t used = st->ring_lo;
+    for (int k = 0; k < XLAT_MAX_REGIONS; ++k)
+        if (st->region[k].held)
+            used += st->region[k].chunk_hi - st->region[k].chunk_lo;
+    xlat_stats.code_bytes = used;
     return true;
 }
 
@@ -890,11 +1041,12 @@ void xlat_log_write(uint16_t psp, const char *name)
     log_printf("== exit PSP %04X %s ==\r\n", psp, name);
     log_region_counts();
     log_rejects();
-    log_printf("S translations=%lu rejects=%lu entries=%lu invalid=%lu flushes=%lu "
+    log_printf("S translations=%lu rejects=%lu entries=%lu invalid=%lu flushes=%lu evict=%lu "
                "exit b/bu/s/st=%lu/%lu/%lu/%lu native=%lu code=%lu stack_skips=%lu interp=%lu side=%lu cuts=%lu/%lu cold=%lu lost=%lu\r\n",
                (unsigned long)xlat_stats.translations, (unsigned long)xlat_stats.rejects,
                (unsigned long)xlat_stats.entries, (unsigned long)xlat_stats.invalidations,
-               (unsigned long)xlat_stats.flushes, (unsigned long)xlat_stats.exits[0],
+               (unsigned long)xlat_stats.flushes, (unsigned long)xlat_stats.evictions,
+               (unsigned long)xlat_stats.exits[0],
                (unsigned long)xlat_stats.exits[1], (unsigned long)xlat_stats.exits[2],
                (unsigned long)xlat_stats.exits[3], (unsigned long)xlat_stats.guest_insns, (unsigned long)xlat_stats.code_bytes,
                (unsigned long)xlat_stats.stack_skips, (unsigned long)xlat_stats.interp,

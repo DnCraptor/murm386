@@ -127,7 +127,8 @@ void arm_lsl(arm_emit_t *e, int rd, int rm, int amount)
 
 void arm_lsr(arm_emit_t *e, int rd, int rm, int amount)
 {
-    arm_dp_reg(e, DP_ORR, 0, rd, A_PC, rm, SH_LSR, amount);
+    /* LSR #0 would encode LSR #32: a plain move (32-bit operations, s = 0) */
+    arm_dp_reg(e, DP_ORR, 0, rd, A_PC, rm, amount ? SH_LSR : SH_LSL, amount);
 }
 
 void arm_lsr_reg(arm_emit_t *e, int rd, int rn, int rm)

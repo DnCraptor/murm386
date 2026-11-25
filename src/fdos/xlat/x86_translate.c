@@ -35,7 +35,6 @@
 
 /* x86 16-bit register index -> ARM register; SP (4) is not cached. */
 static const int8_t arm_reg16[8] = {A_R4, A_R5, A_R6, A_R7, -1, A_R8, A_R9, A_R10};
-#define REG16_SP 4   /* SP lives in rt->gpr only: read and written there */
 
 enum { ST_EXIT = 0, ST_BACK = 1, ST_SIDE = 2 };
 enum { D_INSN = 0, D_STUB = 1 };
@@ -267,9 +266,23 @@ static int discover(tctx_t *c, uint16_t start)
         }
         c->in[j + 1] = t;
     }
-    for (int i = 0; i + 1 < c->n; ++i)
-        if ((uint32_t)c->in[i].ip + c->in[i].len > c->in[i + 1].ip)
-            return XLAT_RJ_OVERLAP;   /* overlapping instructions: leave it to XRIP */
+    for (int i = 0; i + 1 < c->n; ++i) {
+        x86_insn_t *in = &c->in[i];
+        const x86_insn_t *nx = &c->in[i + 1];
+        if ((uint32_t)in->ip + in->len <= nx->ip)
+            continue;
+        /* An entry after the NOP / FWAIT bytes taken into an instruction
+         * (90 D9 .., 90 9B: XRIP runs them one by one and a burst may end
+         * between them): those bytes become an instruction of their own,
+         * falling through to the entry. */
+        if (in->pad && nx->ip > in->ip && nx->ip <= in->ip + in->pad &&
+            (uint32_t)nx->ip + nx->len == (uint32_t)in->ip + in->len) {
+            x86_decode_pad(c->rt->mem + c->cs_base + in->ip, in->ip,
+                           (unsigned)(nx->ip - in->ip), in);
+            continue;
+        }
+        return XLAT_RJ_OVERLAP;   /* overlapping instructions: leave it to XRIP */
+    }
 
     /* Edges, leaders, loop check. */
     memset(c->leader, 0, sizeof(c->leader));
@@ -615,6 +628,17 @@ static void local_patch(tctx_t *c, uint32_t site, int cond)
 }
 
 /* Operand value shifted to bit 31 into rd. Memory uses the linear address in r0. */
+/* Load / store of an operand of size bits. */
+static int ls_load(int size)
+{
+    return size == 32 ? LS_LDR : size == 16 ? LS_LDRH : LS_LDRB;
+}
+
+static int ls_store(int size)
+{
+    return size == 32 ? LS_STR : size == 16 ? LS_STRH : LS_STRB;
+}
+
 static void get_shifted(tctx_t *c, const x86_opd_t *o, int size, int rd)
 {
     arm_emit_t *e = &c->e;
@@ -625,8 +649,8 @@ static void get_shifted(tctx_t *c, const x86_opd_t *o, int size, int rd)
             arm_ls_imm(e, LS_LDR, rd, A_R11, XLAT_RT_GPR);
             arm_ls_imm(e, LS_LDRH, rd, rd, 16);
             arm_lsl(e, rd, rd, 16);
-        } else if (size == 16) {
-            arm_lsl(e, rd, arm_reg16[o->reg], 16);
+        } else if (size >= 16) {
+            arm_lsl(e, rd, arm_reg16[o->reg], s);
         } else if (o->reg < 4) {
             arm_lsl(e, rd, arm_reg16[o->reg], 24);
         } else {
@@ -636,8 +660,9 @@ static void get_shifted(tctx_t *c, const x86_opd_t *o, int size, int rd)
         break;
     case OPD_MEM:
         arm_ls_imm(e, LS_LDR, A_LR, A_R11, XLAT_RT_MEM);
-        arm_ls_reg(e, size == 16 ? LS_LDRH : LS_LDRB, rd, A_LR, A_R0);
-        arm_lsl(e, rd, rd, s);
+        arm_ls_reg(e, ls_load(size), rd, A_LR, A_R0);
+        if (s)
+            arm_lsl(e, rd, rd, s);
         break;
     default:
         arm_mov32(e, rd, (uint32_t)o->imm << s);
@@ -656,13 +681,13 @@ static int get_raw(tctx_t *c, const x86_opd_t *o, int size, int scratch)
             arm_ls_imm(e, LS_LDRH, scratch, scratch, 16);
             return scratch;
         }
-        if (size == 16 || o->reg < 4)
+        if (size >= 16 || o->reg < 4)
             return arm_reg16[o->reg];
         arm_ubfx(e, scratch, arm_reg16[o->reg - 4], 8, 8);
         return scratch;
     case OPD_MEM:
         arm_ls_imm(e, LS_LDR, A_LR, A_R11, XLAT_RT_MEM);
-        arm_ls_reg(e, size == 16 ? LS_LDRH : LS_LDRB, scratch, A_LR, A_R0);
+        arm_ls_reg(e, ls_load(size), scratch, A_LR, A_R0);
         return scratch;
     default:
         arm_mov32(e, scratch, o->imm);
@@ -675,7 +700,10 @@ static void put_raw(tctx_t *c, const x86_opd_t *o, int size, int src)
     arm_emit_t *e = &c->e;
     if (o->kind == OPD_MEM) {
         arm_ls_imm(e, LS_LDR, A_LR, A_R11, XLAT_RT_MEM);
-        arm_ls_reg(e, size == 16 ? LS_STRH : LS_STRB, src, A_LR, A_R0);
+        arm_ls_reg(e, ls_store(size), src, A_LR, A_R0);
+    } else if (size == 32) {
+        if (src != arm_reg16[o->reg])
+            arm_mov(e, arm_reg16[o->reg], src);
     } else if (size == 16 && o->reg == REG16_SP) {
         const int t = src == A_LR ? A_R12 : A_LR;
         arm_ls_imm(e, LS_LDR, t, A_R11, XLAT_RT_GPR);
@@ -1275,11 +1303,20 @@ static void emit_misc(tctx_t *c, int i)
     const x86_insn_t *in = &c->in[i];
     switch (in->sub) {
     case MISC_CBW:
+        if (in->size == 32) {                                       /* CWDE */
+            arm_lsl(e, A_R12, A_R4, 16);
+            arm_dp_reg(e, DP_ORR, 0, A_R4, A_PC, A_R12, SH_ASR, 16);
+            break;
+        }
         arm_lsl(e, A_R12, A_R4, 24);
         arm_dp_reg(e, DP_ORR, 0, A_R12, A_PC, A_R12, SH_ASR, 24);   /* ASR #24 */
         arm_bfi(e, A_R4, A_R12, 0, 16);
         break;
     case MISC_CWD:
+        if (in->size == 32) {                                       /* CDQ */
+            arm_dp_reg(e, DP_ORR, 0, A_R6, A_PC, A_R4, SH_ASR, 31);
+            break;
+        }
         arm_lsl(e, A_R12, A_R4, 16);
         arm_dp_reg(e, DP_ORR, 0, A_R12, A_PC, A_R12, SH_ASR, 31);   /* ASR #31 */
         arm_bfi(e, A_R6, A_R12, 0, 16);
@@ -1302,17 +1339,18 @@ static void emit_misc(tctx_t *c, int i)
         arm_bfi(e, A_R4, A_R1, 0, 8);
         break;
     case MISC_MOVZX:
-    case MISC_MOVSX: {  /* r16 <- r/m8, zero / sign extended */
+    case MISC_MOVSX: {  /* r16 / r32 (local) <- r/m8 / r/m16, zero / sign extended */
+        const int from = in->size;
         if (in->b.kind == OPD_MEM)
-            emit_mem_access(c, i, 1, false);
-        const int v = get_raw(c, &in->b, 8, A_R1);
+            emit_mem_access(c, i, from / 8, false);
+        const int v = get_raw(c, &in->b, from, A_R1);
         if (in->sub == MISC_MOVZX) {
-            arm_ubfx(e, A_R1, v, 0, 8);
+            arm_ubfx(e, A_R1, v, 0, from);
         } else {
-            arm_lsl(e, A_R1, v, 24);
-            arm_dp_reg(e, DP_ORR, 0, A_R1, A_PC, A_R1, SH_ASR, 24);  /* ASR #24 */
+            arm_lsl(e, A_R1, v, 32 - from);
+            arm_dp_reg(e, DP_ORR, 0, A_R1, A_PC, A_R1, SH_ASR, 32 - from);
         }
-        put_raw(c, &in->a, 16, A_R1);
+        put_raw(c, &in->a, in->local ? 32 : 16, A_R1);
         break;
     }
     default: {  /* NOT r/m */
@@ -1390,7 +1428,7 @@ static void emit_str_step(tctx_t *c, int bytes)
     arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_EFLAGS);
     arm_ubfx(e, A_R12, A_R12, 10, 1);
     arm_mov32(e, A_R0, (uint32_t)bytes);
-    arm_dp_reg(e, DP_SUB, 0, A_R0, A_R0, A_R12, SH_LSL, bytes == 2 ? 2 : 1);
+    arm_dp_reg(e, DP_SUB, 0, A_R0, A_R0, A_R12, SH_LSL, bytes == 4 ? 3 : bytes);
 }
 
 /* CMPS / SCAS, with REPE / REPNE: the lazy SUB flags of each element go to
@@ -1412,14 +1450,14 @@ static void emit_string_cmp(tctx_t *c, int i)
         arm_mov(e, A_R3, A_R0);
         emit_str_addr(c, i, 5, 0, bytes, false);                    /* ES:[DI] */
         arm_ls_imm(e, LS_LDR, A_LR, A_R11, XLAT_RT_MEM);
-        arm_ls_reg(e, bytes == 2 ? LS_LDRH : LS_LDRB, A_R2, A_LR, A_R3);
-        arm_ls_reg(e, bytes == 2 ? LS_LDRH : LS_LDRB, A_R3, A_LR, A_R0);
+        arm_ls_reg(e, ls_load(in->size), A_R2, A_LR, A_R3);
+        arm_ls_reg(e, ls_load(in->size), A_R3, A_LR, A_R0);
         arm_lsl(e, A_R2, A_R2, s);
     } else {
         emit_str_addr(c, i, 5, 0, bytes, false);                    /* ES:[DI] */
         arm_ls_imm(e, LS_LDR, A_LR, A_R11, XLAT_RT_MEM);
-        arm_ls_reg(e, bytes == 2 ? LS_LDRH : LS_LDRB, A_R3, A_LR, A_R0);
-        arm_lsl(e, A_R2, A_R4, s);                                  /* AL / AX */
+        arm_ls_reg(e, ls_load(in->size), A_R3, A_LR, A_R0);
+        arm_lsl(e, A_R2, A_R4, s);                                  /* AL / AX / EAX */
     }
     arm_lsl(e, A_R3, A_R3, s);
     arm_dp_reg(e, DP_SUB, 0, A_R1, A_R2, A_R3, SH_LSL, 0);
@@ -1454,7 +1492,7 @@ static void emit_string(tctx_t *c, int i)
     arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_EFLAGS);
     arm_ubfx(e, A_R12, A_R12, 10, 1);
     arm_mov32(e, A_R2, (uint32_t)bytes);
-    arm_dp_reg(e, DP_SUB, 0, A_R2, A_R2, A_R12, SH_LSL, bytes == 2 ? 2 : 1);
+    arm_dp_reg(e, DP_SUB, 0, A_R2, A_R2, A_R12, SH_LSL, bytes == 4 ? 3 : bytes);
     uint32_t top = 0, done = 0;
     if (in->rep) {
         top = e->pos;
@@ -1483,13 +1521,17 @@ static void emit_string(tctx_t *c, int i)
     }
     arm_ls_imm(e, LS_LDR, A_LR, A_R11, XLAT_RT_MEM);
     if (in->sub == STR_LODS) {
-        arm_ls_reg(e, bytes == 2 ? LS_LDRH : LS_LDRB, A_R1, A_LR, A_R0);
-        arm_bfi(e, A_R4, A_R1, 0, bytes * 8);
+        if (bytes == 4) {
+            arm_ls_reg(e, LS_LDR, A_R4, A_LR, A_R0);
+        } else {
+            arm_ls_reg(e, ls_load(in->size), A_R1, A_LR, A_R0);
+            arm_bfi(e, A_R4, A_R1, 0, bytes * 8);
+        }
     } else if (in->sub == STR_STOS) {
-        arm_ls_reg(e, bytes == 2 ? LS_STRH : LS_STRB, A_R4, A_LR, A_R0);
+        arm_ls_reg(e, ls_store(in->size), A_R4, A_LR, A_R0);
     } else {
-        arm_ls_reg(e, bytes == 2 ? LS_LDRH : LS_LDRB, A_R1, A_LR, A_R3);
-        arm_ls_reg(e, bytes == 2 ? LS_STRH : LS_STRB, A_R1, A_LR, A_R0);
+        arm_ls_reg(e, ls_load(in->size), A_R1, A_LR, A_R3);
+        arm_ls_reg(e, ls_store(in->size), A_R1, A_LR, A_R0);
     }
     if (in->sub != STR_STOS) {
         arm_dp_reg(e, DP_ADD, 0, A_R1, A_R9, A_R2, SH_LSL, 0);
@@ -1857,6 +1899,15 @@ static void emit_fpu(tctx_t *c, int i)
     arm_emit_t *e = &c->e;
     const x86_insn_t *in = &c->in[i];
     uint32_t ctl;
+    if (in->rep && in->sub != FPU_WAIT) {
+        /* FWAIT folded in front (x86_decode) */
+        arm_mov32(e, A_R1, XLAT_FPU_WAIT);
+        arm_mov(e, A_R0, A_R11);
+        arm_mov32(e, A_R12, (uint32_t)(uintptr_t)&xlat_rt_fpu);
+        arm_blx(e, A_R12);
+        arm_dp_imm(e, DP_SUB, 1, A_PC, A_R0, 0);
+        emit_branch(c, side_dest(c, i, 0), C_EQ);
+    }
     if (in->sub == FPU_WAIT) {
         ctl = XLAT_FPU_WAIT;
     } else {

@@ -103,6 +103,7 @@ typedef struct xlat_stats {
     uint32_t rejects;           /* hot entry points that could not be translated */
     uint32_t invalidations;     /* regions dropped because their x86 bytes changed */
     uint32_t flushes;           /* whole-cache resets */
+    uint32_t evictions;         /* regions dropped to make room (ring) */
     uint32_t exits[XLAT_EXIT_COUNT];
     uint32_t guest_insns;       /* approximate guest instructions run natively */
     uint32_t code_bytes;        /* current code-cache use */

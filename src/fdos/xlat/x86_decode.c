@@ -51,15 +51,119 @@ static bool decode_modrm(const uint8_t *code, unsigned *pos, int seg_override,
     return true;
 }
 
+static bool decode_one(const uint8_t *code, uint16_t ip, x86_insn_t *in);
+
+/* x87 code of compilers with emulator fix-ups has NOP / FWAIT bytes before
+ * the ESC opcode (90 D9 .., 9B D9 .., 90 9B ..; a segment override may come
+ * between). They are taken into the x87 instruction, which then fills one
+ * slot of the region instead of two or three: the NOPs do nothing, and an
+ * FWAIT is done first (in->rep, emit_fpu). A side exit restarts at the
+ * first byte, which only repeats the wait. A run of NOPs and FWAITs before
+ * other code (90 9B C4 ..) is one FWAIT. */
 bool x86_decode(const uint8_t *code, uint16_t ip, x86_insn_t *in)
+{
+    unsigned q = 0;
+    uint8_t wait = 0;
+    while (q < 3 && (code[q] == 0x90 || code[q] == 0x9b)) {
+        wait |= code[q] == 0x9b;
+        ++q;
+    }
+    if (q && (uint32_t)ip + q <= 0xffffu) {
+        const uint8_t p = code[q];
+        const uint8_t esc = (p == 0x26 || p == 0x2e || p == 0x36 || p == 0x3e) ? code[q + 1] : p;
+        if (esc >= 0xd8 && esc <= 0xdf && decode_one(code + q, (uint16_t)(ip + q), in) &&
+            in->op == XO_FPU && in->len + q <= 15) {
+            in->ip = ip;
+            in->len = (uint8_t)(in->len + q);
+            in->rep = wait;
+            in->pad = (uint8_t)q;
+            return true;
+        }
+        /* 90 9B, 9B 9B ..: one FWAIT */
+        unsigned w = 0;
+        while (code[w] != 0x9b)
+            ++w;
+        if (wait && q >= 2 && decode_one(code + w, (uint16_t)(ip + w), in)) {
+            in->ip = ip;
+            in->len = (uint8_t)q;
+            in->pad = (uint8_t)q;
+            return true;
+        }
+    }
+    return decode_one(code, ip, in);
+}
+
+void x86_decode_pad(const uint8_t *code, uint16_t ip, unsigned n, x86_insn_t *in)
+{
+    unsigned w = 0;
+    while (w < n && code[w] != 0x9b)
+        ++w;
+    decode_one(code + (w < n ? w : 0), (uint16_t)(ip + (w < n ? w : 0)), in);  /* FWAIT / NOP */
+    in->ip = ip;
+    in->len = (uint8_t)n;
+}
+
+/* Immediate of a 16- or 32-bit operation. */
+static uint32_t imm_z(const uint8_t *code, unsigned *pos, bool o32)
+{
+    uint32_t v = rd16(code + *pos);
+    if (o32)
+        v |= (uint32_t)rd16(code + *pos + 2) << 16;
+    *pos += o32 ? 4u : 2u;
+    return v;
+}
+
+/* 66h (32-bit operand in 16-bit code) is native for: ALU without ADC / SBB,
+ * TEST, NEG, NOT, MOV (register, memory, immediate), INC / DEC, XCHG,
+ * CWDE / CDQ, MOVZX / MOVSX r32, the string instructions. Not with ESP
+ * (rt->gpr[4]). The rest goes to x86_decode_interp(). */
+static bool o32_ok(x86_insn_t *in)
+{
+    if (in->op == XO_MISC && (in->sub == MISC_MOVZX || in->sub == MISC_MOVSX)) {
+        in->local = 1;          /* r32 destination; size stays the source's */
+        return in->a.reg != REG16_SP;
+    }
+    if (in->size != 16)
+        return false;           /* 66h on a byte operation: left to XRIP */
+    switch (in->op) {
+    case XO_ALU:
+        if (in->sub == ALU_ADC || in->sub == ALU_SBB)
+            return false;       /* XRIP: eager 32-bit flags (alu32) */
+        break;
+    case XO_MOV:
+    case XO_INCDEC:
+    case XO_XCHG:
+    case XO_STR:
+        break;
+    case XO_MISC:
+        if (in->sub != MISC_CBW && in->sub != MISC_CWD && in->sub != MISC_NOT)
+            return false;
+        break;
+    default:
+        return false;
+    }
+    if ((in->a.kind == OPD_REG && in->a.reg == REG16_SP) ||
+        (in->b.kind == OPD_REG && in->b.reg == REG16_SP))
+        return false;
+    in->size = 32;
+    return true;
+}
+
+static bool decode_one(const uint8_t *code, uint16_t ip, x86_insn_t *in)
 {
     unsigned pos = 0;
     int seg = -1;
     uint8_t rep = 0;
     uint8_t g;
+    bool o32 = false;
 
     for (;;) {
         const uint8_t p = code[pos];
+        if (p == 0x66 && !o32) {
+            o32 = true;
+            ++pos;
+            continue;
+        }
         if ((p == 0xf2 || p == 0xf3) && !rep) {
             rep = p == 0xf3 ? 1 : 2;   /* only string instructions accept it (below) */
             ++pos;
@@ -90,6 +194,7 @@ bool x86_decode(const uint8_t *code, uint16_t ip, x86_insn_t *in)
     in->rep = 0;
     in->sreg = 0;
     in->local = 0;
+    in->pad = 0;
 
     const bool str = (op >= 0xa4 && op <= 0xa7) || (op >= 0xaa && op <= 0xaf);
     if (rep && !str)
@@ -149,8 +254,7 @@ bool x86_decode(const uint8_t *code, uint16_t ip, x86_insn_t *in)
         default:
             in->a.kind = OPD_REG;
             in->b.kind = OPD_IMM;
-            in->b.imm = rd16(code + pos);
-            pos += 2;
+            in->b.imm = imm_z(code, &pos, o32);
             break;
         }
     } else if (op >= 0x40 && op <= 0x4f) {
@@ -204,7 +308,10 @@ bool x86_decode(const uint8_t *code, uint16_t ip, x86_insn_t *in)
         decode_modrm(code, &pos, seg, in, &in->b, &g);
         in->a.kind = OPD_REG;
         in->a.reg = g;
-        if (op2 & 1) {
+        if ((op2 & 1) && o32) {
+            in->op = XO_MISC;      /* r32 <- r/m16 */
+            in->sub = op2 == 0xb7 ? MISC_MOVZX : MISC_MOVSX;
+        } else if (op2 & 1) {
             in->op = XO_MOV;
         } else {
             in->op = XO_MISC;
@@ -218,10 +325,11 @@ bool x86_decode(const uint8_t *code, uint16_t ip, x86_insn_t *in)
         in->size = op == 0x80 ? 8 : 16;
         in->b.kind = OPD_IMM;
         if (op == 0x81) {
-            in->b.imm = rd16(code + pos);
-            pos += 2;
+            in->b.imm = imm_z(code, &pos, o32);
         } else if (op == 0x83) {
-            in->b.imm = (uint16_t)(int16_t)(int8_t)code[pos++];
+            in->b.imm = (uint32_t)(int32_t)(int8_t)code[pos++];
+            if (!o32)
+                in->b.imm &= 0xffffu;
         } else {
             in->b.imm = code[pos++];
         }
@@ -284,12 +392,10 @@ bool x86_decode(const uint8_t *code, uint16_t ip, x86_insn_t *in)
         in->size = op == 0xa8 ? 8 : 16;
         in->a.kind = OPD_REG;
         in->b.kind = OPD_IMM;
-        if (op == 0xa8) {
+        if (op == 0xa8)
             in->b.imm = code[pos++];
-        } else {
-            in->b.imm = rd16(code + pos);
-            pos += 2;
-        }
+        else
+            in->b.imm = imm_z(code, &pos, o32);
     } else if (op >= 0xb0 && op <= 0xbf) {
         in->op = XO_MOV;
         in->size = op >= 0xb8 ? 16 : 8;
@@ -297,8 +403,7 @@ bool x86_decode(const uint8_t *code, uint16_t ip, x86_insn_t *in)
         in->a.reg = op & 7;
         in->b.kind = OPD_IMM;
         if (op >= 0xb8) {
-            in->b.imm = rd16(code + pos);
-            pos += 2;
+            in->b.imm = imm_z(code, &pos, o32);
         } else {
             in->b.imm = code[pos++];
         }
@@ -309,12 +414,10 @@ bool x86_decode(const uint8_t *code, uint16_t ip, x86_insn_t *in)
         in->op = XO_MOV;
         in->size = op == 0xc6 ? 8 : 16;
         in->b.kind = OPD_IMM;
-        if (op == 0xc6) {
+        if (op == 0xc6)
             in->b.imm = code[pos++];
-        } else {
-            in->b.imm = rd16(code + pos);
-            pos += 2;
-        }
+        else
+            in->b.imm = imm_z(code, &pos, o32);
     } else if (op == 0xe2 || op == 0xe3 || op == 0xeb) {
         in->op = op == 0xe2 ? XO_LOOP : op == 0xe3 ? XO_JCXZ : XO_JMP;
         const int8_t rel = (int8_t)code[pos++];
@@ -389,12 +492,10 @@ bool x86_decode(const uint8_t *code, uint16_t ip, x86_insn_t *in)
         in->sub = ALU_TEST;
         in->size = op == 0xf6 ? 8 : 16;
         in->b.kind = OPD_IMM;
-        if (op == 0xf6) {
+        if (op == 0xf6)
             in->b.imm = code[pos++];
-        } else {
-            in->b.imm = rd16(code + pos);
-            pos += 2;
-        }
+        else
+            in->b.imm = imm_z(code, &pos, o32);
     } else if (op == 0xff && (((code[pos] >> 3) & 7) == 2 || ((code[pos] >> 3) & 7) == 4)) {
         decode_modrm(code, &pos, seg, in, &in->b, &g);   /* CALL / JMP r/m16 */
         in->op = XO_IND;
@@ -479,6 +580,8 @@ bool x86_decode(const uint8_t *code, uint16_t ip, x86_insn_t *in)
         return false;
     }
 
+    if (o32 && !o32_ok(in))
+        return false;
     /* 8-bit immediates of 8-bit operations stay 8-bit. */
     if (in->size == 8 && in->b.kind == OPD_IMM)
         in->b.imm &= 0xffu;
@@ -683,6 +786,7 @@ bool x86_decode_interp(const uint8_t *code, uint16_t ip, x86_insn_t *in)
     in->ip = ip;
     in->target = 0;
     in->len = (uint8_t)pos;
+    in->pad = 0;
     in->op = XO_INTERP;
     in->sub = (uint8_t)((reg_only ? 0 : XI_MAY_WRITE) | (fall ? 0 : XI_NO_FALL));
     in->size = 16;
