@@ -49,6 +49,7 @@ static int cfg_usb_joystick = 0;
 static int cfg_mouse_joystick = 0;
 static int cfg_joystick_swap_buttons = 0;
 static int cfg_cpu_freq = CPU_CLOCK_MHZ;
+int config_mips_limit_milli = -1;
 static int cfg_psram_freq = PSRAM_MAX_FREQ_MHZ;
 static int cfg_psram_size_mb = 0;
 static int cfg_psram_test_freq = 0;
@@ -400,6 +401,16 @@ void config_set_numpad_mouse(int enabled) {
     if (enabled) pc->mouse_enabled = 1;
 }
 
+/* A positive finite value is stored in thousandths of a MIPS. */
+void config_set_mips_limit(int milli) {
+    if (milli <= 0) milli = -1;
+    if (milli > 1000000) milli = 1000000;
+    if (config_mips_limit_milli != milli) {
+        config_mips_limit_milli = milli;
+        cfg_changed = true;
+    }
+}
+
 int config_get_cpu_freq(void) { return cfg_cpu_freq; }
 void config_set_cpu_freq(int mhz) {
     if (cfg_cpu_freq != mhz) {
@@ -675,6 +686,13 @@ bool config_save_all(void) {
         write_line(&fp, "esp_firmware=none\r\n");
     snprintf(line, sizeof(line), "cpu_freq=%d\r\n", cfg_cpu_freq);
     write_line(&fp, line);
+    if (config_mips_limit_milli < 0)
+        write_line(&fp, "mips_limit=-\r\n");
+    else {
+        snprintf(line, sizeof(line), "mips_limit=%d.%03d\r\n",
+                 config_mips_limit_milli / 1000, config_mips_limit_milli % 1000);
+        write_line(&fp, line);
+    }
     snprintf(line, sizeof(line), "psram_freq=%d\r\n", cfg_psram_freq);
     write_line(&fp, line);
     if (cfg_psram_size_mb) {
@@ -774,6 +792,13 @@ int parse_frank_386_ini(void* user, const char* section,
         cfg_numpad_mouse = !!atoi(value);
     } else if (strcmp(name, "cpu_freq") == 0) {
         cfg_cpu_freq = atoi(value);
+    } else if (strcmp(name, "mips_limit") == 0) {
+        char *end;
+        const double mips = strtod(value, &end);
+        if (strcmp(value, "-") == 0 || (end != value && !*end && mips < 0.0))
+            config_mips_limit_milli = -1;
+        else if (end != value && !*end && mips >= 0.001 && mips <= 1000.0)
+            config_mips_limit_milli = (int)(mips * 1000.0 + 0.5);
     } else if (strcmp(name, "psram_freq") == 0) {
         cfg_psram_freq = atoi(value);
     } else if (strcmp(name, "psram_size") == 0) {

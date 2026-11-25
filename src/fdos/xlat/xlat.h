@@ -45,6 +45,8 @@ typedef struct xlat_rt {
     uint32_t deadline;             /* the burst ends once *clock reaches it */
     uint32_t extra;                /* budget added at clock checks (instructions) */
     const uint8_t *code_map;       /* xlat_code_map (set by xlat_run) */
+    uint32_t fn_entry;             /* linear address of a hot CALL target XRIP stopped at
+                                      (xlat_call_hot), else ~0 */
 } xlat_rt_t;
 
 #define XLAT_RT_MEM          0
@@ -104,6 +106,7 @@ typedef struct xlat_stats {
     uint32_t invalidations;     /* regions dropped because their x86 bytes changed */
     uint32_t flushes;           /* whole-cache resets */
     uint32_t evictions;         /* regions dropped to make room (ring) */
+    uint32_t fn_regions;        /* regions without a loop built at hot CALL targets */
     uint32_t exits[XLAT_EXIT_COUNT];
     uint32_t guest_insns;       /* approximate guest instructions run natively */
     uint32_t code_bytes;        /* current code-cache use */
@@ -200,6 +203,29 @@ uint32_t xlat_stack_free(void);
 #define XLAT_CODE_MAP_BYTES (0xa0000u >> (XLAT_CODE_BLOCK_SHIFT + 3u))
 extern uint8_t xlat_code_map[XLAT_CODE_MAP_BYTES];
 
+/* Hot CALL targets (near, far, r/m) seen by XRIP: a target reaching
+ * XLAT_CALL_HOT calls in its slot stops the burst there once (the caller
+ * sets rt->fn_entry), so a function without a loop can get a region; later
+ * calls reach it through xlat_entry_map. Cleared with the cache. */
+#define XLAT_CALL_SLOTS 128u
+#define XLAT_CALL_HOT   16u
+extern uint32_t xlat_call_key[XLAT_CALL_SLOTS];
+extern uint8_t xlat_call_count[XLAT_CALL_SLOTS];
+static inline bool xlat_call_hot(uint32_t linear)
+{
+    const uint32_t h = (linear * 0x9e3779b1u) >> 25;
+    if (xlat_call_key[h] != linear) {
+        xlat_call_key[h] = linear;
+        xlat_call_count[h] = 1;
+        return false;
+    }
+    const uint32_t n = xlat_call_count[h];
+    if (n >= XLAT_CALL_HOT)
+        return false;           /* stopped there once already */
+    xlat_call_count[h] = (uint8_t)(n + 1);
+    return n + 1 == XLAT_CALL_HOT;
+}
+
 #define XLAT_MAP_BITS 8192u
 extern uint8_t xlat_entry_map[XLAT_MAP_BITS / 8];
 static inline uint32_t xlat_map_index(uint32_t linear)
@@ -247,6 +273,16 @@ uint32_t xlat_rt_resolve(xlat_rt_t *rt);
 #define XLAT_FPU_MEM   0x200u     /* ctl: op | group << 3 | rm << 6 | ... */
 #define XLAT_FPU_WAIT  0x400u
 uint32_t xlat_rt_fpu(xlat_rt_t *rt, uint32_t ctl, uint32_t addr);
+
+/* Helper called by generated code for IN / OUT (the CPU core's port
+ * handlers) and CLI / STI (rt->eflags IF, rt->intr). ctl: port | bytes << 16
+ * | XLAT_IO_* . Returns XLAT_IO_DONE | the value read; 0: XRIP must do it
+ * (nothing was done). */
+#define XLAT_IO_OUT    0x00100000u
+#define XLAT_IO_CLI    0x00200000u
+#define XLAT_IO_STI    0x00400000u
+#define XLAT_IO_DONE   0x00010000u
+uint32_t xlat_rt_io(xlat_rt_t *rt, uint32_t ctl, uint32_t value);
 
 #ifdef __cplusplus
 }

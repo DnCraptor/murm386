@@ -38,6 +38,7 @@ typedef struct {
     uint8_t held;          /* the slot holds a chunk (live, cold or invalidated) */
     uint8_t live;
     uint8_t cold;          /* dropped: too little runs per entry (see xlat_run) */
+    uint8_t fn;            /* a function region (no loop, built at a hot CALL target) */
     uint32_t entries;
     uint32_t insns;        /* instructions charged at its back edges */
     uint32_t us;           /* time inside it (rt->clock), entries included */
@@ -107,6 +108,8 @@ static bool disabled;
 
 uint8_t xlat_entry_map[XLAT_MAP_BITS / 8];
 uint8_t xlat_code_map[XLAT_CODE_MAP_BYTES];
+uint32_t xlat_call_key[XLAT_CALL_SLOTS];
+uint8_t xlat_call_count[XLAT_CALL_SLOTS];
 
 #if defined(XLAT_HOST_TEST)
 void *xlat_test_calloc(size_t size);   /* executable, zeroed */
@@ -234,7 +237,7 @@ static void log_region_count(const region_t *r)
                    r->cs, r->ip, (unsigned long)r->entries, (unsigned long)r->exits[0],
                    (unsigned long)r->exits[1], (unsigned long)r->exits[2],
                    (unsigned long)r->exits[3], (unsigned long)r->insns, (unsigned long)r->us,
-                   r->live ? "" : r->cold ? " (cold)" : " (invalidated)");
+                   r->live ? (r->fn ? " fn" : "") : r->cold ? " (cold)" : " (invalidated)");
     }
 }
 
@@ -379,6 +382,8 @@ static __attribute__((noinline)) bool ready(void)
 
 void xlat_release(void)
 {
+    memset(xlat_call_key, 0, sizeof(xlat_call_key));
+    memset(xlat_call_count, 0, sizeof(xlat_call_count));
     memset(xlat_entry_map, 0, sizeof(xlat_entry_map));
     memset(xlat_code_map, 0, sizeof(xlat_code_map));
     st = NULL;
@@ -390,6 +395,8 @@ void xlat_flush(void)
     if (!st)
         return;
     reset_tables();
+    memset(xlat_call_key, 0, sizeof(xlat_call_key));
+    memset(xlat_call_count, 0, sizeof(xlat_call_count));
     xlat_stats.flushes++;
 }
 
@@ -619,6 +626,8 @@ built:;
     r->lo = out->lo;
     r->span = out->span;
     r->n_runs = out->n_runs;
+    r->fn = out->fn;
+    xlat_stats.fn_regions += out->fn;
     /* the copies follow the code (xlat_translate keeps code_top + data
      * below data_bottom) */
     r->chunk_lo = out->code_off;
@@ -671,18 +680,20 @@ static __attribute__((noinline)) bool sample(const xlat_rt_t *rt)
 {
     const uint32_t key = (uint32_t)rt->cs << 16 | (rt->ip & 0xffffu);
     hot_t *h = &st->hot[hash32(key) >> (32 - 6)];
+    /* a hot CALL target (xlat_call_hot) is translated at once */
+    const bool fn = rt->fn_entry == rt->seg_base[1] + (rt->ip & 0xffffu);
     if (h->key != key) {
         h->key = key;
         h->count = 1;
         h->reject = 0;
-        return false;
-    }
-    if (h->reject) {
+        if (!fn)
+            return false;
+    } else if (h->reject) {
         note_reject_hit(key);
         return false;
-    }
-    if (++h->count < XLAT_HOT_THRESHOLD)
+    } else if (++h->count < XLAT_HOT_THRESHOLD && !fn) {
         return false;
+    }
     h->count = 0;
     if (stack_free() < XLAT_STACK_NEEDED) {
         xlat_stats.stack_skips++;   /* try again when it is hot at a shallower depth */
@@ -1042,7 +1053,7 @@ void xlat_log_write(uint16_t psp, const char *name)
     log_region_counts();
     log_rejects();
     log_printf("S translations=%lu rejects=%lu entries=%lu invalid=%lu flushes=%lu evict=%lu "
-               "exit b/bu/s/st=%lu/%lu/%lu/%lu native=%lu code=%lu stack_skips=%lu interp=%lu side=%lu cuts=%lu/%lu cold=%lu lost=%lu\r\n",
+               "exit b/bu/s/st=%lu/%lu/%lu/%lu native=%lu code=%lu stack_skips=%lu interp=%lu side=%lu cuts=%lu/%lu cold=%lu fn=%lu lost=%lu\r\n",
                (unsigned long)xlat_stats.translations, (unsigned long)xlat_stats.rejects,
                (unsigned long)xlat_stats.entries, (unsigned long)xlat_stats.invalidations,
                (unsigned long)xlat_stats.flushes, (unsigned long)xlat_stats.evictions,
@@ -1052,7 +1063,7 @@ void xlat_log_write(uint16_t psp, const char *name)
                (unsigned long)xlat_stats.stack_skips, (unsigned long)xlat_stats.interp,
                (unsigned long)xlat_stats.side_interp, (unsigned long)xlat_stats.cut_entries,
                (unsigned long)xlat_stats.cuts, (unsigned long)xlat_stats.cold,
-               (unsigned long)st->log_lost);
+               (unsigned long)xlat_stats.fn_regions, (unsigned long)st->log_lost);
     /* CPU bursts: averages and histograms (xlat_stats_t), XRIP only / with
      * translated code; device service after the bursts. XLAT_SLICE_US is
      * meant to match the usual XRIP burst. */

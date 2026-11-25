@@ -449,6 +449,18 @@ static uint16_t ref_pop(void)
     return v;
 }
 
+/* The test's ports: a read returns a function of everything done on the
+ * ports before (port, value, order), so the reference and the translated
+ * code agree only if they do the same accesses in the same order. */
+static uint8_t zero_byte, one_byte = 1;
+static uint32_t io_sum;
+static uint32_t tio(uint32_t port, uint32_t bytes, bool out, uint32_t value)
+{
+    io_sum = ((io_sum ^ port * 0x9e3779b1u ^ value * 0x85ebca6bu) + (out ? 0x1234567u : 0u) + bytes) *
+             0xc2b2ae35u + 1u;
+    return out ? 0u : (io_sum >> 7) & (bytes == 2 ? 0xffffu : 0xffu);
+}
+
 /* 66h in 16-bit code: XRIP's exec386() (cpu386.c.inl) for the forms the
  * generator makes; anything else makes the program unusable. */
 static uint32_t rd32(uint32_t a) { return rd16(a) | (uint32_t)rd16(a + 2) << 16; }
@@ -740,6 +752,18 @@ static void ref_step(void)
     case 0x99: putreg16(2, (getreg16(0) & 0x8000) ? 0xffff : 0); return;
     case 0xfc: R.eflags &= ~0x400u; return;
     case 0xfd: R.eflags |= 0x400u; return;
+    case 0xfa: R.eflags &= ~0x200u; return;
+    case 0xfb: R.eflags |= 0x200u; return;
+    case 0xe4: case 0xe5: case 0xe6: case 0xe7: case 0xec: case 0xed: case 0xee: case 0xef: {
+        const uint32_t port = op & 8 ? getreg16(2) : fetch8(), bytes = op & 1 ? 2u : 1u;
+        if (op & 2)
+            tio(port, bytes, true, bytes == 2 ? getreg16(0) : getreg8(0));
+        else if (bytes == 2)
+            putreg16(0, (uint16_t)tio(port, 2, false, 0));
+        else
+            putreg8(0, (uint8_t)tio(port, 1, false, 0));
+        return;
+    }
     case 0xaa: case 0xab: case 0xac: case 0xad: case 0xa4: case 0xa5: {
         const int w = op & 1, step = (R.eflags & 0x400u ? -1 : 1) * (w ? 2 : 1);
         while (!rep || getreg16(1)) {
@@ -845,6 +869,26 @@ uint32_t xlat_rt_fpu(xlat_rt_t *rt, uint32_t ctl, uint32_t addr)
               addr, &ax);
     rt->gpr[0] = (rt->gpr[0] & 0xffff0000u) | ax;
     return 1;
+}
+
+/* The test's xlat_rt_io(): the test ports; every 5th call refuses (XRIP,
+ * the reference, does that one). */
+static const volatile uint8_t *test_irq;   /* rt->intr when IF is set */
+static unsigned long io_calls;
+uint32_t xlat_rt_io(xlat_rt_t *rt, uint32_t ctl, uint32_t value)
+{
+    if (++io_calls % 5 == 0)
+        return 0;
+    if (ctl & (XLAT_IO_CLI | XLAT_IO_STI)) {
+        if (ctl & XLAT_IO_STI) { rt->eflags |= 0x200u; rt->intr = test_irq; }
+        else { rt->eflags &= ~0x200u; rt->intr = &zero_byte; }
+        return XLAT_IO_DONE;
+    }
+    const uint32_t bytes = ctl >> 16 & 0xfu;
+    const bool out = (ctl & XLAT_IO_OUT) != 0;
+    if (!out)
+        value = 0;      /* r2 is not set for IN */
+    return XLAT_IO_DONE | tio(ctl & 0xffffu, bytes, out, bytes == 2 ? value & 0xffffu : value & 0xffu);
 }
 
 /* The test's xlat_interp_one(): the reference interpreter is the "XRIP". */
@@ -1159,6 +1203,14 @@ static void gen_one(ginsn_t *g, int index, int total)
     }
     if (rn(8) == 0) {
         gen_o32(g);
+        return;
+    }
+    if (rn(24) == 0) {     /* IN / OUT (port imm8 or DX), CLI, STI */
+        static const uint8_t ops[10] = {0xe4, 0xe5, 0xe6, 0xe7, 0xec, 0xed, 0xee, 0xef, 0xfa, 0xfb};
+        const uint8_t op = ops[rn(10)];
+        g->b[g->len++] = op;
+        if ((op & 0xf8) == 0xe0)
+            g->b[g->len++] = (uint8_t)rnd();
         return;
     }
     const int kind = rn(20);
@@ -1476,7 +1528,6 @@ static uint32_t gen_program(uint8_t *code)
 /* ---------------------------------------------------------------------- */
 
 static uint8_t mem_init[MEM_BYTES];
-static uint8_t zero_byte, one_byte = 1;
 static bool lockstep, smc, reuse_cs;
 static uint16_t last_cs = 0x1000;
 
@@ -1510,7 +1561,7 @@ static void setup_state(ref_t *s, uint32_t seed_regs)
         s->seg_base[3] = s->seg_base[0] = s->seg_base[2] = s->seg_base[1];
         s->gpr[3] = rn(0x30); s->gpr[6] = rn(0x10); s->gpr[7] = rn(0x10); s->gpr[5] = rn(0x20);
     }
-    s->eflags = 2 | (rnd() & 0x8d5u);
+    s->eflags = 2 | (rnd() & 0xad5u);
     s->ip = 0;
 }
 
@@ -1610,21 +1661,23 @@ static int replay(const char *path, int states)
             static uint8_t rfpu_before[94], rfpu_after[94], rfpu_now[94];
             fpu_random_state(rfpu_before);
             tfpu_state(rfpu_before, 0);
+            const uint32_t io_before = io_sum = rnd();
             undo_n = 0;
             undo_from = REPLAY_SPAN;
             xlat_flush();
             bool ran = false;
-            xlat_rt_t rt;
+            xlat_rt_t rt = {.fn_entry = UINT32_MAX};
             for (int attempt = 0; attempt < 4 && !ran; ++attempt) {
                 rt.mem = mem; rt.mem_size = REPLAY_SPAN;   /* above it: XRIP (logged) */
                 memcpy(rt.seg_base, R.seg_base, sizeof(rt.seg_base));
                 rt.budget = 1 + (int32_t)rn(300);
                 rt.clock = &test_clock; rt.extra = 0;
                 rt.deadline = test_clock;   /* expired: logged loops may never end */
-                rt.intr = &zero_byte; rt.gpr = R.gpr;
+                rt.intr = test_irq = &zero_byte; rt.gpr = R.gpr;
                 rt.lazy_result = R.flags_result; rt.lazy_dst = R.flags_dst; rt.lazy_src = R.flags_src;
                 rt.eflags = R.eflags; rt.lazy_op = R.flags_op; rt.lazy_cf = R.flags_cf;
                 rt.cs = R.cs; rt.ip = R.ip;
+                rt.fn_entry = R.seg_base[1] + R.ip;   /* logged function regions too */
                 ran = xlat_run(&rt);
             }
             if (!ran) continue;
@@ -1642,6 +1695,8 @@ static int replay(const char *path, int states)
             memcpy(after_mem, mem, REPLAY_SPAN);
             tfpu_state(rfpu_after, 1);
             tfpu_state(rfpu_before, 0);
+            const uint32_t io_after = io_sum;
+            io_sum = io_before;
             /* the reference from 'before' must reach the same registers, flags and memory */
             memcpy(mem, before_mem, REPLAY_SPAN);
             undo_apply();
@@ -1656,7 +1711,8 @@ static int replay(const char *path, int states)
                     R = a; flags_now(); a = R;
                     R = b; flags_now(); b = R;
                     tfpu_state(rfpu_now, 1);
-                    if ((a.eflags & 0xcd5u) == (b.eflags & 0xcd5u) && !memcmp(mem, after_mem, REPLAY_SPAN) &&
+                    if ((a.eflags & 0xed5u) == (b.eflags & 0xed5u) && !memcmp(mem, after_mem, REPLAY_SPAN) &&
+                        io_sum == io_after &&
                         !memcmp(rfpu_now, rfpu_after, 94)) {
                         found = true;
                         break;
@@ -1697,7 +1753,7 @@ static int shift_check(void)
                     memset(&R, 0, sizeof(R));
                     R.eflags = 2 | (rnd() & 0x8d5u);
                     if (k & 1) { uint16_t r16; alu16((int)(rn(2) ? 0 : 5 + rn(3)), (uint16_t)rnd(), (uint16_t)rnd(), &r16); }
-                    xlat_rt_t rt;
+                    xlat_rt_t rt = {.fn_entry = UINT32_MAX};
                     memset(&rt, 0, sizeof(rt));
                     rt.eflags = R.eflags; rt.lazy_op = R.flags_op; rt.lazy_cf = R.flags_cf;
                     rt.lazy_result = R.flags_result; rt.lazy_dst = R.flags_dst; rt.lazy_src = R.flags_src;
@@ -1737,7 +1793,7 @@ static int shift_check(void)
         R.eflags = 2 | (rnd() & 0x8d5u);
         if (k & 1) { uint16_t r16; alu16((int)(rn(2) ? 0 : 5 + rn(3)), (uint16_t)rnd(), (uint16_t)rnd(), &r16); }
         putreg16(0, ax); putreg16(2, dx);
-        xlat_rt_t rt;
+        xlat_rt_t rt = {.fn_entry = UINT32_MAX};
         memset(&rt, 0, sizeof(rt));
         rt.eflags = R.eflags; rt.lazy_op = R.flags_op; rt.lazy_cf = R.flags_cf;
         rt.lazy_result = R.flags_result; rt.lazy_dst = R.flags_dst; rt.lazy_src = R.flags_src;
@@ -1831,7 +1887,7 @@ static int chain_check(void)
             for (int k = 0; k < 4; ++k) {
                 R = init;
                 R.ip = entries[test][e];
-                xlat_rt_t rt;
+                xlat_rt_t rt = {.fn_entry = UINT32_MAX};
                 memset(&rt, 0, sizeof(rt));
                 rt.mem = mem; rt.mem_size = 0xa0000;
                 memcpy(rt.seg_base, R.seg_base, sizeof(rt.seg_base));
@@ -1855,7 +1911,7 @@ static int chain_check(void)
         R.ip = starts[test];
         const unsigned long entries0 = xlat_stats.entries;
         for (int guard = 0; guard < 10000 && !R.halted; ++guard) {
-            xlat_rt_t rt;
+            xlat_rt_t rt = {.fn_entry = UINT32_MAX};
             memset(&rt, 0, sizeof(rt));
             rt.mem = mem; rt.mem_size = 0xa0000;
             memcpy(rt.seg_base, R.seg_base, sizeof(rt.seg_base));
@@ -1940,6 +1996,7 @@ int main(int argc, char **argv)
         /* reference */
         memcpy(mem, mem_init, MEM_BYTES);
         tfpu_state(fpu_init, 0);
+        const uint32_t io_init = io_sum = rnd();
         R = init;
         long steps = 0;
         while (!R.halted && steps < 200000) { ref_step(); steps++; }
@@ -1953,23 +2010,25 @@ int main(int argc, char **argv)
         static uint8_t want_mem[MEM_BYTES];
         memcpy(want_mem, mem, MEM_BYTES);
         tfpu_state(fpu_want, 1);
+        const uint32_t io_want = io_sum;
 
         /* translated */
         memcpy(mem, mem_init, MEM_BYTES);
         tfpu_state(fpu_init, 0);
+        io_sum = io_init;
         R = init;
         if (!reuse_cs && rn(8) && !keep_cache) xlat_flush();
         const uint32_t mem_size = rn(3) ? 0xa0000u : 0x20000u + rn(0x80000);
         long guard = 0;
         while (!R.halted && guard++ < 400000) {
-            xlat_rt_t rt;
+            xlat_rt_t rt = {.fn_entry = UINT32_MAX};
             rt.mem = mem;
             rt.mem_size = mem_size;
             memcpy(rt.seg_base, R.seg_base, sizeof(rt.seg_base));
             rt.budget = 1 + (int32_t)rn(300);
             rt.clock = &test_clock; rt.extra = 0;
             rt.deadline = test_clock + (rn(2) ? 0u : 1000u);   /* expired / never reached */
-            rt.intr = rn(20) ? &zero_byte : &one_byte;
+            rt.intr = test_irq = rn(20) ? &zero_byte : &one_byte;
             rt.gpr = R.gpr;
             rt.lazy_result = R.flags_result;
             rt.lazy_dst = R.flags_dst;
@@ -1979,9 +2038,11 @@ int main(int argc, char **argv)
             rt.lazy_cf = R.flags_cf;
             rt.cs = R.cs;
             rt.ip = R.ip;
+            rt.fn_entry = rn(3) ? UINT32_MAX : R.seg_base[1] + R.ip;   /* as at a hot CALL target */
             rt.exit_kind = 0xff;
             ref_t before = R;
             static uint8_t before_mem[MEM_BYTES], fpu_before[94], fpu_after[94], fpu_now[94];
+            const uint32_t io_before = io_sum;
             if (lockstep) { memcpy(before_mem, mem, MEM_BYTES); tfpu_state(fpu_before, 1); }
             if (getenv("XLAT_TRACE2")) printf("  run? ip %04x sp %04x cx %04x\n", R.ip, getreg16(4), getreg16(1));
             if (xlat_run(&rt)) {
@@ -2007,6 +2068,8 @@ int main(int argc, char **argv)
                     memcpy(mem, before_mem, MEM_BYTES);
                     tfpu_state(fpu_after, 1);
                     tfpu_state(fpu_before, 0);
+                    const uint32_t io_after = io_sum;
+                    io_sum = io_before;
                     R = before;
                     bool found = false;
                     /* a run past its budget (deadline not reached) did up to extra more */
@@ -2020,7 +2083,8 @@ int main(int argc, char **argv)
                             R = a; flags_now(); a = R;
                             R = b; flags_now(); b = R;
                             tfpu_state(fpu_now, 1);
-                            if ((a.eflags & 0xcd5u) == (b.eflags & 0xcd5u) && !memcmp(fpu_now, fpu_after, 94)) {
+                            if ((a.eflags & 0xed5u) == (b.eflags & 0xed5u) && !memcmp(fpu_now, fpu_after, 94) &&
+                                io_sum == io_after) {
                                 found = true;
                                 break;
                             }
@@ -2059,6 +2123,7 @@ int main(int argc, char **argv)
                     }
                     memcpy(mem, after_mem, MEM_BYTES);
                     tfpu_state(fpu_after, 0);
+                    io_sum = io_after;
                     R = after;
                 }
             }
@@ -2068,11 +2133,11 @@ int main(int argc, char **argv)
         flags_now();
         const bool regs_ok = !memcmp(want.gpr, R.gpr, sizeof(R.gpr)) &&
                              !memcmp(want.seg_base, R.seg_base, sizeof(R.seg_base));
-        const bool flags_ok = (want.eflags & 0xcd5u) == (R.eflags & 0xcd5u);
+        const bool flags_ok = (want.eflags & 0xed5u) == (R.eflags & 0xed5u);
         const bool ip_ok = want.ip == R.ip && want.cs == R.cs && R.halted;
         const bool mem_ok = !memcmp(want_mem, mem, MEM_BYTES);
         tfpu_state(fpu_got, 1);
-        const bool fpu_ok = !memcmp(fpu_want, fpu_got, sizeof(fpu_got));
+        const bool fpu_ok = !memcmp(fpu_want, fpu_got, sizeof(fpu_got)) && io_sum == io_want;
         if (!(regs_ok && flags_ok && ip_ok && mem_ok && fpu_ok) || R.bad) {
             failures++;
             printf("FAIL seed %u: regs %d flags %d (want %03x got %03x) ip %d (%04x/%04x) mem %d x87 %d\n",
@@ -2090,8 +2155,8 @@ int main(int argc, char **argv)
         memset(mem_init + init.seg_base[1], 0, len);
     }
     printf("programs %d, skipped %d, failures %d\n", run, skipped, failures);
-    printf("stats: translations %u rejects %u entries %u invalid %u flushes %u evictions %u exits b/budget/side/stop %u/%u/%u/%u native insns %u interp %lu side %lu\n",
-           xlat_stats.translations, xlat_stats.rejects, xlat_stats.entries, xlat_stats.invalidations,
+    printf("stats: translations %u (fn %u) rejects %u entries %u invalid %u flushes %u evictions %u exits b/budget/side/stop %u/%u/%u/%u native insns %u interp %lu side %lu\n",
+           xlat_stats.translations, xlat_stats.fn_regions, xlat_stats.rejects, xlat_stats.entries, xlat_stats.invalidations,
            xlat_stats.flushes, xlat_stats.evictions, xlat_stats.exits[0], xlat_stats.exits[1],
            xlat_stats.exits[2], xlat_stats.exits[3], xlat_stats.guest_insns, interp_calls, side_calls);
     return failures ? 1 : 0;

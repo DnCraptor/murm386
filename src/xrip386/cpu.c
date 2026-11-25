@@ -1,5 +1,8 @@
 /* Derived from xrip/pico-286, 572890a. See LICENSE.pico-286. */
 #include "platform.h"
+#if XLAT
+#include "../config_save.h"
+#endif
 
 static CPU *active_cpu;
 cpu_state_t cpu_state; // cpu.h
@@ -345,6 +348,27 @@ static __time_critical_func() INLINE uint16_t pop() {
     stack_add(2);
     return value;
 }
+
+#if XLAT
+/* After a CALL (near, r/m, far): a target that became hot (xlat_call_hot)
+ * ends the burst there once, marked as a function entry for xlat_run(); a
+ * marked target (translated already) ends it as a taken branch does. */
+static uint32_t xlat_fn_root = UINT32_MAX;
+static __time_critical_func() INLINE void xlat_call_seen(void) {
+    if (!xlat_armed)
+        return;
+    const uint32_t linear = segment_base[regcs] + xrip_ip;
+    if (xlat_call_hot(linear)) {
+        xlat_cut = true;
+        xlat_fn_root = linear;
+    } else if (xlat_map_test(linear)) {
+        xlat_cut = true;
+    }
+}
+#define XLAT_CALL_SEEN() xlat_call_seen()
+#else
+#define XLAT_CALL_SEEN() ((void)0)
+#endif
 
 // Near relative jump; with a 16-bit operand size EIP wraps at 64K.
 static __time_critical_func() INLINE void jump_relative(int32_t displacement) {
@@ -891,10 +915,12 @@ static __time_critical_func() void op_grp5() {
         case 2: /* CALL Ev */
             push(xrip_ip);
             xrip_ip = oper1;
+            XLAT_CALL_SEEN();
             break;
 
         case 3: /* CALL Mp */
             far_call(mem_read16(ea + 2), mem_read16(ea), false);
+            XLAT_CALL_SEEN();
             break;
 
         case 4: /* JMP Ev */
@@ -2030,6 +2056,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 oper2 = getmem16(CS_BASE, XRIP_IP);
                 StepIP(2);
                 far_call(oper2, oper1, false);
+                XLAT_CALL_SEEN();
                 break;
 
             case 0x9B: /* 9B WAIT */
@@ -2758,6 +2785,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 StepIP(2);
                 push(XRIP_IP);
                 jump_relative((int16_t) oper1);
+                XLAT_CALL_SEEN();
                 break;
 
             case 0xE9: /* E9 JMP Jv */

@@ -114,6 +114,11 @@ void config_set_joystick_swap_buttons(int enabled);
 int config_get_cpu_freq(void);
 void config_set_cpu_freq(int mhz);
 
+/* Guest speed, in thousandths of a MIPS; -1 = unlimited. */
+extern int config_mips_limit_milli;
+static inline int config_get_mips_limit(void) { return config_mips_limit_milli; }
+void config_set_mips_limit(int milli);
+
 int config_get_psram_freq(void);
 void config_set_psram_freq(int mhz);
 int config_get_psram_size_mb(void);

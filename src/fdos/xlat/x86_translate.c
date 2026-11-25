@@ -25,6 +25,7 @@
  * Exits are always at an x86 instruction boundary with all registers written
  * back, so XRIP continues exactly there.
  */
+#include <limits.h>
 #include <string.h>
 
 #include "xlat_internal.h"
@@ -92,6 +93,8 @@ typedef struct {
     bool overflow;
     arm_emit_t e;
     uint32_t epilogue, interp_thunk;
+    uint8_t fn_ok;                 /* entry at rt->fn_entry: a region without a loop may do */
+    uint8_t fn;                    /* built so (min_native_path) */
     int n_interp;
 } tctx_t;
 
@@ -167,6 +170,54 @@ static bool seen_before(tctx_t *c, uint16_t ip)
  * region leave it, and their return sites are entries, not loop paths. (A
  * branch backwards alone is not enough: a loop body that calls into another
  * CS exits on every pass.) */
+static bool has_cycle(const tctx_t *c, int first);
+
+/* The fewest native instructions any path from the entry runs before it can
+ * leave the region (an exit edge, a RET / far / indirect transfer, an
+ * instruction XRIP ends). Interpreted instructions count 0, a REP string
+ * instruction XLAT_TRACE_MIN. */
+static int min_native_path(const tctx_t *c, int first)
+{
+    int dist[XLAT_MAX_INSNS];
+    for (int i = 0; i < c->n; ++i)
+        dist[i] = INT_MAX;
+    dist[first] = 0;
+    int best = INT_MAX;
+    for (int pass = 0; pass < c->n; ++pass) {   /* Bellman-Ford, n <= 63 */
+        bool changed = false;
+        for (int i = 0; i < c->n; ++i) {
+            if (dist[i] == INT_MAX)
+                continue;
+            const x86_insn_t *in = &c->in[i];
+            const int w = in->op == XO_INTERP ? 0
+                        : in->op == XO_STR && in->rep ? XLAT_TRACE_MIN : 1;
+            const int d = dist[i] + w;
+            int succ[3], ns = 0;
+            bool leaves = dyn_exit(in);
+            if (falls_through(in)) {
+                if (c->fall_idx[i] < 0) leaves = true; else succ[ns++] = c->fall_idx[i];
+            }
+            if (is_branch(in)) {
+                if (c->tgt_idx[i] < 0) leaves = true; else succ[ns++] = c->tgt_idx[i];
+            }
+            if ((in->op == XO_CALL || in->op == XO_FAR) && c->tgt_idx[i] >= 0) {
+                const int r = find_insn(c, (uint16_t)(in->ip + in->len));
+                if (r >= 0) succ[ns++] = r;
+            }
+            if ((leaves || !ns) && d < best)
+                best = d;
+            for (int k = 0; k < ns; ++k)
+                if (d < dist[succ[k]]) {
+                    dist[succ[k]] = d;
+                    changed = true;
+                }
+        }
+        if (!changed)
+            break;
+    }
+    return best;
+}
+
 static bool has_cycle(const tctx_t *c, int first)
 {
     uint8_t color[XLAT_MAX_INSNS];         /* 0 new, 1 on the path, 2 done */
@@ -318,7 +369,13 @@ static int discover(tctx_t *c, uint16_t start)
     c->n_interp = interp;
     if (interp * XLAT_INTERP_RATIO > c->n)
         return XLAT_RJ_INTERP;
-    return has_cycle(c, first) ? XLAT_RJ_NONE : XLAT_RJ_NOLOOP;
+    if (has_cycle(c, first))
+        return XLAT_RJ_NONE;
+    if (c->fn_ok && min_native_path(c, first) >= XLAT_TRACE_MIN) {
+        c->fn = 1;
+        return XLAT_RJ_NONE;
+    }
+    return XLAT_RJ_NOLOOP;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -519,7 +576,7 @@ static void plan(tctx_t *c)
     }
     for (int i = 0; i < c->n; ++i) {
         const x86_insn_t *in = &c->in[i];
-        if (x86_accesses_mem(in) || in->op == XO_FPU)
+        if (x86_accesses_mem(in) || in->op == XO_FPU || in->op == XO_IO)
             plan_sync(c, c->in_set[i], side_producer(c, i));  /* side exit */
         if (dyn_exit(in))
             plan_sync(c, c->out_set[i], edge_producer(c, i)); /* exit to the popped IP */
@@ -1892,6 +1949,39 @@ static void emit_loopcc(tctx_t *c, int i)
     local_patch(c, skip, in->sub ? zcond ^ 1 : zcond);
 }
 
+/* IN / OUT, CLI / STI through xlat_rt_io (the port handlers do not use the
+ * x86 registers or flags); a 0 from it leaves the instruction to XRIP. An
+ * OUT may raise an IRQ (PIC): the next back edge sees it in rt->intr. */
+static void emit_io(tctx_t *c, int i)
+{
+    arm_emit_t *e = &c->e;
+    const x86_insn_t *in = &c->in[i];
+    uint32_t ctl;
+    switch (in->sub) {
+    case IO_CLI: ctl = XLAT_IO_CLI; break;
+    case IO_STI: ctl = XLAT_IO_STI; break;
+    default:
+        ctl = (uint32_t)(in->size / 8) << 16 | (in->sub == IO_OUT ? XLAT_IO_OUT : 0u);
+        if (!in->local)
+            ctl |= in->a.imm & 0xffu;
+        break;
+    }
+    arm_mov32(e, A_R1, ctl);
+    if ((in->sub == IO_IN || in->sub == IO_OUT) && in->local) {
+        arm_ubfx(e, A_R12, A_R6, 0, 16);                            /* DX */
+        arm_dp_reg(e, DP_ORR, 0, A_R1, A_R1, A_R12, SH_LSL, 0);
+    }
+    if (in->sub == IO_OUT)
+        arm_mov(e, A_R2, A_R4);
+    arm_mov(e, A_R0, A_R11);
+    arm_mov32(e, A_R12, (uint32_t)(uintptr_t)&xlat_rt_io);
+    arm_blx(e, A_R12);
+    arm_dp_imm(e, DP_SUB, 1, A_PC, A_R0, 0);
+    emit_branch(c, side_dest(c, i, 0), C_EQ);
+    if (in->sub == IO_IN)
+        arm_bfi(e, A_R4, A_R0, 0, in->size);
+}
+
 /* x87: fpu.c through xlat_rt_fpu (no flags, no x86 registers but FNSTSW
  * AX); a 0 from it (CR0.EM/TS) leaves the instruction to XRIP. */
 static void emit_fpu(tctx_t *c, int i)
@@ -2017,6 +2107,9 @@ static void emit_insn(tctx_t *c, int i)
         break;
     case XO_FPU:
         emit_fpu(c, i);
+        break;
+    case XO_IO:
+        emit_io(c, i);
         break;
     }
     if (falls_through(in) && c->fall_idx[i] != i + 1)
@@ -2207,8 +2300,11 @@ bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip,
     c->interp_thunk = a->interp_thunk;
     c->n_interp = 0;
     out->reject = XLAT_RJ_NONE;
+    c->fn_ok = rt->fn_entry == c->cs_base + ip;
+    c->fn = 0;
 
     const int why = discover(c, ip);
+    out->fn = c->fn;
     out->n_insns = (uint8_t)c->n;
     out->n_interp = (uint8_t)c->n_interp;
     if (why != XLAT_RJ_NONE) {

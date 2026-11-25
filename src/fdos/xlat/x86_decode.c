@@ -526,6 +526,19 @@ static bool decode_one(const uint8_t *code, uint16_t ip, x86_insn_t *in)
         in->sub = (code[pos + 2] & 0x1f) ? STK_ENTER1 : STK_ENTER0;
         in->b.imm = rd16(code + pos);
         pos += 3;
+    } else if ((op & 0xf4) == 0xe4) {      /* E4..E7, EC..EF: IN / OUT */
+        in->op = XO_IO;
+        in->sub = op & 2 ? IO_OUT : IO_IN;
+        in->size = op & 1 ? 16 : 8;
+        if (op & 8) {
+            in->local = 1;                  /* port in DX */
+        } else {
+            in->a.kind = OPD_IMM;
+            in->a.imm = code[pos++];
+        }
+    } else if (op == 0xfa || op == 0xfb) {
+        in->op = XO_IO;
+        in->sub = op == 0xfa ? IO_CLI : IO_STI;
     } else if (op == 0xf8 || op == 0xf9 || op == 0xf5 || op == 0x9f || op == 0x9e || op == 0x9c) {
         in->op = XO_FLAG;
         in->sub = op == 0xf8 ? FL_CLC : op == 0xf9 ? FL_STC : op == 0xf5 ? FL_CMC :

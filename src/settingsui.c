@@ -25,6 +25,7 @@ extern bool SELECT_VGA;
 typedef enum {
     SETTINGS_CLOSED,
     SETTINGS_MAIN,
+    SETTINGS_CPU_SPEED,
     SETTINGS_CONFIRM_SAVE_RESTART,
     SETTINGS_CONFIRM_SAVE
 } SettingsState;
@@ -53,6 +54,7 @@ typedef enum {
     SETTING_JOYSTICK_BUTTONS,
     SETTING_USB_MODEM,
     SETTING_MOUSE_INVERT_Y,
+    SETTING_CPU_SPEED,
     SETTING_CPU_FREQ,
     SETTING_VOLTAGE,
     SETTING_PSRAM_FREQ,
@@ -65,6 +67,26 @@ typedef enum {
 // Option values
 static const int vol_options[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
 static const int vol_option_count = 17;
+
+/* Guest-speed calibration targets, not cycle-accurate CPU models. */
+static const struct {
+    const char *name, *cpu;
+    int milli;
+} cpu_speed_modes[] = {
+    {"XT",       "8088 4.77 MHz",   330},
+    {"TURBO8",   "8088 8 MHz",      550},
+    {"TURBO10",  "8088 10 MHz",     700},
+    {"AT",       "80286 6 MHz",     900},
+    {"MODEL 50", "80286 10 MHz",   1500},
+    {"AT 16",    "80286 16 MHz",   2500},
+    {"386SX",    "80386SX 16 MHz", 3000},
+    {"386DX",    "80386DX 33 MHz", 6000},
+    {"386DX40",  "80386DX 40 MHz", 8000},
+    {"UNLIM",    "Unlimited",        -1},
+};
+#define CPU_SPEED_COUNT ((int)(sizeof(cpu_speed_modes) / sizeof(cpu_speed_modes[0])))
+static int cpu_speed_selected, cpu_speed_custom;
+static int orig_mips_limit;
 
 static const int cpu_freq_options[] = { 252, 378, 504, 524, 564 };
 static const int cpu_freq_option_count = 5;
@@ -138,6 +160,7 @@ static int orig_svga_refresh;
 
 // Forward declarations
 static void draw_settings_menu(void);
+static void draw_cpu_speed_menu(void);
 static void draw_confirm_dialog(void);
 static void draw_confirm_dialog2(void);
 static int find_option_index(const int *options, int count, int value);
@@ -261,6 +284,7 @@ void settingsui_open(void) {
     orig_nes_mouse = config_get_nes_mouse();
     orig_nes_joystick = config_get_nes_joystick();
     orig_cpu_freq = config_get_cpu_freq();
+    orig_mips_limit = config_get_mips_limit();
     orig_psram_freq = config_get_psram_freq();
     orig_flash_freq = config_get_flash_freq();
     orig_volume = audio_get_volume();
@@ -284,10 +308,11 @@ void settingsui_open(void) {
 
 void settingsui_close(void) {
     // Restore original values if not confirmed
-    if (settings_state == SETTINGS_MAIN && settingsui_has_changes()) {
+    if ((settings_state == SETTINGS_MAIN || settings_state == SETTINGS_CPU_SPEED) && settingsui_has_changes()) {
         config_set_video_adapter(orig_video_adapter);
         config_set_fpu(orig_fpu);
         config_set_cpu_freq(orig_cpu_freq);
+        config_set_mips_limit(orig_mips_limit);
         config_set_psram_freq(orig_psram_freq);
         config_set_flash_freq(orig_flash_freq);
         config_set_voltage(orig_voltage);
@@ -559,6 +584,7 @@ static void draw_settings_menu(void) {
         "Joystick buttons:",
         "USB modem:",
         "Invert Mouse Y:",
+        "CPU:",
         "RP2350 Freq:",
         "CPU Voltage:",
         "PSRAM Freq:",
@@ -668,6 +694,14 @@ static void draw_settings_menu(void) {
             case SETTING_MOUSE_INVERT_Y:
                 snprintf(value, sizeof(value), "< %s >", config_get_mouse_invert_y() ? "Yes" : "No");
                 break;
+            case SETTING_CPU_SPEED: {
+                int milli = config_get_mips_limit();
+                if (milli < 0)
+                    snprintf(value, sizeof(value), "UNLIMITED >");
+                else
+                    snprintf(value, sizeof(value), "%d.%03d MIPS >", milli / 1000, milli % 1000);
+                break;
+            }
             case SETTING_CPU_FREQ: {
                 int mhz = config_get_cpu_freq();
                 if (!SELECT_VGA && mhz < 504) mhz = 504;
@@ -721,6 +755,53 @@ static void draw_settings_menu(void) {
 
     // Help (centered)
     osd_print_center(MENU_Y + MENU_H - 2, "\x18\x19: Select  \x1b\x1a: Change  Enter: Apply  Esc: Cancel", OSD_ATTR_HIGHLIGHT);
+}
+
+static int cpu_speed_rows(void) {
+    return CPU_SPEED_COUNT + (cpu_speed_custom > 0);
+}
+
+static void open_cpu_speed_menu(void) {
+    const int milli = config_get_mips_limit();
+    cpu_speed_custom = 0;
+    cpu_speed_selected = CPU_SPEED_COUNT - 1;
+    if (milli > 0) {
+        for (int i = 0; i < CPU_SPEED_COUNT; ++i) {
+            if (cpu_speed_modes[i].milli == milli) {
+                cpu_speed_selected = i;
+                goto opened;
+            }
+        }
+        cpu_speed_custom = milli;
+        cpu_speed_selected = CPU_SPEED_COUNT;
+    }
+opened:
+    settings_state = SETTINGS_CPU_SPEED;
+    draw_cpu_speed_menu();
+}
+
+static void draw_cpu_speed_menu(void) {
+    osd_draw_plasma_background(plasma_frame * 3, MENU_X, MENU_Y, MENU_W, MENU_H);
+    osd_draw_box(MENU_X, MENU_Y, MENU_W, MENU_H, OSD_ATTR_BORDER);
+    osd_fill(MENU_X + 1, MENU_Y + 1, MENU_W - 2, MENU_H - 2, ' ', OSD_ATTR_NORMAL);
+    osd_print_center(MENU_Y, " CPU speed ", OSD_ATTR(OSD_YELLOW, OSD_BLUE));
+    osd_print(MENU_X + 3, MENU_Y + 2, "Mode        Reference CPU                 MIPS", OSD_ATTR_HIGHLIGHT);
+    for (int i = 0; i < cpu_speed_rows(); ++i) {
+        const bool custom = i == CPU_SPEED_COUNT;
+        const int milli = custom ? cpu_speed_custom : cpu_speed_modes[i].milli;
+        const char *name = custom ? "CUSTOM" : cpu_speed_modes[i].name;
+        const char *cpu = custom ? "INI value" : cpu_speed_modes[i].cpu;
+        const uint8_t attr = i == cpu_speed_selected ? OSD_ATTR_SELECTED : OSD_ATTR_NORMAL;
+        const int y = MENU_Y + 4 + i;
+        char line[54], speed[16];
+        if (milli < 0) snprintf(speed, sizeof(speed), "-");
+        else snprintf(speed, sizeof(speed), "%d.%03d", milli / 1000, milli % 1000);
+        snprintf(line, sizeof(line), "%-11s %-26s %9s", name, cpu, speed);
+        osd_fill(MENU_X + 2, y, MENU_W - 4, 1, ' ', attr);
+        osd_print(MENU_X + 3, y, line, attr);
+    }
+    osd_print_center(MENU_Y + MENU_H - 4, "Approximate speed classes (not cycle-accurate)", OSD_ATTR_NORMAL);
+    osd_print_center(MENU_Y + MENU_H - 2, "\x18\x19: Select   Enter: Apply   Esc: Back", OSD_ATTR_HIGHLIGHT);
 }
 
 static void draw_confirm_dialog(void) {
@@ -779,19 +860,27 @@ bool settingsui_handle_key(int keycode, bool is_down) {
                     break;
 
                 case KEY_LEFT:
-                    cycle_option(-1);
-                    draw_settings_menu();
+                    if (selected_item == SETTING_CPU_SPEED) open_cpu_speed_menu();
+                    else { cycle_option(-1); draw_settings_menu(); }
                     break;
 
                 case KEY_RIGHT:
-                    cycle_option(1);
-                    draw_settings_menu();
+                    if (selected_item == SETTING_CPU_SPEED) open_cpu_speed_menu();
+                    else { cycle_option(1); draw_settings_menu(); }
                     break;
 
                 case KEY_ENTER:
-                    if (settingsui_has_changes()) {
-                        settings_state = SETTINGS_CONFIRM_SAVE_RESTART;
-                        draw_confirm_dialog();
+                    if (selected_item == SETTING_CPU_SPEED) {
+                        open_cpu_speed_menu();
+                    } else if (settingsui_has_changes()) {
+                        if (config_get_mips_limit() != orig_mips_limit &&
+                            !config_hw_changed() && !audio_output_requires_restart()) {
+                            settings_state = SETTINGS_CONFIRM_SAVE;
+                            draw_confirm_dialog2();
+                        } else {
+                            settings_state = SETTINGS_CONFIRM_SAVE_RESTART;
+                            draw_confirm_dialog();
+                        }
                     } else {
                         settingsui_close();
                     }
@@ -807,6 +896,30 @@ bool settingsui_handle_key(int keycode, bool is_down) {
                     } else {
                         settingsui_close();
                     }
+                    break;
+            }
+            break;
+
+        case SETTINGS_CPU_SPEED:
+            switch (keycode) {
+                case KEY_UP:
+                    cpu_speed_selected = (cpu_speed_selected + cpu_speed_rows() - 1) % cpu_speed_rows();
+                    draw_cpu_speed_menu();
+                    break;
+                case KEY_DOWN:
+                    cpu_speed_selected = (cpu_speed_selected + 1) % cpu_speed_rows();
+                    draw_cpu_speed_menu();
+                    break;
+                case KEY_ENTER:
+                    config_set_mips_limit(cpu_speed_selected == CPU_SPEED_COUNT ?
+                                          cpu_speed_custom : cpu_speed_modes[cpu_speed_selected].milli);
+                    /* Return to Settings; normal save/cancel rules apply. */
+                    settings_state = SETTINGS_MAIN;
+                    draw_settings_menu();
+                    break;
+                case KEY_ESC:
+                    settings_state = SETTINGS_MAIN;
+                    draw_settings_menu();
                     break;
             }
             break;
@@ -831,6 +944,8 @@ bool settingsui_handle_key(int keycode, bool is_down) {
                 settings_state = SETTINGS_CLOSED;
                 osd_hide();
             } else if (keycode == 49 || keycode == KEY_ESC) {  // N or Escape
+                /* Runtime speed must be rolled back when saving is refused. */
+                config_set_mips_limit(orig_mips_limit);
                 settingsui_close();
             }
             break;

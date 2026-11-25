@@ -1083,6 +1083,34 @@ void pc_vga_step(void *o)
 
 static uint32_t pc_last_device_service;
 
+/* One shared token bucket, including reentrant BIOS/DOS pc_step calls.
+ * Credit is in thousandths of an instruction; milli-MIPS = tokens/us.
+ * Sample the global retirement counter, not per-call deltas (nested calls
+ * would otherwise charge the same instructions twice). */
+#define PC_RATE_WINDOW_US 400u
+static int pc_rate_limit;
+static uint32_t pc_rate_time, pc_rate_retired;
+static int64_t pc_rate_credit;
+
+static void __not_in_flash_func(pc_rate_update)(PC *pc, int limit)
+{
+    const uint32_t now = get_uticks();
+    const uint32_t retired = (uint32_t)cpui386_get_cycle(pc->cpu);
+    if (pc_rate_limit != limit) {
+        pc_rate_limit = limit;
+        pc_rate_credit = 0;
+    } else {
+        const uint32_t elapsed = now - pc_rate_time;
+        const uint32_t ran = retired - pc_rate_retired;
+        const int64_t cap = limit * PC_RATE_WINDOW_US < 1000u ?
+                            1000 : (int64_t)limit * PC_RATE_WINDOW_US;
+        pc_rate_credit += (int64_t)elapsed * limit - (int64_t)ran * 1000;
+        if (pc_rate_credit > cap) pc_rate_credit = cap;
+    }
+    pc_rate_time = now;
+    pc_rate_retired = retired;
+}
+
 #if XLAT && XLAT_LOG
 #include "fdos/xlat/xlat.h"
 #endif
@@ -1172,11 +1200,35 @@ void __not_in_flash_func(pc_step)(PC *pc, size_t max_ops)
      * миллисекундным гарантированным тактом.
      */
     bool was_native_done = pc->cpu->native_done;
+    const int limit = config_get_mips_limit();
+    if (pc->paused || limit < 0)
+        pc_rate_limit = 0;
     if (!pc->paused) {
         if (max_ops > 4096) max_ops = 4096;
+        if (limit > 0) {
+            pc_rate_update(pc, limit);
+            /* Accumulate a complete short slice rather than dispatching
+             * one guest instruction every few microseconds. */
+            const size_t slice = (size_t)limit * PC_RATE_WINDOW_US / 1000u;
+            if (max_ops > (slice ? slice : 1u)) max_ops = slice ? slice : 1u;
+            if (pc_rate_credit < (int64_t)max_ops * 1000) {
+                /* Do not sleep in a nested BIOS callback. Keep devices alive
+                 * and let the caller retry when more credit has accrued. */
+                if ((uint32_t)(get_uticks() - pc_last_device_service) >= PC_RATE_WINDOW_US)
+                    pc_service_impl(pc);
+                return;
+            }
+        }
         PROF_T(t_cpu);
         cpu_step(pc->cpu, max_ops);
         PROF_ADD(t_cpu, cpu);
+        if (limit > 0) {
+            pc_rate_update(pc, limit);
+            /* Tiny throttled bursts must not run the device tail on every
+             * instruction. Device time continues even while CPU waits. */
+            if ((uint32_t)(get_uticks() - pc_last_device_service) < PC_RATE_WINDOW_US)
+                return;
+        }
         if (pc->cpu->native_done && !was_native_done &&
             (uint32_t)(get_uticks() - pc_last_device_service) < 1000u)
             return;
@@ -2497,6 +2549,7 @@ void load_bios_and_reset(PC *pc)
 		printf("ERROR: guest-RAM paging flush failed before reset\n");
 #endif
 	sn76489_reset();
+    pc_rate_limit = 0;
 	cpu_reset(pc->cpu);
 }
 

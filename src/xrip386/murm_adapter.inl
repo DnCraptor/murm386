@@ -191,6 +191,38 @@ uint32_t __time_critical_func(xlat_rt_fpu)(xlat_rt_t *rt, uint32_t ctl, uint32_t
     return 1;
 }
 
+/* Called by translated code (xlat.h) for IN / OUT and CLI / STI, as the
+ * opcodes E4..E7, EC..EF, FA, FB in real mode (no I/O permission check).
+ * The port handlers do not touch the CPU registers. STI: the IRQ shadow as
+ * XRIP's; the next back edge reads rt->intr. */
+uint32_t __time_critical_func(xlat_rt_io)(xlat_rt_t *rt, uint32_t ctl, uint32_t value)
+{
+    CPU *const cpu = active_cpu;
+    if (ctl & (XLAT_IO_CLI | XLAT_IO_STI)) {
+        if (ctl & XLAT_IO_STI) {
+            rt->eflags |= 0x200u;
+            rt->intr = (const volatile uint8_t *)&cpu->intr;
+            cpu->i286_irq_shadow = true;
+        } else {
+            rt->eflags &= ~0x200u;
+            rt->intr = &xlat_no_irq;
+        }
+        return XLAT_IO_DONE;
+    }
+    if (xlat_stack_free() < XLAT_STACK_NEEDED)
+        return 0;   /* the device code may go deep: XRIP does it */
+    const uint16_t port = (uint16_t)ctl;
+    const bool word = (ctl >> 16 & 0xfu) == 2u;
+    if (ctl & XLAT_IO_OUT) {
+        if (word)
+            portout16(port, (uint16_t)value);
+        else
+            portout(port, (uint8_t)value);
+        return XLAT_IO_DONE;
+    }
+    return XLAT_IO_DONE | (word ? (uint32_t)portin16(port) : (uint32_t)(uint8_t)portin(port));
+}
+
 /* Called by translated code (xlat.h): XRIP executes the one instruction at
  * rt->ip. The registers are in cpu->gprx already; the lazy flags come from
  * and go back to rt. */
@@ -265,7 +297,8 @@ static __time_critical_func() uint32_t xlat_enter(CPU *cpu, uint32_t count, uint
     rt->seg_base[3] = segment_base[regds];
     rt->budget = (int32_t)count;
     rt->clock = &timer_hw->timerawl;
-    rt->deadline = t0 + XLAT_SLICE_US;
+    /* In a limited mode, never extend an exhausted instruction budget. */
+    rt->deadline = config_get_mips_limit() > 0 ? t0 : t0 + XLAT_SLICE_US;
     rt->extra = 0;
     /* With IF clear an IRQ cannot be taken: the back edges need not stop. */
     rt->intr = ifl ? (const volatile uint8_t *)&cpu->intr : &xlat_no_irq;
@@ -278,6 +311,8 @@ static __time_critical_func() uint32_t xlat_enter(CPU *cpu, uint32_t count, uint
     rt->eflags = x86_flags.value;
     rt->cs = segregs[regcs];
     rt->ip = XRIP_IP;
+    rt->fn_entry = xlat_fn_root;   /* a hot CALL target XRIP stopped at */
+    xlat_fn_root = UINT32_MAX;
     /* No burst cut while translated code runs: the instructions it hands to
      * XRIP (xlat_interp_one) must run, not stop at a marked branch target. */
     xlat_armed = false;

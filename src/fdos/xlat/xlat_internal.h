@@ -30,6 +30,13 @@
 #ifndef XLAT_MAX_REGIONS
 #define XLAT_MAX_REGIONS     32
 #endif
+/* A region without a loop is built only at a hot CALL target (rt->fn_entry)
+ * and only when every path from the entry runs at least this many native
+ * instructions before it can leave (a REP string instruction counts as
+ * XLAT_TRACE_MIN): entering costs about that. */
+#ifndef XLAT_TRACE_MIN
+#define XLAT_TRACE_MIN       8
+#endif
 #ifndef XLAT_RING_WANT
 #define XLAT_RING_WANT       2048u           /* bytes evicted ahead of the ring head when a region does not fit */
 #endif
@@ -106,7 +113,7 @@ bool arm_patch_branch(arm_emit_t *e, uint32_t at, uint32_t target, int cond);
 
 enum { XO_ALU = 1, XO_INCDEC, XO_MOV, XO_LEA, XO_XCHG, XO_NOP, XO_JCC, XO_JMP, XO_LOOP,
        XO_JCXZ, XO_PUSH, XO_POP, XO_CALL, XO_RET, XO_INTERP, XO_STR, XO_SHIFT, XO_MULDIV, XO_MISC, XO_SEG, XO_FAR, XO_IND, XO_STK, XO_FPU,
-       XO_FLAG, XO_LOOPCC };
+       XO_FLAG, XO_LOOPCC, XO_IO };
 
 /* XO_FAR (real mode): CALL / JMP ptr16:16 (target = offset, a.imm = selector,
  * local: the selector is the region's CS, so it is a near transfer that
@@ -123,6 +130,10 @@ enum { STK_PUSHA = 0, STK_POPA = 1, STK_ENTER0 = 2, STK_ENTER1 = 3, STK_LEAVE = 
 enum { FL_CLC = 0, FL_STC = 1, FL_CMC = 2, FL_LAHF = 3, FL_SAHF = 4, FL_PUSHF = 5 };
 
 /* XO_LOOPCC: sub 0 LOOPNZ (E0), 1 LOOPZ (E1). */
+
+/* XO_IO (xlat_rt_io): IN / OUT AL / AX (size 8 / 16) with the port in a.imm
+ * or in DX (local), CLI, STI. */
+enum { IO_IN = 0, IO_OUT = 1, IO_CLI = 2, IO_STI = 3 };
 
 /* XO_FPU: an x87 instruction (D8..DF, sub = opcode - D8, sreg = the ModR/M
  * reg field, a.reg = rm for a register form, b = the memory operand, size =
@@ -311,6 +322,7 @@ typedef struct xlat_region_out {
     uint32_t data_size;                /* arena bytes the caller stores the runs in */
     uint8_t reject;                    /* XLAT_RJ_* when no region was built */
     uint8_t n_insns, n_interp;         /* what discovery found (for the log) */
+    uint8_t fn;                        /* a function region: no loop (XLAT_TRACE_MIN) */
 } xlat_region_out_t;
 
 /* Why a hot entry point got no region (XLAT_LOG "R" lines). */
