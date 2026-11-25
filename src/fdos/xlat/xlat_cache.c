@@ -466,13 +466,20 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
             xlat_stats.exits[rt->exit_kind]++;
             r->exits[rt->exit_kind]++;
         }
-        /* STOP: XRIP must run the next instruction. SIDE (left after an
-         * interpreted access): never re-enter at once without progress. */
-        if (rt->budget <= 0 || *rt->intr || rt->exit_kind == XLAT_EXIT_STOP)
+        /* STOP: XRIP must run the next instruction. */
+        if (*rt->intr || rt->exit_kind == XLAT_EXIT_STOP)
             break;
+        /* Budget used up (entry costs, short regions): the burst lasts
+         * until its deadline, as in the back-edge stubs. */
+        if (rt->budget <= 0) {
+            if ((int32_t)(*rt->clock - rt->deadline) >= 0)
+                break;
+            rt->budget += XLAT_SLICE_CHECK;
+            rt->extra += XLAT_SLICE_CHECK;
+        }
     }
-    if (ran && start > rt->budget)
-        xlat_stats.guest_insns += (uint32_t)(start - rt->budget);
+    if (ran)
+        xlat_stats.guest_insns += (uint32_t)(start + (int32_t)rt->extra - rt->budget);
     return ran;
 }
 
@@ -543,6 +550,20 @@ void xlat_log_write(uint16_t psp, const char *name)
                (unsigned long)xlat_stats.exits[3], (unsigned long)xlat_stats.guest_insns, (unsigned long)xlat_stats.code_bytes,
                (unsigned long)xlat_stats.stack_skips, (unsigned long)xlat_stats.interp,
                (unsigned long)xlat_stats.side_interp, (unsigned long)st->log_lost);
+    /* CPU bursts: average us and instructions, XRIP only / with translated
+     * code (XLAT_SLICE_US is meant to match XRIP's us per 4096). */
+    const xlat_stats_t *const b = &xlat_stats;
+    log_printf("B xrip n=%lu us=%lu insns=%lu us/4096=%lu  xlat n=%lu us=%lu insns=%lu slice=%u\r\n",
+               (unsigned long)b->xrip_bursts,
+               (unsigned long)(b->xrip_bursts ? (uint32_t)(b->xrip_us / b->xrip_bursts) : 0),
+               (unsigned long)(b->xrip_bursts ? (uint32_t)(b->xrip_insns / b->xrip_bursts) : 0),
+               (unsigned long)(b->xrip_insns ? (uint32_t)(b->xrip_us * 4096u / b->xrip_insns) : 0),
+               (unsigned long)b->xlat_bursts,
+               (unsigned long)(b->xlat_bursts ? (uint32_t)(b->xlat_us / b->xlat_bursts) : 0),
+               (unsigned long)(b->xlat_bursts ? (uint32_t)(b->xlat_insns / b->xlat_bursts) : 0),
+               (unsigned)XLAT_SLICE_US);
+    xlat_stats.xrip_bursts = xlat_stats.xlat_bursts = 0;
+    xlat_stats.xrip_us = xlat_stats.xrip_insns = xlat_stats.xlat_us = xlat_stats.xlat_insns = 0;
     if (state == 0)
         state = f_open(&lf, SD_DATA_DIR_SLASH "xlat.log",
                        FA_WRITE | FA_OPEN_APPEND | FA_OPEN_ALWAYS) == FR_OK ? 1 : 2;

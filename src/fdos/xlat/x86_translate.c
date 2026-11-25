@@ -49,7 +49,7 @@ typedef struct {
     uint16_t ip;         /* exit IP */
     int16_t target;      /* ST_BACK: instruction to continue at */
     int16_t exit_stub;   /* ST_BACK: stub taken when the budget is used up */
-    uint8_t budget_n;    /* ST_BACK: guest instructions charged */
+    uint8_t budget_n;    /* ST_BACK: guest instructions charged (loop body length) */
     uint8_t dyn;         /* ST_EXIT: rt->ip already stored by the code */
     uint8_t mw;          /* ST_SIDE: the access may hit the region's code */
     int16_t insn;        /* ST_SIDE: the instruction to interpret */
@@ -90,7 +90,7 @@ typedef struct {
     int n_fix;
     bool overflow;
     arm_emit_t e;
-    uint32_t epilogue;
+    uint32_t epilogue, interp_thunk;
 } tctx_t;
 
 /* ---------------------------------------------------------------------- */
@@ -473,8 +473,7 @@ static dest_t make_dest(tctx_t *c, int i, uint16_t target_ip)
         const int b = new_stub(c, ST_BACK);
         c->stub[b].target = (int16_t)j;
         c->stub[b].exit_stub = (int16_t)ex;
-        const int n = (i - j + 1) >> XLAT_BUDGET_SHIFT;
-        c->stub[b].budget_n = (uint8_t)(n > 0 ? n : 1);
+        c->stub[b].budget_n = (uint8_t)(i - j + 1);
         return (dest_t){D_STUB, (int16_t)b};
     }
     return (dest_t){D_STUB, (int16_t)exit_stub(c, target_ip, XLAT_EXIT_BRANCH, recon)};
@@ -952,47 +951,22 @@ static void emit_stack_op(tctx_t *c, int i)
 
 #define GPR_LIST(x) x(A_R4, 0) x(A_R5, 4) x(A_R6, 8) x(A_R7, 12) x(A_R8, 20) x(A_R9, 24) x(A_R10, 28)
 
-static void emit_gpr_transfer(arm_emit_t *e, int kind)
-{
-    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_GPR);
-#define MOVE(r, off) arm_ls_imm(e, kind, r, A_R12, off);
-    GPR_LIST(MOVE)
-#undef MOVE
-}
-
-/* Run instruction i in XRIP (xlat_interp_one) with the registers written
- * back and reloaded after. Leaves with rt as it stands if XRIP must take
- * over (stop) or, when cont is false or the instruction did not fall
- * through, at its new IP (branch_kind). Otherwise execution goes on after the
- * code emitted here. flags: XI_* bits passed on to the helper. */
-static void emit_interp_call(tctx_t *c, int i, uint32_t flags, bool cont, uint8_t branch_kind)
+/* Run instruction i in XRIP (xlat_interp_one) through the common thunk
+ * (xlat_emit_trampoline): registers written back and reloaded there. The
+ * thunk leaves the region with rt as it stands if XRIP must take over (stop)
+ * or, when cont is false, CS changed or the instruction did not fall
+ * through, at its new IP (XLAT_EXIT_SIDE for XI_SIDE, else BRANCH).
+ * Otherwise it returns and execution goes on after the code emitted here.
+ * flags: XI_* bits passed on to the helper. */
+static void emit_interp_call(tctx_t *c, int i, uint32_t flags, bool cont)
 {
     arm_emit_t *e = &c->e;
     const x86_insn_t *in = &c->in[i];
-    emit_gpr_transfer(e, LS_STR);
     arm_movw(e, A_R12, in->ip);
-    arm_ls_imm(e, LS_STR, A_R12, A_R11, XLAT_RT_IP);
-    arm_mov(e, A_R0, A_R11);
     arm_mov32(e, A_R1, flags);
-    arm_mov32(e, A_R12, (uint32_t)(uintptr_t)&xlat_interp_one);
-    arm_blx(e, A_R12);
-    emit_gpr_transfer(e, LS_LDR);
-    int k = exit_stub(c, 0, XLAT_EXIT_STOP, -1);
-    c->stub[k].dyn = 1;
-    arm_dp_imm(e, DP_SUB, 1, A_PC, A_R0, 0);
-    emit_branch(c, (dest_t){D_STUB, (int16_t)k}, C_EQ);      /* state no longer runnable */
-    k = exit_stub(c, 0, branch_kind, -1);
-    c->stub[k].dyn = 1;
-    arm_dp_imm(e, DP_SUB, 1, A_PC, A_R0, 2);
-    emit_branch(c, (dest_t){D_STUB, (int16_t)k}, C_EQ);      /* other CS: dispatcher */
-    if (!cont) {
-        emit_branch(c, (dest_t){D_STUB, (int16_t)k}, C_AL);
-        return;
-    }
-    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_IP);
-    arm_mov32(e, A_LR, (uint16_t)(in->ip + in->len));
-    arm_dp_reg(e, DP_SUB, 1, A_PC, A_R12, A_LR, SH_LSL, 0);
-    emit_branch(c, (dest_t){D_STUB, (int16_t)k}, C_NE);      /* it jumped: dispatcher */
+    arm_mov32(e, A_R2, cont ? (uint16_t)(in->ip + in->len) : UINT32_MAX);
+    if (!arm_bl(e, c->interp_thunk))
+        c->overflow = true;
 }
 
 /* An instruction the translator does not handle: XRIP executes it, and the
@@ -1003,7 +977,7 @@ static void emit_interp(tctx_t *c, int i)
     const int r = sync_recon(c, c->in_set[i], c->pfp[i]);
     if (r >= 0)
         emit_recon(c, r);
-    emit_interp_call(c, i, in->sub & XI_MAY_WRITE, !(in->sub & XI_NO_FALL), XLAT_EXIT_BRANCH);
+    emit_interp_call(c, i, in->sub & XI_MAY_WRITE, !(in->sub & XI_NO_FALL));
 }
 
 static void emit_jcc(tctx_t *c, int i)
@@ -1105,17 +1079,35 @@ static void emit_stubs(tctx_t *c)
                 if (!arm_patch_branch(e, s->site[j], s->pos, s->cond[j]))
                     c->overflow = true;
             if (s->type == ST_BACK) {
+                /* Budget used up: read the clock, leave at the burst's
+                 * deadline, else go on for XLAT_SLICE_CHECK instructions. */
                 const dest_t ex = {D_STUB, s->exit_stub};
                 arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_BUDGET);
                 arm_dp_imm(e, DP_SUB, 1, A_R12, A_R12, s->budget_n);
                 arm_ls_imm(e, LS_STR, A_R12, A_R11, XLAT_RT_BUDGET);
-                emit_branch(c, ex, C_LE);
+                const uint32_t slow = arm_branch_slot(e);
+                const uint32_t irq = e->pos;
                 arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_INTR);
                 arm_ls_imm(e, LS_LDRB, A_R12, A_R12, 0);
                 arm_dp_imm(e, DP_SUB, 1, A_PC, A_R12, 0);
                 emit_branch(c, ex, C_NE);
-                const uint32_t site = arm_branch_slot(e);
+                uint32_t site = arm_branch_slot(e);
                 if (!arm_patch_branch(e, site, c->label[s->target], C_AL))
+                    c->overflow = true;
+                local_patch(c, slow, C_LE);
+                arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_CLOCK);
+                arm_ls_imm(e, LS_LDR, A_R12, A_R12, 0);
+                arm_ls_imm(e, LS_LDR, A_LR, A_R11, XLAT_RT_DEADLINE);
+                arm_dp_reg(e, DP_SUB, 1, A_R12, A_R12, A_LR, SH_LSL, 0);
+                emit_branch(c, ex, C_PL);                      /* clock - deadline >= 0 */
+                arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_BUDGET);
+                arm_dp_imm(e, DP_ADD, 0, A_R12, A_R12, XLAT_SLICE_CHECK);
+                arm_ls_imm(e, LS_STR, A_R12, A_R11, XLAT_RT_BUDGET);
+                arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_EXTRA);
+                arm_dp_imm(e, DP_ADD, 0, A_R12, A_R12, XLAT_SLICE_CHECK);
+                arm_ls_imm(e, LS_STR, A_R12, A_R11, XLAT_RT_EXTRA);
+                site = arm_branch_slot(e);
+                if (!arm_patch_branch(e, site, irq, C_AL))
                     c->overflow = true;
             } else if (s->type == ST_SIDE) {
                 /* The access cannot be done here: XRIP executes the whole
@@ -1126,7 +1118,7 @@ static void emit_stubs(tctx_t *c)
                 const bool cont = falls_through(in) && !is_producer(in) && c->fall_idx[i] >= 0;
                 if (s->recon >= 0)
                     emit_recon(c, s->recon);
-                emit_interp_call(c, i, (s->mw ? XI_MAY_WRITE : 0u) | XI_SIDE, cont, XLAT_EXIT_SIDE);
+                emit_interp_call(c, i, (s->mw ? XI_MAY_WRITE : 0u) | XI_SIDE, cont);
                 if (cont) {
                     const uint32_t site = arm_branch_slot(e);
                     if (!arm_patch_branch(e, site, c->label[c->fall_idx[i]], C_AL))
@@ -1171,7 +1163,49 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     GPR_LIST(STORE)
 #undef STORE
     arm_pop(&e, 0x8ff8u);                      /* r3-r11, pc */
-    if (e.full)
+
+    /* Interpreter call, reached by BL from region code (emit_interp_call):
+     * r12 = IP of the instruction, r1 = XI_* flags, r2 = IP it falls
+     * through to or 0xffffffff (the region does not go on after it). */
+    a->interp_thunk = e.pos;
+    arm_push(&e, 0x400eu);                     /* r1-r3, lr: 8-byte aligned */
+    arm_ls_imm(&e, LS_STR, A_R12, A_R11, XLAT_RT_IP);
+    arm_ls_imm(&e, LS_LDR, A_R12, A_R11, XLAT_RT_GPR);
+#define STORE(r, off) arm_ls_imm(&e, LS_STR, r, A_R12, off);
+    GPR_LIST(STORE)
+#undef STORE
+    arm_mov(&e, A_R0, A_R11);
+    arm_mov32(&e, A_R12, (uint32_t)(uintptr_t)&xlat_interp_one);
+    arm_blx(&e, A_R12);
+    arm_ls_imm(&e, LS_LDR, A_R12, A_R11, XLAT_RT_GPR);
+#define LOAD(r, off) arm_ls_imm(&e, LS_LDR, r, A_R12, off);
+    GPR_LIST(LOAD)
+#undef LOAD
+    arm_pop(&e, 0x400eu);
+    arm_dp_imm(&e, DP_SUB, 1, A_PC, A_R0, 1);
+    const uint32_t leave1 = arm_branch_slot(&e);      /* 0: stop, 2: other CS */
+    arm_dp_imm(&e, DP_ADD, 1, A_PC, A_R2, 1);
+    const uint32_t leave2 = arm_branch_slot(&e);      /* region does not go on */
+    arm_ls_imm(&e, LS_LDR, A_R12, A_R11, XLAT_RT_IP);
+    arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R12, A_R2, SH_LSL, 0);
+    const uint32_t leave3 = arm_branch_slot(&e);      /* it jumped */
+    arm_bx(&e, A_LR);
+    const uint32_t leave = e.pos;
+    arm_mov32(&e, A_R12, XLAT_EXIT_STOP);
+    arm_dp_imm(&e, DP_SUB, 1, A_PC, A_R0, 0);
+    const uint32_t store = arm_branch_slot(&e);
+    arm_mov32(&e, A_R12, XLAT_EXIT_BRANCH);
+    arm_dp_imm(&e, DP_AND, 1, A_PC, A_R1, XI_SIDE);
+    const uint32_t store2 = arm_branch_slot(&e);
+    arm_mov32(&e, A_R12, XLAT_EXIT_SIDE);
+    const uint32_t at_store = e.pos;
+    arm_ls_imm(&e, LS_STR, A_R12, A_R11, XLAT_RT_EXIT_KIND);
+    const uint32_t to_epi = arm_branch_slot(&e);
+    if (e.full ||
+        !arm_patch_branch(&e, leave1, leave, C_NE) || !arm_patch_branch(&e, leave2, leave, C_EQ) ||
+        !arm_patch_branch(&e, leave3, leave, C_NE) || !arm_patch_branch(&e, store, at_store, C_EQ) ||
+        !arm_patch_branch(&e, store2, at_store, C_EQ) ||
+        !arm_patch_branch(&e, to_epi, a->epilogue, C_AL))
         return false;
     a->code_top = (e.pos + 3u) & ~3u;
     a->data_bottom = a->size;
@@ -1194,6 +1228,7 @@ bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip,
     c->n_stubs = c->n_fix = 0;
     c->overflow = false;
     c->epilogue = a->epilogue;
+    c->interp_thunk = a->interp_thunk;
 
     if (!discover(c, ip))
         goto done;

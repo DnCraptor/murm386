@@ -26,6 +26,15 @@ set(VIDEO_MODE "VGA256" CACHE STRING "Video adapter: RUNTIME, MCGA, EGA128, VGA1
 # interpreter is built exactly as before. The arena (code + source copies)
 # and tables are allocated from the heap on first use.
 option(XLAT "Translate hot real-mode x86 loops to ARM code" ON)
+set(XLAT_ARENA_KB 32 CACHE STRING "Translator code arena, KiB (max 64)")
+# Experiment: code arena in a static SRAM buffer (XLAT_ARENA_KB of SRAM!)
+# instead of the PSRAM span, to measure the XIP-cache contention.
+option(XLAT_ARENA_SRAM "Translator code arena in SRAM (experiment)" OFF)
+# Diagnostics: at each DOS program exit append the translated regions (their
+# x86 bytes), per-region entry/exit counts and totals to <SD_DATA_DIR>/xlat.log.
+option(XLAT_LOG "Log translated regions to the SD card" ON)
+# Real-time length of a CPU burst with translated code (XRIP: 4096 instructions).
+set(XLAT_SLICE_US 400 CACHE STRING "Translator burst length, microseconds")
 # CPU overclock configuration (252, 378, 504 MHz)
 # 252 - very basic overclock, 378 = stable overclock, 504 = high overclock
 set(CPU_SPEED "504" CACHE STRING "CPU clock in MHz: 378, 504")
@@ -645,13 +654,6 @@ if(CONTROL_STACK)
     target_compile_definitions(${BUILD_NAME} PRIVATE CONTROL_STACK=1)
 endif()
 
-set(XLAT_ARENA_KB 32 CACHE STRING "Translator code arena, KiB (max 64)")
-# Experiment: code arena in a static SRAM buffer (XLAT_ARENA_KB of SRAM!)
-# instead of the PSRAM span, to measure the XIP-cache contention.
-option(XLAT_ARENA_SRAM "Translator code arena in SRAM (experiment)" OFF)
-# Diagnostics: at each DOS program exit append the translated regions (their
-# x86 bytes), per-region entry/exit counts and totals to <SD_DATA_DIR>/xlat.log.
-option(XLAT_LOG "Log translated regions to the SD card" ON)
 if(XLAT)
     math(EXPR XLAT_ARENA_BYTES "${XLAT_ARENA_KB} * 1024")
     target_sources(${BUILD_NAME} PRIVATE
@@ -660,7 +662,8 @@ if(XLAT)
         src/fdos/xlat/x86_translate.c
         src/fdos/xlat/xlat_cache.c
     )
-    target_compile_definitions(${BUILD_NAME} PRIVATE XLAT=1 XLAT_ARENA_SIZE=${XLAT_ARENA_BYTES}u)
+    target_compile_definitions(${BUILD_NAME} PRIVATE XLAT=1 XLAT_ARENA_SIZE=${XLAT_ARENA_BYTES}u
+                               XLAT_SLICE_US=${XLAT_SLICE_US}u)
     if(XLAT_LOG)
         target_compile_definitions(${BUILD_NAME} PRIVATE XLAT_LOG=1)
     endif()

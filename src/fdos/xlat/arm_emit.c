@@ -229,3 +229,13 @@ bool arm_patch_branch(arm_emit_t *e, uint32_t at, uint32_t target, int cond)
     e->buf[at + 3] = (uint8_t)(hw2 >> 8);
     return true;
 }
+
+/* BL target: the B.W (T4) encoding with bit 14 of the second halfword set. */
+bool arm_bl(arm_emit_t *e, uint32_t target)
+{
+    const uint32_t at = arm_branch_slot(e);
+    if (e->full || !arm_patch_branch(e, at, target, C_AL))
+        return false;
+    e->buf[at + 3] |= 0x40u;
+    return true;
+}

@@ -34,10 +34,6 @@
 #define XLAT_ENTRY_COST      8               /* budget charged per region entry */
 #define XLAT_INTERP_RATIO    8               /* at most 1/8 of a region interpreted */
 #define XLAT_SPAN_WINDOW     2048u           /* region code within +-1 KiB of the entry */
-/* Native instructions are charged to the burst budget with weight
- * 1 / 2^XLAT_BUDGET_SHIFT, so a burst lasts about as long as in XRIP and the
- * per-burst device service (pc_service) does not run several times as often. */
-#define XLAT_BUDGET_SHIFT    2
 #ifndef XLAT_ARENA_SRAM
 #define XLAT_ARENA_SRAM      0
 #endif
@@ -91,6 +87,7 @@ void arm_push(arm_emit_t *e, uint16_t list);
 void arm_pop(arm_emit_t *e, uint16_t list);
 void arm_bx(arm_emit_t *e, int rm);
 void arm_blx(arm_emit_t *e, int rm);
+bool arm_bl(arm_emit_t *e, uint32_t target);
 /* Placeholder for B / B<cond>.W, patched by arm_patch_branch(). */
 uint32_t arm_branch_slot(arm_emit_t *e);
 bool arm_patch_branch(arm_emit_t *e, uint32_t at, uint32_t target, int cond);
@@ -202,6 +199,7 @@ typedef struct xlat_arena {
     uint32_t code_top;     /* code grows up from 0 */
     uint32_t data_bottom;  /* source copies grow down from size */
     uint32_t epilogue;     /* offset of the common exit sequence */
+    uint32_t interp_thunk; /* offset of the common xlat_interp_one() call */
 } xlat_arena_t;
 
 /* Build the trampoline (entry/exit sequences) at the start of the arena. */

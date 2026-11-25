@@ -131,6 +131,7 @@ void xrip_reset_cpu(CPU *cpu)
 
 #if XLAT
 #include "../fdos/xlat/xlat.h"
+#include "hardware/structs/timer.h"   /* timer_hw->timerawl: time_us_32(), get_uticks() */
 
 static uint8_t xlat_no_irq;   /* stays 0; RAM, read by generated code */
 static xlat_rt_t xlat_state;
@@ -204,7 +205,7 @@ uint32_t __time_critical_func(xlat_interp_one)(xlat_rt_t *rt, uint32_t flags)
  * accounted to translated code (0: nothing ran, the state is untouched).
  * DOS programs run in nested bursts (exec_run_process() inside INT 21h), so
  * nested bursts are included; xlat_run() checks the stack before translating. */
-static __time_critical_func() uint32_t xlat_enter(CPU *cpu, uint32_t count)
+static __time_critical_func() uint32_t xlat_enter(CPU *cpu, uint32_t count, uint32_t t0)
 {
     if (xlat_busy || !xlat_state_ok(cpu))
         return 0;
@@ -216,6 +217,9 @@ static __time_critical_func() uint32_t xlat_enter(CPU *cpu, uint32_t count)
     rt->seg_base[2] = segment_base[regss];
     rt->seg_base[3] = segment_base[regds];
     rt->budget = (int32_t)count;
+    rt->clock = &timer_hw->timerawl;
+    rt->deadline = t0 + XLAT_SLICE_US;
+    rt->extra = 0;
     /* With IF clear an IRQ cannot be taken: the back edges need not stop. */
     rt->intr = ifl ? (const volatile uint8_t *)&cpu->intr : &xlat_no_irq;
     rt->gpr = (uint32_t *)cpu->gprx;
@@ -240,10 +244,12 @@ static __time_critical_func() uint32_t xlat_enter(CPU *cpu, uint32_t count)
     flags_src = rt->lazy_src;
     flags_op = rt->lazy_op;
     flags_cf = rt->lazy_cf;
-    const uint32_t left = rt->budget > 0 ? (uint32_t)rt->budget : 0;
-    const uint32_t used = count - (left < count ? left : count);
-    retired += used;
-    return used;
+    /* count + extra - budget instructions ran (more than count when the
+     * burst went on to its deadline); XRIP runs what is left of count. */
+    const int32_t used = (int32_t)(count + rt->extra) - rt->budget;
+    const uint32_t ran_insns = used > 0 ? (uint32_t)used : 0;
+    retired += ran_insns;
+    return ran_insns;
 }
 #endif
 
@@ -264,7 +270,11 @@ void __time_critical_func(xrip_step_cpu)(CPU *cpu, int count)
                                ? phys_mem_size - HMA_START : 0;
     }
 #if XLAT
-    const uint32_t xlat_used = xlat_enter(cpu, (uint32_t)count);
+#if XLAT_LOG
+    const unsigned long retired0 = retired;
+#endif
+    const uint32_t t0 = timer_hw->timerawl;
+    const uint32_t xlat_used = xlat_enter(cpu, (uint32_t)count, t0);
 #endif
 
     void *context[5];
@@ -280,6 +290,21 @@ void __time_critical_func(xrip_step_cpu)(CPU *cpu, int count)
         run_instructions((uint32_t)count);
 #endif
     fault_point = outer_fault_point;
+#if XLAT && XLAT_LOG
+    {
+        const uint32_t us = timer_hw->timerawl - t0;
+        const uint32_t n = (uint32_t)(retired - retired0);
+        if (xlat_used) {
+            xlat_stats.xlat_bursts++;
+            xlat_stats.xlat_us += us;
+            xlat_stats.xlat_insns += n;
+        } else if (n == (uint32_t)count) {   /* full XRIP bursts only */
+            xlat_stats.xrip_bursts++;
+            xlat_stats.xrip_us += us;
+            xlat_stats.xrip_insns += n;
+        }
+    }
+#endif
     flags_now();
     cpu->ip = cpu->next_ip = XRIP_IP;
 }

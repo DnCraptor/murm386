@@ -29,7 +29,7 @@ typedef struct xlat_rt {
     uint8_t *mem;                  /* fast (conventional) guest memory */
     uint32_t mem_size;             /* bytes reachable through mem, 0: none */
     uint32_t seg_base[4];          /* ES, CS, SS, DS (XRIP reges..regds) */
-    int32_t budget;                /* guest instructions left in this burst */
+    int32_t budget;                /* guest instructions until the next clock check */
     const volatile uint8_t *intr;  /* pending IRQ (or a constant 0 when IF=0) */
     uint32_t *gpr;                 /* EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI */
     uint32_t lazy_result;
@@ -41,6 +41,9 @@ typedef struct xlat_rt {
     uint16_t cs;                   /* CS selector */
     uint32_t ip;                   /* in: entry IP; out: guest IP at exit */
     uint32_t exit_kind;            /* XLAT_EXIT_* of the last region exit */
+    const volatile uint32_t *clock;  /* microseconds, the clock of get_uticks() */
+    uint32_t deadline;             /* the burst ends once *clock reaches it */
+    uint32_t extra;                /* budget added at clock checks (instructions) */
 } xlat_rt_t;
 
 #define XLAT_RT_MEM          0
@@ -58,6 +61,9 @@ typedef struct xlat_rt {
 #define XLAT_RT_CS          54
 #define XLAT_RT_IP          56
 #define XLAT_RT_EXIT_KIND   60
+#define XLAT_RT_CLOCK       64
+#define XLAT_RT_DEADLINE    68
+#define XLAT_RT_EXTRA       72
 
 #if UINTPTR_MAX == 0xffffffffu
 _Static_assert(__builtin_offsetof(xlat_rt_t, mem_size) == XLAT_RT_MEM_SIZE &&
@@ -73,13 +79,16 @@ _Static_assert(__builtin_offsetof(xlat_rt_t, mem_size) == XLAT_RT_MEM_SIZE &&
                __builtin_offsetof(xlat_rt_t, lazy_cf) == XLAT_RT_CF &&
                __builtin_offsetof(xlat_rt_t, cs) == XLAT_RT_CS &&
                __builtin_offsetof(xlat_rt_t, ip) == XLAT_RT_IP &&
-               __builtin_offsetof(xlat_rt_t, exit_kind) == XLAT_RT_EXIT_KIND,
+               __builtin_offsetof(xlat_rt_t, exit_kind) == XLAT_RT_EXIT_KIND &&
+               __builtin_offsetof(xlat_rt_t, clock) == XLAT_RT_CLOCK &&
+               __builtin_offsetof(xlat_rt_t, deadline) == XLAT_RT_DEADLINE &&
+               __builtin_offsetof(xlat_rt_t, extra) == XLAT_RT_EXTRA,
                "xlat_rt_t layout is used by generated code");
 #endif
 
 enum {
     XLAT_EXIT_BRANCH = 0,   /* control left the region (target not translated) */
-    XLAT_EXIT_BUDGET = 1,   /* burst budget used up or IRQ pending, at a back edge */
+    XLAT_EXIT_BUDGET = 1,   /* burst time used up or IRQ pending, at a back edge */
     XLAT_EXIT_SIDE = 2,     /* memory operand outside fast memory, or a write to the region's code */
     XLAT_EXIT_STOP = 3,     /* after an interpreted instruction the state needs XRIP (mode, CS, IRQ...) */
     XLAT_EXIT_COUNT = 4
@@ -98,16 +107,36 @@ typedef struct xlat_stats {
     uint32_t stack_skips;       /* translations postponed: core-0 stack too low */
     uint32_t interp;            /* instructions run by XRIP from inside a region */
     uint32_t side_interp;       /* of those: accesses outside fast memory or onto the code */
+    /* XLAT_LOG: CPU bursts timed by the adapter (time in us, instructions). */
+    uint32_t xrip_bursts, xlat_bursts;   /* XRIP only / with translated code */
+    uint64_t xrip_us, xrip_insns, xlat_us, xlat_insns;
 } xlat_stats_t;
 
 extern xlat_stats_t xlat_stats;
 
 /*
+ * Length of a CPU burst that runs translated code, in microseconds of the
+ * clock rt->clock. XRIP bursts are 4096 instructions; translated code runs
+ * them several times faster, and counting its instructions alone would make
+ * the device service after each burst (pc_service) run several times as
+ * often per unit of real time. So translated code runs until the burst's
+ * deadline: the instruction budget only sets how often the clock is read
+ * (every XLAT_SLICE_CHECK instructions once the first rt->budget is used).
+ * The default is about the time XRIP needs for 4096 instructions (the XLAT_LOG
+ * line "B" shows the measured value).
+ */
+#ifndef XLAT_SLICE_US
+#define XLAT_SLICE_US 400u
+#endif
+#define XLAT_SLICE_CHECK 1024
+
+/*
  * Run translated code for the guest state in rt, starting at rt->cs:rt->ip.
  * Returns false and leaves rt untouched when no translation applies (the
  * caller interprets). Returns true after running at least one region; rt
- * then holds the new IP, flags and remaining budget, and the registers have
- * been written back to rt->gpr.
+ * then holds the new IP, flags and budget, and the registers have been
+ * written back to rt->gpr. Instructions run: initial budget + rt->extra -
+ * rt->budget (the caller sets extra to 0).
  *
  * Preconditions (checked by the caller): real mode, 16-bit code, TF clear,
  * no pending IRQ with IF set, not halted, rt->mem_size != 0.

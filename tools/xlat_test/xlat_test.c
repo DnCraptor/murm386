@@ -881,6 +881,8 @@ static int replay_parse(const char *path, replay_region_t *out, int max)
     return n + 1;
 }
 
+static volatile uint32_t test_clock = 12345u;   /* a stopped microsecond clock */
+
 static int replay(const char *path, int states)
 {
     static replay_region_t reg[256];
@@ -917,6 +919,8 @@ static int replay(const char *path, int states)
                 rt.mem = mem; rt.mem_size = 0xa0000u;
                 memcpy(rt.seg_base, R.seg_base, sizeof(rt.seg_base));
                 rt.budget = 1 + (int32_t)rn(300);
+                rt.clock = &test_clock; rt.extra = 0;
+                rt.deadline = test_clock;   /* expired: logged loops may never end */
                 rt.intr = &zero_byte; rt.gpr = R.gpr;
                 rt.lazy_result = R.flags_result; rt.lazy_dst = R.flags_dst; rt.lazy_src = R.flags_src;
                 rt.eflags = R.eflags; rt.lazy_op = R.flags_op; rt.lazy_cf = R.flags_cf;
@@ -1030,6 +1034,8 @@ int main(int argc, char **argv)
             rt.mem_size = mem_size;
             memcpy(rt.seg_base, R.seg_base, sizeof(rt.seg_base));
             rt.budget = 1 + (int32_t)rn(300);
+            rt.clock = &test_clock; rt.extra = 0;
+            rt.deadline = test_clock + (rn(2) ? 0u : 1000u);   /* expired / never reached */
             rt.intr = rn(20) ? &zero_byte : &one_byte;
             rt.gpr = R.gpr;
             rt.lazy_result = R.flags_result;
@@ -1063,7 +1069,9 @@ int main(int argc, char **argv)
                     memcpy(mem, before_mem, MEM_BYTES);
                     R = before;
                     bool found = false;
-                    for (int k = 0; k < 20000 && !R.halted; ++k) {
+                    /* a run past its budget (deadline not reached) did up to extra more */
+                    const long lim = 20000 + 2L * (long)rt.extra;
+                    for (long k = 0; k < lim && !R.halted; ++k) {
                         if (getenv("XLAT_TRACE") && k < 6) printf("   ref ip %04x op %02x efl %03x res %08x\n", R.ip, R.flags_op, R.eflags, R.flags_result);
                         if (k) ref_step();
                         if (R.ip == after.ip && R.cs == after.cs && !memcmp(R.gpr, after.gpr, sizeof(R.gpr))) {
@@ -1071,7 +1079,7 @@ int main(int argc, char **argv)
                             R = a; flags_now(); a = R;
                             R = b; flags_now(); b = R;
                             if ((a.eflags & 0xcd5u) == (b.eflags & 0xcd5u)) { found = true; break; }
-                            printf("  lockstep: ip %04x regs match, flags want %03x got %03x (k=%d)\n",
+                            printf("  lockstep: ip %04x regs match, flags want %03x got %03x (k=%ld)\n",
                                    after.ip, b.eflags & 0x8d5u, a.eflags & 0x8d5u, k);
                             printf("  got lazy op %02x res %08x dst %08x src %08x cf %d; want op %02x res %08x dst %08x src %08x cf %d\n",
                                    after.flags_op, after.flags_result, after.flags_dst, after.flags_src, after.flags_cf,
