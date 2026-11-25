@@ -34,6 +34,13 @@
 #define XLAT_ENTRY_COST      8               /* budget charged per region entry */
 #define XLAT_INTERP_RATIO    8               /* at most 1/8 of a region interpreted */
 #define XLAT_SPAN_WINDOW     2048u           /* region code within +-1 KiB of the entry */
+/* Native instructions are charged to the burst budget with weight
+ * 1 / 2^XLAT_BUDGET_SHIFT, so a burst lasts about as long as in XRIP and the
+ * per-burst device service (pc_service) does not run several times as often. */
+#define XLAT_BUDGET_SHIFT    2
+#ifndef XLAT_ARENA_SRAM
+#define XLAT_ARENA_SRAM      0
+#endif
 
 /* ---------------------------------------------------------------------- */
 /* Thumb-2 emitter (arm_emit.c)                                           */

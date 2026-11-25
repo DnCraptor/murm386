@@ -359,6 +359,19 @@ static void ref_step(void)
     case 0x6a: ref_push((uint16_t)(int16_t)(int8_t)fetch8()); return;
     case 0xe8: { uint16_t d = fetch16(); ref_push(R.ip); R.ip = (uint16_t)(R.ip + d); return; }
     case 0xc3: R.ip = ref_pop(); return;
+    case 0x9a: {   /* CALL far: CS changes */
+        const uint16_t off = fetch16(), sel = fetch16();
+        ref_push(R.cs); ref_push(R.ip);
+        R.cs = sel; R.seg_base[1] = (uint32_t)sel << 4; R.ip = off;
+        return;
+    }
+    case 0xcb: case 0xca: {
+        const uint16_t n = op == 0xca ? fetch16() : 0;
+        R.ip = ref_pop();
+        R.cs = ref_pop(); R.seg_base[1] = (uint32_t)R.cs << 4;
+        putreg16(4, getreg16(4) + n);
+        return;
+    }
     case 0xc2: { uint16_t n = fetch16(); R.ip = ref_pop(); putreg16(4, getreg16(4) + n); return; }
     case 0x91: case 0x92: case 0x93: case 0x94: case 0x95: case 0x96: case 0x97: {
         uint16_t t = getreg16(0); putreg16(0, getreg16(op & 7)); putreg16(op & 7, t); return;
@@ -442,6 +455,11 @@ uint32_t xlat_interp_one(xlat_rt_t *rt, uint32_t flags)
     interp_calls++;
     if (R.halted)
         return 0;
+    if (R.cs != rt->cs) {
+        rt->cs = R.cs;
+        rt->seg_base[1] = R.seg_base[1];
+        return 2;
+    }
     if (may_write && !xlat_region_still_valid(rt))
         return 0;
     return 1;
@@ -467,6 +485,7 @@ typedef struct { uint8_t b[12]; uint8_t len; int8_t fwd; uint8_t rel16; int8_t c
 
 #define MAX_SUBS 4
 static int nsubs;
+static uint16_t gen_cs;   /* CS the program runs in: far calls use the alias CS-1 */
 static struct { uint32_t pos; int sub; } call_fix[64];
 static int ncall_fix;
 
@@ -516,8 +535,13 @@ static void gen_one(ginsn_t *g, int index, int total)
     if (total > 0 && rn(14) == 0) {    /* stack: PUSH/POP, CALL to a subroutine */
         const int t = rn(5);
         if (t == 0 && nsubs) {
-            g->b[g->len++] = 0xe8; g->b[g->len++] = 0; g->b[g->len++] = 0;
             g->call = (int8_t)rn((uint32_t)nsubs);
+            if (g->call & 1) {      /* odd subroutines are far: CALL CS-1:off+16 */
+                g->b[g->len++] = 0x9a; g->b[g->len++] = 0; g->b[g->len++] = 0;
+                g->b[g->len++] = (uint8_t)(gen_cs - 1); g->b[g->len++] = (uint8_t)((gen_cs - 1) >> 8);
+            } else {
+                g->b[g->len++] = 0xe8; g->b[g->len++] = 0; g->b[g->len++] = 0;
+            }
         } else if (t == 1) {
             g->b[g->len++] = rn(2) ? 0x68 : 0x6a;
             g->b[g->len++] = (uint8_t)rnd();
@@ -691,7 +715,7 @@ static uint32_t layout(uint8_t *code, uint16_t at_ip)
             }
         }
         if (body[i].call >= 0 && ncall_fix < 64) {
-            call_fix[ncall_fix].pos = at_ip + p + body[i].len - 2;
+            call_fix[ncall_fix].pos = at_ip + p + body[i].len - ((body[i].call & 1) ? 4 : 2);
             call_fix[ncall_fix].sub = body[i].call;
             ncall_fix++;
         }
@@ -751,13 +775,22 @@ static uint32_t gen_program(uint8_t *code)
             memcpy(code + p, g.b, g.len);
             p += g.len;
         }
-        if (rn(4)) {
+        if (k & 1) {
+            code[p++] = rn(2) ? 0xcb : 0xca;
+            if (code[p - 1] == 0xca) { code[p++] = (uint8_t)(rn(3) * 2); code[p++] = 0; }
+        } else if (rn(4)) {
             code[p++] = 0xc3;
         } else {
             code[p++] = 0xc2; code[p++] = (uint8_t)(rn(3) * 2); code[p++] = 0;
         }
     }
     for (int k = 0; k < ncall_fix; ++k) {
+        if (call_fix[k].sub & 1) {   /* far: offset in the CS-1 alias */
+            const uint32_t off = sub_at[call_fix[k].sub] + 16;
+            code[call_fix[k].pos] = (uint8_t)off;
+            code[call_fix[k].pos + 1] = (uint8_t)(off >> 8);
+            continue;
+        }
         const int32_t rel = (int32_t)sub_at[call_fix[k].sub] - (int32_t)(call_fix[k].pos + 2);
         code[call_fix[k].pos] = (uint8_t)rel;
         code[call_fix[k].pos + 1] = (uint8_t)(rel >> 8);
@@ -952,11 +985,11 @@ int main(int argc, char **argv)
         allow_mem = rn(4) != 0;
         smc = allow_mem && (rn(10) == 0 || getenv("XLAT_SMC"));
         reuse_cs = rn(4) == 0;
-        const uint32_t len = gen_program(code);
-        if (!len) { skipped++; continue; }
-
         ref_t init;
         setup_state(&init, seed);
+        gen_cs = init.cs;
+        const uint32_t len = gen_program(code);
+        if (!len) { skipped++; continue; }
         /* random memory contents near likely data, code at CS:0 */
         for (uint32_t k = 0; k < 64; ++k) {
             const uint32_t base = rnd() % (MEM_BYTES - 256);
@@ -1013,6 +1046,7 @@ int main(int argc, char **argv)
             if (lockstep) memcpy(before_mem, mem, MEM_BYTES);
             if (getenv("XLAT_TRACE2")) printf("  run? ip %04x sp %04x cx %04x\n", R.ip, getreg16(4), getreg16(1));
             if (xlat_run(&rt)) {
+                R.cs = rt.cs; R.seg_base[1] = rt.seg_base[1];
                 if (getenv("XLAT_TRACE2")) printf("  ran -> ip %04x kind %u sp %04x cx %04x\n", rt.ip, rt.exit_kind, getreg16(4), getreg16(1));
                 R.ip = (uint16_t)rt.ip;
                 R.flags_result = rt.lazy_result;
@@ -1032,7 +1066,7 @@ int main(int argc, char **argv)
                     for (int k = 0; k < 20000 && !R.halted; ++k) {
                         if (getenv("XLAT_TRACE") && k < 6) printf("   ref ip %04x op %02x efl %03x res %08x\n", R.ip, R.flags_op, R.eflags, R.flags_result);
                         if (k) ref_step();
-                        if (R.ip == after.ip && !memcmp(R.gpr, after.gpr, sizeof(R.gpr))) {
+                        if (R.ip == after.ip && R.cs == after.cs && !memcmp(R.gpr, after.gpr, sizeof(R.gpr))) {
                             ref_t a = after, b = R;
                             R = a; flags_now(); a = R;
                             R = b; flags_now(); b = R;
@@ -1080,7 +1114,7 @@ int main(int argc, char **argv)
         flags_now();
         const bool regs_ok = !memcmp(want.gpr, R.gpr, sizeof(R.gpr));
         const bool flags_ok = (want.eflags & 0xcd5u) == (R.eflags & 0xcd5u);
-        const bool ip_ok = want.ip == R.ip && R.halted;
+        const bool ip_ok = want.ip == R.ip && want.cs == R.cs && R.halted;
         const bool mem_ok = !memcmp(want_mem, mem, MEM_BYTES);
         if (!(regs_ok && flags_ok && ip_ok && mem_ok) || R.bad) {
             failures++;

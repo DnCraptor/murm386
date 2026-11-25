@@ -130,8 +130,9 @@ void xlat_log_write(uint16_t psp, const char *name);
  * flags in rt being the current state, and update rt (IP, flags, FLAGS image,
  * segment bases, IRQ pointer). flags bit 0: the instruction may write
  * memory, recheck the region's code; bit 2: statistics only (a side access).
- * Returns nonzero if translated code may go on; 0 if XRIP must take over
- * (mode, CS, TF, IRQ, HLT, stack low, or the region's code changed). */
+ * Returns 1 if the region may go on; 2 if CS changed (rt->cs and
+ * rt->seg_base[1] updated) and the dispatcher may continue there; 0 if XRIP
+ * must take over (mode, TF, IRQ, HLT, stack low, or the region's code changed). */
 uint32_t xlat_interp_one(xlat_rt_t *rt, uint32_t flags);
 
 /* For xlat_interp_one(): the x86 bytes of the running region are unchanged

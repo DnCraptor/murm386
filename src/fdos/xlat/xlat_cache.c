@@ -148,7 +148,7 @@ static uint32_t hash32(uint32_t key)
 
 static void log_printf(const char *fmt, ...)
 {
-    char line[160];
+    char line[256];
     va_list ap;
     va_start(ap, fmt);
     int n = vsnprintf(line, sizeof(line), fmt, ap);
@@ -228,8 +228,16 @@ static __attribute__((noinline)) bool ready(void)
     if (disabled)
         return false;
     const size_t ctx_off = ALIGN8(sizeof(state_t));
+#if XLAT_ARENA_SRAM
+    /* Experiment: code in SRAM, out of the XIP cache shared with guest RAM
+     * and core 1's flash code. Tables and context stay in the PSRAM span. */
+    static uint32_t sram_arena[XLAT_ARENA_SIZE / 4];
+    const size_t arena_off = ALIGN8(ctx_off + xlat_translate_ctx_size());
+    const size_t log_off = arena_off;
+#else
     const size_t arena_off = ALIGN8(ctx_off + xlat_translate_ctx_size());
     const size_t log_off = arena_off + XLAT_ARENA_SIZE;
+#endif
     uint8_t *block = (uint8_t *)XLAT_ALLOC(log_off + XLAT_LOG_SIZE);
     if (!block) {
         disabled = true;
@@ -239,7 +247,11 @@ static __attribute__((noinline)) bool ready(void)
     st = (state_t *)block;
     memset(st, 0, sizeof(*st));
     st->ctx = block + ctx_off;
+#if XLAT_ARENA_SRAM
+    st->arena.base = (uint8_t *)sram_arena;
+#else
     st->arena.base = block + arena_off;
+#endif
     st->arena.size = XLAT_ARENA_SIZE;
 #if XLAT_LOG
     st->log = (char *)block + log_off;

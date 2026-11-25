@@ -473,7 +473,8 @@ static dest_t make_dest(tctx_t *c, int i, uint16_t target_ip)
         const int b = new_stub(c, ST_BACK);
         c->stub[b].target = (int16_t)j;
         c->stub[b].exit_stub = (int16_t)ex;
-        c->stub[b].budget_n = (uint8_t)(i - j + 1);
+        const int n = (i - j + 1) >> XLAT_BUDGET_SHIFT;
+        c->stub[b].budget_n = (uint8_t)(n > 0 ? n : 1);
         return (dest_t){D_STUB, (int16_t)b};
     }
     return (dest_t){D_STUB, (int16_t)exit_stub(c, target_ip, XLAT_EXIT_BRANCH, recon)};
@@ -982,6 +983,8 @@ static void emit_interp_call(tctx_t *c, int i, uint32_t flags, bool cont, uint8_
     emit_branch(c, (dest_t){D_STUB, (int16_t)k}, C_EQ);      /* state no longer runnable */
     k = exit_stub(c, 0, branch_kind, -1);
     c->stub[k].dyn = 1;
+    arm_dp_imm(e, DP_SUB, 1, A_PC, A_R0, 2);
+    emit_branch(c, (dest_t){D_STUB, (int16_t)k}, C_EQ);      /* other CS: dispatcher */
     if (!cont) {
         emit_branch(c, (dest_t){D_STUB, (int16_t)k}, C_AL);
         return;

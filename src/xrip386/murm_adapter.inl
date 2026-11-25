@@ -185,9 +185,15 @@ uint32_t __time_critical_func(xlat_interp_one)(xlat_rt_t *rt, uint32_t flags)
     rt->seg_base[2] = segment_base[regss];
     rt->seg_base[3] = segment_base[regds];
     rt->intr = ifl ? (const volatile uint8_t *)&cpu->intr : &xlat_no_irq;
-    if (segregs[regcs] != rt->cs || segment_base[regcs] != rt->seg_base[1] ||
-        fast_memory_size != rt->mem_size || !xlat_state_ok(cpu))
+    if (fast_memory_size != rt->mem_size || !xlat_state_ok(cpu))
         return 0;
+    if (segregs[regcs] != rt->cs || segment_base[regcs] != rt->seg_base[1]) {
+        /* far CALL/RET/JMP, INT into guest code: go on from the dispatcher */
+        rt->cs = segregs[regcs];
+        rt->seg_base[1] = segment_base[regcs];
+        rt->ip &= 0xffffu;
+        return 2;
+    }
     if ((flags & 1u) && !xlat_region_still_valid(rt))
         return 0;
     return 1;
