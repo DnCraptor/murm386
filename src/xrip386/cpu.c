@@ -70,8 +70,13 @@ static __time_critical_func() inline void load_segment(uint8_t index, uint16_t s
 
 #define portin(port) active_cpu->cb.io_read8(active_cpu->cb.io, (port))
 #define portin16(port) active_cpu->cb.io_read16(active_cpu->cb.io, (port))
-#define portout(port, value) active_cpu->cb.io_write8(active_cpu->cb.io, (port), (value))
-#define portout16(port, value) active_cpu->cb.io_write16(active_cpu->cb.io, (port), (value))
+#if XLAT
+#define XLAT_NOTE_FOREIGN() (xlat_dirty = true)   /* a device or native code may write guest RAM */
+#else
+#define XLAT_NOTE_FOREIGN() ((void)0)
+#endif
+#define portout(port, value) (XLAT_NOTE_FOREIGN(), active_cpu->cb.io_write8(active_cpu->cb.io, (port), (value)))
+#define portout16(port, value) (XLAT_NOTE_FOREIGN(), active_cpu->cb.io_write16(active_cpu->cb.io, (port), (value)))
 // The memory accesses of the CPU, by linear address. Conventional RAM is reached inline; the memory
 // from 1 MB directly too (cpu.h), from a small function; the rest goes through read86/write86.
 // A word or dword is one load or store: the Cortex-M33 and the host take it at any address.
@@ -170,18 +175,25 @@ static __time_critical_func() inline uint32_t mem_read32(uint32_t address) {
     return value;
 }
 
+#if XLAT
+/* A write into translated code (xlat.h): the regions are compared again. */
+#define XLAT_NOTE_WRITE(address) xlat_note_write(address)
+#else
+#define XLAT_NOTE_WRITE(address) ((void)0)
+#endif
+
 static __time_critical_func() inline void mem_write8(uint32_t address, uint8_t value) {
-    if (in_fast_memory(address, 0)) fast_memory[address] = value;
+    if (in_fast_memory(address, 0)) { fast_memory[address] = value; XLAT_NOTE_WRITE(address); }
     else mem_write8_far(address, value);
 }
 
 static __time_critical_func() inline void mem_write16(uint32_t address, uint16_t value) {
-    if (in_fast_memory_wide(address, 2)) memcpy(fast_memory + address, &value, 2);
+    if (in_fast_memory_wide(address, 2)) { memcpy(fast_memory + address, &value, 2); XLAT_NOTE_WRITE(address); }
     else mem_write16_far(address, value);
 }
 
 static __time_critical_func() inline void mem_write32(uint32_t address, uint32_t value) {
-    if (in_fast_memory_wide(address, 4)) memcpy(fast_memory + address, &value, 4);
+    if (in_fast_memory_wide(address, 4)) { memcpy(fast_memory + address, &value, 4); XLAT_NOTE_WRITE(address); }
     else mem_write32_far(address, value);
 }
 
@@ -948,6 +960,7 @@ static __time_critical_func() void op_0f() {
 }
 
 static void xrip_fpu(uint8_t opcode) {
+    XLAT_NOTE_FOREIGN();    /* fpu.c stores through cpu_store*, not mem_write* */
     if (cr0 & 0x0c)
         cpu_fault(7);
     else {

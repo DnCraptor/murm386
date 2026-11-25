@@ -203,16 +203,35 @@ uint32_t xlat_stack_free(void);
 #define XLAT_CODE_MAP_BYTES (0xa0000u >> (XLAT_CODE_BLOCK_SHIFT + 3u))
 extern uint8_t xlat_code_map[XLAT_CODE_MAP_BYTES];
 
+/* Translated x86 code may have changed since the last xlat_run(): set at
+ * the start of every CPU burst (device service, DMA, native programs ran
+ * before it), by XRIP when it writes into a block of xlat_code_map
+ * (xlat_note_write), runs a native BIOS / DOS handler, an x87 instruction
+ * (fpu.c stores past XRIP's writes) or an OUT. xlat_run() compares the
+ * regions' code again only then: entries through burst cuts (CALLs of
+ * function regions) in one burst do not. */
+extern bool xlat_dirty;
+static inline void xlat_note_write(uint32_t linear)
+{
+    if (xlat_code_map[linear >> (XLAT_CODE_BLOCK_SHIFT + 3)] & (1u << ((linear >> XLAT_CODE_BLOCK_SHIFT) & 7u)))
+        xlat_dirty = true;
+}
+
 /* Hot CALL targets (near, far, r/m) seen by XRIP: a target reaching
  * XLAT_CALL_HOT calls in its slot stops the burst there once (the caller
  * sets rt->fn_entry), so a function without a loop can get a region; later
  * calls reach it through xlat_entry_map. Cleared with the cache. */
+#ifndef XLAT_FN_REGIONS
+#define XLAT_FN_REGIONS 0       /* CMake XLAT_FN_REGIONS */
+#endif
 #define XLAT_CALL_SLOTS 128u
 #define XLAT_CALL_HOT   16u
 extern uint32_t xlat_call_key[XLAT_CALL_SLOTS];
 extern uint8_t xlat_call_count[XLAT_CALL_SLOTS];
 static inline bool xlat_call_hot(uint32_t linear)
 {
+    if (!XLAT_FN_REGIONS)
+        return false;
     const uint32_t h = (linear * 0x9e3779b1u) >> 25;
     if (xlat_call_key[h] != linear) {
         xlat_call_key[h] = linear;

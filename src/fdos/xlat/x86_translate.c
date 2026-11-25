@@ -94,7 +94,7 @@ typedef struct {
     arm_emit_t e;
     uint32_t epilogue, interp_thunk;
     uint8_t fn_ok;                 /* entry at rt->fn_entry: a region without a loop may do */
-    uint8_t fn;                    /* built so (min_native_path) */
+    uint8_t fn;                    /* built so: min_native_path (>= XLAT_TRACE_MIN), else 0 */
     int n_interp;
 } tctx_t;
 
@@ -174,8 +174,8 @@ static bool has_cycle(const tctx_t *c, int first);
 
 /* The fewest native instructions any path from the entry runs before it can
  * leave the region (an exit edge, a RET / far / indirect transfer, an
- * instruction XRIP ends). Interpreted instructions count 0, a REP string
- * instruction XLAT_TRACE_MIN. */
+ * instruction XRIP does: INT, a far transfer it decodes, ... may change CS
+ * and leave). A REP string instruction counts XLAT_TRACE_MIN. */
 static int min_native_path(const tctx_t *c, int first)
 {
     int dist[XLAT_MAX_INSNS];
@@ -189,8 +189,12 @@ static int min_native_path(const tctx_t *c, int first)
             if (dist[i] == INT_MAX)
                 continue;
             const x86_insn_t *in = &c->in[i];
-            const int w = in->op == XO_INTERP ? 0
-                        : in->op == XO_STR && in->rep ? XLAT_TRACE_MIN : 1;
+            if (in->op == XO_INTERP) {
+                if (dist[i] < best)
+                    best = dist[i];
+                continue;
+            }
+            const int w = in->op == XO_STR && in->rep ? XLAT_TRACE_MIN : 1;
             const int d = dist[i] + w;
             int succ[3], ns = 0;
             bool leaves = dyn_exit(in);
@@ -371,9 +375,12 @@ static int discover(tctx_t *c, uint16_t start)
         return XLAT_RJ_INTERP;
     if (has_cycle(c, first))
         return XLAT_RJ_NONE;
-    if (c->fn_ok && min_native_path(c, first) >= XLAT_TRACE_MIN) {
-        c->fn = 1;
-        return XLAT_RJ_NONE;
+    if (c->fn_ok) {
+        const int len = min_native_path(c, first);
+        if (len >= XLAT_TRACE_MIN) {
+            c->fn = (uint8_t)(len < 255 ? len : 255);
+            return XLAT_RJ_NONE;
+        }
     }
     return XLAT_RJ_NOLOOP;
 }

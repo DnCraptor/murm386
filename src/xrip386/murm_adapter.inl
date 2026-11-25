@@ -51,6 +51,7 @@ static bool dispatch_int_hook(uint8_t vector)
     if (!hook || protected_mode)
         return false;
     flags_now();
+    XLAT_NOTE_FOREIGN();    /* native code writes guest RAM directly */
     const uint32_t saved_ip = firstip, saved_esp = first_esp;
     active_cpu->ip = active_cpu->next_ip = XRIP_IP;
     const bool handled = hook->handler(active_cpu, hook->opaque);
@@ -90,6 +91,7 @@ static bool bios_escape(uint8_t id)
         return false;
 
     flags_now();
+    XLAT_NOTE_FOREIGN();    /* native code writes guest RAM directly */
     const uint32_t saved_ip = firstip, saved_esp = first_esp;
     active_cpu->ip = active_cpu->next_ip = firstip;
     const bool iret = rp2350_bios_handler(active_cpu, id);
@@ -368,6 +370,7 @@ void __time_critical_func(xrip_step_cpu)(CPU *cpu, int count)
     const unsigned long retired0 = retired;
 #endif
     const uint32_t t0 = timer_hw->timerawl;
+    xlat_dirty = true;      /* device service, DMA, native code ran since the last burst */
     uint32_t xlat_used = xlat_enter(cpu, (uint32_t)count, t0);
     xlat_burst_native = xlat_used != 0;
 #endif
@@ -526,6 +529,7 @@ void cpu_intcall(CPU *cpu, uint8_t vector)
     XRIP_IP = cpu->next_ip;
     void *context[5];
     void **const outer_fault_point = fault_point;
+    XLAT_NOTE_FOREIGN();    /* native code writes guest RAM directly */
     const uint32_t saved_ip = firstip, saved_esp = first_esp;
     firstip = XRIP_IP;
     first_esp = dwordregs[regsp];

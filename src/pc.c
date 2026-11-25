@@ -1879,9 +1879,17 @@ static void bios_post_components(PC *pc, size_t psram_size)
     char serial[40], parallel[40];
     char hdd[6][40];
 
-    snprintf(left, sizeof(left), "CPU      : 80386");
-    snprintf(right, sizeof(right), "FPU      : %s",
-             pc->fpu_enabled ? "80387" : "not installed");
+	int limit = config_get_mips_limit();
+	if (limit <= 0) {
+#if XLAT
+    	snprintf(left, sizeof(left), "CPU      : 80386 + ARM T2 JIT");
+#else
+    	snprintf(left, sizeof(left), "CPU      : 80386");
+#endif
+	} else {
+    	snprintf(left, sizeof(left), "CPU      : 80386 @ %d.%03d MIPS", limit / 1000, limit % 1000);
+	}
+    snprintf(right, sizeof(right), "FPU      : %s",  pc->fpu_enabled ? "80387" : "not installed");
 
     bios_post_table_rule(pc, 0xDA, 0xC2, 0xBF);
     bios_post_table_row(pc, left, right);

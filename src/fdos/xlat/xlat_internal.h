@@ -28,7 +28,7 @@
 #endif
 #define XLAT_MAX_INSNS       63              /* per region; bit 63 of a set is "entry state" */
 #ifndef XLAT_MAX_REGIONS
-#define XLAT_MAX_REGIONS     32
+#define XLAT_MAX_REGIONS     64              /* region slots (entry_t.region is 8 bits) */
 #endif
 /* A region without a loop is built only at a hot CALL target (rt->fn_entry)
  * and only when every path from the entry runs at least this many native
@@ -40,7 +40,8 @@
 #ifndef XLAT_RING_WANT
 #define XLAT_RING_WANT       2048u           /* bytes evicted ahead of the ring head when a region does not fit */
 #endif
-#define XLAT_ENTRY_SLOTS     256             /* power of two */
+#define XLAT_ENTRY_BITS      9
+#define XLAT_ENTRY_SLOTS     (1 << XLAT_ENTRY_BITS)  /* power of two */
 #define XLAT_HOT_SLOTS       64              /* power of two */
 #define XLAT_HOT_THRESHOLD   2               /* burst-start samples before translating */
 #define XLAT_ENTRY_COST      8               /* budget charged per region entry */
@@ -322,7 +323,8 @@ typedef struct xlat_region_out {
     uint32_t data_size;                /* arena bytes the caller stores the runs in */
     uint8_t reject;                    /* XLAT_RJ_* when no region was built */
     uint8_t n_insns, n_interp;         /* what discovery found (for the log) */
-    uint8_t fn;                        /* a function region: no loop (XLAT_TRACE_MIN) */
+    uint8_t fn;                        /* a function region (no loop): the fewest native
+                                          instructions an entry runs, else 0 */
 } xlat_region_out_t;
 
 /* Why a hot entry point got no region (XLAT_LOG "R" lines). */

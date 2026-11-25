@@ -36,9 +36,11 @@ typedef struct {
     uint16_t n_runs;
     uint16_t ip;           /* the entry point it was built from */
     uint8_t held;          /* the slot holds a chunk (live, cold or invalidated) */
+    uint32_t last;         /* st->seq at the last entry (take_slot) */
     uint8_t live;
     uint8_t cold;          /* dropped: too little runs per entry (see xlat_run) */
-    uint8_t fn;            /* a function region (no loop, built at a hot CALL target) */
+    uint8_t fn;            /* a function region (no loop, built at a hot CALL target):
+                              the fewest native instructions an entry runs */
     uint32_t entries;
     uint32_t insns;        /* instructions charged at its back edges */
     uint32_t us;           /* time inside it (rt->clock), entries included */
@@ -76,6 +78,7 @@ typedef struct {
 typedef struct {
     xlat_arena_t arena;
     region_t region[XLAT_MAX_REGIONS];
+    uint32_t seq;           /* region entries so far (region_t.last) */
     uint32_t ring_lo;       /* first byte after the trampoline */
     uint32_t head;          /* where the next chunk goes */
     uint32_t epoch;         /* changes whenever x86 code may have been written */
@@ -87,6 +90,7 @@ typedef struct {
     char *log;              /* text kept until the next safe point (xlat_log_write) */
     uint32_t log_len;
     uint32_t log_lost;      /* bytes that did not fit */
+    uint32_t log_skipped;   /* region dumps left out (XLAT_LOG_RESERVE) */
     rej_t rej[XLAT_REJ_SLOTS];
     uint32_t rej_why[XLAT_RJ_COUNT];
 #endif
@@ -95,7 +99,10 @@ typedef struct {
 #ifndef XLAT_LOG
 #define XLAT_LOG 0
 #endif
-#define XLAT_LOG_SIZE (XLAT_LOG ? 16384u : 0u)
+#define XLAT_LOG_SIZE (XLAT_LOG ? 32768u : 0u)
+/* The region dumps (T lines, C lines of evicted regions) stop this far
+ * from the end: the summary at the program's exit always fits. */
+#define XLAT_LOG_RESERVE 8192u
 
 #define ALIGN8(n) (((n) + 7u) & ~(size_t)7u)
 
@@ -108,6 +115,7 @@ static bool disabled;
 
 uint8_t xlat_entry_map[XLAT_MAP_BITS / 8];
 uint8_t xlat_code_map[XLAT_CODE_MAP_BYTES];
+bool xlat_dirty = true;
 uint32_t xlat_call_key[XLAT_CALL_SLOTS];
 uint8_t xlat_call_count[XLAT_CALL_SLOTS];
 
@@ -204,8 +212,19 @@ static void log_printf(const char *fmt, ...)
 }
 
 /* x86 bytes of a region, as the translator saw them: replayable offline. */
+/* Room for one more region dump, keeping XLAT_LOG_RESERVE. */
+static bool log_dump_room(void)
+{
+    if (st->log_len + XLAT_LOG_RESERVE <= XLAT_LOG_SIZE)
+        return true;
+    st->log_skipped++;
+    return false;
+}
+
 static void log_region_code(const region_t *r)
 {
+    if (!log_dump_room())
+        return;
     log_printf("T %04X:%04X lo=%05lX span=%lu runs=%u\r\n", r->cs, r->ip,
                (unsigned long)r->lo, (unsigned long)r->span, r->n_runs);
     const uint8_t *d = st->arena.base + r->data_off;
@@ -322,6 +341,7 @@ static void log_rejects(void)
 #define log_region_code(r) ((void)0)
 #define log_region_counts() ((void)0)
 #define log_region_count(r) ((void)0)
+#define log_dump_room() false
 #define note_reject(rt, key, why) ((void)0)
 #define note_reject_hit(key) ((void)0)
 #endif
@@ -402,7 +422,7 @@ void xlat_flush(void)
 
 static entry_t *XLAT_HOT_FN(lookup)(uint32_t key)
 {
-    const uint32_t h = hash32(key) >> (32 - 8);
+    const uint32_t h = hash32(key) >> (32 - XLAT_ENTRY_BITS);
     for (uint32_t k = 0; k < 8; ++k) {
         entry_t *e = &st->entry[(h + k) & (XLAT_ENTRY_SLOTS - 1)];
         if (e->used == E_FREE)
@@ -415,7 +435,7 @@ static entry_t *XLAT_HOT_FN(lookup)(uint32_t key)
 
 static bool insert(uint32_t key, uint8_t region, uint32_t code_off, bool mark)
 {
-    const uint32_t h = hash32(key) >> (32 - 8);
+    const uint32_t h = hash32(key) >> (32 - XLAT_ENTRY_BITS);
     for (uint32_t k = 0; k < 8; ++k) {
         entry_t *e = &st->entry[(h + k) & (XLAT_ENTRY_SLOTS - 1)];
         if (e->used <= E_DEAD || e->key == key || !st->region[e->region].live) {
@@ -490,7 +510,8 @@ static bool covered(const xlat_rt_t *rt)
 static void evict(int k)
 {
     region_t *r = &st->region[k];
-    log_region_count(r);
+    if (log_dump_room())
+        log_region_count(r);
     for (int j = 0; j < XLAT_ENTRY_SLOTS; ++j) {
         entry_t *e = &st->entry[j];
         if (e->used >= E_LIVE && e->region == k)
@@ -560,7 +581,7 @@ static uint32_t window_end(void)
 }
 
 /* A free region slot: an empty one, else an invalidated one, else the
- * region whose chunk comes next after the head (the oldest in ring order). */
+ * region entered longest ago (a hot loop translated early stays). */
 static int take_slot(bool *evicted)
 {
     int best = -1;
@@ -569,11 +590,8 @@ static int take_slot(bool *evicted)
         const region_t *r = &st->region[k];
         if (!r->held)
             return k;
-        uint32_t d = r->chunk_lo - st->head;   /* ring distance ahead */
-        if (r->chunk_lo < st->head)
-            d += st->arena.size - st->ring_lo;
-        if (!r->live && !r->cold)
-            d = 0;
+        const uint32_t age = st->seq - r->last;
+        const uint32_t d = !r->live && !r->cold ? 0u : UINT32_MAX - age;
         if (d < best_d) {
             best_d = d;
             best = k;
@@ -627,7 +645,8 @@ built:;
     r->span = out->span;
     r->n_runs = out->n_runs;
     r->fn = out->fn;
-    xlat_stats.fn_regions += out->fn;
+    r->last = st->seq;      /* new: as if entered now */
+    xlat_stats.fn_regions += out->fn != 0;
     /* the copies follow the code (xlat_translate keeps code_top + data
      * below data_bottom) */
     r->chunk_lo = out->code_off;
@@ -727,8 +746,12 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
     }
     const int32_t start = rt->budget;
     rt->code_map = xlat_code_map;
-    /* XRIP ran since the last call: compare each region's bytes once */
-    st->epoch++;
+    /* Something but XRIP's ordinary writes ran since the last call (or XRIP
+     * wrote into translated code): compare each region's bytes once */
+    if (xlat_dirty) {
+        xlat_dirty = false;
+        st->epoch++;
+    }
     const xlat_tramp_fn tramp = (xlat_tramp_fn)(uintptr_t)(st->arena.base + 1);
     bool ran = false, built = false;
     for (;;) {
@@ -757,8 +780,12 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
         const int32_t b0 = rt->budget, x0 = (int32_t)rt->extra;
         const uint32_t t0 = *rt->clock;
         cur_region = r;
+        r->last = ++st->seq;
         tramp(rt, (uint32_t)(uintptr_t)(st->arena.base + e->code_off) | 1u);
         cur_region = NULL;
+        /* A region without a loop has no back edge charging the budget:
+         * at least r->fn instructions ran. */
+        rt->budget -= r->fn;
         r->us += *rt->clock - t0;
         ran = true;
         xlat_stats.entries++;
@@ -1053,7 +1080,7 @@ void xlat_log_write(uint16_t psp, const char *name)
     log_region_counts();
     log_rejects();
     log_printf("S translations=%lu rejects=%lu entries=%lu invalid=%lu flushes=%lu evict=%lu "
-               "exit b/bu/s/st=%lu/%lu/%lu/%lu native=%lu code=%lu stack_skips=%lu interp=%lu side=%lu cuts=%lu/%lu cold=%lu fn=%lu lost=%lu\r\n",
+               "exit b/bu/s/st=%lu/%lu/%lu/%lu native=%lu code=%lu stack_skips=%lu interp=%lu side=%lu cuts=%lu/%lu cold=%lu fn=%lu lost=%lu skipped=%lu\r\n",
                (unsigned long)xlat_stats.translations, (unsigned long)xlat_stats.rejects,
                (unsigned long)xlat_stats.entries, (unsigned long)xlat_stats.invalidations,
                (unsigned long)xlat_stats.flushes, (unsigned long)xlat_stats.evictions,
@@ -1063,7 +1090,8 @@ void xlat_log_write(uint16_t psp, const char *name)
                (unsigned long)xlat_stats.stack_skips, (unsigned long)xlat_stats.interp,
                (unsigned long)xlat_stats.side_interp, (unsigned long)xlat_stats.cut_entries,
                (unsigned long)xlat_stats.cuts, (unsigned long)xlat_stats.cold,
-               (unsigned long)xlat_stats.fn_regions, (unsigned long)st->log_lost);
+               (unsigned long)xlat_stats.fn_regions, (unsigned long)st->log_lost,
+               (unsigned long)st->log_skipped);
     /* CPU bursts: averages and histograms (xlat_stats_t), XRIP only / with
      * translated code; device service after the bursts. XLAT_SLICE_US is
      * meant to match the usual XRIP burst. */
@@ -1106,6 +1134,7 @@ void xlat_log_write(uint16_t psp, const char *name)
     }
     st->log_len = 0;
     st->log_lost = 0;
+    st->log_skipped = 0;
 }
 #endif
 

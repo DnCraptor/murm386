@@ -263,6 +263,7 @@ static __time_critical_func() void port_write_sized(uint16_t port, uint32_t valu
     if (size == 1) portout(port, (uint8_t) value);
     else if (size == 2) portout16(port, (uint16_t) value);
     else {
+        XLAT_NOTE_FOREIGN();
         active_cpu->cb.io_write32(active_cpu->cb.io, port, value);
     }
 }
