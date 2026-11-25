@@ -109,6 +109,7 @@ typedef struct xlat_stats {
     uint32_t side_interp;       /* of those: accesses outside fast memory or onto the code */
     uint32_t cuts;              /* XRIP bursts ended at a marked branch target */
     uint32_t cut_entries;       /* of those: translated code was entered */
+    uint32_t cold;              /* regions given back to XRIP (too short per entry) */
     /* XLAT_LOG: CPU bursts timed by the adapter (time in us, instructions),
      * without bursts that ran nested bursts (native INT handlers); and the
      * device service after each burst (pc_service_impl). Histograms by
@@ -213,6 +214,10 @@ void xlat_note_service(uint32_t us);
 
 /* Helper called by generated code: x86 condition code cc on the lazy flags. */
 uint32_t xlat_rt_cond(const xlat_rt_t *rt, uint32_t cc);
+
+/* Helper called by generated code: shift / rotate (group 2) of value with
+ * XRIP's flag results in rt. ctl = operation | 16-bit << 3 | count << 8. */
+uint32_t xlat_rt_shift(xlat_rt_t *rt, uint32_t value, uint32_t ctl);
 
 #ifdef __cplusplus
 }

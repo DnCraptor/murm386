@@ -213,7 +213,6 @@ static __time_critical_func() uint32_t xlat_enter(CPU *cpu, uint32_t count, uint
         xlat_armed = false;
         return 0;
     }
-    xlat_armed = true;
     xlat_rt_t *const rt = &xlat_state;
     rt->mem = fast_memory;
     rt->mem_size = fast_memory_size;
@@ -236,9 +235,14 @@ static __time_critical_func() uint32_t xlat_enter(CPU *cpu, uint32_t count, uint
     rt->eflags = x86_flags.value;
     rt->cs = segregs[regcs];
     rt->ip = XRIP_IP;
+    /* No burst cut while translated code runs: the instructions it hands to
+     * XRIP (xlat_interp_one) must run, not stop at a marked branch target. */
+    xlat_armed = false;
+    xlat_cut = false;
     xlat_busy = true;
     const bool ran = xlat_run(rt);
     xlat_busy = false;
+    xlat_armed = true;
     if (!ran)
         return 0;
     /* x86_flags, segment registers and CS:IP changed by interpreted

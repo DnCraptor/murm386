@@ -278,8 +278,11 @@ static void dataflow(tctx_t *c)
             }
             const x86_insn_t *x = &c->in[i];
             /* after the interpreter the flags are in rt, as at an entry */
-            const uint64_t out = x->op == XO_INTERP ? NONE_BIT : is_producer(x) ? 1ull << i : in;
-            const uint64_t cfout = x->op == XO_INTERP ? NONE_BIT
+            /* after the interpreter or the shift helper the flags are in rt,
+             * as at an entry */
+            const bool in_rt = x->op == XO_INTERP || x->op == XO_SHIFT;
+            const uint64_t out = in_rt ? NONE_BIT : is_producer(x) ? 1ull << i : in;
+            const uint64_t cfout = in_rt ? NONE_BIT
                                    : is_producer(x) && x->op != XO_INCDEC ? 1ull << i : cfin;
             if (in != c->in_set[i] || out != c->out_set[i] || cfin != c->cf_in[i] ||
                 cfout != cf_out[i]) {
@@ -389,6 +392,15 @@ static bool edge_needs_sync(int i, int dest)
     return dest < 0 || dest <= i;   /* region exit, or back edge (budget exit) */
 }
 
+/* Producer a side exit of instruction i may reconstruct the flags from: none
+ * for REP string moves, whose later elements leave after SI, DI and CX
+ * changed (the reaching producers then store the flags themselves). */
+static int side_producer(const tctx_t *c, int i)
+{
+    const x86_insn_t *in = &c->in[i];
+    return in->op == XO_STR && in->rep ? -1 : c->pfp[i];
+}
+
 static void plan(tctx_t *c)
 {
     memset(c->mat, 0, sizeof(c->mat));
@@ -407,11 +419,11 @@ static void plan(tctx_t *c)
     for (int i = 0; i < c->n; ++i) {
         const x86_insn_t *in = &c->in[i];
         if (x86_accesses_mem(in))
-            plan_sync(c, c->in_set[i], c->pfp[i]);            /* side exit */
+            plan_sync(c, c->in_set[i], side_producer(c, i));  /* side exit */
         if (in->op == XO_RET)
             plan_sync(c, c->out_set[i], edge_producer(c, i)); /* exit to the popped IP */
-        if (in->op == XO_INTERP)
-            plan_sync(c, c->in_set[i], c->pfp[i]);            /* the interpreter reads rt */
+        if (in->op == XO_INTERP || in->op == XO_SHIFT)
+            plan_sync(c, c->in_set[i], c->pfp[i]);            /* the helper reads rt */
         if (in->op == XO_JCC && !c->local_jcc[i])
             plan_sync(c, c->in_set[i], c->pfp[i]);            /* helper Jcc */
         const int ep = edge_producer(c, i);
@@ -629,7 +641,7 @@ static dest_t side_dest(tctx_t *c, int i, int mw)
         c->stub[k].insn = (int16_t)i;
         c->stub[k].mw = (uint8_t)mw;
         c->stub[k].exit_kind = XLAT_EXIT_SIDE;
-        const int r = sync_recon(c, c->in_set[i], c->pfp[i]);
+        const int r = sync_recon(c, c->in_set[i], side_producer(c, i));
         c->stub[k].recon = (int8_t)(r >= 0 ? r : -1);
         c->side_stub[i][mw] = (int16_t)k;
     }
@@ -941,10 +953,36 @@ static void emit_stack_op(tctx_t *c, int i)
         emit_branch(c, make_dest(c, i, in->target), C_AL);
         break;
     default: {  /* RET: leave for the popped IP; the dispatcher continues there */
+        /* The flags reach rt first, as at an exit: a return site is a leader
+         * and expects them there. Return sites of CALLs in this region are
+         * reached directly (a back edge charges the budget). The
+         * reconstruction (r1-r3) comes before the pop: RET changes no
+         * register it reads. */
+        const int r = sync_recon(c, c->out_set[i], edge_producer(c, i));
+        if (r >= 0)
+            emit_recon(c, r);
         emit_pop_value(c, i, in->b.imm);
+        for (int j = 0; j < c->n; ++j) {
+            if (c->in[j].op != XO_CALL)
+                continue;
+            const int site = find_insn(c, (uint16_t)(c->in[j].ip + c->in[j].len));
+            if (site < 0)
+                continue;
+            arm_mov32(e, A_R12, c->in[site].ip);
+            arm_dp_reg(e, DP_SUB, 1, A_PC, A_R2, A_R12, SH_LSL, 0);
+            if (site > i) {
+                emit_branch(c, (dest_t){D_INSN, (int16_t)site}, C_EQ);
+            } else {
+                const int ex = exit_stub(c, c->in[site].ip, XLAT_EXIT_BUDGET, -1);
+                const int b = new_stub(c, ST_BACK);
+                c->stub[b].target = (int16_t)site;
+                c->stub[b].exit_stub = (int16_t)ex;
+                c->stub[b].budget_n = (uint8_t)(i - site + 1);
+                emit_branch(c, (dest_t){D_STUB, (int16_t)b}, C_EQ);
+            }
+        }
         arm_ls_imm(e, LS_STR, A_R2, A_R11, XLAT_RT_IP);
-        const int k = exit_stub(c, 0, XLAT_EXIT_BRANCH,
-                                sync_recon(c, c->out_set[i], edge_producer(c, i)));
+        const int k = exit_stub(c, 0, XLAT_EXIT_BRANCH, -1);
         c->stub[k].dyn = 1;
         emit_branch(c, (dest_t){D_STUB, (int16_t)k}, C_AL);
         break;
@@ -1016,6 +1054,112 @@ static void emit_jcc(tctx_t *c, int i)
     emit_branch(c, make_dest(c, i, in->target), C_NE);
 }
 
+/* Shift / rotate through xlat_rt_shift(): the lazy flags go to rt first,
+ * the helper leaves its flags there. Memory operands are checked (side exit)
+ * before anything changes. */
+static void emit_shift(tctx_t *c, int i)
+{
+    arm_emit_t *e = &c->e;
+    const x86_insn_t *in = &c->in[i];
+    const int r = sync_recon(c, c->in_set[i], c->pfp[i]);
+    if (r >= 0)
+        emit_recon(c, r);
+    const bool mem = in->a.kind == OPD_MEM;
+    if (mem) {
+        emit_mem_access(c, i, in->size / 8, true);
+        arm_push(e, 0x0003u);                    /* r0 (address), r1: 8-byte aligned */
+    }
+    const int v = get_raw(c, &in->a, in->size, A_R1);
+    if (v != A_R1)
+        arm_mov(e, A_R1, v);
+    const uint32_t ctl = in->sub | (in->size == 16 ? 8u : 0u);
+    if (in->b.kind == OPD_IMM) {
+        arm_mov32(e, A_R2, ctl | (uint32_t)(in->b.imm & 0xffu) << 8);
+    } else {
+        arm_ubfx(e, A_R2, A_R5, 0, 8);           /* CL */
+        arm_lsl(e, A_R2, A_R2, 8);
+        if (ctl)
+            arm_dp_imm(e, DP_ORR, 0, A_R2, A_R2, ctl);
+    }
+    arm_mov(e, A_R0, A_R11);
+    arm_mov32(e, A_R12, (uint32_t)(uintptr_t)&xlat_rt_shift);
+    arm_blx(e, A_R12);
+    if (mem) {
+        arm_mov(e, A_R1, A_R0);
+        arm_pop(e, 0x0005u);                     /* r0 = address (r2: the pushed r1) */
+        put_raw(c, &in->a, in->size, A_R1);
+    } else {
+        put_raw(c, &in->a, in->size, A_R0);
+    }
+}
+
+/* MOVS / STOS / LODS, with REP: the element loop runs here while CX != 0.
+ * All checks of an element come before its changes, so a side exit runs the
+ * (restartable) instruction in XRIP with the current SI, DI and CX. */
+static void emit_string(tctx_t *c, int i)
+{
+    arm_emit_t *e = &c->e;
+    const x86_insn_t *in = &c->in[i];
+    const int bytes = in->size / 8;
+    /* r2 = step: bytes, or -bytes when DF is set */
+    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_EFLAGS);
+    arm_ubfx(e, A_R12, A_R12, 10, 1);
+    arm_mov32(e, A_R2, (uint32_t)bytes);
+    arm_dp_reg(e, DP_SUB, 0, A_R2, A_R2, A_R12, SH_LSL, bytes == 2 ? 2 : 1);
+    uint32_t top = 0, done = 0;
+    if (in->rep) {
+        top = e->pos;
+        arm_dp_reg(e, DP_ORR, 1, A_R12, A_PC, A_R5, SH_LSL, 16);   /* Z = (CX == 0) */
+        done = arm_branch_slot(e);
+    }
+    x86_insn_t t = *in;
+    t.mem_mod = 0;
+    t.mem_direct = 0;
+    t.disp = 0;
+    if (in->sub != STR_STOS) {
+        t.mem_rm = 4;                                   /* [SI] */
+        emit_offset(c, &t);
+        arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_SEG_BASE + 4u * in->mem_seg);
+        arm_dp_reg(e, DP_ADD, 0, A_R0, A_R0, A_R12, SH_LSL, 0);
+        emit_checks(c, i, bytes, false);
+        if (in->sub == STR_MOVS)
+            arm_mov(e, A_R3, A_R0);
+    }
+    if (in->sub != STR_LODS) {
+        t.mem_rm = 5;                                   /* ES:[DI] */
+        emit_offset(c, &t);
+        arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_SEG_BASE + 0u);
+        arm_dp_reg(e, DP_ADD, 0, A_R0, A_R0, A_R12, SH_LSL, 0);
+        emit_checks(c, i, bytes, true);
+    }
+    arm_ls_imm(e, LS_LDR, A_LR, A_R11, XLAT_RT_MEM);
+    if (in->sub == STR_LODS) {
+        arm_ls_reg(e, bytes == 2 ? LS_LDRH : LS_LDRB, A_R1, A_LR, A_R0);
+        arm_bfi(e, A_R4, A_R1, 0, bytes * 8);
+    } else if (in->sub == STR_STOS) {
+        arm_ls_reg(e, bytes == 2 ? LS_STRH : LS_STRB, A_R4, A_LR, A_R0);
+    } else {
+        arm_ls_reg(e, bytes == 2 ? LS_LDRH : LS_LDRB, A_R1, A_LR, A_R3);
+        arm_ls_reg(e, bytes == 2 ? LS_STRH : LS_STRB, A_R1, A_LR, A_R0);
+    }
+    if (in->sub != STR_STOS) {
+        arm_dp_reg(e, DP_ADD, 0, A_R1, A_R9, A_R2, SH_LSL, 0);
+        arm_bfi(e, A_R9, A_R1, 0, 16);
+    }
+    if (in->sub != STR_LODS) {
+        arm_dp_reg(e, DP_ADD, 0, A_R1, A_R10, A_R2, SH_LSL, 0);
+        arm_bfi(e, A_R10, A_R1, 0, 16);
+    }
+    if (in->rep) {
+        arm_subw(e, A_R1, A_R5, 1);
+        arm_bfi(e, A_R5, A_R1, 0, 16);
+        const uint32_t back = arm_branch_slot(e);
+        if (!arm_patch_branch(e, back, top, C_AL))
+            c->overflow = true;
+        local_patch(c, done, C_EQ);
+    }
+}
+
 static void emit_insn(tctx_t *c, int i)
 {
     arm_emit_t *e = &c->e;
@@ -1062,6 +1206,12 @@ static void emit_insn(tctx_t *c, int i)
         break;
     case XO_INTERP:
         emit_interp(c, i);
+        break;
+    case XO_STR:
+        emit_string(c, i);
+        break;
+    case XO_SHIFT:
+        emit_shift(c, i);
         break;
     }
     if (falls_through(in) && c->fall_idx[i] != i + 1)

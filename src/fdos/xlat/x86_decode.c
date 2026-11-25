@@ -61,10 +61,16 @@ bool x86_decode(const uint8_t *code, uint16_t ip, x86_insn_t *in)
 {
     unsigned pos = 0;
     int seg = -1;
+    bool rep = false;
     uint8_t g;
 
     for (;;) {
         const uint8_t p = code[pos];
+        if ((p == 0xf2 || p == 0xf3) && !rep) {
+            rep = true;     /* only string moves accept it (below) */
+            ++pos;
+            continue;
+        }
         int s = p == 0x26 ? SEG_ES : p == 0x2e ? SEG_CS : p == 0x36 ? SEG_SS :
                 p == 0x3e ? SEG_DS : -1;
         if (s < 0)
@@ -87,8 +93,40 @@ bool x86_decode(const uint8_t *code, uint16_t ip, x86_insn_t *in)
     in->mem_mod = in->mem_rm = in->mem_direct = 0;
     in->mem_seg = SEG_DS;
     in->disp = 0;
+    in->rep = 0;
 
-    if (op < 0x40 && (op & 7) < 6) {
+    if (rep && !(op == 0xa4 || op == 0xa5 || op == 0xaa || op == 0xab || op == 0xac || op == 0xad))
+        return false;
+    if (op == 0xa4 || op == 0xa5 || op == 0xaa || op == 0xab || op == 0xac || op == 0xad) {
+        /* MOVS / STOS / LODS: DS:SI (override allowed) and ES:DI, step by DF */
+        in->op = XO_STR;
+        in->sub = op <= 0xa5 ? STR_MOVS : op <= 0xab ? STR_STOS : STR_LODS;
+        in->size = (op & 1) ? 16 : 8;
+        in->rep = rep;
+        in->mem_seg = seg >= 0 ? (uint8_t)seg : SEG_DS;
+        if (in->sub == STR_STOS)
+            in->a.kind = OPD_MEM;
+        else
+            in->b.kind = OPD_MEM;
+        if (in->sub == STR_MOVS)
+            in->a.kind = OPD_MEM;
+    } else if (op == 0xc0 || op == 0xc1 || (op >= 0xd0 && op <= 0xd3)) {
+        /* group 2 shifts and rotates: count imm8, 1 or CL */
+        decode_modrm(code, &pos, seg, in, &in->a, &g);
+        in->op = XO_SHIFT;
+        in->sub = g;
+        in->size = (op & 1) ? 16 : 8;
+        if (op <= 0xc1) {
+            in->b.kind = OPD_IMM;
+            in->b.imm = code[pos++];
+        } else if (op <= 0xd1) {
+            in->b.kind = OPD_IMM;
+            in->b.imm = 1;
+        } else {
+            in->b.kind = OPD_REG;
+            in->b.reg = 1;   /* CL */
+        }
+    } else if (op < 0x40 && (op & 7) < 6) {
         const uint8_t alu = op >> 3;
         in->op = XO_ALU;
         in->sub = alu;

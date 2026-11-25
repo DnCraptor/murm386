@@ -34,6 +34,8 @@
 #define XLAT_ENTRY_COST      8               /* budget charged per region entry */
 #define XLAT_INTERP_RATIO    8               /* at most 1/8 of a region interpreted */
 #define XLAT_SPAN_WINDOW     2048u           /* region code within +-1 KiB of the entry */
+#define XLAT_COLD_ENTRIES    512             /* entries before a region is judged */
+#define XLAT_COLD_INSNS      8               /* loop instructions per entry to keep it */
 #ifndef XLAT_ARENA_SRAM
 #define XLAT_ARENA_SRAM      0
 #endif
@@ -97,7 +99,10 @@ bool arm_patch_branch(arm_emit_t *e, uint32_t at, uint32_t target, int cond);
 /* ---------------------------------------------------------------------- */
 
 enum { XO_ALU = 1, XO_INCDEC, XO_MOV, XO_LEA, XO_XCHG, XO_NOP, XO_JCC, XO_JMP, XO_LOOP,
-       XO_JCXZ, XO_PUSH, XO_POP, XO_CALL, XO_RET, XO_INTERP };
+       XO_JCXZ, XO_PUSH, XO_POP, XO_CALL, XO_RET, XO_INTERP, XO_STR, XO_SHIFT };
+
+/* XO_STR operations (sub); rep: REP prefix (CX times, MOVS/STOS/LODS). */
+enum { STR_MOVS = 0, STR_STOS = 1, STR_LODS = 2 };
 
 /* XO_INTERP flags (in sub): the interpreter runs the instruction. */
 #define XI_MAY_WRITE 1u   /* may write memory: recheck the region's code after it */
@@ -130,6 +135,7 @@ typedef struct x86_insn {
     /* memory operand (at most one per instruction) */
     uint8_t mem_mod, mem_rm, mem_seg;  /* mod 0..2; rm; 0 ES 1 CS 2 SS 3 DS */
     uint8_t mem_direct;                /* moffs / mod 0 rm 6: offset is disp only */
+    uint8_t rep;                       /* XO_STR: REP / REPE / REPNE prefix */
     uint16_t disp;
 } x86_insn_t;
 

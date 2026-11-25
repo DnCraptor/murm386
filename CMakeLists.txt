@@ -15,7 +15,7 @@ endif()
 cmake_minimum_required(VERSION 3.13)
 
 # Board configuration variant (M1, M2, PC, Z2 or C2)
-set(BOARD "M1" CACHE STRING "Board variant: M1, M2, PC, Z2 or C2")
+set(BOARD "M2" CACHE STRING "Board variant: M1, M2, PC, Z2 or C2")
 # Enable LTEMM support (performance degradation is expected)
 option(EMM "Enable LTEMM support" OFF)
 option(NO_PAGING "Disable guest-RAM paging and use direct QSPI PSRAM access" ON)
@@ -30,7 +30,7 @@ set(XLAT_ARENA_KB 32 CACHE STRING "Translator code arena, KiB (max 64)")
 # Experiment: code arena in a static SRAM buffer of XLAT_SRAM_ARENA_KB instead
 # of the PSRAM span, to measure the XIP-cache contention. The buffer comes out
 # of the heap, which the emulator needs at run time: keep it small.
-option(XLAT_ARENA_SRAM "Translator code arena in SRAM (experiment)" ON)
+option(XLAT_ARENA_SRAM "Translator code arena in SRAM (experiment)" OFF)
 set(XLAT_SRAM_ARENA_KB 8 CACHE STRING "SRAM code arena with XLAT_ARENA_SRAM, KiB")
 # Diagnostics: at each DOS program exit append the translated regions (their
 # x86 bytes), per-region entry/exit counts and totals to <SD_DATA_DIR>/xlat.log.

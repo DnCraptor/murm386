@@ -159,6 +159,80 @@ static void flag_szp16(uint16_t v)
     *f = (*f & ~0xc4u) | (v == 0 ? 0x40u : 0) | ((v >> 8) & 0x80u) |
          (uint32_t)parity_even((uint8_t)v) << 2;
 }
+/* XRIP op_grp2_8 / op_grp2_16 (cpu.c), cf/of as flag bits. */
+#define XCF_SET(v) SETF(0, v)
+#define XOF_SET(v) SETF(11, v)
+static uint8_t ref_grp2_8(uint8_t r, uint8_t cnt, uint8_t oper1b)
+{
+    uint16_t s = oper1b;
+    cnt &= 0x1F;
+    if (!cnt) return (uint8_t)s;
+    switch (r) {
+    case 0: { const uint8_t rotate = cnt & 7;
+        s = (uint8_t)((s << rotate) | (s >> ((8 - rotate) & 7)));
+        XCF_SET(s & 1); XOF_SET(CF() ^ ((s >> 7) & 1)); break; }
+    case 1: { const uint8_t rotate = cnt & 7;
+        s = (uint8_t)((s >> rotate) | (s << ((8 - rotate) & 7)));
+        XCF_SET(s >> 7); XOF_SET((s >> 7) ^ ((s >> 6) & 1)); break; }
+    case 2: { const uint32_t rotate = cnt % 9;
+        const uint32_t ring = ((uint32_t)(uint8_t)s << 1) | CF();
+        const uint32_t shifted = ((ring << rotate) | (ring >> (9 - rotate))) & 0x1FFu;
+        s = (uint16_t)(shifted >> 1); XCF_SET(shifted & 1); XOF_SET(CF() ^ ((s >> 7) & 1)); break; }
+    case 3: { const uint32_t rotate = cnt % 9;
+        const uint32_t ring = ((uint32_t)CF() << 8) | (uint8_t)s;
+        const uint32_t shifted = ((ring >> rotate) | (ring << (9 - rotate))) & 0x1FFu;
+        s = (uint16_t)(shifted & 0xFFu); XCF_SET(shifted >> 8); XOF_SET((s >> 7) ^ ((s >> 6) & 1)); break; }
+    case 4: case 6:
+        XCF_SET(cnt <= 8 ? (s >> (8 - cnt)) & 1 : 0);
+        s = (uint16_t)(((uint32_t)s << cnt) & 0xFF);
+        XOF_SET(CF() ^ (s >> 7)); flag_szp8((uint8_t)s); break;
+    case 5:
+        XOF_SET(cnt == 1 && (s & 0x80));
+        XCF_SET(cnt <= 8 ? (s >> (cnt - 1)) & 1 : 0);
+        s >>= cnt; flag_szp8((uint8_t)s); break;
+    case 7:
+        XCF_SET((s >> ((cnt <= 8 ? cnt : 8) - 1)) & 1);
+        s = (uint8_t)((int32_t)(int8_t)s >> cnt);
+        XOF_SET(0); flag_szp8((uint8_t)s); break;
+    }
+    return (uint8_t)s;
+}
+static uint16_t ref_grp2_16(uint8_t r, uint8_t cnt, uint16_t oper1)
+{
+    uint32_t s = oper1;
+    cnt &= 0x1F;
+    if (!cnt) return (uint16_t)s;
+    switch (r) {
+    case 0: { const uint8_t rotate = cnt & 15;
+        s = ((s << rotate) | (s >> ((16 - rotate) & 15))) & 0xFFFF;
+        XCF_SET(s & 1); XOF_SET(CF() ^ ((s >> 15) & 1)); break; }
+    case 1: { const uint8_t rotate = cnt & 15;
+        s = ((s >> rotate) | (s << ((16 - rotate) & 15))) & 0xFFFF;
+        XCF_SET(s >> 15); XOF_SET((s >> 15) ^ ((s >> 14) & 1)); break; }
+    case 2: { const uint32_t rotate = cnt >= 17 ? cnt - 17 : cnt;
+        const uint32_t ring = ((uint32_t)(uint16_t)s << 1) | CF();
+        const uint32_t shifted = ((ring << rotate) | (ring >> (17 - rotate))) & 0x1FFFFu;
+        s = shifted >> 1; XCF_SET(shifted & 1); XOF_SET(CF() ^ ((s >> 15) & 1)); break; }
+    case 3: { const uint32_t rotate = cnt >= 17 ? cnt - 17 : cnt;
+        const uint32_t ring = ((uint32_t)CF() << 16) | (uint16_t)s;
+        const uint32_t shifted = ((ring >> rotate) | (ring << (17 - rotate))) & 0x1FFFFu;
+        s = shifted & 0xFFFFu; XCF_SET(shifted >> 16); XOF_SET((s >> 15) ^ ((s >> 14) & 1)); break; }
+    case 4: case 6:
+        XCF_SET(cnt <= 16 ? (s >> (16 - cnt)) & 1 : 0);
+        s = (s << cnt) & 0xFFFF;
+        XOF_SET(CF() ^ (s >> 15)); flag_szp16((uint16_t)s); break;
+    case 5:
+        XOF_SET(cnt == 1 && (s & 0x8000));
+        XCF_SET(cnt <= 16 ? (s >> (cnt - 1)) & 1 : 0);
+        s >>= cnt; flag_szp16((uint16_t)s); break;
+    case 7:
+        XCF_SET((s >> ((cnt <= 16 ? cnt : 16) - 1)) & 1);
+        s = (uint16_t)((int32_t)(int16_t)s >> cnt);
+        XOF_SET(0); flag_szp16((uint16_t)s); break;
+    }
+    return (uint16_t)s;
+}
+
 static uint8_t adc8(uint8_t v1, uint8_t v2)
 {
     const uint8_t c = CF();
@@ -297,7 +371,9 @@ static void ref_step(void)
     useseg = R.seg_base[3];
     segoverride = false;
     uint8_t op = fetch8();
+    bool rep = false;
     for (;;) {
+        if (op == 0xf2 || op == 0xf3) { rep = true; op = fetch8(); continue; }
         if (op == 0x26) useseg = R.seg_base[0];
         else if (op == 0x2e) useseg = R.seg_base[1];
         else if (op == 0x36) useseg = R.seg_base[2];
@@ -415,14 +491,24 @@ static void ref_step(void)
     case 0xfd: R.eflags |= 0x400u; return;
     case 0xaa: case 0xab: case 0xac: case 0xad: case 0xa4: case 0xa5: {
         const int w = op & 1, step = (R.eflags & 0x400u ? -1 : 1) * (w ? 2 : 1);
-        const uint32_t src = useseg + getreg16(6), dst = R.seg_base[0] + getreg16(7);
-        if (op <= 0xa5) { if (w) wr16(dst, rd16(src)); else wr8(dst, rd8(src)); }
-        else if (op <= 0xab) { if (w) wr16(dst, getreg16(0)); else wr8(dst, getreg8(0)); }
-        else { if (w) putreg16(0, rd16(src)); else putreg8(0, rd8(src)); }
-        if (op <= 0xa5 || op >= 0xac) putreg16(6, (uint16_t)(getreg16(6) + step));
-        if (op <= 0xab) putreg16(7, (uint16_t)(getreg16(7) + step));
+        while (!rep || getreg16(1)) {
+            const uint32_t src = useseg + getreg16(6), dst = R.seg_base[0] + getreg16(7);
+            if (op <= 0xa5) { if (w) wr16(dst, rd16(src)); else wr8(dst, rd8(src)); }
+            else if (op <= 0xab) { if (w) wr16(dst, getreg16(0)); else wr8(dst, getreg8(0)); }
+            else { if (w) putreg16(0, rd16(src)); else putreg8(0, rd8(src)); }
+            if (op <= 0xa5 || op >= 0xac) putreg16(6, (uint16_t)(getreg16(6) + step));
+            if (op <= 0xab) putreg16(7, (uint16_t)(getreg16(7) + step));
+            if (!rep) break;
+            putreg16(1, (uint16_t)(getreg16(1) - 1));
+        }
         return;
     }
+    case 0xc0: modregrm(); { const uint8_t v = readrm8(); const uint8_t n = fetch8(); writerm8(ref_grp2_8(reg, n, v)); } return;
+    case 0xc1: modregrm(); { const uint16_t v = readrm16(); const uint8_t n = fetch8(); writerm16(ref_grp2_16(reg, n, v)); } return;
+    case 0xd0: modregrm(); writerm8(ref_grp2_8(reg, 1, readrm8())); return;
+    case 0xd1: modregrm(); writerm16(ref_grp2_16(reg, 1, readrm16())); return;
+    case 0xd2: modregrm(); writerm8(ref_grp2_8(reg, getreg8(1), readrm8())); return;
+    case 0xd3: modregrm(); writerm16(ref_grp2_16(reg, getreg8(1), readrm16())); return;
     case 0xf8: SETF(0, 0); return;
     case 0xf9: SETF(0, 1); return;
     case 0xfe: modregrm(); if (reg > 1) break; writerm8((uint8_t)inc_dec(readrm8(), reg != 0, 8)); return;
@@ -641,7 +727,7 @@ static void gen_one(ginsn_t *g, int index, int total)
         break;
     }
     case 14: {                     /* instructions the translator leaves to the interpreter */
-        const int t = rn(9);
+        const int t = rn(13);
         if (t < 3) {
             static const uint8_t f[] = {0xf8, 0xf9, 0xf5};
             g->b[g->len++] = f[t];
@@ -651,11 +737,25 @@ static void gen_one(ginsn_t *g, int index, int total)
             g->b[g->len++] = rn(2) ? 0xfc : 0xfd;
         } else if (t == 5 && allow_mem) {
             static const uint8_t str[] = {0xaa, 0xab, 0xac, 0xad, 0xa4, 0xa5};
+            if (rn(3) == 0) {     /* REP with a small count in CX */
+                g->b[g->len++] = 0xb9;
+                g->b[g->len++] = (uint8_t)rn(6);
+                g->b[g->len++] = 0;
+                g->b[g->len++] = rn(2) ? 0xf3 : 0xf2;
+            }
+            if (rn(4) == 0)
+                g->b[g->len++] = rn(2) ? 0x26 : 0x2e;   /* source segment override */
             g->b[g->len++] = str[rn(6)];
         } else if (t == 6) {     /* NOT / NEG / MUL */
             const int sub = 2 + (int)rn(3);
             g->b[g->len++] = (uint8_t)(sub == 4 ? 0xf7 : 0xf6 | word);
             put_modrm(g, sub, sub == 4 || word, true);
+        } else if (t >= 8) {     /* shifts and rotates: count 1, CL or imm8 */
+            const int form = (int)rn(3);
+            g->b[g->len++] = (uint8_t)((form == 0 ? 0xd0 : form == 1 ? 0xd2 : 0xc0) | word);
+            put_modrm(g, (int)rn(8), word, true);
+            if (form == 2)
+                g->b[g->len++] = (uint8_t)(rn(4) ? rn(18) : rnd());
         } else if (t == 7) {     /* SP arithmetic: add/sub sp, imm8 */
             g->b[g->len++] = 0x83;
             g->b[g->len++] = rn(2) ? 0xc4 : 0xec;
@@ -971,8 +1071,53 @@ static int replay(const char *path, int states)
     return bad ? 1 : 0;
 }
 
+/* xlat_rt_shift() against the reference group 2 for every operation, size
+ * and count, many values, both lazy and resolved incoming flags. */
+static int shift_check(void)
+{
+    int bad = 0, n = 0;
+    for (int size = 8; size <= 16; size += 8)
+        for (int op = 0; op < 8; ++op)
+            for (int cnt = 0; cnt < 256; ++cnt)
+                for (int k = 0; k < 64; ++k) {
+                    const uint16_t v = (uint16_t)(k < 4 ? (k == 0 ? 0 : k == 1 ? 0xffff : k == 2 ? 0x8000 : 1) : rnd());
+                    memset(&R, 0, sizeof(R));
+                    R.eflags = 2 | (rnd() & 0x8d5u);
+                    if (k & 1) { uint16_t r16; alu16((int)(rn(2) ? 0 : 5 + rn(3)), (uint16_t)rnd(), (uint16_t)rnd(), &r16); }
+                    xlat_rt_t rt;
+                    memset(&rt, 0, sizeof(rt));
+                    rt.eflags = R.eflags; rt.lazy_op = R.flags_op; rt.lazy_cf = R.flags_cf;
+                    rt.lazy_result = R.flags_result; rt.lazy_dst = R.flags_dst; rt.lazy_src = R.flags_src;
+                    const uint32_t got = xlat_rt_shift(&rt, size == 8 ? (v & 0xffu) : v,
+                                                       (uint32_t)op | (size == 16 ? 8u : 0u) | (uint32_t)cnt << 8);
+                    const uint32_t want = size == 8 ? ref_grp2_8((uint8_t)op, (uint8_t)cnt, (uint8_t)v)
+                                                    : ref_grp2_16((uint8_t)op, (uint8_t)cnt, v);
+                    /* both sides resolved to compare the full image */
+                    flags_now();
+                    const uint32_t fe = R.eflags & 0x8d5u;
+                    const ref_t save = R;
+                    R.flags_op = rt.lazy_op; R.flags_cf = rt.lazy_cf; R.flags_result = rt.lazy_result;
+                    R.flags_dst = rt.lazy_dst; R.flags_src = rt.lazy_src; R.eflags = rt.eflags;
+                    flags_now();
+                    const uint32_t fg = R.eflags & 0x8d5u;
+                    R = save;
+                    ++n;
+                    if (got != want || fg != fe) {
+                        if (bad++ < 10)
+                            printf("shift size %d op %d cnt %d v %04x: got %04x/%03x want %04x/%03x\n",
+                                   size, op, cnt, v, got, fg, want, fe);
+                    }
+                }
+    printf("shift check: %d cases, %d bad\n", n, bad);
+    return bad != 0;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc > 1 && !strcmp(argv[1], "--shift")) {
+        rng = 0x9e3779b9u;
+        return shift_check();
+    }
     if (argc > 2 && !strcmp(argv[1], "--replay")) {
         rng = 0x12345u;
         return replay(argv[2], argc > 3 ? atoi(argv[3]) : 300);

@@ -6,14 +6,14 @@
 #
 # XLAT_LOCKSTEP=1  check the state after every translated run (slower)
 # XLAT_SMC=1       make every program write into its own code
+# First: the shift helper against the reference for all counts (--shift).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 out="${TMPDIR:-/tmp}/xlat_test"
 arm-linux-gnueabihf-gcc -O2 -g -mthumb -march=armv7-a+fp -static -Wall -Wextra \
     -DXLAT_HOST_TEST -Isrc/fdos/xlat \
     tools/xlat_test/xlat_test.c src/fdos/xlat/*.c -o "$out"
-if [[ "$(uname -m)" == arm* || "$(uname -m)" == aarch64 ]]; then
-    "$out" "${1:-5000}" "${2:-1}"
-else
-    qemu-arm "$out" "${1:-5000}" "${2:-1}"
-fi
+run=()
+[[ "$(uname -m)" == arm* || "$(uname -m)" == aarch64 ]] || run=(qemu-arm)
+"${run[@]}" "$out" --shift
+"${run[@]}" "$out" "${1:-5000}" "${2:-1}"

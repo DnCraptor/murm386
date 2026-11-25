@@ -27,7 +27,9 @@ typedef struct {
     uint16_t n_runs;
     uint16_t ip;           /* the entry point it was built from */
     uint8_t live;
+    uint8_t cold;          /* dropped: too little runs per entry (see xlat_run) */
     uint32_t entries;
+    uint32_t insns;        /* instructions charged at its back edges */
     uint32_t exits[XLAT_EXIT_COUNT];
 } region_t;
 
@@ -214,7 +216,7 @@ static void log_region_counts(void)
                    r->cs, r->ip, (unsigned long)r->entries, (unsigned long)r->exits[0],
                    (unsigned long)r->exits[1], (unsigned long)r->exits[2],
                    (unsigned long)r->exits[3],
-                   r->live ? "" : " (invalidated)");
+                   r->live ? "" : r->cold ? " (cold)" : " (invalidated)");
     }
 }
 
@@ -429,7 +431,7 @@ static bool covered(const xlat_rt_t *rt)
     const uint32_t linear = rt->seg_base[1] + (rt->ip & 0xffffu);
     for (int k = 0; k < st->n_regions; ++k) {
         const region_t *r = &st->region[k];
-        if (r->live && linear - r->lo < r->span)
+        if ((r->live || r->cold) && linear - r->lo < r->span)
             return true;
     }
     return false;
@@ -544,6 +546,8 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
         const uint32_t key = (uint32_t)rt->cs << 16 | (rt->ip & 0xffffu);
         entry_t *e = lookup(key);
         if (!e || !st->region[e->region].live) {
+            if (e && st->region[e->region].cold)
+                break;      /* XRIP runs it: entering costs more than it saves */
             if (ran || built || !sample(rt))
                 break;
             built = true;
@@ -556,12 +560,23 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
             break;
         }
         rt->budget -= XLAT_ENTRY_COST;
+        const int32_t b0 = rt->budget, x0 = (int32_t)rt->extra;
         cur_region = r;
         tramp(rt, (uint32_t)(uintptr_t)(st->arena.base + e->code_off) | 1u);
         cur_region = NULL;
         ran = true;
         xlat_stats.entries++;
         r->entries++;
+        r->insns += (uint32_t)((b0 - rt->budget) + ((int32_t)rt->extra - x0));
+        /* A region left before its loops run (a loop body that calls or
+         * jumps out every time) costs an entry and an exit per pass: after
+         * XLAT_COLD_ENTRIES entries with fewer than XLAT_COLD_INSNS loop
+         * instructions per entry, XRIP keeps it. */
+        if (r->entries == XLAT_COLD_ENTRIES && r->insns < XLAT_COLD_ENTRIES * XLAT_COLD_INSNS) {
+            r->live = 0;
+            r->cold = 1;
+            xlat_stats.cold++;
+        }
         if (rt->exit_kind < XLAT_EXIT_COUNT) {
             xlat_stats.exits[rt->exit_kind]++;
             r->exits[rt->exit_kind]++;
@@ -621,6 +636,116 @@ uint32_t XLAT_HOT_FN(xlat_rt_cond)(const xlat_rt_t *rt, uint32_t cc)
     return result != (cc & 1u);
 }
 
+/* x86 flags image from the lazy state, as XRIP's resolve_flags(). */
+static void resolve_rt(xlat_rt_t *rt)
+{
+    if (!rt->lazy_op)
+        return;
+    const uint32_t shift = rt->lazy_op & 31u, kind = rt->lazy_op >> 5;
+    const uint32_t r = rt->lazy_result, d = rt->lazy_dst, s = rt->lazy_src;
+    uint32_t p = (r >> shift) & 0xffu;
+    p ^= p >> 4;
+    p ^= p >> 2;
+    p ^= p >> 1;
+    uint32_t v = (uint32_t)rt->lazy_cf | (~p & 1u) << 2 | (uint32_t)(r == 0) << 6 |
+                 (r >> 31) << 7 | (((r ^ d) & (r ^ s)) >> 31) << 11;
+    uint32_t carries = d ^ s ^ r;
+    if (kind == FK_SUB)
+        carries = ~carries;
+    if (kind != FK_LOGIC)
+        v |= (carries >> shift) & 0x10u;
+    rt->eflags = (rt->eflags & ~0x8d5u) | v;
+    rt->lazy_op = 0;
+}
+
+static uint32_t szp(uint32_t value, int bits)
+{
+    uint32_t p = value & 0xffu;
+    p ^= p >> 4;
+    p ^= p >> 2;
+    p ^= p >> 1;
+    return (value == 0 ? 0x40u : 0u) | ((value >> (bits - 8)) & 0x80u) | (~p & 1u) << 2;
+}
+
+/* Shift / rotate group 2 (C0, C1, D0-D3) as XRIP's op_grp2_8/16. ctl:
+ * bits 0-2 the operation (/reg), bit 3 16-bit, bits 8-15 the count. A
+ * count of 0 (mod 32) changes nothing, not even the lazy flags; otherwise
+ * the flags end up resolved in rt->eflags. Called from generated code. */
+uint32_t XLAT_HOT_FN(xlat_rt_shift)(xlat_rt_t *rt, uint32_t value, uint32_t ctl)
+{
+    const uint32_t op = ctl & 7u, bits = ctl & 8u ? 16u : 8u, mask = (1u << bits) - 1u;
+    const uint32_t cnt = (ctl >> 8) & 0x1fu;
+    uint32_t s = value & mask;
+    if (!cnt)
+        return s;
+    resolve_rt(rt);
+    uint32_t cf = rt->eflags & 1u, of = (rt->eflags >> 11) & 1u, flags_szp = 0;
+    bool set_szp = false;
+    const uint32_t top = bits - 1u;
+    switch (op) {
+    case 0: {   /* ROL */
+        const uint32_t k = cnt & top;
+        s = ((s << k) | (s >> ((bits - k) & top))) & mask;
+        cf = s & 1u;
+        of = cf ^ ((s >> top) & 1u);
+        break;
+    }
+    case 1: {   /* ROR */
+        const uint32_t k = cnt & top;
+        s = ((s >> k) | (s << ((bits - k) & top))) & mask;
+        cf = s >> top;
+        of = (s >> top) ^ ((s >> (top - 1u)) & 1u);
+        break;
+    }
+    case 2: {   /* RCL: rotate [operand:CF] */
+        const uint32_t k = bits == 8 ? cnt % 9u : (cnt >= 17 ? cnt - 17 : cnt);
+        const uint32_t ring = (s << 1) | cf, wide = (1u << (bits + 1)) - 1u;
+        const uint32_t sh = ((ring << k) | (ring >> (bits + 1 - k))) & wide;
+        s = sh >> 1;
+        cf = sh & 1u;
+        of = cf ^ ((s >> top) & 1u);
+        break;
+    }
+    case 3: {   /* RCR: rotate [CF:operand] */
+        const uint32_t k = bits == 8 ? cnt % 9u : (cnt >= 17 ? cnt - 17 : cnt);
+        const uint32_t ring = (cf << bits) | s, wide = (1u << (bits + 1)) - 1u;
+        const uint32_t sh = ((ring >> k) | (ring << (bits + 1 - k))) & wide;
+        s = sh & mask;
+        cf = sh >> bits;
+        of = (s >> top) ^ ((s >> (top - 1u)) & 1u);
+        break;
+    }
+    case 4:
+    case 6:     /* SHL */
+        cf = cnt <= bits ? (s >> (bits - cnt)) & 1u : 0u;
+        s = (s << cnt) & mask;
+        of = cf ^ (s >> top);
+        set_szp = true;
+        break;
+    case 5:     /* SHR */
+        of = cnt == 1 && (s >> top);
+        cf = cnt <= bits ? (s >> (cnt - 1u)) & 1u : 0u;
+        s >>= cnt;
+        set_szp = true;
+        break;
+    default: {  /* SAR */
+        const int32_t sv = bits == 8 ? (int32_t)(int8_t)s : (int32_t)(int16_t)s;
+        cf = (s >> ((cnt <= bits ? cnt : bits) - 1u)) & 1u;
+        s = (uint32_t)(sv >> cnt) & mask;
+        of = 0;
+        set_szp = true;
+        break;
+    }
+    }
+    uint32_t f = (rt->eflags & ~0x801u) | cf | of << 11;
+    if (set_szp) {
+        flags_szp = szp(s, (int)bits);
+        f = (f & ~0xc4u) | flags_szp;
+    }
+    rt->eflags = f;
+    return s;
+}
+
 #if XLAT_LOG
 #include "ff.h"
 
@@ -643,7 +768,7 @@ void xlat_log_write(uint16_t psp, const char *name)
     log_region_counts();
     log_rejects();
     log_printf("S translations=%lu rejects=%lu entries=%lu invalid=%lu flushes=%lu "
-               "exit b/bu/s/st=%lu/%lu/%lu/%lu native=%lu code=%lu stack_skips=%lu interp=%lu side=%lu cuts=%lu/%lu lost=%lu\r\n",
+               "exit b/bu/s/st=%lu/%lu/%lu/%lu native=%lu code=%lu stack_skips=%lu interp=%lu side=%lu cuts=%lu/%lu cold=%lu lost=%lu\r\n",
                (unsigned long)xlat_stats.translations, (unsigned long)xlat_stats.rejects,
                (unsigned long)xlat_stats.entries, (unsigned long)xlat_stats.invalidations,
                (unsigned long)xlat_stats.flushes, (unsigned long)xlat_stats.exits[0],
@@ -651,7 +776,8 @@ void xlat_log_write(uint16_t psp, const char *name)
                (unsigned long)xlat_stats.exits[3], (unsigned long)xlat_stats.guest_insns, (unsigned long)xlat_stats.code_bytes,
                (unsigned long)xlat_stats.stack_skips, (unsigned long)xlat_stats.interp,
                (unsigned long)xlat_stats.side_interp, (unsigned long)xlat_stats.cut_entries,
-               (unsigned long)xlat_stats.cuts, (unsigned long)st->log_lost);
+               (unsigned long)xlat_stats.cuts, (unsigned long)xlat_stats.cold,
+               (unsigned long)st->log_lost);
     /* CPU bursts: averages and histograms (xlat_stats_t), XRIP only / with
      * translated code; device service after the bursts. XLAT_SLICE_US is
      * meant to match the usual XRIP burst. */
