@@ -4681,6 +4681,7 @@ static bool arm_elf_irq_return(CPU *cpu, bios_callback_params_t *params)
 static void arm_elf_service_guest_irq(void)
 {
   struct saved_cpu_ctx saved;
+  CPU_regs full_regs;
   bios_callback_params_t params;
   bool old_native_done;
   bool old_pending_trap;
@@ -4691,6 +4692,9 @@ static void arm_elf_service_guest_irq(void)
     return;
 
   save_ctx(cpu, &saved);
+  /* An ISR may use 386 registers even in real mode. Preserve the upper
+     halves of the parked registers, full flags, and FS/GS as well. */
+  cpu_save_regs(cpu, &full_regs);
   old_native_done = cpu->native_done;
   old_pending_trap = cpu_pending_trap();
   old_irq_shadow = cpu_irq_shadow(cpu);
@@ -4729,9 +4733,32 @@ static void arm_elf_service_guest_irq(void)
   cpu_pending_trap_set(old_pending_trap);
   cpu_irq_shadow_set(cpu, old_irq_shadow);
   restore_ctx(cpu, &saved);
+  cpu_restore_regs(cpu, &full_regs);
   cpu->native_done = old_native_done;
   ifl = old_ifl;
 }
+
+#if XLAT
+/* Called only between completed native FDOS disk reads, never from an
+ * RP2350 interrupt or while a transport/FatFs operation is in progress.
+ * Unlike ELF yield, this path must honor the live guest IF and shadow.
+ * One ISR at a time; an ISR's own DOS/BIOS calls cannot recurse here. */
+bool fdos_disk_irq_service(void)
+{
+  static bool servicing;
+  if (servicing || pc == NULL || cpu == NULL || !cpu->intr || !ifl ||
+      cpu->native_done || cpu_irq_shadow(cpu) || cpu_pending_trap() ||
+      (cpu_getflags(cpu) & 0x0100u) || terminate_requested() ||
+      xlat_stack_free() < 4096u)
+    return false;
+
+  servicing = true;
+  arm_elf_service_guest_irq();
+  servicing = false;
+  xlat_stats.disk_irq_yields++;
+  return true;
+}
+#endif
 
 /*
  * Cooperative service point for a running native ELF application.

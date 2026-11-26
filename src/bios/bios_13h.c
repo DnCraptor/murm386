@@ -4,6 +4,14 @@
 #include "bios.h"
 #include "disk.h"
 
+#if XLAT
+/* Only the direct native FDOS path opens this window. A guest INT 13h
+ * still uses the normal interrupt semantics. */
+static bool fdos_read_irq_window;
+extern bool fdos_disk_irq_service(void);
+extern bool terminate_requested(void);
+#endif
+
 /* INT 13h status codes used by the minimal BIOS layer below.
  * These are the conventional BIOS status values returned in AH.
  */
@@ -229,6 +237,34 @@ static bool int13_transfer_lba(CPU* cpu, const BiosDisk *d, uint32_t lba, uint16
                 guest_write_block(addr, buf, sector_size);
             }
         }
+#if XLAT
+        /* A complete sector has been delivered. Neither FatFs nor the
+         * transport owns the sector buffer or has an open transaction now.
+         * Do not enter the guest from inside SPI, USB or FatFs itself. */
+        if (fdos_read_irq_window && !write && !verify && cpu->intr) {
+            fdos_read_irq_window = false;
+            const bool serviced = fdos_disk_irq_service();
+            fdos_read_irq_window = true;
+            if (serviced) {
+                if (terminate_requested()) {
+                    CPU_AL = (uint8_t)(i + 1u);
+                    int13_set_status(cpu, drive, INT13_ST_CONTROLLER);
+                    return true;
+                }
+                /* An ISR can itself use BIOS disk services: restore the
+                 * image cursor before the next sector. */
+                if (!raw && i + 1u < count) {
+                    BiosDisk current;
+                    if (!int13_get_disk(drive, &current) || current.f != d->f ||
+                        f_lseek(d->f, (FSIZE_t)(lba + i + 1u) * sector_size) != FR_OK) {
+                        CPU_AL = (uint8_t)(i + 1u);
+                        int13_set_status(cpu, drive, INT13_ST_SEEK_FAILED);
+                        return true;
+                    }
+                }
+            }
+        }
+#endif
     }
 
     if (write) {
@@ -1181,6 +1217,19 @@ static bool bios_13h_18h(CPU* cpu)
     CPU_DI = FLOPPY_DPT_OFF;
     int13_set_status(cpu, drive, INT13_ST_OK);
     return true;
+}
+
+bool bios_13h_fdos(CPU* cpu)
+{
+#if XLAT
+    const bool old_window = fdos_read_irq_window;
+    fdos_read_irq_window = true;
+    const bool result = bios_13h(cpu);
+    fdos_read_irq_window = old_window;
+    return result;
+#else
+    return bios_13h(cpu);
+#endif
 }
 
 bool bios_13h(CPU* cpu) {

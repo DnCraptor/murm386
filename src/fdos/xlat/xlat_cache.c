@@ -835,6 +835,8 @@ static int translate_here(const xlat_rt_t *rt, uint16_t ip, int trace_min, const
     const uint32_t t0 = *rt->clock;
     const int idx = translate_at(rt, ip, trace_min, extra, n_extra);
     const uint32_t us = *rt->clock - t0;
+    if (idx < 0 && st->out.reject == XLAT_RJ_DEFER)
+        xlat_stats.compile_defers++;
     xlat_stats.translate_us += us;
     if (us > xlat_stats.translate_max_us)
         xlat_stats.translate_max_us = us;
@@ -856,6 +858,10 @@ static int translate_at(const xlat_rt_t *rt, uint16_t ip, int trace_min, const u
      * encodings). */
     uint32_t need = 0;
     for (int attempt = 0; attempt < 3; ++attempt) {
+        if (xlat_compile_irq(rt)) {
+            out->reject = XLAT_RJ_DEFER;
+            break;
+        }
         if (attempt) {
             need = (need + 7u) & ~7u;
             if (need > a->size - st->ring_lo)
@@ -1036,7 +1042,13 @@ static __attribute__((noinline)) bool sample(const xlat_rt_t *rt)
             xlat_stats.stack_skips++;
             return false;
         }
-        return sample_retry(rt, h->why);
+        st->out.reject = XLAT_RJ_NONE;
+        const bool ok = sample_retry(rt, h->why);
+        if (!ok && st->out.reject == XLAT_RJ_DEFER) {
+            h->reject = HOT_RETRY;
+            h->count = 0;
+        }
+        return ok;
     } else if (++h->count < XLAT_HOT_THRESHOLD && !fn) {
         return false;
     }
@@ -1051,6 +1063,14 @@ static __attribute__((noinline)) bool sample(const xlat_rt_t *rt)
     const bool inside = covered(rt);
     if (inside || translate_here(rt, (uint16_t)rt->ip, fn ? XLAT_TRACE_MIN : 0, NULL, 0) < 0) {
         const int why = inside ? XLAT_RJ_COVERED : st->out.reject;
+        if (why == XLAT_RJ_DEFER) {
+            /* Still hot, but back off before repeating expensive discovery
+             * under a high-rate guest timer. Not an unsupported region. */
+            h->reject = HOT_RETRY;
+            h->why = (uint8_t)why;
+            h->count = 0;
+            return false;
+        }
         h->reject = why == XLAT_RJ_COVERED || why == XLAT_RJ_NOLOOP || why == XLAT_RJ_FULL
                         ? HOT_RETRY : HOT_FINAL;
         h->why = (uint8_t)why;
@@ -1080,19 +1100,30 @@ static __attribute__((noinline)) bool sample_exit(const xlat_rt_t *rt)
         h->reject = 0;
         return false;
     }
-    if (h->reject || ++h->count < XLAT_EXIT_HOT)
+    if (h->reject == HOT_FINAL ||
+        ++h->count < (h->reject == HOT_RETRY ? XLAT_REJECT_RETRY : XLAT_EXIT_HOT))
         return false;
     h->count = 0;
+    h->reject = HOT_NONE;
     if (stack_free() < XLAT_STACK_NEEDED) {
         xlat_stats.stack_skips++;
         return false;
     }
     /* inside a live region: one more entry there (no second copy) */
     const int in_live = covering(rt);
+    st->out.reject = XLAT_RJ_NONE;
     if (in_live >= 0 && add_entry(rt, in_live))
         return true;
+    if (st->out.reject == XLAT_RJ_DEFER) {
+        h->reject = HOT_RETRY;
+        return false;
+    }
     if (translate_here(rt, (uint16_t)rt->ip, XLAT_LINK_MIN, NULL, 0) < 0) {
-        h->reject = 1;
+        if (st->out.reject == XLAT_RJ_DEFER) {
+            h->reject = HOT_RETRY;
+            return false;
+        }
+        h->reject = HOT_FINAL;
         xlat_stats.rejects++;
         note_reject(rt, key, st->out.reject);
         return false;
@@ -1729,10 +1760,11 @@ void xlat_log_write(uint16_t psp, const char *name)
                (unsigned long)xlat_stats.links, (unsigned long)xlat_stats.slot_evictions,
                (unsigned long)xlat_stats.ring_retries, (unsigned long)st->log_lost,
                (unsigned long)st->log_skipped);
-    log_printf("Q ring=%luK tus=%lu tmax=%lu retry=%lu/%lu gap=%lu\r\n",
+    log_printf("Q ring=%luK tus=%lu tmax=%lu retry=%lu/%lu gap=%lu defer=%lu disk_irq=%lu\r\n",
                (unsigned long)(st->arena.size >> 10), (unsigned long)xlat_stats.translate_us,
                (unsigned long)xlat_stats.translate_max_us, (unsigned long)xlat_stats.retries_built,
-               (unsigned long)xlat_stats.retries, (unsigned long)xlat_stats.gap_calls);
+               (unsigned long)xlat_stats.retries, (unsigned long)xlat_stats.gap_calls,
+               (unsigned long)xlat_stats.compile_defers, (unsigned long)xlat_stats.disk_irq_yields);
     /* CPU bursts: averages and histograms (xlat_stats_t), XRIP only / with
      * translated code; device service after the bursts. XLAT_SLICE_US is
      * meant to match the usual XRIP burst. */

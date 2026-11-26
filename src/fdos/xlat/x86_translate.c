@@ -291,6 +291,8 @@ static int discover(tctx_t *c, uint16_t start)
     c->n = 0;
     c->n_seen = 0;
     for (;;) {
+        if ((head & 7) == 0 && xlat_compile_irq(c->rt))
+            return XLAT_RJ_DEFER;
         if (head == tail) {
             if (dhead == dtail || c->n >= XLAT_MAX_INSNS || c->no_calls)
                 break;
@@ -517,7 +519,7 @@ static void mark_dead_flags(tctx_t *c)
     }
 }
 
-static void dataflow(tctx_t *c)
+static bool dataflow(tctx_t *c)
 {
     memset(c->in_set, 0, sizeof(c->in_set));
     memset(c->out_set, 0, sizeof(c->out_set));
@@ -528,6 +530,8 @@ static void dataflow(tctx_t *c)
     while (changed) {
         changed = false;
         for (int i = 0; i < c->n; ++i) {
+            if ((i & 7) == 0 && xlat_compile_irq(c->rt))
+                return false;
             uint64_t in = c->leader[i] ? NONE_BIT : 0, cfin = in;
             for (int p = 0; p < c->n; ++p) {
                 if (c->fall_idx[p] == i || c->tgt_idx[p] == i) {
@@ -552,6 +556,7 @@ static void dataflow(tctx_t *c)
             }
         }
     }
+    return true;
 }
 
 /* How the lazy flags reach rt at a point where they may be observed:
@@ -2594,12 +2599,14 @@ static bool side_writes_more(const x86_insn_t *in)
     }
 }
 
-static void emit_stubs(tctx_t *c)
+static bool emit_stubs(tctx_t *c)
 {
     arm_emit_t *e = &c->e;
     /* Back-edge stubs first: they branch to exit stubs emitted after them. */
     for (int pass = 0; pass < 2; ++pass) {
         for (int k = 0; k < c->n_stubs; ++k) {
+            if ((k & 7) == 0 && xlat_compile_irq(c->rt))
+                return false;
             stub_t *s = &c->stub[k];
             if (pass ? s->type == ST_BACK : s->type != ST_BACK)
                 continue;
@@ -2677,6 +2684,7 @@ static void emit_stubs(tctx_t *c)
             }
         }
     }
+    return true;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -3148,6 +3156,8 @@ bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int trace
 
     c->no_calls = 0;
     int why = discover(c, ip);
+    if (why == XLAT_RJ_DEFER)
+        goto deferred;
     bool calls = false;
     for (int i = 0; i < c->n && !calls; ++i)
         calls = x86_is_call(&c->in[i]) && c->tgt_idx[i] >= 0;
@@ -3159,12 +3169,18 @@ bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int trace
         c->no_calls = 1;
         c->fn = 0;
         why = discover(c, ip);
+        if (why == XLAT_RJ_DEFER)
+            goto deferred;
         if (why != XLAT_RJ_NONE || !c->fn) {
             c->no_calls = 0;
             c->fn = 0;
             why = discover(c, ip);
+            if (why == XLAT_RJ_DEFER)
+                goto deferred;
         }
     }
+    if (xlat_compile_irq(rt))
+        goto deferred;
     out->fn = c->fn;
     out->n_insns = (uint8_t)c->n;
     out->n_interp = (uint8_t)c->n_interp;
@@ -3183,8 +3199,11 @@ bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int trace
         c->leader[j] = 1;
     }
     mark_dead_flags(c);
-    dataflow(c);
+    if (!dataflow(c))
+        goto deferred;
     plan(c);
+    if (xlat_compile_irq(rt))
+        goto deferred;
 
     /* Source copies: runs of adjacent instructions. */
     out->n_runs = 0;
@@ -3210,10 +3229,13 @@ bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int trace
     for (int i = 0; i < c->n; ++i) {
         const uint32_t from = c->e.pos;
         (void)from;
+        if ((i & 7) == 0 && xlat_compile_irq(rt))
+            goto deferred;
         emit_insn(c, i);
         SIZE_NOTE(c->in[i].op < XLAT_SIZE_RECON ? c->in[i].op : 0, from);
     }
-    emit_stubs(c);
+    if (!emit_stubs(c) || xlat_compile_irq(rt))
+        goto deferred;
     if (c->e.full) {
         /* labels past the space are not real: no patching */
         *full = true;
@@ -3239,6 +3261,8 @@ bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int trace
         goto done;
     }
 
+    if (xlat_compile_irq(rt))
+        goto deferred;
     out->code_off = a->code_top;
     out->code_len = c->e.pos - a->code_top;
     out->lo = c->lo;
@@ -3262,6 +3286,11 @@ bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int trace
     out->data_size = data;
     a->code_top = (c->e.pos + 3u) & ~3u;
     ok = true;
+    goto done;
+deferred:
+    /* No entry or region descriptor has been published. The caller owns
+     * eviction/map maintenance and may reuse these uncommitted bytes. */
+    out->reject = XLAT_RJ_DEFER;
 done:
     return ok;
 }

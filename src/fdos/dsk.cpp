@@ -134,7 +134,7 @@ STATIC void fdos_bios_13h(CPU *cpu, const char *owner)
     writew86(frame + 0u, CPU_IP);
     writew86(frame + 2u, CPU_CS);
     writew86(frame + 4u, cpu_getflags(cpu));
-    bios_13h(cpu);
+    bios_13h_fdos(cpu);
     CPU_SP = saved_sp;
   }
 }

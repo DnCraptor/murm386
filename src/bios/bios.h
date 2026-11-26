@@ -15,6 +15,7 @@ bool bios_10h(CPU*); // VIDEO
 bool bios_11h(CPU*); // EQUIPMENT LIST
 bool bios_12h(CPU*); // LOW MEM SIZE
 bool bios_13h(CPU*); // DISK 
+bool bios_13h_fdos(CPU*); /* direct native FDOS call, cooperative read */
 void bios_13h_init(void);
 void bios_13h_fdc_mediachange(int drive);
 bool bios_14h(CPU*); // SERIAL

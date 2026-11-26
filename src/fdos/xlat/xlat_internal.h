@@ -394,8 +394,17 @@ enum {
     XLAT_RJ_NOLOOP,     /* no back edge in the reachable code */
     XLAT_RJ_EMIT,       /* stubs, fix-ups or branch range exceeded */
     XLAT_RJ_FULL,       /* does not fit an empty arena */
-    XLAT_RJ_COUNT
+    XLAT_RJ_COUNT,
+    XLAT_RJ_DEFER = XLAT_RJ_COUNT /* transient: never passed to note_reject */
 };
+
+/* A large region may need longer than the CPU quantum. Only an enabled
+ * pending IRQ aborts a compilation already in progress. The burst
+ * deadline still limits starting another translation. */
+static inline bool xlat_compile_irq(const xlat_rt_t *rt)
+{
+    return rt->wall_deadline && *rt->intr;
+}
 
 /* Arena layout shared by translator and cache. */
 typedef struct xlat_arena {
