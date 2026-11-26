@@ -145,16 +145,28 @@ static bool xlat_burst_native;
 
 /* Translated execution needs real mode with 16-bit code and stack, no trap,
  * no HLT, no IRQ shadow, no pending IRQ with IF set, direct fast memory. */
-static __time_critical_func() bool xlat_state_ok(const CPU *cpu)
+/* The machine mode translated code runs in: stays so for the burst. */
+static __time_critical_func() bool xlat_mode_ok(const CPU *cpu)
 {
     return !(protected_mode || (cr0 & CR0_PE) || code32 || stack32 || !fast_memory_size || tf ||
-             halted || pending_trap || cpu->i286_irq_shadow || cpu->native_done ||
-             XRIP_IP > 0xffffu || (cpu->intr && ifl)) &&
+             cpu->native_done || XRIP_IP > 0xffffu) &&
            /* plain real-mode segments: translated code takes selector = base >> 4 */
            segment_base[reges] == (uint32_t)segregs[reges] << 4 &&
            segment_base[regcs] == (uint32_t)segregs[regcs] << 4 &&
            segment_base[regss] == (uint32_t)segregs[regss] << 4 &&
            segment_base[regds] == (uint32_t)segregs[regds] << 4;
+}
+
+/* XRIP must run the next instruction first (an IRQ to take, the STI / MOV SS
+ * shadow, HLT, a trap): over after an instruction or the ISR. */
+static __time_critical_func() bool xlat_moment_ok(const CPU *cpu)
+{
+    return !(halted || pending_trap || cpu->i286_irq_shadow || (cpu->intr && ifl));
+}
+
+static __time_critical_func() bool xlat_state_ok(const CPU *cpu)
+{
+    return xlat_mode_ok(cpu) && xlat_moment_ok(cpu);
 }
 
 /* ES and DS loaded by translated code (rt->seg_base) become XRIP's, and CS
@@ -289,10 +301,19 @@ uint32_t __time_critical_func(xlat_interp_one)(xlat_rt_t *rt, uint32_t flags)
  * accounted to translated code (0: nothing ran, the state is untouched).
  * DOS programs run in nested bursts (exec_run_process() inside INT 21h), so
  * nested bursts are included; xlat_run() checks the stack before translating. */
-static __time_critical_func() uint32_t xlat_enter(CPU *cpu, uint32_t count, uint32_t t0)
+static __time_critical_func() uint32_t xlat_enter(CPU *cpu, uint32_t count, uint32_t t0,
+                                                  bool at_start)
 {
-    if (xlat_busy || !xlat_state_ok(cpu)) {
+    if (xlat_busy || !xlat_mode_ok(cpu)) {
         xlat_armed = false;
+        return 0;
+    }
+    if (!xlat_moment_ok(cpu)) {
+        /* An IRQ pending at the burst start (the usual case after a timer
+         * tick): XRIP takes it, and the first taken branch to a loop head
+         * after the IRET comes back here. Disarmed, the whole burst ran in
+         * XRIP, the interrupted loop included. */
+        xlat_armed = true;
         return 0;
     }
     xlat_rt_t *const rt = &xlat_state;
@@ -327,7 +348,10 @@ static __time_critical_func() uint32_t xlat_enter(CPU *cpu, uint32_t count, uint
     xlat_busy = true;
     const bool ran = xlat_run(rt);
     xlat_busy = false;
-    xlat_armed = true;
+    /* Nothing to run at a burst start: the marked loop heads XRIP reaches
+     * later may have regions. At a cut (a marked target) without one: no
+     * more cuts this burst (each would cost a lookup and a sample). */
+    xlat_armed = ran || at_start;
     if (!ran)
         return 0;
     /* Segment registers changed by interpreted instructions are XRIP's own
@@ -376,7 +400,7 @@ void __time_critical_func(xrip_step_cpu)(CPU *cpu, int count)
 #endif
     const uint32_t t0 = timer_hw->timerawl;
     xlat_dirty = true;      /* device service, DMA, native code ran since the last burst */
-    uint32_t xlat_used = xlat_enter(cpu, (uint32_t)count, t0);
+    uint32_t xlat_used = xlat_enter(cpu, (uint32_t)count, t0, true);
     xlat_burst_native = xlat_used != 0;
 #endif
 
@@ -410,12 +434,10 @@ void __time_critical_func(xrip_step_cpu)(CPU *cpu, int count)
             if (!xlat_cut || !left)
                 break;
             xlat_stats.cuts++;
-            xlat_used = xlat_enter(cpu, left, t0);
+            xlat_used = xlat_enter(cpu, left, t0, false);   /* sets xlat_armed */
             if (xlat_used) {
                 xlat_stats.cut_entries++;
                 xlat_burst_native = true;
-            } else {
-                xlat_armed = false;
             }
         }
         xlat_cut = false;

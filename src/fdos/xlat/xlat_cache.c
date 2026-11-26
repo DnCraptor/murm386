@@ -280,11 +280,29 @@ static void log_region_count(const region_t *r)
     }
 }
 
+/* The XLAT_LOG_TOP regions with the most time in them, while the log has
+ * room (the summary is written before them). */
+#define XLAT_LOG_TOP 40
 static void log_region_counts(void)
 {
+    static uint8_t done[XLAT_MAX_REGIONS];
+    memset(done, 0, sizeof(done));
+    int held = 0, shown = 0;
     for (int k = 0; k < XLAT_MAX_REGIONS; ++k)
-        if (st->region[k].held)
-            log_region_count(&st->region[k]);
+        held += st->region[k].held;
+    for (; shown < XLAT_LOG_TOP && st->log_len + 256u <= XLAT_LOG_SIZE; ++shown) {
+        int best = -1;
+        for (int k = 0; k < XLAT_MAX_REGIONS; ++k)
+            if (st->region[k].held && !done[k] &&
+                (best < 0 || st->region[k].us > st->region[best].us))
+                best = k;
+        if (best < 0)
+            break;
+        done[best] = 1;
+        log_region_count(&st->region[best]);
+    }
+    if (held > shown)
+        log_printf("C ... %d more regions\r\n", held - shown);
 }
 
 static void note_reject(const xlat_rt_t *rt, uint32_t key, int why)
@@ -361,9 +379,10 @@ static void log_rejects(void)
 /* Where the time goes outside translated code (xlat_prof_note, xlat.h): the
  * heaviest CS:IP of each kind, counted as in the space-saving algorithm (a
  * new key takes the smallest slot and its count: counts are upper bounds). */
-#define XLAT_PROF_SLOTS 16
+#define XLAT_PROF_SLOTS 24
 typedef struct {
     uint32_t key, linear, count;
+    uint32_t err;          /* the count it took over: the true count is at least count - err */
     uint8_t b[8];
 } prof_t;
 static prof_t prof[XLAT_PROF_KINDS][XLAT_PROF_SLOTS];
@@ -385,6 +404,7 @@ void XLAT_HOT_FN(xlat_prof_note)(unsigned kind, uint32_t key, uint32_t linear, c
     }
     min->key = key;
     min->linear = linear;
+    min->err = min->count;
     min->count += weight;
     for (uint32_t i = 0; i < 8; ++i)
         min->b[i] = linear + i < mem_size ? mem[linear + i] : 0;
@@ -406,9 +426,10 @@ static void log_prof(void)
             const uint32_t a = best->linear;
             const char *const area = a < 0xa0000u ? "" : a < 0xc0000u ? " vram" : a < 0x100000u
                                      ? " rom/umb" : " hma/xms";
-            log_printf("P %s %04X:%04X %05lX n=%lu%s %02X %02X %02X %02X %02X %02X %02X %02X\r\n",
+            log_printf("P %s %04X:%04X %05lX n=%lu err=%lu%s %02X %02X %02X %02X %02X %02X %02X %02X\r\n",
                        kinds[kind], (unsigned)(best->key >> 16), (unsigned)(best->key & 0xffffu),
-                       (unsigned long)a, (unsigned long)best->count, area, best->b[0], best->b[1],
+                       (unsigned long)a, (unsigned long)best->count, (unsigned long)best->err, area,
+                       best->b[0], best->b[1],
                        best->b[2], best->b[3], best->b[4], best->b[5], best->b[6], best->b[7]);
             best->count = 0;
         }
@@ -1393,9 +1414,6 @@ void xlat_log_write(uint16_t psp, const char *name)
     last_translations = xlat_stats.translations;
     last_entries = xlat_stats.entries;
     log_printf("== exit PSP %04X %s ==\r\n", psp, name);
-    log_region_counts();
-    log_rejects();
-    log_prof();
     /* in two parts: log_printf() formats at most 255 characters */
     log_printf("S translations=%lu rejects=%lu entries=%lu invalid=%lu flushes=%lu evict=%lu "
                "exit b/bu/s/st=%lu/%lu/%lu/%lu native=%lu code=%lu stack_skips=%lu ",
@@ -1444,6 +1462,10 @@ void xlat_log_write(uint16_t psp, const char *name)
     log_printf("V svc n=%lu us=%lu max=%lu\r\n", (unsigned long)b->svc_n,
                (unsigned long)(b->svc_n ? (uint32_t)(b->svc_us / b->svc_n) : 0),
                (unsigned long)b->svc_max);
+    /* then the details, the region counts last: they fill what room is left */
+    log_rejects();
+    log_prof();
+    log_region_counts();
     xlat_stats.xrip_bursts = xlat_stats.xlat_bursts = 0;
     xlat_stats.xrip_us = xlat_stats.xrip_insns = xlat_stats.xlat_us = xlat_stats.xlat_insns = 0;
     memset(xlat_stats.xrip_hist, 0, sizeof(xlat_stats.xrip_hist));
