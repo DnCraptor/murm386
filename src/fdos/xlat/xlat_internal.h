@@ -28,7 +28,7 @@
 #endif
 #define XLAT_MAX_INSNS       63              /* per region; bit 63 of a set is "entry state" */
 #ifndef XLAT_MAX_REGIONS
-#define XLAT_MAX_REGIONS     192             /* region slots (entry_t.region is 8 bits) */
+#define XLAT_MAX_REGIONS     384             /* region slots (entry_t.region, xlat_link_t.region: 16 bits) */
 #endif
 /* Regions without a loop (traces, XLAT_TRACES): built at a hot CALL target
  * (rt->fn_entry) when every path from the entry runs at least XLAT_TRACE_MIN
@@ -56,9 +56,11 @@ typedef struct xlat_link {
     uint32_t code;         /* entry label address | 1 */
     uint32_t epoch;        /* rt->epoch it is good for */
     uint16_t charge;       /* budget charged on entry: XLAT_ENTRY_COST + region fn */
-    uint8_t region;
-    uint8_t pad;
+    uint16_t region;       /* the dispatcher reads it at offset 14 (LDRH) */
 } xlat_link_t;
+_Static_assert(__builtin_offsetof(xlat_link_t, charge) == 12 &&
+               __builtin_offsetof(xlat_link_t, region) == 14,
+               "xlat_link_t layout is used by the dispatcher");
 _Static_assert(sizeof(xlat_link_t) == 16, "xlat_link_t is indexed << 4 by generated code");
 static inline uint32_t xlat_link_hash(uint32_t key)
 {

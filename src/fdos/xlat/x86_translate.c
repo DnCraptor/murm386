@@ -458,7 +458,8 @@ static bool dead_mul_ok(const x86_insn_t *x)
 
 /* Shifts and multiplications whose flags nothing sees: the instructions
  * after them on their one path touch neither the flags nor memory (nor
- * leave) until an ALU instruction that writes all of them and reads none.
+ * leave) until an ALU instruction without a memory operand that writes all
+ * of them and reads none.
  * Such an instruction is done here without flags (emit_shift_value,
  * emit_mul_value) and is no producer: the flags pass it unchanged
  * (dataflow). Nothing in between can observe them (a side exit, an exit
@@ -474,7 +475,11 @@ static bool flags_dead_after(const tctx_t *c, int i)
         const x86_insn_t *x = &c->in[k];
         switch (x->op) {
         case XO_ALU:
-            return !x86_is_carry_op(x);       /* writes every arithmetic flag */
+            /* writes every arithmetic flag; one with a memory operand may
+             * leave by its side exit, where XRIP would write them too, but
+             * an exception it raises there (#GP at offset FFFF) would see
+             * flags never computed */
+            return !x86_is_carry_op(x) && !x86_has_mem(x);
         case XO_MOV:
         case XO_XCHG:
         case XO_LEA:
@@ -961,9 +966,9 @@ static void emit_checks(tctx_t *c, int i, int bytes, bool write)
 {
     arm_emit_t *e = &c->e;
     if (write) {
-        /* the shared check (xlat_emit_trampoline): fast memory, and the
-         * 64-byte block of addr holds (or is right before) no translated
-         * x86 code of any region (xlat_code_map) */
+        /* the shared check (xlat_emit_trampoline): fast or upper memory,
+         * and no translated x86 code of any region in the bytes
+         * (xlat_code_map, then the exact gapchk) */
         const int k = bytes == 1 ? 0 : bytes == 2 ? 1 : bytes == 4 ? 2 : 3;
         if (k == 3)
             arm_addw(e, A_R12, A_R0, (uint32_t)bytes - 1u);
@@ -2707,7 +2712,7 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     arm_dp_reg(&e, DP_SUB, 1, A_R0, A_R0, A_R2, SH_LSL, 0);   /* SUBS budget, charge */
     const uint32_t miss4 = arm_branch_slot(&e);
     arm_ls_imm(&e, LS_STR, A_R0, A_R11, XLAT_RT_BUDGET);
-    arm_ls_imm(&e, LS_LDRB, A_R2, A_R3, 14);
+    arm_ls_imm(&e, LS_LDRH, A_R2, A_R3, 14);                  /* region */
     arm_ls_imm(&e, LS_STR, A_R2, A_R11, XLAT_RT_CUR);
     arm_ls_imm(&e, LS_LDR, A_R0, A_R11, XLAT_RT_LAST);
     arm_dp_reg(&e, DP_ADD, 0, A_R0, A_R0, A_R2, SH_LSL, 2);
@@ -2738,11 +2743,51 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
         ok &= tramp_patch(&e, to, k == 0 ? a->dispatch : a->epilogue, C_AL);
     }
 
+    /* Exact write check behind xlat_code_map, BL here from the trampolines
+     * below (their lr pushed) with r0 = the first byte, r12 = the last:
+     * r12 = 0 when the bytes hold no translated x86 code (rt->gap), 1 when
+     * they do (rt->hit), else what xlat_rt_gap() finds. r0-r3 kept. The
+     * callers have pushed 16 bytes: the C call has an 8-byte aligned stack. */
+    const uint32_t gapchk = e.pos;
+    arm_e16(&e, 0xb406u);                                    /* PUSH {r1, r2} */
+    arm_ls_imm(&e, LS_LDR, A_R1, A_R11, XLAT_RT_GAP_LO);
+    arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R0, A_R1, SH_LSL, 0);
+    const uint32_t g_below = arm_branch_slot(&e);           /* addr < gap_lo */
+    arm_ls_imm(&e, LS_LDR, A_R1, A_R11, XLAT_RT_GAP_HI);
+    arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R12, A_R1, SH_LSL, 0);
+    const uint32_t g_above = arm_branch_slot(&e);           /* last >= gap_hi */
+    arm_mov32(&e, A_R12, 0);
+    const uint32_t g_ret = e.pos;
+    arm_e16(&e, 0xbc06u);                                    /* POP {r1, r2} */
+    arm_bx(&e, A_LR);
+    const uint32_t g_hit = e.pos;
+    arm_ls_imm(&e, LS_LDR, A_R1, A_R11, XLAT_RT_HIT_LO);
+    arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R12, A_R1, SH_LSL, 0);
+    const uint32_t h_below = arm_branch_slot(&e);           /* last < hit_lo */
+    arm_ls_imm(&e, LS_LDR, A_R1, A_R11, XLAT_RT_HIT_HI);
+    arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R0, A_R1, SH_LSL, 0);
+    const uint32_t h_above = arm_branch_slot(&e);           /* addr >= hit_hi */
+    arm_mov32(&e, A_R12, 1);
+    const uint32_t h_ret = arm_branch_slot(&e);
+    const uint32_t g_call = e.pos;
+    arm_push(&e, 0x4019u);                     /* r0, r3, r4, lr */
+    arm_mov(&e, A_R1, A_R12);
+    arm_mov(&e, A_R2, A_R11);
+    arm_mov32(&e, A_R12, (uint32_t)(uintptr_t)&xlat_rt_gap);
+    arm_blx(&e, A_R12);
+    arm_mov(&e, A_R12, A_R0);
+    arm_pop(&e, 0x4019u);
+    const uint32_t c_ret = arm_branch_slot(&e);
+    ok &= tramp_patch(&e, g_below, g_hit, C_CC) && tramp_patch(&e, g_above, g_hit, C_CS) &&
+          tramp_patch(&e, h_below, g_call, C_CC) && tramp_patch(&e, h_above, g_call, C_CS) &&
+          tramp_patch(&e, h_ret, g_ret, C_AL) && tramp_patch(&e, c_ret, g_ret, C_AL);
+
     /* Write check (emit_checks), BL here with r0 = linear address of an
      * access of 1, 2, 4 bytes (wchk[0..2]) or of up to 128 ending at r12
      * (wchk[3]). Returns CS when the access is outside fast and upper
-     * memory (tramp_umb) or its 64-byte block may hold translated x86 code
-     * (xlat_code_map), else CC. r0 and r1 are kept, r12 clobbered. */
+     * memory (tramp_umb) or it meets translated x86 code (its 64-byte block
+     * marked in xlat_code_map, then gapchk), else CC. r0-r2 are kept, r12
+     * clobbered. */
     static const uint8_t wlast[3] = {0, 1, 3};
     uint32_t to_common[3];
     for (int k = 0; k < 3; ++k) {
@@ -2756,7 +2801,8 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     a->wchk[3] = e.pos;
     for (int k = 0; k < 3; ++k)
         ok &= tramp_patch(&e, to_common[k], a->wchk[3], C_AL);
-    arm_e16(&e, 0xb402u);                                    /* PUSH {r1} */
+    arm_e16(&e, 0xb406u);                                    /* PUSH {r1, r2} */
+    arm_mov(&e, A_R2, A_R12);                                /* the last byte */
     arm_ls_imm(&e, LS_LDR, A_R1, A_R11, XLAT_RT_MEM_SIZE);
     arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R12, A_R1, SH_LSL, 0);   /* CMP last, size */
     const uint32_t wout = arm_branch_slot(&e);
@@ -2768,9 +2814,13 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     arm_lsr_reg(&e, A_R12, A_R12, A_R1);
     arm_dp_imm(&e, DP_AND, 1, A_PC, A_R12, 1);                 /* TST #1: C stays clear */
     const uint32_t wfree = arm_branch_slot(&e);
-    arm_dp_imm(&e, DP_SUB, 1, A_PC, A_R12, 0);                 /* CMP r12, #0: C set */
+    arm_e16(&e, 0xb502u);                                    /* PUSH {r1, lr} */
+    arm_mov(&e, A_R12, A_R2);
+    ok &= arm_bl(&e, gapchk);
+    arm_pop(&e, 0x4002u);                                    /* r1, lr */
+    arm_dp_imm(&e, DP_SUB, 1, A_PC, A_R12, 1);                 /* CMP r12, #1: CS = code */
     const uint32_t wdone = e.pos;
-    arm_e16(&e, 0xbc02u);                                    /* POP {r1} */
+    arm_e16(&e, 0xbc06u);                                    /* POP {r1, r2} */
     arm_bx(&e, A_LR);
     const uint32_t wumb = e.pos;                             /* past fast memory */
     tramp_umb(&e, A_R1);
@@ -2807,7 +2857,8 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     a->wside[3] = e.pos;
     for (int k = 0; k < 3; ++k)
         ok &= tramp_patch(&e, xto_common[k], a->wside[3], C_AL);
-    arm_e16(&e, 0xb402u);                                    /* PUSH {r1} */
+    arm_e16(&e, 0xb406u);                                    /* PUSH {r1, r2} */
+    arm_mov(&e, A_R2, A_R12);
     arm_ls_imm(&e, LS_LDR, A_R1, A_R11, XLAT_RT_MEM_SIZE);
     arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R12, A_R1, SH_LSL, 0);
     const uint32_t xout = arm_branch_slot(&e);
@@ -2818,12 +2869,19 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     arm_ubfx(&e, A_R1, A_R0, XLAT_CODE_BLOCK_SHIFT, 3);
     arm_lsr_reg(&e, A_R12, A_R12, A_R1);
     arm_dp_imm(&e, DP_AND, 1, A_PC, A_R12, 1);
+    const uint32_t xfree = arm_branch_slot(&e);
+    arm_e16(&e, 0xb502u);                                    /* PUSH {r1, lr} */
+    arm_mov(&e, A_R12, A_R2);
+    ok &= arm_bl(&e, gapchk);
+    arm_pop(&e, 0x4002u);                                    /* r1, lr */
+    arm_dp_imm(&e, DP_SUB, 1, A_PC, A_R12, 1);
     const uint32_t xcode = arm_branch_slot(&e);
-    arm_e16(&e, 0xbc02u);                                    /* POP {r1} */
+    const uint32_t xok = e.pos;
+    arm_e16(&e, 0xbc06u);                                    /* POP {r1, r2} */
     arm_addw(&e, A_LR, A_LR, 6);
     arm_bx(&e, A_LR);
     const uint32_t xfail = e.pos;
-    arm_e16(&e, 0xbc02u);                                    /* POP {r1} */
+    arm_e16(&e, 0xbc06u);                                    /* POP {r1, r2} */
     arm_subw(&e, A_R0, A_LR, 1);                             /* the halfwords */
     arm_ls_imm(&e, LS_LDRH, A_R12, A_R0, 4);
     arm_addw(&e, A_LR, A_LR, 6);
@@ -2833,7 +2891,8 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     tramp_umb(&e, A_R1);
     const uint32_t xumb_out = arm_branch_slot(&e);
     const uint32_t xumb_in = arm_branch_slot(&e);
-    ok &= tramp_patch(&e, xout, xumb, C_CS) && tramp_patch(&e, xcode, xfail, C_NE) &&
+    ok &= tramp_patch(&e, xout, xumb, C_CS) && tramp_patch(&e, xfree, xok, C_EQ) &&
+          tramp_patch(&e, xcode, xfail, C_CS) &&
           tramp_patch(&e, xumb_out, xfail, C_CS) && tramp_patch(&e, xumb_in, xmap, C_AL);
 
     /* PUSH of r2 (emit_push_value) with the arguments as for wside: SS:SP-2
@@ -2846,7 +2905,7 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     arm_ls_imm(&e, LS_LDR, A_R12, A_R11, XLAT_RT_SEG_BASE + 8u);
     arm_dp_reg(&e, DP_ADD, 0, A_R0, A_R1, A_R12, SH_LSL, 0);
     arm_addw(&e, A_R12, A_R0, 1);
-    arm_e16(&e, 0xb408u);                                    /* PUSH {r3} */
+    arm_e16(&e, 0xb40au);                                    /* PUSH {r1, r3} */
     arm_ls_imm(&e, LS_LDR, A_R3, A_R11, XLAT_RT_MEM_SIZE);
     arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R12, A_R3, SH_LSL, 0);
     const uint32_t pout = arm_branch_slot(&e);
@@ -2857,21 +2916,29 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     arm_ubfx(&e, A_R3, A_R0, XLAT_CODE_BLOCK_SHIFT, 3);
     arm_lsr_reg(&e, A_R12, A_R12, A_R3);
     arm_dp_imm(&e, DP_AND, 1, A_PC, A_R12, 1);
+    const uint32_t pfree = arm_branch_slot(&e);
+    arm_e16(&e, 0xb502u);                                    /* PUSH {r1, lr} */
+    arm_addw(&e, A_R12, A_R0, 1);
+    ok &= arm_bl(&e, gapchk);
+    arm_pop(&e, 0x4002u);                                    /* r1, lr */
+    arm_dp_imm(&e, DP_SUB, 1, A_PC, A_R12, 1);
     const uint32_t pcode = arm_branch_slot(&e);
-    arm_e16(&e, 0xbc08u);                                    /* POP {r3} */
+    const uint32_t pok = e.pos;
+    arm_e16(&e, 0xbc0au);                                    /* POP {r1, r3} */
     arm_ls_imm(&e, LS_LDR, A_R12, A_R11, XLAT_RT_MEM);
     arm_ls_reg(&e, LS_STRH, A_R2, A_R12, A_R0);
     arm_ls_imm(&e, LS_STRH, A_R1, A_R11, XLAT_RT_SP);
     arm_addw(&e, A_LR, A_LR, 6);
     arm_bx(&e, A_LR);
     const uint32_t pfail = e.pos;
-    arm_e16(&e, 0xbc08u);                                    /* POP {r3} */
+    arm_e16(&e, 0xbc0au);                                    /* POP {r1, r3} */
     const uint32_t pto = arm_branch_slot(&e);
     const uint32_t pumb = e.pos;                             /* past fast memory */
     tramp_umb(&e, A_R3);
     const uint32_t pumb_out = arm_branch_slot(&e);
     const uint32_t pumb_in = arm_branch_slot(&e);
-    ok &= tramp_patch(&e, pout, pumb, C_CS) && tramp_patch(&e, pcode, pfail, C_NE) &&
+    ok &= tramp_patch(&e, pout, pumb, C_CS) && tramp_patch(&e, pfree, pok, C_EQ) &&
+          tramp_patch(&e, pcode, pfail, C_CS) &&
           tramp_patch(&e, pto, xfail + 2u, C_AL) &&          /* wside's failure, after its POP */
           tramp_patch(&e, pumb_out, pfail, C_CS) && tramp_patch(&e, pumb_in, pmap, C_AL);
 

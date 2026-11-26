@@ -1755,9 +1755,9 @@ static int replay(const char *path, int states)
     }
     printf("replay: regions %d, states checked %d, mismatches %d, untranslated %d\n",
            nreg, checked, bad, untranslated);
-    printf("stats: translations %u entries %u exits b/budget/side %u/%u/%u native insns %u\n",
+    printf("stats: translations %u entries %u exits b/budget/side %u/%u/%u native insns %u gap %u\n",
            xlat_stats.translations, xlat_stats.entries, xlat_stats.exits[0], xlat_stats.exits[1],
-           xlat_stats.exits[2], xlat_stats.guest_insns);
+           xlat_stats.exits[2], xlat_stats.guest_insns, xlat_stats.gap_calls);
     return bad ? 1 : 0;
 }
 

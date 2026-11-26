@@ -57,7 +57,7 @@ typedef struct {
 typedef struct {
     uint32_t key;          /* cs << 16 | ip */
     uint32_t code_off;     /* arena offset of the entry label */
-    uint8_t region;
+    uint16_t region;
     uint8_t used;          /* E_* */
 } entry_t;
 
@@ -290,7 +290,7 @@ static void log_region_count(const region_t *r)
 #define XLAT_LOG_TOP 40
 static void log_region_counts(void)
 {
-    static uint8_t done[XLAT_MAX_REGIONS];
+    static uint32_t done[(XLAT_MAX_REGIONS + 31) / 32];   /* bits: SRAM is short */
     memset(done, 0, sizeof(done));
     int held = 0, shown = 0;
     for (int k = 0; k < XLAT_MAX_REGIONS; ++k)
@@ -298,12 +298,12 @@ static void log_region_counts(void)
     for (; shown < XLAT_LOG_TOP && st->log_len + 256u <= XLAT_LOG_SIZE; ++shown) {
         int best = -1;
         for (int k = 0; k < XLAT_MAX_REGIONS; ++k)
-            if (st->region[k].held && !done[k] &&
+            if (st->region[k].held && !(done[k >> 5] >> (k & 31) & 1u) &&
                 (best < 0 || st->region[k].us > st->region[best].us))
                 best = k;
         if (best < 0)
             break;
-        done[best] = 1;
+        done[best >> 5] |= 1u << (best & 31);
         log_region_count(&st->region[best]);
     }
     if (held > shown)
@@ -591,7 +591,7 @@ static entry_t *XLAT_HOT_FN(lookup)(uint32_t key)
     return NULL;
 }
 
-static bool insert(uint32_t key, uint8_t region, uint32_t code_off, bool mark)
+static bool insert(uint32_t key, uint16_t region, uint32_t code_off, bool mark)
 {
     const uint32_t h = hash32(key) >> (32 - XLAT_ENTRY_BITS);
     for (uint32_t k = 0; k < 8; ++k) {
@@ -772,6 +772,7 @@ static int take_slot(bool *evicted)
 
 static int translate_at(const xlat_rt_t *rt, uint16_t ip, int trace_min, const uint16_t *extra,
                         int n_extra);
+static void gap_reset(void);
 
 /* Translate at rt->cs:ip (with extra entry points); the new region's slot,
  * or -1. */
@@ -868,10 +869,11 @@ built:;
     }
     r->live = 1;
     r->epoch = st->epoch;
+    gap_reset();           /* its bytes may be in a cached gap */
     if (evicted)
         rebuild_maps();    /* before the new marks: they are set below */
     for (unsigned k = 0; k < out->n_entries; ++k) {
-        insert((uint32_t)rt->cs << 16 | out->entries[k].ip, (uint8_t)idx,
+        insert((uint32_t)rt->cs << 16 | out->entries[k].ip, (uint16_t)idx,
                out->entries[k].code_off, out->entries[k].mark);
         if (out->entries[k].mark) {
             const uint32_t m = xlat_map_index(r->cs_base + out->entries[k].ip);
@@ -1297,6 +1299,71 @@ static bool rep_direct(const xlat_rt_t *rt, uint32_t linear, uint32_t len)
            linear + len <= XLAT_UMB_BASE + XLAT_UMB_MARGIN + rt->umb_room;
 }
 
+/* The rt the trampolines' exact write checks were last filled for
+ * (xlat_rt_gap): a new region's bytes make its gap stale. */
+static xlat_rt_t *gap_rt;
+
+static void gap_reset(void)
+{
+    if (gap_rt)
+        gap_rt->gap_lo = gap_rt->gap_hi = gap_rt->hit_lo = gap_rt->hit_hi = 0;
+}
+
+/* [addr, last] meets the x86 bytes of a held region (live, cold or
+ * invalidated: as xlat_code_map). Else *lo, *hi (when given) narrowed to
+ * the gap around it. */
+static bool code_meets(uint32_t addr, uint32_t last, uint32_t *lo, uint32_t *hi,
+                       uint32_t *run_lo, uint32_t *run_hi)
+{
+    const uint32_t wlo = lo ? *lo : addr, whi = hi ? *hi : last + 1u;
+    for (int k = 0; k < XLAT_MAX_REGIONS; ++k) {
+        const region_t *r = &st->region[k];
+        if (!r->held || r->lo >= whi || r->lo + r->span <= wlo)
+            continue;
+        const uint8_t *d = st->arena.base + r->data_off;
+        for (unsigned j = 0; j < r->n_runs; ++j) {
+            uint32_t at;
+            __builtin_memcpy(&at, d, 4);
+            const uint32_t len = d[4] | (uint32_t)d[5] << 8;
+            d += 8 + ((len + 3u) & ~3u);
+            if (!len)
+                continue;
+            const uint32_t end = at + len;
+            if (at <= last && end > addr) {
+                *run_lo = at;
+                *run_hi = end;
+                return true;
+            }
+            if (end <= addr) {
+                if (lo && end > *lo)
+                    *lo = end;
+            } else if (hi && at < *hi) {
+                *hi = at;
+            }
+        }
+    }
+    return false;
+}
+
+/* In flash: called only for writes into marked blocks the cached gap and
+ * hit do not cover. */
+uint32_t xlat_rt_gap(uint32_t addr, uint32_t last, xlat_rt_t *rt)
+{
+    gap_rt = rt;
+    uint32_t lo = addr & ~0xfffu, hi = (last | 0xfffu) + 1u, run_lo, run_hi;
+    xlat_stats.gap_calls++;
+    if (!st || code_meets(addr, last, &lo, &hi, &run_lo, &run_hi)) {
+        if (st) {
+            rt->hit_lo = run_lo;
+            rt->hit_hi = run_hi;
+        }
+        return 1;
+    }
+    rt->gap_lo = lo;
+    rt->gap_hi = hi;
+    return 0;
+}
+
 /* In flash, not SRAM (__time_critical_func): the SRAM heap is small, and
  * the copy itself is bound by guest memory. */
 uint32_t xlat_rt_rep(xlat_rt_t *rt, uint32_t src, uint32_t dst, uint32_t ctl)
@@ -1311,10 +1378,15 @@ uint32_t xlat_rt_rep(xlat_rt_t *rt, uint32_t src, uint32_t dst, uint32_t ctl)
     if (!stos && ((src - rt->seg_base[ctl >> XLAT_REP_SEG_SHIFT & 3u]) + len > 0x10000u ||
                   !rep_direct(rt, src, len)))
         return 0;
-    /* no translated code in the destination (as the write checks) */
+    /* no translated code in the destination (as the write checks): the
+     * blocks, then the bytes when a block is marked */
     for (uint32_t b = dst >> XLAT_CODE_BLOCK_SHIFT; b <= (dst + len - 1u) >> XLAT_CODE_BLOCK_SHIFT; ++b)
-        if (rt->code_map[b >> 3] >> (b & 7u) & 1u)
-            return 0;
+        if (rt->code_map[b >> 3] >> (b & 7u) & 1u) {
+            uint32_t run_lo, run_hi;
+            if (!st || code_meets(dst, dst + len - 1u, NULL, NULL, &run_lo, &run_hi))
+                return 0;
+            break;
+        }
     uint8_t *d = rt->mem + dst;
     if (stos) {
         uint32_t v = bytes == 1 ? (src & 0xffu) * 0x01010101u
@@ -1328,10 +1400,22 @@ uint32_t xlat_rt_rep(xlat_rt_t *rt, uint32_t src, uint32_t dst, uint32_t ctl)
     }
     const uint8_t *s = rt->mem + src;
     if (dst > src && dst < src + len) {
-        /* forward overlap: element by element, as the instruction does */
-        for (uint32_t k = 0; k < len; k += bytes)
-            for (uint32_t j = 0; j < bytes; ++j)
-                d[k + j] = s[k + j];
+        /* forward overlap: element by element, each read whole before it
+         * is written, as the instruction does (MOVSW at dst = src + 1
+         * repeats the first byte pair, not the first byte) */
+        for (uint32_t k = 0; k < len; k += bytes) {
+            if (bytes == 4) {
+                uint32_t w;
+                __builtin_memcpy(&w, s + k, 4);
+                __builtin_memcpy(d + k, &w, 4);
+            } else if (bytes == 2) {
+                uint16_t w;
+                __builtin_memcpy(&w, s + k, 2);
+                __builtin_memcpy(d + k, &w, 2);
+            } else {
+                d[k] = s[k];
+            }
+        }
         return 1;
     }
     uint32_t k = 0;
@@ -1557,10 +1641,10 @@ void xlat_log_write(uint16_t psp, const char *name)
                (unsigned long)xlat_stats.links, (unsigned long)xlat_stats.slot_evictions,
                (unsigned long)xlat_stats.ring_retries, (unsigned long)st->log_lost,
                (unsigned long)st->log_skipped);
-    log_printf("Q ring=%luK tus=%lu tmax=%lu retry=%lu/%lu\r\n",
+    log_printf("Q ring=%luK tus=%lu tmax=%lu retry=%lu/%lu gap=%lu\r\n",
                (unsigned long)(st->arena.size >> 10), (unsigned long)xlat_stats.translate_us,
                (unsigned long)xlat_stats.translate_max_us, (unsigned long)xlat_stats.retries_built,
-               (unsigned long)xlat_stats.retries);
+               (unsigned long)xlat_stats.retries, (unsigned long)xlat_stats.gap_calls);
     /* CPU bursts: averages and histograms (xlat_stats_t), XRIP only / with
      * translated code; device service after the bursts. XLAT_SLICE_US is
      * meant to match the usual XRIP burst. */

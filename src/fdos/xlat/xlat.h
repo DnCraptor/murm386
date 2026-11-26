@@ -65,6 +65,12 @@ typedef struct xlat_rt {
      * bytes is checked by its last byte: the first XLAT_UMB_MARGIN bytes
      * of the window are left to XRIP. Not the VGA aperture A0000-BFFFF. */
     uint32_t umb_room;
+    /* Exact checks behind xlat_code_map (xlat_rt_gap): a write into a
+     * marked block within [gap_lo, gap_hi) touches no translated x86 code;
+     * one meeting [hit_lo, hit_hi) does (a run of some region). Both are
+     * reset when a region is installed; empty when lo >= hi. */
+    uint32_t gap_lo, gap_hi;
+    uint32_t hit_lo, hit_hi;
 } xlat_rt_t;
 
 #define XLAT_UMB_BASE   0xC0000u
@@ -97,6 +103,10 @@ typedef struct xlat_rt {
 #define XLAT_RT_LINKS      104
 #define XLAT_RT_SP         108
 #define XLAT_RT_UMB        112
+#define XLAT_RT_GAP_LO     116
+#define XLAT_RT_GAP_HI     120
+#define XLAT_RT_HIT_LO     124
+#define XLAT_RT_HIT_HI     128
 
 #if UINTPTR_MAX == 0xffffffffu
 _Static_assert(__builtin_offsetof(xlat_rt_t, mem_size) == XLAT_RT_MEM_SIZE &&
@@ -124,7 +134,11 @@ _Static_assert(__builtin_offsetof(xlat_rt_t, mem_size) == XLAT_RT_MEM_SIZE &&
                __builtin_offsetof(xlat_rt_t, cur) == XLAT_RT_CUR &&
                __builtin_offsetof(xlat_rt_t, links) == XLAT_RT_LINKS &&
                __builtin_offsetof(xlat_rt_t, sp) == XLAT_RT_SP &&
-               __builtin_offsetof(xlat_rt_t, umb_room) == XLAT_RT_UMB,
+               __builtin_offsetof(xlat_rt_t, umb_room) == XLAT_RT_UMB &&
+               __builtin_offsetof(xlat_rt_t, gap_lo) == XLAT_RT_GAP_LO &&
+               __builtin_offsetof(xlat_rt_t, gap_hi) == XLAT_RT_GAP_HI &&
+               __builtin_offsetof(xlat_rt_t, hit_lo) == XLAT_RT_HIT_LO &&
+               __builtin_offsetof(xlat_rt_t, hit_hi) == XLAT_RT_HIT_HI,
                "xlat_rt_t layout is used by generated code");
 #endif
 
@@ -152,6 +166,7 @@ typedef struct xlat_stats {
     uint32_t evictions;         /* regions dropped to make room (ring, slots) */
     uint32_t slot_evictions;    /* of those: for a region slot (all 64 held) */
     uint32_t ring_retries;      /* translations that did not fit at the ring head */
+    uint32_t gap_calls;         /* xlat_rt_gap(): exact write checks the cached gap/hit missed */
     uint32_t retries;           /* rejected burst starts tried again (still hot) */
     uint32_t retries_built;     /* of those: built */
     uint32_t translate_us;      /* time in the translator (xlat_translate, eviction) */
@@ -404,6 +419,12 @@ uint32_t xlat_rt_popf(xlat_rt_t *rt, uint32_t value);
 #define XLAT_REP_STOS      (1u << 19)
 #define XLAT_REP_SEG_SHIFT 20
 uint32_t xlat_rt_rep(xlat_rt_t *rt, uint32_t src, uint32_t dst, uint32_t ctl);
+
+/* A write of [addr, last] by generated code into a block xlat_code_map
+ * marks (the trampoline's checks, when rt->gap / rt->hit do not decide):
+ * 1 when it meets the x86 bytes of a held region (rt->hit set to that
+ * run), else 0 (rt->gap set to the gap around it, within its 4 KiB). */
+uint32_t xlat_rt_gap(uint32_t addr, uint32_t last, xlat_rt_t *rt);
 
 /* Helper called by generated code for an x87 instruction (and FWAIT), the
  * memory operand's linear address already checked (fast memory, no
