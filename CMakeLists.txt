@@ -26,7 +26,7 @@ set(VIDEO_MODE "VGA256" CACHE STRING "Video adapter: RUNTIME, MCGA, EGA128, VGA1
 # interpreter is built exactly as before. The arena (code + source copies)
 # and tables are allocated from the native PSRAM pool on first use.
 option(XLAT "Translate hot real-mode x86 loops to ARM code" ON)
-set(XLAT_ARENA_KB 256 CACHE STRING "Translator code arena (ring), KiB, from the native PSRAM pool")
+set(XLAT_ARENA_KB 512 CACHE STRING "Translator code arena (ring), KiB, from the native PSRAM pool")
 # Experiment: code arena in a static SRAM buffer of XLAT_SRAM_ARENA_KB instead
 # of the PSRAM span, to measure the XIP-cache contention. The buffer comes out
 # of the heap, which the emulator needs at run time: keep it small.

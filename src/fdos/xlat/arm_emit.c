@@ -138,6 +138,46 @@ void arm_lsr_reg(arm_emit_t *e, int rd, int rn, int rm)
     arm_e32(e, (uint16_t)(0xfa20u | (unsigned)rn), (uint16_t)(0xf000u | (unsigned)rd << 8 | (unsigned)rm));
 }
 
+void arm_shift_reg(arm_emit_t *e, int sh, int rd, int rn, int rm)
+{
+    arm_e32(e, (uint16_t)(0xfa00u | (unsigned)sh << 5 | (unsigned)rn),
+            (uint16_t)(0xf000u | (unsigned)rd << 8 | (unsigned)rm));
+}
+
+void arm_shift_imm(arm_emit_t *e, int sh, int rd, int rm, int amount)
+{
+    arm_dp_reg(e, DP_ORR, 0, rd, A_PC, rm, sh, amount);
+}
+
+void arm_mul(arm_emit_t *e, int rd, int rn, int rm)
+{
+    arm_e32(e, (uint16_t)(0xfb00u | (unsigned)rn), (uint16_t)(0xf000u | (unsigned)rd << 8 | (unsigned)rm));
+}
+
+void arm_udiv(arm_emit_t *e, int rd, int rn, int rm)
+{
+    arm_e32(e, (uint16_t)(0xfbb0u | (unsigned)rn), (uint16_t)(0xf0f0u | (unsigned)rd << 8 | (unsigned)rm));
+}
+
+void arm_sdiv(arm_emit_t *e, int rd, int rn, int rm)
+{
+    arm_e32(e, (uint16_t)(0xfb90u | (unsigned)rn), (uint16_t)(0xf0f0u | (unsigned)rd << 8 | (unsigned)rm));
+}
+
+void arm_mls(arm_emit_t *e, int rd, int rn, int rm, int ra)
+{
+    arm_e32(e, (uint16_t)(0xfb00u | (unsigned)rn),
+            (uint16_t)((unsigned)ra << 12 | (unsigned)rd << 8 | 0x10u | (unsigned)rm));
+}
+
+void arm_sbfx(arm_emit_t *e, int rd, int rn, int lsb, int width)
+{
+    const unsigned l = (unsigned)lsb;
+    arm_e32(e, (uint16_t)(0xf340u | (unsigned)rn),
+            (uint16_t)((l >> 2) << 12 | (unsigned)rd << 8 | (l & 3u) << 6 |
+                       (unsigned)(width - 1)));
+}
+
 void arm_bfi(arm_emit_t *e, int rd, int rn, int lsb, int width)
 {
     const unsigned l = (unsigned)lsb, msb = (unsigned)(lsb + width - 1);

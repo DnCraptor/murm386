@@ -451,6 +451,9 @@ void __time_critical_func(xrip_step_cpu)(CPU *cpu, int count)
     const uint32_t svc0 = xlat_stats.svc_n;
     const unsigned long retired0 = retired;
 #endif
+#if XLAT_LOG
+    uint32_t burst_xrip_us = 0, burst_xrip_insns = 0;   /* in run_instructions() */
+#endif
     const uint32_t t0 = timer_hw->timerawl;
     xlat_dirty = true;      /* device service, DMA, native code ran since the last burst */
     uint32_t xlat_used = xlat_enter(cpu, (uint32_t)count, t0, true);
@@ -470,7 +473,7 @@ void __time_critical_func(xrip_step_cpu)(CPU *cpu, int count)
          * disarms the check for the rest of the burst. */
         uint32_t left = (uint32_t)count;
 #if XLAT_LOG
-        uint32_t xrip_ran = 0;
+        uint32_t xrip_ran = 0, xrip_us = 0;
 #endif
         for (;;) {
             left = xlat_used >= left ? 0 : left - xlat_used;
@@ -478,10 +481,14 @@ void __time_critical_func(xrip_step_cpu)(CPU *cpu, int count)
                 break;
             xlat_cut = false;
             const unsigned long r0 = retired;
+#if XLAT_LOG
+            const uint32_t tx = timer_hw->timerawl;
+#endif
             run_instructions(left);
             const uint32_t ran = (uint32_t)(retired - r0);
 #if XLAT_LOG
             xrip_ran += ran;
+            xrip_us += timer_hw->timerawl - tx;
 #endif
             left = ran >= left ? 0 : left - ran;
             if (!xlat_cut || !left)
@@ -504,6 +511,8 @@ void __time_critical_func(xrip_step_cpu)(CPU *cpu, int count)
             if (xlat_burst_native)
                 xlat_stats.xrip_tail += xrip_ran;
         }
+        burst_xrip_us = xrip_us;
+        burst_xrip_insns = xrip_ran;
 #endif
     }
     xlat_armed = false;
@@ -523,6 +532,8 @@ void __time_critical_func(xrip_step_cpu)(CPU *cpu, int count)
             xlat_stats.xlat_bursts++;
             xlat_stats.xlat_us += us;
             xlat_stats.xlat_insns += n;
+            xlat_stats.mix_xrip_us += burst_xrip_us;
+            xlat_stats.mix_xrip_insns += burst_xrip_insns;
             xlat_stats.xlat_hist[xlat_us_bucket(us)]++;
         } else if (n == (uint32_t)count) {   /* full XRIP bursts only */
             xlat_stats.xrip_bursts++;

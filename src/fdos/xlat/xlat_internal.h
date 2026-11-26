@@ -126,6 +126,13 @@ void arm_mov(arm_emit_t *e, int rd, int rm);            /* MOV.W, flags unchange
 void arm_lsl(arm_emit_t *e, int rd, int rm, int amount);/* flags unchanged */
 void arm_lsr(arm_emit_t *e, int rd, int rm, int amount);/* flags unchanged */
 void arm_lsr_reg(arm_emit_t *e, int rd, int rn, int rm);   /* LSR.W rd, rn, rm; flags unchanged */
+void arm_shift_reg(arm_emit_t *e, int sh, int rd, int rn, int rm);  /* SH_* rd, rn, rm (by rm & 0xff); flags unchanged */
+void arm_shift_imm(arm_emit_t *e, int sh, int rd, int rm, int amount);  /* SH_* by 1..31; flags unchanged */
+void arm_sbfx(arm_emit_t *e, int rd, int rn, int lsb, int width);
+void arm_mul(arm_emit_t *e, int rd, int rn, int rm);               /* MUL.W: flags unchanged */
+void arm_udiv(arm_emit_t *e, int rd, int rn, int rm);
+void arm_sdiv(arm_emit_t *e, int rd, int rn, int rm);
+void arm_mls(arm_emit_t *e, int rd, int rn, int rm, int ra);      /* rd = ra - rn * rm */
 void arm_bfi(arm_emit_t *e, int rd, int rn, int lsb, int width);
 void arm_ubfx(arm_emit_t *e, int rd, int rn, int lsb, int width);
 void arm_uxth(arm_emit_t *e, int rd, int rm);
@@ -229,7 +236,9 @@ typedef struct x86_insn {
     uint8_t mem_direct;                /* moffs / mod 0 rm 6: offset is disp only */
     uint8_t rep;                       /* XO_STR: 0, 1 REP / REPE (F3), 2 REPNE (F2) */
     uint8_t sreg;                      /* XO_SEG: segment register (0 ES 1 CS 2 SS 3 DS) */
-    uint8_t local;                     /* XO_FAR CALL / JMP to the region's own CS */
+    uint8_t local;                     /* XO_FAR CALL / JMP to the region's own CS;
+                                          XO_SHIFT, MUL / IMUL: its flags are never seen
+                                          (x86_translate: mark_dead_flags) */
     uint8_t pad;                       /* NOP / FWAIT bytes taken in front (x86_decode) */
     uint16_t disp;
 } x86_insn_t;
@@ -328,6 +337,12 @@ static inline int x86_flag_kind(const x86_insn_t *in)
     case ALU_SUB: case ALU_SBB: case ALU_CMP: case ALU_NEG: return FK_SUB;
     default: return FK_LOGIC;
     }
+}
+
+/* DIV / IDIV: XRIP leaves the flags as they are. */
+static inline bool x86_is_div(const x86_insn_t *in)
+{
+    return in->op == XO_MULDIV && (in->sub == 6 || in->sub == 7);
 }
 
 /* ADC/SBB: read CF and always store their flags (XRIP resolves them). */

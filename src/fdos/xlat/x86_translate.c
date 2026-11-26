@@ -158,7 +158,8 @@ static bool dyn_exit(const x86_insn_t *in)
  * or the instruction works on rt), as at an entry. */
 static bool flags_in_rt(const x86_insn_t *in)
 {
-    return in->op == XO_INTERP || in->op == XO_SHIFT || in->op == XO_MULDIV ||
+    return in->op == XO_INTERP || (in->op == XO_SHIFT && !in->local) ||
+           (in->op == XO_MULDIV && !in->local && !x86_is_div(in)) ||
            in->op == XO_FLAG || x86_str_flags(in);
 }
 
@@ -442,6 +443,73 @@ static bool recon_ok(const x86_insn_t *in)
     return true;
 }
 
+/* A shift or rotate that may go without flags: a register operand, not
+ * RCL / RCR (they read CF). */
+static bool dead_shift_ok(const x86_insn_t *x)
+{
+    return x->op == XO_SHIFT && x->a.kind == OPD_REG && x->sub != 2 && x->sub != 3;
+}
+
+/* MUL / IMUL (one operand or r16, r/m16, imm): its flags may be dropped. */
+static bool dead_mul_ok(const x86_insn_t *x)
+{
+    return x->op == XO_MULDIV && !x86_is_div(x);
+}
+
+/* Shifts and multiplications whose flags nothing sees: the instructions
+ * after them on their one path touch neither the flags nor memory (nor
+ * leave) until an ALU instruction that writes all of them and reads none.
+ * Such an instruction is done here without flags (emit_shift_value,
+ * emit_mul_value) and is no producer: the flags pass it unchanged
+ * (dataflow). Nothing in between can observe them (a side exit, an exit
+ * edge, a helper); the instruction itself may side-exit before it changes
+ * anything (a memory operand of MUL: XRIP does it, flags included). */
+static bool flags_dead_after(const tctx_t *c, int i)
+{
+    int k = i;
+    for (int steps = 0; steps < 16; ++steps) {
+        k = c->fall_idx[k];
+        if (k < 0)
+            return false;
+        const x86_insn_t *x = &c->in[k];
+        switch (x->op) {
+        case XO_ALU:
+            return !x86_is_carry_op(x);       /* writes every arithmetic flag */
+        case XO_MOV:
+        case XO_XCHG:
+        case XO_LEA:
+        case XO_NOP:
+            if (x86_has_mem(x) && x->op != XO_LEA)
+                return false;
+            break;
+        case XO_MISC:
+            if (x86_has_mem(x) || x->sub == MISC_XLAT)
+                return false;
+            break;
+        case XO_SHIFT:                        /* dead as well: the same ALU follows */
+            if (!dead_shift_ok(x))
+                return false;
+            break;
+        case XO_MULDIV:                       /* the same; DIV may leave (#DE) */
+            if (!dead_mul_ok(x) || x->b.kind == OPD_MEM)
+                return false;
+            break;
+        default:
+            return false;
+        }
+    }
+    return false;
+}
+
+static void mark_dead_flags(tctx_t *c)
+{
+    for (int i = 0; i < c->n; ++i) {
+        x86_insn_t *x = &c->in[i];
+        if (x->op == XO_SHIFT || x->op == XO_MULDIV)
+            x->local = (dead_shift_ok(x) || dead_mul_ok(x)) && flags_dead_after(c, i);
+    }
+}
+
 static void dataflow(tctx_t *c)
 {
     memset(c->in_set, 0, sizeof(c->in_set));
@@ -604,7 +672,7 @@ static void plan(tctx_t *c)
     }
     for (int i = 0; i < c->n; ++i) {
         const x86_insn_t *in = &c->in[i];
-        if (x86_accesses_mem(in) || in->op == XO_FPU || in->op == XO_IO)
+        if (x86_accesses_mem(in) || in->op == XO_FPU || in->op == XO_IO || x86_is_div(in))
             plan_sync(c, c->in_set[i], side_producer(c, i));  /* side exit */
         if (dyn_exit(in))
             plan_sync(c, c->out_set[i], edge_producer(c, i)); /* exit to the popped IP */
@@ -1406,10 +1474,56 @@ static void emit_jcc(tctx_t *c, int i)
 /* Shift / rotate through xlat_rt_shift(): the lazy flags go to rt first,
  * the helper leaves its flags there. Memory operands are checked (side exit)
  * before anything changes. */
+/* A register shift or rotate whose flags are dead (mark_dead_shifts): the
+ * value only, the count as XRIP's (& 31; rotates modulo the size). */
+static void emit_shift_value(tctx_t *c, int i)
+{
+    arm_emit_t *e = &c->e;
+    const x86_insn_t *in = &c->in[i];
+    const int size = in->size;
+    const int v = get_raw(c, &in->a, size, A_R1);
+    const bool rot = in->sub < 2;
+    /* r1 = the operand as the shift needs it */
+    if (rot) {
+        arm_ubfx(e, A_R1, v, 0, size);
+        arm_dp_reg(e, DP_ORR, 0, A_R1, A_R1, A_R1, SH_LSL, size);        /* x:x */
+        if (size == 8)
+            arm_dp_reg(e, DP_ORR, 0, A_R1, A_R1, A_R1, SH_LSL, 16);    /* x:x:x:x */
+    } else if (in->sub == 5) {
+        arm_ubfx(e, A_R1, v, 0, size);
+    } else if (in->sub == 7) {
+        arm_sbfx(e, A_R1, v, 0, size);
+    } else if (v != A_R1) {
+        arm_mov(e, A_R1, v);
+    }
+    const int sh = rot ? SH_ROR : in->sub == 5 ? SH_LSR : in->sub == 7 ? SH_ASR : SH_LSL;
+    if (in->b.kind == OPD_IMM) {
+        int n = (int)(in->b.imm & 31u);
+        if (rot) {
+            n &= size - 1;
+            if (n && in->sub == 0)
+                n = size - n;                 /* ROL n = ROR size - n */
+        }
+        if (!n)
+            return;                           /* the value stays */
+        arm_shift_imm(e, sh, A_R1, A_R1, n);
+    } else {
+        arm_dp_imm(e, DP_AND, 0, A_R2, A_R5, rot ? (uint32_t)size - 1u : 31u);   /* CL */
+        if (rot && in->sub == 0)
+            arm_dp_imm(e, DP_RSB, 0, A_R2, A_R2, (uint32_t)size);  /* ROR by size - n (or size) */
+        arm_shift_reg(e, sh, A_R1, A_R1, A_R2);
+    }
+    put_raw(c, &in->a, size, A_R1);
+}
+
 static void emit_shift(tctx_t *c, int i)
 {
     arm_emit_t *e = &c->e;
     const x86_insn_t *in = &c->in[i];
+    if (in->local) {
+        emit_shift_value(c, i);
+        return;
+    }
     const int r = sync_recon(c, c->in_set[i], c->pfp[i]);
     if (r >= 0)
         emit_recon(c, r);
@@ -1563,10 +1677,97 @@ static void emit_misc(tctx_t *c, int i)
 /* MUL / IMUL / DIV / IDIV through xlat_rt_muldiv(): flags to rt first, as
  * for the shift helper. #DE (division by zero or overflow) leaves by the side
  * exit before anything changed: XRIP runs the instruction and the fault. */
+/* DIV / IDIV here (no flags, as XRIP's); #DE (a zero divisor, a quotient
+ * that does not fit) leaves by the side exit: XRIP raises it. r2 = the
+ * divisor (from get_raw). */
+static void emit_div_value(tctx_t *c, int i, int v)
+{
+    arm_emit_t *e = &c->e;
+    const x86_insn_t *in = &c->in[i];
+    const bool sign = in->sub == 7, w = in->size == 16;
+    if (sign)
+        arm_sbfx(e, A_R2, v, 0, in->size);
+    else
+        arm_ubfx(e, A_R2, v, 0, in->size);
+    arm_dp_imm(e, DP_SUB, 1, A_PC, A_R2, 0);
+    emit_branch(c, side_dest(c, i, 0), C_EQ);
+    /* r1 = the dividend: DX:AX or AX */
+    if (w) {
+        arm_uxth(e, A_R1, A_R4);
+        arm_dp_reg(e, DP_ORR, 0, A_R1, A_R1, A_R6, SH_LSL, 16);
+    } else if (sign) {
+        arm_sbfx(e, A_R1, A_R4, 0, 16);
+    } else {
+        arm_uxth(e, A_R1, A_R4);
+    }
+    if (sign)
+        arm_sdiv(e, A_R3, A_R1, A_R2);
+    else
+        arm_udiv(e, A_R3, A_R1, A_R2);
+    /* the quotient fits: 0..max, or -half..half-1 (INT32_MIN / -1 too) */
+    const uint32_t lim = w ? 0x10000u : 0x100u;
+    if (sign) {
+        arm_addw(e, A_R12, A_R3, lim / 2u);
+        arm_dp_imm(e, DP_SUB, 1, A_PC, A_R12, lim);
+    } else {
+        arm_dp_imm(e, DP_SUB, 1, A_PC, A_R3, lim);
+    }
+    emit_branch(c, side_dest(c, i, 0), C_CS);
+    arm_mls(e, A_R1, A_R3, A_R2, A_R1);                              /* remainder */
+    if (w) {
+        arm_bfi(e, A_R4, A_R3, 0, 16);                               /* AX */
+        arm_bfi(e, A_R6, A_R1, 0, 16);                               /* DX */
+    } else {
+        arm_bfi(e, A_R4, A_R3, 0, 8);                                /* AL */
+        arm_bfi(e, A_R4, A_R1, 8, 8);                                /* AH */
+    }
+}
+
+/* MUL / IMUL whose flags are dead (mark_dead_flags): the product only. */
+static void emit_mul_value(tctx_t *c, int i, int v)
+{
+    arm_emit_t *e = &c->e;
+    const x86_insn_t *in = &c->in[i];
+    if (in->sub == MULDIV_IMUL3) {
+        arm_sbfx(e, A_R2, v, 0, 16);
+        arm_mov32(e, A_R3, (uint32_t)(int32_t)(int16_t)in->a.imm);
+        arm_mul(e, A_R1, A_R2, A_R3);
+        put_raw(c, &in->a, 16, A_R1);
+        return;
+    }
+    const bool sign = in->sub == 5, w = in->size == 16;
+    if (sign) {
+        arm_sbfx(e, A_R2, v, 0, in->size);
+        arm_sbfx(e, A_R3, A_R4, 0, in->size);
+    } else {
+        arm_ubfx(e, A_R2, v, 0, in->size);
+        arm_ubfx(e, A_R3, A_R4, 0, in->size);
+    }
+    arm_mul(e, A_R1, A_R2, A_R3);
+    if (w) {
+        arm_bfi(e, A_R4, A_R1, 0, 16);                               /* AX */
+        arm_lsr(e, A_R1, A_R1, 16);
+        arm_bfi(e, A_R6, A_R1, 0, 16);                               /* DX */
+    } else {
+        arm_bfi(e, A_R4, A_R1, 0, 16);                               /* AX */
+    }
+}
+
 static void emit_muldiv(tctx_t *c, int i)
 {
     arm_emit_t *e = &c->e;
     const x86_insn_t *in = &c->in[i];
+    if (x86_is_div(in) || in->local) {
+        const int size = in->sub == MULDIV_IMUL3 ? 16 : in->size;
+        if (in->b.kind == OPD_MEM)
+            emit_mem_access(c, i, size / 8, false);
+        const int v = get_raw(c, &in->b, size, A_R2);
+        if (x86_is_div(in))
+            emit_div_value(c, i, v);
+        else
+            emit_mul_value(c, i, v);
+        return;
+    }
     const int r = sync_recon(c, c->in_set[i], c->pfp[i]);
     if (r >= 0)
         emit_recon(c, r);
@@ -1679,11 +1880,69 @@ static void emit_string_cmp(tctx_t *c, int i)
 /* MOVS / STOS / LODS, with REP: the element loop runs here while CX != 0.
  * All checks of an element come before its changes, so a side exit runs the
  * (restartable) instruction in XRIP with the current SI, DI and CX. */
+/* REP MOVS / STOS: the whole run in xlat_rt_rep() when it can. Returns the
+ * branch slot taken when it did (to the end of the instruction), or
+ * UINT32_MAX. */
+static uint32_t emit_rep_bulk(tctx_t *c, int i)
+{
+    arm_emit_t *e = &c->e;
+    const x86_insn_t *in = &c->in[i];
+    const int bytes = in->size / 8;
+    x86_insn_t t = *in;
+    t.mem_mod = 0;
+    t.mem_direct = 0;
+    t.disp = 0;
+    if (in->sub == STR_MOVS) {
+        t.mem_rm = 4;                                   /* [SI] */
+        emit_offset(c, &t);
+        arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_SEG_BASE + 4u * in->mem_seg);
+        arm_dp_reg(e, DP_ADD, 0, A_R3, A_R0, A_R12, SH_LSL, 0);
+    } else if (bytes == 4) {
+        arm_mov(e, A_R3, A_R4);
+    } else {
+        arm_ubfx(e, A_R3, A_R4, 0, bytes * 8);         /* AL / AX */
+    }
+    t.mem_rm = 5;                                       /* ES:[DI] */
+    emit_offset(c, &t);
+    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_SEG_BASE + 0u);
+    arm_dp_reg(e, DP_ADD, 0, A_R2, A_R0, A_R12, SH_LSL, 0);
+    arm_mov(e, A_R1, A_R3);
+    arm_uxth(e, A_R3, A_R5);                            /* CX */
+    uint32_t ctl = (uint32_t)bytes << 16 | (in->sub == STR_STOS ? XLAT_REP_STOS : 0u) |
+                   (uint32_t)in->mem_seg << XLAT_REP_SEG_SHIFT;
+    if (!arm_dp_imm(e, DP_ORR, 0, A_R3, A_R3, ctl)) {
+        arm_mov32(e, A_R12, ctl);
+        arm_dp_reg(e, DP_ORR, 0, A_R3, A_R3, A_R12, SH_LSL, 0);
+    }
+    arm_mov(e, A_R0, A_R11);
+    arm_mov32(e, A_R12, (uint32_t)(uintptr_t)&xlat_rt_rep);
+    arm_blx(e, A_R12);
+    arm_dp_imm(e, DP_SUB, 1, A_PC, A_R0, 0);
+    const uint32_t slow = arm_branch_slot(e);
+    /* done: SI, DI += CX * bytes (16 bits), CX = 0 */
+    arm_uxth(e, A_R12, A_R5);
+    if (bytes > 1)
+        arm_lsl(e, A_R12, A_R12, bytes == 4 ? 2 : 1);
+    if (in->sub == STR_MOVS) {
+        arm_dp_reg(e, DP_ADD, 0, A_R1, A_R9, A_R12, SH_LSL, 0);
+        arm_bfi(e, A_R9, A_R1, 0, 16);
+    }
+    arm_dp_reg(e, DP_ADD, 0, A_R1, A_R10, A_R12, SH_LSL, 0);
+    arm_bfi(e, A_R10, A_R1, 0, 16);
+    arm_mov32(e, A_R1, 0);
+    arm_bfi(e, A_R5, A_R1, 0, 16);
+    const uint32_t done = arm_branch_slot(e);
+    local_patch(c, slow, C_EQ);
+    return done;
+}
+
 static void emit_string(tctx_t *c, int i)
 {
     arm_emit_t *e = &c->e;
     const x86_insn_t *in = &c->in[i];
     const int bytes = in->size / 8;
+    const uint32_t bulk = in->rep && (in->sub == STR_MOVS || in->sub == STR_STOS)
+                          ? emit_rep_bulk(c, i) : UINT32_MAX;
     /* r2 = step: bytes, or -bytes when DF is set */
     arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_EFLAGS);
     arm_ubfx(e, A_R12, A_R12, 10, 1);
@@ -1745,6 +2004,8 @@ static void emit_string(tctx_t *c, int i)
             c->overflow = true;
         local_patch(c, done, C_EQ);
     }
+    if (bulk != UINT32_MAX)
+        local_patch(c, bulk, C_AL);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -2810,6 +3071,7 @@ bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int trace
         }
         c->leader[j] = 1;
     }
+    mark_dead_flags(c);
     dataflow(c);
     plan(c);
 

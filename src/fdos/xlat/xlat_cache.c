@@ -1272,7 +1272,8 @@ uint32_t XLAT_HOT_FN(xlat_rt_resolve)(xlat_rt_t *rt)
     return rt->eflags;
 }
 
-uint32_t XLAT_HOT_FN(xlat_rt_popf)(xlat_rt_t *rt, uint32_t value)
+/* In flash as xlat_rt_rep (SRAM heap). */
+uint32_t xlat_rt_popf(xlat_rt_t *rt, uint32_t value)
 {
     xlat_rt_pending(rt);
     resolve_rt(rt);
@@ -1284,6 +1285,63 @@ uint32_t XLAT_HOT_FN(xlat_rt_popf)(xlat_rt_t *rt, uint32_t value)
         return 0;
     rt->eflags = (rt->eflags & ~0x7fd5u) | (value & 0x7fd5u);
     rt->lazy_cf = (uint8_t)(rt->eflags & 1u);   /* resolved: lazy_cf = CF */
+    return 1;
+}
+
+/* [linear, + len) is at rt->mem + linear (xlat_rt_t: fast or upper memory). */
+static bool rep_direct(const xlat_rt_t *rt, uint32_t linear, uint32_t len)
+{
+    if (linear + len <= rt->mem_size)
+        return true;
+    return rt->umb_room && linear >= XLAT_UMB_BASE &&
+           linear + len <= XLAT_UMB_BASE + XLAT_UMB_MARGIN + rt->umb_room;
+}
+
+/* In flash, not SRAM (__time_critical_func): the SRAM heap is small, and
+ * the copy itself is bound by guest memory. */
+uint32_t xlat_rt_rep(xlat_rt_t *rt, uint32_t src, uint32_t dst, uint32_t ctl)
+{
+    const uint32_t n = ctl & 0xffffu, bytes = ctl >> 16 & 7u;
+    const bool stos = (ctl & XLAT_REP_STOS) != 0;
+    if (!n || (rt->eflags & 0x400u))
+        return 0;
+    const uint32_t len = n * bytes;
+    if ((dst - rt->seg_base[0]) + len > 0x10000u || !rep_direct(rt, dst, len))
+        return 0;
+    if (!stos && ((src - rt->seg_base[ctl >> XLAT_REP_SEG_SHIFT & 3u]) + len > 0x10000u ||
+                  !rep_direct(rt, src, len)))
+        return 0;
+    /* no translated code in the destination (as the write checks) */
+    for (uint32_t b = dst >> XLAT_CODE_BLOCK_SHIFT; b <= (dst + len - 1u) >> XLAT_CODE_BLOCK_SHIFT; ++b)
+        if (rt->code_map[b >> 3] >> (b & 7u) & 1u)
+            return 0;
+    uint8_t *d = rt->mem + dst;
+    if (stos) {
+        uint32_t v = bytes == 1 ? (src & 0xffu) * 0x01010101u
+                     : bytes == 2 ? (src & 0xffffu) * 0x00010001u : src;
+        uint32_t k = 0;
+        for (; k + 4u <= len; k += 4u)
+            __builtin_memcpy(d + k, &v, 4);
+        for (; k < len; ++k)
+            d[k] = (uint8_t)(v >> (8u * (k & 3u)));   /* the pattern goes on byte by byte */
+        return 1;
+    }
+    const uint8_t *s = rt->mem + src;
+    if (dst > src && dst < src + len) {
+        /* forward overlap: element by element, as the instruction does */
+        for (uint32_t k = 0; k < len; k += bytes)
+            for (uint32_t j = 0; j < bytes; ++j)
+                d[k + j] = s[k + j];
+        return 1;
+    }
+    uint32_t k = 0;
+    for (; k + 4u <= len; k += 4u) {
+        uint32_t w;
+        __builtin_memcpy(&w, s + k, 4);
+        __builtin_memcpy(d + k, &w, 4);
+    }
+    for (; k < len; ++k)
+        d[k] = s[k];
     return 1;
 }
 
@@ -1516,6 +1574,13 @@ void xlat_log_write(uint16_t psp, const char *name)
                (unsigned long)(b->xlat_bursts ? (uint32_t)(b->xlat_us / b->xlat_bursts) : 0),
                (unsigned long)(b->xlat_bursts ? (uint32_t)(b->xlat_insns / b->xlat_bursts) : 0),
                (unsigned)XLAT_SLICE_US);
+    /* the bursts with translated code split: XRIP (run_instructions) and the
+     * rest (xlat_run: translated code, helpers, the translations) */
+    log_printf("M ms=%lu insns=%lu xrip ms=%lu insns=%lu rest ms=%lu insns=%lu\r\n",
+               (unsigned long)(b->xlat_us / 1000u), (unsigned long)b->xlat_insns,
+               (unsigned long)(b->mix_xrip_us / 1000u), (unsigned long)b->mix_xrip_insns,
+               (unsigned long)((b->xlat_us - b->mix_xrip_us) / 1000u),
+               (unsigned long)(b->xlat_insns - b->mix_xrip_insns));
     static const char *const hist_names[3] = {"xrip", "xlat", "svc"};
     const uint32_t *const hists[3] = {b->xrip_hist, b->xlat_hist, b->svc_hist};
     for (int k = 0; k < 3; ++k) {
@@ -1547,6 +1612,7 @@ void xlat_log_write(uint16_t psp, const char *name)
     log_region_counts();
     xlat_stats.xrip_bursts = xlat_stats.xlat_bursts = 0;
     xlat_stats.xrip_us = xlat_stats.xrip_insns = xlat_stats.xlat_us = xlat_stats.xlat_insns = 0;
+    xlat_stats.mix_xrip_us = xlat_stats.mix_xrip_insns = 0;
     memset(xlat_stats.xrip_hist, 0, sizeof(xlat_stats.xrip_hist));
     memset(xlat_stats.xlat_hist, 0, sizeof(xlat_stats.xlat_hist));
     memset(xlat_stats.svc_hist, 0, sizeof(xlat_stats.svc_hist));

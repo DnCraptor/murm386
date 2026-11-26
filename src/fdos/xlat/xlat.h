@@ -178,6 +178,7 @@ typedef struct xlat_stats {
     uint64_t xrip_tail;         /* XRIP instructions in bursts with translated code */
     uint32_t enter_why[XLAT_ENTER_COUNT];  /* xlat_enter() outcomes (XLAT_LOG) */
     uint64_t xrip_us, xrip_insns, xlat_us, xlat_insns;
+    uint64_t mix_xrip_us, mix_xrip_insns;  /* of xlat_us / xlat_insns: inside run_instructions() */
     uint32_t xrip_hist[8], xlat_hist[8];
     uint32_t svc_n, svc_max, svc_hist[8];
     uint64_t svc_us;
@@ -392,6 +393,17 @@ uint32_t xlat_rt_resolve(xlat_rt_t *rt);
  * xlat_rt_io() (CLI / STI). 0: nothing changed but the lazy flags resolved,
  * XRIP does the POPF (TF, IOPL or NT change, or xlat_rt_io refused). */
 uint32_t xlat_rt_popf(xlat_rt_t *rt, uint32_t value);
+
+/* Helper called by generated code for REP MOVS / REP STOS (DF clear): the
+ * whole run at once when it is in direct memory (fast or upper, xlat_rt_t),
+ * neither offset wraps and the destination holds no translated code
+ * (xlat_code_map). src: linear address of DS:SI (MOVS) or the value (STOS),
+ * dst: of ES:DI, ctl: CX | bytes << 16 | XLAT_REP_STOS | the source
+ * segment << XLAT_REP_SEG_SHIFT. Nonzero: done (the caller moves SI, DI and
+ * clears CX); 0: nothing done, the instruction runs element by element. */
+#define XLAT_REP_STOS      (1u << 19)
+#define XLAT_REP_SEG_SHIFT 20
+uint32_t xlat_rt_rep(xlat_rt_t *rt, uint32_t src, uint32_t dst, uint32_t ctl);
 
 /* Helper called by generated code for an x87 instruction (and FWAIT), the
  * memory operand's linear address already checked (fast memory, no
