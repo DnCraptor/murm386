@@ -105,7 +105,7 @@ typedef struct {
     bool overflow;
     arm_emit_t e;
     uint32_t epilogue, dispatch, interp_call, exit_ip[2], exit_dyn, wchk[4], wside[4], rchk[2], back_slow, pend;
-    uint32_t spush, spop;
+    uint32_t spush, spop, scalar_call;
     uint8_t trace_min;             /* a region without a loop may do (xlat_translate) */
     uint8_t fn;                    /* built so: min_native_path (>= trace_min), else 0 */
     uint8_t no_calls;              /* discover: leave called functions out */
@@ -1440,19 +1440,22 @@ static bool emit_side_args(tctx_t *c, int i, uint32_t target, uint32_t xi)
     arm_emit_t *e = &c->e;
     const x86_insn_t *in = &c->in[i];
     const bool cont = falls_through(in) && !is_producer(in) && c->fall_idx[i] >= 0;
-    if (native_string(in) || native_scalar(in) ||
+    const bool scalar = native_scalar(in);
+    const bool redirect = scalar && (target == c->spush || target == c->spop);
+    if (native_string(in) || (scalar && !redirect) ||
         sync_recon(c, c->in_set[i], side_producer(c, i)) >= 0 || c->n_dfix >= MAX_FIXUPS ||
         (cont && c->fall_idx[i] <= i))
         return false;
     if (!arm_bl(e, target))
         c->overflow = true;
     arm_e16(e, in->ip);
-    if (native_string(in))
-        xi = string_ctl(in);
-    arm_e16(e, (uint16_t)(xi | XI_SIDE | (uint32_t)(in->len & 0xfu) << 8 | (cont ? 0x8000u : 0u)));
-    if (cont) {
+    arm_e16(e, (uint16_t)(xi | XI_SIDE | (uint32_t)(in->len & 0xfu) << 8 |
+                        (cont ? 0x8000u : 0u) | (redirect ? SC_CHECK_REDIRECT : 0u)));
+    if (redirect || cont) {
         c->dfix[c->n_dfix].pos = e->pos;
-        c->dfix[c->n_dfix++].insn = c->fall_idx[i];
+        /* Negative index encodes a forward SIDE stub, not an insn label. */
+        c->dfix[c->n_dfix++].insn = redirect ?
+            (int16_t)(-1 - side_dest(c, i, target == c->spush).idx) : c->fall_idx[i];
     }
     arm_e16(e, 0);
     return true;
@@ -2800,152 +2803,99 @@ static void emit_side_tail(tctx_t *c, uint16_t ip, uint32_t kind)
     emit_side_dispatch(c, kind);
 }
 
-static void emit_side_irq_before(tctx_t *c, uint16_t ip)
-{
-    arm_emit_t *e = &c->e;
-    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_INTR);
-    arm_ls_imm(e, LS_LDRB, A_R12, A_R12, 0);
-    arm_dp_imm(e, DP_SUB, 1, A_PC, A_R12, 0);
-    const uint32_t ok = arm_branch_slot(e);
-    emit_side_tail(c, ip, XLAT_EXIT_STOP);
-    local_patch(c, ok, C_EQ);
-}
-
-/* After a successful memory helper keep ARM GPRs in registers. A changed
- * active region, pending IRQ, or nonlocal successor uses the dispatcher. */
-static void emit_scalar_next(tctx_t *c, int i, uint16_t ip, bool cont, bool write, bool add_flags)
-{
-    arm_emit_t *e = &c->e;
-    if (cont && c->fall_idx[i] > i) {
-        uint32_t invalid = UINT32_MAX;
-        if (write) {
-            arm_dp_imm(e, DP_SUB, 1, A_PC, A_R0, XLAT_MEM_REDISPATCH);
-            invalid = arm_branch_slot(e);
-        }
-        arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_INTR);
-        arm_ls_imm(e, LS_LDRB, A_R12, A_R12, 0);
-        arm_dp_imm(e, DP_SUB, 1, A_PC, A_R12, 0);
-        const uint32_t irq = arm_branch_slot(e);
-        if (add_flags) {
-            arm_ls_imm(e, LS_LDR, A_R1, A_R11, XLAT_RT_DST);
-            arm_ls_imm(e, LS_LDR, A_R2, A_R11, XLAT_RT_SRC);
-            arm_dp_reg(e, DP_ADD, 1, A_PC, A_R1, A_R2, SH_LSL, 0);
-        }
-        const uint32_t site = arm_branch_slot(e);
-        if (!arm_patch_branch(e, site, c->label[c->fall_idx[i]], C_AL))
-            c->overflow = true;
-        if (invalid != UINT32_MAX)
-            local_patch(c, invalid, C_EQ);
-        local_patch(c, irq, C_NE);
-    }
-    emit_side_tail(c, ip, XLAT_EXIT_BRANCH);
-}
-
-static void emit_scalar_addr(tctx_t *c, const x86_insn_t *in)
-{
-    arm_emit_t *e = &c->e;
-    if (in->op == XO_MISC && in->sub == MISC_XLAT) {
-        arm_ubfx(e, A_R12, A_R4, 0, 8);
-        arm_dp_reg(e, DP_ADD, 0, A_R0, A_R7, A_R12, SH_LSL, 0);
-        arm_uxth(e, A_R0, A_R0);
-    } else
-        emit_offset(c, in);
-    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_SEG_BASE + 4u * in->mem_seg);
-    arm_dp_reg(e, DP_ADD, 0, A_R0, A_R0, A_R12, SH_LSL, 0);
-}
-
-/* True: all paths were emitted. False: the untouched/refused store must
- * use the existing synchronized fallback. No successful store is replayed. */
-static bool emit_scalar_side(tctx_t *c, int i, bool cont)
+/* Emit only a BL, eight halfwords and (when needed) a continuation
+ * branch. All memory semantics and the cold-path register snapshot are
+ * shared across regions. This replaces the per-instruction ARM helpers. */
+static bool emit_scalar_side(tctx_t *c, int i, bool cont, uint32_t xi)
 {
     arm_emit_t *e = &c->e;
     const x86_insn_t *in = &c->in[i];
     if (!native_scalar(in))
         return false;
-    const uint16_t next = (uint16_t)(in->ip + in->len);
-    const bool push = in->op == XO_PUSH || in->op == XO_CALL ||
-                      (in->op == XO_SEG && in->sub == SEG_PUSH);
-    const bool pop = in->op == XO_POP || in->op == XO_RET || in->op == XO_FAR ||
-                     (in->op == XO_SEG && in->sub == SEG_POP);
-    const bool add = in->op == XO_ALU;
-    const bool write = add || push || (in->op == XO_MOV && in->a.kind == OPD_MEM) ||
-                       (in->op == XO_SEG && in->sub == SEG_STORE);
-    const uint32_t seg_off = XLAT_RT_SEG_BASE + 4u * in->sreg;
-    emit_side_irq_before(c, in->ip);
-    if (write) {
-        if (push)
-            emit_stack_addr(c, -2);
-        else
-            emit_scalar_addr(c, in);
-        if (in->op == XO_CALL)
-            arm_mov32(e, A_R2, next);
-        else if (in->op == XO_SEG) {
-            arm_ls_imm(e, LS_LDR, A_R2, A_R11, seg_off);
-            arm_lsr(e, A_R2, A_R2, 4);
+    unsigned op, reg = 0, bytes = in->size / 8u, flags = 0;
+    unsigned ea = in->mem_rm | (unsigned)in->mem_seg << 3 |
+                  (in->mem_direct ? SC_EA_DIRECT : 0u);
+    uint16_t next = (uint16_t)(in->ip + in->len);
+    uint32_t imm = 0;
+    const x86_opd_t *src = NULL;
+    switch (in->op) {
+    case XO_MOV:
+        if (in->a.kind == OPD_MEM) {
+            op = SC_STORE;
+            src = &in->b;
         } else {
-            const int v = get_raw(c, &in->b, push ? 16 : in->size, A_R2);
-            if (v != A_R2)
-                arm_mov(e, A_R2, v);
+            op = SC_LOAD;
+            reg = in->a.reg;
         }
-        arm_mov(e, A_R1, A_R0);
-        arm_mov(e, A_R0, A_R11);
-        arm_mov32(e, A_R3, push || in->op == XO_SEG ? 2u : in->size / 8u);
-        arm_mov32(e, A_R12, add ? (uint32_t)(uintptr_t)&xlat_rt_bus_add :
-                                      (uint32_t)(uintptr_t)&xlat_rt_bus_write);
-        arm_blx(e, A_R12);
-        arm_dp_imm(e, DP_SUB, 1, A_PC, A_R0, 0);
-        const uint32_t slow = arm_branch_slot(e);
-        if (push) {
-            arm_ls_imm(e, LS_LDRH, A_R1, A_R11, XLAT_RT_SP);
-            arm_subw(e, A_R1, A_R1, 2);
-            emit_store_sp(c);
+        break;
+    case XO_ALU:
+        op = SC_ADD;
+        src = &in->b;
+        break;
+    case XO_MISC:
+        if (in->sub == MISC_XLAT) {
+            op = SC_LOAD;
+            bytes = 1;
+            ea |= SC_EA_XLAT;
+        } else {
+            op = in->sub == MISC_MOVSX ? SC_MOVSX : SC_MOVZX;
+            reg = in->a.reg;
+            if (in->local)
+                flags |= SC_WIDE;
         }
-        emit_scalar_next(c, i, in->op == XO_CALL ? in->target : next, cont || add, true, add);
-        local_patch(c, slow, C_EQ);
-        return false;
+        break;
+    case XO_PUSH: op = SC_PUSH; bytes = 2; src = &in->b; break;
+    case XO_POP: op = SC_POP; bytes = 2; reg = in->a.reg; break;
+    case XO_CALL:
+        op = SC_CALL;
+        bytes = 2;
+        imm = next;
+        flags |= SC_IMM;
+        next = in->target;
+        break;
+    case XO_RET: case XO_FAR:
+        op = in->op == XO_RET ? SC_RET : SC_RETF;
+        bytes = 2;
+        imm = in->b.imm;
+        break;
+    case XO_SEG:
+        bytes = 2;
+        reg = in->sreg;
+        switch (in->sub) {
+        case SEG_LOAD: op = SC_SEG_LOAD; break;
+        case SEG_STORE: op = SC_SEG_STORE; break;
+        case SEG_PUSH: op = SC_SEG_PUSH; break;
+        default: op = SC_SEG_POP; break;
+        }
+        break;
+    default: return false;
     }
-    if (pop) {
-        arm_mov(e, A_R0, A_R11);
-        arm_mov32(e, A_R1, in->op == XO_RET || in->op == XO_FAR ? in->b.imm : 0u);
-        arm_mov32(e, A_R2, in->op == XO_FAR);
-        arm_mov32(e, A_R12, (uint32_t)(uintptr_t)&xlat_rt_bus_pop);
-        arm_blx(e, A_R12);
-        if (in->op == XO_FAR) {
-            arm_uxth(e, A_R2, A_R0);
-            arm_lsr(e, A_R3, A_R0, 16);
-            arm_ls_imm(e, LS_STRH, A_R3, A_R11, XLAT_RT_CS);
-            arm_lsl(e, A_R12, A_R3, 4);
-            arm_ls_imm(e, LS_STR, A_R12, A_R11, XLAT_RT_SEG_BASE + 4u);
-            arm_ls_imm(e, LS_STR, A_R2, A_R11, XLAT_RT_IP);
-            emit_side_dispatch(c, XLAT_EXIT_BRANCH);
-            return true;
-        }
-        if (in->op == XO_RET) {
-            arm_uxth(e, A_R2, A_R0);
-            arm_ls_imm(e, LS_STR, A_R2, A_R11, XLAT_RT_IP);
-            emit_side_dispatch(c, XLAT_EXIT_BRANCH);
-            return true;
-        }
-    } else {
-        emit_scalar_addr(c, in);
-        arm_mov32(e, A_R1, in->op == XO_SEG ? 2u : in->size / 8u);
-        arm_mov32(e, A_R12, (uint32_t)(uintptr_t)&xlat_bus_read);
-        arm_blx(e, A_R12);
+    if (src) {
+        if (src->kind == OPD_IMM) {
+            flags |= SC_IMM;
+            imm = src->imm;
+        } else
+            reg = src->reg;
     }
-    if (in->op == XO_SEG) {
-        arm_lsl(e, A_R0, A_R0, 4);
-        arm_ls_imm(e, LS_STR, A_R0, A_R11, seg_off);
-    } else if (in->op == XO_MISC && in->sub == MISC_XLAT) {
-        arm_bfi(e, A_R4, A_R0, 0, 8);
-    } else if (in->op == XO_MISC) {
-        if (in->sub == MISC_MOVSX) {
-            arm_lsl(e, A_R0, A_R0, 32 - in->size);
-            arm_dp_reg(e, DP_ORR, 0, A_R0, A_PC, A_R0, SH_ASR, 32 - in->size);
-        }
-        put_raw(c, &in->a, in->local ? 32 : 16, A_R0);
-    } else
-        put_raw(c, &in->a, pop ? 16 : in->size, A_R0);
-    emit_scalar_next(c, i, next, cont, false, false);
+    const bool resume = (cont || op == SC_ADD) && c->fall_idx[i] > i;
+    if (resume)
+        flags |= SC_CONT;
+    if (!arm_bl(e, c->scalar_call))
+        c->overflow = true;
+    arm_e16(e, (uint16_t)(op | (bytes == 4 ? 2u : bytes == 2 ? 1u : 0u) << 4 | reg << 6 | flags));
+    arm_e16(e, (uint16_t)ea);
+    arm_e16(e, in->disp);
+    arm_e16(e, (uint16_t)imm);
+    arm_e16(e, (uint16_t)(imm >> 16));
+    arm_e16(e, next);
+    /* Last four bytes are also an ordinary interpreter payload. */
+    arm_e16(e, in->ip);
+    arm_e16(e, (uint16_t)(xi | (uint32_t)(in->len & 15u) << 8 | (cont ? 0x8000u : 0u)));
+    if (resume || cont) {
+        const uint32_t site = arm_branch_slot(e);
+        if (!arm_patch_branch(e, site, c->label[c->fall_idx[i]], C_AL))
+            c->overflow = true;
+    }
     return true;
 }
 
@@ -2996,12 +2946,12 @@ static bool emit_stubs(tctx_t *c)
                 const bool cont = falls_through(in) && !is_producer(in) && c->fall_idx[i] >= 0;
                 if (s->recon >= 0)
                     emit_recon(c, s->recon);
-                if (emit_scalar_side(c, i, cont)) {
+                const uint32_t ctl = native_string(in) ? string_ctl(in) :
+                    (s->mw || side_writes_more(in) ? XI_MAY_WRITE : 0u) | XI_SIDE;
+                if (emit_scalar_side(c, i, cont, ctl)) {
                     SIZE_NOTE(XLAT_SIZE_SIDE, from);
                     continue;
                 }
-                const uint32_t ctl = native_string(in) ? string_ctl(in) :
-                    (s->mw || side_writes_more(in) ? XI_MAY_WRITE : 0u) | XI_SIDE;
                 if (native_string(in) && !in->rep && cont) {
                     /* A single VGA element need not spill the guest GPRs.
                      * Unknown mappings and code writes use the old thunk. */
@@ -3335,7 +3285,10 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     arm_ls_imm(&e, LS_LDRH, A_R12, A_R0, 4);
     arm_addw(&e, A_LR, A_LR, 6);
     arm_dp_reg(&e, DP_ADD, 0, A_LR, A_LR, A_R12, SH_LSL, 0);   /* where it goes on */
+    arm_ls_imm(&e, LS_LDRH, A_R1, A_R0, 2);
+    ok &= arm_dp_imm(&e, DP_AND, 1, A_PC, A_R1, SC_CHECK_REDIRECT);
     const uint32_t to_interp = arm_branch_slot(&e);
+    arm_bx(&e, A_LR);                   /* redirected native SIDE stub */
     const uint32_t xumb = e.pos;                             /* past fast memory */
     tramp_umb(&e, A_R1);
     const uint32_t xumb_out = arm_branch_slot(&e);
@@ -3454,7 +3407,7 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     a->interp_call = e.pos;
     arm_subw(&e, A_R0, A_LR, 1);
     arm_addw(&e, A_LR, A_LR, 4);
-    ok &= tramp_patch(&e, to_interp, e.pos, C_AL);           /* r0 = the halfwords */
+    ok &= tramp_patch(&e, to_interp, e.pos, C_EQ);           /* r0 = the halfwords */
     arm_ls_imm(&e, LS_LDRH, A_R12, A_R0, 0);                  /* ip */
     arm_ls_imm(&e, LS_LDRH, A_R1, A_R0, 2);                   /* ctl */
     arm_ubfx(&e, A_R2, A_R1, 8, 4);
@@ -3518,6 +3471,46 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
         !arm_patch_branch(&e, to_dispatch, a->dispatch, C_AL) ||
         !arm_patch_branch(&e, to_epi, a->epilogue, C_AL))
         return false;
+    /* Cold scalar path: local ARM stack snapshot, no XRIP register-file
+     * synchronization. r4-r10,lr = 32 bytes, preserving AAPCS alignment.
+     * The runtime commits only the affected registers in that snapshot. */
+    a->scalar_call = e.pos;
+    arm_push(&e, 0x47f0u);                     /* r4-r10, lr */
+    arm_mov(&e, A_R0, A_R11);
+    arm_e16(&e, 0x4669u);                    /* MOV r1, sp */
+    arm_subw(&e, A_R2, A_LR, 1);               /* descriptor */
+    arm_mov32(&e, A_R12, (uint32_t)(uintptr_t)&xlat_rt_scalar);
+    arm_blx(&e, A_R12);
+    arm_pop(&e, 0x47f0u);
+    arm_dp_imm(&e, DP_SUB, 1, A_PC, A_R0, SC_REFUSED);
+    const uint32_t sc_refused = arm_branch_slot(&e);
+    arm_dp_imm(&e, DP_SUB, 1, A_PC, A_R0, SC_DISPATCH);
+    const uint32_t sc_dispatch = arm_branch_slot(&e);
+    arm_dp_imm(&e, DP_SUB, 1, A_PC, A_R0, SC_STOP);
+    const uint32_t sc_stop = arm_branch_slot(&e);
+    arm_addw(&e, A_LR, A_LR, 2u * SC_WORDS);
+    arm_dp_imm(&e, DP_SUB, 1, A_PC, A_R0, SC_RESUME_ADD);
+    const uint32_t sc_resume = arm_branch_slot(&e);
+    arm_ls_imm(&e, LS_LDR, A_R1, A_R11, XLAT_RT_DST);
+    arm_ls_imm(&e, LS_LDR, A_R2, A_R11, XLAT_RT_SRC);
+    arm_dp_reg(&e, DP_ADD, 1, A_PC, A_R1, A_R2, SH_LSL, 0);  /* CMN for local Jcc */
+    const uint32_t sc_return = e.pos;
+    arm_bx(&e, A_LR);
+    const uint32_t sc_fallback = e.pos;
+    arm_addw(&e, A_LR, A_LR, 2u * SC_WORDS - 4u);
+    const uint32_t sc_interp = arm_branch_slot(&e);          /* ordinary IP/XI payload */
+    const uint32_t sc_at_stop = e.pos;
+    arm_mov32(&e, A_R12, XLAT_EXIT_STOP);
+    arm_ls_imm(&e, LS_STR, A_R12, A_R11, XLAT_RT_EXIT_KIND);
+    const uint32_t sc_epi = arm_branch_slot(&e);
+    if (e.full ||
+        !tramp_patch(&e, sc_refused, sc_fallback, C_EQ) ||
+        !tramp_patch(&e, sc_dispatch, a->exit_dyn, C_EQ) ||
+        !tramp_patch(&e, sc_stop, sc_at_stop, C_EQ) ||
+        !tramp_patch(&e, sc_resume, sc_return, C_NE) ||
+        !tramp_patch(&e, sc_interp, a->interp_call, C_AL) ||
+        !tramp_patch(&e, sc_epi, a->epilogue, C_AL))
+        return false;
     a->code_top = (e.pos + 3u) & ~3u;
     a->data_bottom = a->size;
     return true;
@@ -3568,6 +3561,7 @@ bool xlat_translate_step(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int 
     c->pend = a->pend;
     c->spush = a->spush;
     c->spop = a->spop;
+    c->scalar_call = a->scalar_call;
     c->n_interp = 0;
     out->reject = XLAT_RJ_NONE;
     c->trace_min = (uint8_t)(trace_min > 0 ? (trace_min < 255 ? trace_min : 255) : 0);
@@ -3694,8 +3688,10 @@ finish_phase:
         goto done;
     }
     for (int k = 0; k < c->n_dfix; ++k) {
-        /* the label after the instruction, from the end of the halfwords */
-        const uint32_t at = c->dfix[k].pos, to = c->label[c->dfix[k].insn];
+        /* Forward continuation or native SIDE stub, from the payload end. */
+        const int idx = c->dfix[k].insn;
+        const uint32_t at = c->dfix[k].pos;
+        const uint32_t to = idx < 0 ? c->stub[-1 - idx].pos : c->label[idx];
         if (to < at + 2u || to - (at + 2u) > 0xffffu) {
             c->overflow = true;
             continue;

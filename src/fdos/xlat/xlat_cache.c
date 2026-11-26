@@ -1166,6 +1166,8 @@ built:;
     xlat_sync_code(st->arena.base + out->code_off, out->code_len);
     log_region_code(r);
     xlat_stats.translations++;
+    xlat_stats.compiled_code_bytes += out->code_len;
+    xlat_stats.compiled_source_bytes += out->data_size;
     uint32_t used = st->ring_lo;
     for (int k = 0; k < XLAT_MAX_REGIONS; ++k)
         if (st->region[k].held)
@@ -1946,6 +1948,137 @@ uint32_t xlat_rt_bus_pop(xlat_rt_t *rt, uint32_t release, uint32_t far_ret)
     return value;
 }
 
+/* ARM r4-r10 are EAX, ECX, EDX, EBX, EBP, ESI, EDI in this order.
+ * ESP is already in rt. No writes to XRIP's register file or decoder state. */
+static uint32_t *scalar_reg(xlat_rt_t *rt, uint32_t *frame, unsigned reg)
+{
+    return reg == 4u ? &rt->sp : &frame[reg - (reg > 4u)];
+}
+
+static uint32_t scalar_get(xlat_rt_t *rt, uint32_t *frame, unsigned reg, unsigned bytes)
+{
+    if (bytes == 1u)
+        return (uint8_t)(frame[reg & 3u] >> (reg >= 4u ? 8u : 0u));
+    const uint32_t v = *scalar_reg(rt, frame, reg);
+    return bytes == 2u ? (uint16_t)v : v;
+}
+
+static void scalar_put(xlat_rt_t *rt, uint32_t *frame, unsigned reg, unsigned bytes, uint32_t v)
+{
+    if (bytes == 1u) {
+        const unsigned shift = reg >= 4u ? 8u : 0u;
+        uint32_t *p = &frame[reg & 3u];
+        *p = (*p & ~(0xffu << shift)) | ((v & 0xffu) << shift);
+    } else {
+        uint32_t *p = scalar_reg(rt, frame, reg);
+        *p = bytes == 2u ? (*p & 0xffff0000u) | (uint16_t)v : v;
+    }
+}
+
+static uint32_t scalar_address(const xlat_rt_t *rt, const uint32_t *frame, unsigned ea, uint16_t disp)
+{
+    /* BX+SI, BX+DI, BP+SI, BP+DI, SI, DI, BP, BX. */
+    static const uint8_t base[8] = {3, 3, 4, 4, 5, 6, 4, 3};
+    static const uint8_t index[4] = {5, 6, 5, 6};
+    const unsigned rm = ea & 7u;
+    uint32_t off = disp;
+    if (ea & SC_EA_XLAT)
+        off = frame[3] + (uint8_t)frame[0];
+    else if (!(ea & SC_EA_DIRECT)) {
+        off += frame[base[rm]];
+        if (rm < 4u)
+            off += frame[index[rm]];
+    }
+    return rt->seg_base[(ea >> 3) & 3u] + (uint16_t)off;
+}
+
+/* Run an already decoded scalar operation. The descriptor belongs to
+ * generated code, not guest memory. On refusal no guest effects occurred;
+ * after a committed store, never execute the old instruction again. */
+uint32_t xlat_rt_scalar(xlat_rt_t *rt, uint32_t *frame, const uint16_t *d)
+{
+    const unsigned ctl = d[0], op = ctl & 15u;
+    const unsigned bytes = 1u << ((ctl >> 4) & 3u), reg = (ctl >> 6) & 7u;
+    const uint32_t imm = d[3] | (uint32_t)d[4] << 16;
+    uint32_t next = d[5], status = 1, v;
+    if (*rt->intr) {
+        rt->ip = d[6];
+        ++xlat_stats.scalar_stop;
+        return SC_STOP;
+    }
+    if (bytes > 4u || op > SC_SEG_POP) {
+        ++xlat_stats.scalar_refused;
+        return SC_REFUSED;
+    }
+    switch (op) {
+    case SC_LOAD:
+    case SC_MOVZX:
+    case SC_MOVSX:
+    case SC_SEG_LOAD:
+        v = xlat_bus_read(scalar_address(rt, frame, d[1], d[2]), bytes);
+        if (op == SC_SEG_LOAD)
+            rt->seg_base[reg] = (uint32_t)(uint16_t)v << 4;
+        else {
+            if (op == SC_MOVSX)
+                v = bytes == 1u ? (uint32_t)(int32_t)(int8_t)v : (uint32_t)(int32_t)(int16_t)v;
+            scalar_put(rt, frame, reg, op == SC_LOAD ? bytes : (ctl & SC_WIDE ? 4u : 2u), v);
+        }
+        break;
+    case SC_STORE:
+    case SC_ADD:
+    case SC_SEG_STORE: {
+        const uint32_t a = scalar_address(rt, frame, d[1], d[2]);
+        v = op == SC_SEG_STORE ? rt->seg_base[reg] >> 4 :
+            (ctl & SC_IMM) ? imm : scalar_get(rt, frame, reg, bytes);
+        status = op == SC_ADD ? xlat_rt_bus_add(rt, a, v, bytes) : xlat_rt_bus_write(rt, a, v, bytes);
+        break;
+    }
+    case SC_CALL:
+    case SC_PUSH:
+    case SC_SEG_PUSH: {
+        const uint16_t sp = (uint16_t)(rt->sp - 2u);
+        v = op == SC_SEG_PUSH ? rt->seg_base[reg] >> 4 :
+            (ctl & SC_IMM) ? imm : scalar_get(rt, frame, reg, 2u);
+        status = xlat_rt_bus_write(rt, rt->seg_base[2] + sp, v, 2u);
+        if (status)
+            rt->sp = (rt->sp & 0xffff0000u) | sp;
+        break;
+    }
+    case SC_POP:
+    case SC_SEG_POP:
+    case SC_RET:
+    case SC_RETF:
+        v = xlat_rt_bus_pop(rt, imm, op == SC_RETF);
+        if (op == SC_POP)
+            scalar_put(rt, frame, reg, 2u, v);
+        else if (op == SC_SEG_POP)
+            rt->seg_base[reg] = (uint32_t)(uint16_t)v << 4;
+        else {
+            next = (uint16_t)v;
+            if (op == SC_RETF) {
+                rt->cs = (uint16_t)(v >> 16);
+                rt->seg_base[1] = (uint32_t)rt->cs << 4;
+            }
+        }
+        break;
+    }
+    if (!status) {
+        ++xlat_stats.scalar_refused;
+        return SC_REFUSED;
+    }
+    rt->ip = next;
+    if (*rt->intr) {
+        ++xlat_stats.scalar_stop;
+        return SC_STOP;
+    }
+    if (status == XLAT_MEM_REDISPATCH || !(ctl & SC_CONT)) {
+        ++xlat_stats.scalar_dispatch;
+        return SC_DISPATCH;
+    }
+    ++xlat_stats.scalar_resume;
+    return op == SC_ADD ? SC_RESUME_ADD : SC_RESUME;
+}
+
 /* Check at the last possible moment before the full GPR spill. The
  * synchronized string path still rechecks CPU state and the deadline. */
 uint32_t xlat_rt_string_ready(xlat_rt_t *rt)
@@ -2385,6 +2518,10 @@ void xlat_log_write(uint16_t psp, const char *name)
                (unsigned long)xlat_stats.bus_pop, (unsigned long)xlat_stats.bus_rmw,
                (unsigned long)xlat_stats.string_preempt,
                (unsigned long)xlat_stats.bios_write_leaf, (unsigned long)xlat_stats.bios_cursor_local);
+    log_printf("Z scalar_resume=%lu scalar_dispatch=%lu scalar_refused=%lu scalar_stop=%lu compiled_code=%lu compiled_source=%lu\r\n",
+               (unsigned long)xlat_stats.scalar_resume, (unsigned long)xlat_stats.scalar_dispatch,
+               (unsigned long)xlat_stats.scalar_refused, (unsigned long)xlat_stats.scalar_stop,
+               (unsigned long)xlat_stats.compiled_code_bytes, (unsigned long)xlat_stats.compiled_source_bytes);
     /* CPU bursts: averages and histograms (xlat_stats_t), XRIP only / with
      * translated code; device service after the bursts. XLAT_SLICE_US is
      * meant to match the usual XRIP burst. */

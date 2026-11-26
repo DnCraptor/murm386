@@ -417,6 +417,29 @@ static inline bool xlat_compile_irq(const xlat_rt_t *rt)
 }
 
 /* Arena layout shared by translator and cache. */
+/* Compact scalar SIDE descriptor, eight little-endian halfwords after BL:
+ * ctl, ea, disp, imm_lo, imm_hi, next, ip, XI flags/len/continuation.
+ * The last two words also form the existing interpreter call arguments.
+ * ctl: op[3:0], log2(bytes)[5:4], register[8:6], immediate[9],
+ * wide MOVZX/MOVSX destination[10], native continuation[15].
+ * ea: r/m[2:0], segment[4:3], direct[5], XLAT[6].
+ * frame is a private ARM stack snapshot of r4-r10, not rt->gpr. */
+enum {
+    SC_LOAD, SC_STORE, SC_ADD, SC_MOVZX, SC_MOVSX, SC_PUSH, SC_POP,
+    SC_CALL, SC_RET, SC_RETF, SC_SEG_LOAD, SC_SEG_STORE, SC_SEG_PUSH, SC_SEG_POP
+};
+#define SC_IMM   0x0200u
+#define SC_WIDE  0x0400u
+#define SC_CONT  0x8000u
+#define SC_EA_DIRECT 0x20u
+#define SC_EA_XLAT   0x40u
+#define SC_WORDS 8u
+/* A compact shared PUSH/POP check redirects its failed path to a SIDE
+ * stub, rather than to the interpreter. Only used in the check payload. */
+#define SC_CHECK_REDIRECT 0x4000u
+enum { SC_REFUSED, SC_RESUME, SC_DISPATCH, SC_STOP, SC_RESUME_ADD };
+uint32_t xlat_rt_scalar(xlat_rt_t *rt, uint32_t *frame, const uint16_t *d);
+
 typedef struct xlat_arena {
     uint8_t *base;
     uint32_t size;
@@ -426,6 +449,7 @@ typedef struct xlat_arena {
     uint32_t interp_thunk; /* offset of the common xlat_interp_one() call (after interp_call) */
     uint32_t dispatch;     /* offset of the link-table dispatcher (BRANCH exits) */
     uint32_t interp_call;  /* xlat_interp_one() call with its arguments after the BL */
+    uint32_t scalar_call;  /* shared native scalar SIDE dispatcher */
     uint32_t exit_ip[2];   /* exits with the IP after the BL: BRANCH, BUDGET */
     uint32_t exit_dyn;     /* BRANCH exit, rt->ip stored */
     uint32_t wchk[4];      /* write checks: 1, 2, 4 bytes; up to 128 (r12 = last byte) */

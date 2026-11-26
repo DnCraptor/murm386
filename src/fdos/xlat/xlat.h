@@ -201,6 +201,8 @@ typedef struct xlat_stats {
     uint32_t thunk_int, thunk_retf, link_alt, bios_flags_umb;
     uint32_t bus_read, bus_write, bus_smc, bus_write_miss, bus_pop, bus_rmw;
     uint32_t string_preempt, bios_write_leaf, bios_cursor_local;
+    uint32_t scalar_resume, scalar_dispatch, scalar_refused, scalar_stop;
+    uint32_t compiled_code_bytes, compiled_source_bytes;
     uint32_t cuts;              /* XRIP bursts ended at a marked branch target */
     uint32_t cut_entries;       /* of those: translated code was entered */
     uint32_t cold;              /* regions given back to XRIP (too short per entry) */
