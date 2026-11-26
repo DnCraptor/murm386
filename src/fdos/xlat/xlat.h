@@ -149,7 +149,7 @@ enum {
     XLAT_EXIT_SIDE = 2,     /* memory operand outside fast and upper memory, or a write to the region's code */
     XLAT_EXIT_STOP = 3,     /* after an interpreted instruction the state needs XRIP (mode, CS, IRQ...) */
     XLAT_EXIT_COUNT = 4,
-    XLAT_EXIT_FAR_CALL = XLAT_EXIT_COUNT  /* dispatch miss, counted as a branch */
+    XLAT_EXIT_FAR_CALL = XLAT_EXIT_COUNT  /* far/indirect call miss, counted as a branch */
 };
 
 /* xlat_enter() outcomes, at a burst start (S_*) and at a cut (C_*) */

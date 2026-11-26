@@ -2225,7 +2225,7 @@ static void emit_ind(tctx_t *c, int i)
         emit_site_dispatch(c, i, A_R3);
     }
     arm_ls_imm(e, LS_STR, A_R3, A_R11, XLAT_RT_IP);
-    emit_dyn_exit(c, XLAT_EXIT_BRANCH);
+    emit_dyn_exit(c, in->sub == IND_CALL ? XLAT_EXIT_FAR_CALL : XLAT_EXIT_BRANCH);
 }
 
 /* PUSHA / POPA (one 16-byte block, SP must not wrap inside it: otherwise
@@ -3134,11 +3134,17 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     arm_mov32(&e, A_R12, XLAT_EXIT_SIDE);
     const uint32_t at_store = e.pos;
     arm_ls_imm(&e, LS_STR, A_R12, A_R11, XLAT_RT_EXIT_KIND);
+    /* The helper accepted the new CPU state. GPRs are already reloaded;
+     * try a validated link before spilling them again in the epilogue. */
+    const uint32_t to_dispatch = arm_branch_slot(&e);
+    const uint32_t at_stop = e.pos;
+    arm_ls_imm(&e, LS_STR, A_R12, A_R11, XLAT_RT_EXIT_KIND);
     const uint32_t to_epi = arm_branch_slot(&e);
     if (e.full || !ok ||
         !arm_patch_branch(&e, leave1, leave, C_NE) || !arm_patch_branch(&e, leave2, leave, C_EQ) ||
-        !arm_patch_branch(&e, leave3, leave, C_NE) || !arm_patch_branch(&e, store, at_store, C_EQ) ||
+        !arm_patch_branch(&e, leave3, leave, C_NE) || !arm_patch_branch(&e, store, at_stop, C_EQ) ||
         !arm_patch_branch(&e, store2, at_store, C_EQ) ||
+        !arm_patch_branch(&e, to_dispatch, a->dispatch, C_AL) ||
         !arm_patch_branch(&e, to_epi, a->epilogue, C_AL))
         return false;
     a->code_top = (e.pos + 3u) & ~3u;
@@ -3348,11 +3354,13 @@ finish_phase:
     out->n_entries = 0;
     for (int i = 0; i < c->n; ++i) {
         if (c->leader[i]) {
-            /* Loop heads (targets of back edges) and the entry point are
-             * marked for XRIP's taken branches (xlat_entry_map). */
+            /* Also mark call continuations: an interpreted callee can
+             * return straight to an existing native entry. */
             bool head = c->in[i].ip == ip;
-            for (int j = i; j < c->n && !head; ++j)
-                head = c->tgt_idx[j] == i;
+            for (int j = 0; j < c->n && !head; ++j)
+                head = (j >= i && c->tgt_idx[j] == i) ||
+                       (x86_is_call(&c->in[j]) &&
+                        (uint16_t)(c->in[j].ip + c->in[j].len) == c->in[i].ip);
             for (int k = 0; k < n_extra && !head; ++k)
                 head = c->in[i].ip == extra[k];
             out->entries[out->n_entries].ip = c->in[i].ip;

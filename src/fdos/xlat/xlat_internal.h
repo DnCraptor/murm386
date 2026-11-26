@@ -36,13 +36,10 @@
 #ifndef XLAT_MAX_REGIONS
 #define XLAT_MAX_REGIONS     384             /* region slots (entry_t.region, xlat_link_t.region: 16 bits) */
 #endif
-/* Regions without a loop (traces, XLAT_TRACES): built at a hot CALL target
- * (rt->fn_key) when every path from the entry runs at least XLAT_TRACE_MIN
- * native instructions before it can leave (a REP string instruction counts
- * as XLAT_TRACE_MIN): entering from XRIP costs about that. At a region exit
- * target seen XLAT_EXIT_HOT times XLAT_LINK_MIN do: the exits reach it
- * through the link table. (A burst start in the middle of straight code is
- * rarely entered again: loops only there.) */
+/* Regions without a loop (traces, XLAT_TRACES): a hot CALL or exit target
+ * can use XLAT_LINK_MIN to connect native regions. XLAT_TRACE_MIN remains
+ * the threshold for retries of burst-start requests. A REP string
+ * instruction counts as XLAT_TRACE_MIN. */
 #ifndef XLAT_TRACE_MIN
 #define XLAT_TRACE_MIN       8
 #endif
@@ -86,7 +83,6 @@ static inline uint32_t xlat_link_hash(uint32_t key)
 #define XLAT_INTERP_RATIO    8               /* at most 1/8 of a region interpreted */
 #define XLAT_SPAN_WINDOW     2048u           /* code within +-1 KiB of the entry or of a called function */
 #define XLAT_COLD_ENTRIES    512             /* entries before a region is judged */
-#define XLAT_COLD_INSNS      8               /* loop instructions per entry to keep it */
 #define XLAT_COLD_SIDE_RATIO 4               /* cold too: more than 1 in this many instructions side */
 #ifndef XLAT_ARENA_SRAM
 #define XLAT_ARENA_SRAM      0

@@ -1050,7 +1050,7 @@ static bool queue_compile(uint32_t key, uint8_t kind, uint8_t why)
     const unsigned priority = 1u << kind;
     if (st->compile_blocked & priority)
         return false;
-    if (st->job.pending && st->job.request.key == key && st->job.request.kind == kind)
+    if (st->job.pending && st->job.request.key == key && st->job.request.kind >= kind)
         return true;
 
     unsigned replace = XLAT_COMPILE_QUEUE;
@@ -1058,11 +1058,10 @@ static bool queue_compile(uint32_t key, uint8_t kind, uint8_t why)
     for (unsigned i = 0; i < st->queued; ++i) {
         const compile_request_t *q = &st->queue[i];
         if (q->key == key) {
-            if (q->kind == kind)
+            if (q->kind >= kind)
                 return true;
-            /* A hot CALL upgrades a queued burst sample at the same address. */
-            if (kind == COMPILE_CALL && q->kind == COMPILE_BURST)
-                upgrade = i;
+            /* Keep only the strongest queued request for this entry. */
+            upgrade = i;
         }
         if (q->kind < kind && (replace == XLAT_COMPILE_QUEUE ||
                                q->kind <= st->queue[replace].kind))
@@ -1196,18 +1195,20 @@ static void start_compile(const xlat_rt_t *rt)
     }
     const bool retry = req.kind == COMPILE_RETRY;
     const bool exit = req.kind == COMPILE_EXIT;
-    const int old = exit || (retry && req.why == XLAT_RJ_COVERED) ? covering(&st->job.rt) : -1;
+    const bool call = req.kind == COMPILE_CALL;
+    const int old = exit || call || (retry && req.why == XLAT_RJ_COVERED)
+                        ? covering(&st->job.rt) : -1;
     if (retry)
         xlat_stats.retries++;
     if (old >= 0 && st->region[old].n_extra < XLAT_EXTRA_MAX) {
         set_compile_target(old, 0);
     } else if ((old >= 0 && retry) ||
-               ((req.kind == COMPILE_BURST || req.kind == COMPILE_CALL) && covered(&st->job.rt))) {
+               (req.kind == COMPILE_BURST && covered(&st->job.rt))) {
         finish_compile(-1, XLAT_RJ_COVERED);
     } else {
-        const int min = exit ? XLAT_LINK_MIN :
-                        req.kind == COMPILE_CALL || (retry && req.why != XLAT_RJ_FULL)
-                            ? XLAT_TRACE_MIN : 0;
+        /* A hot callee can connect two regions even when it is very short. */
+        const int min = exit || call ? XLAT_LINK_MIN :
+                        retry && req.why != XLAT_RJ_FULL ? XLAT_TRACE_MIN : 0;
         set_compile_target(-1, min);
     }
 }
@@ -1246,8 +1247,9 @@ static __attribute__((noinline)) void compile_slice(const xlat_rt_t *rt)
         if (st->job.pending) {
             xlat_stats.compile_defers++;
         } else if (idx < 0 && st->out.reject < XLAT_RJ_COUNT &&
-                   st->job.old_slot >= 0 && st->job.request.kind == COMPILE_EXIT) {
-            /* When extending a region fails, try a standalone exit trace. */
+                   st->job.old_slot >= 0 &&
+                   (st->job.request.kind == COMPILE_EXIT || st->job.request.kind == COMPILE_CALL)) {
+            /* When extending a region fails, try a standalone link trace. */
             set_compile_target(-1, XLAT_LINK_MIN);
         } else {
             finish_compile(idx, st->out.reject);
@@ -1324,7 +1326,8 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
             const uint32_t linear = request_linear(key);
             if (call && xlat_call_hot(linear) && queue_compile(key, COMPILE_CALL, XLAT_RJ_NONE))
                 xlat_call_ack(linear);
-            else if (ran ? call || rt->exit_kind == XLAT_EXIT_BRANCH : key != rt->fn_key)
+            else if (ran ? call || rt->exit_kind == XLAT_EXIT_BRANCH ||
+                           rt->exit_kind == XLAT_EXIT_SIDE : key != rt->fn_key)
                 sample(key, ran);
         }
         const int32_t remaining = rt->wall_deadline ? (int32_t)(rt->wall_deadline - *rt->clock)
@@ -1383,16 +1386,11 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
         xlat_stats.entries++;
         r->entries++;
         r->insns += (uint32_t)((b0 - rt->budget) + ((int32_t)rt->extra - x0)) + r->fn;
-        /* A region left before its loops run (a loop body that calls or
-         * jumps out every time) costs an entry and an exit per pass: after
-         * XLAT_COLD_ENTRIES entries with fewer than XLAT_COLD_INSNS loop
-         * instructions per entry, XRIP keeps it. (The time per instruction
-         * is logged only: a REP string instruction counts as one.) */
-        /* ... or one that mostly sends its memory accesses to XRIP (data
-         * outside fast memory: upper memory code with its data there) */
+        /* A short region may connect much larger native regions. Its
+         * length alone is not a reason to force the chain through XRIP.
+         * Retain the existing guard for regions dominated by side exits. */
         if (r->live && r->entries == XLAT_COLD_ENTRIES &&
-            (r->insns < XLAT_COLD_ENTRIES * XLAT_COLD_INSNS ||
-             (r->sides + r->exits[XLAT_EXIT_SIDE]) * XLAT_COLD_SIDE_RATIO > r->insns)) {
+            (r->sides + r->exits[XLAT_EXIT_SIDE]) * XLAT_COLD_SIDE_RATIO > r->insns) {
             r->live = 0;
             r->cold = 1;
             gap_reset();
