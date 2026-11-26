@@ -891,18 +891,18 @@ static const volatile uint8_t *test_irq;   /* rt->intr when IF is set */
 static unsigned long io_calls;
 uint32_t xlat_rt_io(xlat_rt_t *rt, uint32_t ctl, uint32_t value)
 {
-    (void)value;
-    if (ctl & (XLAT_IO_STI | XLAT_IO_OUT))
-        return 0;
+    if (ctl & (XLAT_IO_CLI | XLAT_IO_STI | XLAT_IO_SET_IF)) {
+        const bool enable = (ctl & XLAT_IO_STI) || ((ctl & XLAT_IO_SET_IF) && value);
+        const bool shadow = (ctl & XLAT_IO_STI) && !(rt->eflags & 0x200u);
+        rt->eflags = (rt->eflags & ~0x200u) | (enable ? 0x200u : 0u);
+        rt->intr = enable && test_irq ? test_irq : &zero_byte;
+        return XLAT_IO_DONE | ((shadow || *rt->intr) ? XLAT_IO_BOUNDARY : 0u);
+    }
     if (++io_calls % 5 == 0)
         return 0;
-    if (ctl & XLAT_IO_CLI) {
-        rt->eflags &= ~0x200u;
-        rt->intr = &zero_byte;
-        return XLAT_IO_DONE;
-    }
     const uint32_t bytes = ctl >> 16 & 0xfu;
-    return XLAT_IO_DONE | tio(ctl & 0xffffu, bytes, false, 0);
+    const bool out = (ctl & XLAT_IO_OUT) != 0;
+    return XLAT_IO_DONE | tio(ctl & 0xffffu, bytes, out, out ? value & (bytes == 2 ? 0xffffu : 0xffu) : 0u);
 }
 
 /* The test's xlat_interp_one(): the reference interpreter is the "XRIP". */

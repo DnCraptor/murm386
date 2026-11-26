@@ -136,6 +136,7 @@ static void gap_reset(void);
 uint8_t xlat_entry_map[XLAT_MAP_BITS / 8];
 uint8_t xlat_code_map[XLAT_CODE_MAP_BYTES];
 bool xlat_dirty = true;
+bool xlat_clean_resume;
 uint32_t xlat_call_key[XLAT_CALL_SLOTS];
 uint8_t xlat_call_count[XLAT_CALL_SLOTS];
 
@@ -1135,6 +1136,10 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
     rt->links = 0;
     bool ran = false, built = false;
     for (;;) {
+        /* Check before entering a region or starting another compilation. */
+        if (rt->wall_deadline && (*rt->intr ||
+            (int32_t)(*rt->clock - rt->wall_deadline) >= 0))
+            break;
         const uint32_t key = (uint32_t)rt->cs << 16 | (rt->ip & 0xffffu);
         entry_t *e = lookup(key);
         if (!e || !st->region[e->region].live) {
@@ -1212,10 +1217,20 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
         /* Budget used up (entry costs, short regions): the burst lasts
          * until its deadline, as in the back-edge stubs. */
         if (rt->budget <= 0) {
-            if ((int32_t)(*rt->clock - rt->deadline) >= 0)
+            uint32_t more = XLAT_SLICE_CHECK;
+            if (rt->budget_limit) {
+                const uint32_t granted = (uint32_t)start + rt->extra;
+                if (granted >= rt->budget_limit ||
+                    (int32_t)(*rt->clock - rt->wall_deadline) >= 0)
+                    break;
+                const uint32_t remain = rt->budget_limit - granted;
+                if (more > remain)
+                    more = remain;
+            } else if ((int32_t)(*rt->clock - rt->deadline) >= 0) {
                 break;
-            rt->budget += XLAT_SLICE_CHECK;
-            rt->extra += XLAT_SLICE_CHECK;
+            }
+            rt->budget += (int32_t)more;
+            rt->extra += more;
         }
     }
     xlat_rt_pending(rt);    /* XRIP takes the lazy flags as they are */
@@ -1339,10 +1354,10 @@ uint32_t xlat_rt_popf(xlat_rt_t *rt, uint32_t value)
     xlat_rt_pending(rt);
     resolve_rt(rt);
     const uint32_t diff = (rt->eflags ^ value) & 0x7fd5u;
-    /* IF changes must go through XRIP's POPF, not STI: there is no IRQ
-     * shadow after POPF, and a newly enabled pending IRQ needs a boundary. */
-    if (diff & 0x7300u)
-        return 0;       /* TF, IF, IOPL, NT */
+    if (diff & 0x7100u)
+        return 0;       /* TF, IOPL, NT */
+    if ((diff & 0x200u) && !xlat_rt_io(rt, XLAT_IO_SET_IF, value & 0x200u))
+        return 0;
     rt->eflags = (rt->eflags & ~0x7fd5u) | (value & 0x7fd5u);
     rt->lazy_cf = (uint8_t)(rt->eflags & 1u);   /* resolved: lazy_cf = CF */
     return 1;
@@ -1420,7 +1435,7 @@ uint32_t xlat_rt_gap(uint32_t addr, uint32_t last, xlat_rt_t *rt)
 
 /* In flash, not SRAM (__time_critical_func): the SRAM heap is small, and
  * the copy itself is bound by guest memory. */
-uint32_t xlat_rt_rep(xlat_rt_t *rt, uint32_t src, uint32_t dst, uint32_t ctl)
+static uint32_t rep_chunk(xlat_rt_t *rt, uint32_t src, uint32_t dst, uint32_t ctl)
 {
     const uint32_t n = ctl & 0xffffu, bytes = ctl >> 16 & 7u;
     const bool stos = (ctl & XLAT_REP_STOS) != 0;
@@ -1481,6 +1496,25 @@ uint32_t xlat_rt_rep(xlat_rt_t *rt, uint32_t src, uint32_t dst, uint32_t ctl)
     for (; k < len; ++k)
         d[k] = s[k];
     return 1;
+}
+
+uint32_t xlat_rt_rep(xlat_rt_t *rt, uint32_t src, uint32_t dst, uint32_t ctl)
+{
+    const uint32_t count = ctl & 0xffffu, bytes = ctl >> 16 & 7u;
+    const bool stos = (ctl & XLAT_REP_STOS) != 0;
+    uint32_t done = 0;
+    while (done < count) {
+        const uint32_t left = count - done;
+        const uint32_t n = left < XLAT_REP_CHUNK ? left : XLAT_REP_CHUNK;
+        if (!rep_chunk(rt, stos ? src : src + done * bytes, dst + done * bytes,
+                       (ctl & ~0xffffu) | n))
+            break;
+        done += n;
+        if (*rt->intr || (rt->wall_deadline &&
+            (int32_t)(*rt->clock - rt->wall_deadline) >= 0))
+            break;
+    }
+    return done;
 }
 
 static uint32_t szp(uint32_t value, int bits)

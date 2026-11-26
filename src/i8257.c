@@ -29,6 +29,9 @@
 #include <string.h>
 #include "ems.h"
 #include "mem.h"
+#if XLAT
+#include "fdos/xlat/xlat.h"
+#endif
 
 #ifdef BUILD_ESP32
 #include "esp_attr.h"
@@ -474,6 +477,12 @@ int i8257_dma_write_memory(IsaDma *obj, int nchan, void *buf, int pos, int len)
 
     uint8_t *p = buf;
 
+#if XLAT
+    /* DMA reads do not invalidate code. Guest-memory writes do, even if
+     * the controller is serviced outside the CPU or inside an OUT. */
+    if (len > 0)
+        xlat_dirty = true;
+#endif
     if (r->mode & 0x20) {
         for (int i = 0; i < len; i++)
             pstore8((uint32_t)(addr - pos - i), p[i]);

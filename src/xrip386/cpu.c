@@ -72,11 +72,28 @@ static __time_critical_func() inline void load_segment(uint8_t index, uint16_t s
 #define portin16(port) active_cpu->cb.io_read16(active_cpu->cb.io, (port))
 #if XLAT
 #define XLAT_NOTE_FOREIGN() (xlat_dirty = true)   /* a device or native code may write guest RAM */
+extern bool pc_xlat_safe_out(void *o, uint16_t port, bool word);
+static __time_critical_func() inline void xlat_portout8(CPU *cpu, uint16_t port, uint8_t value)
+{
+    const bool foreign = !pc_xlat_safe_out(cpu->cb.io, port, false);
+    if (foreign) XLAT_NOTE_FOREIGN();
+    cpu->cb.io_write8(cpu->cb.io, port, value);
+    if (foreign) XLAT_NOTE_FOREIGN();
+}
+static __time_critical_func() inline void xlat_portout16(CPU *cpu, uint16_t port, uint16_t value)
+{
+    const bool foreign = !pc_xlat_safe_out(cpu->cb.io, port, true);
+    if (foreign) XLAT_NOTE_FOREIGN();
+    cpu->cb.io_write16(cpu->cb.io, port, value);
+    if (foreign) XLAT_NOTE_FOREIGN();
+}
+#define portout(port, value) xlat_portout8(active_cpu, (port), (value))
+#define portout16(port, value) xlat_portout16(active_cpu, (port), (value))
 #else
 #define XLAT_NOTE_FOREIGN() ((void)0)
+#define portout(port, value) active_cpu->cb.io_write8(active_cpu->cb.io, (port), (value))
+#define portout16(port, value) active_cpu->cb.io_write16(active_cpu->cb.io, (port), (value))
 #endif
-#define portout(port, value) (XLAT_NOTE_FOREIGN(), active_cpu->cb.io_write8(active_cpu->cb.io, (port), (value)))
-#define portout16(port, value) (XLAT_NOTE_FOREIGN(), active_cpu->cb.io_write16(active_cpu->cb.io, (port), (value)))
 // The memory accesses of the CPU, by linear address. Conventional RAM is reached inline; the memory
 // from 1 MB directly too (cpu.h), from a small function; the rest goes through read86/write86.
 // A word or dword is one load or store: the Cortex-M33 and the host take it at any address.
@@ -2974,8 +2991,9 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
 
             case 0xFB: /* FB STI */
                 if (unlikely(cpl > iopl)) raise_fault(13, 0);
+                if (!ifl)
+                    active_cpu->i286_irq_shadow = true;
                 ifl = 1;
-                active_cpu->i286_irq_shadow = true;
                 break;
 
             case 0xFC: /* FC CLD */

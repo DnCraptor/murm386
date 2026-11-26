@@ -16,7 +16,13 @@
 #define XLAT_HOT_FN(name) name
 #else
 #include "pico.h"
+#if defined(NO_PAGING) && defined(I386_MODE)
+/* main() copies RAM_4_EXT code before init_hardware(); the runtime stack
+ * floor is raised to __ram_4_ext_end__ after hardware initialization. */
+#define XLAT_HOT_FN(name) __attribute__((section(".ram_4_ext_code.xlat." #name))) name
+#else
 #define XLAT_HOT_FN(name) __time_critical_func(name)
+#endif
 #endif
 
 /* ---------------------------------------------------------------------- */
@@ -41,10 +47,10 @@
 #define XLAT_TRACE_MIN       8
 #endif
 #ifndef XLAT_LINK_MIN
-#define XLAT_LINK_MIN        1               /* any: XRIP costs more than an entry by link */
+#define XLAT_LINK_MIN        1               /* even a short epilogue can connect hot regions */
 #endif
 #ifndef XLAT_EXIT_HOT
-#define XLAT_EXIT_HOT        4               /* region exits to a target before translating there */
+#define XLAT_EXIT_HOT        16              /* amortize compilation of short exit traces */
 #endif
 /* Link table: a region exit (BRANCH) looks its target up here, in the
  * trampoline's dispatcher, and goes on without returning to xlat_run().

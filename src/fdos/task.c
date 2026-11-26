@@ -55,6 +55,7 @@ extern volatile uint32_t dos_diag_kernel_code;
  */
 extern struct PC *pc;
 void pc_step(struct PC *pc, int stepcount);
+void pc_step_guest(struct PC *pc, size_t stepcount, bool continuation);
 void pc_service(struct PC *pc);
 uint32_t get_uticks(void);
 size_t psram_usable_size(void);
@@ -5147,8 +5148,11 @@ static COUNT exec_run_process(const struct exec_process_start *start)
   {
     for (;;)
     {
-      while (!terminate_flag)
-        pc_step(pc, 4096);
+      bool continuation = false;
+      while (!terminate_flag) {
+        pc_step_guest(pc, 4096, continuation);
+        continuation = true;
+      }
       /* Our own child ended: leave the EXEC. Anything else ended (a process
          started without EXEC): resume its parent and keep running. */
       if (task_idata_read16(offsetof(struct dos_data, cu_psp)) ==

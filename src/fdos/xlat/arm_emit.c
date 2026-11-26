@@ -81,14 +81,37 @@ static void plain_imm12(arm_emit_t *e, uint16_t base, int rd, int rn, uint32_t i
             (uint16_t)((imm12 >> 8 & 7u) << 12 | (unsigned)rd << 8 | (imm12 & 0xffu)));
 }
 
-void arm_addw(arm_emit_t *e, int rd, int rn, uint32_t imm12)
+/* ADDW/SUBW only encode 12 unsigned bits. Larger constants must never
+ * silently wrap (IDIV's signed 16-bit quotient bias is 0x8000).
+ * Prefer one modified-immediate instruction; otherwise each nonzero byte
+ * of the constant is independently encodable. No scratch register or
+ * change to APSR, including when rd == rn. */
+static void addsub_imm(arm_emit_t *e, int rd, int rn, uint32_t imm, bool sub)
 {
-    plain_imm12(e, 0xf200u, rd, rn, imm12 & 0xfffu);
+    if (imm <= 0xfffu) {
+        plain_imm12(e, sub ? 0xf2a0u : 0xf200u, rd, rn, imm);
+        return;
+    }
+    const int op = sub ? DP_SUB : DP_ADD;
+    if (arm_dp_imm(e, op, 0, rd, rn, imm))
+        return;
+    for (unsigned shift = 0; shift < 32; shift += 8) {
+        const uint32_t part = imm & (0xffu << shift);
+        if (!part)
+            continue;
+        arm_dp_imm(e, op, 0, rd, rn, part);
+        rn = rd;
+    }
 }
 
-void arm_subw(arm_emit_t *e, int rd, int rn, uint32_t imm12)
+void arm_addw(arm_emit_t *e, int rd, int rn, uint32_t imm)
 {
-    plain_imm12(e, 0xf2a0u, rd, rn, imm12 & 0xfffu);
+    addsub_imm(e, rd, rn, imm, false);
+}
+
+void arm_subw(arm_emit_t *e, int rd, int rn, uint32_t imm)
+{
+    addsub_imm(e, rd, rn, imm, true);
 }
 
 static void mov16(arm_emit_t *e, uint16_t base, int rd, uint32_t imm16)

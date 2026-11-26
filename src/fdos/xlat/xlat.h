@@ -71,6 +71,8 @@ typedef struct xlat_rt {
      * reset when a region is installed; empty when lo >= hi. */
     uint32_t gap_lo, gap_hi;
     uint32_t hit_lo, hit_hi;
+    uint32_t wall_deadline;       /* nonzero: independent real-time deadline */
+    uint32_t budget_limit;        /* total instruction credit, 0 unlimited */
 } xlat_rt_t;
 
 #define XLAT_UMB_BASE   0xC0000u
@@ -215,7 +217,8 @@ extern xlat_stats_t xlat_stats;
 #ifndef XLAT_SLICE_US
 #define XLAT_SLICE_US 400u
 #endif
-#define XLAT_SLICE_CHECK 1024
+#define XLAT_SLICE_CHECK 256
+#define XLAT_XRIP_CHECK 128u
 
 /*
  * Run translated code for the guest state in rt, starting at rt->cs:rt->ip.
@@ -306,16 +309,15 @@ uint32_t xlat_stack_free(void);
 #define XLAT_CODE_MAP_BYTES (0x110000u >> (XLAT_CODE_BLOCK_SHIFT + 3u))
 extern uint8_t xlat_code_map[XLAT_CODE_MAP_BYTES];
 
-/* Translated x86 code may have changed since the last xlat_run(): set at
- * the start of every CPU burst (device service, DMA, native programs ran
- * before it), by XRIP when it writes into a block of xlat_code_map
- * (xlat_note_write), runs a native BIOS / DOS handler, an x87 instruction
- * (fpu.c stores past XRIP's writes) or an OUT. xlat_run() compares the
- * regions' code again only then: entries through burst cuts (CALLs of
- * function regions) in one burst do not. Inside xlat_run(), the same for
- * the instructions XRIP runs for translated code (xlat_region_still_valid):
- * a side exit for a write outside fast memory compares nothing. */
+/* Translated x86 code may have changed since the last xlat_run(). Set on
+ * untrusted CPU entry, full device service, DMA writes, native BIOS/DOS
+ * calls, mapping changes and XRIP writes touching translated code.
+ * Consecutive guest-only bursts may retain their epoch. xlat_run() and
+ * xlat_region_still_valid() revalidate the affected regions when dirty. */
 extern bool xlat_dirty;
+/* One-shot permission from an audited consecutive guest loop. Other CPU
+ * entry points retain the conservative dirty-on-entry behavior. */
+extern bool xlat_clean_resume;
 static inline void xlat_note_write(uint32_t linear)
 {
     if (xlat_code_map[linear >> (XLAT_CODE_BLOCK_SHIFT + 3)] & (1u << ((linear >> XLAT_CODE_BLOCK_SHIFT) & 7u)))
@@ -332,7 +334,7 @@ static inline void xlat_note_write(uint32_t linear)
 #define XLAT_TRACES 1
 #endif
 #define XLAT_CALL_SLOTS 128u
-#define XLAT_CALL_HOT   16u
+#define XLAT_CALL_HOT   32u
 extern uint32_t xlat_call_key[XLAT_CALL_SLOTS];
 extern uint8_t xlat_call_count[XLAT_CALL_SLOTS];
 static inline bool xlat_call_hot(uint32_t linear)
@@ -406,8 +408,8 @@ uint64_t xlat_rt_muldiv(xlat_rt_t *rt, uint32_t ctl, uint32_t operand, uint32_t 
  * flags in rt as XRIP's flags_now() and returns rt->eflags. */
 uint32_t xlat_rt_resolve(xlat_rt_t *rt);
 
-/* Helper for POPF (real mode: CPL 0). Return 0 before changing FLAGS
- * when TF, IF, IOPL or NT changes; XRIP executes the whole POPF. */
+/* Helper for POPF: TF, IOPL or NT changes fall back to XRIP;
+ * IF changes alone do not create an interrupt shadow. */
 uint32_t xlat_rt_popf(xlat_rt_t *rt, uint32_t value);
 
 /* Helper called by generated code for REP MOVS / REP STOS (DF clear): the
@@ -415,8 +417,10 @@ uint32_t xlat_rt_popf(xlat_rt_t *rt, uint32_t value);
  * neither offset wraps and the destination holds no translated code
  * (xlat_code_map). src: linear address of DS:SI (MOVS) or the value (STOS),
  * dst: of ES:DI, ctl: CX | bytes << 16 | XLAT_REP_STOS | the source
- * segment << XLAT_REP_SEG_SHIFT. Nonzero: done (the caller moves SI, DI and
- * clears CX); 0: nothing done, the instruction runs element by element. */
+ * segment << XLAT_REP_SEG_SHIFT. Returns elements transferred (possibly
+ * partial at an IRQ/deadline), or 0 before any write. Caller updates SI,
+ * DI and CX. Each internal chunk has at most XLAT_REP_CHUNK elements. */
+#define XLAT_REP_CHUNK 256u
 #define XLAT_REP_STOS      (1u << 19)
 #define XLAT_REP_SEG_SHIFT 20
 uint32_t xlat_rt_rep(xlat_rt_t *rt, uint32_t src, uint32_t dst, uint32_t ctl);
@@ -436,13 +440,15 @@ uint32_t xlat_rt_gap(uint32_t addr, uint32_t last, xlat_rt_t *rt);
 #define XLAT_FPU_WAIT  0x400u
 uint32_t xlat_rt_fpu(xlat_rt_t *rt, uint32_t ctl, uint32_t addr);
 
-/* Helper for IN and CLI. OUT and STI are executed through the interpreter
- * thunk. ctl: port | bytes << 16 | XLAT_IO_*.
- * Returns XLAT_IO_DONE | value read, or 0 before any side effect. */
+/* I/O and IF helper. Unsafe OUT falls back before any side effect.
+ * XLAT_IO_BOUNDARY means the instruction completed and XRIP must take over
+ * at the next IP (pending IRQ or STI shadow). SET_IF is only for POPF. */
 #define XLAT_IO_OUT    0x00100000u
 #define XLAT_IO_CLI    0x00200000u
 #define XLAT_IO_STI    0x00400000u
+#define XLAT_IO_SET_IF 0x00800000u
 #define XLAT_IO_DONE   0x00010000u
+#define XLAT_IO_BOUNDARY 0x00020000u
 uint32_t xlat_rt_io(xlat_rt_t *rt, uint32_t ctl, uint32_t value);
 
 #ifdef __cplusplus

@@ -1850,6 +1850,11 @@ static void emit_string_cmp(tctx_t *c, int i)
     arm_emit_t *e = &c->e;
     const x86_insn_t *in = &c->in[i];
     const int bytes = in->size / 8, s = 32 - in->size;
+    if (in->rep) {
+        arm_uxth(e, A_R12, A_R5);
+        arm_dp_imm(e, DP_SUB, 1, A_PC, A_R12, XLAT_REP_CHUNK);
+        emit_branch(c, (dest_t){D_STUB, (int16_t)exit_stub(c, in->ip, XLAT_EXIT_STOP, -1)}, C_HI);
+    }
     uint32_t top = 0, done = 0;
     if (in->rep) {
         top = e->pos;
@@ -1933,8 +1938,10 @@ static uint32_t emit_rep_bulk(tctx_t *c, int i)
     arm_blx(e, A_R12);
     arm_dp_imm(e, DP_SUB, 1, A_PC, A_R0, 0);
     const uint32_t slow = arm_branch_slot(e);
-    /* done: SI, DI += CX * bytes (16 bits), CX = 0 */
-    arm_uxth(e, A_R12, A_R5);
+    /* r0 = transferred elements. Update CX and indices even on partial REP. */
+    arm_dp_reg(e, DP_SUB, 0, A_R1, A_R5, A_R0, SH_LSL, 0);
+    arm_bfi(e, A_R5, A_R1, 0, 16);
+    arm_mov(e, A_R12, A_R0);
     if (bytes > 1)
         arm_lsl(e, A_R12, A_R12, bytes == 4 ? 2 : 1);
     if (in->sub == STR_MOVS) {
@@ -1943,8 +1950,9 @@ static uint32_t emit_rep_bulk(tctx_t *c, int i)
     }
     arm_dp_reg(e, DP_ADD, 0, A_R1, A_R10, A_R12, SH_LSL, 0);
     arm_bfi(e, A_R10, A_R1, 0, 16);
-    arm_mov32(e, A_R1, 0);
-    arm_bfi(e, A_R5, A_R1, 0, 16);
+    arm_dp_reg(e, DP_ORR, 1, A_R12, A_PC, A_R5, SH_LSL, 16);
+    const int k = exit_stub(c, in->ip, XLAT_EXIT_STOP, -1);
+    emit_branch(c, (dest_t){D_STUB, (int16_t)k}, C_NE);
     const uint32_t done = arm_branch_slot(e);
     local_patch(c, slow, C_EQ);
     return done;
@@ -1957,6 +1965,12 @@ static void emit_string(tctx_t *c, int i)
     const int bytes = in->size / 8;
     const uint32_t bulk = in->rep && (in->sub == STR_MOVS || in->sub == STR_STOS)
                           ? emit_rep_bulk(c, i) : UINT32_MAX;
+    /* Long non-bulk REP is restartable in XRIP (one element per iteration). */
+    if (in->rep) {
+        arm_uxth(e, A_R12, A_R5);
+        arm_dp_imm(e, DP_SUB, 1, A_PC, A_R12, XLAT_REP_CHUNK);
+        emit_branch(c, (dest_t){D_STUB, (int16_t)exit_stub(c, in->ip, XLAT_EXIT_STOP, -1)}, C_HI);
+    }
     /* r2 = step: bytes, or -bytes when DF is set */
     arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_EFLAGS);
     arm_ubfx(e, A_R12, A_R12, 10, 1);
@@ -2334,6 +2348,12 @@ static void emit_flag(tctx_t *c, int i)
         arm_addw(e, A_R1, A_R1, 2u);
         arm_uxth(e, A_R1, A_R1);
         emit_store_sp(c);
+        /* POPF completed (including SP): no STI shadow. */
+        arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_INTR);
+        arm_ls_imm(e, LS_LDRB, A_R12, A_R12, 0);
+        arm_dp_imm(e, DP_SUB, 1, A_PC, A_R12, 0);
+        emit_branch(c, (dest_t){D_STUB, (int16_t)exit_stub(c, (uint16_t)(in->ip + in->len),
+                                                        XLAT_EXIT_STOP, -1)}, C_NE);
         break;
     default:        /* PUSHF: 2 | (FLAGS & 0x7fd5), as XRIP's makeflagsword() */
         emit_resolve(c);
@@ -2375,8 +2395,8 @@ static void emit_loopcc(tctx_t *c, int i)
     local_patch(c, skip, in->sub ? zcond ^ 1 : zcond);
 }
 
-/* IN / CLI through the light helper. STI and OUT run once through XRIP,
- * with the full register/flag image and post-instruction validity check. */
+/* Safe OUT and IF updates need no decoder; unsafe OUT falls back before
+ * any port side effect, through the synchronized interpreter thunk. */
 static void emit_io(tctx_t *c, int i)
 {
     arm_emit_t *e = &c->e;
@@ -2385,8 +2405,6 @@ static void emit_io(tctx_t *c, int i)
         const int r = sync_recon(c, c->in_set[i], c->pfp[i]);
         if (r >= 0)
             emit_recon(c, r);
-        emit_interp_call(c, i, in->sub == IO_OUT ? XI_MAY_WRITE : 0u, true);
-        return;
     }
     uint32_t ctl;
     switch (in->sub) {
@@ -2409,9 +2427,20 @@ static void emit_io(tctx_t *c, int i)
     arm_mov32(e, A_R12, (uint32_t)(uintptr_t)&xlat_rt_io);
     arm_blx(e, A_R12);
     arm_dp_imm(e, DP_SUB, 1, A_PC, A_R0, 0);
-    emit_branch(c, side_dest(c, i, 0), C_EQ);
-    if (in->sub == IO_IN)
-        arm_bfi(e, A_R4, A_R0, 0, in->size);
+    if (in->sub == IO_STI || in->sub == IO_OUT) {
+        const uint32_t native = arm_branch_slot(e);
+        emit_interp_call(c, i, in->sub == IO_OUT ? XI_MAY_WRITE : 0u, true);
+        const uint32_t done = arm_branch_slot(e);
+        local_patch(c, native, C_NE);
+        arm_dp_imm(e, DP_AND, 1, A_PC, A_R0, XLAT_IO_BOUNDARY);
+        const int k = exit_stub(c, (uint16_t)(in->ip + in->len), XLAT_EXIT_STOP, -1);
+        emit_branch(c, (dest_t){D_STUB, (int16_t)k}, C_NE);
+        local_patch(c, done, C_AL);
+    } else {
+        emit_branch(c, side_dest(c, i, 0), C_EQ);
+        if (in->sub == IO_IN)
+            arm_bfi(e, A_R4, A_R0, 0, in->size);
+    }
 }
 
 /* x87: fpu.c through xlat_rt_fpu (no flags, no x86 registers but FNSTSW

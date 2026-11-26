@@ -2176,13 +2176,31 @@ static void __not_in_flash_func(default_tsr1)(void)
 static tsr_callback_t tsr0_callback = default_tsr0;
 static tsr_callback_t tsr1_callback = default_tsr1;
 
+#if XLAT
+/* Once a native ISR has been installed, keep conservative validation for
+ * the rest of the boot, even if that ISR unregisters itself. */
+static bool xlat_native_isr_seen;
+bool xlat_host_async_writers(void)
+{
+    return __atomic_load_n(&xlat_native_isr_seen, __ATOMIC_ACQUIRE);
+}
+#endif
+
 tsr_callback_t __not_in_flash_func(set_tsr0_callback)(tsr_callback_t cb)
 {
+#if XLAT
+    if (cb != default_tsr0)
+        __atomic_store_n(&xlat_native_isr_seen, true, __ATOMIC_RELEASE);
+#endif
     return __atomic_exchange_n(&tsr0_callback, cb, __ATOMIC_ACQ_REL);
 }
 
 tsr_callback_t __not_in_flash_func(set_tsr1_callback)(tsr_callback_t cb)
 {
+#if XLAT
+    if (cb != default_tsr1)
+        __atomic_store_n(&xlat_native_isr_seen, true, __ATOMIC_RELEASE);
+#endif
     return __atomic_exchange_n(&tsr1_callback, cb, __ATOMIC_ACQ_REL);
 }
 

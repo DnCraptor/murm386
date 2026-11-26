@@ -707,6 +707,27 @@ inline static void out_ems(const uint16_t port, const uint8_t data) {
 }
 #endif
 
+#if XLAT
+/* Only handlers that cannot write guest RAM or change its mapping. */
+bool pc_xlat_safe_out(void *o, uint16_t port, bool word)
+{
+    PC *pc = o;
+    if (COVOX_IS_SOUND_MASTER(pc->covox_enabled) &&
+        (port & 0xffe0u) == csm_get_io_base())
+        return false;
+    switch (port) {
+    case 0x20: case 0x21: case 0xa0: case 0xa1:
+        return !word;
+    case 0x228: case 0x388: case 0x38a:
+        return true;
+    case 0x229: case 0x389: case 0x38b:
+        return !word;
+    default:
+        return false;
+    }
+}
+#endif
+
 static void pc_io_write(void *o, int addr, u8 val)
 {
 	cp_io_write();
@@ -1082,6 +1103,10 @@ void pc_vga_step(void *o)
 }
 
 static uint32_t pc_last_device_service;
+#if XLAT
+static uint32_t pc_last_full_service;
+#define PC_FULL_SERVICE_US 1000u
+#endif
 
 /* One shared token bucket, including reentrant BIOS/DOS pc_step calls.
  * Credit is in thousandths of an instruction; milli-MIPS = tokens/us.
@@ -1111,11 +1136,12 @@ static void __not_in_flash_func(pc_rate_update)(PC *pc, int limit)
     pc_rate_retired = retired;
 }
 
-#if XLAT && XLAT_LOG
+#if XLAT
 #include "fdos/xlat/xlat.h"
+extern bool xlat_host_async_writers(void);
 #endif
 
-static void __not_in_flash_func(pc_service_impl)(PC *pc)
+static void __not_in_flash_func(pc_service_impl)(PC *pc, bool full)
 {
     /*
      * Native ELF code runs synchronously on core0, so the outer emulation
@@ -1125,8 +1151,14 @@ static void __not_in_flash_func(pc_service_impl)(PC *pc)
      * execute or advance guest CPU state.
      */
     pc_last_device_service = get_uticks();
+#if XLAT
+    if (full) {
+        pc_last_full_service = pc_last_device_service;
+        xlat_dirty = true;  /* host polling and native callbacks may write RAM */
+    }
+#endif
 
-    {
+    if (full) {
         /* Завершение отложенного INT 15h/AH=83h (см. bios_15h.c). */
         extern void bios_15h_event_wait_tick(void);
         bios_15h_event_wait_tick();
@@ -1135,24 +1167,29 @@ static void __not_in_flash_func(pc_service_impl)(PC *pc)
     PROF_T(t_dev);
     /* reset_request is handled in main.c via load_bios_and_reset() */
     int refresh = vga_step(pc->vga);
-    if (pc->enable_serial)
-        u8250_update(pc->serial);
-    kbd_step(pc->i8042);
+    if (full) {
+        if (pc->enable_serial)
+            u8250_update(pc->serial);
+        kbd_step(pc->i8042);
+    }
     sb16_service(pc->sb16, pc_last_device_service);
     i8257_dma_run(pc->isa_dma);
     i8257_dma_run(pc->isa_hdma);
     csm_service();
-    if (pc->fdc) fdc_tick(pc->fdc);
+    if (full && pc->fdc) fdc_tick(pc->fdc);
     PROF_ADD(t_dev, devices);
 
     {
         PROF_T(t_poll);
-        if (pc->poll) pc->poll(pc->redraw_data);
+        if (full && pc->poll) pc->poll(pc->redraw_data);
         PROF_ADD(t_poll, poll);
     }
     {
         PROF_T(t_refresh);
         if (refresh && pc->redraw) {
+#if XLAT
+            xlat_dirty = true;
+#endif
             vga_refresh(pc->vga, pc->redraw, pc->redraw_data,
                         pc->full_update != 0);
             if (pc->full_update == 2)
@@ -1160,19 +1197,40 @@ static void __not_in_flash_func(pc_service_impl)(PC *pc)
         }
         PROF_ADD(t_refresh, refresh);
     }
-#if XLAT && XLAT_LOG
+#if XLAT
+    /* A nested call could have consumed the dirty flag while polling. */
+    if (full || refresh)
+        xlat_dirty = true;
+#if XLAT_LOG
     xlat_note_service(get_uticks() - pc_last_device_service);
+#endif
+#endif
+}
+
+static void __not_in_flash_func(pc_service_due)(PC *pc)
+{
+#if XLAT
+    const uint32_t now = get_uticks();
+    const bool full = (uint32_t)(now - pc_last_full_service) >= PC_FULL_SERVICE_US;
+    if (full || (uint32_t)(now - pc_last_device_service) >= PC_RATE_WINDOW_US)
+        pc_service_impl(pc, full);
+#else
+    pc_service_impl(pc, true);
 #endif
 }
 
 void __not_in_flash_func(pc_service)(PC *pc)
 {
-    pc_service_impl(pc);
+    pc_service_impl(pc, true);
 }
 
-void __not_in_flash_func(pc_step)(PC *pc, size_t max_ops)
+static void __not_in_flash_func(pc_step_impl)(PC *pc, size_t max_ops, bool continuation)
 {
     PROF_T(t_total);
+#if XLAT
+    if (!continuation)
+        xlat_dirty = true;
+#endif
     /*
      * Порядок слайса: сначала CPU-burst, затем обслуживание устройств.
      *
@@ -1214,27 +1272,52 @@ void __not_in_flash_func(pc_step)(PC *pc, size_t max_ops)
             if (pc_rate_credit < (int64_t)max_ops * 1000) {
                 /* Do not sleep in a nested BIOS callback. Keep devices alive
                  * and let the caller retry when more credit has accrued. */
+#if XLAT
+                pc_service_due(pc);
+#else
                 if ((uint32_t)(get_uticks() - pc_last_device_service) >= PC_RATE_WINDOW_US)
-                    pc_service_impl(pc);
+                    pc_service_impl(pc, true);
+#endif
                 return;
             }
         }
         PROF_T(t_cpu);
+#if XLAT
+        /* Only an explicitly uninterrupted guest loop can reuse the epoch.
+         * Consume the permission at CPU entry, never in a nested callback. */
+        xlat_clean_resume = continuation && !xlat_host_async_writers();
+#else
+        (void)continuation;
+#endif
         cpu_step(pc->cpu, max_ops);
+#if XLAT
+        xlat_clean_resume = false;
+#endif
         PROF_ADD(t_cpu, cpu);
         if (limit > 0) {
             pc_rate_update(pc, limit);
             /* Tiny throttled bursts must not run the device tail on every
              * instruction. Device time continues even while CPU waits. */
+#if !XLAT
             if ((uint32_t)(get_uticks() - pc_last_device_service) < PC_RATE_WINDOW_US)
                 return;
+#endif
         }
+#if !XLAT
         if (pc->cpu->native_done && !was_native_done &&
             (uint32_t)(get_uticks() - pc_last_device_service) < 1000u)
             return;
+#endif
     }
-
-    pc_service_impl(pc);
+#if XLAT
+    (void)was_native_done;
+    if (pc->paused)
+        pc_service_impl(pc, true);
+    else
+        pc_service_due(pc);
+#else
+    pc_service_impl(pc, true);
+#endif
 
 #if SUBSYS_PROFILE
     PROF_ADD(t_total, total);
@@ -1252,6 +1335,16 @@ void __not_in_flash_func(pc_step)(PC *pc, size_t max_ops)
         prof_dump_counter = 0;
     }
 #endif
+}
+
+void __not_in_flash_func(pc_step)(PC *pc, size_t max_ops)
+{
+    pc_step_impl(pc, max_ops, false);
+}
+
+void __not_in_flash_func(pc_step_guest)(PC *pc, size_t max_ops, bool continuation)
+{
+    pc_step_impl(pc, max_ops, continuation);
 }
 
 static void raise_irq(void *o, PicState2 *s)

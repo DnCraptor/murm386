@@ -131,6 +131,8 @@ static __time_critical_func() void set_paging(bool on) {
 static __time_critical_func() void set_cr0(uint32_t value) {
     value |= CR0_ET;
     const uint32_t changed = cr0 ^ value;
+    if (changed & (CR0_PE | CR0_PG))
+        XLAT_NOTE_FOREIGN();
     cr0 = value;
     protected_mode = (cr0 & CR0_PE) && !v86;
     if (!(cr0 & CR0_PE)) cpl = 0;

@@ -55,6 +55,7 @@ static bool dispatch_int_hook(uint8_t vector)
     const uint32_t saved_ip = firstip, saved_esp = first_esp;
     active_cpu->ip = active_cpu->next_ip = XRIP_IP;
     const bool handled = hook->handler(active_cpu, hook->opaque);
+    XLAT_NOTE_FOREIGN();    /* a nested guest call may have consumed it */
     XRIP_IP = active_cpu->next_ip;
     firstip = saved_ip;
     first_esp = saved_esp;
@@ -95,6 +96,7 @@ static bool bios_escape(uint8_t id)
     const uint32_t saved_ip = firstip, saved_esp = first_esp;
     active_cpu->ip = active_cpu->next_ip = firstip;
     const bool iret = rp2350_bios_handler(active_cpu, id);
+    XLAT_NOTE_FOREIGN();    /* native handler may write after a nested call */
     XRIP_IP = active_cpu->next_ip;
     firstip = saved_ip;
     first_esp = saved_esp;
@@ -209,24 +211,34 @@ uint32_t __time_critical_func(xlat_rt_fpu)(xlat_rt_t *rt, uint32_t ctl, uint32_t
     return 1;
 }
 
-/* IN and CLI in real mode. STI and OUT must use the interpreter thunk:
- * STI has an instruction-boundary IRQ shadow, and OUT may run DMA or other
- * device code that changes guest memory. Never perform either before a
- * fallback, or the instruction would be executed twice. */
+/* Safe I/O does not dirty the translation cache. STI publishes its
+ * shadow before returning to XRIP at the following guest instruction. */
 uint32_t __time_critical_func(xlat_rt_io)(xlat_rt_t *rt, uint32_t ctl, uint32_t value)
 {
-    (void)value;
-    if (ctl & (XLAT_IO_STI | XLAT_IO_OUT))
-        return 0;
-    if (ctl & XLAT_IO_CLI) {
-        rt->eflags &= ~0x200u;
-        rt->intr = &xlat_no_irq;
-        return XLAT_IO_DONE;
+    CPU *const cpu = active_cpu;
+    if (ctl & (XLAT_IO_CLI | XLAT_IO_STI | XLAT_IO_SET_IF)) {
+        const bool enable = (ctl & XLAT_IO_STI) ||
+                            ((ctl & XLAT_IO_SET_IF) && value);
+        const bool shadow = (ctl & XLAT_IO_STI) && !(rt->eflags & 0x200u);
+        rt->eflags = (rt->eflags & ~0x200u) | (enable ? 0x200u : 0u);
+        rt->intr = enable ? (const volatile uint8_t *)&cpu->intr : &xlat_no_irq;
+        if (shadow)
+            cpu->i286_irq_shadow = true;
+        return XLAT_IO_DONE | ((shadow || *rt->intr) ? XLAT_IO_BOUNDARY : 0u);
     }
     if (xlat_stack_free() < XLAT_STACK_NEEDED)
-        return 0;   /* the device code may go deep: XRIP does it */
+        return 0;
     const uint16_t port = (uint16_t)ctl;
     const bool word = (ctl >> 16 & 0xfu) == 2u;
+    if (ctl & XLAT_IO_OUT) {
+        if (!pc_xlat_safe_out(cpu->cb.io, port, word))
+            return 0;   /* synchronized XRIP handles DMA etc., no side effects yet */
+        if (word)
+            cpu->cb.io_write16(cpu->cb.io, port, (uint16_t)value);
+        else
+            cpu->cb.io_write8(cpu->cb.io, port, (uint8_t)value);
+        return XLAT_IO_DONE | (*rt->intr ? XLAT_IO_BOUNDARY : 0u);
+    }
     return XLAT_IO_DONE | (word ? (uint32_t)portin16(port) : (uint32_t)(uint8_t)portin(port));
 }
 
@@ -325,7 +337,8 @@ uint32_t __time_critical_func(xlat_interp_one)(xlat_rt_t *rt, uint32_t flags)
      * Otherwise xlat_enter() restores the pre-interrupt CS over the ISR. */
     rt->cs = segregs[regcs];
     rt->seg_base[1] = segment_base[regcs];
-    if (!can_continue || !valid)
+    if (!can_continue || !valid ||
+        (rt->wall_deadline && (int32_t)(*rt->clock - rt->wall_deadline) >= 0))
         return 0;
     if (changed_cs) {
         rt->ip &= 0xffffu;
@@ -369,10 +382,13 @@ static __time_critical_func() uint32_t xlat_enter(CPU *cpu, uint32_t count, uint
     rt->seg_base[1] = segment_base[regcs];
     rt->seg_base[2] = segment_base[regss];
     rt->seg_base[3] = segment_base[regds];
-    rt->budget = (int32_t)count;
+    const uint32_t initial = count < XLAT_SLICE_CHECK ? count : XLAT_SLICE_CHECK;
+    rt->budget = (int32_t)initial;
     rt->clock = &timer_hw->timerawl;
-    /* In a limited mode, never extend an exhausted instruction budget. */
-    rt->deadline = config_get_mips_limit() > 0 ? t0 : t0 + XLAT_SLICE_US;
+    rt->wall_deadline = (t0 + XLAT_SLICE_US) | 1u;
+    rt->budget_limit = config_get_mips_limit() > 0 ? count : 0u;
+    /* Limited mode replenishes its remaining credit only in xlat_run. */
+    rt->deadline = rt->budget_limit ? t0 : rt->wall_deadline;
     rt->extra = 0;
     /* With IF clear an IRQ cannot be taken: the back edges need not stop. */
     rt->intr = ifl ? (const volatile uint8_t *)&cpu->intr : &xlat_no_irq;
@@ -416,9 +432,9 @@ static __time_critical_func() uint32_t xlat_enter(CPU *cpu, uint32_t count, uint
     flags_src = rt->lazy_src;
     flags_op = rt->lazy_op;
     flags_cf = rt->lazy_cf;
-    /* count + extra - budget instructions ran (more than count when the
+    /* initial + extra - budget instructions ran (more than count when the
      * burst went on to its deadline); XRIP runs what is left of count. */
-    const int32_t used = (int32_t)(count + rt->extra) - rt->budget;
+    const int32_t used = (int32_t)(initial + rt->extra) - rt->budget;
     const uint32_t ran_insns = used > 0 ? (uint32_t)used : 0;
     retired += ran_insns;
     return ran_insns;
@@ -452,7 +468,10 @@ void __time_critical_func(xrip_step_cpu)(CPU *cpu, int count)
     uint32_t burst_xrip_us = 0, burst_xrip_insns = 0;   /* in run_instructions() */
 #endif
     const uint32_t t0 = timer_hw->timerawl;
-    xlat_dirty = true;      /* device service, DMA, native code ran since the last burst */
+    const bool clean_resume = xlat_clean_resume;
+    xlat_clean_resume = false;
+    if (!clean_resume || !xlat_mode_ok(cpu))
+        xlat_dirty = true;
     uint32_t xlat_used = xlat_enter(cpu, (uint32_t)count, t0, true);
     xlat_burst_native = xlat_used != 0;
 #endif
@@ -474,22 +493,30 @@ void __time_critical_func(xrip_step_cpu)(CPU *cpu, int count)
 #endif
         for (;;) {
             left = xlat_used >= left ? 0 : left - xlat_used;
-            if (!left)
+            xlat_used = 0;
+            if (!left || (int32_t)(timer_hw->timerawl - t0) >= (int32_t)XLAT_SLICE_US)
                 break;
             xlat_cut = false;
             const unsigned long r0 = retired;
 #if XLAT_LOG
             const uint32_t tx = timer_hw->timerawl;
 #endif
-            run_instructions(left);
+            const uint32_t chunk = left < XLAT_XRIP_CHECK ? left : XLAT_XRIP_CHECK;
+            run_instructions(chunk);
             const uint32_t ran = (uint32_t)(retired - r0);
 #if XLAT_LOG
             xrip_ran += ran;
             xrip_us += timer_hw->timerawl - tx;
 #endif
             left = ran >= left ? 0 : left - ran;
-            if (!xlat_cut || !left)
+            if (!left || cpu->native_done || halted ||
+                (int32_t)(timer_hw->timerawl - t0) >= (int32_t)XLAT_SLICE_US)
                 break;
+            if (!xlat_cut) {
+                if (!ran)
+                    break;
+                continue;
+            }
             xlat_stats.cuts++;
             xlat_used = xlat_enter(cpu, left, t0, false);   /* sets xlat_armed */
             if (xlat_used) {
@@ -532,7 +559,7 @@ void __time_critical_func(xrip_step_cpu)(CPU *cpu, int count)
             xlat_stats.mix_xrip_us += burst_xrip_us;
             xlat_stats.mix_xrip_insns += burst_xrip_insns;
             xlat_stats.xlat_hist[xlat_us_bucket(us)]++;
-        } else if (n == (uint32_t)count) {   /* full XRIP bursts only */
+        } else if (n) {   /* include deadline-limited XRIP bursts */
             xlat_stats.xrip_bursts++;
             xlat_stats.xrip_us += us;
             xlat_stats.xrip_insns += n;
@@ -643,6 +670,7 @@ void cpu_intcall(CPU *cpu, uint8_t vector)
         deliver_fault();
     else
         external_interrupt(vector);
+    XLAT_NOTE_FOREIGN();    /* native hook may have executed nested guest code */
     fault_point = outer_fault_point;
     firstip = saved_ip;
     first_esp = saved_esp;
