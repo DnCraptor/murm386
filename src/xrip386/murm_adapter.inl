@@ -144,8 +144,7 @@ static xlat_rt_t xlat_state;
 static bool xlat_busy;
 /* This burst ran translated code (statistics). */
 static bool xlat_burst_native;
-/* Cuts this burst that found no region (xlat_enter): after XLAT_CUT_MISSES
- * of them XRIP stops cutting until the next burst. */
+/* After this many consecutive cuts without a region, XRIP keeps the burst. */
 #define XLAT_CUT_MISSES 4u
 static uint8_t xlat_cut_misses;
 
@@ -360,6 +359,8 @@ static __time_critical_func() uint32_t xlat_enter(CPU *cpu, uint32_t count, uint
 #else
 #define XLAT_ENTER_NOTE(s_why, c_why) ((void)0)
 #endif
+    if (at_start)
+        xlat_cut_misses = 0;
     if (xlat_busy || !xlat_mode_ok(cpu)) {
         XLAT_ENTER_NOTE(xlat_busy ? XLAT_ENTER_S_BUSY : XLAT_ENTER_S_MODE, XLAT_ENTER_C_MODE);
         xlat_armed = false;
@@ -410,12 +411,13 @@ static __time_critical_func() uint32_t xlat_enter(CPU *cpu, uint32_t count, uint
     xlat_busy = true;
     const bool ran = xlat_run(rt);
     xlat_busy = false;
-    /* Nothing to run at a burst start: the marked loop heads XRIP reaches
-     * later may have regions. At a cut (a marked target) without one: a few
-     * more cuts this burst (each costs a lookup and a sample), then none. */
-    if (at_start)
+    /* A successful entry ends the streak of misses. A hot CALL requesting
+     * compilation is a sample, so leave room for subsequent marked targets. */
+    if (ran)
         xlat_cut_misses = 0;
-    xlat_armed = ran || at_start || ++xlat_cut_misses < XLAT_CUT_MISSES;
+    else if (!at_start && rt->fn_key == UINT32_MAX)
+        xlat_cut_misses++;
+    xlat_armed = xlat_cut_misses < XLAT_CUT_MISSES;
     XLAT_ENTER_NOTE(ran ? XLAT_ENTER_S_RAN : XLAT_ENTER_S_NONE, ran ? XLAT_ENTER_C_RAN : XLAT_ENTER_C_NONE);
 #undef XLAT_ENTER_NOTE
     if (!ran)

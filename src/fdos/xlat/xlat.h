@@ -346,9 +346,10 @@ static inline void xlat_note_write(uint32_t linear)
 #define XLAT_CALL_ACK   UINT8_MAX
 extern uint32_t xlat_call_key[XLAT_CALL_SLOTS];
 extern uint8_t xlat_call_count[XLAT_CALL_SLOTS];
+extern bool xlat_call_queue_blocked;
 static inline bool xlat_call_hot(uint32_t linear)
 {
-    if (!XLAT_TRACES)
+    if (!XLAT_TRACES || xlat_call_queue_blocked)
         return false;
     const uint32_t h = (linear * 0x9e3779b1u) >> 25;
     if (xlat_call_key[h] != linear) {

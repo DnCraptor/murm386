@@ -400,6 +400,7 @@ enum {
 };
 
 /* A compiler slice is separate from the CPU instruction budget. */
+#define XLAT_COMPILE_QUEUE 16u
 #define XLAT_COMPILE_US 150u
 #define XLAT_COMPILE_RATIO 12 /* microseconds of guest time per microsecond of compiler time */
 #if defined(XLAT_HOST_TEST)

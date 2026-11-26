@@ -78,7 +78,6 @@ enum { HOT_NONE = 0, HOT_RETRY = 1, HOT_FINAL = 2 };
 
 /* In order of increasing priority, FIFO within each priority. */
 enum { COMPILE_BURST, COMPILE_RETRY, COMPILE_EXIT, COMPILE_CALL };
-#define XLAT_COMPILE_QUEUE 16u
 #define XLAT_COMPILE_MIN_US 40
 #define XLAT_COMPILE_CREDIT (XLAT_COMPILE_RATIO * (int32_t)XLAT_COMPILE_US)
 
@@ -118,6 +117,7 @@ typedef struct {
     void *ctx;              /* translator working memory */
     compile_request_t queue[XLAT_COMPILE_QUEUE];
     unsigned queued;
+    uint8_t compile_blocked;       /* priorities denied since the last dequeue */
     int32_t compile_credit;        /* microseconds of guest work, debt if negative */
     uint32_t compile_burst;        /* at most one compiler slice per CPU burst */
     /* One unpublished region owns the free arena window. Lives in PSRAM. */
@@ -166,6 +166,7 @@ bool xlat_dirty = true;
 bool xlat_clean_resume;
 uint32_t xlat_call_key[XLAT_CALL_SLOTS];
 uint8_t xlat_call_count[XLAT_CALL_SLOTS];
+bool xlat_call_queue_blocked;
 
 #if defined(XLAT_HOST_TEST)
 void *xlat_test_calloc(size_t size);   /* executable, zeroed */
@@ -519,10 +520,17 @@ static void log_prof(void)
 #define log_pages() ((void)0)
 #endif
 
+static void clear_compile_blocked(void)
+{
+    st->compile_blocked = 0;
+    xlat_call_queue_blocked = false;
+}
+
 static void reset_tables(void)
 {
     st->job.pending = false;
     st->queued = 0;
+    clear_compile_blocked();
     st->compile_credit = 0;
     st->compile_burst = 0;
     log_region_counts();    /* the regions are about to go */
@@ -594,6 +602,7 @@ static __attribute__((noinline)) bool ready(void)
 
 void xlat_release(void)
 {
+    xlat_call_queue_blocked = false;
     memset(xlat_call_key, 0, sizeof(xlat_call_key));
     memset(xlat_call_count, 0, sizeof(xlat_call_count));
     memset(xlat_entry_map, 0, sizeof(xlat_entry_map));
@@ -768,6 +777,7 @@ static compile_request_t dequeue_compile(unsigned i)
     --st->queued;
     memmove(&st->queue[i], &st->queue[i + 1],
             (st->queued - i) * sizeof(st->queue[0]));
+    clear_compile_blocked();
     return request;
 }
 
@@ -1037,6 +1047,9 @@ static unsigned hot_slot(uint32_t key)
 
 static bool queue_compile(uint32_t key, uint8_t kind, uint8_t why)
 {
+    const unsigned priority = 1u << kind;
+    if (st->compile_blocked & priority)
+        return false;
     if (st->job.pending && st->job.request.key == key && st->job.request.kind == kind)
         return true;
 
@@ -1059,8 +1072,12 @@ static bool queue_compile(uint32_t key, uint8_t kind, uint8_t why)
         dequeue_compile(upgrade);
     } else if (st->queued == XLAT_COMPILE_QUEUE) {
         xlat_stats.compile_queue_drops++;
-        if (replace == XLAT_COMPILE_QUEUE)
+        if (replace == XLAT_COMPILE_QUEUE) {
+            st->compile_blocked |= priority;
+            if (kind == COMPILE_CALL)
+                xlat_call_queue_blocked = true;
             return false;
+        }
         dequeue_compile(replace);
     }
     st->queue[st->queued++] = (compile_request_t){key, kind, why};
@@ -1272,6 +1289,7 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
         for (unsigned i = 0; i < st->queued; ++i)
             rearm_request(st->queue[i]);
         st->queued = 0;
+        clear_compile_blocked();
         gap_reset();
         st->mem = rt->mem;
         st->mem_size = rt->mem_size;

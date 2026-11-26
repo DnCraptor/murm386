@@ -396,6 +396,7 @@ static __time_critical_func() void far_jump(uint16_t selector, uint32_t offset) 
     if (!protected_mode) {
         xrip_ip = offset;
         load_segment(regcs, selector);
+        XLAT_BRANCH_SEEN();
         return;
     }
     descriptor_t d;
@@ -488,6 +489,7 @@ static __time_critical_func() void far_return(bool size32, uint16_t release) {
     if (!protected_mode) {
         xrip_ip = offset;
         load_segment(regcs, selector);
+        XLAT_BRANCH_SEEN();
         return;
     }
     const uint8_t privilege = selector & 3;
@@ -580,6 +582,7 @@ static __time_critical_func() void interrupt_return(bool size32) {
         xrip_ip = pop_sized(size32);
         load_segment(regcs, pop_sized(size32));
         set_flags(pop_sized(size32), size32 ? 0x17FD5 : 0x7FD5);
+        XLAT_BRANCH_SEEN();
         return;
     }
     if (nt) { // return to the task in the back link

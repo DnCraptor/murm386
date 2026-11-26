@@ -669,9 +669,13 @@ static __time_critical_func() bool exec386(uint8_t opcode) {
             const uint16_t release = fetch16();
             xrip_ip = pop32();
             stack_add(release);
+            XLAT_BRANCH_SEEN();
             return true;
         }
-        case 0xC3: xrip_ip = pop32(); return true;
+        case 0xC3:
+            xrip_ip = pop32();
+            XLAT_BRANCH_SEEN();
+            return true;
         case 0xC4: case 0xC5: // LES / LDS r32, m16:32
             modregrm();
             if (mode == 3) {
@@ -731,6 +735,7 @@ static __time_critical_func() bool exec386(uint8_t opcode) {
         case 0xE9: { // JMP rel32
             const uint32_t displacement = fetch32();
             xrip_ip += displacement;
+            XLAT_BRANCH_SEEN();
             return true;
         }
         case 0xEA: { // JMP ptr16:32
@@ -753,7 +758,10 @@ static __time_critical_func() bool exec386(uint8_t opcode) {
                 case 3: // CALL far m16:32
                     far_call(mem_read16(ea + 4), mem_read32(ea), true);
                     return true;
-                case 4: xrip_ip = readrm32(rm); return true;
+                case 4: // JMP near r/m32
+                    xrip_ip = readrm32(rm);
+                    XLAT_BRANCH_SEEN();
+                    return true;
                 case 5: // JMP far m16:32
                     far_jump(mem_read16(ea + 4), mem_read32(ea));
                     return true;

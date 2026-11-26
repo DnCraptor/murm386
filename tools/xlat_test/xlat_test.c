@@ -2267,6 +2267,53 @@ static int compile_scheduler_check(void)
     if (xlat_stats.translations != 3 || xlat_stats.retries_built != 1)
         return 1;
 
+    xlat_flush();
+    const uint32_t drops = xlat_stats.compile_queue_drops;
+    const uint16_t extra_call = 0x400 + 16 * XLAT_COMPILE_QUEUE;
+    rt.eflags = 0;
+    /* Fill the queue with CALLs, which have the highest priority. */
+    for (unsigned i = 0; i < XLAT_COMPILE_QUEUE; ++i) {
+        rt.ip = (uint16_t)(0x400 + 16 * i);
+        memcpy(mem + base + rt.ip, trace, sizeof(trace));
+        rt.fn_key = (uint32_t)cs << 16 | rt.ip;
+        xlat_run(&rt);
+    }
+    rt.ip = extra_call;
+    for (unsigned i = 1; i < XLAT_CALL_HOT; ++i)
+        if (xlat_call_hot(base + rt.ip))
+            return 1;
+    if (!xlat_call_hot(base + rt.ip))
+        return 1;
+    rt.fn_key = (uint32_t)cs << 16 | rt.ip;
+    xlat_run(&rt);
+    rt.fn_key = UINT32_MAX;
+    for (unsigned i = 0; i < 4 * XLAT_HOT_THRESHOLD; ++i) {
+        if (xlat_call_hot(base + extra_call))
+            return 1;
+        rt.ip = 0x900;
+        xlat_run(&rt);
+    }
+    if (xlat_stats.compile_queue_drops != drops + 2)
+        return 1;
+    xlat_compile_credit(XLAT_COMPILE_RATIO * XLAT_COMPILE_US);
+    rt.eflags = 0x200;
+    rt.wall_deadline += XLAT_SLICE_US;
+    rt.ip++;
+    xlat_run(&rt);
+    if (xlat_stats.translations != 4)
+        return 1;
+    for (unsigned i = 1; i < XLAT_CALL_RESCAN; ++i)
+        if (xlat_call_hot(base + extra_call))
+            return 1;
+    if (!xlat_call_hot(base + extra_call))
+        return 1;
+    rt.eflags = 0;
+    rt.ip = extra_call;
+    rt.fn_key = (uint32_t)cs << 16 | rt.ip;
+    xlat_run(&rt);
+    if (xlat_stats.compile_queue_drops != drops + 2 || xlat_call_queue_blocked)
+        return 1;
+
     puts("compiler scheduler: OK");
     return 0;
 }
