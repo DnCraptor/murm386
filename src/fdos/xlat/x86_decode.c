@@ -342,9 +342,8 @@ static bool decode_one(const uint8_t *code, uint16_t ip, x86_insn_t *in)
         in->b.kind = OPD_REG;
         in->b.reg = g;
     } else if (op == 0x86 || op == 0x87) {
+        /* r/m, r: the memory form reads and writes the operand (emit_xchg) */
         decode_modrm(code, &pos, seg, in, &in->a, &g);
-        if (in->a.kind != OPD_REG)
-            return false;
         in->op = XO_XCHG;
         in->size = op == 0x86 ? 8 : 16;
         in->b.kind = OPD_REG;
@@ -540,10 +539,11 @@ static bool decode_one(const uint8_t *code, uint16_t ip, x86_insn_t *in)
     } else if (op == 0xfa || op == 0xfb) {
         in->op = XO_IO;
         in->sub = op == 0xfa ? IO_CLI : IO_STI;
-    } else if (op == 0xf8 || op == 0xf9 || op == 0xf5 || op == 0x9f || op == 0x9e || op == 0x9c) {
+    } else if (op == 0xf8 || op == 0xf9 || op == 0xf5 || op == 0x9f || op == 0x9e || op == 0x9c ||
+               op == 0x9d) {
         in->op = XO_FLAG;
         in->sub = op == 0xf8 ? FL_CLC : op == 0xf9 ? FL_STC : op == 0xf5 ? FL_CMC :
-                  op == 0x9f ? FL_LAHF : op == 0x9e ? FL_SAHF : FL_PUSHF;
+                  op == 0x9f ? FL_LAHF : op == 0x9e ? FL_SAHF : op == 0x9d ? FL_POPF : FL_PUSHF;
     } else if (op == 0xd7) {
         in->op = XO_MISC;                                 /* XLAT: AL = [BX + AL] */
         in->sub = MISC_XLAT;

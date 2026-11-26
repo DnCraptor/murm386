@@ -43,6 +43,7 @@ typedef struct {
     uint32_t entries;
     uint32_t insns;        /* instructions charged at its back edges */
     uint32_t us;           /* time inside it (rt->clock), entries included */
+    uint32_t sides;        /* instructions sent to XRIP for memory outside fast memory */
     uint32_t exits[XLAT_EXIT_COUNT];
     uint32_t epoch;        /* st->epoch when its bytes were last compared */
     uint32_t mem_size;     /* rt->mem_size it was built for (reads compare with it) */
@@ -275,10 +276,11 @@ static void log_region_code(const region_t *r)
 static void log_region_count(const region_t *r)
 {
     {
-        log_printf("C %04X:%04X entries=%lu exit branch/budget/side/stop=%lu/%lu/%lu/%lu ins=%lu us=%lu%s\r\n",
+        log_printf("C %04X:%04X entries=%lu exit branch/budget/side/stop=%lu/%lu/%lu/%lu ins=%lu us=%lu sides=%lu%s\r\n",
                    r->cs, r->ip, (unsigned long)r->entries, (unsigned long)r->exits[0],
                    (unsigned long)r->exits[1], (unsigned long)r->exits[2],
                    (unsigned long)r->exits[3], (unsigned long)r->insns, (unsigned long)r->us,
+                   (unsigned long)r->sides,
                    r->live ? (r->fn ? " fn" : "") : r->cold ? " (cold)" : " (invalidated)");
     }
 }
@@ -337,7 +339,7 @@ static void note_reject(const xlat_rt_t *rt, uint32_t key, int why)
         slot->n = slot->n_interp = 0;
     const uint32_t linear = rt->seg_base[1] + (rt->ip & 0xffffu);
     for (uint32_t i = 0; i < XLAT_REJ_BYTES; ++i)
-        slot->b[i] = linear + i < rt->mem_size ? rt->mem[linear + i] : 0;
+        slot->b[i] = xlat_code_direct(linear + i, 1) ? rt->mem[linear + i] : 0;
 }
 
 /* A burst started at a rejected entry point again. */
@@ -410,7 +412,8 @@ void XLAT_HOT_FN(xlat_prof_note)(unsigned kind, uint32_t key, uint32_t linear, c
     min->err = min->count;
     min->count += weight;
     for (uint32_t i = 0; i < 8; ++i)
-        min->b[i] = linear + i < mem_size ? mem[linear + i] : 0;
+        min->b[i] = xlat_code_direct(linear + i, 1) ? mem[linear + i] : 0;
+    (void)mem_size;
 }
 
 void XLAT_HOT_FN(xlat_prof_page)(uint32_t linear, uint32_t weight)
@@ -623,7 +626,7 @@ static bool XLAT_HOT_FN(region_valid)(const region_t *r, const xlat_rt_t *rt)
         const uint32_t linear = load32(d);
         const uint32_t len = d[4] | (uint32_t)d[5] << 8;
         const uint8_t *copy = d + 8;
-        if (linear + len > rt->mem_size)
+        if (!xlat_code_direct(linear, len))
             return false;
         const uint8_t *g = rt->mem + linear;
         uint32_t i = 0;
@@ -1129,7 +1132,11 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
          * XLAT_COLD_ENTRIES entries with fewer than XLAT_COLD_INSNS loop
          * instructions per entry, XRIP keeps it. (The time per instruction
          * is logged only: a REP string instruction counts as one.) */
-        if (r->entries == XLAT_COLD_ENTRIES && r->insns < XLAT_COLD_ENTRIES * XLAT_COLD_INSNS) {
+        /* ... or one that mostly sends its memory accesses to XRIP (data
+         * outside fast memory: upper memory code with its data there) */
+        if (r->entries == XLAT_COLD_ENTRIES &&
+            (r->insns < XLAT_COLD_ENTRIES * XLAT_COLD_INSNS ||
+             (r->sides + r->exits[XLAT_EXIT_SIDE]) * XLAT_COLD_SIDE_RATIO > r->insns)) {
             r->live = 0;
             r->cold = 1;
             unlink_region(e->region);
@@ -1157,6 +1164,12 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
     xlat_stats.links += rt->links;
     xlat_stats.entries += rt->links;
     return ran;
+}
+
+void XLAT_HOT_FN(xlat_note_side)(const xlat_rt_t *rt)
+{
+    if (st && rt->cur < XLAT_MAX_REGIONS)
+        st->region[rt->cur].sides++;
 }
 
 /* x86 condition cc (Jcc low nibble) on the lazy flags in rt, as XRIP's
@@ -1257,6 +1270,21 @@ uint32_t XLAT_HOT_FN(xlat_rt_resolve)(xlat_rt_t *rt)
     xlat_rt_pending(rt);
     resolve_rt(rt);
     return rt->eflags;
+}
+
+uint32_t XLAT_HOT_FN(xlat_rt_popf)(xlat_rt_t *rt, uint32_t value)
+{
+    xlat_rt_pending(rt);
+    resolve_rt(rt);
+    const uint32_t diff = (rt->eflags ^ value) & 0x7fd5u;
+    if (diff & 0x7100u)
+        return 0;       /* TF (a trap after it), IOPL, NT */
+    if ((diff & 0x200u) &&
+        !xlat_rt_io(rt, (value & 0x200u) ? XLAT_IO_STI : XLAT_IO_CLI, 0))
+        return 0;
+    rt->eflags = (rt->eflags & ~0x7fd5u) | (value & 0x7fd5u);
+    rt->lazy_cf = (uint8_t)(rt->eflags & 1u);   /* resolved: lazy_cf = CF */
+    return 1;
 }
 
 static uint32_t szp(uint32_t value, int bits)

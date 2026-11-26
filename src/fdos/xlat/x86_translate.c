@@ -301,7 +301,7 @@ static int discover(tctx_t *c, uint16_t start)
             c->n >= XLAT_MAX_INSNS || seen_before(c, ip))
             continue;
         const uint32_t linear = c->cs_base + ip;
-        if (linear + 16u > c->rt->mem_size)
+        if (!xlat_code_direct(linear, 16u))
             continue;
         x86_insn_t in;
         if (!x86_decode(c->rt->mem + linear, ip, &in) &&
@@ -1169,6 +1169,9 @@ static void emit_mov(tctx_t *c, int i)
 static void emit_xchg(tctx_t *c, int i)
 {
     const x86_insn_t *in = &c->in[i];
+    /* the memory form: r0 = address, checked as a write (it covers the read) */
+    if (x86_has_mem(in))
+        emit_mem_access(c, i, in->size / 8, true);
     const int ra = get_raw(c, &in->a, in->size, A_R1);
     if (ra != A_R1)
         arm_mov(&c->e, A_R1, ra);
@@ -1999,7 +2002,7 @@ static void emit_resolve(tctx_t *c)
     arm_blx(e, A_R12);
 }
 
-/* CLC / STC / CMC, LAHF, SAHF, PUSHF on the flags in rt. XRIP resolves the
+/* CLC / STC / CMC, LAHF, SAHF, PUSHF, POPF on the flags in rt. XRIP resolves the
  * lazy flags for these; CLC / STC / CMC here change CF where it is (the
  * lazy CF or the image), the same flags. */
 static void emit_flag(tctx_t *c, int i)
@@ -2042,6 +2045,21 @@ static void emit_flag(tctx_t *c, int i)
         arm_ls_imm(e, LS_STR, A_R0, A_R11, XLAT_RT_EFLAGS);
         arm_dp_imm(e, DP_AND, 0, A_R12, A_R0, 1);                /* resolved: lazy_cf = CF */
         arm_ls_imm(e, LS_STRB, A_R12, A_R11, XLAT_RT_CF);
+        break;
+    case FL_POPF:   /* xlat_rt_popf(rt, word at SS:SP), then SP += 2 */
+        emit_stack_addr(c, 0);
+        emit_checks(c, i, 2, false);
+        arm_ls_imm(e, LS_LDR, A_LR, A_R11, XLAT_RT_MEM);
+        arm_ls_reg(e, LS_LDRH, A_R1, A_LR, A_R0);
+        arm_mov(e, A_R0, A_R11);
+        arm_mov32(e, A_R12, (uint32_t)(uintptr_t)&xlat_rt_popf);
+        arm_blx(e, A_R12);
+        arm_dp_imm(e, DP_SUB, 1, A_PC, A_R0, 0);
+        emit_branch(c, side_dest(c, i, 0), C_EQ);
+        arm_ls_imm(e, LS_LDRH, A_R1, A_R11, XLAT_RT_SP);
+        arm_addw(e, A_R1, A_R1, 2u);
+        arm_uxth(e, A_R1, A_R1);
+        emit_store_sp(c);
         break;
     default:        /* PUSHF: 2 | (FLAGS & 0x7fd5), as XRIP's makeflagsword() */
         emit_resolve(c);

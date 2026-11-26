@@ -214,6 +214,18 @@ void xlat_release(void);
  * SD_DATA_DIR/xlat.log. Only at a safe point (a DOS program has ended). */
 void xlat_log_write(uint16_t psp, const char *name);
 
+/* Provided by the CPU side: the guest bytes [linear, linear + len) are at
+ * rt->mem + linear, readable directly (conventional memory, and upper
+ * memory / ROM / HMA where they are direct PSRAM, not VGA or an EMS
+ * window). Only code is fetched this way: translated memory accesses past
+ * rt->mem_size still go to XRIP. */
+bool xlat_code_direct(uint32_t linear, uint32_t len);
+
+/* An instruction of the running region (rt->cur) went to XRIP for a memory
+ * access outside fast memory (side): counted per region (xlat_run drops
+ * regions that mostly do that, as cold ones). */
+void xlat_note_side(const xlat_rt_t *rt);
+
 /* XLAT_LOG: time outside translated code, by CS:IP (key cs << 16 | ip):
  * XRIP instructions run at the end of a burst (weight: how many), the
  * instructions translated code hands to XRIP (xlat_interp_one): those it has
@@ -259,7 +271,9 @@ uint32_t xlat_stack_free(void);
  * write by translated code into a marked block leaves by a side exit: XRIP
  * does it and the regions are checked again. Cleared by a flush. */
 #define XLAT_CODE_BLOCK_SHIFT 6u
-#define XLAT_CODE_MAP_BYTES (0xa0000u >> (XLAT_CODE_BLOCK_SHIFT + 3u))
+/* Up to the end of the HMA: code outside fast memory (upper memory, ROM,
+ * HMA) can be translated too (xlat_code_direct) */
+#define XLAT_CODE_MAP_BYTES (0x110000u >> (XLAT_CODE_BLOCK_SHIFT + 3u))
 extern uint8_t xlat_code_map[XLAT_CODE_MAP_BYTES];
 
 /* Translated x86 code may have changed since the last xlat_run(): set at
@@ -361,6 +375,12 @@ uint64_t xlat_rt_muldiv(xlat_rt_t *rt, uint32_t ctl, uint32_t operand, uint32_t 
 /* Helper called by generated code (PUSHF, LAHF, SAHF): resolves the lazy
  * flags in rt as XRIP's flags_now() and returns rt->eflags. */
 uint32_t xlat_rt_resolve(xlat_rt_t *rt);
+
+/* Helper called by generated code for POPF (real mode: CPL 0), value = the
+ * popped word: the flags as XRIP's decodeflagsword(), IF through
+ * xlat_rt_io() (CLI / STI). 0: nothing changed but the lazy flags resolved,
+ * XRIP does the POPF (TF, IOPL or NT change, or xlat_rt_io refused). */
+uint32_t xlat_rt_popf(xlat_rt_t *rt, uint32_t value);
 
 /* Helper called by generated code for an x87 instruction (and FWAIT), the
  * memory operand's linear address already checked (fast memory, no

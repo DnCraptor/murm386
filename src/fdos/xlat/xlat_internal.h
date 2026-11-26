@@ -79,6 +79,7 @@ static inline uint32_t xlat_link_hash(uint32_t key)
 #define XLAT_SPAN_WINDOW     2048u           /* code within +-1 KiB of the entry or of a called function */
 #define XLAT_COLD_ENTRIES    512             /* entries before a region is judged */
 #define XLAT_COLD_INSNS      8               /* loop instructions per entry to keep it */
+#define XLAT_COLD_SIDE_RATIO 4               /* cold too: more than 1 in this many instructions side */
 #ifndef XLAT_ARENA_SRAM
 #define XLAT_ARENA_SRAM      0
 #endif
@@ -160,7 +161,7 @@ enum { IND_CALL = 0, IND_JMP = 1 };
 enum { STK_PUSHA = 0, STK_POPA = 1, STK_ENTER0 = 2, STK_ENTER1 = 3, STK_LEAVE = 4 };
 
 /* XO_FLAG: they read or write the flags in rt (synchronized before). */
-enum { FL_CLC = 0, FL_STC = 1, FL_CMC = 2, FL_LAHF = 3, FL_SAHF = 4, FL_PUSHF = 5 };
+enum { FL_CLC = 0, FL_STC = 1, FL_CMC = 2, FL_LAHF = 3, FL_SAHF = 4, FL_PUSHF = 5, FL_POPF = 6 };
 
 /* XO_LOOPCC: sub 0 LOOPNZ (E0), 1 LOOPZ (E1). */
 
@@ -252,7 +253,7 @@ static inline bool x86_is_stack_op(const x86_insn_t *in)
            (in->op == XO_SEG && (in->sub == SEG_PUSH || in->sub == SEG_POP)) ||
            (in->op == XO_FAR && in->sub != FAR_JMP && in->sub != FAR_JMPM) ||
            (in->op == XO_IND && in->sub == IND_CALL) || in->op == XO_STK ||
-           (in->op == XO_FLAG && in->sub == FL_PUSHF);
+           (in->op == XO_FLAG && (in->sub == FL_PUSHF || in->sub == FL_POPF));
 }
 
 /* The x87 memory forms done natively: operand bytes, or 0 (XRIP does it).

@@ -140,8 +140,9 @@ static __time_critical_func() __attribute__((noinline)) uint32_t mem_read32_far(
 }
 
 #if XLAT
-/* A write past fast memory may still end in it (a word at its last byte):
- * xlat_note_write() for the translated code there. */
+/* A write past fast memory: xlat_note_write() for translated code there
+ * (upper memory, HMA: xlat_code_direct), or for a word that ends in fast
+ * memory. */
 #define XLAT_NOTE_FAR(address) \
     do { if ((address) < (XLAT_CODE_MAP_BYTES * 8u << XLAT_CODE_BLOCK_SHIFT)) xlat_note_write(address); } while (0)
 #else
@@ -150,6 +151,7 @@ static __time_critical_func() __attribute__((noinline)) uint32_t mem_read32_far(
 
 static __time_critical_func() __attribute__((noinline)) void mem_write8_far(uint32_t address, uint8_t value) {
     uint8_t *direct = far_direct_at(address, 0);
+    XLAT_NOTE_FAR(address);
     if (direct) *direct = value;
     else write86(address, value);
 }

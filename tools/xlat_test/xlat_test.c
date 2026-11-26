@@ -32,6 +32,12 @@ static uint8_t mem[MEM_BYTES];
 /* Host hooks                                                             */
 /* ---------------------------------------------------------------------- */
 
+/* conventional memory only, as before upper-memory code */
+bool xlat_code_direct(uint32_t linear, uint32_t len)
+{
+    return linear + len >= linear && linear + len <= 0xa0000u;
+}
+
 void *xlat_test_calloc(size_t size)
 {
     void *p = mmap(NULL, size, PROT_READ | PROT_WRITE | PROT_EXEC,
@@ -699,6 +705,7 @@ static void ref_step(void)
     }
     case 0xc9: putreg16(4, getreg16(5)); putreg16(5, ref_pop()); return;   /* LEAVE */
     case 0x9c: ref_push((uint16_t)(2 | (*flags_now() & 0x7fd5u))); return;   /* PUSHF */
+    case 0x9d: { const uint16_t v = ref_pop(); *flags_now() = (*flags_now() & ~0x7fd5u) | (v & 0x7fd5u); return; }   /* POPF */
     case 0x9f: putreg8(4, (uint8_t)(2 | (*flags_now() & 0x7fd5u))); return;  /* LAHF */
     case 0x9e: {   /* SAHF: decodeflagsword((makeflagsword() & 0xff00) | AH) */
         const uint32_t v = ((2 | (*flags_now() & 0x7fd5u)) & 0xff00u) | getreg8(4);
@@ -1168,9 +1175,17 @@ static void gen_one(ginsn_t *g, int index, int total)
             } else {
                 g->b[g->len++] = 0xe8; g->b[g->len++] = 0; g->b[g->len++] = 0;
             }
-        } else if (t == 5) {     /* PUSHA / POPA / PUSHF / ENTER / LEAVE */
-            const int f = (int)rn(5);
-            if (f == 0) g->b[g->len++] = 0x60;
+        } else if (t == 5) {     /* PUSHA / POPA / PUSHF / ENTER / LEAVE / POPF */
+            const int f = (int)rn(7);
+            if (f >= 5) {        /* PUSHF / PUSH imm; POPF (IF, DF, and now and then TF) */
+                if (f == 5) {
+                    g->b[g->len++] = 0x9c;
+                } else {
+                    const uint16_t v = (uint16_t)((rnd() & 0x0ed7u) | (rn(16) ? 0u : 0x100u));
+                    g->b[g->len++] = 0x68; g->b[g->len++] = (uint8_t)v; g->b[g->len++] = (uint8_t)(v >> 8);
+                }
+                g->b[g->len++] = 0x9d;
+            } else if (f == 0) g->b[g->len++] = 0x60;
             else if (f == 1) g->b[g->len++] = 0x61;
             else if (f == 2) g->b[g->len++] = 0x9c;
             else if (f == 3) { g->b[g->len++] = 0xc8; g->b[g->len++] = (uint8_t)(rn(3) * 2); g->b[g->len++] = rn(8) ? 0 : (uint8_t)rnd(); g->b[g->len++] = (uint8_t)rn(3); }
@@ -1287,15 +1302,13 @@ static void gen_one(ginsn_t *g, int index, int total)
         allow_mem = save;
         break;
     }
-    case 13: {                     /* XCHG reg, reg / NOP */
+    case 13: {                     /* XCHG r/m, reg / NOP */
         const int t = rn(3);
         if (t == 0) { g->b[g->len++] = 0x90; }
         else if (t == 1) { int r = pick_reg16_dst(); g->b[g->len++] = (uint8_t)(r ? 0x90 | r : 0x90); }
-        else {
+        else {   /* XCHG r/m, r (the memory form now and then) */
             g->b[g->len++] = (uint8_t)(0x86 | word);
-            int a = word ? pick_reg16_dst() : pick_reg8_dst();
-            int b = word ? pick_reg16_dst() : pick_reg8_dst();
-            g->b[g->len++] = (uint8_t)(0xc0 | a << 3 | b);
+            put_modrm(g, word ? pick_reg16_dst() : pick_reg8_dst(), word, true);
         }
         break;
     }

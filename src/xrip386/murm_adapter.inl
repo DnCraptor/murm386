@@ -237,6 +237,23 @@ uint32_t __time_critical_func(xlat_rt_io)(xlat_rt_t *rt, uint32_t ctl, uint32_t 
     return XLAT_IO_DONE | (word ? (uint32_t)portin16(port) : (uint32_t)(uint8_t)portin(port));
 }
 
+/* xlat.h: code at linear is in the direct guest memory (conventional
+ * memory, or upper memory / ROM / HMA where far_direct_at() reaches it at
+ * the same offset of fast_memory). */
+bool __time_critical_func(xlat_code_direct)(uint32_t linear, uint32_t len)
+{
+    if (!len || !fast_memory_size)
+        return len == 0;
+    if (linear < fast_memory_size)
+        return linear + len <= fast_memory_size;
+    /* Not the system BIOS segment: its native stubs (NATIVE_BIOS_STUB_PHYS)
+     * and the callback sentinel (NATIVE_BIOS_CALLBACK_PHYS) are escapes
+     * XRIP recognises by address. */
+    if (linear < 0x100000u && linear + len > 0xF0000u)
+        return false;
+    return linear + len > linear && far_direct_at(linear, len - 1u) == fast_memory + linear;
+}
+
 /* Called by translated code (xlat.h): XRIP executes the one instruction at
  * rt->ip. The registers are in cpu->gprx already; the lazy flags come from
  * and go back to rt. */
@@ -246,8 +263,10 @@ uint32_t __time_critical_func(xlat_interp_one)(xlat_rt_t *rt, uint32_t flags)
     if (xlat_stack_free() < XLAT_STACK_NEEDED)
         return 0;   /* XRIP runs it after the exit, from a shallower stack */
     xlat_stats.interp++;
-    if (flags & 4u)
+    if (flags & 4u) {
         xlat_stats.side_interp++;
+        xlat_note_side(rt);
+    }
 #if XLAT_LOG
     xlat_prof_note((flags & 4u) ? XLAT_PROF_SIDE : XLAT_PROF_INTERP,
                    (uint32_t)rt->cs << 16 | (rt->ip & 0xffffu), rt->seg_base[1] + (rt->ip & 0xffffu),
