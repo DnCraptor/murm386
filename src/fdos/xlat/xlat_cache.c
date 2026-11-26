@@ -51,6 +51,8 @@ typedef struct {
     uint16_t extra[XLAT_EXTRA_MAX];
 } region_t;
 
+#define XLAT_PAGES 4096u   /* XLAT_LOG: xlat_prof_page() pages (256 bytes) of the first MiB */
+
 typedef struct {
     uint32_t key;          /* cs << 16 | ip */
     uint32_t code_off;     /* arena offset of the entry label */
@@ -106,6 +108,7 @@ typedef struct {
     uint32_t log_skipped;   /* region dumps left out (XLAT_LOG_RESERVE) */
     rej_t rej[XLAT_REJ_SLOTS];
     uint32_t rej_why[XLAT_RJ_COUNT];
+    uint32_t page[XLAT_PAGES + 1];  /* xlat_prof_page: 256-byte pages of 1 MiB, then above */
 #endif
 } state_t;
 
@@ -410,6 +413,40 @@ void XLAT_HOT_FN(xlat_prof_note)(unsigned kind, uint32_t key, uint32_t linear, c
         min->b[i] = linear + i < mem_size ? mem[linear + i] : 0;
 }
 
+void XLAT_HOT_FN(xlat_prof_page)(uint32_t linear, uint32_t weight)
+{
+    if (st)
+        st->page[linear < 0x100000u ? linear >> 8 : XLAT_PAGES] += weight;
+}
+
+/* The XLAT_LOG_TOP_PAGES pages XRIP ran most in. */
+#define XLAT_LOG_TOP_PAGES 20
+static void log_pages(void)
+{
+    uint64_t total = 0;
+    for (uint32_t k = 0; k <= XLAT_PAGES; ++k)
+        total += st->page[k];
+    log_printf("X xrip pages total=%lu\r\n", (unsigned long)total);
+    for (int n = 0; n < XLAT_LOG_TOP_PAGES; ++n) {
+        uint32_t best = 0, best_n = 0;
+        for (uint32_t k = 0; k <= XLAT_PAGES; ++k)
+            if (st->page[k] > best_n) {
+                best_n = st->page[k];
+                best = k;
+            }
+        if (!best_n)
+            break;
+        if (best == XLAT_PAGES)
+            log_printf("X >=100000 n=%lu\r\n", (unsigned long)best_n);
+        else
+            log_printf("X %05lX-%05lX n=%lu %lu%%\r\n", (unsigned long)(best << 8),
+                       (unsigned long)((best << 8) | 0xffu), (unsigned long)best_n,
+                       (unsigned long)(total ? (uint64_t)best_n * 100u / total : 0));
+        st->page[best] = 0;
+    }
+    memset(st->page, 0, sizeof(st->page));
+}
+
 static void log_prof(void)
 {
     static const char *const kinds[XLAT_PROF_KINDS] = {"xrip", "interp", "side"};
@@ -445,6 +482,7 @@ static void log_prof(void)
 #define note_reject(rt, key, why) ((void)0)
 #define note_reject_hit(key) ((void)0)
 #define log_prof() ((void)0)
+#define log_pages() ((void)0)
 #endif
 
 static void reset_tables(void)
@@ -1463,6 +1501,19 @@ void xlat_log_write(uint16_t psp, const char *name)
                (unsigned long)(b->svc_n ? (uint32_t)(b->svc_us / b->svc_n) : 0),
                (unsigned long)b->svc_max);
     /* then the details, the region counts last: they fill what room is left */
+    {
+        const uint32_t *w = xlat_stats.enter_why;
+        log_printf("E start ran/none/irq/mode/busy=%lu/%lu/%lu/%lu/%lu cut ran/none/irq/mode=%lu/%lu/%lu/%lu "
+                   "xrip_tail=%lu\r\n",
+                   (unsigned long)w[XLAT_ENTER_S_RAN], (unsigned long)w[XLAT_ENTER_S_NONE],
+                   (unsigned long)w[XLAT_ENTER_S_MOMENT], (unsigned long)w[XLAT_ENTER_S_MODE],
+                   (unsigned long)w[XLAT_ENTER_S_BUSY], (unsigned long)w[XLAT_ENTER_C_RAN],
+                   (unsigned long)w[XLAT_ENTER_C_NONE], (unsigned long)w[XLAT_ENTER_C_MOMENT],
+                   (unsigned long)w[XLAT_ENTER_C_MODE], (unsigned long)xlat_stats.xrip_tail);
+        memset(xlat_stats.enter_why, 0, sizeof(xlat_stats.enter_why));
+        xlat_stats.xrip_tail = 0;
+    }
+    log_pages();
     log_rejects();
     log_prof();
     log_region_counts();

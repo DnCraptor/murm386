@@ -304,11 +304,18 @@ uint32_t __time_critical_func(xlat_interp_one)(xlat_rt_t *rt, uint32_t flags)
 static __time_critical_func() uint32_t xlat_enter(CPU *cpu, uint32_t count, uint32_t t0,
                                                   bool at_start)
 {
+#if XLAT_LOG
+#define XLAT_ENTER_NOTE(s_why, c_why) (xlat_stats.enter_why[at_start ? (s_why) : (c_why)]++)
+#else
+#define XLAT_ENTER_NOTE(s_why, c_why) ((void)0)
+#endif
     if (xlat_busy || !xlat_mode_ok(cpu)) {
+        XLAT_ENTER_NOTE(xlat_busy ? XLAT_ENTER_S_BUSY : XLAT_ENTER_S_MODE, XLAT_ENTER_C_MODE);
         xlat_armed = false;
         return 0;
     }
     if (!xlat_moment_ok(cpu)) {
+        XLAT_ENTER_NOTE(XLAT_ENTER_S_MOMENT, XLAT_ENTER_C_MOMENT);
         /* An IRQ pending at the burst start (the usual case after a timer
          * tick): XRIP takes it, and the first taken branch to a loop head
          * after the IRET comes back here. Disarmed, the whole burst ran in
@@ -352,6 +359,8 @@ static __time_critical_func() uint32_t xlat_enter(CPU *cpu, uint32_t count, uint
      * later may have regions. At a cut (a marked target) without one: no
      * more cuts this burst (each would cost a lookup and a sample). */
     xlat_armed = ran || at_start;
+    XLAT_ENTER_NOTE(ran ? XLAT_ENTER_S_RAN : XLAT_ENTER_S_NONE, ran ? XLAT_ENTER_C_RAN : XLAT_ENTER_C_NONE);
+#undef XLAT_ENTER_NOTE
     if (!ran)
         return 0;
     /* Segment registers changed by interpreted instructions are XRIP's own
@@ -443,10 +452,14 @@ void __time_critical_func(xrip_step_cpu)(CPU *cpu, int count)
         xlat_cut = false;
 #if XLAT_LOG
         /* where XRIP ran out (a sample of where its time goes) */
-        if (xrip_ran)
+        if (xrip_ran) {
             xlat_prof_note(XLAT_PROF_XRIP, (uint32_t)segregs[regcs] << 16 | (XRIP_IP & 0xffffu),
                            segment_base[regcs] + (XRIP_IP & 0xffffu), fast_memory,
                            fast_memory_size, xrip_ran);
+            xlat_prof_page(segment_base[regcs] + (XRIP_IP & 0xffffu), xrip_ran);
+            if (xlat_burst_native)
+                xlat_stats.xrip_tail += xrip_ran;
+        }
 #endif
     }
     xlat_armed = false;

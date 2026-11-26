@@ -125,6 +125,13 @@ enum {
     XLAT_EXIT_COUNT = 4
 };
 
+/* xlat_enter() outcomes, at a burst start (S_*) and at a cut (C_*) */
+enum {
+    XLAT_ENTER_S_RAN, XLAT_ENTER_S_NONE, XLAT_ENTER_S_MOMENT, XLAT_ENTER_S_MODE, XLAT_ENTER_S_BUSY,
+    XLAT_ENTER_C_RAN, XLAT_ENTER_C_NONE, XLAT_ENTER_C_MOMENT, XLAT_ENTER_C_MODE,
+    XLAT_ENTER_COUNT
+};
+
 typedef struct xlat_stats {
     uint32_t entries;           /* region executions */
     uint32_t translations;      /* regions built */
@@ -157,6 +164,8 @@ typedef struct xlat_stats {
      * device service after each burst (pc_service_impl). Histograms by
      * duration: < 50, 100, 200, 400, 800, 1600, 3200 us, longer. */
     uint32_t xrip_bursts, xlat_bursts;   /* XRIP only / with translated code */
+    uint64_t xrip_tail;         /* XRIP instructions in bursts with translated code */
+    uint32_t enter_why[XLAT_ENTER_COUNT];  /* xlat_enter() outcomes (XLAT_LOG) */
     uint64_t xrip_us, xrip_insns, xlat_us, xlat_insns;
     uint32_t xrip_hist[8], xlat_hist[8];
     uint32_t svc_n, svc_max, svc_hist[8];
@@ -212,6 +221,9 @@ void xlat_log_write(uint16_t psp, const char *name);
  * into translated code (side). Logged
  * as P lines at a program's exit. */
 enum { XLAT_PROF_XRIP, XLAT_PROF_INTERP, XLAT_PROF_SIDE, XLAT_PROF_KINDS };
+/* Exact XRIP instruction counts by 256-byte linear page of the burst end
+ * (XLAT_LOG; the space-saving top list above only bounds them). */
+void xlat_prof_page(uint32_t linear, uint32_t weight);
 void xlat_prof_note(unsigned kind, uint32_t key, uint32_t linear, const uint8_t *mem,
                     uint32_t mem_size, uint32_t weight);
 

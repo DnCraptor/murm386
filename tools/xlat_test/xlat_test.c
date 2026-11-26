@@ -2023,12 +2023,15 @@ static int dump_region(const char *hex, const char *path)
     rt.seg_base[1] = 0x10000;
     static xlat_region_out_t out;
     bool full;
-    if (!xlat_translate(&a, &rt, 0x100, 1, NULL, 0, &out, &full, ctx)) {
+    if (!xlat_translate(&a, &rt, 0x100, 0, NULL, 0, &out, &full, ctx) &&
+        !xlat_translate(&a, &rt, 0x100, 1, NULL, 0, &out, &full, ctx)) {
         printf("not translated: reason %u (insns %u)\n", out.reject, out.n_insns);
         return 1;
     }
     printf("trampoline %u bytes; region: %u x86 instructions, %u code bytes at %u, %u entries\n",
            tramp, out.n_insns, out.code_len, out.code_off, out.n_entries);
+    for (unsigned k = 0; k < out.n_entries; ++k)
+        printf("  entry %04X%s\n", out.entries[k].ip, out.entries[k].mark ? " marked" : "");
     FILE *f = fopen(path, "wb");
     if (!f) return 1;
     fwrite(a.base + out.code_off, 1, out.code_len, f);
