@@ -98,9 +98,16 @@ typedef struct {
     uint8_t b[XLAT_REJ_BYTES];
 } rej_t;
 
+/* PSRAM directory: one bit per held region for each guest 4-KiB page.
+ * The span is conservative; the source runs decide exact overlap. */
+#define REGION_PAGE_SHIFT 12u
+#define REGION_PAGE_COUNT (0x110000u >> REGION_PAGE_SHIFT)
+#define REGION_WORDS ((XLAT_MAX_REGIONS + 31u) / 32u)
+
 typedef struct {
     xlat_arena_t arena;
     region_t region[XLAT_MAX_REGIONS];
+    uint32_t page_regions[REGION_PAGE_COUNT][REGION_WORDS];
     uint32_t last[XLAT_MAX_REGIONS];  /* st->seq at each region's last entry (take_slot);
                                          written by the dispatcher too (rt->last) */
     xlat_link_t link[XLAT_LINK_SLOTS];  /* entries the dispatcher may make (rt->link) */
@@ -537,6 +544,7 @@ static void reset_tables(void)
     st->compile_burst = 0;
     log_region_counts();    /* the regions are about to go */
     memset(st->region, 0, sizeof(st->region));
+    memset(st->page_regions, 0, sizeof(st->page_regions));
     memset(st->last, 0, sizeof(st->last));
     for (unsigned k = 0; k < XLAT_LINK_SLOTS; ++k)
         st->link[k].key = UINT32_MAX;
@@ -730,6 +738,59 @@ static bool covered(const xlat_rt_t *rt)
     return false;
 }
 
+/* Membership follows the held chunk, including cold regions. Clear a
+ * slot before reuse; invalidated chunks are filtered by live/cold. */
+static void index_region(unsigned k, bool add)
+{
+    const region_t *r = &st->region[k];
+    if (!r->span || r->lo >= 0x110000u)
+        return;
+    uint32_t last = (r->lo + r->span - 1u) >> REGION_PAGE_SHIFT;
+    if (last >= REGION_PAGE_COUNT)
+        last = REGION_PAGE_COUNT - 1u;
+    const uint32_t bit = 1u << (k & 31u);
+    for (uint32_t p = r->lo >> REGION_PAGE_SHIFT; p <= last; ++p) {
+        uint32_t *w = &st->page_regions[p][k >> 5];
+        if (add)
+            *w |= bit;
+        else
+            *w &= ~bit;
+    }
+}
+
+typedef struct {
+    uint32_t first, last, word, bits;
+} region_iter_t;
+
+static inline region_iter_t regions_in(uint32_t lo, uint32_t hi)
+{
+    region_iter_t it = {0, 0, REGION_WORDS, 0};
+    if (hi > lo && lo < 0x110000u) {
+        it.first = lo >> REGION_PAGE_SHIFT;
+        it.last = (hi - 1u) >> REGION_PAGE_SHIFT;
+        if (it.last >= REGION_PAGE_COUNT)
+            it.last = REGION_PAGE_COUNT - 1u;
+        it.word = 0;
+    }
+    return it;
+}
+
+/* Union the page masks a word at a time: visit each candidate once.
+ * Empty slots never cause PSRAM descriptor reads. */
+static inline int region_next(region_iter_t *it)
+{
+    while (!it->bits) {
+        if (it->word == REGION_WORDS)
+            return -1;
+        for (uint32_t p = it->first; p <= it->last; ++p)
+            it->bits |= st->page_regions[p][it->word];
+        ++it->word;
+    }
+    const unsigned bit = (unsigned)__builtin_ctz(it->bits);
+    it->bits &= it->bits - 1u;
+    return (int)((it->word - 1u) * 32u + bit);
+}
+
 /* The dispatcher no longer enters region k (dropped, cold or evicted). */
 static void unlink_region(int k)
 {
@@ -745,6 +806,7 @@ static void evict(int k)
     region_t *r = &st->region[k];
     if (log_dump_room())
         log_region_count(r);
+    index_region((unsigned)k, false);
     unlink_region(k);
     for (int j = 0; j < XLAT_ENTRY_SLOTS; ++j) {
         entry_t *e = &st->entry[j];
@@ -790,6 +852,30 @@ static void rebuild_maps(void)
     }
 }
 
+/* Compare only the intersection with saved source for a known write.
+ * Unrelated bytes and regions retain their existing epoch. */
+static bool region_range_changed(const region_t *r, const xlat_rt_t *rt,
+                                 uint32_t lo, uint32_t hi)
+{
+    const uint8_t *d = st->arena.base + r->data_off;
+    for (unsigned j = 0; j < r->n_runs; ++j) {
+        const uint32_t at = load32(d);
+        const uint32_t len = d[4] | (uint32_t)d[5] << 8;
+        const uint32_t first = lo > at ? lo : at;
+        const uint32_t end = hi < at + len ? hi : at + len;
+        if (first < end) {
+            if (rt->mem_size != r->mem_size || !xlat_code_direct(first, end - first))
+                return true;
+            const uint8_t *saved = d + 8 + first - at;
+            for (uint32_t a = first; a < end; ++a)
+                if (rt->mem[a] != *saved++)
+                    return true;
+        }
+        d += 8 + ((len + 3u) & ~3u);
+    }
+    return false;
+}
+
 /* Only known guest writes reach here. Retain the epoch and every link
  * whose region still matches its source bytes, even across different CS. */
 static void validate_local_writes(const xlat_rt_t *rt)
@@ -801,11 +887,13 @@ static void validate_local_writes(const xlat_rt_t *rt)
     xlat_write_hi = 0;
     xlat_stats.local_checks++;
     bool changed = false;
-    for (int k = 0; k < XLAT_MAX_REGIONS; ++k) {
+    region_iter_t it = regions_in(lo, hi);
+    for (int k; (k = region_next(&it)) >= 0;) {
         region_t *r = &st->region[k];
         if (!(r->live || r->cold) || r->lo >= hi || r->lo + r->span <= lo)
             continue;
-        if (region_bytes_valid(r, rt))
+        xlat_stats.local_candidates++;
+        if (!region_range_changed(r, rt, lo, hi))
             continue;
         xlat_stats.invalidations += r->live != 0;
         xlat_stats.local_invalid++;
@@ -875,7 +963,8 @@ void xlat_forget_range(uint32_t linear, uint32_t len)
         }
     }
     bool changed = false;
-    for (int k = 0; k < XLAT_MAX_REGIONS; ++k) {
+    region_iter_t it = regions_in(linear, end);
+    for (int k; (k = region_next(&it)) >= 0;) {
         region_t *r = &st->region[k];
         if (!(r->live || r->cold) || r->lo >= end || r->lo + r->span <= linear)
             continue;
@@ -896,7 +985,6 @@ void xlat_forget_range(uint32_t linear, uint32_t len)
     if (changed) {
         gap_reset();
         rebuild_maps();
-        xlat_dirty = true;
     }
 }
 
@@ -1048,6 +1136,7 @@ built:;
         d += 8 + ((len + 3u) & ~3u);
     }
     r->live = 1;
+    index_region((unsigned)idx, true);
     r->epoch = st->epoch;
     gap_reset();           /* its bytes may be in a cached gap */
     if (evicted)
@@ -1388,6 +1477,22 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
                                                     : INT32_MAX;
         if (rt->wall_deadline && (remaining <= 0 || *rt->intr))
             break;
+        /* A far transfer or INT may have reached a native ROM entry.
+         * Try the actual target before compiling or returning to XRIP. */
+        const uint32_t linear = request_linear(key);
+        if (!live && !cold && rt->budget > 0 && !*rt->intr &&
+            linear >= 0xf0000u && linear < 0x100000u) {
+            xlat_rt_pending(rt);
+            if (xlat_try_native_escape(rt)) {
+                cf_mirror(rt);
+                ran = true;
+                resample = true;
+                if (flush_pending || rt->exit_kind == XLAT_EXIT_STOP ||
+                    rt->budget <= 0 || *rt->intr)
+                    break;
+                continue;
+            }
+        }
         /* Serve misses after sampling; on a ready path drain a full credit
          * at the burst's first entry so long-running regions cannot starve
          * the queue. Recheck the entry after any cache mutation. */
@@ -1633,10 +1738,12 @@ static bool code_meets(uint32_t addr, uint32_t last, uint32_t *lo, uint32_t *hi,
                        uint32_t *run_lo, uint32_t *run_hi)
 {
     const uint32_t wlo = lo ? *lo : addr, whi = hi ? *hi : last + 1u;
-    for (int k = 0; k < XLAT_MAX_REGIONS; ++k) {
+    region_iter_t it = regions_in(wlo, whi);
+    for (int k; (k = region_next(&it)) >= 0;) {
         const region_t *r = &st->region[k];
         if (!r->live || r->lo >= whi || r->lo + r->span <= wlo)
             continue;
+        xlat_stats.gap_candidates++;
         const uint8_t *d = st->arena.base + r->data_off;
         for (unsigned j = 0; j < r->n_runs; ++j) {
             uint32_t at;
@@ -1983,9 +2090,11 @@ void xlat_log_write(uint16_t psp, const char *name)
                (unsigned long)xlat_stats.compile_defers, (unsigned long)xlat_stats.disk_irq_yields,
                (unsigned long)xlat_stats.compile_resumes, (unsigned long)xlat_stats.compile_cancel,
                (unsigned long)xlat_stats.compile_queue_drops);
-    log_printf("I int_direct=%lu bios_leaf=%lu local_checks=%lu local_invalid=%lu\r\n",
+    log_printf("I int_direct=%lu bios_leaf=%lu local_checks=%lu local_invalid=%lu local_candidates=%lu gap_candidates=%lu rom_dispatch=%lu\r\n",
                (unsigned long)xlat_stats.int_direct, (unsigned long)xlat_stats.int_leaf,
-               (unsigned long)xlat_stats.local_checks, (unsigned long)xlat_stats.local_invalid);
+               (unsigned long)xlat_stats.local_checks, (unsigned long)xlat_stats.local_invalid,
+               (unsigned long)xlat_stats.local_candidates, (unsigned long)xlat_stats.gap_candidates,
+               (unsigned long)xlat_stats.rom_dispatch);
     /* CPU bursts: averages and histograms (xlat_stats_t), XRIP only / with
      * translated code; device service after the bursts. XLAT_SLICE_US is
      * meant to match the usual XRIP burst. */

@@ -191,6 +191,7 @@ typedef struct xlat_stats {
     uint32_t side_interp;       /* of those: accesses outside fast memory or onto the code */
     uint32_t int_direct, int_leaf; /* software INT / native BIOS escape without decoding */
     uint32_t local_checks, local_invalid;
+    uint32_t local_candidates, gap_candidates, rom_dispatch;
     uint32_t cuts;              /* XRIP bursts ended at a marked branch target */
     uint32_t cut_entries;       /* of those: translated code was entered */
     uint32_t cold;              /* regions given back to XRIP (too short per entry) */
@@ -295,6 +296,10 @@ void xlat_prof_note(unsigned kind, uint32_t key, uint32_t linear, const uint8_t 
 #define XLAT_XI_INT_MASK (XLAT_XI_INT3 | XLAT_XI_INT_IMM)
 uint32_t xlat_interp_one(xlat_rt_t *rt, uint32_t flags);
 
+/* Try a checked nonblocking native ROM entry at rt->cs:ip after a
+ * translated far transfer. False: no guest instruction executed. */
+bool xlat_try_native_escape(xlat_rt_t *rt);
+
 /* For xlat_interp_one(): the x86 bytes of the running region are unchanged
  * (if not, the region is dropped). Compares only when xlat_dirty is set:
  * the instruction (or something before it) may have written translated
@@ -331,16 +336,20 @@ extern uint32_t xlat_write_lo, xlat_write_hi; /* known writes: half-open range, 
 /* One-shot permission from an audited consecutive guest loop. Other CPU
  * entry points retain the conservative dirty-on-entry behavior. */
 extern bool xlat_clean_resume;
-static inline void xlat_note_write(uint32_t linear)
+/* n is 1..16: the map also covers starts of writes before source bytes. */
+static inline void xlat_note_write_n(uint32_t linear, uint32_t n)
 {
     if (xlat_code_map[linear >> (XLAT_CODE_BLOCK_SHIFT + 3)] & (1u << ((linear >> XLAT_CODE_BLOCK_SHIFT) & 7u))) {
-        /* The code map includes up to 15 bytes before each source run.
-         * Cover a wide write without adding a size argument to the hot path. */
         if (!xlat_write_hi || linear < xlat_write_lo)
             xlat_write_lo = linear;
-        if (linear + 16u > xlat_write_hi)
-            xlat_write_hi = linear + 16u;
+        if (linear + n > xlat_write_hi)
+            xlat_write_hi = linear + n;
     }
+}
+
+static inline void xlat_note_write(uint32_t linear)
+{
+    xlat_note_write_n(linear, 16u);
 }
 
 /* Hot CALL targets (near, far, r/m) seen by XRIP: a target reaching

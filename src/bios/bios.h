@@ -34,6 +34,13 @@ bool set_bios_callback(CPU*, bios_callback_params_t*, bool reenter);
 bool drop_bios_callback(CPU*, bios_callback_params_t*);
 void bios_intcall(CPU*, uint8_t, const char*); // sync call
 
+#if XLAT
+/* Scope of an audited nonblocking handler, checked against the actual
+ * registered function. STACK_FLAGS writes only SS:SP+4 (two bytes). */
+enum { BIOS_XLAT_UNKNOWN, BIOS_XLAT_READONLY, BIOS_XLAT_STACK_FLAGS };
+unsigned bios_xlat_leaf_scope(CPU *cpu, uint8_t id);
+#endif
+
 bool bios_teletype(CPU* cpu, uint8_t ch, uint8_t page);
 void bios_15h_event_wait_arm(uint32_t flag_lin, uint32_t usec);
 void bios_15h_event_wait_cancel(void);

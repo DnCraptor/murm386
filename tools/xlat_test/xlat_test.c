@@ -905,6 +905,13 @@ uint32_t xlat_rt_io(xlat_rt_t *rt, uint32_t ctl, uint32_t value)
     return XLAT_IO_DONE | tio(ctl & 0xffffu, bytes, out, out ? value & (bytes == 2 ? 0xffffu : 0xffu) : 0u);
 }
 
+/* The host reference has no native BIOS ROM dispatcher. */
+bool xlat_try_native_escape(xlat_rt_t *rt)
+{
+    (void)rt;
+    return false;
+}
+
 /* The test's xlat_interp_one(): the reference interpreter is the "XRIP". */
 uint32_t xlat_interp_one(xlat_rt_t *rt, uint32_t flags)
 {

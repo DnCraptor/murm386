@@ -119,6 +119,28 @@ void bios_intcall(CPU* cpu, uint8_t intnum, const char* owner) {
 
 handler_t handlers[256];
 
+#if XLAT
+unsigned bios_xlat_leaf_scope(CPU *cpu, uint8_t id)
+{
+#if !BIOS_DEBUG && !PDB_DEBUG
+    if (id == 0x16 && handlers[id] == bios_16h) {
+        switch (CPU_AH) {
+        case 0x01: case 0x11:
+            return BIOS_XLAT_STACK_FLAGS;
+        case 0x02: case 0x12:
+            return BIOS_XLAT_READONLY;
+        }
+    }
+    if (id == 0x33 && handlers[id] == bios_33h && CPU_AX == 3)
+        return BIOS_XLAT_READONLY;
+#else
+    (void)cpu;
+    (void)id;
+#endif
+    return BIOS_XLAT_UNKNOWN;
+}
+#endif
+
 void cpu_err_msg(CPU* cpu, const char* msg) {
     char buf[80];
     uint32_t ip = ((uint32_t)CPU_CS << 4) + CPU_IP;

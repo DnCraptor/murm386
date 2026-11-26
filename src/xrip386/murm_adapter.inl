@@ -92,11 +92,25 @@ static bool bios_escape(uint8_t id)
         return false;
 
     flags_now();
-    XLAT_NOTE_FOREIGN();    /* native code writes guest RAM directly */
+#if XLAT
+    const unsigned scope = bios_xlat_leaf_scope(active_cpu, id);
+    const uint32_t flags_linear = ((uint32_t)segregs[regss] << 4) +
+                                  (uint16_t)dwordregs[regsp] + 4u;
+    const bool local = scope == BIOS_XLAT_READONLY ||
+        (scope == BIOS_XLAT_STACK_FLAGS && fast_memory_size >= 2u &&
+         flags_linear <= fast_memory_size - 2u);
+    if (!local)
+        XLAT_NOTE_FOREIGN();
+#endif
     const uint32_t saved_ip = firstip, saved_esp = first_esp;
     active_cpu->ip = active_cpu->next_ip = firstip;
     const bool iret = rp2350_bios_handler(active_cpu, id);
-    XLAT_NOTE_FOREIGN();    /* native handler may write after a nested call */
+#if XLAT
+    if (!local)
+        XLAT_NOTE_FOREIGN();    /* may have written after a nested call */
+    else if (scope == BIOS_XLAT_STACK_FLAGS)
+        xlat_note_write_n(flags_linear, 2u);
+#endif
     XRIP_IP = active_cpu->next_ip;
     firstip = saved_ip;
     first_esp = saved_esp;
@@ -276,11 +290,43 @@ static uint32_t xlat_umb_room(void)
 #endif
 }
 
-/* The same interrupt entry as XRIP's opcode handler, without entering
- * run_instructions(). Only the actual IVT destination can qualify for a
- * nonblocking native BIOS escape; an installed hook or guest ISR is not
- * bypassed. Do not run blocking/native EXEC handlers inside a trampoline. */
-static void __time_critical_func(xlat_direct_int)(CPU *cpu, uint8_t vector, uint32_t len)
+/* Shared entry for INT and far-transfer misses: follow at most one
+ * actual ROM JMP FAR, then a verified native escape. Never infer the
+ * destination from the original INT vector or bypass a guest ISR. */
+typedef struct {
+    uint16_t cs, ip;
+    uint8_t id;
+    bool jump;
+} xlat_leaf_t;
+
+static bool xlat_leaf_target(CPU *cpu, xlat_leaf_t *leaf)
+{
+    const uint32_t address = CS_BASE + XRIP_IP;
+    if (cpu->bios || !xlat_state_ok(cpu) ||
+        address < 0xf0000u || address >= 0x100000u)
+        return false;
+    leaf->cs = XRIP_CS;
+    leaf->ip = (uint16_t)XRIP_IP;
+    leaf->jump = getmem8(CS_BASE, XRIP_IP) == 0xea;
+    if (leaf->jump) {
+        if (XRIP_IP > 0xfffbu || address > 0xffffbu)
+            return false;
+        leaf->ip = getmem16(CS_BASE, XRIP_IP + 1u);
+        leaf->cs = getmem16(CS_BASE, XRIP_IP + 3u);
+    }
+    const uint32_t base = (uint32_t)leaf->cs << 4;
+    const uint32_t stub = base + leaf->ip - NATIVE_BIOS_STUB_PHYS;
+    if (stub >= 256u * NATIVE_BIOS_STUB_SIZE ||
+        stub % NATIVE_BIOS_STUB_SIZE || leaf->ip > 0xfffdu)
+        return false;
+    leaf->id = (uint8_t)(stub / NATIVE_BIOS_STUB_SIZE);
+    return bios_xlat_leaf_scope(cpu, leaf->id) != BIOS_XLAT_UNKNOWN &&
+           getmem8(base, leaf->ip) == 0x0f &&
+           getmem8(base, leaf->ip + 1u) == 0xff &&
+           getmem8(base, leaf->ip + 2u) == leaf->id;
+}
+
+static inline void xlat_begin_insn(void)
 {
     firstip = XRIP_IP;
     first_esp = dwordregs[regsp];
@@ -289,24 +335,106 @@ static void __time_critical_func(xlat_direct_int)(CPU *cpu, uint8_t vector, uint
     useseg = DS_BASE;
     pending_trap = false;
     ++retired;
-    StepIP(len);
-    const bool leaf = !cpu->int_hooks[vector] &&
-        ((vector == 0x16 && (XRIP_AH == 1 || XRIP_AH == 2 ||
-                            XRIP_AH == 0x11 || XRIP_AH == 0x12)) ||
-         (vector == 0x33 && XRIP_AX == 3));
-    intcall86(vector);
-    if (!leaf || cpu->bios || !xlat_state_ok(cpu) ||
-        CS_BASE + XRIP_IP != NATIVE_BIOS_STUB_PHYS + NATIVE_BIOS_STUB_SIZE * vector ||
-        getmem8(CS_BASE, XRIP_IP) != 0x0f ||
-        getmem8(CS_BASE, XRIP_IP + 1u) != 0xff ||
-        getmem8(CS_BASE, XRIP_IP + 2u) != vector)
-        return;
-    firstip = XRIP_IP;
-    first_esp = dwordregs[regsp];
-    ++retired;
+}
+
+static unsigned xlat_leaf_run(CPU *cpu, const xlat_leaf_t *leaf)
+{
+    unsigned steps = 1;
+    if (leaf->jump) {
+        xlat_begin_insn();
+        load_segment(regcs, leaf->cs);
+        XRIP_IP = leaf->ip;
+        /* A far JMP with IF set does not inhibit an IRQ at its target. */
+        if (!xlat_state_ok(cpu))
+            return steps;
+        ++steps;
+    }
+    xlat_begin_insn();
     StepIP(3);
-    bios_escape(vector);
+    bios_escape(leaf->id);
     xlat_stats.int_leaf++;
+    return steps;
+}
+
+static void __time_critical_func(xlat_direct_int)(CPU *cpu, uint8_t vector, uint32_t len)
+{
+    xlat_begin_insn();
+    StepIP(len);
+    const bool hooked = cpu->int_hooks[vector] != NULL;
+    intcall86(vector);
+    xlat_leaf_t leaf;
+    if (!hooked && xlat_leaf_target(cpu, &leaf))
+        (void)xlat_leaf_run(cpu, &leaf);
+}
+
+static inline void xlat_load_guest(const xlat_rt_t *rt)
+{
+    XRIP_IP = rt->ip;
+    flags_result = rt->lazy_result;
+    flags_dst = rt->lazy_dst;
+    flags_src = rt->lazy_src;
+    flags_op = rt->lazy_op;
+    flags_cf = rt->lazy_cf;
+    x86_flags.value = rt->eflags;
+    xlat_segs_to_xrip(rt);
+}
+
+static inline uint32_t xlat_save_guest(xlat_rt_t *rt, CPU *cpu)
+{
+    rt->ip = XRIP_IP;
+    rt->lazy_result = flags_result;
+    rt->lazy_dst = flags_dst;
+    rt->lazy_src = flags_src;
+    rt->lazy_op = flags_op;
+    rt->lazy_cf = flags_cf;
+    rt->eflags = x86_flags.value;
+    rt->seg_base[0] = segment_base[reges];
+    rt->seg_base[2] = segment_base[regss];
+    rt->seg_base[3] = segment_base[regds];
+    rt->intr = ifl ? (const volatile uint8_t *)&cpu->intr : &xlat_no_irq;
+    const bool changed_cs = segregs[regcs] != rt->cs ||
+                            segment_base[regcs] != rt->seg_base[1];
+    const bool can_continue = fast_memory_size == rt->mem_size && xlat_state_ok(cpu);
+    const bool valid = !can_continue || xlat_region_still_valid(rt);
+    /* Publish CS even on STOP; the caller must not restore the old CS. */
+    rt->cs = segregs[regcs];
+    rt->seg_base[1] = segment_base[regcs];
+    if (!can_continue || !valid ||
+        (rt->wall_deadline && (int32_t)(*rt->clock - rt->wall_deadline) >= 0))
+        return 0;
+    if (changed_cs) {
+        rt->ip &= 0xffffu;
+        return 2;
+    }
+    return 1;
+}
+
+/* The trampoline has returned: GPRs, including SP, are already spilled.
+ * Nonblocking audited ROM entries can continue in the same xlat_run. */
+bool xlat_try_native_escape(xlat_rt_t *rt)
+{
+    CPU *const cpu = active_cpu;
+    if (xlat_stack_free() < XLAT_STACK_NEEDED)
+        return false;
+    xlat_load_guest(rt);
+    xlat_leaf_t leaf;
+    if (!xlat_leaf_target(cpu, &leaf))
+        return false;
+    void *context[5];
+    void **const outer_fault_point = fault_point;
+    fault_point = context;
+    unsigned steps;
+    if (__builtin_setjmp(context)) {
+        deliver_fault();
+        steps = 1;
+    } else {
+        steps = xlat_leaf_run(cpu, &leaf);
+    }
+    fault_point = outer_fault_point;
+    rt->budget -= (int32_t)steps;
+    rt->exit_kind = xlat_save_guest(rt, cpu) ? XLAT_EXIT_BRANCH : XLAT_EXIT_STOP;
+    xlat_stats.rom_dispatch++;
+    return true;
 }
 
 /* Called by translated code: execute one instruction or a direct INT.
@@ -316,14 +444,7 @@ uint32_t __time_critical_func(xlat_interp_one)(xlat_rt_t *rt, uint32_t flags)
     CPU *const cpu = active_cpu;
     if (xlat_stack_free() < XLAT_STACK_NEEDED)
         return 0;   /* XRIP runs it after the exit, from a shallower stack */
-    XRIP_IP = rt->ip;
-    flags_result = rt->lazy_result;
-    flags_dst = rt->lazy_dst;
-    flags_src = rt->lazy_src;
-    flags_op = rt->lazy_op;
-    flags_cf = rt->lazy_cf;
-    x86_flags.value = rt->eflags;   /* the shift / MUL helpers write the image */
-    xlat_segs_to_xrip(rt);          /* MOV ES / DS, LES, LDS, POP ES / DS, far CS */
+    xlat_load_guest(rt);
 
     const bool direct = (flags & XLAT_XI_INT_MASK) && xlat_state_ok(cpu);
     const uint8_t vector = !direct ? 0 :
@@ -357,36 +478,7 @@ uint32_t __time_critical_func(xlat_interp_one)(xlat_rt_t *rt, uint32_t flags)
         run_instructions(1);
     fault_point = outer_fault_point;
 
-    rt->ip = XRIP_IP;
-    rt->lazy_result = flags_result;
-    rt->lazy_dst = flags_dst;
-    rt->lazy_src = flags_src;
-    rt->lazy_op = flags_op;
-    rt->lazy_cf = flags_cf;
-    rt->eflags = x86_flags.value;
-    rt->seg_base[0] = segment_base[reges];
-    rt->seg_base[2] = segment_base[regss];
-    rt->seg_base[3] = segment_base[regds];
-    rt->intr = ifl ? (const volatile uint8_t *)&cpu->intr : &xlat_no_irq;
-    const bool changed_cs = segregs[regcs] != rt->cs ||
-                            segment_base[regcs] != rt->seg_base[1];
-    const bool can_continue = fast_memory_size == rt->mem_size && xlat_state_ok(cpu);
-    /* Compare against the old region's CS before publishing the new CS.
-     * A device or a native handler may write memory even when the opcode
-     * itself was not classified XI_MAY_WRITE. */
-    const bool valid = !can_continue || xlat_region_still_valid(rt);
-    /* Publish CS on EVERY exit, including STOP (IRQ, mode, native_done).
-     * Otherwise xlat_enter() restores the pre-interrupt CS over the ISR. */
-    rt->cs = segregs[regcs];
-    rt->seg_base[1] = segment_base[regcs];
-    if (!can_continue || !valid ||
-        (rt->wall_deadline && (int32_t)(*rt->clock - rt->wall_deadline) >= 0))
-        return 0;
-    if (changed_cs) {
-        rt->ip &= 0xffffu;
-        return 2;
-    }
-    return 1;
+    return xlat_save_guest(rt, cpu);
 }
 
 /* Translated code is entered only here, at the start of a burst: one lookup

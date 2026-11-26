@@ -1274,6 +1274,31 @@ static void emit_alu(tctx_t *c, int i)
 static void emit_mov(tctx_t *c, int i)
 {
     const x86_insn_t *in = &c->in[i];
+    /* Stack thunks repeatedly write CD/CB even if the bytes are unchanged.
+     * A same-value store into direct RAM cannot change a translation.
+     * Keep the regular fast store and the checked fallback for actual
+     * changes or non-direct memory. */
+    if (in->a.kind == OPD_MEM && in->b.kind == OPD_IMM &&
+        in->size == 8 && in->mem_seg == 2 /* SS */) {
+        arm_emit_t *e = &c->e;
+        emit_offset(c, in);
+        arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_SEG_BASE + 4u * in->mem_seg);
+        arm_dp_reg(e, DP_ADD, 0, A_R0, A_R0, A_R12, SH_LSL, 0);
+        if (!arm_bl(e, c->wchk[0]))
+            c->overflow = true;
+        const uint32_t safe = arm_branch_slot(e);
+        emit_checks(c, i, 1, false);
+        arm_ls_imm(e, LS_LDR, A_LR, A_R11, XLAT_RT_MEM);
+        arm_ls_reg(e, LS_LDRB, A_R1, A_LR, A_R0);
+        arm_dp_imm(e, DP_SUB, 1, A_PC, A_R1, in->b.imm & 0xffu);
+        emit_branch(c, side_dest(c, i, 1), C_NE);
+        const uint32_t unchanged = arm_branch_slot(e);
+        local_patch(c, safe, C_CC);
+        const int r = get_raw(c, &in->b, 8, A_R1);
+        put_raw(c, &in->a, 8, r);
+        local_patch(c, unchanged, C_AL);
+        return;
+    }
     if (x86_has_mem(in))
         emit_mem_access(c, i, in->size / 8, in->a.kind == OPD_MEM);
     const int r = get_raw(c, &in->b, in->size, A_R1);

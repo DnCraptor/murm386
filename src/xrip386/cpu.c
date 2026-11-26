@@ -160,29 +160,29 @@ static __time_critical_func() __attribute__((noinline)) uint32_t mem_read32_far(
 /* A write past fast memory: xlat_note_write() for translated code there
  * (upper memory, HMA: xlat_code_direct), or for a word that ends in fast
  * memory. */
-#define XLAT_NOTE_FAR(address) \
-    do { if ((address) < (XLAT_CODE_MAP_BYTES * 8u << XLAT_CODE_BLOCK_SHIFT)) xlat_note_write(address); } while (0)
+#define XLAT_NOTE_FAR(address, width) \
+    do { if ((address) < (XLAT_CODE_MAP_BYTES * 8u << XLAT_CODE_BLOCK_SHIFT)) xlat_note_write_n(address, width); } while (0)
 #else
-#define XLAT_NOTE_FAR(address) ((void)0)
+#define XLAT_NOTE_FAR(address, width) ((void)0)
 #endif
 
 static __time_critical_func() __attribute__((noinline)) void mem_write8_far(uint32_t address, uint8_t value) {
     uint8_t *direct = far_direct_at(address, 0);
-    XLAT_NOTE_FAR(address);
+    XLAT_NOTE_FAR(address, 1u);
     if (direct) *direct = value;
     else write86(address, value);
 }
 
 static __time_critical_func() __attribute__((noinline)) void mem_write16_far(uint32_t address, uint16_t value) {
     uint8_t *direct = far_direct_at(address, 1);
-    XLAT_NOTE_FAR(address);
+    XLAT_NOTE_FAR(address, 2u);
     if (direct) memcpy(direct, &value, 2);
     else writew86(address, value);
 }
 
 static __time_critical_func() __attribute__((noinline)) void mem_write32_far(uint32_t address, uint32_t value) {
     uint8_t *direct = far_direct_at(address, 3);
-    XLAT_NOTE_FAR(address);
+    XLAT_NOTE_FAR(address, 4u);
     if (direct) memcpy(direct, &value, 4);
     else writedw86(address, value);
 }
@@ -207,23 +207,23 @@ static __time_critical_func() inline uint32_t mem_read32(uint32_t address) {
 
 #if XLAT
 /* A write into translated code (xlat.h): the regions are compared again. */
-#define XLAT_NOTE_WRITE(address) xlat_note_write(address)
+#define XLAT_NOTE_WRITE(address, width) xlat_note_write_n(address, width)
 #else
-#define XLAT_NOTE_WRITE(address) ((void)0)
+#define XLAT_NOTE_WRITE(address, width) ((void)0)
 #endif
 
 static __time_critical_func() inline void mem_write8(uint32_t address, uint8_t value) {
-    if (in_fast_memory(address, 0)) { fast_memory[address] = value; XLAT_NOTE_WRITE(address); }
+    if (in_fast_memory(address, 0)) { fast_memory[address] = value; XLAT_NOTE_WRITE(address, 1u); }
     else mem_write8_far(address, value);
 }
 
 static __time_critical_func() inline void mem_write16(uint32_t address, uint16_t value) {
-    if (in_fast_memory_wide(address, 2)) { memcpy(fast_memory + address, &value, 2); XLAT_NOTE_WRITE(address); }
+    if (in_fast_memory_wide(address, 2)) { memcpy(fast_memory + address, &value, 2); XLAT_NOTE_WRITE(address, 2u); }
     else mem_write16_far(address, value);
 }
 
 static __time_critical_func() inline void mem_write32(uint32_t address, uint32_t value) {
-    if (in_fast_memory_wide(address, 4)) { memcpy(fast_memory + address, &value, 4); XLAT_NOTE_WRITE(address); }
+    if (in_fast_memory_wide(address, 4)) { memcpy(fast_memory + address, &value, 4); XLAT_NOTE_WRITE(address, 4u); }
     else mem_write32_far(address, value);
 }
 
