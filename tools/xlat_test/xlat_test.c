@@ -905,6 +905,22 @@ uint32_t xlat_rt_io(xlat_rt_t *rt, uint32_t ctl, uint32_t value)
     return XLAT_IO_DONE | tio(ctl & 0xffffu, bytes, out, out ? value & (bytes == 2 ? 0xffffu : 0xffu) : 0u);
 }
 
+/* Model the physical VGA aperture using the host's guest memory. */
+uint32_t xlat_vga_read(uint32_t address, unsigned bytes)
+{
+    return bytes == 1 ? rd8(address) : bytes == 2 ? rd16(address) : rd32(address);
+}
+
+void xlat_vga_write(uint32_t address, uint32_t value, unsigned bytes)
+{
+    if (bytes == 1)
+        wr8(address, (uint8_t)value);
+    else if (bytes == 2)
+        wr16(address, (uint16_t)value);
+    else
+        wr32(address, value);
+}
+
 /* The host reference has no native BIOS ROM dispatcher. */
 bool xlat_try_native_escape(xlat_rt_t *rt)
 {

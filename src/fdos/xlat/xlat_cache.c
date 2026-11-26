@@ -167,6 +167,11 @@ static bool disabled;
 static xlat_rt_t *gap_rt;
 static bool flush_pending;
 static void gap_reset(void);
+/* Secondary negative cache. The existing ARM fast path still uses its
+ * single hot gap; a miss here need not walk any PSRAM region metadata. */
+#define GAP_RECENT 8u
+static struct { uint32_t lo, hi; } gap_recent[GAP_RECENT];
+static unsigned gap_next;
 
 uint8_t xlat_entry_map[XLAT_MAP_BITS / 8];
 uint8_t xlat_code_map[XLAT_CODE_MAP_BYTES];
@@ -537,6 +542,7 @@ static void clear_compile_blocked(void)
 
 static void reset_tables(void)
 {
+    gap_reset();
     st->job.pending = false;
     st->queued = 0;
     clear_compile_blocked();
@@ -612,6 +618,7 @@ static __attribute__((noinline)) bool ready(void)
 
 void xlat_release(void)
 {
+    gap_reset();
     flush_pending = false;
     xlat_write_hi = 0;
     xlat_call_queue_blocked = false;
@@ -1737,6 +1744,8 @@ static void gap_reset(void)
 {
     if (gap_rt)
         gap_rt->gap_lo = gap_rt->gap_hi = gap_rt->hit_lo = gap_rt->hit_hi = 0;
+    memset(gap_recent, 0, sizeof(gap_recent));
+    gap_next = 0;
 }
 
 /* [addr, last] meets the x86 bytes of a live region. Cold/invalidated
@@ -1783,6 +1792,14 @@ uint32_t xlat_rt_gap(uint32_t addr, uint32_t last, xlat_rt_t *rt)
 {
     uint32_t lo = addr & ~0xfffu, hi = (last | 0xfffu) + 1u, run_lo, run_hi;
     xlat_stats.gap_calls++;
+    for (unsigned k = 0; k < GAP_RECENT; ++k) {
+        if (addr >= gap_recent[k].lo && last < gap_recent[k].hi) {
+            rt->gap_lo = gap_recent[k].lo;
+            rt->gap_hi = gap_recent[k].hi;
+            ++xlat_stats.gap_reuse;
+            return 0;
+        }
+    }
     if (!st || code_meets(addr, last, &lo, &hi, &run_lo, &run_hi)) {
         if (st) {
             rt->hit_lo = run_lo;
@@ -1792,7 +1809,112 @@ uint32_t xlat_rt_gap(uint32_t addr, uint32_t last, xlat_rt_t *rt)
     }
     rt->gap_lo = lo;
     rt->gap_hi = hi;
+    gap_recent[gap_next].lo = lo;
+    gap_recent[gap_next].hi = hi;
+    gap_next = (gap_next + 1u) & (GAP_RECENT - 1u);
     return 0;
+}
+
+/* Reuse the same exact negative cache for C memory helpers. */
+static bool range_has_code(xlat_rt_t *rt, uint32_t first, uint32_t last)
+{
+    if (first >= rt->gap_lo && last < rt->gap_hi)
+        return false;
+    if (rt->hit_lo < rt->hit_hi && last >= rt->hit_lo && first < rt->hit_hi)
+        return true;
+    return xlat_rt_gap(first, last, rt) != 0;
+}
+
+/* A fast string element can use conventional RAM or the audited VGA
+ * aperture, but never bypass mapping checks for UMB/EMS/HMA. */
+static bool string_ram(const xlat_rt_t *rt, uint32_t a, unsigned bytes)
+{
+    return rt->mem_size >= bytes && a <= rt->mem_size - bytes;
+}
+
+static bool string_vga(uint32_t a, unsigned bytes)
+{
+    return a >= 0xa0000u && a <= 0xc0000u - bytes;
+}
+
+uint32_t xlat_rt_string_fast(xlat_rt_t *rt, uint32_t src, uint32_t dst, uint32_t ctl)
+{
+    const uint32_t count = ctl & 0xffffu;
+    const unsigned bytes = (ctl >> 16) & 7u;
+    const bool stos = (ctl & XLAT_REP_STOS) != 0;
+    if (bytes != 1 && bytes != 2 && bytes != 4)
+        return 0;
+    const int step = (rt->eflags & 0x400u) ? -(int)bytes : (int)bytes;
+    const uint32_t sb = rt->seg_base[(ctl >> XLAT_REP_SEG_SHIFT) & 3u], db = rt->seg_base[0];
+    uint16_t si = (uint16_t)(src - sb), di = (uint16_t)(dst - db);
+    uint32_t done = 0;
+    ++xlat_stats.fast_string_calls;
+    while (done < count) {
+        if (*rt->intr || (rt->wall_deadline &&
+            (int32_t)(*rt->clock - rt->wall_deadline) >= 0) ||
+            (rt->budget_limit && rt->budget <= 0))
+            break;
+        const uint32_t sa = sb + si, da = db + di;
+        const bool dr = string_ram(rt, da, bytes);
+        const bool sr = !stos && string_ram(rt, sa, bytes);
+        if ((!dr && !string_vga(da, bytes)) ||
+            (!stos && !sr && !string_vga(sa, bytes)))
+            break;
+        if ((rt->code_map[da >> (XLAT_CODE_BLOCK_SHIFT + 3u)] >>
+             ((da >> XLAT_CODE_BLOCK_SHIFT) & 7u)) & 1u) {
+            if (range_has_code(rt, da, da + bytes - 1u))
+                break;  /* before even a VGA read: latches have side effects */
+        }
+        uint32_t v = src;
+        if (!stos) {
+            if (!sr)
+                v = xlat_vga_read(sa, bytes);
+            else if (bytes == 1)
+                v = rt->mem[sa];
+            else if (bytes == 2) {
+                uint16_t w;
+                __builtin_memcpy(&w, rt->mem + sa, 2);
+                v = w;
+            } else
+                __builtin_memcpy(&v, rt->mem + sa, 4);
+        }
+        if (!dr)
+            xlat_vga_write(da, v, bytes);
+        else if (bytes == 1)
+            rt->mem[da] = (uint8_t)v;
+        else if (bytes == 2) {
+            const uint16_t w = (uint16_t)v;
+            __builtin_memcpy(rt->mem + da, &w, 2);
+        } else
+            __builtin_memcpy(rt->mem + da, &v, 4);
+        if (!stos)
+            si = (uint16_t)(si + step);
+        di = (uint16_t)(di + step);
+        ++done;
+        --rt->budget;
+    }
+    xlat_stats.fast_string_elems += done;
+    return done;
+}
+
+/* The protected POP is a direct stack read: no interpreter context,
+ * no pending shadow is left behind after the pair. */
+uint32_t xlat_rt_sti_pop(xlat_rt_t *rt, uint32_t seg)
+{
+    const uint32_t addr = rt->seg_base[2] + (uint16_t)rt->sp;
+    if ((seg != 0 && seg != 3) || !string_ram(rt, addr, 2) || *rt->intr)
+        return 0;
+    uint16_t selector;
+    __builtin_memcpy(&selector, rt->mem + addr, 2);
+    if (*rt->intr)
+        return 0;   /* IF was already set: IRQ can precede POP */
+    if (!(rt->eflags & 0x200u) && !xlat_rt_io(rt, XLAT_IO_SET_IF, 1))
+        return 0;
+    rt->sp = (rt->sp & 0xffff0000u) | (uint16_t)(rt->sp + 2u);
+    rt->seg_base[seg] = (uint32_t)selector << 4;
+    ++xlat_stats.shadow_pop;
+    ++xlat_stats.shadow_fast;
+    return XLAT_IO_DONE | (*rt->intr ? XLAT_IO_BOUNDARY : 0u);
 }
 
 /* In flash, not SRAM (__time_critical_func): the SRAM heap is small, and
@@ -1813,8 +1935,7 @@ static uint32_t rep_chunk(xlat_rt_t *rt, uint32_t src, uint32_t dst, uint32_t ct
      * blocks, then the bytes when a block is marked */
     for (uint32_t b = dst >> XLAT_CODE_BLOCK_SHIFT; b <= (dst + len - 1u) >> XLAT_CODE_BLOCK_SHIFT; ++b)
         if (rt->code_map[b >> 3] >> (b & 7u) & 1u) {
-            uint32_t run_lo, run_hi;
-            if (!st || code_meets(dst, dst + len - 1u, NULL, NULL, &run_lo, &run_hi))
+            if (range_has_code(rt, dst, dst + len - 1u))
                 return 0;
             break;
         }
@@ -1866,11 +1987,19 @@ uint32_t xlat_rt_rep(xlat_rt_t *rt, uint32_t src, uint32_t dst, uint32_t ctl)
     const bool stos = (ctl & XLAT_REP_STOS) != 0;
     uint32_t done = 0;
     while (done < count) {
+        if (*rt->intr || (rt->wall_deadline &&
+            (int32_t)(*rt->clock - rt->wall_deadline) >= 0))
+            break;
         const uint32_t left = count - done;
         const uint32_t n = left < XLAT_REP_CHUNK ? left : XLAT_REP_CHUNK;
         if (!rep_chunk(rt, stos ? src : src + done * bytes, dst + done * bytes,
-                       (ctl & ~0xffffu) | n))
+                       (ctl & ~0xffffu) | n)) {
+            /* DF=1 rejects bulk at done=0. In all other cases the
+             * prefix already copied ran forward. Offsets wrap in fast. */
+            done += xlat_rt_string_fast(rt, stos ? src : src + done * bytes,
+                                       dst + done * bytes, (ctl & ~0xffffu) | left);
             break;
+        }
         done += n;
         if (*rt->intr || (rt->wall_deadline &&
             (int32_t)(*rt->clock - rt->wall_deadline) >= 0))
@@ -2103,9 +2232,11 @@ void xlat_log_write(uint16_t psp, const char *name)
                (unsigned long)xlat_stats.local_checks, (unsigned long)xlat_stats.local_invalid,
                (unsigned long)xlat_stats.local_candidates, (unsigned long)xlat_stats.gap_candidates,
                (unsigned long)xlat_stats.rom_dispatch);
-    log_printf("N string_calls=%lu string_elems=%lu shadow_pop=%lu\r\n",
+    log_printf("N string_calls=%lu string_elems=%lu shadow_pop=%lu fast_string_calls=%lu fast_string_elems=%lu shadow_fast=%lu gap_reuse=%lu\r\n",
                (unsigned long)xlat_stats.string_calls, (unsigned long)xlat_stats.string_elems,
-               (unsigned long)xlat_stats.shadow_pop);
+               (unsigned long)xlat_stats.shadow_pop, (unsigned long)xlat_stats.fast_string_calls,
+               (unsigned long)xlat_stats.fast_string_elems, (unsigned long)xlat_stats.shadow_fast,
+               (unsigned long)xlat_stats.gap_reuse);
     /* CPU bursts: averages and histograms (xlat_stats_t), XRIP only / with
      * translated code; device service after the bursts. XLAT_SLICE_US is
      * meant to match the usual XRIP burst. */

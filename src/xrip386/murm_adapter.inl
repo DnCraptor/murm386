@@ -255,6 +255,23 @@ uint32_t __time_critical_func(xlat_rt_io)(xlat_rt_t *rt, uint32_t ctl, uint32_t 
     return XLAT_IO_DONE | (word ? (uint32_t)portin16(port) : (uint32_t)(uint8_t)portin(port));
 }
 
+/* Only the VGA aperture is admitted by xlat_rt_string_fast. These are
+ * exactly the physical bus callbacks used by XRIP for that aperture. */
+uint32_t xlat_vga_read(uint32_t address, unsigned bytes)
+{
+    return bytes == 1 ? read86(address) : bytes == 2 ? readw86(address) : readdw86(address);
+}
+
+void xlat_vga_write(uint32_t address, uint32_t value, unsigned bytes)
+{
+    if (bytes == 1)
+        write86(address, (uint8_t)value);
+    else if (bytes == 2)
+        writew86(address, (uint16_t)value);
+    else
+        writedw86(address, value);
+}
+
 /* xlat.h: code at linear is in the direct guest memory (conventional
  * memory, or upper memory / ROM / HMA where far_direct_at() reaches it at
  * the same offset of fast_memory). */

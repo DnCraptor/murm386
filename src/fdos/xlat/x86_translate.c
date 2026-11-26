@@ -1415,7 +1415,8 @@ static bool emit_side_args(tctx_t *c, int i, uint32_t target, uint32_t xi)
     arm_emit_t *e = &c->e;
     const x86_insn_t *in = &c->in[i];
     const bool cont = falls_through(in) && !is_producer(in) && c->fall_idx[i] >= 0;
-    if (sync_recon(c, c->in_set[i], side_producer(c, i)) >= 0 || c->n_dfix >= MAX_FIXUPS ||
+    if (native_string(in) ||
+        sync_recon(c, c->in_set[i], side_producer(c, i)) >= 0 || c->n_dfix >= MAX_FIXUPS ||
         (cont && c->fall_idx[i] <= i))
         return false;
     if (!arm_bl(e, target))
@@ -2000,8 +2001,8 @@ static void emit_string_cmp(tctx_t *c, int i)
 /* MOVS / STOS / LODS, with REP: the element loop runs here while CX != 0.
  * All checks of an element come before its changes, so a side exit runs the
  * (restartable) instruction in XRIP with the current SI, DI and CX. */
-/* REP MOVS/STOS: direct bulk first, decoded memory helper for the rest. */
-static void emit_rep_bulk(tctx_t *c, int i)
+/* Explicit string operands; ARM GPRs stay live across the call. */
+static void emit_string_args(tctx_t *c, int i)
 {
     arm_emit_t *e = &c->e;
     const x86_insn_t *in = &c->in[i];
@@ -2025,7 +2026,10 @@ static void emit_rep_bulk(tctx_t *c, int i)
     arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_SEG_BASE + 0u);
     arm_dp_reg(e, DP_ADD, 0, A_R2, A_R0, A_R12, SH_LSL, 0);
     arm_mov(e, A_R1, A_R3);
-    arm_uxth(e, A_R3, A_R5);                            /* CX */
+    if (in->rep)
+        arm_uxth(e, A_R3, A_R5);                        /* CX */
+    else
+        arm_mov32(e, A_R3, 1u);
     uint32_t ctl = (uint32_t)bytes << 16 | (in->sub == STR_STOS ? XLAT_REP_STOS : 0u) |
                    (uint32_t)in->mem_seg << XLAT_REP_SEG_SHIFT;
     if (!arm_dp_imm(e, DP_ORR, 0, A_R3, A_R3, ctl)) {
@@ -2033,24 +2037,61 @@ static void emit_rep_bulk(tctx_t *c, int i)
         arm_dp_reg(e, DP_ORR, 0, A_R3, A_R3, A_R12, SH_LSL, 0);
     }
     arm_mov(e, A_R0, A_R11);
-    arm_mov32(e, A_R12, (uint32_t)(uintptr_t)&xlat_rt_rep);
-    arm_blx(e, A_R12);
-    /* r0 = transferred elements. Update CX and indices even on partial REP. */
-    arm_dp_reg(e, DP_SUB, 0, A_R1, A_R5, A_R0, SH_LSL, 0);
-    arm_bfi(e, A_R5, A_R1, 0, 16);
+}
+
+/* r0 = transferred elements, including partial REP and backward runs. */
+static void emit_string_update(tctx_t *c, int i)
+{
+    arm_emit_t *e = &c->e;
+    const x86_insn_t *in = &c->in[i];
+    const int bytes = in->size / 8;
+    if (in->rep) {
+        arm_dp_reg(e, DP_SUB, 0, A_R1, A_R5, A_R0, SH_LSL, 0);
+        arm_bfi(e, A_R5, A_R1, 0, 16);
+    }
     arm_mov(e, A_R12, A_R0);
     if (bytes > 1)
         arm_lsl(e, A_R12, A_R12, bytes == 4 ? 2 : 1);
+    arm_ls_imm(e, LS_LDR, A_R1, A_R11, XLAT_RT_EFLAGS);
+    arm_dp_imm(e, DP_AND, 1, A_PC, A_R1, 0x400u);
+    const uint32_t forward = arm_branch_slot(e);
+    arm_dp_imm(e, DP_RSB, 0, A_R12, A_R12, 0u);
+    local_patch(c, forward, C_EQ);
     if (in->sub == STR_MOVS) {
         arm_dp_reg(e, DP_ADD, 0, A_R1, A_R9, A_R12, SH_LSL, 0);
         arm_bfi(e, A_R9, A_R1, 0, 16);
     }
     arm_dp_reg(e, DP_ADD, 0, A_R1, A_R10, A_R12, SH_LSL, 0);
     arm_bfi(e, A_R10, A_R1, 0, 16);
+}
+
+/* Check the IRQ after a completed fast helper before the next guest IP. */
+static void emit_string_irq(tctx_t *c, uint16_t ip)
+{
+    arm_emit_t *e = &c->e;
+    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_INTR);
+    arm_ls_imm(e, LS_LDRB, A_R12, A_R12, 0);
+    arm_dp_imm(e, DP_SUB, 1, A_PC, A_R12, 0);
+    const int stop = exit_stub(c, ip, XLAT_EXIT_STOP, -1);
+    emit_branch(c, (dest_t){D_STUB, (int16_t)stop}, C_NE);
+}
+
+static void emit_rep_bulk(tctx_t *c, int i)
+{
+    arm_emit_t *e = &c->e;
+    const x86_insn_t *in = &c->in[i];
+    emit_string_args(c, i);
+    arm_mov32(e, A_R12, (uint32_t)(uintptr_t)&xlat_rt_rep);
+    arm_blx(e, A_R12);
+    emit_string_update(c, i);
     arm_dp_reg(e, DP_ORR, 1, A_R12, A_PC, A_R5, SH_LSL, 16);
-    /* A refused/partial bulk run goes through the native memory helper.
-     * CX=0 needs no further work. */
-    emit_branch(c, side_dest(c, i, 1), C_NE);
+    const uint32_t complete = arm_branch_slot(e);
+    emit_string_irq(c, in->ip);
+    /* A refused/partial run uses the old synchronized helper only if
+     * the remaining work was not stopped by a pending IRQ. */
+    emit_branch(c, side_dest(c, i, 1), C_AL);
+    local_patch(c, complete, C_EQ);
+    emit_string_irq(c, (uint16_t)(in->ip + in->len));
 }
 
 static void emit_string(tctx_t *c, int i)
@@ -2505,8 +2546,20 @@ static void emit_io(tctx_t *c, int i)
     if (shadow >= 0) {
         /* The helper completes STI and exactly its shadow instruction.
          * POP still has its own label for branches targeting it. */
+        arm_mov(e, A_R0, A_R11);
+        arm_mov32(e, A_R1, c->in[shadow].sreg);
+        arm_mov32(e, A_R12, (uint32_t)(uintptr_t)&xlat_rt_sti_pop);
+        arm_blx(e, A_R12);
+        arm_dp_imm(e, DP_SUB, 1, A_PC, A_R0, 0);
+        const uint32_t fast = arm_branch_slot(e);
         emit_helper_call(c, i, XLAT_XI_STI_POP | (c->in[shadow].sreg == 3),
                          2u, true);
+        const uint32_t done = arm_branch_slot(e);
+        local_patch(c, fast, C_NE);
+        arm_dp_imm(e, DP_AND, 1, A_PC, A_R0, XLAT_IO_BOUNDARY);
+        const int stop = exit_stub(c, (uint16_t)(in->ip + 2u), XLAT_EXIT_STOP, -1);
+        emit_branch(c, (dest_t){D_STUB, (int16_t)stop}, C_NE);
+        local_patch(c, done, C_AL);
         emit_branch(c, make_dest(c, i, (uint16_t)(in->ip + 2u)), C_AL);
         return;
     }
@@ -2747,6 +2800,21 @@ static bool emit_stubs(tctx_t *c)
                     emit_recon(c, s->recon);
                 const uint32_t ctl = native_string(in) ? string_ctl(in) :
                     (s->mw || side_writes_more(in) ? XI_MAY_WRITE : 0u) | XI_SIDE;
+                if (native_string(in) && !in->rep && cont) {
+                    /* A single VGA element need not spill the guest GPRs.
+                     * Unknown mappings and code writes use the old thunk. */
+                    emit_string_args(c, i);
+                    arm_mov32(e, A_R12, (uint32_t)(uintptr_t)&xlat_rt_string_fast);
+                    arm_blx(e, A_R12);
+                    arm_dp_imm(e, DP_SUB, 1, A_PC, A_R0, 0);
+                    const uint32_t slow = arm_branch_slot(e);
+                    emit_string_update(c, i);
+                    emit_string_irq(c, (uint16_t)(in->ip + in->len));
+                    const uint32_t site = arm_branch_slot(e);
+                    if (!arm_patch_branch(e, site, c->label[c->fall_idx[i]], C_AL))
+                        c->overflow = true;
+                    local_patch(c, slow, C_EQ);
+                }
                 emit_interp_call(c, i, ctl, cont);
                 if (cont) {
                     const uint32_t site = arm_branch_slot(e);

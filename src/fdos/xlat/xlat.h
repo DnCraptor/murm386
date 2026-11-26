@@ -193,6 +193,7 @@ typedef struct xlat_stats {
     uint32_t local_checks, local_invalid;
     uint32_t local_candidates, gap_candidates, rom_dispatch;
     uint32_t string_calls, string_elems, shadow_pop;
+    uint32_t fast_string_calls, fast_string_elems, shadow_fast, gap_reuse;
     uint32_t cuts;              /* XRIP bursts ended at a marked branch target */
     uint32_t cut_entries;       /* of those: translated code was entered */
     uint32_t cold;              /* regions given back to XRIP (too short per entry) */
@@ -480,6 +481,15 @@ uint32_t xlat_rt_popf(xlat_rt_t *rt, uint32_t value);
 #define XLAT_REP_STOS      (1u << 19)
 #define XLAT_REP_SEG_SHIFT 20
 uint32_t xlat_rt_rep(xlat_rt_t *rt, uint32_t src, uint32_t dst, uint32_t ctl);
+/* Explicit operands: no GPR spill, decoder or XRIP state synchronization.
+ * A zero/partial count leaves the remaining elements for the slow path. */
+uint32_t xlat_rt_string_fast(xlat_rt_t *rt, uint32_t src, uint32_t dst, uint32_t ctl);
+/* Only called for accesses wholly within A0000..BFFFF. */
+uint32_t xlat_vga_read(uint32_t address, unsigned bytes);
+void xlat_vga_write(uint32_t address, uint32_t value, unsigned bytes);
+/* STI + POP DS/ES, direct stack only. Returns the XLAT_IO_* status,
+ * or zero before changing any state (synchronized fallback). */
+uint32_t xlat_rt_sti_pop(xlat_rt_t *rt, uint32_t seg);
 
 /* A write of [addr, last] by generated code into a block xlat_code_map
  * marks (the trampoline's checks, when rt->gap / rt->hit do not decide):
