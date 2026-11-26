@@ -20,6 +20,8 @@ arm-linux-gnueabihf-gcc -O2 -g -mthumb -march=armv7-a+fp -static -Wall -Wextra \
     -lm -o "$out"
 run=()
 [[ "$(uname -m)" == arm* || "$(uname -m)" == aarch64 ]] || run=(qemu-arm)
+"${run[@]}" "$out" --compile-resume
+"${run[@]}" "$out" --compile-scheduler
 "${run[@]}" "$out" --shift   # shift and MUL/DIV helpers
 "${run[@]}" "$out" --replay tools/xlat_test/regions.log 300   # hand-made regions
 "${run[@]}" "$out" "${1:-5000}" "${2:-1}"

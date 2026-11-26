@@ -45,8 +45,7 @@ typedef struct xlat_rt {
     uint32_t deadline;             /* the burst ends once *clock reaches it */
     uint32_t extra;                /* budget added at clock checks (instructions) */
     const uint8_t *code_map;       /* xlat_code_map (set by xlat_run) */
-    uint32_t fn_entry;             /* linear address of a hot CALL target XRIP stopped at
-                                      (xlat_call_hot), else ~0 */
+    uint32_t fn_key;               /* CS:IP of a hot CALL target, or UINT32_MAX */
     /* Set by xlat_run() (the caller need not): the link table the region
      * exits look the next region up in (xlat_emit_trampoline), the epoch
      * its entries must carry, the stamp written to last[region] on a linked
@@ -176,6 +175,7 @@ typedef struct xlat_stats {
     uint32_t compile_defers;    /* compiler slices paused (not rejected) */
     uint32_t compile_resumes;   /* work continued from a previous slice */
     uint32_t compile_cancel;    /* unpublished job discarded on memory change */
+    uint32_t compile_queue_drops; /* requests denied or displaced by a higher priority */
     uint32_t disk_irq_yields;   /* ISR service points in native FDOS reads */
     uint32_t fn_regions;        /* regions without a loop (traces, function regions) */
     uint32_t exit_built;        /* of those: built at a hot region exit target */
@@ -236,6 +236,8 @@ extern xlat_stats_t xlat_stats;
  * no pending IRQ with IF set, not halted, rt->mem_size != 0.
  */
 bool xlat_run(xlat_rt_t *rt);
+/* Credit from completed guest CPU bursts, excluding compiler time. */
+void xlat_compile_credit(uint32_t guest_us);
 
 /* Drop every translation (e.g. after a program terminates). */
 void xlat_flush(void);
@@ -329,8 +331,9 @@ static inline void xlat_note_write(uint32_t linear)
 }
 
 /* Hot CALL targets (near, far, r/m) seen by XRIP: a target reaching
- * XLAT_CALL_HOT calls in its slot stops the burst there once (the caller
- * sets rt->fn_entry), so a function without a loop can get a region; later
+ * XLAT_CALL_HOT calls in its slot requests a cut (the caller sets
+ * rt->fn_key), so a function without a loop can get a region. Further
+ * cuts are spaced out until the cache acknowledges the request; later
  * calls reach it through xlat_entry_map, its return sites get regions as hot
  * region exit targets (xlat_run). Cleared with the cache. XLAT_TRACES: CMake
  * XLAT_TRACES (regions without a loop, xlat_internal.h). */
@@ -339,6 +342,8 @@ static inline void xlat_note_write(uint32_t linear)
 #endif
 #define XLAT_CALL_SLOTS 128u
 #define XLAT_CALL_HOT   32u
+#define XLAT_CALL_RESCAN 8u
+#define XLAT_CALL_ACK   UINT8_MAX
 extern uint32_t xlat_call_key[XLAT_CALL_SLOTS];
 extern uint8_t xlat_call_count[XLAT_CALL_SLOTS];
 static inline bool xlat_call_hot(uint32_t linear)
@@ -352,10 +357,25 @@ static inline bool xlat_call_hot(uint32_t linear)
         return false;
     }
     const uint32_t n = xlat_call_count[h];
-    if (n >= XLAT_CALL_HOT)
-        return false;           /* stopped there once already */
-    xlat_call_count[h] = (uint8_t)(n + 1);
-    return n + 1 == XLAT_CALL_HOT;
+    if (n == XLAT_CALL_ACK)
+        return false;
+    const uint8_t next = n + 1 == XLAT_CALL_HOT + XLAT_CALL_RESCAN ? XLAT_CALL_HOT : n + 1;
+    xlat_call_count[h] = next;
+    return next == XLAT_CALL_HOT;
+}
+
+static inline void xlat_call_ack(uint32_t linear)
+{
+    const uint32_t h = (linear * 0x9e3779b1u) >> 25;
+    if (xlat_call_key[h] == linear)
+        xlat_call_count[h] = XLAT_CALL_ACK;
+}
+
+static inline void xlat_call_rearm(uint32_t linear)
+{
+    const uint32_t h = (linear * 0x9e3779b1u) >> 25;
+    if (xlat_call_key[h] == linear && xlat_call_count[h] == XLAT_CALL_ACK)
+        xlat_call_count[h] = XLAT_CALL_HOT - 1;
 }
 
 #define XLAT_MAP_BITS 8192u

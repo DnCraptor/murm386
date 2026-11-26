@@ -37,7 +37,7 @@
 #define XLAT_MAX_REGIONS     384             /* region slots (entry_t.region, xlat_link_t.region: 16 bits) */
 #endif
 /* Regions without a loop (traces, XLAT_TRACES): built at a hot CALL target
- * (rt->fn_entry) when every path from the entry runs at least XLAT_TRACE_MIN
+ * (rt->fn_key) when every path from the entry runs at least XLAT_TRACE_MIN
  * native instructions before it can leave (a REP string instruction counts
  * as XLAT_TRACE_MIN): entering from XRIP costs about that. At a region exit
  * target seen XLAT_EXIT_HOT times XLAT_LINK_MIN do: the exits reach it
@@ -77,7 +77,7 @@ static inline uint32_t xlat_link_hash(uint32_t key)
 #endif
 #define XLAT_ENTRY_SLOTS     (1 << XLAT_ENTRY_BITS)  /* power of two */
 #define XLAT_HOT_SLOTS       64              /* power of two */
-#define XLAT_EXTRA_MAX       12              /* entry points added to a region (xlat_cache add_entry) */
+#define XLAT_EXTRA_MAX       12              /* entry points added to a cached region */
 #define XLAT_HOT_THRESHOLD   2               /* burst-start samples before translating */
 #ifndef XLAT_REJECT_RETRY
 #define XLAT_REJECT_RETRY    32              /* samples of a rejected burst start before one more try */
@@ -401,6 +401,7 @@ enum {
 
 /* A compiler slice is separate from the CPU instruction budget. */
 #define XLAT_COMPILE_US 150u
+#define XLAT_COMPILE_RATIO 12 /* microseconds of guest time per microsecond of compiler time */
 #if defined(XLAT_HOST_TEST)
 extern uint32_t xlat_test_compile_ticks;
 #endif

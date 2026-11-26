@@ -401,8 +401,8 @@ static __time_critical_func() uint32_t xlat_enter(CPU *cpu, uint32_t count, uint
     rt->eflags = x86_flags.value;
     rt->cs = segregs[regcs];
     rt->ip = XRIP_IP;
-    rt->fn_entry = xlat_fn_root;   /* a hot CALL target XRIP stopped at */
-    xlat_fn_root = UINT32_MAX;
+    rt->fn_key = xlat_fn_key;   /* The target can differ from the current PC after an IRQ. */
+    xlat_fn_key = UINT32_MAX;
     /* No burst cut while translated code runs: the instructions it hands to
      * XRIP (xlat_interp_one) must run, not stop at a marked branch target. */
     xlat_armed = false;
@@ -458,13 +458,12 @@ void __time_critical_func(xrip_step_cpu)(CPU *cpu, int count)
                                ? phys_mem_size - HMA_START : 0;
     }
 #if XLAT
-#if XLAT_LOG
     static uint32_t burst_seq;   /* changes if this burst runs nested bursts */
     const uint32_t seq0 = ++burst_seq;
-    const uint32_t svc0 = xlat_stats.svc_n;
     const unsigned long retired0 = retired;
-#endif
+    const uint32_t compile0 = xlat_stats.translate_us;
 #if XLAT_LOG
+    const uint32_t svc0 = xlat_stats.svc_n;
     uint32_t burst_xrip_us = 0, burst_xrip_insns = 0;   /* in run_instructions() */
 #endif
     const uint32_t t0 = timer_hw->timerawl;
@@ -545,10 +544,17 @@ void __time_critical_func(xrip_step_cpu)(CPU *cpu, int count)
         run_instructions((uint32_t)count);
 #endif
     fault_point = outer_fault_point;
-#if XLAT && XLAT_LOG
+#if XLAT
+    const uint32_t us = timer_hw->timerawl - t0;
+    const uint32_t n = (uint32_t)(retired - retired0);
+    const uint32_t compile_us = xlat_stats.translate_us - compile0;
+    if (burst_seq == seq0 && n && us > compile_us) {
+        const uint32_t guest_us = us - compile_us;
+        /* Limit credit from bursts that ran a slow host or device handler. */
+        xlat_compile_credit(guest_us < XLAT_SLICE_US ? guest_us : XLAT_SLICE_US);
+    }
+#if XLAT_LOG
     {
-        const uint32_t us = timer_hw->timerawl - t0;
-        const uint32_t n = (uint32_t)(retired - retired0);
         if (burst_seq != seq0 || xlat_stats.svc_n != svc0) {
             /* nested bursts or device service: a native handler ran guest
              * code or waited (the burst is not CPU time) */
@@ -566,6 +572,7 @@ void __time_critical_func(xrip_step_cpu)(CPU *cpu, int count)
             xlat_stats.xrip_hist[xlat_us_bucket(us)]++;
         }
     }
+#endif
 #endif
     flags_now();
     cpu->ip = cpu->next_ip = XRIP_IP;

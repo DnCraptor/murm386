@@ -1688,7 +1688,7 @@ static int replay(const char *path, int states)
             undo_from = REPLAY_SPAN;
             xlat_flush();
             bool ran = false;
-            xlat_rt_t rt = {.fn_entry = UINT32_MAX};
+            xlat_rt_t rt = {.fn_key = UINT32_MAX};
             for (int attempt = 0; attempt < 4 && !ran; ++attempt) {
                 rt.mem = mem; rt.mem_size = REPLAY_SPAN;   /* above it: XRIP (logged) */
                 memcpy(rt.seg_base, R.seg_base, sizeof(rt.seg_base));
@@ -1699,7 +1699,7 @@ static int replay(const char *path, int states)
                 rt.lazy_result = R.flags_result; rt.lazy_dst = R.flags_dst; rt.lazy_src = R.flags_src;
                 rt.eflags = R.eflags; rt.lazy_op = R.flags_op; rt.lazy_cf = R.flags_cf;
                 rt.cs = R.cs; rt.ip = R.ip;
-                rt.fn_entry = R.seg_base[1] + R.ip;   /* logged function regions too */
+                rt.fn_key = (uint32_t)R.cs << 16 | R.ip;   /* logged function regions too */
                 ran = xlat_run(&rt);
             }
             if (!ran) continue;
@@ -1775,7 +1775,7 @@ static int shift_check(void)
                     memset(&R, 0, sizeof(R));
                     R.eflags = 2 | (rnd() & 0x8d5u);
                     if (k & 1) { uint16_t r16; alu16((int)(rn(2) ? 0 : 5 + rn(3)), (uint16_t)rnd(), (uint16_t)rnd(), &r16); }
-                    xlat_rt_t rt = {.fn_entry = UINT32_MAX};
+                    xlat_rt_t rt = {.fn_key = UINT32_MAX};
                     memset(&rt, 0, sizeof(rt));
                     rt.eflags = R.eflags; rt.lazy_op = R.flags_op; rt.lazy_cf = R.flags_cf;
                     rt.lazy_result = R.flags_result; rt.lazy_dst = R.flags_dst; rt.lazy_src = R.flags_src;
@@ -1815,7 +1815,7 @@ static int shift_check(void)
         R.eflags = 2 | (rnd() & 0x8d5u);
         if (k & 1) { uint16_t r16; alu16((int)(rn(2) ? 0 : 5 + rn(3)), (uint16_t)rnd(), (uint16_t)rnd(), &r16); }
         putreg16(0, ax); putreg16(2, dx);
-        xlat_rt_t rt = {.fn_entry = UINT32_MAX};
+        xlat_rt_t rt = {.fn_key = UINT32_MAX};
         memset(&rt, 0, sizeof(rt));
         rt.eflags = R.eflags; rt.lazy_op = R.flags_op; rt.lazy_cf = R.flags_cf;
         rt.lazy_result = R.flags_result; rt.lazy_dst = R.flags_dst; rt.lazy_src = R.flags_src;
@@ -1924,14 +1924,14 @@ static int chain_check(void)
             for (int k = 0; k < 4; ++k) {
                 R = init;
                 R.ip = entries[test][e];
-                xlat_rt_t rt = {.fn_entry = UINT32_MAX};
+                xlat_rt_t rt = {.fn_key = UINT32_MAX};
                 memset(&rt, 0, sizeof(rt));
                 rt.mem = mem; rt.mem_size = 0xa0000;
                 memcpy(rt.seg_base, R.seg_base, sizeof(rt.seg_base));
                 rt.budget = 50; rt.clock = &test_clock; rt.deadline = test_clock;
                 rt.intr = &zero_byte; rt.gpr = R.gpr; rt.eflags = R.eflags;
                 rt.cs = R.cs; rt.ip = R.ip;
-                rt.fn_entry = test == 4 ? R.seg_base[1] + R.ip : UINT32_MAX;   /* L: as a hot CALL target */
+                rt.fn_key = test == 4 ? ((uint32_t)R.cs << 16 | R.ip) : UINT32_MAX;   /* L: as a hot CALL target */
                 xlat_run(&rt);
                 xlat_dirty = true, memcpy(mem, mem_init, MEM_BYTES);
             }
@@ -1949,8 +1949,7 @@ static int chain_check(void)
         R.ip = starts[test];
         const unsigned long entries0 = xlat_stats.entries, links0 = xlat_stats.links;
         for (int guard = 0; guard < 10000 && !R.halted; ++guard) {
-            xlat_rt_t rt = {.fn_entry = UINT32_MAX};
-            memset(&rt, 0, sizeof(rt));
+            xlat_rt_t rt = {.fn_key = UINT32_MAX};
             rt.mem = mem; rt.mem_size = 0xa0000;
             memcpy(rt.seg_base, R.seg_base, sizeof(rt.seg_base));
             rt.budget = 1000; rt.clock = &test_clock; rt.deadline = test_clock + 1000u;
@@ -1988,7 +1987,7 @@ static int chain_check(void)
             for (int k = 0; k < XLAT_REJECT_RETRY + 1; ++k) {
                 xlat_rt_t rt;
                 memset(&rt, 0, sizeof(rt));
-                rt.fn_entry = UINT32_MAX;
+                rt.fn_key = UINT32_MAX;
                 rt.mem = mem; rt.mem_size = 0xa0000;
                 memcpy(rt.seg_base, init.seg_base, sizeof(rt.seg_base));
                 ref_t scratch = init;
@@ -2033,7 +2032,7 @@ static int dump_region(const char *hex, const char *path)
     if (!a.base || !xlat_emit_trampoline(&a) || xlat_translate_ctx_size() > sizeof(ctx)) return 1;
     const uint32_t tramp = a.code_top;
     a.data_bottom = a.size;
-    xlat_rt_t rt = {.mem = mem, .mem_size = 0xa0000, .cs = 0x1000, .fn_entry = UINT32_MAX};
+    xlat_rt_t rt = {.mem = mem, .mem_size = 0xa0000, .cs = 0x1000, .fn_key = UINT32_MAX};
     rt.seg_base[1] = 0x10000;
     static xlat_region_out_t out;
     bool full;
@@ -2076,7 +2075,7 @@ static int size_report(const char *path)
         if (cs_base + 0x10000 > MEM_BYTES) continue;
         for (int l = 0; l < reg[r].nlines; ++l)
             memcpy(mem + cs_base + reg[r].line[l].ip, reg[r].line[l].b, reg[r].line[l].n);
-        xlat_rt_t rt = {.mem = mem, .mem_size = 0xa0000, .cs = reg[r].cs, .fn_entry = UINT32_MAX};
+        xlat_rt_t rt = {.mem = mem, .mem_size = 0xa0000, .cs = reg[r].cs, .fn_key = UINT32_MAX};
         rt.seg_base[1] = cs_base;
         a.code_top = tramp;
         a.data_bottom = a.size;
@@ -2158,10 +2157,126 @@ static int compile_resume_check(void)
     return 0;
 }
 
+/* Schedule at a different PC so this test only executes host C. */
+static int compile_scheduler_check(void)
+{
+    static const uint8_t trace[] = {
+        0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0xc3
+    };
+    static const uint8_t loop[] = {0x40, 0x83, 0xf8, 0x20, 0x75, 0xfa, 0xc3};
+    static const uint16_t cs = 0x1000, call = 0x100, burst = 0x200, retry = 0x300;
+    const uint32_t base = (uint32_t)cs << 4;
+    uint32_t clock = 0;
+    uint8_t irq = 0;
+    xlat_rt_t rt = {.mem = mem, .mem_size = 0xa0000, .cs = cs, .ip = 0x800,
+                    .clock = &clock, .intr = &irq, .wall_deadline = XLAT_SLICE_US,
+                    .fn_key = UINT32_MAX};
+    rt.seg_base[1] = base;
+    memcpy(mem + base + call, trace, sizeof(trace));
+    memcpy(mem + base + burst, loop, sizeof(loop));
+    memcpy(mem + base + retry, trace, sizeof(trace));
+
+    for (unsigned i = 1; i < XLAT_CALL_HOT; ++i)
+        if (xlat_call_hot(base + call))
+            return 1;
+    if (!xlat_call_hot(base + call))
+        return 1;
+    for (unsigned i = 1; i < XLAT_CALL_RESCAN; ++i)
+        if (xlat_call_hot(base + call))
+            return 1;
+    if (!xlat_call_hot(base + call))
+        return 1;
+
+    /* A CALL whose cut was displaced by an IRQ is queued at the next entry. */
+    rt.fn_key = (uint32_t)cs << 16 | call;
+    xlat_run(&rt);
+    rt.fn_key = UINT32_MAX;
+    for (unsigned i = 0; i < 2 * XLAT_CALL_RESCAN; ++i)
+        if (xlat_call_hot(base + call))
+            return 1;
+
+    xlat_compile_credit(XLAT_COMPILE_RATIO * XLAT_COMPILE_US - 1);
+    rt.eflags = 0x200;
+    rt.ip++;
+    xlat_run(&rt);
+    if (xlat_stats.translations || xlat_stats.compile_defers)
+        return 1;
+    xlat_compile_credit(1);
+    rt.eflags = 0;
+    rt.ip++;
+    xlat_run(&rt);
+    rt.eflags = 0x200;
+    irq = 1;
+    rt.ip++;
+    xlat_run(&rt);
+    if (xlat_stats.translations || xlat_stats.compile_defers)
+        return 1;
+
+    irq = 0;
+    rt.ip++;
+    xlat_test_compile_ticks = 1;
+    xlat_run(&rt);
+    xlat_test_compile_ticks = UINT32_MAX;
+    if (xlat_stats.compile_defers != 1 || xlat_stats.translations)
+        return 1;
+    rt.eflags = 0;
+    rt.ip = burst;
+    for (unsigned i = 0; i < XLAT_HOT_THRESHOLD; ++i)
+        xlat_run(&rt);
+    rt.eflags = 0x200;
+    rt.ip = 0x810;
+    xlat_run(&rt); /* same burst: no additional slice */
+    if (xlat_stats.compile_resumes || xlat_stats.translations)
+        return 1;
+    rt.wall_deadline += XLAT_SLICE_US;
+    rt.ip++;
+    xlat_run(&rt);
+    if (xlat_stats.compile_resumes != 1 || xlat_stats.translations != 1)
+        return 1;
+    rt.wall_deadline += XLAT_SLICE_US;
+    rt.ip++;
+    xlat_run(&rt); /* the burst sample taken with a paused job and IF=0 */
+    if (xlat_stats.translations != 2 || xlat_stats.fn_regions != 1)
+        return 1;
+
+    rt.eflags = 0;
+    rt.ip = retry;
+    for (unsigned i = 0; i < XLAT_HOT_THRESHOLD; ++i)
+        xlat_run(&rt);
+    rt.eflags = 0x200;
+    rt.wall_deadline += XLAT_SLICE_US;
+    rt.ip = 0x813;
+    xlat_run(&rt); /* first attempt: trace has no loop */
+    if (xlat_stats.rejects != 1 || xlat_stats.retries)
+        return 1;
+    rt.eflags = 0;
+    rt.ip = retry;
+    for (unsigned i = 0; i < XLAT_REJECT_RETRY; ++i)
+        xlat_run(&rt);
+    rt.eflags = 0x200;
+    rt.wall_deadline += XLAT_SLICE_US;
+    rt.ip = 0x814;
+    xlat_test_compile_ticks = 1;
+    xlat_run(&rt);
+    xlat_test_compile_ticks = UINT32_MAX;
+    if (xlat_stats.retries != 1 || xlat_stats.retries_built)
+        return 1;
+    rt.wall_deadline += XLAT_SLICE_US;
+    rt.ip++;
+    xlat_run(&rt);
+    if (xlat_stats.translations != 3 || xlat_stats.retries_built != 1)
+        return 1;
+
+    puts("compiler scheduler: OK");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1 && !strcmp(argv[1], "--compile-resume"))
         return compile_resume_check();
+    if (argc > 1 && !strcmp(argv[1], "--compile-scheduler"))
+        return compile_scheduler_check();
     tfpu_mem = mem;
     if (argc > 2 && !strcmp(argv[1], "--size"))
         return size_report(argv[2]);
@@ -2240,7 +2355,7 @@ int main(int argc, char **argv)
         const uint32_t umb_room = rn(2) ? 0x100000u - XLAT_UMB_BASE - XLAT_UMB_MARGIN : 0;
         long guard = 0;
         while (!R.halted && guard++ < 400000) {
-            xlat_rt_t rt = {.fn_entry = UINT32_MAX};
+            xlat_rt_t rt = {.fn_key = UINT32_MAX};
             rt.mem = mem;
             rt.mem_size = mem_size;
             rt.umb_room = umb_room;   /* the test's memory is plain up to MEM_BYTES */
@@ -2258,7 +2373,7 @@ int main(int argc, char **argv)
             rt.lazy_cf = R.flags_cf;
             rt.cs = R.cs;
             rt.ip = R.ip;
-            rt.fn_entry = rn(3) ? UINT32_MAX : R.seg_base[1] + R.ip;   /* as at a hot CALL target */
+            rt.fn_key = rn(3) ? UINT32_MAX : ((uint32_t)R.cs << 16 | R.ip);   /* as at a hot CALL target */
             rt.exit_kind = 0xff;
             ref_t before = R;
             static uint8_t before_mem[MEM_BYTES], fpu_before[94], fpu_after[94], fpu_now[94];

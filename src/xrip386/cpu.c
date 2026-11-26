@@ -393,16 +393,17 @@ static __time_critical_func() INLINE uint16_t pop() {
 
 #if XLAT
 /* After a CALL (near, r/m, far): a target that became hot (xlat_call_hot)
- * ends the burst there once, marked as a function entry for xlat_run(); a
- * marked target (translated already) ends it as a taken branch does. */
-static uint32_t xlat_fn_root = UINT32_MAX;
+ * requests a cut until acknowledged by xlat_run(); a marked target
+ * (translated already) ends the burst as a taken branch does. */
+static uint32_t xlat_fn_key = UINT32_MAX;
 static __time_critical_func() INLINE void xlat_call_seen(void) {
     if (!xlat_armed)
         return;
     const uint32_t linear = segment_base[regcs] + xrip_ip;
-    if (xlat_call_hot(linear)) {
+    if (xlat_call_hot(linear) && xrip_ip <= UINT16_MAX &&
+        segment_base[regcs] == (uint32_t)segregs[regcs] << 4) {
         xlat_cut = true;
-        xlat_fn_root = linear;
+        xlat_fn_key = (uint32_t)segregs[regcs] << 16 | xrip_ip;
     } else if (xlat_map_test(linear)) {
         xlat_cut = true;
     }
