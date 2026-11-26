@@ -2,6 +2,9 @@
 #include <pico/time.h>
 #include "286/cpu.h"
 #include "bios.h"
+#if XLAT
+#include "../fdos/xlat/xlat.h"
+#endif
 
 /*
  * INT 15h/AH=83h: отложенное взведение флага события. Армируется из
@@ -33,6 +36,10 @@ void bios_15h_event_wait_tick(void)
     if ((int32_t)(get_uticks() - event_wait_deadline) < 0)
         return;
     event_wait_armed = false;
+#if XLAT
+    xlat_note_host_write(event_wait_flag_lin, 1u);
+    xlat_note_host_write(0x4A0, 1u);
+#endif
     pstore8(event_wait_flag_lin, pload8(event_wait_flag_lin) | 0x80);
     pstore8(0x4A0, 0x00);
 }

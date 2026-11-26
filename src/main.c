@@ -76,6 +76,9 @@ bool ega128_paging_flush(void);
 #include "vga_osd.h"
 #include "profile_subsys.h"
 #include "remote_mem.h"
+#if XLAT
+#include "fdos/xlat/xlat.h"
+#endif
 #include "codeprofile.h"
 #include "pcsample.h"
 #include "autotype.h"
@@ -659,7 +662,7 @@ static bool numpad_mouse_key(int is_down, int keycode)
     return true;
 }
 
-static bool process_keycode(int is_down, int keycode) {
+static bool process_keycode_impl(int is_down, int keycode) {
     /*
      * Track Ctrl/Alt before any modal OSD handling.  Ctrl+Alt+Del is a
      * host-side emergency reset and must work even while the guest is wedged.
@@ -774,6 +777,21 @@ static bool process_keycode(int is_down, int keycode) {
         return false;  // Keypad key drives the emulated mouse
 
     return true;  // Pass to emulator
+}
+
+static bool process_keycode(int is_down, int keycode)
+{
+#if XLAT
+    /* Host keys can enter disk/settings UI and run arbitrary native work.
+     * Ordinary empty input polls have no such effect. A nested guest call
+     * may consume dirty, so bracket the actual host event. */
+    xlat_dirty = true;
+#endif
+    const bool pass = process_keycode_impl(is_down, keycode);
+#if XLAT
+    xlat_dirty = true;
+#endif
+    return pass;
 }
 
 typedef struct {
@@ -1159,6 +1177,16 @@ rst:
         goto rst;
     }
 }
+
+#if XLAT
+/* Only the built-in input poll and the no-op RP2350 redraw are audited.
+ * Unknown callbacks and modal host work retain the old conservative rule. */
+bool xlat_platform_callbacks_safe(const PC *p)
+{
+    return p->poll == platform_poll && p->redraw == vga_redraw &&
+           !p->paused && !diskui_is_open() && !settingsui_is_open();
+}
+#endif
 
 //=============================================================================
 // Configuration Loading

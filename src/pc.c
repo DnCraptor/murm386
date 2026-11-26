@@ -717,6 +717,8 @@ bool pc_xlat_safe_out(void *o, uint16_t port, bool word)
         return false;
     switch (port) {
     case 0x20: case 0x21: case 0xa0: case 0xa1:
+    case 0x40: case 0x41: case 0x42: case 0x43:
+    case 0x80: case 0xed:
         return !word;
     case 0x228: case 0x388: case 0x38a:
         return true;
@@ -1139,6 +1141,7 @@ static void __not_in_flash_func(pc_rate_update)(PC *pc, int limit)
 #if XLAT
 #include "fdos/xlat/xlat.h"
 extern bool xlat_host_async_writers(void);
+extern bool xlat_platform_callbacks_safe(const PC *pc);
 #endif
 
 static void __not_in_flash_func(pc_service_impl)(PC *pc, bool full)
@@ -1152,9 +1155,11 @@ static void __not_in_flash_func(pc_service_impl)(PC *pc, bool full)
      */
     pc_last_device_service = get_uticks();
 #if XLAT
+    const bool foreign = !xlat_platform_callbacks_safe(pc) || xlat_host_async_writers();
     if (full) {
         pc_last_full_service = pc_last_device_service;
-        xlat_dirty = true;  /* host polling and native callbacks may write RAM */
+        if (foreign)
+            xlat_dirty = true;
     }
 #endif
 
@@ -1188,7 +1193,8 @@ static void __not_in_flash_func(pc_service_impl)(PC *pc, bool full)
         PROF_T(t_refresh);
         if (refresh && pc->redraw) {
 #if XLAT
-            xlat_dirty = true;
+            if (foreign)
+                xlat_dirty = true;
 #endif
             vga_refresh(pc->vga, pc->redraw, pc->redraw_data,
                         pc->full_update != 0);
@@ -1198,10 +1204,18 @@ static void __not_in_flash_func(pc_service_impl)(PC *pc, bool full)
         PROF_ADD(t_refresh, refresh);
     }
 #if XLAT
-    /* A nested call could have consumed the dirty flag while polling. */
-    if (full || refresh)
+    /* Device state and IRQ delivery do not write guest code. DMA and the
+     * deferred INT 15h event report their actual RAM writes separately.
+     * Untrusted callbacks may have consumed dirty in a nested call. */
+    if (foreign && (full || refresh))
         xlat_dirty = true;
 #if XLAT_LOG
+    if (full) {
+        if (foreign || xlat_dirty)
+            ++xlat_stats.service_foreign;
+        else
+            ++xlat_stats.service_clean;
+    }
     xlat_note_service(get_uticks() - pc_last_device_service);
 #endif
 #endif
@@ -1221,7 +1235,14 @@ static void __not_in_flash_func(pc_service_due)(PC *pc)
 
 void __not_in_flash_func(pc_service)(PC *pc)
 {
+#if XLAT
+    /* Public native-ELF yield is not a certified guest continuation. */
+    xlat_dirty = true;
+#endif
     pc_service_impl(pc, true);
+#if XLAT
+    xlat_dirty = true;
+#endif
 }
 
 static void __not_in_flash_func(pc_step_impl)(PC *pc, size_t max_ops, bool continuation)

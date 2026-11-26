@@ -73,6 +73,7 @@ typedef struct xlat_rt {
     uint32_t wall_deadline;       /* nonzero: independent real-time deadline */
     uint32_t budget_limit;        /* total instruction credit, 0 unlimited */
     uint32_t link_alt;            /* secondary link matches, before budget check */
+    uint32_t gap2_lo, gap2_hi;    /* second exact negative range, checked in ARM */
 } xlat_rt_t;
 
 #define XLAT_UMB_BASE   0xC0000u
@@ -110,6 +111,8 @@ typedef struct xlat_rt {
 #define XLAT_RT_HIT_LO     124
 #define XLAT_RT_HIT_HI     128
 #define XLAT_RT_LINK_ALT   140
+#define XLAT_RT_GAP2_LO    144
+#define XLAT_RT_GAP2_HI    148
 
 #if UINTPTR_MAX == 0xffffffffu
 _Static_assert(__builtin_offsetof(xlat_rt_t, mem_size) == XLAT_RT_MEM_SIZE &&
@@ -142,7 +145,9 @@ _Static_assert(__builtin_offsetof(xlat_rt_t, mem_size) == XLAT_RT_MEM_SIZE &&
                __builtin_offsetof(xlat_rt_t, gap_hi) == XLAT_RT_GAP_HI &&
                __builtin_offsetof(xlat_rt_t, hit_lo) == XLAT_RT_HIT_LO &&
                __builtin_offsetof(xlat_rt_t, hit_hi) == XLAT_RT_HIT_HI &&
-               __builtin_offsetof(xlat_rt_t, link_alt) == XLAT_RT_LINK_ALT,
+               __builtin_offsetof(xlat_rt_t, link_alt) == XLAT_RT_LINK_ALT &&
+               __builtin_offsetof(xlat_rt_t, gap2_lo) == XLAT_RT_GAP2_LO &&
+               __builtin_offsetof(xlat_rt_t, gap2_hi) == XLAT_RT_GAP2_HI,
                "xlat_rt_t layout is used by generated code");
 #endif
 
@@ -203,6 +208,8 @@ typedef struct xlat_stats {
     uint32_t string_preempt, bios_write_leaf, bios_cursor_local;
     uint32_t scalar_resume, scalar_dispatch, scalar_refused, scalar_stop;
     uint32_t compiled_code_bytes, compiled_source_bytes;
+    uint32_t epoch_start, epoch_helper, revalidations, revalidate_bytes;
+    uint32_t service_clean, service_foreign, host_local, host_unknown;
     uint32_t cuts;              /* XRIP bursts ended at a marked branch target */
     uint32_t cut_entries;       /* of those: translated code was entered */
     uint32_t cold;              /* regions given back to XRIP (too short per entry) */
@@ -367,8 +374,8 @@ uint32_t xlat_stack_free(void);
 extern uint8_t xlat_code_map[XLAT_CODE_MAP_BYTES];
 
 /* Translated x86 code may have changed since the last xlat_run(). Set on
- * untrusted CPU entry, full device service, DMA writes, native BIOS/DOS
- * calls, mapping changes and XRIP writes touching translated code.
+ * untrusted CPU entry, untrusted callbacks, native BIOS/DOS calls and
+ * mapping changes. Known RAM writes use the local range below.
  * Consecutive guest-only bursts may retain their epoch. xlat_run() and
  * xlat_region_still_valid() revalidate the affected regions when dirty. */
 extern bool xlat_dirty;  /* unknown writes / mapping changes */
@@ -391,6 +398,10 @@ static inline void xlat_note_write(uint32_t linear)
 {
     xlat_note_write_n(linear, 16u);
 }
+
+/* Synchronous host/device write, before the actual store(s). Only audited
+ * direct conventional RAM is admitted to the exact local-write path. */
+void xlat_note_host_write(uint32_t linear, uint32_t len);
 
 /* Hot CALL targets (near, far, r/m) seen by XRIP: a target reaching
  * XLAT_CALL_HOT calls in its slot requests a cut (the caller sets

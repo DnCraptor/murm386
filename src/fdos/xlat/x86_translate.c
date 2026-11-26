@@ -3155,10 +3155,20 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     arm_ls_imm(&e, LS_LDR, A_R1, A_R11, XLAT_RT_GAP_HI);
     arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R12, A_R1, SH_LSL, 0);
     const uint32_t g_above = arm_branch_slot(&e);           /* last >= gap_hi */
+    const uint32_t g_clear = e.pos;
     arm_mov32(&e, A_R12, 0);
     const uint32_t g_ret = e.pos;
     arm_e16(&e, 0xbc06u);                                    /* POP {r1, r2} */
     arm_bx(&e, A_LR);
+    /* Stack and data often alternate between two negative ranges. Do not
+     * call C merely to exchange them. r0 and r12 remain the first/last. */
+    const uint32_t g_second = e.pos;
+    arm_ls_imm(&e, LS_LDR, A_R1, A_R11, XLAT_RT_GAP2_LO);
+    arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R0, A_R1, SH_LSL, 0);
+    const uint32_t g2_below = arm_branch_slot(&e);
+    arm_ls_imm(&e, LS_LDR, A_R1, A_R11, XLAT_RT_GAP2_HI);
+    arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R12, A_R1, SH_LSL, 0);
+    const uint32_t g2_clear = arm_branch_slot(&e);
     const uint32_t g_hit = e.pos;
     arm_ls_imm(&e, LS_LDR, A_R1, A_R11, XLAT_RT_HIT_LO);
     arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R12, A_R1, SH_LSL, 0);
@@ -3177,7 +3187,8 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     arm_mov(&e, A_R12, A_R0);
     arm_pop(&e, 0x4019u);
     const uint32_t c_ret = arm_branch_slot(&e);
-    ok &= tramp_patch(&e, g_below, g_hit, C_CC) && tramp_patch(&e, g_above, g_hit, C_CS) &&
+    ok &= tramp_patch(&e, g_below, g_second, C_CC) && tramp_patch(&e, g_above, g_second, C_CS) &&
+          tramp_patch(&e, g2_below, g_hit, C_CC) && tramp_patch(&e, g2_clear, g_clear, C_CC) &&
           tramp_patch(&e, h_below, g_call, C_CC) && tramp_patch(&e, h_above, g_call, C_CS) &&
           tramp_patch(&e, h_ret, g_ret, C_AL) && tramp_patch(&e, c_ret, g_ret, C_AL);
 

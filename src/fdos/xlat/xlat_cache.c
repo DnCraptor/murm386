@@ -696,6 +696,9 @@ static uint32_t XLAT_HOT_FN(load32)(const uint8_t *p)
 /* The x86 bytes the region was built from are still there. */
 static bool XLAT_HOT_FN(region_bytes_valid)(const region_t *r, const xlat_rt_t *rt)
 {
+#if XLAT_LOG
+    ++xlat_stats.revalidations;
+#endif
     if (rt->mem_size != r->mem_size)
         return false;
     const uint8_t *d = st->arena.base + r->data_off;
@@ -703,6 +706,9 @@ static bool XLAT_HOT_FN(region_bytes_valid)(const region_t *r, const xlat_rt_t *
         const uint32_t linear = load32(d);
         const uint32_t len = d[4] | (uint32_t)d[5] << 8;
         const uint8_t *copy = d + 8;
+#if XLAT_LOG
+        xlat_stats.revalidate_bytes += len;
+#endif
         if (!xlat_code_direct(linear, len))
             return false;
         const uint8_t *g = rt->mem + linear;
@@ -1460,6 +1466,9 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
     if (xlat_dirty) {
         xlat_dirty = false;
         st->epoch++;
+#if XLAT_LOG
+        ++xlat_stats.epoch_start;
+#endif
         rt->hit_lo = rt->hit_hi = 0;
     }
     validate_local_writes(rt);
@@ -1775,10 +1784,45 @@ static bool rep_direct(const xlat_rt_t *rt, uint32_t linear, uint32_t len)
 /* Clear both cached ranges while the runtime state is active. */
 static void gap_reset(void)
 {
-    if (gap_rt)
+    if (gap_rt) {
         gap_rt->gap_lo = gap_rt->gap_hi = gap_rt->hit_lo = gap_rt->hit_hi = 0;
+        gap_rt->gap2_lo = gap_rt->gap2_hi = 0;
+    }
     memset(gap_recent, 0, sizeof(gap_recent));
     gap_next = 0;
+}
+
+void xlat_note_host_write(uint32_t linear, uint32_t len)
+{
+    if (!len)
+        return;
+#if defined(NO_PAGING)
+    /* The conventional window cannot be banked or aliased by EMS/VGA.
+     * Scan the conservative map across the whole destination, not just
+     * the first byte. The local validator checks the actual source bytes. */
+    if (linear < 0xa0000u && len <= 0xa0000u - linear) {
+        const uint32_t last = linear + len - 1u;
+        for (uint32_t b = linear >> XLAT_CODE_BLOCK_SHIFT;
+             b <= (last >> XLAT_CODE_BLOCK_SHIFT); ++b) {
+            if (xlat_code_map[b >> 3] & (1u << (b & 7u))) {
+                if (!xlat_write_hi || linear < xlat_write_lo)
+                    xlat_write_lo = linear;
+                if (last + 1u > xlat_write_hi)
+                    xlat_write_hi = last + 1u;
+                break;
+            }
+        }
+#if XLAT_LOG
+        ++xlat_stats.host_local;
+#endif
+        return;
+    }
+#endif
+    /* HMA, UMB/EMS, VGA, remote or paged RAM: keep the original policy. */
+    xlat_dirty = true;
+#if XLAT_LOG
+    ++xlat_stats.host_unknown;
+#endif
 }
 
 /* [addr, last] meets the x86 bytes of a live region. Cold/invalidated
@@ -1821,14 +1865,23 @@ static bool code_meets(uint32_t addr, uint32_t last, uint32_t *lo, uint32_t *hi,
 
 /* In flash: called only for writes into marked blocks the cached gap and
  * hit do not cover. */
+static inline void gap_promote(xlat_rt_t *rt, uint32_t lo, uint32_t hi)
+{
+    if (rt->gap_lo == lo && rt->gap_hi == hi)
+        return;
+    rt->gap2_lo = rt->gap_lo;
+    rt->gap2_hi = rt->gap_hi;
+    rt->gap_lo = lo;
+    rt->gap_hi = hi;
+}
+
 uint32_t xlat_rt_gap(uint32_t addr, uint32_t last, xlat_rt_t *rt)
 {
     uint32_t lo = addr & ~0xfffu, hi = (last | 0xfffu) + 1u, run_lo, run_hi;
     xlat_stats.gap_calls++;
     for (unsigned k = 0; k < GAP_RECENT; ++k) {
         if (addr >= gap_recent[k].lo && last < gap_recent[k].hi) {
-            rt->gap_lo = gap_recent[k].lo;
-            rt->gap_hi = gap_recent[k].hi;
+            gap_promote(rt, gap_recent[k].lo, gap_recent[k].hi);
             ++xlat_stats.gap_reuse;
             return 0;
         }
@@ -1840,8 +1893,7 @@ uint32_t xlat_rt_gap(uint32_t addr, uint32_t last, xlat_rt_t *rt)
         }
         return 1;
     }
-    rt->gap_lo = lo;
-    rt->gap_hi = hi;
+    gap_promote(rt, lo, hi);
     gap_recent[gap_next].lo = lo;
     gap_recent[gap_next].hi = hi;
     gap_next = (gap_next + 1u) & (GAP_RECENT - 1u);
@@ -1851,7 +1903,8 @@ uint32_t xlat_rt_gap(uint32_t addr, uint32_t last, xlat_rt_t *rt)
 /* Reuse the same exact negative cache for C memory helpers. */
 static bool range_has_code(xlat_rt_t *rt, uint32_t first, uint32_t last)
 {
-    if (first >= rt->gap_lo && last < rt->gap_hi)
+    if ((first >= rt->gap_lo && last < rt->gap_hi) ||
+        (first >= rt->gap2_lo && last < rt->gap2_hi))
         return false;
     if (rt->hit_lo < rt->hit_hi && last >= rt->hit_lo && first < rt->hit_hi)
         return true;
@@ -2522,6 +2575,11 @@ void xlat_log_write(uint16_t psp, const char *name)
                (unsigned long)xlat_stats.scalar_resume, (unsigned long)xlat_stats.scalar_dispatch,
                (unsigned long)xlat_stats.scalar_refused, (unsigned long)xlat_stats.scalar_stop,
                (unsigned long)xlat_stats.compiled_code_bytes, (unsigned long)xlat_stats.compiled_source_bytes);
+    log_printf("K epoch_start=%lu epoch_helper=%lu revalidations=%lu revalidate_bytes=%lu service_clean=%lu service_foreign=%lu host_local=%lu host_unknown=%lu\r\n",
+               (unsigned long)xlat_stats.epoch_start, (unsigned long)xlat_stats.epoch_helper,
+               (unsigned long)xlat_stats.revalidations, (unsigned long)xlat_stats.revalidate_bytes,
+               (unsigned long)xlat_stats.service_clean, (unsigned long)xlat_stats.service_foreign,
+               (unsigned long)xlat_stats.host_local, (unsigned long)xlat_stats.host_unknown);
     /* CPU bursts: averages and histograms (xlat_stats_t), XRIP only / with
      * translated code; device service after the bursts. XLAT_SLICE_US is
      * meant to match the usual XRIP burst. */
@@ -2621,6 +2679,9 @@ bool XLAT_HOT_FN(xlat_region_still_valid)(xlat_rt_t *rt)
     /* the other regions are compared at their next entry (through
      * xlat_run(): the link table entries are for the old epoch) */
     rt->epoch = ++st->epoch;
+#if XLAT_LOG
+    ++xlat_stats.epoch_helper;
+#endif
     rt->hit_lo = rt->hit_hi = 0;
     if (!r || region_valid(r, rt)) {
         if (r)
