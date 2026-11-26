@@ -28,7 +28,7 @@
 #endif
 #define XLAT_MAX_INSNS       63              /* per region; bit 63 of a set is "entry state" */
 #ifndef XLAT_MAX_REGIONS
-#define XLAT_MAX_REGIONS     64              /* region slots (entry_t.region is 8 bits) */
+#define XLAT_MAX_REGIONS     192             /* region slots (entry_t.region is 8 bits) */
 #endif
 /* Regions without a loop (traces, XLAT_TRACES): built at a hot CALL target
  * (rt->fn_entry) when every path from the entry runs at least XLAT_TRACE_MIN
@@ -64,11 +64,16 @@ static inline uint32_t xlat_link_hash(uint32_t key)
 {
     return (key ^ (key >> 7) ^ (key >> 16)) & (XLAT_LINK_SLOTS - 1u);
 }
-#define XLAT_ENTRY_BITS      9
+#ifndef XLAT_ENTRY_BITS
+#define XLAT_ENTRY_BITS      11              /* entry points of all regions (their leaders) */
+#endif
 #define XLAT_ENTRY_SLOTS     (1 << XLAT_ENTRY_BITS)  /* power of two */
 #define XLAT_HOT_SLOTS       64              /* power of two */
 #define XLAT_EXTRA_MAX       12              /* entry points added to a region (xlat_cache add_entry) */
 #define XLAT_HOT_THRESHOLD   2               /* burst-start samples before translating */
+#ifndef XLAT_REJECT_RETRY
+#define XLAT_REJECT_RETRY    32              /* samples of a rejected burst start before one more try */
+#endif
 #define XLAT_ENTRY_COST      8               /* budget charged per region entry */
 #define XLAT_INTERP_RATIO    8               /* at most 1/8 of a region interpreted */
 #define XLAT_SPAN_WINDOW     2048u           /* code within +-1 KiB of the entry or of a called function */

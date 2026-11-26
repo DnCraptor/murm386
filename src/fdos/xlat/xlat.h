@@ -134,6 +134,10 @@ typedef struct xlat_stats {
     uint32_t evictions;         /* regions dropped to make room (ring, slots) */
     uint32_t slot_evictions;    /* of those: for a region slot (all 64 held) */
     uint32_t ring_retries;      /* translations that did not fit at the ring head */
+    uint32_t retries;           /* rejected burst starts tried again (still hot) */
+    uint32_t retries_built;     /* of those: built */
+    uint32_t translate_us;      /* time in the translator (xlat_translate, eviction) */
+    uint32_t translate_max_us;
     uint32_t fn_regions;        /* regions without a loop (traces, function regions) */
     uint32_t exit_built;        /* of those: built at a hot region exit target */
     uint32_t entries_added;     /* regions translated again with one more entry point */
@@ -200,6 +204,16 @@ void xlat_release(void);
 /* XLAT_LOG builds: append the collected regions and counters to
  * SD_DATA_DIR/xlat.log. Only at a safe point (a DOS program has ended). */
 void xlat_log_write(uint16_t psp, const char *name);
+
+/* XLAT_LOG: time outside translated code, by CS:IP (key cs << 16 | ip):
+ * XRIP instructions run at the end of a burst (weight: how many), the
+ * instructions translated code hands to XRIP (xlat_interp_one): those it has
+ * no translation for (interp) and the memory accesses outside fast memory or
+ * into translated code (side). Logged
+ * as P lines at a program's exit. */
+enum { XLAT_PROF_XRIP, XLAT_PROF_INTERP, XLAT_PROF_SIDE, XLAT_PROF_KINDS };
+void xlat_prof_note(unsigned kind, uint32_t key, uint32_t linear, const uint8_t *mem,
+                    uint32_t mem_size, uint32_t weight);
 
 /* Provided by the CPU adapter (and by tools/xlat_test): execute the one
  * instruction at rt->cs:rt->ip with the interpreter, rt->gpr and the lazy

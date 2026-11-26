@@ -22,6 +22,7 @@
 
 #include "xlat.h"
 #include "fpu_glue.h"
+#include "xlat_internal.h"   /* XLAT_REJECT_RETRY */
 
 #define MEM_BYTES 0x110100u
 
@@ -1966,6 +1967,28 @@ static int chain_check(void)
                    translations - tr0);
             bad++;
         }
+        if (test == 5) {
+            /* ... unless it stays hot: XLAT_REJECT_RETRY more burst starts
+             * there give M that entry (sample_retry) */
+            const unsigned long retries0 = xlat_stats.retries_built;
+            for (int k = 0; k < XLAT_REJECT_RETRY + 1; ++k) {
+                xlat_rt_t rt;
+                memset(&rt, 0, sizeof(rt));
+                rt.fn_entry = UINT32_MAX;
+                rt.mem = mem; rt.mem_size = 0xa0000;
+                memcpy(rt.seg_base, init.seg_base, sizeof(rt.seg_base));
+                ref_t scratch = init;
+                rt.budget = 50; rt.clock = &test_clock; rt.deadline = test_clock;
+                rt.intr = &zero_byte; rt.gpr = scratch.gpr; rt.eflags = init.eflags;
+                rt.cs = init.cs; rt.ip = 0x0701;
+                xlat_run(&rt);
+                xlat_dirty = true, memcpy(mem, mem_init, MEM_BYTES);
+            }
+            if (xlat_stats.retries_built != retries0 + 1 || xlat_stats.entries_added != added0 + 1) {
+                printf("  chain test 5: hot burst start inside a region got no entry\n");
+                bad++;
+            }
+        }
         if (test == 4 && (!xlat_stats.exit_built || xlat_stats.links - links0 < 20)) {
             printf("  chain test 4: exit target not built or not linked (links %lu)\n",
                    xlat_stats.links - links0);
@@ -1982,7 +2005,6 @@ static int chain_check(void)
 /* --dump HEX [out.bin]: translate the x86 bytes HEX (at 1000:0100, as a
  * trace too) and write the Thumb code for a disassembler:
  * arm-none-eabi-objdump -D -b binary -marm -Mforce-thumb out.bin */
-#include "xlat_internal.h"
 static int dump_region(const char *hex, const char *path)
 {
     static uint32_t ctx[64 * 1024];

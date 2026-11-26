@@ -53,7 +53,7 @@ typedef struct {
 
 typedef struct {
     uint32_t key;          /* cs << 16 | ip */
-    uint16_t code_off;     /* arena offset of the entry label */
+    uint32_t code_off;     /* arena offset of the entry label */
     uint8_t region;
     uint8_t used;          /* E_* */
 } entry_t;
@@ -64,9 +64,14 @@ enum { E_FREE = 0, E_DEAD = 1, E_LIVE = 2, E_MARK = 4 };
 
 typedef struct {
     uint32_t key;
-    uint8_t count;
-    uint8_t reject;
+    uint8_t count;         /* samples in a row; after a reject: samples since */
+    uint8_t reject;        /* HOT_* */
+    uint8_t why;           /* XLAT_RJ_* of the reject */
 } hot_t;
+
+/* hot_t.reject: HOT_RETRY: rejected, tried once more (sample_retry) when it
+ * stays hot XLAT_REJECT_RETRY more samples; HOT_FINAL: left to XRIP. */
+enum { HOT_NONE = 0, HOT_RETRY = 1, HOT_FINAL = 2 };
 
 /* XLAT_LOG: hot entry points that got no region, the most often seen kept. */
 #define XLAT_REJ_SLOTS 16
@@ -114,8 +119,8 @@ typedef struct {
 
 #define ALIGN8(n) (((n) + 7u) & ~(size_t)7u)
 
-#if XLAT_ARENA_SIZE > 0x10000
-#error "entry_t.code_off is 16-bit"
+#if XLAT_ARENA_SIZE > 0x800000
+#error "XLAT_ARENA_SIZE: the B.W / BL from the arena end to the trampoline reach 16 MiB"
 #endif
 
 static state_t *st;
@@ -352,6 +357,65 @@ static void log_rejects(void)
     memset(st->rej, 0, sizeof(st->rej));
     memset(st->rej_why, 0, sizeof(st->rej_why));
 }
+
+/* Where the time goes outside translated code (xlat_prof_note, xlat.h): the
+ * heaviest CS:IP of each kind, counted as in the space-saving algorithm (a
+ * new key takes the smallest slot and its count: counts are upper bounds). */
+#define XLAT_PROF_SLOTS 16
+typedef struct {
+    uint32_t key, linear, count;
+    uint8_t b[8];
+} prof_t;
+static prof_t prof[XLAT_PROF_KINDS][XLAT_PROF_SLOTS];
+static uint32_t prof_total[XLAT_PROF_KINDS];
+
+void XLAT_HOT_FN(xlat_prof_note)(unsigned kind, uint32_t key, uint32_t linear, const uint8_t *mem,
+                                 uint32_t mem_size, uint32_t weight)
+{
+    prof_t *const t = prof[kind];
+    prof_t *min = &t[0];
+    prof_total[kind] += weight;
+    for (int k = 0; k < XLAT_PROF_SLOTS; ++k) {
+        if (t[k].key == key && t[k].count) {
+            t[k].count += weight;
+            return;
+        }
+        if (t[k].count < min->count)
+            min = &t[k];
+    }
+    min->key = key;
+    min->linear = linear;
+    min->count += weight;
+    for (uint32_t i = 0; i < 8; ++i)
+        min->b[i] = linear + i < mem_size ? mem[linear + i] : 0;
+}
+
+static void log_prof(void)
+{
+    static const char *const kinds[XLAT_PROF_KINDS] = {"xrip", "interp", "side"};
+    for (unsigned kind = 0; kind < XLAT_PROF_KINDS; ++kind) {
+        prof_t *const t = prof[kind];
+        log_printf("P %s total=%lu\r\n", kinds[kind], (unsigned long)prof_total[kind]);
+        for (int n = 0; n < XLAT_PROF_SLOTS; ++n) {
+            prof_t *best = NULL;
+            for (int k = 0; k < XLAT_PROF_SLOTS; ++k)
+                if (t[k].count && (!best || t[k].count > best->count))
+                    best = &t[k];
+            if (!best)
+                break;
+            const uint32_t a = best->linear;
+            const char *const area = a < 0xa0000u ? "" : a < 0xc0000u ? " vram" : a < 0x100000u
+                                     ? " rom/umb" : " hma/xms";
+            log_printf("P %s %04X:%04X %05lX n=%lu%s %02X %02X %02X %02X %02X %02X %02X %02X\r\n",
+                       kinds[kind], (unsigned)(best->key >> 16), (unsigned)(best->key & 0xffffu),
+                       (unsigned long)a, (unsigned long)best->count, area, best->b[0], best->b[1],
+                       best->b[2], best->b[3], best->b[4], best->b[5], best->b[6], best->b[7]);
+            best->count = 0;
+        }
+    }
+    memset(prof, 0, sizeof(prof));
+    memset(prof_total, 0, sizeof(prof_total));
+}
 #else
 #define log_region_code(r) ((void)0)
 #define log_region_counts() ((void)0)
@@ -359,6 +423,7 @@ static void log_rejects(void)
 #define log_dump_room() false
 #define note_reject(rt, key, why) ((void)0)
 #define note_reject_hit(key) ((void)0)
+#define log_prof() ((void)0)
 #endif
 
 static void reset_tables(void)
@@ -393,11 +458,23 @@ static __attribute__((noinline)) bool ready(void)
     static uint32_t sram_arena[XLAT_ARENA_SIZE / 4];
     const size_t arena_off = ALIGN8(ctx_off + xlat_translate_ctx_size());
     const size_t log_off = arena_off;
-#else
-    const size_t arena_off = ALIGN8(ctx_off + xlat_translate_ctx_size());
-    const size_t log_off = arena_off + XLAT_ARENA_SIZE;
-#endif
     uint8_t *block = (uint8_t *)XLAT_ALLOC(log_off + XLAT_LOG_SIZE);
+    const uint32_t arena_size = XLAT_ARENA_SIZE;
+#else
+    /* The arena as configured, else as large as the pool still gives
+     * (down to 32 KiB) */
+    const size_t arena_off = ALIGN8(ctx_off + xlat_translate_ctx_size());
+    uint32_t arena_size = XLAT_ARENA_SIZE;
+    uint8_t *block;
+    size_t log_off;
+    for (;;) {
+        log_off = arena_off + arena_size;
+        block = (uint8_t *)XLAT_ALLOC(log_off + XLAT_LOG_SIZE);
+        if (block || arena_size <= 32768u)
+            break;
+        arena_size /= 2u;
+    }
+#endif
     if (!block) {
         disabled = true;
         xlat_stats.alloc_failed = 1;
@@ -411,7 +488,7 @@ static __attribute__((noinline)) bool ready(void)
 #else
     st->arena.base = block + arena_off;
 #endif
-    st->arena.size = XLAT_ARENA_SIZE;
+    st->arena.size = arena_size;
 #if XLAT_LOG
     st->log = (char *)block + log_off;
 #endif
@@ -461,7 +538,7 @@ static bool insert(uint32_t key, uint8_t region, uint32_t code_off, bool mark)
             /* an entry of the same key further on is shadowed (lookup takes
              * the first); it comes back if this region is evicted */
             e->key = key;
-            e->code_off = (uint16_t)code_off;
+            e->code_off = code_off;
             e->region = region;
             e->used = (uint8_t)(E_LIVE | (mark ? E_MARK : 0));
             return true;
@@ -631,10 +708,25 @@ static int take_slot(bool *evicted)
     return best;
 }
 
+static int translate_at(const xlat_rt_t *rt, uint16_t ip, int trace_min, const uint16_t *extra,
+                        int n_extra);
+
 /* Translate at rt->cs:ip (with extra entry points); the new region's slot,
  * or -1. */
 static int translate_here(const xlat_rt_t *rt, uint16_t ip, int trace_min, const uint16_t *extra,
                           int n_extra)
+{
+    const uint32_t t0 = *rt->clock;
+    const int idx = translate_at(rt, ip, trace_min, extra, n_extra);
+    const uint32_t us = *rt->clock - t0;
+    xlat_stats.translate_us += us;
+    if (us > xlat_stats.translate_max_us)
+        xlat_stats.translate_max_us = us;
+    return idx;
+}
+
+static int translate_at(const xlat_rt_t *rt, uint16_t ip, int trace_min, const uint16_t *extra,
+                        int n_extra)
 {
     xlat_region_out_t *out = &st->out;
     xlat_arena_t *const a = &st->arena;
@@ -785,6 +877,26 @@ static bool add_entry(const xlat_rt_t *rt, int k)
     return true;
 }
 
+/* A burst start rejected for why that stayed hot (XLAT_REJECT_RETRY more
+ * samples): it costs XRIP every time, so once more, the way a region exit
+ * target is translated. Inside a live region's code: one more entry there
+ * (add_entry). No loop: a trace (as at a hot CALL target). No room: again. */
+static bool sample_retry(const xlat_rt_t *rt, int why)
+{
+    bool ok = false;
+    const int k = why == XLAT_RJ_COVERED ? covering(rt) : -1;
+    if (k >= 0) {
+        ok = add_entry(rt, k);
+    } else {
+        /* no loop, no room, or inside a cold region's code only */
+        ok = translate_here(rt, (uint16_t)rt->ip, why == XLAT_RJ_FULL ? 0 : XLAT_TRACE_MIN, NULL,
+                            0) >= 0;
+    }
+    xlat_stats.retries++;
+    xlat_stats.retries_built += ok;
+    return ok;
+}
+
 /* Called when no translation exists at rt->cs:ip. True when one was built. */
 static __attribute__((noinline)) bool sample(const xlat_rt_t *rt)
 {
@@ -800,7 +912,14 @@ static __attribute__((noinline)) bool sample(const xlat_rt_t *rt)
             return false;
     } else if (h->reject) {
         note_reject_hit(key);
-        return false;
+        if (h->reject != HOT_RETRY || ++h->count < XLAT_REJECT_RETRY)
+            return false;
+        h->reject = HOT_FINAL;
+        if (stack_free() < XLAT_STACK_NEEDED) {
+            xlat_stats.stack_skips++;
+            return false;
+        }
+        return sample_retry(rt, h->why);
     } else if (++h->count < XLAT_HOT_THRESHOLD && !fn) {
         return false;
     }
@@ -814,9 +933,13 @@ static __attribute__((noinline)) bool sample(const xlat_rt_t *rt)
      * worth rebuilding a region for (region exits are: sample_exit). */
     const bool inside = covered(rt);
     if (inside || translate_here(rt, (uint16_t)rt->ip, fn ? XLAT_TRACE_MIN : 0, NULL, 0) < 0) {
-        h->reject = 1;
+        const int why = inside ? XLAT_RJ_COVERED : st->out.reject;
+        h->reject = why == XLAT_RJ_COVERED || why == XLAT_RJ_NOLOOP || why == XLAT_RJ_FULL
+                        ? HOT_RETRY : HOT_FINAL;
+        h->why = (uint8_t)why;
+        h->count = 0;
         xlat_stats.rejects++;
-        note_reject(rt, key, inside ? XLAT_RJ_COVERED : st->out.reject);
+        note_reject(rt, key, why);
         return false;
     }
     return true;
@@ -1272,6 +1395,7 @@ void xlat_log_write(uint16_t psp, const char *name)
     log_printf("== exit PSP %04X %s ==\r\n", psp, name);
     log_region_counts();
     log_rejects();
+    log_prof();
     /* in two parts: log_printf() formats at most 255 characters */
     log_printf("S translations=%lu rejects=%lu entries=%lu invalid=%lu flushes=%lu evict=%lu "
                "exit b/bu/s/st=%lu/%lu/%lu/%lu native=%lu code=%lu stack_skips=%lu ",
@@ -1291,6 +1415,10 @@ void xlat_log_write(uint16_t psp, const char *name)
                (unsigned long)xlat_stats.links, (unsigned long)xlat_stats.slot_evictions,
                (unsigned long)xlat_stats.ring_retries, (unsigned long)st->log_lost,
                (unsigned long)st->log_skipped);
+    log_printf("Q ring=%luK tus=%lu tmax=%lu retry=%lu/%lu\r\n",
+               (unsigned long)(st->arena.size >> 10), (unsigned long)xlat_stats.translate_us,
+               (unsigned long)xlat_stats.translate_max_us, (unsigned long)xlat_stats.retries_built,
+               (unsigned long)xlat_stats.retries);
     /* CPU bursts: averages and histograms (xlat_stats_t), XRIP only / with
      * translated code; device service after the bursts. XLAT_SLICE_US is
      * meant to match the usual XRIP burst. */

@@ -236,6 +236,11 @@ uint32_t __time_critical_func(xlat_interp_one)(xlat_rt_t *rt, uint32_t flags)
     xlat_stats.interp++;
     if (flags & 4u)
         xlat_stats.side_interp++;
+#if XLAT_LOG
+    xlat_prof_note((flags & 4u) ? XLAT_PROF_SIDE : XLAT_PROF_INTERP,
+                   (uint32_t)rt->cs << 16 | (rt->ip & 0xffffu), rt->seg_base[1] + (rt->ip & 0xffffu),
+                   rt->mem, rt->mem_size, 1);
+#endif
     XRIP_IP = rt->ip;
     flags_result = rt->lazy_result;
     flags_dst = rt->lazy_dst;
@@ -387,6 +392,9 @@ void __time_critical_func(xrip_step_cpu)(CPU *cpu, int count)
          * on, then XRIP again. Translated code that cannot be entered there
          * disarms the check for the rest of the burst. */
         uint32_t left = (uint32_t)count;
+#if XLAT_LOG
+        uint32_t xrip_ran = 0;
+#endif
         for (;;) {
             left = xlat_used >= left ? 0 : left - xlat_used;
             if (!left)
@@ -395,6 +403,9 @@ void __time_critical_func(xrip_step_cpu)(CPU *cpu, int count)
             const unsigned long r0 = retired;
             run_instructions(left);
             const uint32_t ran = (uint32_t)(retired - r0);
+#if XLAT_LOG
+            xrip_ran += ran;
+#endif
             left = ran >= left ? 0 : left - ran;
             if (!xlat_cut || !left)
                 break;
@@ -408,6 +419,13 @@ void __time_critical_func(xrip_step_cpu)(CPU *cpu, int count)
             }
         }
         xlat_cut = false;
+#if XLAT_LOG
+        /* where XRIP ran out (a sample of where its time goes) */
+        if (xrip_ran)
+            xlat_prof_note(XLAT_PROF_XRIP, (uint32_t)segregs[regcs] << 16 | (XRIP_IP & 0xffffu),
+                           segment_base[regcs] + (XRIP_IP & 0xffffu), fast_memory,
+                           fast_memory_size, xrip_ran);
+#endif
     }
     xlat_armed = false;
 #else
