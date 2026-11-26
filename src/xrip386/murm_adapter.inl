@@ -209,35 +209,24 @@ uint32_t __time_critical_func(xlat_rt_fpu)(xlat_rt_t *rt, uint32_t ctl, uint32_t
     return 1;
 }
 
-/* Called by translated code (xlat.h) for IN / OUT and CLI / STI, as the
- * opcodes E4..E7, EC..EF, FA, FB in real mode (no I/O permission check).
- * The port handlers do not touch the CPU registers. STI: the IRQ shadow as
- * XRIP's; the next back edge reads rt->intr. */
+/* IN and CLI in real mode. STI and OUT must use the interpreter thunk:
+ * STI has an instruction-boundary IRQ shadow, and OUT may run DMA or other
+ * device code that changes guest memory. Never perform either before a
+ * fallback, or the instruction would be executed twice. */
 uint32_t __time_critical_func(xlat_rt_io)(xlat_rt_t *rt, uint32_t ctl, uint32_t value)
 {
-    CPU *const cpu = active_cpu;
-    if (ctl & (XLAT_IO_CLI | XLAT_IO_STI)) {
-        if (ctl & XLAT_IO_STI) {
-            rt->eflags |= 0x200u;
-            rt->intr = (const volatile uint8_t *)&cpu->intr;
-            cpu->i286_irq_shadow = true;
-        } else {
-            rt->eflags &= ~0x200u;
-            rt->intr = &xlat_no_irq;
-        }
+    (void)value;
+    if (ctl & (XLAT_IO_STI | XLAT_IO_OUT))
+        return 0;
+    if (ctl & XLAT_IO_CLI) {
+        rt->eflags &= ~0x200u;
+        rt->intr = &xlat_no_irq;
         return XLAT_IO_DONE;
     }
     if (xlat_stack_free() < XLAT_STACK_NEEDED)
         return 0;   /* the device code may go deep: XRIP does it */
     const uint16_t port = (uint16_t)ctl;
     const bool word = (ctl >> 16 & 0xfu) == 2u;
-    if (ctl & XLAT_IO_OUT) {
-        if (word)
-            portout16(port, (uint16_t)value);
-        else
-            portout(port, (uint8_t)value);
-        return XLAT_IO_DONE;
-    }
     return XLAT_IO_DONE | (word ? (uint32_t)portin16(port) : (uint32_t)(uint8_t)portin(port));
 }
 
@@ -323,17 +312,25 @@ uint32_t __time_critical_func(xlat_interp_one)(xlat_rt_t *rt, uint32_t flags)
     rt->seg_base[2] = segment_base[regss];
     rt->seg_base[3] = segment_base[regds];
     rt->intr = ifl ? (const volatile uint8_t *)&cpu->intr : &xlat_no_irq;
-    if (fast_memory_size != rt->mem_size || !xlat_state_ok(cpu))
+    const bool changed_cs = segregs[regcs] != rt->cs ||
+                            segment_base[regcs] != rt->seg_base[1];
+    const bool can_continue = fast_memory_size == rt->mem_size && xlat_state_ok(cpu);
+    /* Compare against the old region's CS before publishing the new CS.
+     * A device or a native handler may write memory even when the opcode
+     * itself was not classified XI_MAY_WRITE. */
+    const bool valid = !can_continue ||
+                       (!(flags & 1u) && !xlat_dirty) ||
+                       xlat_region_still_valid(rt);
+    /* Publish CS on EVERY exit, including STOP (IRQ, mode, native_done).
+     * Otherwise xlat_enter() restores the pre-interrupt CS over the ISR. */
+    rt->cs = segregs[regcs];
+    rt->seg_base[1] = segment_base[regcs];
+    if (!can_continue || !valid)
         return 0;
-    if (segregs[regcs] != rt->cs || segment_base[regcs] != rt->seg_base[1]) {
-        /* far CALL/RET/JMP, INT into guest code: go on from the dispatcher */
-        rt->cs = segregs[regcs];
-        rt->seg_base[1] = segment_base[regcs];
+    if (changed_cs) {
         rt->ip &= 0xffffu;
         return 2;
     }
-    if ((flags & 1u) && !xlat_region_still_valid(rt))
-        return 0;
     return 1;
 }
 

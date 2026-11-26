@@ -233,6 +233,10 @@ bool xlat_run(xlat_rt_t *rt);
 /* Drop every translation (e.g. after a program terminates). */
 void xlat_flush(void);
 
+/* Invalidate code in guest DOS memory returned to the MCB allocator.
+ * Safe inside a native handler called by a translated region. */
+void xlat_forget_range(uint32_t linear, uint32_t len);
+
 /* The memory block was taken away (machine reset clears the PSRAM span
  * table): forget it; the next hot spot allocates a new one. */
 void xlat_release(void);
@@ -293,10 +297,9 @@ uint32_t xlat_stack_free(void);
  * A set bit ends the interpreter burst early so the adapter can enter the
  * translated code (xrip_step_cpu); a false hit only costs a lookup.
  */
-/* Translated x86 code by 64-byte block of fast memory (bit set: some live
- * or dropped region's bytes, or the 15 bytes before them, are there). A
- * write by translated code into a marked block leaves by a side exit: XRIP
- * does it and the regions are checked again. Cleared by a flush. */
+/* Translated x86 code by 64-byte block. The filter also marks possible
+ * starting addresses of writes up to 16 bytes. Wider individual stores
+ * use XRIP; bulk REP checks its whole destination separately. */
 #define XLAT_CODE_BLOCK_SHIFT 6u
 /* Up to the end of the HMA: code outside fast memory (upper memory, ROM,
  * HMA) can be translated too (xlat_code_direct) */
@@ -403,10 +406,8 @@ uint64_t xlat_rt_muldiv(xlat_rt_t *rt, uint32_t ctl, uint32_t operand, uint32_t 
  * flags in rt as XRIP's flags_now() and returns rt->eflags. */
 uint32_t xlat_rt_resolve(xlat_rt_t *rt);
 
-/* Helper called by generated code for POPF (real mode: CPL 0), value = the
- * popped word: the flags as XRIP's decodeflagsword(), IF through
- * xlat_rt_io() (CLI / STI). 0: nothing changed but the lazy flags resolved,
- * XRIP does the POPF (TF, IOPL or NT change, or xlat_rt_io refused). */
+/* Helper for POPF (real mode: CPL 0). Return 0 before changing FLAGS
+ * when TF, IF, IOPL or NT changes; XRIP executes the whole POPF. */
 uint32_t xlat_rt_popf(xlat_rt_t *rt, uint32_t value);
 
 /* Helper called by generated code for REP MOVS / REP STOS (DF clear): the
@@ -422,7 +423,7 @@ uint32_t xlat_rt_rep(xlat_rt_t *rt, uint32_t src, uint32_t dst, uint32_t ctl);
 
 /* A write of [addr, last] by generated code into a block xlat_code_map
  * marks (the trampoline's checks, when rt->gap / rt->hit do not decide):
- * 1 when it meets the x86 bytes of a held region (rt->hit set to that
+ * 1 when it meets the x86 bytes of a live region (rt->hit set to that
  * run), else 0 (rt->gap set to the gap around it, within its 4 KiB). */
 uint32_t xlat_rt_gap(uint32_t addr, uint32_t last, xlat_rt_t *rt);
 
@@ -435,10 +436,9 @@ uint32_t xlat_rt_gap(uint32_t addr, uint32_t last, xlat_rt_t *rt);
 #define XLAT_FPU_WAIT  0x400u
 uint32_t xlat_rt_fpu(xlat_rt_t *rt, uint32_t ctl, uint32_t addr);
 
-/* Helper called by generated code for IN / OUT (the CPU core's port
- * handlers) and CLI / STI (rt->eflags IF, rt->intr). ctl: port | bytes << 16
- * | XLAT_IO_* . Returns XLAT_IO_DONE | the value read; 0: XRIP must do it
- * (nothing was done). */
+/* Helper for IN and CLI. OUT and STI are executed through the interpreter
+ * thunk. ctl: port | bytes << 16 | XLAT_IO_*.
+ * Returns XLAT_IO_DONE | value read, or 0 before any side effect. */
 #define XLAT_IO_OUT    0x00100000u
 #define XLAT_IO_CLI    0x00200000u
 #define XLAT_IO_STI    0x00400000u

@@ -158,7 +158,9 @@ static bool dyn_exit(const x86_insn_t *in)
  * or the instruction works on rt), as at an entry. */
 static bool flags_in_rt(const x86_insn_t *in)
 {
-    return in->op == XO_INTERP || (in->op == XO_SHIFT && !in->local) ||
+    return in->op == XO_INTERP ||
+           (in->op == XO_IO && (in->sub == IO_STI || in->sub == IO_OUT)) ||
+           (in->op == XO_SHIFT && !in->local) ||
            (in->op == XO_MULDIV && !in->local && !x86_is_div(in)) ||
            in->op == XO_FLAG || x86_str_flags(in);
 }
@@ -966,6 +968,13 @@ static void emit_checks(tctx_t *c, int i, int bytes, bool write)
 {
     arm_emit_t *e = &c->e;
     if (write) {
+        /* The map covers starting addresses of writes up to 16 bytes.
+         * Wider individual stores (x87) must not bypass a later marked
+         * block just because their first block was unmarked. */
+        if (bytes > 16) {
+            emit_branch(c, side_dest(c, i, 1), C_AL);
+            return;
+        }
         /* the shared check (xlat_emit_trampoline): fast or upper memory,
          * and no translated x86 code of any region in the bytes
          * (xlat_code_map, then the exact gapchk) */
@@ -2366,13 +2375,19 @@ static void emit_loopcc(tctx_t *c, int i)
     local_patch(c, skip, in->sub ? zcond ^ 1 : zcond);
 }
 
-/* IN / OUT, CLI / STI through xlat_rt_io (the port handlers do not use the
- * x86 registers or flags); a 0 from it leaves the instruction to XRIP. An
- * OUT may raise an IRQ (PIC): the next back edge sees it in rt->intr. */
+/* IN / CLI through the light helper. STI and OUT run once through XRIP,
+ * with the full register/flag image and post-instruction validity check. */
 static void emit_io(tctx_t *c, int i)
 {
     arm_emit_t *e = &c->e;
     const x86_insn_t *in = &c->in[i];
+    if (in->sub == IO_STI || in->sub == IO_OUT) {
+        const int r = sync_recon(c, c->in_set[i], c->pfp[i]);
+        if (r >= 0)
+            emit_recon(c, r);
+        emit_interp_call(c, i, in->sub == IO_OUT ? XI_MAY_WRITE : 0u, true);
+        return;
+    }
     uint32_t ctl;
     switch (in->sub) {
     case IO_CLI: ctl = XLAT_IO_CLI; break;

@@ -129,6 +129,9 @@ typedef struct {
 
 static state_t *st;
 static bool disabled;
+/* Non-NULL only while xlat_run owns this runtime state. */
+static xlat_rt_t *gap_rt;
+static void gap_reset(void);
 
 uint8_t xlat_entry_map[XLAT_MAP_BITS / 8];
 uint8_t xlat_code_map[XLAT_CODE_MAP_BYTES];
@@ -685,6 +688,7 @@ static void evict(int k)
             e->used = E_DEAD;
     }
     memset(r, 0, sizeof(*r));
+    gap_reset();
     xlat_stats.evictions++;
 }
 
@@ -695,7 +699,8 @@ static void rebuild_maps(void)
     memset(xlat_code_map, 0, sizeof(xlat_code_map));
     for (int j = 0; j < XLAT_ENTRY_SLOTS; ++j) {
         const entry_t *e = &st->entry[j];
-        if ((e->used & (E_LIVE | E_MARK)) == (E_LIVE | E_MARK)) {
+        if ((e->used & (E_LIVE | E_MARK)) == (E_LIVE | E_MARK) &&
+            st->region[e->region].live) {
             const uint32_t m =
                 xlat_map_index(st->region[e->region].cs_base + (e->key & 0xffffu));
             xlat_entry_map[m >> 3] |= (uint8_t)(1u << (m & 7u));
@@ -718,6 +723,54 @@ static void rebuild_maps(void)
                 xlat_code_map[b >> 3] |= (uint8_t)(1u << (b & 7u));
             d += 8 + ((len + 3u) & ~3u);
         }
+    }
+}
+
+/* A DOS MCB has been freed or shrunk. Invalidate just the regions whose
+ * source runs touch the returned bytes. Do not evict their chunks here:
+ * INT 21h may have reached FDOS from inside a running trampoline. Its
+ * region descriptors and native return addresses remain valid until exit. */
+void xlat_forget_range(uint32_t linear, uint32_t len)
+{
+    if (!len)
+        return;
+    const uint32_t end = linear + len;
+    for (unsigned k = 0; k < XLAT_CALL_SLOTS; ++k)
+        if (xlat_call_key[k] >= linear && xlat_call_key[k] < end)
+            xlat_call_count[k] = 0;
+    if (!st)
+        return;
+    for (unsigned k = 0; k < XLAT_HOT_SLOTS; ++k) {
+        hot_t *h[2] = {&st->hot[k], &st->exit_hot[k]};
+        for (unsigned j = 0; j < 2; ++j) {
+            const uint32_t at = (h[j]->key >> 16 << 4) + (h[j]->key & 0xffffu);
+            if (at >= linear && at < end)
+                memset(h[j], 0, sizeof(*h[j]));
+        }
+    }
+    bool changed = false;
+    for (int k = 0; k < XLAT_MAX_REGIONS; ++k) {
+        region_t *r = &st->region[k];
+        if (!(r->live || r->cold) || r->lo >= end || r->lo + r->span <= linear)
+            continue;
+        const uint8_t *d = st->arena.base + r->data_off;
+        for (unsigned j = 0; j < r->n_runs; ++j) {
+            const uint32_t at = load32(d);
+            const uint32_t n = d[4] | (uint32_t)d[5] << 8;
+            if (n && at < end && at + n > linear) {
+                xlat_stats.invalidations += r->live != 0;
+                r->live = r->cold = 0;
+                unlink_region(k);
+                changed = true;
+                break;
+            }
+            d += 8 + ((n + 3u) & ~3u);
+        }
+    }
+    if (changed) {
+        gap_reset();
+        rebuild_maps();
+        xlat_dirty = true;
     }
 }
 
@@ -772,7 +825,6 @@ static int take_slot(bool *evicted)
 
 static int translate_at(const xlat_rt_t *rt, uint16_t ip, int trace_min, const uint16_t *extra,
                         int n_extra);
-static void gap_reset(void);
 
 /* Translate at rt->cs:ip (with extra entry points); the new region's slot,
  * or -1. */
@@ -1063,6 +1115,7 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
             return false;
     }
     const int32_t start = rt->budget;
+    gap_rt = rt;
     rt->code_map = xlat_code_map;
     /* Something but XRIP's ordinary writes ran since the last call (or XRIP
      * wrote into translated code): compare each region's bytes once */
@@ -1070,6 +1123,9 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
         xlat_dirty = false;
         st->mem_size = rt->mem_size;   /* regions built for another size go */
         st->epoch++;
+        /* Hits may name a region that has since been invalidated or freed.
+         * A cached gap remains safe until a new region is installed. */
+        rt->hit_lo = rt->hit_hi = 0;
     }
     const xlat_tramp_fn tramp = (xlat_tramp_fn)(uintptr_t)(st->arena.base + 1);
     rt->link = st->link;
@@ -1097,6 +1153,7 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
              * cannot write into translated x86 code (xlat_code_map). */
             if (!region_valid(r, rt)) {
                 r->live = 0;
+                gap_reset();
                 unlink_region(e->region);
                 xlat_stats.invalidations++;
                 break;
@@ -1136,11 +1193,12 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
          * is logged only: a REP string instruction counts as one.) */
         /* ... or one that mostly sends its memory accesses to XRIP (data
          * outside fast memory: upper memory code with its data there) */
-        if (r->entries == XLAT_COLD_ENTRIES &&
+        if (r->live && r->entries == XLAT_COLD_ENTRIES &&
             (r->insns < XLAT_COLD_ENTRIES * XLAT_COLD_INSNS ||
              (r->sides + r->exits[XLAT_EXIT_SIDE]) * XLAT_COLD_SIDE_RATIO > r->insns)) {
             r->live = 0;
             r->cold = 1;
+            gap_reset();
             unlink_region(e->region);
             xlat_stats.cold++;
         }
@@ -1165,6 +1223,7 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
         xlat_stats.guest_insns += (uint32_t)(start + (int32_t)rt->extra - rt->budget);
     xlat_stats.links += rt->links;
     xlat_stats.entries += rt->links;
+    gap_rt = NULL;
     return ran;
 }
 
@@ -1280,11 +1339,10 @@ uint32_t xlat_rt_popf(xlat_rt_t *rt, uint32_t value)
     xlat_rt_pending(rt);
     resolve_rt(rt);
     const uint32_t diff = (rt->eflags ^ value) & 0x7fd5u;
-    if (diff & 0x7100u)
-        return 0;       /* TF (a trap after it), IOPL, NT */
-    if ((diff & 0x200u) &&
-        !xlat_rt_io(rt, (value & 0x200u) ? XLAT_IO_STI : XLAT_IO_CLI, 0))
-        return 0;
+    /* IF changes must go through XRIP's POPF, not STI: there is no IRQ
+     * shadow after POPF, and a newly enabled pending IRQ needs a boundary. */
+    if (diff & 0x7300u)
+        return 0;       /* TF, IF, IOPL, NT */
     rt->eflags = (rt->eflags & ~0x7fd5u) | (value & 0x7fd5u);
     rt->lazy_cf = (uint8_t)(rt->eflags & 1u);   /* resolved: lazy_cf = CF */
     return 1;
@@ -1299,26 +1357,23 @@ static bool rep_direct(const xlat_rt_t *rt, uint32_t linear, uint32_t len)
            linear + len <= XLAT_UMB_BASE + XLAT_UMB_MARGIN + rt->umb_room;
 }
 
-/* The rt the trampolines' exact write checks were last filled for
- * (xlat_rt_gap): a new region's bytes make its gap stale. */
-static xlat_rt_t *gap_rt;
-
+/* Clear both cached ranges while the runtime state is active. */
 static void gap_reset(void)
 {
     if (gap_rt)
         gap_rt->gap_lo = gap_rt->gap_hi = gap_rt->hit_lo = gap_rt->hit_hi = 0;
 }
 
-/* [addr, last] meets the x86 bytes of a held region (live, cold or
- * invalidated: as xlat_code_map). Else *lo, *hi (when given) narrowed to
- * the gap around it. */
+/* [addr, last] meets the x86 bytes of a live region. Cold/invalidated
+ * chunks are retained for allocation/statistics, not for code protection.
+ * Else *lo, *hi (when given) are narrowed to the gap around the write. */
 static bool code_meets(uint32_t addr, uint32_t last, uint32_t *lo, uint32_t *hi,
                        uint32_t *run_lo, uint32_t *run_hi)
 {
     const uint32_t wlo = lo ? *lo : addr, whi = hi ? *hi : last + 1u;
     for (int k = 0; k < XLAT_MAX_REGIONS; ++k) {
         const region_t *r = &st->region[k];
-        if (!r->held || r->lo >= whi || r->lo + r->span <= wlo)
+        if (!r->live || r->lo >= whi || r->lo + r->span <= wlo)
             continue;
         const uint8_t *d = st->arena.base + r->data_off;
         for (unsigned j = 0; j < r->n_runs; ++j) {
@@ -1349,7 +1404,6 @@ static bool code_meets(uint32_t addr, uint32_t last, uint32_t *lo, uint32_t *hi,
  * hit do not cover. */
 uint32_t xlat_rt_gap(uint32_t addr, uint32_t last, xlat_rt_t *rt)
 {
-    gap_rt = rt;
     uint32_t lo = addr & ~0xfffu, hi = (last | 0xfffu) + 1u, run_lo, run_hi;
     xlat_stats.gap_calls++;
     if (!st || code_meets(addr, last, &lo, &hi, &run_lo, &run_hi)) {
@@ -1741,12 +1795,16 @@ bool XLAT_HOT_FN(xlat_region_still_valid)(xlat_rt_t *rt)
     /* the other regions are compared at their next entry (through
      * xlat_run(): the link table entries are for the old epoch) */
     rt->epoch = ++st->epoch;
+    rt->hit_lo = rt->hit_hi = 0;
+    if (r && !r->live)
+        return false;       /* FDOS may have freed it during the call */
     if (!r || region_valid(r, rt)) {
         if (r)
             r->epoch = st->epoch;
         return true;
     }
     r->live = 0;
+    gap_reset();
     unlink_region((int)rt->cur);
     xlat_stats.invalidations++;
     return false;

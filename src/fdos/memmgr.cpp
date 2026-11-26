@@ -36,6 +36,11 @@ extern "C" {
 #include "guest_ref.hpp"
 #include "sdcard.h"
 
+#if XLAT
+/* xlat.h also declares the ARM runtime layout (C static assertions). */
+extern "C" void xlat_forget_range(uint32_t linear, uint32_t len);
+#endif
+
 using fdos_guest::mcb_ref;
 using fdos_guest::lol_ref;
 using fdos_guest::dos_data_ref;
@@ -377,6 +382,9 @@ extern "C" COUNT DosMemFree(UWORD para)
   mcb_ref p(static_cast<seg>(para));
   if (!p.freeable())
     return DE_INVLDMCB;
+#if XLAT
+  xlat_forget_range((uint32_t)para << 4, ((uint32_t)p.size() + 1u) << 4);
+#endif
   p.psp(FREE_PSP);
   p.clear_name();
   refresh_ff_low_cache_arena();
@@ -417,6 +425,11 @@ extern "C" COUNT DosMemChange(UWORD para, UWORD size, UWORD *maxSize)
   if (size < p.size())
   {
     const UWORD old_size = p.size();
+#if XLAT
+    /* The returned tail starts at the new free MCB, not the retained block. */
+    xlat_forget_range(((uint32_t)para + size) << 4,
+                      ((uint32_t)old_size - size) << 4);
+#endif
     const BYTE old_type = p.type();
     const seg qseg = static_cast<seg>(pseg + size + 1u);
     mcb_ref q(qseg);
