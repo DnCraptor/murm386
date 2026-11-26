@@ -54,6 +54,7 @@
  * xlat_run() fills an entry at each region entry it makes. */
 #define XLAT_LINK_BITS       8
 #define XLAT_LINK_SLOTS      (1u << XLAT_LINK_BITS)
+#define XLAT_LINK_ENTRIES    (2u * XLAT_LINK_SLOTS) /* primary + secondary banks */
 typedef struct xlat_link {
     uint32_t key;          /* cs << 16 | ip */
     uint32_t code;         /* entry label address | 1 */

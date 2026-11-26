@@ -72,6 +72,7 @@ typedef struct xlat_rt {
     uint32_t hit_lo, hit_hi;
     uint32_t wall_deadline;       /* nonzero: independent real-time deadline */
     uint32_t budget_limit;        /* total instruction credit, 0 unlimited */
+    uint32_t link_alt;            /* secondary link matches, before budget check */
 } xlat_rt_t;
 
 #define XLAT_UMB_BASE   0xC0000u
@@ -108,6 +109,7 @@ typedef struct xlat_rt {
 #define XLAT_RT_GAP_HI     120
 #define XLAT_RT_HIT_LO     124
 #define XLAT_RT_HIT_HI     128
+#define XLAT_RT_LINK_ALT   140
 
 #if UINTPTR_MAX == 0xffffffffu
 _Static_assert(__builtin_offsetof(xlat_rt_t, mem_size) == XLAT_RT_MEM_SIZE &&
@@ -139,7 +141,8 @@ _Static_assert(__builtin_offsetof(xlat_rt_t, mem_size) == XLAT_RT_MEM_SIZE &&
                __builtin_offsetof(xlat_rt_t, gap_lo) == XLAT_RT_GAP_LO &&
                __builtin_offsetof(xlat_rt_t, gap_hi) == XLAT_RT_GAP_HI &&
                __builtin_offsetof(xlat_rt_t, hit_lo) == XLAT_RT_HIT_LO &&
-               __builtin_offsetof(xlat_rt_t, hit_hi) == XLAT_RT_HIT_HI,
+               __builtin_offsetof(xlat_rt_t, hit_hi) == XLAT_RT_HIT_HI &&
+               __builtin_offsetof(xlat_rt_t, link_alt) == XLAT_RT_LINK_ALT,
                "xlat_rt_t layout is used by generated code");
 #endif
 
@@ -194,6 +197,8 @@ typedef struct xlat_stats {
     uint32_t local_candidates, gap_candidates, rom_dispatch;
     uint32_t string_calls, string_elems, shadow_pop;
     uint32_t fast_string_calls, fast_string_elems, shadow_fast, gap_reuse;
+    uint32_t rep_yield, shadow_umb, shadow_mem_miss, shadow_irq_miss;
+    uint32_t thunk_int, thunk_retf, link_alt, bios_flags_umb;
     uint32_t cuts;              /* XRIP bursts ended at a marked branch target */
     uint32_t cut_entries;       /* of those: translated code was entered */
     uint32_t cold;              /* regions given back to XRIP (too short per entry) */
@@ -309,6 +314,27 @@ uint32_t xlat_interp_one(xlat_rt_t *rt, uint32_t flags);
 /* Try a checked nonblocking native ROM entry at rt->cs:ip after a
  * translated far transfer. False: no guest instruction executed. */
 bool xlat_try_native_escape(xlat_rt_t *rt);
+
+/* Dynamic three-byte INT/RETF thunks in conventional RAM. No saved
+ * source or assumed vector; check the live bytes at each dispatch. */
+static inline unsigned xlat_thunk_kind(const xlat_rt_t *rt, uint32_t key)
+{
+#if defined(XLAT_HOST_TEST)
+    (void)rt; (void)key;
+#else
+    const uint16_t ip = (uint16_t)key;
+    const uint32_t a = ((key >> 16) << 4) + ip;
+    if (a >= rt->mem_size)
+        return 0;
+    if (rt->mem[a] == 0xcdu && ip <= 0xfffdu &&
+        rt->mem_size - a >= 3u && rt->mem[a + 2u] == 0xcbu)
+        return 1;
+    if (rt->mem[a] == 0xcbu && ip >= 2u && rt->mem[a - 2u] == 0xcdu)
+        return 2;
+#endif
+    return 0;
+}
+bool xlat_try_native_thunk(xlat_rt_t *rt, unsigned kind);
 
 /* For xlat_interp_one(): the x86 bytes of the running region are unchanged
  * (if not, the region is dropped). Compares only when xlat_dirty is set:
@@ -480,6 +506,9 @@ uint32_t xlat_rt_popf(xlat_rt_t *rt, uint32_t value);
 #define XLAT_REP_CHUNK 256u
 #define XLAT_REP_STOS      (1u << 19)
 #define XLAT_REP_SEG_SHIFT 20
+/* Low half: completed elements. A partial run with this bit set must
+ * yield at the REP IP, not enter the synchronized memory helper. */
+#define XLAT_REP_YIELD (1u << 16)
 uint32_t xlat_rt_rep(xlat_rt_t *rt, uint32_t src, uint32_t dst, uint32_t ctl);
 /* Explicit operands: no GPR spill, decoder or XRIP state synchronization.
  * A zero/partial count leaves the remaining elements for the slow path. */

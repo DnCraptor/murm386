@@ -123,6 +123,14 @@ handler_t handlers[256];
 unsigned bios_xlat_leaf_scope(CPU *cpu, uint8_t id)
 {
 #if !BIOS_DEBUG && !PDB_DEBUG
+    if (id == 0x10 && handlers[id] == bios_10h) {
+        /* These dispatch cases read BDA/video memory or return registers;
+         * none writes guest RAM or goes to bios_10h's err/FLAGS path. */
+        switch (CPU_AH) {
+        case 0x03: case 0x04: case 0x08: case 0x0f:
+            return BIOS_XLAT_READONLY;
+        }
+    }
     if (id == 0x16 && handlers[id] == bios_16h) {
         switch (CPU_AH) {
         case 0x01: case 0x11:

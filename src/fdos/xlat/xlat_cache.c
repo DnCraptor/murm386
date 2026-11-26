@@ -110,7 +110,7 @@ typedef struct {
     uint32_t page_regions[REGION_PAGE_COUNT][REGION_WORDS];
     uint32_t last[XLAT_MAX_REGIONS];  /* st->seq at each region's last entry (take_slot);
                                          written by the dispatcher too (rt->last) */
-    xlat_link_t link[XLAT_LINK_SLOTS];  /* entries the dispatcher may make (rt->link) */
+    xlat_link_t link[XLAT_LINK_ENTRIES];  /* entries the dispatcher may make (rt->link) */
     uint32_t seq;           /* xlat_run() region entries so far */
     uint32_t ring_lo;       /* first byte after the trampoline */
     uint32_t head;          /* where the next chunk goes */
@@ -552,7 +552,7 @@ static void reset_tables(void)
     memset(st->region, 0, sizeof(st->region));
     memset(st->page_regions, 0, sizeof(st->page_regions));
     memset(st->last, 0, sizeof(st->last));
-    for (unsigned k = 0; k < XLAT_LINK_SLOTS; ++k)
+    for (unsigned k = 0; k < XLAT_LINK_ENTRIES; ++k)
         st->link[k].key = UINT32_MAX;
     memset(st->entry, 0, sizeof(st->entry));
     memset(st->exit_hot, 0, sizeof(st->exit_hot));
@@ -641,7 +641,7 @@ void xlat_flush(void)
         flush_pending = true;
         for (int k = 0; k < XLAT_MAX_REGIONS; ++k)
             st->region[k].live = st->region[k].cold = 0;
-        for (unsigned k = 0; k < XLAT_LINK_SLOTS; ++k)
+        for (unsigned k = 0; k < XLAT_LINK_ENTRIES; ++k)
             st->link[k].key = UINT32_MAX;
         memset(xlat_entry_map, 0, sizeof(xlat_entry_map));
         gap_reset();
@@ -808,7 +808,7 @@ static inline int region_next(region_iter_t *it)
 /* The dispatcher no longer enters region k (dropped, cold or evicted). */
 static void unlink_region(int k)
 {
-    for (unsigned j = 0; j < XLAT_LINK_SLOTS; ++j)
+    for (unsigned j = 0; j < XLAT_LINK_ENTRIES; ++j)
         if (st->link[j].region == k)
             st->link[j].key = UINT32_MAX;   /* no IP is 0xffff with CS 0xffff here */
 }
@@ -1337,6 +1337,8 @@ static void start_compile(const xlat_rt_t *rt)
     st->job.rt.seg_base[1] = (uint32_t)st->job.rt.cs << 4;
     st->job.rt.ip = (uint16_t)req.key;
     st->job.request = req;
+    if (xlat_thunk_kind(rt, req.key))
+        return;  /* dynamic thunk may have appeared since enqueue */
     if (e) {
         region_t *r = &st->region[e->region];
         if ((r->live || r->cold) &&
@@ -1465,10 +1467,13 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
     cf_mirror(rt);
     rt->cur = NO_REGION;
     rt->links = 0;
+    rt->link_alt = 0;
+    rt->epoch = st->epoch;
     if (rt->fn_key != UINT32_MAX) {
         const entry_t *e = lookup(rt->fn_key);
         const region_t *r = e ? &st->region[e->region] : NULL;
-        if ((r && (r->live || r->cold) && r->epoch == st->epoch) ||
+        if (xlat_thunk_kind(rt, rt->fn_key) ||
+            (r && (r->live || r->cold) && r->epoch == st->epoch) ||
             queue_compile(rt->fn_key, COMPILE_CALL, XLAT_RJ_NONE))
             xlat_call_ack(request_linear(rt->fn_key));
     }
@@ -1478,7 +1483,26 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
         entry_t *e = lookup(key);
         const bool live = e && st->region[e->region].live;
         const bool cold = e && st->region[e->region].cold;
-        if (resample && !live && !cold) {
+        const int32_t remaining = rt->wall_deadline ? (int32_t)(rt->wall_deadline - *rt->clock)
+                                                    : INT32_MAX;
+        if (rt->wall_deadline && (remaining <= 0 || *rt->intr))
+            break;
+        /* On a miss, a live INT/RETF thunk needs neither source copies
+         * nor a region. Execute the actual bytes before sampling/queueing. */
+        const unsigned thunk = !live && !cold ? xlat_thunk_kind(rt, key) : 0;
+        if (thunk && rt->budget > 0 && !*rt->intr) {
+            xlat_rt_pending(rt);
+            if (xlat_try_native_thunk(rt, thunk)) {
+                cf_mirror(rt);
+                ran = true;
+                resample = true;
+                if (flush_pending || rt->exit_kind == XLAT_EXIT_STOP ||
+                    rt->budget <= 0 || *rt->intr)
+                    break;
+                continue;
+            }
+        }
+        if (resample && !live && !cold && !thunk) {
             const bool call = ran && rt->exit_kind == XLAT_EXIT_FAR_CALL;
             const uint32_t linear = request_linear(key);
             if (call && xlat_call_hot(linear) && queue_compile(key, COMPILE_CALL, XLAT_RJ_NONE))
@@ -1487,10 +1511,6 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
                            rt->exit_kind == XLAT_EXIT_SIDE : key != rt->fn_key)
                 sample(key, ran);
         }
-        const int32_t remaining = rt->wall_deadline ? (int32_t)(rt->wall_deadline - *rt->clock)
-                                                    : INT32_MAX;
-        if (rt->wall_deadline && (remaining <= 0 || *rt->intr))
-            break;
         /* A far transfer or INT may have reached a native ROM entry.
          * Try the actual target before compiling or returning to XRIP. */
         const uint32_t linear = request_linear(key);
@@ -1538,7 +1558,17 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
         const uint32_t charge = XLAT_ENTRY_COST + r->fn;
         const uint32_t code = (uint32_t)(uintptr_t)(st->arena.base + e->code_off) | 1u;
         /* the exits that reach this entry from now on go on here at once */
-        xlat_link_t *l = &st->link[xlat_link_hash(key)];
+        const unsigned slot = xlat_link_hash(key);
+        xlat_link_t *l = &st->link[slot];
+        xlat_link_t *alt = &st->link[slot + XLAT_LINK_SLOTS];
+        /* Keep a colliding valid entry in the secondary bank. An old
+         * epoch is never promoted; both banks obey the same invalidation. */
+        if (l->key != key) {
+            if (l->key != UINT32_MAX && l->epoch == st->epoch)
+                *alt = *l;
+            else if (alt->key == key)
+                alt->key = UINT32_MAX;
+        }
         l->key = key;
         l->code = code;
         l->epoch = st->epoch;
@@ -1602,6 +1632,7 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
     if (ran)
         xlat_stats.guest_insns += (uint32_t)(start + (int32_t)rt->extra - rt->budget);
     xlat_stats.links += rt->links;
+    xlat_stats.link_alt += rt->link_alt;
     xlat_stats.entries += rt->links;
     gap_rt = NULL;
     if (flush_pending)
@@ -1902,18 +1933,27 @@ uint32_t xlat_rt_string_fast(xlat_rt_t *rt, uint32_t src, uint32_t dst, uint32_t
 uint32_t xlat_rt_sti_pop(xlat_rt_t *rt, uint32_t seg)
 {
     const uint32_t addr = rt->seg_base[2] + (uint16_t)rt->sp;
-    if ((seg != 0 && seg != 3) || !string_ram(rt, addr, 2) || *rt->intr)
+    if ((seg != 0 && seg != 3) || !rep_direct(rt, addr, 2)) {
+        ++xlat_stats.shadow_mem_miss;
         return 0;
+    }
+    if (*rt->intr) {
+        ++xlat_stats.shadow_irq_miss;
+        return 0;
+    }
     uint16_t selector;
     __builtin_memcpy(&selector, rt->mem + addr, 2);
-    if (*rt->intr)
+    if (*rt->intr) {
+        ++xlat_stats.shadow_irq_miss;
         return 0;   /* IF was already set: IRQ can precede POP */
+    }
     if (!(rt->eflags & 0x200u) && !xlat_rt_io(rt, XLAT_IO_SET_IF, 1))
         return 0;
     rt->sp = (rt->sp & 0xffff0000u) | (uint16_t)(rt->sp + 2u);
     rt->seg_base[seg] = (uint32_t)selector << 4;
     ++xlat_stats.shadow_pop;
     ++xlat_stats.shadow_fast;
+    xlat_stats.shadow_umb += addr >= rt->mem_size;
     return XLAT_IO_DONE | (*rt->intr ? XLAT_IO_BOUNDARY : 0u);
 }
 
@@ -1988,7 +2028,8 @@ uint32_t xlat_rt_rep(xlat_rt_t *rt, uint32_t src, uint32_t dst, uint32_t ctl)
     uint32_t done = 0;
     while (done < count) {
         if (*rt->intr || (rt->wall_deadline &&
-            (int32_t)(*rt->clock - rt->wall_deadline) >= 0))
+            (int32_t)(*rt->clock - rt->wall_deadline) >= 0) ||
+            (rt->budget_limit && rt->budget <= 0))
             break;
         const uint32_t left = count - done;
         const uint32_t n = left < XLAT_REP_CHUNK ? left : XLAT_REP_CHUNK;
@@ -2004,6 +2045,11 @@ uint32_t xlat_rt_rep(xlat_rt_t *rt, uint32_t src, uint32_t dst, uint32_t ctl)
         if (*rt->intr || (rt->wall_deadline &&
             (int32_t)(*rt->clock - rt->wall_deadline) >= 0))
             break;
+    }
+    if (done < count && ((rt->budget_limit && rt->budget <= 0) ||
+        (rt->wall_deadline && (int32_t)(*rt->clock - rt->wall_deadline) >= 0))) {
+        ++xlat_stats.rep_yield;
+        return done | XLAT_REP_YIELD;
     }
     return done;
 }
@@ -2237,6 +2283,11 @@ void xlat_log_write(uint16_t psp, const char *name)
                (unsigned long)xlat_stats.shadow_pop, (unsigned long)xlat_stats.fast_string_calls,
                (unsigned long)xlat_stats.fast_string_elems, (unsigned long)xlat_stats.shadow_fast,
                (unsigned long)xlat_stats.gap_reuse);
+    log_printf("L rep_yield=%lu shadow_umb=%lu shadow_mem_miss=%lu shadow_irq_miss=%lu thunk_int=%lu thunk_retf=%lu link_alt=%lu bios_flags_umb=%lu\r\n",
+               (unsigned long)xlat_stats.rep_yield, (unsigned long)xlat_stats.shadow_umb,
+               (unsigned long)xlat_stats.shadow_mem_miss, (unsigned long)xlat_stats.shadow_irq_miss,
+               (unsigned long)xlat_stats.thunk_int, (unsigned long)xlat_stats.thunk_retf,
+               (unsigned long)xlat_stats.link_alt, (unsigned long)xlat_stats.bios_flags_umb);
     /* CPU bursts: averages and histograms (xlat_stats_t), XRIP only / with
      * translated code; device service after the bursts. XLAT_SLICE_US is
      * meant to match the usual XRIP burst. */

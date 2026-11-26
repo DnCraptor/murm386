@@ -2083,12 +2083,16 @@ static void emit_rep_bulk(tctx_t *c, int i)
     emit_string_args(c, i);
     arm_mov32(e, A_R12, (uint32_t)(uintptr_t)&xlat_rt_rep);
     arm_blx(e, A_R12);
+    arm_mov(e, A_R3, A_R0);          /* count + yield reason */
+    arm_uxth(e, A_R0, A_R0);
     emit_string_update(c, i);
     arm_dp_reg(e, DP_ORR, 1, A_R12, A_PC, A_R5, SH_LSL, 16);
     const uint32_t complete = arm_branch_slot(e);
     emit_string_irq(c, in->ip);
-    /* A refused/partial run uses the old synchronized helper only if
-     * the remaining work was not stopped by a pending IRQ. */
+    arm_dp_imm(e, DP_AND, 1, A_PC, A_R3, XLAT_REP_YIELD);
+    const int yield = exit_stub(c, in->ip, XLAT_EXIT_BUDGET, -1);
+    emit_branch(c, (dest_t){D_STUB, (int16_t)yield}, C_NE);
+    /* Only a mapping/code refusal reaches the synchronized helper. */
     emit_branch(c, side_dest(c, i, 1), C_AL);
     local_patch(c, complete, C_EQ);
     emit_string_irq(c, (uint16_t)(in->ip + in->len));
@@ -2928,6 +2932,7 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     arm_ls_imm(&e, LS_LDR, A_R2, A_R11, XLAT_RT_EPOCH);
     arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R0, A_R2, SH_LSL, 0);   /* CMP epoch */
     const uint32_t miss3 = arm_branch_slot(&e);
+    const uint32_t link_charge = e.pos;
     arm_ls_imm(&e, LS_LDR, A_R0, A_R11, XLAT_RT_BUDGET);
     arm_ls_imm(&e, LS_LDRH, A_R2, A_R3, 12);
     arm_dp_reg(&e, DP_SUB, 1, A_R0, A_R0, A_R2, SH_LSL, 0);   /* SUBS budget, charge */
@@ -2944,8 +2949,24 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     arm_ls_imm(&e, LS_STR, A_R0, A_R11, XLAT_RT_LINKS);
     arm_ls_imm(&e, LS_LDR, A_R0, A_R3, 4);
     arm_bx(&e, A_R0);
-    ok &= tramp_patch(&e, miss1, a->epilogue, C_NE) && tramp_patch(&e, miss2, a->epilogue, C_NE) &&
-          tramp_patch(&e, miss3, a->epilogue, C_NE) && tramp_patch(&e, miss4, a->epilogue, C_LE);
+    /* Secondary bank is consulted only on a primary key collision. */
+    const uint32_t alt_link = e.pos;
+    ok &= arm_dp_imm(&e, DP_ADD, 0, A_R3, A_R3, XLAT_LINK_SLOTS * sizeof(xlat_link_t));
+    arm_ls_imm(&e, LS_LDR, A_R0, A_R3, 0);
+    arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R0, A_R1, SH_LSL, 0);
+    const uint32_t alt_miss = arm_branch_slot(&e);
+    arm_ls_imm(&e, LS_LDR, A_R0, A_R3, 8);
+    arm_ls_imm(&e, LS_LDR, A_R2, A_R11, XLAT_RT_EPOCH);
+    arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R0, A_R2, SH_LSL, 0);
+    const uint32_t alt_stale = arm_branch_slot(&e);
+    arm_ls_imm(&e, LS_LDR, A_R0, A_R11, XLAT_RT_LINK_ALT);
+    arm_dp_imm(&e, DP_ADD, 0, A_R0, A_R0, 1);
+    arm_ls_imm(&e, LS_STR, A_R0, A_R11, XLAT_RT_LINK_ALT);
+    const uint32_t alt_charge = arm_branch_slot(&e);
+    ok &= tramp_patch(&e, miss1, a->epilogue, C_NE) && tramp_patch(&e, miss2, alt_link, C_NE) &&
+          tramp_patch(&e, miss3, a->epilogue, C_NE) && tramp_patch(&e, miss4, a->epilogue, C_LE) &&
+          tramp_patch(&e, alt_miss, a->epilogue, C_NE) && tramp_patch(&e, alt_stale, a->epilogue, C_NE) &&
+          tramp_patch(&e, alt_charge, link_charge, C_AL);
 
     /* Exit stubs (emit_stubs): BL here with the exit IP in the halfword
      * after the BL (exit_ip), or B to exit_dyn when the code stored rt->ip.

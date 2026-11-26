@@ -928,6 +928,12 @@ bool xlat_try_native_escape(xlat_rt_t *rt)
     return false;
 }
 
+bool xlat_try_native_thunk(xlat_rt_t *rt, unsigned kind)
+{
+    (void)rt; (void)kind;
+    return false;
+}
+
 /* The test's xlat_interp_one(): the reference interpreter is the "XRIP". */
 uint32_t xlat_interp_one(xlat_rt_t *rt, uint32_t flags)
 {

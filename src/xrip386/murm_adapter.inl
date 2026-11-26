@@ -96,9 +96,13 @@ static bool bios_escape(uint8_t id)
     const unsigned scope = bios_xlat_leaf_scope(active_cpu, id);
     const uint32_t flags_linear = ((uint32_t)segregs[regss] << 4) +
                                   (uint16_t)dwordregs[regsp] + 4u;
+    const bool flags_ram = fast_memory_size >= 2u && flags_linear <= fast_memory_size - 2u;
+    const bool flags_umb = flags_linear >= 0xc0000u && flags_linear < 0xfffffu &&
+        fast_memory_size && far_direct_at(flags_linear, 1u) == fast_memory + flags_linear;
     const bool local = scope == BIOS_XLAT_READONLY ||
-        (scope == BIOS_XLAT_STACK_FLAGS && fast_memory_size >= 2u &&
-         flags_linear <= fast_memory_size - 2u);
+        (scope == BIOS_XLAT_STACK_FLAGS && (flags_ram || flags_umb));
+    if (scope == BIOS_XLAT_STACK_FLAGS && flags_umb)
+        ++xlat_stats.bios_flags_umb;
     if (!local)
         XLAT_NOTE_FOREIGN();
 #endif
@@ -378,7 +382,7 @@ static unsigned xlat_leaf_run(CPU *cpu, const xlat_leaf_t *leaf)
     return steps;
 }
 
-static void __time_critical_func(xlat_direct_int)(CPU *cpu, uint8_t vector, uint32_t len)
+static unsigned __time_critical_func(xlat_direct_int)(CPU *cpu, uint8_t vector, uint32_t len)
 {
     xlat_begin_insn();
     StepIP(len);
@@ -386,7 +390,8 @@ static void __time_critical_func(xlat_direct_int)(CPU *cpu, uint8_t vector, uint
     intcall86(vector);
     xlat_leaf_t leaf;
     if (!hooked && xlat_leaf_target(cpu, &leaf))
-        (void)xlat_leaf_run(cpu, &leaf);
+        return 1u + xlat_leaf_run(cpu, &leaf);
+    return 1u;
 }
 
 static inline void xlat_load_guest(const xlat_rt_t *rt)
@@ -456,6 +461,53 @@ bool xlat_try_native_escape(xlat_rt_t *rt)
     rt->budget -= (int32_t)steps;
     rt->exit_kind = xlat_save_guest(rt, cpu) ? XLAT_EXIT_BRANCH : XLAT_EXIT_STOP;
     xlat_stats.rom_dispatch++;
+    return true;
+}
+
+/* The trampoline has already spilled registers. Dispatch a short,
+ * dynamically generated INT/RETF without building a region for its stack
+ * bytes. Execute RETF only when the actual INT returned to the same CS:IP
+ * and the instruction is still CB. A guest ISR or hook is never bypassed. */
+bool xlat_try_native_thunk(xlat_rt_t *rt, unsigned kind)
+{
+    CPU *const cpu = active_cpu;
+    const uint32_t key = (uint32_t)rt->cs << 16 | (uint16_t)rt->ip;
+    if (!kind || xlat_thunk_kind(rt, key) != kind ||
+        xlat_stack_free() < XLAT_STACK_NEEDED)
+        return false;
+    const uint16_t cs = rt->cs, ip = (uint16_t)rt->ip;
+    const uint32_t linear = rt->seg_base[1] + ip;
+    const uint8_t vector = kind == 1u ? rt->mem[linear + 1u] : 0;
+    if (kind == 1u && vector == 0x21u && ((rt->gpr[0] >> 8) & 0xffu) == 0x4bu)
+        return false;  /* EXEC must unwind first */
+    xlat_load_guest(rt);
+    if (!xlat_state_ok(cpu))
+        return false;
+    void *context[5];
+    void **const outer_fault_point = fault_point;
+    fault_point = context;
+    if (__builtin_setjmp(context)) {
+        deliver_fault();
+        --rt->budget;
+    } else {
+        if (kind == 1u) {
+            ++xlat_stats.thunk_int;
+            ++xlat_stats.int_direct;
+            rt->budget -= (int32_t)xlat_direct_int(cpu, vector, 2u);
+        }
+        if ((kind == 2u || (XRIP_CS == cs && XRIP_IP == (uint16_t)(ip + 2u) &&
+             fast_memory_size == rt->mem_size && rt->budget > 0 && xlat_state_ok(cpu) &&
+             (!rt->wall_deadline || (int32_t)(*rt->clock - rt->wall_deadline) < 0) &&
+             xlat_region_still_valid(rt) && getmem8(CS_BASE, XRIP_IP) == 0xcbu))) {
+            xlat_prepare_insn();
+            StepIP(1);
+            far_return(false, 0);
+            --rt->budget;
+            ++xlat_stats.thunk_retf;
+        }
+    }
+    fault_point = outer_fault_point;
+    rt->exit_kind = xlat_save_guest(rt, cpu) ? XLAT_EXIT_BRANCH : XLAT_EXIT_STOP;
     return true;
 }
 
