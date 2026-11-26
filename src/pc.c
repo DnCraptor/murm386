@@ -720,6 +720,12 @@ bool pc_xlat_safe_out(void *o, uint16_t port, bool word)
     case 0x40: case 0x41: case 0x42: case 0x43:
     case 0x80: case 0xed:
         return !word;
+    /* Legacy VGA register writes touch VGAState only. The CPU code
+     * cache never covers the VGA aperture (A0000-BFFFF). */
+    case 0x3c0 ... 0x3de:
+        return true;
+    case 0x3df:
+        return !word;
     case 0x228: case 0x388: case 0x38a:
         return true;
     case 0x229: case 0x389: case 0x38b:

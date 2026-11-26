@@ -994,7 +994,11 @@ static __time_critical_func() void op_0f() {
 }
 
 static void xrip_fpu(uint8_t opcode) {
-    XLAT_NOTE_FOREIGN();    /* fpu.c stores through cpu_store*, not mem_write* */
+    /* The XRIP cpu_store* adapters now use mem_write*, including the
+     * translated-source write map. Keep the conservative path outside
+     * direct real mode; ordinary x87 operations need no global epoch. */
+    if (protected_mode || (cr0 & (CR0_PE | CR0_PG)) || !fast_memory_size)
+        XLAT_NOTE_FOREIGN();
     if (cr0 & 0x0c)
         cpu_fault(7);
     else {
