@@ -183,6 +183,35 @@ static bool is_producer(const x86_insn_t *in)
     return x86_flag_kind(in) != FK_NONE;
 }
 
+static bool native_string(const x86_insn_t *in)
+{
+    return in->op == XO_STR && (in->sub == STR_MOVS || in->sub == STR_STOS);
+}
+
+static uint32_t string_ctl(const x86_insn_t *in)
+{
+    const unsigned size = in->size == 32 ? 2u : in->size == 16 ? 1u : 0u;
+    return XLAT_XI_STRING | XI_SIDE |
+           (in->sub == STR_STOS ? XLAT_XS_STOS : 0u) |
+           (in->rep ? XLAT_XS_REP : 0u) |
+           (size << XLAT_XS_SIZE_SHIFT) |
+           ((uint32_t)in->mem_seg << XLAT_XS_SEG_SHIFT);
+}
+
+/* One-byte STI followed by a one-byte POP DS/ES, no folded prefix. */
+static int sti_pop(const tctx_t *c, int i)
+{
+    const x86_insn_t *in = &c->in[i];
+    if (in->op != XO_IO || in->sub != IO_STI || in->len != 1)
+        return -1;
+    const int j = find_insn(c, (uint16_t)(in->ip + 1u));
+    if (j <= i)
+        return -1;
+    const x86_insn_t *p = &c->in[j];
+    return p->op == XO_SEG && p->sub == SEG_POP && p->len == 1 &&
+           (p->sreg == 0 || p->sreg == 3) ? j : -1;
+}
+
 static bool seen_before(tctx_t *c, uint16_t ip)
 {
     for (int k = 0; k < c->n_seen; ++k)
@@ -408,6 +437,13 @@ static int discover(tctx_t *c, uint16_t start)
         c->tgt_idx[i] = is_branch(in) ? (int8_t)find_insn(c, in->target) : -1;
         if (c->tgt_idx[i] >= 0)
             c->leader[c->tgt_idx[i]] = 1;
+        if (native_string(in) && in->rep)
+            c->leader[i] = 1;   /* restart after IRQ or partial REP */
+        if (sti_pop(c, i) >= 0) {
+            const int ret = find_insn(c, (uint16_t)(in->ip + 2u));
+            if (ret >= 0)
+                c->leader[ret] = 1;
+        }
         if (x86_is_call(in) || (in->op == XO_INTERP && (in->sub & XLAT_XI_INT_MASK))) {
             const int ret = find_insn(c, (uint16_t)(in->ip + in->len));
             if (ret >= 0)
@@ -1385,6 +1421,8 @@ static bool emit_side_args(tctx_t *c, int i, uint32_t target, uint32_t xi)
     if (!arm_bl(e, target))
         c->overflow = true;
     arm_e16(e, in->ip);
+    if (native_string(in))
+        xi = string_ctl(in);
     arm_e16(e, (uint16_t)(xi | XI_SIDE | (uint32_t)(in->len & 0xfu) << 8 | (cont ? 0x8000u : 0u)));
     if (cont) {
         c->dfix[c->n_dfix].pos = e->pos;
@@ -1489,14 +1527,19 @@ static void emit_stack_op(tctx_t *c, int i)
  * through, at its new IP (XLAT_EXIT_SIDE for XI_SIDE, else BRANCH).
  * Otherwise it returns and execution goes on after the code emitted here.
  * flags: XI_* bits passed on to the helper. */
-static void emit_interp_call(tctx_t *c, int i, uint32_t flags, bool cont)
+static void emit_helper_call(tctx_t *c, int i, uint32_t flags, unsigned len, bool cont)
 {
     arm_emit_t *e = &c->e;
     const x86_insn_t *in = &c->in[i];
     if (!arm_bl(e, c->interp_call))
         c->overflow = true;
     arm_e16(e, in->ip);
-    arm_e16(e, (uint16_t)((flags & 0xffu) | (uint32_t)(in->len & 0xfu) << 8 | (cont ? 0x8000u : 0u)));
+    arm_e16(e, (uint16_t)((flags & 0x70ffu) | (uint32_t)(len & 0xfu) << 8 | (cont ? 0x8000u : 0u)));
+}
+
+static void emit_interp_call(tctx_t *c, int i, uint32_t flags, bool cont)
+{
+    emit_helper_call(c, i, flags, c->in[i].len, cont);
 }
 
 /* An instruction the translator does not handle: XRIP executes it, and the
@@ -1957,10 +2000,8 @@ static void emit_string_cmp(tctx_t *c, int i)
 /* MOVS / STOS / LODS, with REP: the element loop runs here while CX != 0.
  * All checks of an element come before its changes, so a side exit runs the
  * (restartable) instruction in XRIP with the current SI, DI and CX. */
-/* REP MOVS / STOS: the whole run in xlat_rt_rep() when it can. Returns the
- * branch slot taken when it did (to the end of the instruction), or
- * UINT32_MAX. */
-static uint32_t emit_rep_bulk(tctx_t *c, int i)
+/* REP MOVS/STOS: direct bulk first, decoded memory helper for the rest. */
+static void emit_rep_bulk(tctx_t *c, int i)
 {
     arm_emit_t *e = &c->e;
     const x86_insn_t *in = &c->in[i];
@@ -1994,8 +2035,6 @@ static uint32_t emit_rep_bulk(tctx_t *c, int i)
     arm_mov(e, A_R0, A_R11);
     arm_mov32(e, A_R12, (uint32_t)(uintptr_t)&xlat_rt_rep);
     arm_blx(e, A_R12);
-    arm_dp_imm(e, DP_SUB, 1, A_PC, A_R0, 0);
-    const uint32_t slow = arm_branch_slot(e);
     /* r0 = transferred elements. Update CX and indices even on partial REP. */
     arm_dp_reg(e, DP_SUB, 0, A_R1, A_R5, A_R0, SH_LSL, 0);
     arm_bfi(e, A_R5, A_R1, 0, 16);
@@ -2009,11 +2048,9 @@ static uint32_t emit_rep_bulk(tctx_t *c, int i)
     arm_dp_reg(e, DP_ADD, 0, A_R1, A_R10, A_R12, SH_LSL, 0);
     arm_bfi(e, A_R10, A_R1, 0, 16);
     arm_dp_reg(e, DP_ORR, 1, A_R12, A_PC, A_R5, SH_LSL, 16);
-    const int k = exit_stub(c, in->ip, XLAT_EXIT_STOP, -1);
-    emit_branch(c, (dest_t){D_STUB, (int16_t)k}, C_NE);
-    const uint32_t done = arm_branch_slot(e);
-    local_patch(c, slow, C_EQ);
-    return done;
+    /* A refused/partial bulk run goes through the native memory helper.
+     * CX=0 needs no further work. */
+    emit_branch(c, side_dest(c, i, 1), C_NE);
 }
 
 static void emit_string(tctx_t *c, int i)
@@ -2021,8 +2058,10 @@ static void emit_string(tctx_t *c, int i)
     arm_emit_t *e = &c->e;
     const x86_insn_t *in = &c->in[i];
     const int bytes = in->size / 8;
-    const uint32_t bulk = in->rep && (in->sub == STR_MOVS || in->sub == STR_STOS)
-                          ? emit_rep_bulk(c, i) : UINT32_MAX;
+    if (in->rep && native_string(in)) {
+        emit_rep_bulk(c, i);
+        return;
+    }
     /* Long non-bulk REP is restartable in XRIP (one element per iteration). */
     if (in->rep) {
         arm_uxth(e, A_R12, A_R5);
@@ -2090,8 +2129,6 @@ static void emit_string(tctx_t *c, int i)
             c->overflow = true;
         local_patch(c, done, C_EQ);
     }
-    if (bulk != UINT32_MAX)
-        local_patch(c, bulk, C_AL);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -2464,6 +2501,15 @@ static void emit_io(tctx_t *c, int i)
         if (r >= 0)
             emit_recon(c, r);
     }
+    const int shadow = sti_pop(c, i);
+    if (shadow >= 0) {
+        /* The helper completes STI and exactly its shadow instruction.
+         * POP still has its own label for branches targeting it. */
+        emit_helper_call(c, i, XLAT_XI_STI_POP | (c->in[shadow].sreg == 3),
+                         2u, true);
+        emit_branch(c, make_dest(c, i, (uint16_t)(in->ip + 2u)), C_AL);
+        return;
+    }
     uint32_t ctl;
     switch (in->sub) {
     case IO_CLI: ctl = XLAT_IO_CLI; break;
@@ -2699,8 +2745,9 @@ static bool emit_stubs(tctx_t *c)
                 const bool cont = falls_through(in) && !is_producer(in) && c->fall_idx[i] >= 0;
                 if (s->recon >= 0)
                     emit_recon(c, s->recon);
-                emit_interp_call(c, i, (s->mw || side_writes_more(in) ? XI_MAY_WRITE : 0u) | XI_SIDE,
-                                 cont);
+                const uint32_t ctl = native_string(in) ? string_ctl(in) :
+                    (s->mw || side_writes_more(in) ? XI_MAY_WRITE : 0u) | XI_SIDE;
+                emit_interp_call(c, i, ctl, cont);
                 if (cont) {
                     const uint32_t site = arm_branch_slot(e);
                     if (!arm_patch_branch(e, site, c->label[c->fall_idx[i]], C_AL))
@@ -3120,7 +3167,7 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     arm_ubfx(&e, A_R0, A_R1, 15, 1);
     arm_subw(&e, A_R0, A_R0, 1);                              /* 0 / ~0 */
     arm_dp_reg(&e, DP_ORR, 0, A_R2, A_R2, A_R0, SH_LSL, 0);
-    arm_dp_imm(&e, DP_AND, 0, A_R1, A_R1, 0xffu);
+    arm_ubfx(&e, A_R1, A_R1, 0, 15);
 
     /* Interpreter thunk: r12 = IP of the instruction, r1 = XI_* flags,
      * r2 = IP it falls through to or 0xffffffff (the region does not go on
@@ -3387,9 +3434,11 @@ finish_phase:
         if (c->leader[i]) {
             /* Also mark call continuations: an interpreted callee can
              * return straight to an existing native entry. */
-            bool head = c->in[i].ip == ip;
+            bool head = c->in[i].ip == ip ||
+                        (native_string(&c->in[i]) && c->in[i].rep);
             for (int j = 0; j < c->n && !head; ++j)
                 head = (j >= i && c->tgt_idx[j] == i) ||
+                       (sti_pop(c, j) >= 0 && (uint16_t)(c->in[j].ip + 2u) == c->in[i].ip) ||
                        ((x86_is_call(&c->in[j]) ||
                          (c->in[j].op == XO_INTERP && (c->in[j].sub & XLAT_XI_INT_MASK))) &&
                         (uint16_t)(c->in[j].ip + c->in[j].len) == c->in[i].ip);

@@ -922,7 +922,11 @@ uint32_t xlat_interp_one(xlat_rt_t *rt, uint32_t flags)
     R.flags_op = rt->lazy_op; R.flags_cf = rt->lazy_cf; R.eflags = rt->eflags;
     R.seg_base[0] = rt->seg_base[0]; R.seg_base[3] = rt->seg_base[3];
     R.cs = rt->cs; R.seg_base[1] = rt->seg_base[1];   /* after a far transfer in the region */
+    const bool old_if = (R.eflags & 0x200u) != 0;
     ref_step();
+    /* Mirror the fused STI/POP helper using the reference instructions. */
+    if ((flags & XLAT_XI_STI_POP) && (!old_if || !test_irq || !*test_irq))
+        ref_step();
     rt->seg_base[0] = R.seg_base[0]; rt->seg_base[2] = R.seg_base[2]; rt->seg_base[3] = R.seg_base[3];
     rt->ip = R.ip;
     rt->lazy_result = R.flags_result; rt->lazy_dst = R.flags_dst; rt->lazy_src = R.flags_src;

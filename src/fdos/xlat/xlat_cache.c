@@ -743,18 +743,25 @@ static bool covered(const xlat_rt_t *rt)
 static void index_region(unsigned k, bool add)
 {
     const region_t *r = &st->region[k];
-    if (!r->span || r->lo >= 0x110000u)
-        return;
-    uint32_t last = (r->lo + r->span - 1u) >> REGION_PAGE_SHIFT;
-    if (last >= REGION_PAGE_COUNT)
-        last = REGION_PAGE_COUNT - 1u;
+    const uint8_t *d = st->arena.base + r->data_off;
     const uint32_t bit = 1u << (k & 31u);
-    for (uint32_t p = r->lo >> REGION_PAGE_SHIFT; p <= last; ++p) {
-        uint32_t *w = &st->page_regions[p][k >> 5];
-        if (add)
-            *w |= bit;
-        else
-            *w &= ~bit;
+    /* Only pages containing source bytes, not holes in the region span. */
+    for (unsigned j = 0; j < r->n_runs; ++j) {
+        const uint32_t at = load32(d);
+        const uint32_t len = d[4] | (uint32_t)d[5] << 8;
+        d += 8 + ((len + 3u) & ~3u);
+        if (!len || at >= 0x110000u)
+            continue;
+        uint32_t last = (at + len - 1u) >> REGION_PAGE_SHIFT;
+        if (last >= REGION_PAGE_COUNT)
+            last = REGION_PAGE_COUNT - 1u;
+        for (uint32_t p = at >> REGION_PAGE_SHIFT; p <= last; ++p) {
+            uint32_t *w = &st->page_regions[p][k >> 5];
+            if (add)
+                *w |= bit;
+            else
+                *w &= ~bit;
+        }
     }
 }
 
@@ -1480,7 +1487,8 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
         /* A far transfer or INT may have reached a native ROM entry.
          * Try the actual target before compiling or returning to XRIP. */
         const uint32_t linear = request_linear(key);
-        if (!live && !cold && rt->budget > 0 && !*rt->intr &&
+        /* Do not create a JIT burst for an isolated native callback. */
+        if (ran && !live && !cold && rt->budget > 0 && !*rt->intr &&
             linear >= 0xf0000u && linear < 0x100000u) {
             xlat_rt_pending(rt);
             if (xlat_try_native_escape(rt)) {
@@ -2095,6 +2103,9 @@ void xlat_log_write(uint16_t psp, const char *name)
                (unsigned long)xlat_stats.local_checks, (unsigned long)xlat_stats.local_invalid,
                (unsigned long)xlat_stats.local_candidates, (unsigned long)xlat_stats.gap_candidates,
                (unsigned long)xlat_stats.rom_dispatch);
+    log_printf("N string_calls=%lu string_elems=%lu shadow_pop=%lu\r\n",
+               (unsigned long)xlat_stats.string_calls, (unsigned long)xlat_stats.string_elems,
+               (unsigned long)xlat_stats.shadow_pop);
     /* CPU bursts: averages and histograms (xlat_stats_t), XRIP only / with
      * translated code; device service after the bursts. XLAT_SLICE_US is
      * meant to match the usual XRIP burst. */

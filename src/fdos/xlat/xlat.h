@@ -192,6 +192,7 @@ typedef struct xlat_stats {
     uint32_t int_direct, int_leaf; /* software INT / native BIOS escape without decoding */
     uint32_t local_checks, local_invalid;
     uint32_t local_candidates, gap_candidates, rom_dispatch;
+    uint32_t string_calls, string_elems, shadow_pop;
     uint32_t cuts;              /* XRIP bursts ended at a marked branch target */
     uint32_t cut_entries;       /* of those: translated code was entered */
     uint32_t cold;              /* regions given back to XRIP (too short per entry) */
@@ -294,6 +295,14 @@ void xlat_prof_note(unsigned kind, uint32_t key, uint32_t linear, const uint8_t 
 #define XLAT_XI_INT3     8u
 #define XLAT_XI_INT_IMM 16u
 #define XLAT_XI_INT_MASK (XLAT_XI_INT3 | XLAT_XI_INT_IMM)
+/* Bits 8..11 carry the decoded length; bit 15 is the continuation.
+ * The low bits of a native string call encode operands, not INT flags. */
+#define XLAT_XI_STRING     0x1000u
+#define XLAT_XI_STI_POP    0x2000u
+#define XLAT_XS_STOS       1u
+#define XLAT_XS_REP        2u
+#define XLAT_XS_SIZE_SHIFT 3u
+#define XLAT_XS_SEG_SHIFT  5u
 uint32_t xlat_interp_one(xlat_rt_t *rt, uint32_t flags);
 
 /* Try a checked nonblocking native ROM entry at rt->cs:ip after a

@@ -326,7 +326,7 @@ static bool xlat_leaf_target(CPU *cpu, xlat_leaf_t *leaf)
            getmem8(base, leaf->ip + 2u) == leaf->id;
 }
 
-static inline void xlat_begin_insn(void)
+static inline void xlat_prepare_insn(void)
 {
     firstip = XRIP_IP;
     first_esp = dwordregs[regsp];
@@ -334,6 +334,11 @@ static inline void xlat_begin_insn(void)
     opsize32 = addrsize32 = false;
     useseg = DS_BASE;
     pending_trap = false;
+}
+
+static inline void xlat_begin_insn(void)
+{
+    xlat_prepare_insn();
     ++retired;
 }
 
@@ -437,7 +442,64 @@ bool xlat_try_native_escape(xlat_rt_t *rt)
     return true;
 }
 
-/* Called by translated code: execute one instruction or a direct INT.
+/* Decoded string continuation for VGA/MMIO, DF=1, segment wrap and
+ * writes to cached source. Reuse XRIP's memory semantics, not its loop
+ * or decoder. REP can be interrupted between elements. */
+static void xlat_direct_string(xlat_rt_t *rt, CPU *cpu, uint32_t ctl)
+{
+    const unsigned len = (ctl >> 8) & 15u;
+    const uint8_t bytes = (uint8_t)(1u << ((ctl >> XLAT_XS_SIZE_SHIFT) & 3u));
+    const bool rep = (ctl & XLAT_XS_REP) != 0;
+    const uint8_t op = (ctl & XLAT_XS_STOS) ? 0xaa : 0xa4;
+    xlat_prepare_insn();
+    const uint16_t next = (uint16_t)(XRIP_IP + len);
+    useseg = segment_base[(ctl >> XLAT_XS_SEG_SHIFT) & 3u];
+    reptype = rep ? 1 : 0;    /* F2 and F3 have identical MOVS/STOS semantics */
+    opsize32 = bytes == 4;
+    xlat_stats.string_calls++;
+    if (rep && !XRIP_CX) {
+        XRIP_IP = next;
+        return;
+    }
+    do {
+        if (!xlat_state_ok(cpu) ||
+            (rt->wall_deadline && (int32_t)(*rt->clock - rt->wall_deadline) >= 0))
+            return;
+        XRIP_IP = next;
+        string_step(op, bytes);
+        ++xlat_stats.string_elems;
+        --rt->budget;   /* slow-path work, counted by xlat_enter */
+        if ((xlat_dirty || xlat_write_hi) && !xlat_region_still_valid(rt))
+            return;    /* re-decode modified REP before another element */
+        if (!rep || !XRIP_CX) {
+            XRIP_IP = next;
+            return;
+        }
+        if (rt->budget_limit && rt->budget <= 0)
+            return;
+    } while (true);
+}
+
+/* Consume the STI shadow with the exact decoded successor (POP DS/ES).
+ * Pending IRQs are checked before STI, and after POP, never in between
+ * while the shadow is set. */
+static void xlat_direct_sti_pop(CPU *cpu, uint32_t ctl)
+{
+    xlat_prepare_insn();
+    StepIP(1);
+    if (!ifl)
+        cpu->i286_irq_shadow = true;
+    ifl = 1;
+    if (cpu->intr && !cpu->i286_irq_shadow)
+        return;
+    cpu->i286_irq_shadow = false;
+    xlat_prepare_insn();
+    StepIP(1);
+    load_segment((ctl & 1u) ? regds : reges, pop());
+    ++xlat_stats.shadow_pop;
+}
+
+/* Called by translated code: execute one instruction or a native helper.
  * Registers are in cpu->gprx; lazy flags come from and go back to rt. */
 uint32_t __time_critical_func(xlat_interp_one)(xlat_rt_t *rt, uint32_t flags)
 {
@@ -446,14 +508,18 @@ uint32_t __time_critical_func(xlat_interp_one)(xlat_rt_t *rt, uint32_t flags)
         return 0;   /* XRIP runs it after the exit, from a shallower stack */
     xlat_load_guest(rt);
 
-    const bool direct = (flags & XLAT_XI_INT_MASK) && xlat_state_ok(cpu);
+    const bool str = (flags & XLAT_XI_STRING) != 0;
+    const bool shadow = (flags & XLAT_XI_STI_POP) != 0;
+    if ((str || shadow) && !xlat_state_ok(cpu))
+        return 0;
+    const bool direct = !str && !shadow && (flags & XLAT_XI_INT_MASK) && xlat_state_ok(cpu);
     const uint8_t vector = !direct ? 0 :
         (flags & XLAT_XI_INT3) ? 3 : getmem8(CS_BASE, (uint16_t)(XRIP_IP + 1u));
     /* EXEC can synchronously run a whole child. Unwind the trampoline
      * before dispatch so the child can enter its own JIT normally. */
     if (direct && vector == 0x21 && XRIP_AH == 0x4b)
         return 0;
-    if (!direct) {
+    if (!direct && !str && !shadow) {
         xlat_stats.interp++;
         if (flags & 4u) {
             xlat_stats.side_interp++;
@@ -471,6 +537,10 @@ uint32_t __time_critical_func(xlat_interp_one)(xlat_rt_t *rt, uint32_t flags)
     fault_point = context;
     if (__builtin_setjmp(context))
         deliver_fault();
+    else if (str)
+        xlat_direct_string(rt, cpu, flags);
+    else if (shadow)
+        xlat_direct_sti_pop(cpu, flags);
     else if (direct) {
         xlat_stats.int_direct++;
         xlat_direct_int(cpu, vector, (flags & XLAT_XI_INT3) ? 1u : 2u);
