@@ -3082,39 +3082,40 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     arm_dp_imm(&e, DP_AND, 0, A_R2, A_R2, XLAT_LINK_SLOTS - 1u);
     arm_ls_imm(&e, LS_LDR, A_R3, A_R11, XLAT_RT_LINK);
     arm_dp_reg(&e, DP_ADD, 0, A_R3, A_R3, A_R2, SH_LSL, 4);
-    arm_ls_imm(&e, LS_LDR, A_R0, A_R3, 0);
+    /* The dispatcher is a tail transfer: LR is scratch here (the host LR
+     * is saved by the outer trampoline). Fetch the complete aligned link
+     * in one LDM: r0=key, r2=code, r12=epoch, lr=charge | region<<16.
+     * Keep code in r2 until BX; no second metadata load after validation. */
+    arm_e32(&e, 0xe893u, 0x5005u);                           /* LDM.W r3,{r0,r2,r12,lr} */
     arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R0, A_R1, SH_LSL, 0);   /* CMP key */
     const uint32_t miss2 = arm_branch_slot(&e);
-    arm_ls_imm(&e, LS_LDR, A_R0, A_R3, 8);
-    arm_ls_imm(&e, LS_LDR, A_R2, A_R11, XLAT_RT_EPOCH);
-    arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R0, A_R2, SH_LSL, 0);   /* CMP epoch */
+    arm_ls_imm(&e, LS_LDR, A_R0, A_R11, XLAT_RT_EPOCH);
+    arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R12, A_R0, SH_LSL, 0);  /* CMP epoch */
     const uint32_t miss3 = arm_branch_slot(&e);
     const uint32_t link_charge = e.pos;
     arm_ls_imm(&e, LS_LDR, A_R0, A_R11, XLAT_RT_BUDGET);
-    arm_ls_imm(&e, LS_LDRH, A_R2, A_R3, 12);
-    arm_dp_reg(&e, DP_SUB, 1, A_R0, A_R0, A_R2, SH_LSL, 0);   /* SUBS budget, charge */
+    arm_uxth(&e, A_R1, A_LR);
+    arm_dp_reg(&e, DP_SUB, 1, A_R0, A_R0, A_R1, SH_LSL, 0);   /* SUBS budget, charge */
     const uint32_t miss4 = arm_branch_slot(&e);
     arm_ls_imm(&e, LS_STR, A_R0, A_R11, XLAT_RT_BUDGET);
-    arm_ls_imm(&e, LS_LDRH, A_R2, A_R3, 14);                  /* region */
-    arm_ls_imm(&e, LS_STR, A_R2, A_R11, XLAT_RT_CUR);
+    arm_lsr(&e, A_R1, A_LR, 16);                             /* region */
+    arm_ls_imm(&e, LS_STR, A_R1, A_R11, XLAT_RT_CUR);
     arm_ls_imm(&e, LS_LDR, A_R0, A_R11, XLAT_RT_LAST);
-    arm_dp_reg(&e, DP_ADD, 0, A_R0, A_R0, A_R2, SH_LSL, 2);
-    arm_ls_imm(&e, LS_LDR, A_R1, A_R11, XLAT_RT_SEQ);
-    arm_ls_imm(&e, LS_STR, A_R1, A_R0, 0);                    /* last[region] = seq */
+    arm_ls_imm(&e, LS_LDR, A_R12, A_R11, XLAT_RT_SEQ);
+    arm_e32(&e, 0xf840u, 0xc021u);                           /* STR.W r12,[r0,r1,LSL #2] */
     arm_ls_imm(&e, LS_LDR, A_R0, A_R11, XLAT_RT_LINKS);
     arm_dp_imm(&e, DP_ADD, 0, A_R0, A_R0, 1);
     arm_ls_imm(&e, LS_STR, A_R0, A_R11, XLAT_RT_LINKS);
-    arm_ls_imm(&e, LS_LDR, A_R0, A_R3, 4);
-    arm_bx(&e, A_R0);
-    /* Secondary bank is consulted only on a primary key collision. */
+    arm_bx(&e, A_R2);
+    /* Secondary bank is consulted only on a primary key collision.
+     * Both banks remain contiguous in PSRAM. */
     const uint32_t alt_link = e.pos;
     ok &= arm_dp_imm(&e, DP_ADD, 0, A_R3, A_R3, XLAT_LINK_SLOTS * sizeof(xlat_link_t));
-    arm_ls_imm(&e, LS_LDR, A_R0, A_R3, 0);
+    arm_e32(&e, 0xe893u, 0x5005u);                           /* LDM.W r3,{r0,r2,r12,lr} */
     arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R0, A_R1, SH_LSL, 0);
     const uint32_t alt_miss = arm_branch_slot(&e);
-    arm_ls_imm(&e, LS_LDR, A_R0, A_R3, 8);
-    arm_ls_imm(&e, LS_LDR, A_R2, A_R11, XLAT_RT_EPOCH);
-    arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R0, A_R2, SH_LSL, 0);
+    arm_ls_imm(&e, LS_LDR, A_R0, A_R11, XLAT_RT_EPOCH);
+    arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R12, A_R0, SH_LSL, 0);
     const uint32_t alt_stale = arm_branch_slot(&e);
     arm_ls_imm(&e, LS_LDR, A_R0, A_R11, XLAT_RT_LINK_ALT);
     arm_dp_imm(&e, DP_ADD, 0, A_R0, A_R0, 1);

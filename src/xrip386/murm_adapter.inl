@@ -819,8 +819,9 @@ void __time_critical_func(xrip_step_cpu)(CPU *cpu, int count)
         }
         xlat_cut = false;
 #if XLAT_LOG
-        /* where XRIP ran out (a sample of where its time goes) */
-        if (xrip_ran) {
+        /* Do not charge nested guest execution to the outer caller's PC.
+         * Use the same exclusion as the burst totals below. */
+        if (xrip_ran && burst_seq == seq0 && xlat_stats.svc_n == svc0) {
             xlat_prof_note(XLAT_PROF_XRIP, (uint32_t)segregs[regcs] << 16 | (XRIP_IP & 0xffffu),
                            segment_base[regcs] + (XRIP_IP & 0xffffu), fast_memory,
                            fast_memory_size, xrip_ran);

@@ -5021,6 +5021,78 @@ static int arm_ez_run_body(void *opaque)
   return entry(meta->argc, (char **)(uintptr_t)meta->argv_addr);
 }
 
+#if XLAT && XLAT_LOG
+/* ChildEnvGuest appends the canonical executable path after the environment
+ * strings and a word containing 1. Do not trust a guest-modified PSP/MCB or
+ * scan past the owned environment block. The one-NUL empty environment is
+ * also produced by ChildEnvGuest when the parent has no environment. */
+static bool xlat_exec_path(UWORD child, char *name, size_t capacity)
+{
+  const UWORD env = pload16(task_guest_seg_linear(child) +
+                            offsetof(psp, ps_environ));
+  if (!env || capacity < 4)
+    return false;
+  const seg mseg = (seg)(env - 1u);
+  const BYTE type = fdos_mcb_type(mseg);
+  if ((type != MCB_NORMAL && type != MCB_LAST) ||
+      fdos_mcb_owner(mseg) != child)
+    return false;
+  const uint32_t base = task_guest_seg_linear(env);
+  uint32_t size = (uint32_t)fdos_mcb_size(mseg) << 4;
+  if (size > MAXENV)
+    size = MAXENV;
+  if (size > 0x100000u - base)
+    size = 0x100000u - base;
+  if (size < 4)
+    return false;
+  uint32_t off = 0;
+  if (pload8(base) == 0) {
+    off = pload8(base + 1u) == 0 ? 2u : 1u;
+  } else {
+    while (off + 1u < size &&
+           (pload8(base + off) || pload8(base + off + 1u)))
+      ++off;
+    off += 2u;
+  }
+  if (off + 2u >= size || pload16(base + off) != 1u)
+    return false;
+  off += 2u;
+  size_t n = 0;
+  while (off < size && n < capacity) {
+    const UBYTE ch = pload8(base + off++);
+    if (!ch) {
+      name[n] = '\0';
+      /* Accept an absolute drive path or UNC, not arbitrary env text. */
+      return n >= 3 &&
+          ((name[1] == ':' && name[2] == '\\') ||
+           (name[0] == '\\' && name[1] == '\\'));
+    }
+    if (ch < 0x20 || ch == 0x7f)
+      return false;
+    name[n++] = (char)ch;
+  }
+  return false;
+}
+
+/* Keep the transient path buffer off the long-lived EXEC frame. */
+static void __attribute__((noinline)) xlat_log_child(UWORD child)
+{
+  char name[sizeof(((struct dos_data *)0)->PriPathBuffer)];
+  if (!xlat_exec_path(child, name, sizeof(name))) {
+    const uint32_t mcb = ((uint32_t)child - 1u) << 4;
+    unsigned k = 0;
+    for (; k < 8; ++k) {
+      const UBYTE ch = pload8(mcb + 8u + k);
+      if (ch < 0x20 || ch >= 0x7f)
+        break;
+      name[k] = (char)ch;
+    }
+    name[k] = '\0';
+  }
+  xlat_log_write(child, name);
+}
+#endif
+
 static COUNT exec_run_process(const struct exec_process_start *start)
 {
   UWORD parent_sp = CPU_SP;
@@ -5199,20 +5271,7 @@ static COUNT exec_run_process(const struct exec_process_start *start)
   }
 
 #if XLAT && XLAT_LOG
-  {
-    /* Program name from its MCB (DOS 4+ owner name), before it is freed. */
-    char name[9];
-    const uint32_t mcb = ((uint32_t)start->child_psp - 1u) << 4;
-    unsigned k = 0;
-    for (; k < 8; ++k) {
-      const UBYTE ch = pload8(mcb + 8u + k);
-      if (ch < 0x20 || ch >= 0x7f)
-        break;
-      name[k] = (char)ch;
-    }
-    name[k] = '\0';
-    xlat_log_write(start->child_psp, name);
-  }
+  xlat_log_child(start->child_psp);
 #endif
   exec_leave_child(saved_linear, start->child_psp);
   return SUCCESS;
