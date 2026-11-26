@@ -1319,9 +1319,14 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
         entry_t *e = lookup(key);
         const bool live = e && st->region[e->region].live;
         const bool cold = e && st->region[e->region].cold;
-        if (resample && !live && !cold &&
-            (ran ? rt->exit_kind == XLAT_EXIT_BRANCH : key != rt->fn_key))
-            sample(key, ran);
+        if (resample && !live && !cold) {
+            const bool call = ran && rt->exit_kind == XLAT_EXIT_FAR_CALL;
+            const uint32_t linear = request_linear(key);
+            if (call && xlat_call_hot(linear) && queue_compile(key, COMPILE_CALL, XLAT_RJ_NONE))
+                xlat_call_ack(linear);
+            else if (ran ? call || rt->exit_kind == XLAT_EXIT_BRANCH : key != rt->fn_key)
+                sample(key, ran);
+        }
         const int32_t remaining = rt->wall_deadline ? (int32_t)(rt->wall_deadline - *rt->clock)
                                                     : INT32_MAX;
         if (rt->wall_deadline && (remaining <= 0 || *rt->intr))
@@ -1394,9 +1399,10 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
             unlink_region(e->region);
             xlat_stats.cold++;
         }
-        if (rt->exit_kind < XLAT_EXIT_COUNT) {
-            xlat_stats.exits[rt->exit_kind]++;
-            x->exits[rt->exit_kind]++;
+        const uint32_t exit_kind = rt->exit_kind == XLAT_EXIT_FAR_CALL ? XLAT_EXIT_BRANCH : rt->exit_kind;
+        if (exit_kind < XLAT_EXIT_COUNT) {
+            xlat_stats.exits[exit_kind]++;
+            x->exits[exit_kind]++;
         }
         /* STOP: XRIP must run the next instruction. */
         if (*rt->intr || rt->exit_kind == XLAT_EXIT_STOP)

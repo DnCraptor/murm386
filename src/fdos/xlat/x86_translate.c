@@ -2078,24 +2078,24 @@ static void emit_dyn_recon(tctx_t *c, int i)
         emit_recon(c, r);
 }
 
-/* Leave for rt->ip (stored by the code) through a BRANCH exit. */
-static void emit_dyn_exit(tctx_t *c)
+/* Dispatch to the run-time target already stored in rt. */
+static void emit_dyn_exit(tctx_t *c, uint8_t kind)
 {
-    const int k = exit_stub(c, 0, XLAT_EXIT_BRANCH, -1);
+    const int k = exit_stub(c, 0, kind, -1);
     c->stub[k].dyn = 1;
     emit_branch(c, (dest_t){D_STUB, (int16_t)k}, C_AL);
 }
 
 /* Far transfer: r2 = IP, r3 = selector (16 bits each). rt->cs and the CS
  * base change here; the adapter loads CS into XRIP (xlat_segs_to_xrip). */
-static void emit_far_exit(tctx_t *c)
+static void emit_far_exit(tctx_t *c, bool call)
 {
     arm_emit_t *e = &c->e;
     arm_ls_imm(e, LS_STRH, A_R3, A_R11, XLAT_RT_CS);
     arm_lsl(e, A_R12, A_R3, 4);
     arm_ls_imm(e, LS_STR, A_R12, A_R11, XLAT_RT_SEG_BASE + 4u);
     arm_ls_imm(e, LS_STR, A_R2, A_R11, XLAT_RT_IP);
-    emit_dyn_exit(c);
+    emit_dyn_exit(c, call ? XLAT_EXIT_FAR_CALL : XLAT_EXIT_BRANCH);
 }
 
 /* Two pushes: v1 to SP-2, v2 to SP-4 (each address wraps at 64 KiB). Both
@@ -2148,7 +2148,7 @@ static void emit_far(tctx_t *c, int i)
         } else {
             arm_mov32(e, A_R2, in->target);
             arm_mov32(e, A_R3, in->a.imm);
-            emit_far_exit(c);
+            emit_far_exit(c, true);
         }
         break;
     case FAR_JMP:
@@ -2157,7 +2157,7 @@ static void emit_far(tctx_t *c, int i)
         } else {
             arm_mov32(e, A_R2, in->target);
             arm_mov32(e, A_R3, in->a.imm);
-            emit_far_exit(c);
+            emit_far_exit(c, false);
         }
         break;
     case FAR_RET:
@@ -2188,7 +2188,7 @@ static void emit_far(tctx_t *c, int i)
             emit_site_dispatch(c, i, A_R2);
             local_patch(c, other, C_NE);
         }
-        emit_far_exit(c);
+        emit_far_exit(c, false);
         break;
     default:    /* CALL / JMP m16:16: offset at [m], selector at [m+2] */
         emit_mem_access(c, i, 4, false);
@@ -2202,7 +2202,7 @@ static void emit_far(tctx_t *c, int i)
             emit_push2(c, i, -1, c->rt->cs, -1, ret_ip);
             arm_ls_imm(e, LS_LDR, A_R2, A_R11, XLAT_RT_IP);
         }
-        emit_far_exit(c);
+        emit_far_exit(c, in->sub == FAR_CALLM);
         break;
     }
 }
@@ -2225,7 +2225,7 @@ static void emit_ind(tctx_t *c, int i)
         emit_site_dispatch(c, i, A_R3);
     }
     arm_ls_imm(e, LS_STR, A_R3, A_R11, XLAT_RT_IP);
-    emit_dyn_exit(c);
+    emit_dyn_exit(c, XLAT_EXIT_BRANCH);
 }
 
 /* PUSHA / POPA (one 16-byte block, SP must not wrap inside it: otherwise
@@ -2702,7 +2702,8 @@ static bool emit_stubs(tctx_t *c)
                     arm_mov32(e, A_R12, s->exit_kind);
                     arm_ls_imm(e, LS_STR, A_R12, A_R11, XLAT_RT_EXIT_KIND);
                     const uint32_t site = arm_branch_slot(e);
-                    if (!arm_patch_branch(e, site, c->epilogue, C_AL))
+                    const uint32_t tail = s->exit_kind == XLAT_EXIT_FAR_CALL ? c->dispatch : c->epilogue;
+                    if (!arm_patch_branch(e, site, tail, C_AL))
                         c->overflow = true;
                 }
                 SIZE_NOTE(XLAT_SIZE_EXIT, from);
