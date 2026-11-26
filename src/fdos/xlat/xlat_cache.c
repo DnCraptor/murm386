@@ -46,6 +46,9 @@ typedef struct {
     uint32_t exits[XLAT_EXIT_COUNT];
     uint32_t epoch;        /* st->epoch when its bytes were last compared */
     uint32_t mem_size;     /* rt->mem_size it was built for (reads compare with it) */
+    uint8_t trace_min;     /* xlat_translate's trace_min it was built with */
+    uint8_t n_extra;       /* entry points added (add_entry) */
+    uint16_t extra[XLAT_EXTRA_MAX];
 } region_t;
 
 typedef struct {
@@ -627,7 +630,10 @@ static int take_slot(bool *evicted)
     return best;
 }
 
-static bool translate_here(const xlat_rt_t *rt, int trace_min)
+/* Translate at rt->cs:ip (with extra entry points); the new region's slot,
+ * or -1. */
+static int translate_here(const xlat_rt_t *rt, uint16_t ip, int trace_min, const uint16_t *extra,
+                          int n_extra)
 {
     xlat_region_out_t *out = &st->out;
     xlat_arena_t *const a = &st->arena;
@@ -651,22 +657,26 @@ static bool translate_here(const xlat_rt_t *rt, int trace_min)
             evicted |= evict_range(st->head, hi);
         a->code_top = st->head;
         a->data_bottom = window_end();
-        if (xlat_translate(a, rt, (uint16_t)rt->ip, trace_min, out, &full, st->ctx))
+        if (xlat_translate(a, rt, ip, trace_min, extra, n_extra, out, &full, st->ctx))
             goto built;
         if (!full)
             break;
     }
     if (evicted)
         rebuild_maps();
-    return false;
+    return -1;
 
 built:;
     const int idx = take_slot(&evicted);   /* not in the new chunk: it was free */
     region_t *r = &st->region[idx];
     r->cs = rt->cs;
-    r->ip = (uint16_t)rt->ip;
+    r->ip = ip;
     r->cs_base = rt->seg_base[1];
     r->mem_size = rt->mem_size;
+    r->trace_min = (uint8_t)trace_min;
+    r->n_extra = (uint8_t)n_extra;
+    for (int k = 0; k < n_extra; ++k)
+        r->extra[k] = extra[k];
     r->lo = out->lo;
     r->span = out->span;
     r->n_runs = out->n_runs;
@@ -717,6 +727,56 @@ built:;
         if (st->region[k].held)
             used += st->region[k].chunk_hi - st->region[k].chunk_lo;
     xlat_stats.code_bytes = used;
+    return idx;
+}
+
+/* The live region of this CS whose x86 code holds rt->cs:ip, or -1. */
+static int covering(const xlat_rt_t *rt)
+{
+    const uint32_t linear = rt->seg_base[1] + (rt->ip & 0xffffu);
+    for (int k = 0; k < XLAT_MAX_REGIONS; ++k) {
+        const region_t *r = &st->region[k];
+        if (!r->live || r->cs != rt->cs || r->cs_base != rt->seg_base[1] ||
+            linear - r->lo >= r->span)
+            continue;
+        const uint8_t *d = st->arena.base + r->data_off;
+        for (unsigned j = 0; j < r->n_runs; ++j) {
+            uint32_t at;
+            memcpy(&at, d, 4);
+            const uint32_t len = d[4] | (uint32_t)d[5] << 8;
+            if (linear - at < len)
+                return k;
+            d += 8 + ((len + 3u) & ~3u);
+        }
+    }
+    return -1;
+}
+
+/* rt->ip lies in the code of live region k but is not one of its entries:
+ * translate the region again with it as one more entry (instead of another
+ * region with a copy of the same code), then drop the old one. */
+static bool add_entry(const xlat_rt_t *rt, int k)
+{
+    region_t *r = &st->region[k];
+    if (r->n_extra >= XLAT_EXTRA_MAX)
+        return false;
+    uint16_t extra[XLAT_EXTRA_MAX];
+    const int n = r->n_extra;
+    for (int j = 0; j < n; ++j)
+        extra[j] = r->extra[j];
+    extra[n] = (uint16_t)rt->ip;
+    const uint32_t lo = r->chunk_lo;
+    const uint16_t root = r->ip;
+    const int idx = translate_here(rt, root, r->trace_min, extra, n + 1);
+    if (idx < 0)
+        return false;
+    /* the old region, unless the ring took it already (its entries now
+     * lead to the new one: insert() replaced them) */
+    if (idx != k && r->held && r->chunk_lo == lo && r->ip == root) {
+        evict(k);
+        rebuild_maps();
+    }
+    xlat_stats.entries_added++;
     return true;
 }
 
@@ -744,10 +804,13 @@ static __attribute__((noinline)) bool sample(const xlat_rt_t *rt)
         xlat_stats.stack_skips++;   /* try again when it is hot at a shallower depth */
         return false;
     }
-    /* Inside an existing region but not at one of its entries: the region is
-     * entered at its loop head once a burst ends there. */
-    const bool inside = covered(rt);
-    if (inside || !translate_here(rt, fn ? XLAT_TRACE_MIN : 0)) {
+    /* Inside a live region but not at one of its entries: one more entry
+     * there. Else (inside a cold region) XRIP keeps it. */
+    const int in_live = covering(rt);
+    if (in_live >= 0 && add_entry(rt, in_live))
+        return true;
+    const bool inside = in_live >= 0 || covered(rt);
+    if (inside || translate_here(rt, (uint16_t)rt->ip, fn ? XLAT_TRACE_MIN : 0, NULL, 0) < 0) {
         h->reject = 1;
         xlat_stats.rejects++;
         note_reject(rt, key, inside ? XLAT_RJ_COVERED : st->out.reject);
@@ -781,7 +844,11 @@ static __attribute__((noinline)) bool sample_exit(const xlat_rt_t *rt)
         xlat_stats.stack_skips++;
         return false;
     }
-    if (!translate_here(rt, XLAT_LINK_MIN)) {
+    /* inside a live region: one more entry there (no second copy) */
+    const int in_live = covering(rt);
+    if (in_live >= 0 && add_entry(rt, in_live))
+        return true;
+    if (translate_here(rt, (uint16_t)rt->ip, XLAT_LINK_MIN, NULL, 0) < 0) {
         h->reject = 1;
         xlat_stats.rejects++;
         note_reject(rt, key, st->out.reject);
@@ -1202,18 +1269,22 @@ void xlat_log_write(uint16_t psp, const char *name)
     log_printf("== exit PSP %04X %s ==\r\n", psp, name);
     log_region_counts();
     log_rejects();
+    /* in two parts: log_printf() formats at most 255 characters */
     log_printf("S translations=%lu rejects=%lu entries=%lu invalid=%lu flushes=%lu evict=%lu "
-               "exit b/bu/s/st=%lu/%lu/%lu/%lu native=%lu code=%lu stack_skips=%lu interp=%lu side=%lu cuts=%lu/%lu cold=%lu fn=%lu xb=%lu links=%lu lost=%lu skipped=%lu\r\n",
+               "exit b/bu/s/st=%lu/%lu/%lu/%lu native=%lu code=%lu stack_skips=%lu ",
                (unsigned long)xlat_stats.translations, (unsigned long)xlat_stats.rejects,
                (unsigned long)xlat_stats.entries, (unsigned long)xlat_stats.invalidations,
                (unsigned long)xlat_stats.flushes, (unsigned long)xlat_stats.evictions,
                (unsigned long)xlat_stats.exits[0],
                (unsigned long)xlat_stats.exits[1], (unsigned long)xlat_stats.exits[2],
                (unsigned long)xlat_stats.exits[3], (unsigned long)xlat_stats.guest_insns, (unsigned long)xlat_stats.code_bytes,
-               (unsigned long)xlat_stats.stack_skips, (unsigned long)xlat_stats.interp,
+               (unsigned long)xlat_stats.stack_skips);
+    log_printf("interp=%lu side=%lu cuts=%lu/%lu cold=%lu fn=%lu xb=%lu xe=%lu links=%lu lost=%lu skipped=%lu\r\n",
+               (unsigned long)xlat_stats.interp,
                (unsigned long)xlat_stats.side_interp, (unsigned long)xlat_stats.cut_entries,
                (unsigned long)xlat_stats.cuts, (unsigned long)xlat_stats.cold,
                (unsigned long)xlat_stats.fn_regions, (unsigned long)xlat_stats.exit_built,
+               (unsigned long)xlat_stats.entries_added,
                (unsigned long)xlat_stats.links, (unsigned long)st->log_lost,
                (unsigned long)st->log_skipped);
     /* CPU bursts: averages and histograms (xlat_stats_t), XRIP only / with

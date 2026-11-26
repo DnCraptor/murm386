@@ -1872,9 +1872,14 @@ static int chain_check(void)
         {0x0600, 15, {0x40, 0x01, 0xc3, 0x43, 0x46, 0x47, 0x01, 0xc6, 0x49, 0x74, 0x03, 0xe9, 0xf2,
                       0x07, 0xf4}},
         {0x0e00, 9, {0x01, 0xdf, 0x45, 0x45, 0x01, 0xde, 0xe9, 0xf7, 0xf7}},
+        /* M: inc ax; T: inc bx; dec cx; jnz M; hlt. A burst start at T, in
+         * M's code, gives M one more entry (add_entry), not a second region. */
+        {0x0700, 6, {0x40, 0x43, 0x49, 0x75, 0xfb, 0xf4}},
     };
     int bad = 0;
-    for (int test = 0; test < (XLAT_TRACES ? 5 : 4); ++test) {
+    for (int test = 0; test < 6; ++test) {
+        if (test == 4 && !XLAT_TRACES)
+            continue;
         const uint16_t cs = 0x1000;
         ref_t init;
         memset(&init, 0, sizeof(init));
@@ -1895,9 +1900,10 @@ static int chain_check(void)
         memcpy(mem_init, mem, MEM_BYTES);
         xlat_flush();
         /* make the regions: entries seen at burst starts, run on scratch state */
-        static const uint16_t entries[5][2] = {{0x0900, 0x0200}, {0x0300, 0x0300}, {0x0400, 0x0400},
-                                               {0x0500, 0x0500}, {0x0600, 0x0600}};
-        static const uint16_t starts[5] = {0x0900, 0x0300, 0x0400, 0x0500, 0x0600};
+        static const uint16_t entries[6][2] = {{0x0900, 0x0200}, {0x0300, 0x0300}, {0x0400, 0x0400},
+                                               {0x0500, 0x0500}, {0x0600, 0x0600}, {0x0700, 0x0701}};
+        static const uint16_t starts[6] = {0x0900, 0x0300, 0x0400, 0x0500, 0x0600, 0x0701};
+        const unsigned long added0 = xlat_stats.entries_added, tr0 = xlat_stats.translations;
         for (int e = 0; e < 2; ++e)
             for (int k = 0; k < 4; ++k) {
                 R = init;
@@ -1954,6 +1960,10 @@ static int chain_check(void)
                     printf("  gpr%d want %08x got %08x\n", i, want.gpr[i], R.gpr[i]);
             bad++;
         }
+        if (test == 5 && (xlat_stats.entries_added == added0 || translations - tr0 != 2)) {
+            printf("  chain test 5: no entry added (translations %lu)\n", translations - tr0);
+            bad++;
+        }
         if (test == 4 && (!xlat_stats.exit_built || xlat_stats.links - links0 < 20)) {
             printf("  chain test 4: exit target not built or not linked (links %lu)\n",
                    xlat_stats.links - links0);
@@ -1989,7 +1999,7 @@ static int dump_region(const char *hex, const char *path)
     rt.seg_base[1] = 0x10000;
     static xlat_region_out_t out;
     bool full;
-    if (!xlat_translate(&a, &rt, 0x100, 1, &out, &full, ctx)) {
+    if (!xlat_translate(&a, &rt, 0x100, 1, NULL, 0, &out, &full, ctx)) {
         printf("not translated: reason %u (insns %u)\n", out.reject, out.n_insns);
         return 1;
     }
@@ -2032,7 +2042,7 @@ static int size_report(const char *path)
         static xlat_region_out_t out;
         bool full;
         if (getenv("XLAT_SIZE_TRACE")) fprintf(stderr, "region %d %04X:%04X\n", r, reg[r].cs, reg[r].ip);
-        if (!xlat_translate(&a, &rt, reg[r].ip, XLAT_LINK_MIN, &out, &full, ctx)) continue;
+        if (!xlat_translate(&a, &rt, reg[r].ip, XLAT_LINK_MIN, NULL, 0, &out, &full, ctx)) continue;
         built++;
         insns += out.n_insns;
         code += out.code_len;

@@ -350,7 +350,13 @@ static int discover(tctx_t *c, uint16_t start)
                            (unsigned)(nx->ip - in->ip), in);
             continue;
         }
-        return XLAT_RJ_OVERLAP;   /* overlapping instructions: leave it to XRIP */
+        /* Other overlapping instructions (a jump into the middle of one,
+         * data decoded as code): the one not at the entry is left out, and
+         * the edges to it leave the region. */
+        const int drop = nx->ip == start ? i : i + 1;
+        memmove(&c->in[drop], &c->in[drop + 1], (size_t)(c->n - drop - 1) * sizeof(c->in[0]));
+        c->n--;
+        --i;    /* the instruction now after in */
     }
 
     /* Edges, leaders, loop check. */
@@ -2676,6 +2682,7 @@ size_t xlat_translate_ctx_size(void)
 }
 
 bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int trace_min,
+                    const uint16_t *extra, int n_extra,
                     xlat_region_out_t *out, bool *full, void *ctx_mem)
 {
     *full = false;
@@ -2727,6 +2734,16 @@ bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int trace
     if (why != XLAT_RJ_NONE) {
         out->reject = (uint8_t)why;
         goto done;
+    }
+    /* More entry points (xlat_cache: region exits and burst starts that
+     * came to these instructions): leaders, entered with the state in rt */
+    for (int k = 0; k < n_extra; ++k) {
+        const int j = find_insn(c, extra[k]);
+        if (j < 0) {
+            out->reject = XLAT_RJ_START;
+            goto done;
+        }
+        c->leader[j] = 1;
     }
     dataflow(c);
     plan(c);
@@ -2797,6 +2814,8 @@ bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int trace
             bool head = c->in[i].ip == ip;
             for (int j = i; j < c->n && !head; ++j)
                 head = c->tgt_idx[j] == i;
+            for (int k = 0; k < n_extra && !head; ++k)
+                head = c->in[i].ip == extra[k];
             out->entries[out->n_entries].ip = c->in[i].ip;
             out->entries[out->n_entries].mark = head;
             out->entries[out->n_entries].code_off = c->label[i];

@@ -41,7 +41,7 @@
 #define XLAT_TRACE_MIN       8
 #endif
 #ifndef XLAT_LINK_MIN
-#define XLAT_LINK_MIN        4
+#define XLAT_LINK_MIN        1               /* any: XRIP costs more than an entry by link */
 #endif
 #ifndef XLAT_EXIT_HOT
 #define XLAT_EXIT_HOT        4               /* region exits to a target before translating there */
@@ -70,6 +70,7 @@ static inline uint32_t xlat_link_hash(uint32_t key)
 #define XLAT_ENTRY_BITS      9
 #define XLAT_ENTRY_SLOTS     (1 << XLAT_ENTRY_BITS)  /* power of two */
 #define XLAT_HOT_SLOTS       64              /* power of two */
+#define XLAT_EXTRA_MAX       12              /* entry points added to a region (xlat_cache add_entry) */
 #define XLAT_HOT_THRESHOLD   2               /* burst-start samples before translating */
 #define XLAT_ENTRY_COST      8               /* budget charged per region entry */
 #define XLAT_INTERP_RATIO    8               /* at most 1/8 of a region interpreted */
@@ -360,7 +361,7 @@ enum {
     XLAT_RJ_NONE = 0,
     XLAT_RJ_COVERED,    /* inside a live region, not one of its entries */
     XLAT_RJ_START,      /* the entry instruction is not decoded */
-    XLAT_RJ_OVERLAP,    /* overlapping instructions */
+    XLAT_RJ_OVERLAP,    /* overlapping instructions (no longer: the later one is left out) */
     XLAT_RJ_INTERP,     /* more than 1/XLAT_INTERP_RATIO interpreted */
     XLAT_RJ_NOLOOP,     /* no back edge in the reachable code */
     XLAT_RJ_EMIT,       /* stubs, fix-ups or branch range exceeded */
@@ -391,6 +392,8 @@ typedef struct xlat_arena {
 bool xlat_emit_trampoline(xlat_arena_t *arena);
 
 /* Translate the region reachable from cs:ip. Code is appended to the arena.
+ * extra: n_extra more entry points (marked), instructions of the region;
+ * the translation fails (XLAT_RJ_START) if one is not.
  * trace_min: a region without a loop is built when every path from the
  * entry runs at least that many native instructions (0: loops only).
  * Returns false (arena unchanged) when no worthwhile region exists or the
@@ -398,6 +401,7 @@ bool xlat_emit_trampoline(xlat_arena_t *arena);
  * working memory, word aligned (kept off the small core-0 stack and heap). */
 size_t xlat_translate_ctx_size(void);
 bool xlat_translate(xlat_arena_t *arena, const xlat_rt_t *rt, uint16_t ip, int trace_min,
+                    const uint16_t *extra, int n_extra,
                     xlat_region_out_t *out, bool *full, void *ctx_mem);
 
 /* Host test: code bytes and counts by x86 instruction kind (XO_*), stub
