@@ -2098,8 +2098,70 @@ static int size_report(const char *path)
     return 0;
 }
 
+/* Compare uninterrupted and sliced emission, then change a decoded byte
+ * while a job is paused. No execution of the unpublished native code. */
+static int compile_resume_check(void)
+{
+    static uint32_t ctx[64 * 1024];
+    static uint8_t expected[0x10000];
+    static xlat_region_out_t want, got;
+    static const uint8_t code[] = {0x40, 0x83, 0xf8, 0x20, 0x75, 0xfa, 0xc3};
+    memcpy(mem + 0x10100, code, sizeof(code));
+    xlat_arena_t a = {.base = xlat_test_calloc(0x10000), .size = 0x10000};
+    if (!a.base || !xlat_emit_trampoline(&a) || xlat_translate_ctx_size() > sizeof(ctx))
+        return 1;
+    const uint32_t top = a.code_top;
+    xlat_rt_t rt = {.mem = mem, .mem_size = 0xa0000, .cs = 0x1000};
+    rt.seg_base[1] = 0x10000;
+    bool full;
+    if (!xlat_translate(&a, &rt, 0x100, 0, NULL, 0, &want, &full, ctx))
+        return 1;
+    memcpy(expected, a.base + want.code_off, want.code_len);
+    for (uint32_t ticks = 1; ticks <= 16; ++ticks) {
+        a.code_top = top;
+        a.data_bottom = a.size;
+        bool resume = false, ok = false;
+        for (int step = 0; step < 4096; ++step) {
+            xlat_test_compile_ticks = ticks;
+            ok = xlat_translate_step(&a, &rt, 0x100, 0, NULL, 0, &got, &full, ctx, resume);
+            if (ok || got.reject != XLAT_RJ_DEFER)
+                break;
+            resume = true;
+        }
+        xlat_test_compile_ticks = UINT32_MAX;
+        if (!ok || got.code_len != want.code_len ||
+            memcmp(expected, a.base + got.code_off, want.code_len))
+            return 1;
+    }
+    /* Insufficient room must preserve analysis for a new emission pass. */
+    a.code_top = top;
+    a.data_bottom = top + 8u;
+    if (xlat_translate_step(&a, &rt, 0x100, 0, NULL, 0, &got, &full, ctx, false) ||
+        !full || got.reject != XLAT_RJ_FULL || a.code_top != top)
+        return 1;
+    a.data_bottom = a.size;
+    if (!xlat_translate_step(&a, &rt, 0x100, 0, NULL, 0, &got, &full, ctx, true) ||
+        got.code_len != want.code_len || memcmp(expected, a.base + got.code_off, want.code_len))
+        return 1;
+    a.code_top = top;
+    a.data_bottom = a.size;
+    xlat_test_compile_ticks = 1; /* first instruction decoded */
+    bool ok = xlat_translate_step(&a, &rt, 0x100, 0, NULL, 0, &got, &full, ctx, false);
+    xlat_test_compile_ticks = UINT32_MAX;
+    if (ok || got.reject != XLAT_RJ_DEFER)
+        return 1;
+    mem[0x10100] = 0x48; /* INC -> DEC, same length */
+    ok = xlat_translate_step(&a, &rt, 0x100, 0, NULL, 0, &got, &full, ctx, true);
+    if (ok || got.reject != XLAT_RJ_CHANGED || a.code_top != top)
+        return 1;
+    puts("resumable compiler: OK");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc > 1 && !strcmp(argv[1], "--compile-resume"))
+        return compile_resume_check();
     tfpu_mem = mem;
     if (argc > 2 && !strcmp(argv[1], "--size"))
         return size_report(argv[2]);

@@ -395,15 +395,26 @@ enum {
     XLAT_RJ_EMIT,       /* stubs, fix-ups or branch range exceeded */
     XLAT_RJ_FULL,       /* does not fit an empty arena */
     XLAT_RJ_COUNT,
-    XLAT_RJ_DEFER = XLAT_RJ_COUNT /* transient: never passed to note_reject */
+    XLAT_RJ_DEFER = XLAT_RJ_COUNT, /* transient: never passed to note_reject */
+    XLAT_RJ_CHANGED              /* unpublished source changed */
 };
 
-/* A large region may need longer than the CPU quantum. Only an enabled
- * pending IRQ aborts a compilation already in progress. The burst
- * deadline still limits starting another translation. */
+/* A compiler slice is separate from the CPU instruction budget. */
+#define XLAT_COMPILE_US 150u
+#if defined(XLAT_HOST_TEST)
+extern uint32_t xlat_test_compile_ticks;
+#endif
 static inline bool xlat_compile_irq(const xlat_rt_t *rt)
 {
-    return rt->wall_deadline && *rt->intr;
+#if defined(XLAT_HOST_TEST)
+    if (xlat_test_compile_ticks != UINT32_MAX) {
+        if (!xlat_test_compile_ticks)
+            return true;
+        --xlat_test_compile_ticks;
+    }
+#endif
+    return rt->wall_deadline && (*rt->intr ||
+           (int32_t)(*rt->clock - rt->wall_deadline) >= 0);
 }
 
 /* Arena layout shared by translator and cache. */
@@ -438,6 +449,11 @@ bool xlat_emit_trampoline(xlat_arena_t *arena);
  * arena is full (*full set). ctx_mem: xlat_translate_ctx_size() bytes of
  * working memory, word aligned (kept off the small core-0 stack and heap). */
 size_t xlat_translate_ctx_size(void);
+/* On DEFER retain the arena window, output and context. On FULL the next
+ * step may use a new arena offset (only emission is restarted). */
+bool xlat_translate_step(xlat_arena_t *arena, const xlat_rt_t *rt, uint16_t ip,
+                         int trace_min, const uint16_t *extra, int n_extra,
+                         xlat_region_out_t *out, bool *full, void *ctx_mem, bool resume);
 bool xlat_translate(xlat_arena_t *arena, const xlat_rt_t *rt, uint16_t ip, int trace_min,
                     const uint16_t *extra, int n_extra,
                     xlat_region_out_t *out, bool *full, void *ctx_mem);

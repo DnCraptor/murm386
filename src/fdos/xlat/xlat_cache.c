@@ -102,6 +102,14 @@ typedef struct {
     hot_t exit_hot[XLAT_HOT_SLOTS];  /* untranslated region exit targets */
     xlat_region_out_t out;  /* translator output, kept here to spare the stack */
     void *ctx;              /* translator working memory */
+    /* One unpublished region owns the free arena window. Lives in PSRAM. */
+    struct {
+        xlat_rt_t rt;
+        uint32_t need, burst, old_lo;
+        uint16_t ip, extra[XLAT_EXTRA_MAX];
+        int trace_min, n_extra, attempt, old_slot;
+        bool pending, started;
+    } job;
 #if XLAT_LOG
     char *log;              /* text kept until the next safe point (xlat_log_write) */
     uint32_t log_len;
@@ -494,6 +502,7 @@ static void log_prof(void)
 
 static void reset_tables(void)
 {
+    st->job.pending = false;
     log_region_counts();    /* the regions are about to go */
     memset(st->region, 0, sizeof(st->region));
     memset(st->last, 0, sizeof(st->last));
@@ -741,6 +750,10 @@ void xlat_forget_range(uint32_t linear, uint32_t len)
             xlat_call_count[k] = 0;
     if (!st)
         return;
+    if (st->job.pending) {
+        st->job.pending = false;
+        xlat_stats.compile_cancel++;
+    }
     for (unsigned k = 0; k < XLAT_HOT_SLOTS; ++k) {
         hot_t *h[2] = {&st->hot[k], &st->exit_hot[k]};
         for (unsigned j = 0; j < 2; ++j) {
@@ -827,20 +840,56 @@ static int take_slot(bool *evicted)
 static int translate_at(const xlat_rt_t *rt, uint16_t ip, int trace_min, const uint16_t *extra,
                         int n_extra);
 
-/* Translate at rt->cs:ip (with extra entry points); the new region's slot,
- * or -1. */
-static int translate_here(const xlat_rt_t *rt, uint16_t ip, int trace_min, const uint16_t *extra,
-                          int n_extra)
+static bool compile_allowed(const xlat_rt_t *rt)
+{
+    return !rt->wall_deadline || ((rt->eflags & 0x200u) &&
+           st->job.burst != rt->wall_deadline && !xlat_compile_irq(rt));
+}
+
+/* Advance one compiler job, at most one slice per CPU burst. */
+static __attribute__((noinline)) int compile_slice(const xlat_rt_t *rt)
 {
     const uint32_t t0 = *rt->clock;
-    const int idx = translate_at(rt, ip, trace_min, extra, n_extra);
+    xlat_rt_t *jrt = &st->job.rt;
+    st->job.burst = rt->wall_deadline;
+    jrt->intr = rt->intr;
+    jrt->clock = rt->clock;
+    jrt->wall_deadline = rt->wall_deadline;
+    if (rt->wall_deadline && (int32_t)(rt->wall_deadline - t0) > (int32_t)XLAT_COMPILE_US)
+        jrt->wall_deadline = (t0 + XLAT_COMPILE_US) | 1u;
+    if (st->job.started || st->job.attempt)
+        xlat_stats.compile_resumes++;
+    const int idx = translate_at(jrt, st->job.ip, st->job.trace_min,
+                                 st->job.extra, st->job.n_extra);
     const uint32_t us = *rt->clock - t0;
-    if (idx < 0 && st->out.reject == XLAT_RJ_DEFER)
+    if (idx < 0 && st->job.pending)
         xlat_stats.compile_defers++;
     xlat_stats.translate_us += us;
     if (us > xlat_stats.translate_max_us)
         xlat_stats.translate_max_us = us;
     return idx;
+}
+
+/* Translate at rt->cs:ip; -1 may mean a suspended job. */
+static int translate_here(const xlat_rt_t *rt, uint16_t ip, int trace_min, const uint16_t *extra,
+                          int n_extra)
+{
+    if (st->job.pending || !compile_allowed(rt)) {
+        st->out.reject = XLAT_RJ_DEFER;
+        return -1;
+    }
+    st->job.rt = *rt;
+    st->job.ip = ip;
+    st->job.trace_min = trace_min;
+    st->job.n_extra = n_extra;
+    for (int k = 0; k < n_extra; ++k)
+        st->job.extra[k] = extra[k];
+    st->job.old_slot = -1;
+    st->job.need = 0;
+    st->job.attempt = 0;
+    st->job.started = false;
+    st->job.pending = true;
+    return compile_slice(rt);
 }
 
 static int translate_at(const xlat_rt_t *rt, uint16_t ip, int trace_min, const uint16_t *extra,
@@ -849,43 +898,50 @@ static int translate_at(const xlat_rt_t *rt, uint16_t ip, int trace_min, const u
     xlat_region_out_t *out = &st->out;
     xlat_arena_t *const a = &st->arena;
     bool full, evicted = false;
-    /* First the free space at the head as it is (a region rejected for
-     * another reason evicts nothing). A translation that does not fit tells
-     * the bytes it needs (xlat_translate emits into no space and counts):
-     * exactly the chunks in that many bytes from the head are evicted, from
-     * the ring start when the arena ends sooner. One more try with more room
-     * if the size was off (it is not position-dependent: fixed-size
-     * encodings). */
-    uint32_t need = 0;
-    for (int attempt = 0; attempt < 3; ++attempt) {
+    for (; st->job.attempt < 3;) {
         if (xlat_compile_irq(rt)) {
             out->reject = XLAT_RJ_DEFER;
-            break;
+            return -1;
         }
-        if (attempt) {
-            need = (need + 7u) & ~7u;
-            if (need > a->size - st->ring_lo)
-                break;                  /* larger than the ring */
-            if (st->head + need > a->size)
-                st->head = st->ring_lo;
-            evicted |= evict_range(st->head, st->head + need);
+        if (!st->job.started) {
+            if (st->job.attempt) {
+                const uint32_t need = (st->job.need + 7u) & ~7u;
+                if (need > a->size - st->ring_lo) {
+                    out->reject = XLAT_RJ_FULL;
+                    break;
+                }
+                if (st->head + need > a->size)
+                    st->head = st->ring_lo;
+                if (evict_range(st->head, st->head + need))
+                    rebuild_maps();  /* guest can run between slices */
+            }
+            a->code_top = st->head;
+            a->data_bottom = window_end();
         }
-        a->code_top = st->head;
-        a->data_bottom = window_end();
-        if (xlat_translate(a, rt, ip, trace_min, extra, n_extra, out, &full, st->ctx))
+        const bool resume = st->job.started || st->job.attempt != 0;
+        st->job.started = true;
+        if (xlat_translate_step(a, rt, ip, trace_min, extra, n_extra, out, &full,
+                                st->ctx, resume))
             goto built;
+        if (out->reject == XLAT_RJ_DEFER)
+            return -1;
         if (!full)
             break;
-        /* the next try: what it said, at least a bit more than this one had */
         const uint32_t had = a->data_bottom - st->head;
-        need = out->need > had ? out->need : had + 64u;
+        st->job.need = out->need > had ? out->need : had + 64u;
+        st->job.attempt++;
+        st->job.started = false;
         xlat_stats.ring_retries++;
     }
-    if (evicted)
-        rebuild_maps();
+    st->job.pending = false;
+    if (out->reject == XLAT_RJ_CHANGED) {
+        xlat_stats.compile_cancel++;
+        out->reject = XLAT_RJ_DEFER; /* not an unsupported region */
+    }
     return -1;
 
 built:;
+    st->job.pending = false;
     const int idx = take_slot(&evicted);   /* not in the new chunk: it was free */
     region_t *r = &st->region[idx];
     r->cs = rt->cs;
@@ -988,8 +1044,13 @@ static bool add_entry(const xlat_rt_t *rt, int k)
     const uint32_t lo = r->chunk_lo;
     const uint16_t root = r->ip;
     const int idx = translate_here(rt, root, r->trace_min, extra, n + 1);
-    if (idx < 0)
+    if (idx < 0) {
+        if (st->job.pending) {
+            st->job.old_slot = k;
+            st->job.old_lo = lo;
+        }
         return false;
+    }
     /* the old region, unless the ring took it already (its entries now
      * lead to the new one: insert() replaced them) */
     if (idx != k && r->held && r->chunk_lo == lo && r->ip == root) {
@@ -1166,6 +1227,40 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
     rt->cur = NO_REGION;
     rt->links = 0;
     bool ran = false, built = false;
+    /* Continue independently of the guest's current CS:IP and hot slots. */
+    if (st->job.pending) {
+        if (st->job.rt.mem != rt->mem || st->job.rt.mem_size != rt->mem_size) {
+            st->job.pending = false;
+            xlat_stats.compile_cancel++;
+        } else if (compile_allowed(rt) && stack_free() >= XLAT_STACK_NEEDED) {
+            const int old = st->job.old_slot;
+            const int idx = compile_slice(rt);
+            if (idx >= 0 && old >= 0 && idx != old &&
+                st->region[old].held && st->region[old].chunk_lo == st->job.old_lo) {
+                evict(old);
+                rebuild_maps();
+                xlat_stats.entries_added++;
+            }
+            if (idx < 0 && !st->job.pending && st->out.reject < XLAT_RJ_COUNT) {
+                /* Record the final outcome, not the intermediate pauses. */
+                const xlat_rt_t *jrt = &st->job.rt;
+                const uint32_t key = (uint32_t)jrt->cs << 16 | (jrt->ip & 0xffffu);
+                const unsigned slot = hash32(key) >> (32 - 6);
+                hot_t *h = &st->hot[slot], *e = &st->exit_hot[slot];
+                const int why = st->out.reject;
+                if (h->key == key) {
+                    h->reject = !st->job.trace_min && why == XLAT_RJ_NOLOOP ? HOT_RETRY : HOT_FINAL;
+                    h->why = (uint8_t)why;
+                    h->count = 0;
+                }
+                if (e->key == key)
+                    e->reject = HOT_FINAL;
+                xlat_stats.rejects++;
+                note_reject(jrt, key, why);
+            }
+            built = true;
+        }
+    }
     for (;;) {
         /* Check before entering a region or starting another compilation. */
         if (rt->wall_deadline && (*rt->intr ||
@@ -1178,7 +1273,8 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
                 break;      /* XRIP runs it: entering costs more than it saves */
             /* one translation per call: at the burst start, or where a
              * region left for code without a region */
-            if (built || !(ran ? rt->exit_kind == XLAT_EXIT_BRANCH && sample_exit(rt) : sample(rt)))
+            if (built || st->job.pending || !compile_allowed(rt) ||
+                !(ran ? rt->exit_kind == XLAT_EXIT_BRANCH && sample_exit(rt) : sample(rt)))
                 break;
             built = true;
             continue;
@@ -1760,11 +1856,12 @@ void xlat_log_write(uint16_t psp, const char *name)
                (unsigned long)xlat_stats.links, (unsigned long)xlat_stats.slot_evictions,
                (unsigned long)xlat_stats.ring_retries, (unsigned long)st->log_lost,
                (unsigned long)st->log_skipped);
-    log_printf("Q ring=%luK tus=%lu tmax=%lu retry=%lu/%lu gap=%lu defer=%lu disk_irq=%lu\r\n",
+    log_printf("Q ring=%luK tus=%lu tmax=%lu retry=%lu/%lu gap=%lu defer=%lu disk_irq=%lu resume=%lu cancel=%lu\r\n",
                (unsigned long)(st->arena.size >> 10), (unsigned long)xlat_stats.translate_us,
                (unsigned long)xlat_stats.translate_max_us, (unsigned long)xlat_stats.retries_built,
                (unsigned long)xlat_stats.retries, (unsigned long)xlat_stats.gap_calls,
-               (unsigned long)xlat_stats.compile_defers, (unsigned long)xlat_stats.disk_irq_yields);
+               (unsigned long)xlat_stats.compile_defers, (unsigned long)xlat_stats.disk_irq_yields,
+               (unsigned long)xlat_stats.compile_resumes, (unsigned long)xlat_stats.compile_cancel);
     /* CPU bursts: averages and histograms (xlat_stats_t), XRIP only / with
      * translated code; device service after the bursts. XLAT_SLICE_US is
      * meant to match the usual XRIP burst. */

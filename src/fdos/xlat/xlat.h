@@ -173,7 +173,9 @@ typedef struct xlat_stats {
     uint32_t retries_built;     /* of those: built */
     uint32_t translate_us;      /* time in the translator (xlat_translate, eviction) */
     uint32_t translate_max_us;
-    uint32_t compile_defers;    /* pending IRQ postponed an unpublished region */
+    uint32_t compile_defers;    /* compiler slices paused (not rejected) */
+    uint32_t compile_resumes;   /* work continued from a previous slice */
+    uint32_t compile_cancel;    /* unpublished job discarded on memory change */
     uint32_t disk_irq_yields;   /* ISR service points in native FDOS reads */
     uint32_t fn_regions;        /* regions without a loop (traces, function regions) */
     uint32_t exit_built;        /* of those: built at a hot region exit target */

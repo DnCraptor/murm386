@@ -110,7 +110,20 @@ typedef struct {
     uint8_t fn;                    /* built so: min_native_path (>= trace_min), else 0 */
     uint8_t no_calls;              /* discover: leave called functions out */
     int n_interp;
+    /* Persistent compiler cursors in the PSRAM context. */
+    uint8_t phase, variant;
+    bool discovering, flow_changed;
+    int head, tail, dhead, dtail, flow_i, emit_i, stub_pass, stub_i;
+    uint32_t data_bytes;
+    int n_source;
+    struct { uint16_t ip; uint8_t len, b[16]; } source[XLAT_MAX_INSNS];
 } tctx_t;
+
+enum { PH_DISCOVER, PH_FLOW, PH_PLAN, PH_EMIT_INIT, PH_EMIT, PH_STUBS, PH_FINISH };
+
+#if defined(XLAT_HOST_TEST)
+uint32_t xlat_test_compile_ticks = UINT32_MAX;
+#endif
 
 /* ---------------------------------------------------------------------- */
 /* Region discovery                                                       */
@@ -284,23 +297,25 @@ static bool has_cycle(const tctx_t *c, int first)
  * leaves the region on every pass (has_cycle rejects it). */
 static int discover(tctx_t *c, uint16_t start)
 {
-    int head = 0, tail = 0, dhead = 0, dtail = 0;
     const int qcap = (int)(sizeof(c->queue) / sizeof(c->queue[0]));
     const int dcap = (int)(sizeof(c->deferred) / sizeof(c->deferred[0]));
-    c->queue[tail++] = (uint32_t)start << 16 | start;
-    c->n = 0;
-    c->n_seen = 0;
+    if (!c->discovering) {
+        c->head = c->tail = c->dhead = c->dtail = 0;
+        c->queue[c->tail++] = (uint32_t)start << 16 | start;
+        c->n = c->n_seen = c->n_source = 0;
+        c->discovering = true;
+    }
     for (;;) {
-        if ((head & 7) == 0 && xlat_compile_irq(c->rt))
+        if (xlat_compile_irq(c->rt))
             return XLAT_RJ_DEFER;
-        if (head == tail) {
-            if (dhead == dtail || c->n >= XLAT_MAX_INSNS || c->no_calls)
+        if (c->head == c->tail) {
+            if (c->dhead == c->dtail || c->n >= XLAT_MAX_INSNS || c->no_calls)
                 break;
-            head = tail = 0;
-            const uint16_t f = c->deferred[dhead++];
-            c->queue[tail++] = (uint32_t)f << 16 | f;
+            c->head = c->tail = 0;
+            const uint16_t f = c->deferred[c->dhead++];
+            c->queue[c->tail++] = (uint32_t)f << 16 | f;
         }
-        const uint32_t item = c->queue[head++];
+        const uint32_t item = c->queue[c->head++];
         const uint16_t ip = (uint16_t)item, root = (uint16_t)(item >> 16);
         if ((uint16_t)(ip - root + XLAT_SPAN_WINDOW / 2) >= XLAT_SPAN_WINDOW ||
             c->n >= XLAT_MAX_INSNS || seen_before(c, ip))
@@ -309,24 +324,32 @@ static int discover(tctx_t *c, uint16_t start)
         if (!xlat_code_direct(linear, 16u))
             continue;
         x86_insn_t in;
-        if (!x86_decode(c->rt->mem + linear, ip, &in) &&
-            !x86_decode_interp(c->rt->mem + linear, ip, &in))
+        const int s = c->n_source;
+        memcpy(c->source[s].b, c->rt->mem + linear, 16);
+        if (!x86_decode(c->source[s].b, ip, &in) &&
+            !x86_decode_interp(c->source[s].b, ip, &in))
             continue;
+        if (!in.len || in.len > 15u)
+            continue;
+        c->source[s].ip = ip;
+        c->source[s].len = in.len;
+        c->n_source++;
         /* a far CALL / JMP into this CS is a near one that pushes CS too */
         if (in.op == XO_FAR && (in.sub == FAR_CALL || in.sub == FAR_JMP) && in.a.imm == c->rt->cs)
             in.local = 1;
         c->in[c->n++] = in;
-        if ((falls_through(&in) || x86_is_call(&in)) && tail < qcap)
-            c->queue[tail++] = (uint32_t)root << 16 | (uint16_t)(ip + in.len);
+        if ((falls_through(&in) || x86_is_call(&in)) && c->tail < qcap)
+            c->queue[c->tail++] = (uint32_t)root << 16 | (uint16_t)(ip + in.len);
         if (is_branch(&in)) {
             if (x86_is_call(&in)) {
-                if (dtail < dcap)
-                    c->deferred[dtail++] = in.target;
-            } else if (tail < qcap) {
-                c->queue[tail++] = (uint32_t)root << 16 | in.target;
+                if (c->dtail < dcap)
+                    c->deferred[c->dtail++] = in.target;
+            } else if (c->tail < qcap) {
+                c->queue[c->tail++] = (uint32_t)root << 16 | in.target;
             }
         }
     }
+    c->discovering = false;
     if (!c->n || c->in[0].ip != start)
         return XLAT_RJ_START;
 
@@ -351,8 +374,12 @@ static int discover(tctx_t *c, uint16_t start)
          * falling through to the entry. */
         if (in->pad && nx->ip > in->ip && nx->ip <= in->ip + in->pad &&
             (uint32_t)nx->ip + nx->len == (uint32_t)in->ip + in->len) {
-            x86_decode_pad(c->rt->mem + c->cs_base + in->ip, in->ip,
-                           (unsigned)(nx->ip - in->ip), in);
+            for (int s = 0; s < c->n_source; ++s)
+                if (c->source[s].ip == in->ip) {
+                    x86_decode_pad(c->source[s].b, in->ip,
+                                   (unsigned)(nx->ip - in->ip), in);
+                    break;
+                }
             continue;
         }
         /* Other overlapping instructions (a jump into the middle of one,
@@ -521,17 +548,12 @@ static void mark_dead_flags(tctx_t *c)
 
 static bool dataflow(tctx_t *c)
 {
-    memset(c->in_set, 0, sizeof(c->in_set));
-    memset(c->out_set, 0, sizeof(c->out_set));
-    memset(c->cf_in, 0, sizeof(c->cf_in));
-    memset(c->cf_out, 0, sizeof(c->cf_out));
     uint64_t *const cf_out = c->cf_out;
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (int i = 0; i < c->n; ++i) {
-            if ((i & 7) == 0 && xlat_compile_irq(c->rt))
+    for (;;) {
+        for (; c->flow_i < c->n; ++c->flow_i) {
+            if (xlat_compile_irq(c->rt))
                 return false;
+            const int i = c->flow_i;
             uint64_t in = c->leader[i] ? NONE_BIT : 0, cfin = in;
             for (int p = 0; p < c->n; ++p) {
                 if (c->fall_idx[p] == i || c->tgt_idx[p] == i) {
@@ -552,11 +574,14 @@ static bool dataflow(tctx_t *c)
                 c->out_set[i] = out;
                 c->cf_in[i] = cfin;
                 cf_out[i] = cfout;
-                changed = true;
+                c->flow_changed = true;
             }
         }
+        if (!c->flow_changed)
+            return true;
+        c->flow_i = 0;
+        c->flow_changed = false;
     }
-    return true;
 }
 
 /* How the lazy flags reach rt at a point where they may be observed:
@@ -2603,12 +2628,12 @@ static bool emit_stubs(tctx_t *c)
 {
     arm_emit_t *e = &c->e;
     /* Back-edge stubs first: they branch to exit stubs emitted after them. */
-    for (int pass = 0; pass < 2; ++pass) {
-        for (int k = 0; k < c->n_stubs; ++k) {
-            if ((k & 7) == 0 && xlat_compile_irq(c->rt))
+    for (; c->stub_pass < 2; ++c->stub_pass, c->stub_i = 0) {
+        for (; c->stub_i < c->n_stubs; ++c->stub_i) {
+            if (xlat_compile_irq(c->rt))
                 return false;
-            stub_t *s = &c->stub[k];
-            if (pass ? s->type == ST_BACK : s->type != ST_BACK)
+            stub_t *s = &c->stub[c->stub_i];
+            if (c->stub_pass ? s->type == ST_BACK : s->type != ST_BACK)
                 continue;
             s->pos = e->pos;
             const uint32_t from = e->pos;
@@ -3125,14 +3150,30 @@ size_t xlat_translate_ctx_size(void)
     return sizeof(tctx_t);
 }
 
-bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int trace_min,
+bool xlat_translate_step(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int trace_min,
                     const uint16_t *extra, int n_extra,
-                    xlat_region_out_t *out, bool *full, void *ctx_mem)
+                    xlat_region_out_t *out, bool *full, void *ctx_mem, bool resume)
 {
     *full = false;
     tctx_t *const c = (tctx_t *)ctx_mem;
     bool ok = false;
     c->rt = rt;
+    out->reject = XLAT_RJ_NONE;
+    if (resume) {
+        switch (c->phase) {
+        case PH_DISCOVER:  goto discover_phase;
+        case PH_FLOW:      goto flow_phase;
+        case PH_PLAN:      goto plan_phase;
+        case PH_EMIT_INIT: goto emit_init_phase;
+        case PH_EMIT:      goto emit_phase;
+        case PH_STUBS:     goto stubs_phase;
+        case PH_FINISH:    goto finish_phase;
+        default:           out->reject = XLAT_RJ_EMIT; return false;
+        }
+    }
+    c->phase = PH_DISCOVER;
+    c->variant = 0;
+    c->discovering = false;
     c->cs_base = rt->seg_base[1];
     c->n_stubs = c->n_fix = c->n_dfix = 0;
     c->overflow = false;
@@ -3155,32 +3196,31 @@ bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int trace
     c->fn = 0;
 
     c->no_calls = 0;
-    int why = discover(c, ip);
-    if (why == XLAT_RJ_DEFER)
-        goto deferred;
-    bool calls = false;
-    for (int i = 0; i < c->n && !calls; ++i)
-        calls = x86_is_call(&c->in[i]) && c->tgt_idx[i] >= 0;
-    if (why == XLAT_RJ_NONE && c->fn && calls) {
-        /* A region without a loop leaves the functions it calls out: they
-         * get regions of their own, reached through the link table, instead
-         * of a copy in every caller's trace. Unless the path is too short
-         * then. */
-        c->no_calls = 1;
-        c->fn = 0;
+discover_phase:;
+    int why;
+    for (;;) {
         why = discover(c, ip);
         if (why == XLAT_RJ_DEFER)
             goto deferred;
-        if (why != XLAT_RJ_NONE || !c->fn) {
+        if (c->variant == 0 && why == XLAT_RJ_NONE && c->fn) {
+            bool calls = false;
+            for (int i = 0; i < c->n && !calls; ++i)
+                calls = x86_is_call(&c->in[i]) && c->tgt_idx[i] >= 0;
+            if (calls) {
+                c->variant = 1;
+                c->no_calls = 1;
+                c->fn = 0;
+                continue;
+            }
+        }
+        if (c->variant == 1 && (why != XLAT_RJ_NONE || !c->fn)) {
+            c->variant = 2;
             c->no_calls = 0;
             c->fn = 0;
-            why = discover(c, ip);
-            if (why == XLAT_RJ_DEFER)
-                goto deferred;
+            continue;
         }
+        break;
     }
-    if (xlat_compile_irq(rt))
-        goto deferred;
     out->fn = c->fn;
     out->n_insns = (uint8_t)c->n;
     out->n_interp = (uint8_t)c->n_interp;
@@ -3199,12 +3239,21 @@ bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int trace
         c->leader[j] = 1;
     }
     mark_dead_flags(c);
+    memset(c->in_set, 0, sizeof(c->in_set));
+    memset(c->out_set, 0, sizeof(c->out_set));
+    memset(c->cf_in, 0, sizeof(c->cf_in));
+    memset(c->cf_out, 0, sizeof(c->cf_out));
+    c->flow_i = 0;
+    c->flow_changed = false;
+    c->phase = PH_FLOW;
+flow_phase:
     if (!dataflow(c))
         goto deferred;
-    plan(c);
+    c->phase = PH_PLAN;
+plan_phase:
     if (xlat_compile_irq(rt))
         goto deferred;
-
+    plan(c);
     /* Source copies: runs of adjacent instructions. */
     out->n_runs = 0;
     uint32_t data = 0;
@@ -3220,27 +3269,47 @@ bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int trace
     }
     for (int r = 0; r < out->n_runs; ++r)
         data += 8u + ((out->runs[r].len + 3u) & ~3u);
+    c->data_bytes = data;
+    c->phase = PH_EMIT_INIT;
+emit_init_phase:
+    if (xlat_compile_irq(rt))
+        goto deferred;
+    c->n_stubs = c->n_fix = c->n_dfix = 0;
+    c->overflow = false;
     /* No room: emitted all the same into no space (arm_e16/e32 count the
      * bytes), so the cache learns the size the region needs. */
-    const uint32_t cap = a->data_bottom > a->code_top + data ? a->data_bottom - data : a->code_top;
+    const uint32_t cap = a->data_bottom > a->code_top + c->data_bytes
+                       ? a->data_bottom - c->data_bytes : a->code_top;
     c->e = (arm_emit_t){a->base, a->code_top, cap, false, 0};
     for (int i = 0; i < c->n; ++i)
         c->side_stub[i][0] = c->side_stub[i][1] = -1;
-    for (int i = 0; i < c->n; ++i) {
+    c->emit_i = 0;
+    c->phase = PH_EMIT;
+emit_phase:
+    for (; c->emit_i < c->n; ++c->emit_i) {
+        const int i = c->emit_i;
         const uint32_t from = c->e.pos;
         (void)from;
-        if ((i & 7) == 0 && xlat_compile_irq(rt))
+        if (xlat_compile_irq(rt))
             goto deferred;
         emit_insn(c, i);
         SIZE_NOTE(c->in[i].op < XLAT_SIZE_RECON ? c->in[i].op : 0, from);
     }
-    if (!emit_stubs(c) || xlat_compile_irq(rt))
+    c->stub_pass = c->stub_i = 0;
+    c->phase = PH_STUBS;
+stubs_phase:
+    if (!emit_stubs(c))
+        goto deferred;
+    c->phase = PH_FINISH;
+finish_phase:
+    if (xlat_compile_irq(rt))
         goto deferred;
     if (c->e.full) {
         /* labels past the space are not real: no patching */
         *full = true;
         out->reject = XLAT_RJ_FULL;
-        out->need = (c->e.pos - a->code_top) + c->e.over + 4u + data;
+        out->need = (c->e.pos - a->code_top) + c->e.over + 4u + c->data_bytes;
+        c->phase = PH_EMIT_INIT;
         goto done;
     }
     for (int k = 0; k < c->n_dfix; ++k) {
@@ -3261,8 +3330,16 @@ bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int trace
         goto done;
     }
 
-    if (xlat_compile_irq(rt))
-        goto deferred;
+    /* Validate the exact bytes decoded before any suspension. */
+    for (int s = 0; s < c->n_source; ++s) {
+        const uint32_t linear = c->cs_base + c->source[s].ip;
+        const uint32_t len = c->source[s].len;
+        if (!xlat_code_direct(linear, len) ||
+            memcmp(c->source[s].b, rt->mem + linear, len)) {
+            out->reject = XLAT_RJ_CHANGED;
+            goto done;
+        }
+    }
     out->code_off = a->code_top;
     out->code_len = c->e.pos - a->code_top;
     out->lo = c->lo;
@@ -3283,14 +3360,21 @@ bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int trace
             out->n_entries++;
         }
     }
-    out->data_size = data;
+    out->data_size = c->data_bytes;
     a->code_top = (c->e.pos + 3u) & ~3u;
     ok = true;
     goto done;
 deferred:
-    /* No entry or region descriptor has been published. The caller owns
-     * eviction/map maintenance and may reuse these uncommitted bytes. */
+    /* Preserve the context and uncommitted arena window. */
     out->reject = XLAT_RJ_DEFER;
 done:
     return ok;
+}
+
+bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int trace_min,
+                    const uint16_t *extra, int n_extra,
+                    xlat_region_out_t *out, bool *full, void *ctx_mem)
+{
+    return xlat_translate_step(a, rt, ip, trace_min, extra, n_extra, out, full,
+                               ctx_mem, false);
 }
