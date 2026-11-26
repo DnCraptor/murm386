@@ -158,11 +158,13 @@ static state_t *st;
 static bool disabled;
 /* Non-NULL only while xlat_run owns this runtime state. */
 static xlat_rt_t *gap_rt;
+static bool flush_pending;
 static void gap_reset(void);
 
 uint8_t xlat_entry_map[XLAT_MAP_BITS / 8];
 uint8_t xlat_code_map[XLAT_CODE_MAP_BYTES];
 bool xlat_dirty = true;
+uint32_t xlat_write_lo, xlat_write_hi;
 bool xlat_clean_resume;
 uint32_t xlat_call_key[XLAT_CALL_SLOTS];
 uint8_t xlat_call_count[XLAT_CALL_SLOTS];
@@ -602,6 +604,8 @@ static __attribute__((noinline)) bool ready(void)
 
 void xlat_release(void)
 {
+    flush_pending = false;
+    xlat_write_hi = 0;
     xlat_call_queue_blocked = false;
     memset(xlat_call_key, 0, sizeof(xlat_call_key));
     memset(xlat_call_count, 0, sizeof(xlat_call_count));
@@ -615,6 +619,21 @@ void xlat_flush(void)
 {
     if (!st)
         return;
+    if (gap_rt) {
+        /* FDOS can switch processes inside a helper called by the
+         * trampoline. Invalidate now, but keep code and descriptors
+         * until the outstanding native return addresses are gone. */
+        flush_pending = true;
+        for (int k = 0; k < XLAT_MAX_REGIONS; ++k)
+            st->region[k].live = st->region[k].cold = 0;
+        for (unsigned k = 0; k < XLAT_LINK_SLOTS; ++k)
+            st->link[k].key = UINT32_MAX;
+        memset(xlat_entry_map, 0, sizeof(xlat_entry_map));
+        gap_reset();
+        return;
+    }
+    flush_pending = false;
+    xlat_write_hi = 0;
     reset_tables();
     memset(xlat_call_key, 0, sizeof(xlat_call_key));
     memset(xlat_call_count, 0, sizeof(xlat_call_count));
@@ -660,9 +679,9 @@ static uint32_t XLAT_HOT_FN(load32)(const uint8_t *p)
 }
 
 /* The x86 bytes the region was built from are still there. */
-static bool XLAT_HOT_FN(region_valid)(const region_t *r, const xlat_rt_t *rt)
+static bool XLAT_HOT_FN(region_bytes_valid)(const region_t *r, const xlat_rt_t *rt)
 {
-    if (rt->seg_base[1] != r->cs_base || rt->mem_size != r->mem_size)
+    if (rt->mem_size != r->mem_size)
         return false;
     const uint8_t *d = st->arena.base + r->data_off;
     for (unsigned k = 0; k < r->n_runs; ++k) {
@@ -682,6 +701,11 @@ static bool XLAT_HOT_FN(region_valid)(const region_t *r, const xlat_rt_t *rt)
         d += 8 + ((len + 3u) & ~3u);
     }
     return true;
+}
+
+static bool XLAT_HOT_FN(region_valid)(const region_t *r, const xlat_rt_t *rt)
+{
+    return rt->seg_base[1] == r->cs_base && region_bytes_valid(r, rt);
 }
 
 /* rt->cs:ip is in the x86 code of a live or dropped region (its runs: a
@@ -763,6 +787,35 @@ static void rebuild_maps(void)
                 xlat_code_map[b >> 3] |= (uint8_t)(1u << (b & 7u));
             d += 8 + ((len + 3u) & ~3u);
         }
+    }
+}
+
+/* Only known guest writes reach here. Retain the epoch and every link
+ * whose region still matches its source bytes, even across different CS. */
+static void validate_local_writes(const xlat_rt_t *rt)
+{
+    const uint32_t hi = xlat_write_hi;
+    if (!hi)
+        return;
+    const uint32_t lo = xlat_write_lo;
+    xlat_write_hi = 0;
+    xlat_stats.local_checks++;
+    bool changed = false;
+    for (int k = 0; k < XLAT_MAX_REGIONS; ++k) {
+        region_t *r = &st->region[k];
+        if (!(r->live || r->cold) || r->lo >= hi || r->lo + r->span <= lo)
+            continue;
+        if (region_bytes_valid(r, rt))
+            continue;
+        xlat_stats.invalidations += r->live != 0;
+        xlat_stats.local_invalid++;
+        r->live = r->cold = 0;
+        unlink_region(k);
+        changed = true;
+    }
+    if (changed) {
+        gap_reset();
+        rebuild_maps();
     }
 }
 
@@ -1302,6 +1355,7 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
         st->epoch++;
         rt->hit_lo = rt->hit_hi = 0;
     }
+    validate_local_writes(rt);
     const xlat_tramp_fn tramp = (xlat_tramp_fn)(uintptr_t)(st->arena.base + 1);
     rt->link = st->link;
     rt->last = st->last;
@@ -1403,7 +1457,7 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
             x->exits[exit_kind]++;
         }
         /* STOP: XRIP must run the next instruction. */
-        if (*rt->intr || rt->exit_kind == XLAT_EXIT_STOP)
+        if (flush_pending || *rt->intr || rt->exit_kind == XLAT_EXIT_STOP)
             break;
         /* Budget used up (entry costs, short regions): the burst lasts
          * until its deadline, as in the back-edge stubs. */
@@ -1430,6 +1484,8 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
     xlat_stats.links += rt->links;
     xlat_stats.entries += rt->links;
     gap_rt = NULL;
+    if (flush_pending)
+        xlat_flush();
     return ran;
 }
 
@@ -1927,6 +1983,9 @@ void xlat_log_write(uint16_t psp, const char *name)
                (unsigned long)xlat_stats.compile_defers, (unsigned long)xlat_stats.disk_irq_yields,
                (unsigned long)xlat_stats.compile_resumes, (unsigned long)xlat_stats.compile_cancel,
                (unsigned long)xlat_stats.compile_queue_drops);
+    log_printf("I int_direct=%lu bios_leaf=%lu local_checks=%lu local_invalid=%lu\r\n",
+               (unsigned long)xlat_stats.int_direct, (unsigned long)xlat_stats.int_leaf,
+               (unsigned long)xlat_stats.local_checks, (unsigned long)xlat_stats.local_invalid);
     /* CPU bursts: averages and histograms (xlat_stats_t), XRIP only / with
      * translated code; device service after the bursts. XLAT_SLICE_US is
      * meant to match the usual XRIP burst. */
@@ -2013,19 +2072,20 @@ void xlat_note_service(uint32_t us)
  * written memory: the running region must still match its x86 bytes. */
 bool XLAT_HOT_FN(xlat_region_still_valid)(xlat_rt_t *rt)
 {
-    /* Nothing wrote translated x86 code since xlat_run() started or the last
-     * check (XRIP's writes into xlat_code_map blocks, native handlers, OUT,
-     * x87 stores set xlat_dirty): nothing to compare. */
+    if (flush_pending)
+        return false;
+    region_t *r = rt->cur < XLAT_MAX_REGIONS ? &st->region[rt->cur] : NULL;
+    if (xlat_write_hi)
+        validate_local_writes(rt);
+    if (r && !r->live)
+        return false;
     if (!xlat_dirty)
         return true;
     xlat_dirty = false;
-    region_t *r = rt->cur < XLAT_MAX_REGIONS ? &st->region[rt->cur] : NULL;
     /* the other regions are compared at their next entry (through
      * xlat_run(): the link table entries are for the old epoch) */
     rt->epoch = ++st->epoch;
     rt->hit_lo = rt->hit_hi = 0;
-    if (r && !r->live)
-        return false;       /* FDOS may have freed it during the call */
     if (!r || region_valid(r, rt)) {
         if (r)
             r->epoch = st->epoch;

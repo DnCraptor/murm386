@@ -220,8 +220,10 @@ static int min_native_path(const tctx_t *c, int first)
                 continue;
             const x86_insn_t *in = &c->in[i];
             if (in->op == XO_INTERP) {
-                if (dist[i] < best)
-                    best = dist[i];
+                /* INT is a native helper, but may transfer to guest code. */
+                const int d = dist[i] + ((in->sub & XLAT_XI_INT_MASK) != 0);
+                if (d < best)
+                    best = d;
                 continue;
             }
             const int w = in->op == XO_STR && in->rep ? XLAT_TRACE_MIN : 1;
@@ -332,7 +334,8 @@ static int discover(tctx_t *c, uint16_t start)
         if (!in.len || in.len > 15u)
             continue;
         c->source[s].ip = ip;
-        c->source[s].len = in.len;
+        c->source[s].len = (uint8_t)(in.len -
+            (in.op == XO_INTERP && (in.sub & XLAT_XI_INT_IMM) != 0));
         c->n_source++;
         /* a far CALL / JMP into this CS is a near one that pushes CS too */
         if (in.op == XO_FAR && (in.sub == FAR_CALL || in.sub == FAR_JMP) && in.a.imm == c->rt->cs)
@@ -405,7 +408,7 @@ static int discover(tctx_t *c, uint16_t start)
         c->tgt_idx[i] = is_branch(in) ? (int8_t)find_insn(c, in->target) : -1;
         if (c->tgt_idx[i] >= 0)
             c->leader[c->tgt_idx[i]] = 1;
-        if (x86_is_call(in)) {
+        if (x86_is_call(in) || (in->op == XO_INTERP && (in->sub & XLAT_XI_INT_MASK))) {
             const int ret = find_insn(c, (uint16_t)(in->ip + in->len));
             if (ret >= 0)
                 c->leader[ret] = 1;
@@ -421,7 +424,7 @@ static int discover(tctx_t *c, uint16_t start)
      * call: keep regions mostly native. */
     int interp = 0;
     for (int i = 0; i < c->n; ++i)
-        interp += c->in[i].op == XO_INTERP;
+        interp += c->in[i].op == XO_INTERP && !(c->in[i].sub & XLAT_XI_INT_MASK);
     c->n_interp = interp;
     if (interp * XLAT_INTERP_RATIO > c->n)
         return XLAT_RJ_INTERP;
@@ -1479,7 +1482,7 @@ static void emit_interp(tctx_t *c, int i)
     const int r = sync_recon(c, c->in_set[i], c->pfp[i]);
     if (r >= 0)
         emit_recon(c, r);
-    emit_interp_call(c, i, in->sub & XI_MAY_WRITE, !(in->sub & XI_NO_FALL));
+    emit_interp_call(c, i, in->sub & (XI_MAY_WRITE | XLAT_XI_INT_MASK), !(in->sub & XI_NO_FALL));
 }
 
 static void emit_jcc(tctx_t *c, int i)
@@ -3261,16 +3264,19 @@ plan_phase:
     if (xlat_compile_irq(rt))
         goto deferred;
     plan(c);
-    /* Source copies: runs of adjacent instructions. */
+    /* Source copies: omit only the runtime-read operand of unprefixed INT.
+     * The opcode and every other decoded byte remain protected. */
     out->n_runs = 0;
     uint32_t data = 0;
     for (int i = 0; i < c->n; ++i) {
+        const uint16_t len = (uint16_t)(c->in[i].len -
+            (c->in[i].op == XO_INTERP && (c->in[i].sub & XLAT_XI_INT_IMM) != 0));
         if (out->n_runs && out->runs[out->n_runs - 1].ip + out->runs[out->n_runs - 1].len ==
                                c->in[i].ip) {
-            out->runs[out->n_runs - 1].len += c->in[i].len;
+            out->runs[out->n_runs - 1].len += len;
         } else {
             out->runs[out->n_runs].ip = c->in[i].ip;
-            out->runs[out->n_runs].len = c->in[i].len;
+            out->runs[out->n_runs].len = len;
             out->n_runs++;
         }
     }
@@ -3359,7 +3365,8 @@ finish_phase:
             bool head = c->in[i].ip == ip;
             for (int j = 0; j < c->n && !head; ++j)
                 head = (j >= i && c->tgt_idx[j] == i) ||
-                       (x86_is_call(&c->in[j]) &&
+                       ((x86_is_call(&c->in[j]) ||
+                         (c->in[j].op == XO_INTERP && (c->in[j].sub & XLAT_XI_INT_MASK))) &&
                         (uint16_t)(c->in[j].ip + c->in[j].len) == c->in[i].ip);
             for (int k = 0; k < n_extra && !head; ++k)
                 head = c->in[i].ip == extra[k];

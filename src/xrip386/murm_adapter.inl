@@ -276,24 +276,46 @@ static uint32_t xlat_umb_room(void)
 #endif
 }
 
-/* Called by translated code (xlat.h): XRIP executes the one instruction at
- * rt->ip. The registers are in cpu->gprx already; the lazy flags come from
- * and go back to rt. */
+/* The same interrupt entry as XRIP's opcode handler, without entering
+ * run_instructions(). Only the actual IVT destination can qualify for a
+ * nonblocking native BIOS escape; an installed hook or guest ISR is not
+ * bypassed. Do not run blocking/native EXEC handlers inside a trampoline. */
+static void __time_critical_func(xlat_direct_int)(CPU *cpu, uint8_t vector, uint32_t len)
+{
+    firstip = XRIP_IP;
+    first_esp = dwordregs[regsp];
+    reptype = segoverride = 0;
+    opsize32 = addrsize32 = false;
+    useseg = DS_BASE;
+    pending_trap = false;
+    ++retired;
+    StepIP(len);
+    const bool leaf = !cpu->int_hooks[vector] &&
+        ((vector == 0x16 && (XRIP_AH == 1 || XRIP_AH == 2 ||
+                            XRIP_AH == 0x11 || XRIP_AH == 0x12)) ||
+         (vector == 0x33 && XRIP_AX == 3));
+    intcall86(vector);
+    if (!leaf || cpu->bios || !xlat_state_ok(cpu) ||
+        CS_BASE + XRIP_IP != NATIVE_BIOS_STUB_PHYS + NATIVE_BIOS_STUB_SIZE * vector ||
+        getmem8(CS_BASE, XRIP_IP) != 0x0f ||
+        getmem8(CS_BASE, XRIP_IP + 1u) != 0xff ||
+        getmem8(CS_BASE, XRIP_IP + 2u) != vector)
+        return;
+    firstip = XRIP_IP;
+    first_esp = dwordregs[regsp];
+    ++retired;
+    StepIP(3);
+    bios_escape(vector);
+    xlat_stats.int_leaf++;
+}
+
+/* Called by translated code: execute one instruction or a direct INT.
+ * Registers are in cpu->gprx; lazy flags come from and go back to rt. */
 uint32_t __time_critical_func(xlat_interp_one)(xlat_rt_t *rt, uint32_t flags)
 {
     CPU *const cpu = active_cpu;
     if (xlat_stack_free() < XLAT_STACK_NEEDED)
         return 0;   /* XRIP runs it after the exit, from a shallower stack */
-    xlat_stats.interp++;
-    if (flags & 4u) {
-        xlat_stats.side_interp++;
-        xlat_note_side(rt);
-    }
-#if XLAT_LOG
-    xlat_prof_note((flags & 4u) ? XLAT_PROF_SIDE : XLAT_PROF_INTERP,
-                   (uint32_t)rt->cs << 16 | (rt->ip & 0xffffu), rt->seg_base[1] + (rt->ip & 0xffffu),
-                   rt->mem, rt->mem_size, 1);
-#endif
     XRIP_IP = rt->ip;
     flags_result = rt->lazy_result;
     flags_dst = rt->lazy_dst;
@@ -303,12 +325,35 @@ uint32_t __time_critical_func(xlat_interp_one)(xlat_rt_t *rt, uint32_t flags)
     x86_flags.value = rt->eflags;   /* the shift / MUL helpers write the image */
     xlat_segs_to_xrip(rt);          /* MOV ES / DS, LES, LDS, POP ES / DS, far CS */
 
+    const bool direct = (flags & XLAT_XI_INT_MASK) && xlat_state_ok(cpu);
+    const uint8_t vector = !direct ? 0 :
+        (flags & XLAT_XI_INT3) ? 3 : getmem8(CS_BASE, (uint16_t)(XRIP_IP + 1u));
+    /* EXEC can synchronously run a whole child. Unwind the trampoline
+     * before dispatch so the child can enter its own JIT normally. */
+    if (direct && vector == 0x21 && XRIP_AH == 0x4b)
+        return 0;
+    if (!direct) {
+        xlat_stats.interp++;
+        if (flags & 4u) {
+            xlat_stats.side_interp++;
+            xlat_note_side(rt);
+        }
+#if XLAT_LOG
+        xlat_prof_note((flags & 4u) ? XLAT_PROF_SIDE : XLAT_PROF_INTERP,
+                       (uint32_t)rt->cs << 16 | (rt->ip & 0xffffu), rt->seg_base[1] + (rt->ip & 0xffffu),
+                       rt->mem, rt->mem_size, 1);
+#endif
+    }
+
     void *context[5];
     void **const outer_fault_point = fault_point;
     fault_point = context;
     if (__builtin_setjmp(context))
         deliver_fault();
-    else
+    else if (direct) {
+        xlat_stats.int_direct++;
+        xlat_direct_int(cpu, vector, (flags & XLAT_XI_INT3) ? 1u : 2u);
+    } else
         run_instructions(1);
     fault_point = outer_fault_point;
 
@@ -329,9 +374,7 @@ uint32_t __time_critical_func(xlat_interp_one)(xlat_rt_t *rt, uint32_t flags)
     /* Compare against the old region's CS before publishing the new CS.
      * A device or a native handler may write memory even when the opcode
      * itself was not classified XI_MAY_WRITE. */
-    const bool valid = !can_continue ||
-                       (!(flags & 1u) && !xlat_dirty) ||
-                       xlat_region_still_valid(rt);
+    const bool valid = !can_continue || xlat_region_still_valid(rt);
     /* Publish CS on EVERY exit, including STOP (IRQ, mode, native_done).
      * Otherwise xlat_enter() restores the pre-interrupt CS over the ISR. */
     rt->cs = segregs[regcs];

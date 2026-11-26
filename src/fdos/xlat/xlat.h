@@ -189,6 +189,8 @@ typedef struct xlat_stats {
     uint32_t stack_skips;       /* translations postponed: core-0 stack too low */
     uint32_t interp;            /* instructions run by XRIP from inside a region */
     uint32_t side_interp;       /* of those: accesses outside fast memory or onto the code */
+    uint32_t int_direct, int_leaf; /* software INT / native BIOS escape without decoding */
+    uint32_t local_checks, local_invalid;
     uint32_t cuts;              /* XRIP bursts ended at a marked branch target */
     uint32_t cut_entries;       /* of those: translated code was entered */
     uint32_t cold;              /* regions given back to XRIP (too short per entry) */
@@ -240,7 +242,7 @@ bool xlat_run(xlat_rt_t *rt);
 /* Credit from completed guest CPU bursts, excluding compiler time. */
 void xlat_compile_credit(uint32_t guest_us);
 
-/* Drop every translation (e.g. after a program terminates). */
+/* Drop every translation; defer recycling while a trampoline is active. */
 void xlat_flush(void);
 
 /* Invalidate code in guest DOS memory returned to the MCB allocator.
@@ -288,6 +290,9 @@ void xlat_prof_note(unsigned kind, uint32_t key, uint32_t linear, const uint8_t 
  * Returns 1 if the region may go on; 2 if CS changed (rt->cs and
  * rt->seg_base[1] updated) and the dispatcher may continue there; 0 if XRIP
  * must take over (mode, TF, IRQ, HLT, stack low, or the region's code changed). */
+#define XLAT_XI_INT3     8u
+#define XLAT_XI_INT_IMM 16u
+#define XLAT_XI_INT_MASK (XLAT_XI_INT3 | XLAT_XI_INT_IMM)
 uint32_t xlat_interp_one(xlat_rt_t *rt, uint32_t flags);
 
 /* For xlat_interp_one(): the x86 bytes of the running region are unchanged
@@ -321,14 +326,21 @@ extern uint8_t xlat_code_map[XLAT_CODE_MAP_BYTES];
  * calls, mapping changes and XRIP writes touching translated code.
  * Consecutive guest-only bursts may retain their epoch. xlat_run() and
  * xlat_region_still_valid() revalidate the affected regions when dirty. */
-extern bool xlat_dirty;
+extern bool xlat_dirty;  /* unknown writes / mapping changes */
+extern uint32_t xlat_write_lo, xlat_write_hi; /* known writes: half-open range, hi=0 when clean */
 /* One-shot permission from an audited consecutive guest loop. Other CPU
  * entry points retain the conservative dirty-on-entry behavior. */
 extern bool xlat_clean_resume;
 static inline void xlat_note_write(uint32_t linear)
 {
-    if (xlat_code_map[linear >> (XLAT_CODE_BLOCK_SHIFT + 3)] & (1u << ((linear >> XLAT_CODE_BLOCK_SHIFT) & 7u)))
-        xlat_dirty = true;
+    if (xlat_code_map[linear >> (XLAT_CODE_BLOCK_SHIFT + 3)] & (1u << ((linear >> XLAT_CODE_BLOCK_SHIFT) & 7u))) {
+        /* The code map includes up to 15 bytes before each source run.
+         * Cover a wide write without adding a size argument to the hot path. */
+        if (!xlat_write_hi || linear < xlat_write_lo)
+            xlat_write_lo = linear;
+        if (linear + 16u > xlat_write_hi)
+            xlat_write_hi = linear + 16u;
+    }
 }
 
 /* Hot CALL targets (near, far, r/m) seen by XRIP: a target reaching

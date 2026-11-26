@@ -803,6 +803,11 @@ bool x86_decode_interp(const uint8_t *code, uint16_t ip, x86_insn_t *in)
     in->pad = 0;
     in->op = XO_INTERP;
     in->sub = (uint8_t)((reg_only ? 0 : XI_MAY_WRITE) | (fall ? 0 : XI_NO_FALL));
+    /* Only unprefixed INT has this fast path; its imm8 is read at execution. */
+    if (code[0] == 0xcc && pos == 1)
+        in->sub |= XLAT_XI_INT3;
+    else if (code[0] == 0xcd && pos == 2)
+        in->sub |= XLAT_XI_INT_IMM;
     in->size = 16;
     in->a.kind = in->b.kind = OPD_NONE;
     in->mem_mod = in->mem_rm = in->mem_direct = 0;

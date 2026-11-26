@@ -4445,6 +4445,9 @@ static void exec_enter_child(uint32_t saved_linear,
   pstore8(saved_linear + offsetof(struct exec_child_context, native_done),
           cpu->native_done ? 1u : 0u);
 
+#if XLAT
+  xlat_flush();
+#endif
   task_idata_write16(offsetof(struct dos_data, cu_psp), child_psp_seg);
   task_idata_write_far(offsetof(struct dos_data, dta),
                        MK_FP(child_psp_seg,offsetof(psp,ps_cmd)));
@@ -4523,6 +4526,9 @@ static void exec_leave_child(uint32_t saved_linear,
   task_idata_write8(offsetof(struct dos_data, abort_progress), (UBYTE)-1);
   exec_release_child(child_psp_seg);
 
+#if XLAT
+  xlat_flush();
+#endif
   task_idata_write16(offsetof(struct dos_data, cu_psp), saved_cu_psp);
   task_idata_write_far(offsetof(struct dos_data, dta), saved_dta);
   task_idata_write8(offsetof(struct dos_data, abort_progress), 0);
@@ -4567,6 +4573,9 @@ static bool exec_return_user(void)
   ret = fdos_psp_vector(psp_seg, 0x22);
 
   exec_release_child(psp_seg);
+#if XLAT
+  xlat_flush();
+#endif
   task_idata_write16(offsetof(struct dos_data, cu_psp), parent);
   task_idata_write_far(offsetof(struct dos_data, dta),
                        MK_FP(parent, offsetof(psp, ps_cmd)));
@@ -5301,6 +5310,9 @@ STATIC int load_transfer(UWORD ds, exec_blk * exp, UWORD fcbcode, COUNT mode)
      sees the child as current and resumes its parent (the debugger) at
      PSP:0Ah. With the debugger still current, its own EXEC ended
      instead, and the IDE was terminated together with the program. */
+#if XLAT
+  xlat_flush();
+#endif
   task_idata_write16(offsetof(struct dos_data, cu_psp), ds);
   task_idata_write_far(offsetof(struct dos_data, dta),
                        MK_FP(ds, offsetof(psp, ps_cmd)));

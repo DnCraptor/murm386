@@ -908,7 +908,6 @@ uint32_t xlat_rt_io(xlat_rt_t *rt, uint32_t ctl, uint32_t value)
 /* The test's xlat_interp_one(): the reference interpreter is the "XRIP". */
 uint32_t xlat_interp_one(xlat_rt_t *rt, uint32_t flags)
 {
-    const uint32_t may_write = flags & 1u;
     if (flags & 4u)
         side_calls++;
     R.ip = (uint16_t)rt->ip;
@@ -925,14 +924,13 @@ uint32_t xlat_interp_one(xlat_rt_t *rt, uint32_t flags)
     interp_calls++;
     if (R.halted)
         return 0;
+    const bool valid = xlat_region_still_valid(rt);
     if (R.cs != rt->cs) {
         rt->cs = R.cs;
         rt->seg_base[1] = R.seg_base[1];
-        return 2;
+        return valid ? 2 : 0;
     }
-    if ((may_write || xlat_dirty) && !xlat_region_still_valid(rt))
-        return 0;
-    return 1;
+    return valid ? 1 : 0;
 }
 
 /* ---------------------------------------------------------------------- */
