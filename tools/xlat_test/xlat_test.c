@@ -905,6 +905,13 @@ uint32_t xlat_rt_io(xlat_rt_t *rt, uint32_t ctl, uint32_t value)
     return XLAT_IO_DONE | tio(ctl & 0xffffu, bytes, out, out ? value & (bytes == 2 ? 0xffffu : 0xffu) : 0u);
 }
 
+/* Model the same decoded memory access in the host reference. */
+uint32_t xlat_bus_read(uint32_t address, unsigned bytes)
+{
+    ++xlat_stats.bus_read;
+    return bytes == 1 ? rd8(address) : bytes == 2 ? rd16(address) : rd32(address);
+}
+
 /* Model the physical VGA aperture using the host's guest memory. */
 uint32_t xlat_vga_read(uint32_t address, unsigned bytes)
 {

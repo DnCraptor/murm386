@@ -120,14 +120,26 @@ void bios_intcall(CPU* cpu, uint8_t intnum, const char* owner) {
 handler_t handlers[256];
 
 #if XLAT
+#if !BIOS_DEBUG && !PDB_DEBUG
+/* Cursor helpers take the CRTC port from BDA. Do not audit an arbitrary
+ * guest-supplied I/O port as a VGA-only operation. */
+static bool xlat_crtc_port(void)
+{
+    const uint16_t port = readw86(0x463u);
+    return port == 0 || port == 0x3b4u || port == 0x3d4u;
+}
+#endif
+
 unsigned bios_xlat_leaf_scope(CPU *cpu, uint8_t id)
 {
 #if !BIOS_DEBUG && !PDB_DEBUG
     if (id == 0x10 && handlers[id] == bios_10h) {
-        /* These dispatch cases read BDA/video memory or return registers;
-         * none writes guest RAM or goes to bios_10h's err/FLAGS path. */
         switch (CPU_AH) {
-        case 0x03: case 0x04: case 0x08: case 0x0f:
+        case 0x01: case 0x02: case 0x05:
+            if (xlat_crtc_port())
+                return BIOS_XLAT_CURSOR;
+            break;
+        case 0x03: case 0x04: case 0x08: case 0x0d: case 0x0f:
             return BIOS_XLAT_READONLY;
         }
     }
@@ -146,6 +158,41 @@ unsigned bios_xlat_leaf_scope(CPU *cpu, uint8_t id)
     (void)id;
 #endif
     return BIOS_XLAT_UNKNOWN;
+}
+
+bool bios_xlat_can_dispatch(CPU *cpu, uint8_t id)
+{
+#if !BIOS_DEBUG && !PDB_DEBUG
+    if (bios_xlat_leaf_scope(cpu, id) != BIOS_XLAT_UNKNOWN)
+        return true;
+    if (id == 0x10 && handlers[id] == bios_10h) {
+        /* These video functions do not run guest code. Writes are NOT
+         * assumed to stay in VGA: addresses may depend on mutable BDA. */
+        switch (CPU_AH) {
+        case 0x06: case 0x07:
+            /* The scroll implementation uses uint8_t loop variables. */
+            return readw86(0x44au) <= 255u && read86(0x484u) < 255u;
+        case 0x09: case 0x0a: case 0x0c:
+            return true;
+        case 0x0e:
+            return xlat_crtc_port();
+        }
+    }
+    if (id == 0x21 && handlers[id] == fdos_21h) {
+        /* Only audited, nonblocking queries in fdos_21h.cpp. The common
+         * DOS register frame, PSP and internal data still require the
+         * conservative write scope. Date/time may call a guest driver. */
+        switch (CPU_AH) {
+        case 0x19: case 0x2f: case 0x30: case 0x34: case 0x35:
+        case 0x51: case 0x54: case 0x59: case 0x62:
+            return true;
+        }
+    }
+#else
+    (void)cpu;
+    (void)id;
+#endif
+    return false;
 }
 #endif
 

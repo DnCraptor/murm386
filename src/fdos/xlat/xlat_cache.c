@@ -1868,6 +1868,97 @@ static bool string_vga(uint32_t a, unsigned bytes)
     return a >= 0xa0000u && a <= 0xc0000u - bytes;
 }
 
+static bool bus_write_ok(const xlat_rt_t *rt, uint32_t address, unsigned bytes)
+{
+    return (bytes == 1 || bytes == 2 || bytes == 4) &&
+           address < 0x110000u && bytes <= 0x110000u - address &&
+           (rep_direct(rt, address, bytes) || string_vga(address, bytes));
+}
+
+/* A decoded scalar store is already past effective-address calculation.
+ * Never bypass EMS/HMA/other non-direct mappings for writes. A store to
+ * live source is committed once, validated locally, then redispatched if
+ * the active region was invalidated. The caller commits SP afterwards. */
+uint32_t xlat_rt_bus_write(xlat_rt_t *rt, uint32_t address, uint32_t value, unsigned bytes)
+{
+    if (!bus_write_ok(rt, address, bytes)) {
+        ++xlat_stats.bus_write_miss;
+        return 0;
+    }
+    if (rep_direct(rt, address, bytes)) {
+        if (bytes == 1)
+            rt->mem[address] = (uint8_t)value;
+        else if (bytes == 2) {
+            const uint16_t word = (uint16_t)value;
+            __builtin_memcpy(rt->mem + address, &word, 2);
+        } else
+            __builtin_memcpy(rt->mem + address, &value, 4);
+    } else {
+        xlat_vga_write(address, value, bytes);
+    }
+    ++xlat_stats.bus_write;
+    xlat_note_write_n(address, bytes);
+    if ((xlat_write_hi || xlat_dirty) && !xlat_region_still_valid(rt)) {
+        ++xlat_stats.bus_smc;
+        return XLAT_MEM_REDISPATCH;
+    }
+    return 1;
+}
+
+/* Decoded ADD r/m,reg/imm: validate the write mapping before the first
+ * read (VGA reads modify latches). Keep the exact XRIP lazy ADD flags;
+ * the emitter can also reconstruct APSR for an immediately following Jcc. */
+uint32_t xlat_rt_bus_add(xlat_rt_t *rt, uint32_t address, uint32_t value, unsigned bytes)
+{
+    if (!bus_write_ok(rt, address, bytes)) {
+        ++xlat_stats.bus_write_miss;
+        return 0;
+    }
+    const unsigned shift = 32u - bytes * 8u;
+    const uint32_t dst = xlat_bus_read(address, bytes) << shift;
+    const uint32_t src = value << shift;
+    const uint32_t result = dst + src;
+    const uint32_t status = xlat_rt_bus_write(rt, address, result >> shift, bytes);
+    if (status) {
+        rt->lazy_dst = dst;
+        rt->lazy_src = src;
+        rt->lazy_result = result;
+        rt->lazy_op = (uint8_t)((FK_ADD << 5) | shift);
+        rt->lazy_cf = result < dst;
+        ++xlat_stats.bus_rmw;
+    }
+    return status;
+}
+
+/* The stack is 16-bit in JIT mode. The two reads of RETF deliberately
+ * use separate addresses, including SP wrap, as XRIP's pop()/far_return. */
+uint32_t xlat_rt_bus_pop(xlat_rt_t *rt, uint32_t release, uint32_t far_ret)
+{
+    uint16_t sp = (uint16_t)rt->sp;
+    uint32_t value = xlat_bus_read(rt->seg_base[2] + sp, 2);
+    sp = (uint16_t)(sp + 2u);
+    if (far_ret) {
+        value |= xlat_bus_read(rt->seg_base[2] + sp, 2) << 16;
+        sp = (uint16_t)(sp + 2u);
+    }
+    rt->sp = (rt->sp & 0xffff0000u) | (uint16_t)(sp + release);
+    ++xlat_stats.bus_pop;
+    return value;
+}
+
+/* Check at the last possible moment before the full GPR spill. The
+ * synchronized string path still rechecks CPU state and the deadline. */
+uint32_t xlat_rt_string_ready(xlat_rt_t *rt)
+{
+    if (*rt->intr || (rt->wall_deadline &&
+        (int32_t)(*rt->clock - rt->wall_deadline) >= 0) ||
+        (rt->budget_limit && rt->budget <= 0)) {
+        ++xlat_stats.string_preempt;
+        return 0;
+    }
+    return 1;
+}
+
 uint32_t xlat_rt_string_fast(xlat_rt_t *rt, uint32_t src, uint32_t dst, uint32_t ctl)
 {
     const uint32_t count = ctl & 0xffffu;
@@ -2288,6 +2379,12 @@ void xlat_log_write(uint16_t psp, const char *name)
                (unsigned long)xlat_stats.shadow_mem_miss, (unsigned long)xlat_stats.shadow_irq_miss,
                (unsigned long)xlat_stats.thunk_int, (unsigned long)xlat_stats.thunk_retf,
                (unsigned long)xlat_stats.link_alt, (unsigned long)xlat_stats.bios_flags_umb);
+    log_printf("Y bus_read=%lu bus_write=%lu bus_smc=%lu bus_write_miss=%lu bus_pop=%lu bus_rmw=%lu string_preempt=%lu bios_write_leaf=%lu bios_cursor_local=%lu\r\n",
+               (unsigned long)xlat_stats.bus_read, (unsigned long)xlat_stats.bus_write,
+               (unsigned long)xlat_stats.bus_smc, (unsigned long)xlat_stats.bus_write_miss,
+               (unsigned long)xlat_stats.bus_pop, (unsigned long)xlat_stats.bus_rmw,
+               (unsigned long)xlat_stats.string_preempt,
+               (unsigned long)xlat_stats.bios_write_leaf, (unsigned long)xlat_stats.bios_cursor_local);
     /* CPU bursts: averages and histograms (xlat_stats_t), XRIP only / with
      * translated code; device service after the bursts. XLAT_SLICE_US is
      * meant to match the usual XRIP burst. */

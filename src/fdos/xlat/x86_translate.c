@@ -188,6 +188,31 @@ static bool native_string(const x86_insn_t *in)
     return in->op == XO_STR && (in->sub == STR_MOVS || in->sub == STR_STOS);
 }
 
+/* Side operations that can complete with explicit operands, without
+ * the general interpreter thunk. Multi-write and other RMW instructions
+ * keep their old paths until all effects can be committed together. */
+static bool native_scalar(const x86_insn_t *in)
+{
+    switch (in->op) {
+    case XO_MOV: return x86_has_mem(in);
+    case XO_ALU:
+        return in->sub == ALU_ADD && in->a.kind == OPD_MEM &&
+               (in->b.kind == OPD_REG || in->b.kind == OPD_IMM);
+    case XO_MISC:
+        return in->sub == MISC_XLAT ||
+               ((in->sub == MISC_MOVZX || in->sub == MISC_MOVSX) && in->b.kind == OPD_MEM);
+    case XO_PUSH: return in->b.kind == OPD_REG || in->b.kind == OPD_IMM;
+    case XO_POP: return in->a.kind == OPD_REG;
+    case XO_CALL: case XO_RET: return true;
+    case XO_FAR: return in->sub == FAR_RET;
+    case XO_SEG:
+        return in->sub == SEG_PUSH || in->sub == SEG_POP ||
+               (in->sub == SEG_LOAD && in->b.kind == OPD_MEM) ||
+               (in->sub == SEG_STORE && in->a.kind == OPD_MEM);
+    default: return false;
+    }
+}
+
 static uint32_t string_ctl(const x86_insn_t *in)
 {
     const unsigned size = in->size == 32 ? 2u : in->size == 16 ? 1u : 0u;
@@ -1415,7 +1440,7 @@ static bool emit_side_args(tctx_t *c, int i, uint32_t target, uint32_t xi)
     arm_emit_t *e = &c->e;
     const x86_insn_t *in = &c->in[i];
     const bool cont = falls_through(in) && !is_producer(in) && c->fall_idx[i] >= 0;
-    if (native_string(in) ||
+    if (native_string(in) || native_scalar(in) ||
         sync_recon(c, c->in_set[i], side_producer(c, i)) >= 0 || c->n_dfix >= MAX_FIXUPS ||
         (cont && c->fall_idx[i] <= i))
         return false;
@@ -2755,6 +2780,175 @@ static bool side_writes_more(const x86_insn_t *in)
     }
 }
 
+/* Unlike new ST_EXIT stubs, these local tails do not consume another
+ * descriptor during the second emission pass. Flags already reach rt
+ * through the side reconstruction. */
+static void emit_side_dispatch(tctx_t *c, uint32_t kind)
+{
+    arm_emit_t *e = &c->e;
+    arm_mov32(e, A_R12, kind);
+    arm_ls_imm(e, LS_STR, A_R12, A_R11, XLAT_RT_EXIT_KIND);
+    const uint32_t site = arm_branch_slot(e);
+    if (!arm_patch_branch(e, site, kind == XLAT_EXIT_BRANCH ? c->dispatch : c->epilogue, C_AL))
+        c->overflow = true;
+}
+
+static void emit_side_tail(tctx_t *c, uint16_t ip, uint32_t kind)
+{
+    arm_movw(&c->e, A_R12, ip);
+    arm_ls_imm(&c->e, LS_STR, A_R12, A_R11, XLAT_RT_IP);
+    emit_side_dispatch(c, kind);
+}
+
+static void emit_side_irq_before(tctx_t *c, uint16_t ip)
+{
+    arm_emit_t *e = &c->e;
+    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_INTR);
+    arm_ls_imm(e, LS_LDRB, A_R12, A_R12, 0);
+    arm_dp_imm(e, DP_SUB, 1, A_PC, A_R12, 0);
+    const uint32_t ok = arm_branch_slot(e);
+    emit_side_tail(c, ip, XLAT_EXIT_STOP);
+    local_patch(c, ok, C_EQ);
+}
+
+/* After a successful memory helper keep ARM GPRs in registers. A changed
+ * active region, pending IRQ, or nonlocal successor uses the dispatcher. */
+static void emit_scalar_next(tctx_t *c, int i, uint16_t ip, bool cont, bool write, bool add_flags)
+{
+    arm_emit_t *e = &c->e;
+    if (cont && c->fall_idx[i] > i) {
+        uint32_t invalid = UINT32_MAX;
+        if (write) {
+            arm_dp_imm(e, DP_SUB, 1, A_PC, A_R0, XLAT_MEM_REDISPATCH);
+            invalid = arm_branch_slot(e);
+        }
+        arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_INTR);
+        arm_ls_imm(e, LS_LDRB, A_R12, A_R12, 0);
+        arm_dp_imm(e, DP_SUB, 1, A_PC, A_R12, 0);
+        const uint32_t irq = arm_branch_slot(e);
+        if (add_flags) {
+            arm_ls_imm(e, LS_LDR, A_R1, A_R11, XLAT_RT_DST);
+            arm_ls_imm(e, LS_LDR, A_R2, A_R11, XLAT_RT_SRC);
+            arm_dp_reg(e, DP_ADD, 1, A_PC, A_R1, A_R2, SH_LSL, 0);
+        }
+        const uint32_t site = arm_branch_slot(e);
+        if (!arm_patch_branch(e, site, c->label[c->fall_idx[i]], C_AL))
+            c->overflow = true;
+        if (invalid != UINT32_MAX)
+            local_patch(c, invalid, C_EQ);
+        local_patch(c, irq, C_NE);
+    }
+    emit_side_tail(c, ip, XLAT_EXIT_BRANCH);
+}
+
+static void emit_scalar_addr(tctx_t *c, const x86_insn_t *in)
+{
+    arm_emit_t *e = &c->e;
+    if (in->op == XO_MISC && in->sub == MISC_XLAT) {
+        arm_ubfx(e, A_R12, A_R4, 0, 8);
+        arm_dp_reg(e, DP_ADD, 0, A_R0, A_R7, A_R12, SH_LSL, 0);
+        arm_uxth(e, A_R0, A_R0);
+    } else
+        emit_offset(c, in);
+    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_SEG_BASE + 4u * in->mem_seg);
+    arm_dp_reg(e, DP_ADD, 0, A_R0, A_R0, A_R12, SH_LSL, 0);
+}
+
+/* True: all paths were emitted. False: the untouched/refused store must
+ * use the existing synchronized fallback. No successful store is replayed. */
+static bool emit_scalar_side(tctx_t *c, int i, bool cont)
+{
+    arm_emit_t *e = &c->e;
+    const x86_insn_t *in = &c->in[i];
+    if (!native_scalar(in))
+        return false;
+    const uint16_t next = (uint16_t)(in->ip + in->len);
+    const bool push = in->op == XO_PUSH || in->op == XO_CALL ||
+                      (in->op == XO_SEG && in->sub == SEG_PUSH);
+    const bool pop = in->op == XO_POP || in->op == XO_RET || in->op == XO_FAR ||
+                     (in->op == XO_SEG && in->sub == SEG_POP);
+    const bool add = in->op == XO_ALU;
+    const bool write = add || push || (in->op == XO_MOV && in->a.kind == OPD_MEM) ||
+                       (in->op == XO_SEG && in->sub == SEG_STORE);
+    const uint32_t seg_off = XLAT_RT_SEG_BASE + 4u * in->sreg;
+    emit_side_irq_before(c, in->ip);
+    if (write) {
+        if (push)
+            emit_stack_addr(c, -2);
+        else
+            emit_scalar_addr(c, in);
+        if (in->op == XO_CALL)
+            arm_mov32(e, A_R2, next);
+        else if (in->op == XO_SEG) {
+            arm_ls_imm(e, LS_LDR, A_R2, A_R11, seg_off);
+            arm_lsr(e, A_R2, A_R2, 4);
+        } else {
+            const int v = get_raw(c, &in->b, push ? 16 : in->size, A_R2);
+            if (v != A_R2)
+                arm_mov(e, A_R2, v);
+        }
+        arm_mov(e, A_R1, A_R0);
+        arm_mov(e, A_R0, A_R11);
+        arm_mov32(e, A_R3, push || in->op == XO_SEG ? 2u : in->size / 8u);
+        arm_mov32(e, A_R12, add ? (uint32_t)(uintptr_t)&xlat_rt_bus_add :
+                                      (uint32_t)(uintptr_t)&xlat_rt_bus_write);
+        arm_blx(e, A_R12);
+        arm_dp_imm(e, DP_SUB, 1, A_PC, A_R0, 0);
+        const uint32_t slow = arm_branch_slot(e);
+        if (push) {
+            arm_ls_imm(e, LS_LDRH, A_R1, A_R11, XLAT_RT_SP);
+            arm_subw(e, A_R1, A_R1, 2);
+            emit_store_sp(c);
+        }
+        emit_scalar_next(c, i, in->op == XO_CALL ? in->target : next, cont || add, true, add);
+        local_patch(c, slow, C_EQ);
+        return false;
+    }
+    if (pop) {
+        arm_mov(e, A_R0, A_R11);
+        arm_mov32(e, A_R1, in->op == XO_RET || in->op == XO_FAR ? in->b.imm : 0u);
+        arm_mov32(e, A_R2, in->op == XO_FAR);
+        arm_mov32(e, A_R12, (uint32_t)(uintptr_t)&xlat_rt_bus_pop);
+        arm_blx(e, A_R12);
+        if (in->op == XO_FAR) {
+            arm_uxth(e, A_R2, A_R0);
+            arm_lsr(e, A_R3, A_R0, 16);
+            arm_ls_imm(e, LS_STRH, A_R3, A_R11, XLAT_RT_CS);
+            arm_lsl(e, A_R12, A_R3, 4);
+            arm_ls_imm(e, LS_STR, A_R12, A_R11, XLAT_RT_SEG_BASE + 4u);
+            arm_ls_imm(e, LS_STR, A_R2, A_R11, XLAT_RT_IP);
+            emit_side_dispatch(c, XLAT_EXIT_BRANCH);
+            return true;
+        }
+        if (in->op == XO_RET) {
+            arm_uxth(e, A_R2, A_R0);
+            arm_ls_imm(e, LS_STR, A_R2, A_R11, XLAT_RT_IP);
+            emit_side_dispatch(c, XLAT_EXIT_BRANCH);
+            return true;
+        }
+    } else {
+        emit_scalar_addr(c, in);
+        arm_mov32(e, A_R1, in->op == XO_SEG ? 2u : in->size / 8u);
+        arm_mov32(e, A_R12, (uint32_t)(uintptr_t)&xlat_bus_read);
+        arm_blx(e, A_R12);
+    }
+    if (in->op == XO_SEG) {
+        arm_lsl(e, A_R0, A_R0, 4);
+        arm_ls_imm(e, LS_STR, A_R0, A_R11, seg_off);
+    } else if (in->op == XO_MISC && in->sub == MISC_XLAT) {
+        arm_bfi(e, A_R4, A_R0, 0, 8);
+    } else if (in->op == XO_MISC) {
+        if (in->sub == MISC_MOVSX) {
+            arm_lsl(e, A_R0, A_R0, 32 - in->size);
+            arm_dp_reg(e, DP_ORR, 0, A_R0, A_PC, A_R0, SH_ASR, 32 - in->size);
+        }
+        put_raw(c, &in->a, in->local ? 32 : 16, A_R0);
+    } else
+        put_raw(c, &in->a, pop ? 16 : in->size, A_R0);
+    emit_scalar_next(c, i, next, cont, false, false);
+    return true;
+}
+
 static bool emit_stubs(tctx_t *c)
 {
     arm_emit_t *e = &c->e;
@@ -2802,6 +2996,10 @@ static bool emit_stubs(tctx_t *c)
                 const bool cont = falls_through(in) && !is_producer(in) && c->fall_idx[i] >= 0;
                 if (s->recon >= 0)
                     emit_recon(c, s->recon);
+                if (emit_scalar_side(c, i, cont)) {
+                    SIZE_NOTE(XLAT_SIZE_SIDE, from);
+                    continue;
+                }
                 const uint32_t ctl = native_string(in) ? string_ctl(in) :
                     (s->mw || side_writes_more(in) ? XI_MAY_WRITE : 0u) | XI_SIDE;
                 if (native_string(in) && !in->rep && cont) {
@@ -2818,6 +3016,15 @@ static bool emit_stubs(tctx_t *c)
                     if (!arm_patch_branch(e, site, c->label[c->fall_idx[i]], C_AL))
                         c->overflow = true;
                     local_patch(c, slow, C_EQ);
+                }
+                if (native_string(in)) {
+                    arm_mov(e, A_R0, A_R11);
+                    arm_mov32(e, A_R12, (uint32_t)(uintptr_t)&xlat_rt_string_ready);
+                    arm_blx(e, A_R12);
+                    arm_dp_imm(e, DP_SUB, 1, A_PC, A_R0, 0);
+                    const uint32_t ready = arm_branch_slot(e);
+                    emit_side_tail(c, in->ip, XLAT_EXIT_BUDGET);
+                    local_patch(c, ready, C_NE);
                 }
                 emit_interp_call(c, i, ctl, cont);
                 if (cont) {

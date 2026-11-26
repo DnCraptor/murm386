@@ -199,6 +199,8 @@ typedef struct xlat_stats {
     uint32_t fast_string_calls, fast_string_elems, shadow_fast, gap_reuse;
     uint32_t rep_yield, shadow_umb, shadow_mem_miss, shadow_irq_miss;
     uint32_t thunk_int, thunk_retf, link_alt, bios_flags_umb;
+    uint32_t bus_read, bus_write, bus_smc, bus_write_miss, bus_pop, bus_rmw;
+    uint32_t string_preempt, bios_write_leaf, bios_cursor_local;
     uint32_t cuts;              /* XRIP bursts ended at a marked branch target */
     uint32_t cut_entries;       /* of those: translated code was entered */
     uint32_t cold;              /* regions given back to XRIP (too short per entry) */
@@ -513,6 +515,15 @@ uint32_t xlat_rt_rep(xlat_rt_t *rt, uint32_t src, uint32_t dst, uint32_t ctl);
 /* Explicit operands: no GPR spill, decoder or XRIP state synchronization.
  * A zero/partial count leaves the remaining elements for the slow path. */
 uint32_t xlat_rt_string_fast(xlat_rt_t *rt, uint32_t src, uint32_t dst, uint32_t ctl);
+/* The decoded scalar memory path: same XRIP bus reads, without its CPU
+ * context. Writes are admitted only for verified direct RAM or VGA.
+ * 0: refused before effects; 1: done; 2: done, redispatch after SMC. */
+#define XLAT_MEM_REDISPATCH 2u
+uint32_t xlat_bus_read(uint32_t address, unsigned bytes);
+uint32_t xlat_rt_bus_write(xlat_rt_t *rt, uint32_t address, uint32_t value, unsigned bytes);
+uint32_t xlat_rt_bus_add(xlat_rt_t *rt, uint32_t address, uint32_t value, unsigned bytes);
+uint32_t xlat_rt_bus_pop(xlat_rt_t *rt, uint32_t release, uint32_t far_ret);
+uint32_t xlat_rt_string_ready(xlat_rt_t *rt);
 /* Only called for accesses wholly within A0000..BFFFF. */
 uint32_t xlat_vga_read(uint32_t address, unsigned bytes);
 void xlat_vga_write(uint32_t address, uint32_t value, unsigned bytes);

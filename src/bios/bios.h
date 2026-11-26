@@ -35,10 +35,12 @@ bool drop_bios_callback(CPU*, bios_callback_params_t*);
 void bios_intcall(CPU*, uint8_t, const char*); // sync call
 
 #if XLAT
-/* Scope of an audited nonblocking handler, checked against the actual
- * registered function. STACK_FLAGS writes only SS:SP+4 (two bytes). */
-enum { BIOS_XLAT_UNKNOWN, BIOS_XLAT_READONLY, BIOS_XLAT_STACK_FLAGS };
+/* Write scope and ability to dispatch are separate. A nonblocking service
+ * may still need conservative validation after arbitrary guest writes.
+ * STACK_FLAGS writes SS:SP+4; CURSOR writes only the selected BDA field. */
+enum { BIOS_XLAT_UNKNOWN, BIOS_XLAT_READONLY, BIOS_XLAT_STACK_FLAGS, BIOS_XLAT_CURSOR };
 unsigned bios_xlat_leaf_scope(CPU *cpu, uint8_t id);
+bool bios_xlat_can_dispatch(CPU *cpu, uint8_t id);
 #endif
 
 bool bios_teletype(CPU* cpu, uint8_t ch, uint8_t page);

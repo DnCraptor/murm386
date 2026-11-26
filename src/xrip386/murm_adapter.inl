@@ -99,7 +99,11 @@ static bool bios_escape(uint8_t id)
     const bool flags_ram = fast_memory_size >= 2u && flags_linear <= fast_memory_size - 2u;
     const bool flags_umb = flags_linear >= 0xc0000u && flags_linear < 0xfffffu &&
         fast_memory_size && far_direct_at(flags_linear, 1u) == fast_memory + flags_linear;
-    const bool local = scope == BIOS_XLAT_READONLY ||
+    const bool cursor = scope == BIOS_XLAT_CURSOR && fast_memory_size >= 0x463u;
+    const uint32_t cursor_linear = XRIP_AH == 1 ? 0x460u :
+        XRIP_AH == 2 ? 0x450u + ((uint32_t)XRIP_BH & 7u) * 2u : 0x462u;
+    const unsigned cursor_bytes = XRIP_AH == 5 ? 1u : 2u;
+    const bool local = scope == BIOS_XLAT_READONLY || cursor ||
         (scope == BIOS_XLAT_STACK_FLAGS && (flags_ram || flags_umb));
     if (scope == BIOS_XLAT_STACK_FLAGS && flags_umb)
         ++xlat_stats.bios_flags_umb;
@@ -114,6 +118,10 @@ static bool bios_escape(uint8_t id)
         XLAT_NOTE_FOREIGN();    /* may have written after a nested call */
     else if (scope == BIOS_XLAT_STACK_FLAGS)
         xlat_note_write_n(flags_linear, 2u);
+    else if (cursor) {
+        xlat_note_write_n(cursor_linear, cursor_bytes);
+        ++xlat_stats.bios_cursor_local;
+    }
 #endif
     XRIP_IP = active_cpu->next_ip;
     firstip = saved_ip;
@@ -259,6 +267,14 @@ uint32_t __time_critical_func(xlat_rt_io)(xlat_rt_t *rt, uint32_t ctl, uint32_t 
     return XLAT_IO_DONE | (word ? (uint32_t)portin16(port) : (uint32_t)(uint8_t)portin(port));
 }
 
+/* Decoded scalar reads use precisely the memory functions of readrm8/16/32.
+ * They need no GPR spill, segment reload or decoder. */
+uint32_t xlat_bus_read(uint32_t address, unsigned bytes)
+{
+    ++xlat_stats.bus_read;
+    return bytes == 1 ? mem_read8(address) : bytes == 2 ? mem_read16(address) : mem_read32(address);
+}
+
 /* Only the VGA aperture is admitted by xlat_rt_string_fast. These are
  * exactly the physical bus callbacks used by XRIP for that aperture. */
 uint32_t xlat_vga_read(uint32_t address, unsigned bytes)
@@ -341,7 +357,7 @@ static bool xlat_leaf_target(CPU *cpu, xlat_leaf_t *leaf)
         stub % NATIVE_BIOS_STUB_SIZE || leaf->ip > 0xfffdu)
         return false;
     leaf->id = (uint8_t)(stub / NATIVE_BIOS_STUB_SIZE);
-    return bios_xlat_leaf_scope(cpu, leaf->id) != BIOS_XLAT_UNKNOWN &&
+    return bios_xlat_can_dispatch(cpu, leaf->id) &&
            getmem8(base, leaf->ip) == 0x0f &&
            getmem8(base, leaf->ip + 1u) == 0xff &&
            getmem8(base, leaf->ip + 2u) == leaf->id;
@@ -375,6 +391,8 @@ static unsigned xlat_leaf_run(CPU *cpu, const xlat_leaf_t *leaf)
             return steps;
         ++steps;
     }
+    if (bios_xlat_leaf_scope(cpu, leaf->id) == BIOS_XLAT_UNKNOWN)
+        ++xlat_stats.bios_write_leaf;
     xlat_begin_insn();
     StepIP(3);
     bios_escape(leaf->id);
