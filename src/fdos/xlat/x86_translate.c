@@ -2364,7 +2364,7 @@ static bool tramp_patch(arm_emit_t *e, uint32_t at, uint32_t target, int cond)
 
 bool xlat_emit_trampoline(xlat_arena_t *a)
 {
-    arm_emit_t e = {a->base, 0, a->size, false};
+    arm_emit_t e = {a->base, 0, a->size, false, 0};
     bool ok = true;
     /* entry(rt = r0, target | 1 = r1) */
     arm_push(&e, 0x4ff8u);                     /* r3-r11, lr: 8-byte aligned */
@@ -2735,8 +2735,8 @@ bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int trace
         out->reject = (uint8_t)why;
         goto done;
     }
-    /* More entry points (xlat_cache: region exits and burst starts that
-     * came to these instructions): leaders, entered with the state in rt */
+    /* More entry points (xlat_cache: hot region exits that came to these
+     * instructions): leaders, entered with the state in rt */
     for (int k = 0; k < n_extra; ++k) {
         const int j = find_insn(c, extra[k]);
         if (j < 0) {
@@ -2763,13 +2763,10 @@ bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int trace
     }
     for (int r = 0; r < out->n_runs; ++r)
         data += 8u + ((out->runs[r].len + 3u) & ~3u);
-    if (a->code_top + data >= a->data_bottom) {
-        *full = true;
-        out->reject = XLAT_RJ_FULL;
-        goto done;
-    }
-
-    c->e = (arm_emit_t){a->base, a->code_top, a->data_bottom - data, false};
+    /* No room: emitted all the same into no space (arm_e16/e32 count the
+     * bytes), so the cache learns the size the region needs. */
+    const uint32_t cap = a->data_bottom > a->code_top + data ? a->data_bottom - data : a->code_top;
+    c->e = (arm_emit_t){a->base, a->code_top, cap, false, 0};
     for (int i = 0; i < c->n; ++i)
         c->side_stub[i][0] = c->side_stub[i][1] = -1;
     for (int i = 0; i < c->n; ++i) {
@@ -2779,6 +2776,13 @@ bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int trace
         SIZE_NOTE(c->in[i].op < XLAT_SIZE_RECON ? c->in[i].op : 0, from);
     }
     emit_stubs(c);
+    if (c->e.full) {
+        /* labels past the space are not real: no patching */
+        *full = true;
+        out->reject = XLAT_RJ_FULL;
+        out->need = (c->e.pos - a->code_top) + c->e.over + 4u + data;
+        goto done;
+    }
     for (int k = 0; k < c->n_dfix; ++k) {
         /* the label after the instruction, from the end of the halfwords */
         const uint32_t at = c->dfix[k].pos, to = c->label[c->dfix[k].insn];
@@ -2792,11 +2796,6 @@ bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int trace
     for (int k = 0; k < c->n_fix; ++k)
         if (!arm_patch_branch(&c->e, c->fix[k].site, c->label[c->fix[k].insn], c->fix[k].cond))
             c->overflow = true;
-    if (c->e.full) {
-        *full = true;
-        out->reject = XLAT_RJ_FULL;
-        goto done;
-    }
     if (c->overflow) {
         out->reject = XLAT_RJ_EMIT;
         goto done;

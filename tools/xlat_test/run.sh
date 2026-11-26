@@ -26,8 +26,15 @@ run=()
 # ring cache: a small arena and 4 region slots evict on every translation;
 # no flush between programs (XLAT_KEEP)
 arm-linux-gnueabihf-gcc -O2 -g -mthumb -march=armv7-a+fp -static -Wall -Wextra \
-    -DXLAT_HOST_TEST -DXLAT_ARENA_SIZE=6144 -DXLAT_MAX_REGIONS=4 -DXLAT_RING_WANT=1024 \
+    -DXLAT_HOST_TEST -DXLAT_ARENA_SIZE=6144 -DXLAT_MAX_REGIONS=4 \
     -Isrc/fdos/xlat -Isrc \
     tools/xlat_test/xlat_test.c tools/xlat_test/fpu_glue.c src/fpu.c src/fdos/xlat/*.c \
     -lm -o "$out-ring"
 XLAT_KEEP=1 "${run[@]}" "$out-ring" "${1:-5000}" "${2:-1}"
+# ring only: 64 slots in a small arena, the ring head evicts what it needs
+arm-linux-gnueabihf-gcc -O2 -g -mthumb -march=armv7-a+fp -static -Wall -Wextra \
+    -DXLAT_HOST_TEST -DXLAT_ARENA_SIZE=12288 \
+    -Isrc/fdos/xlat -Isrc \
+    tools/xlat_test/xlat_test.c tools/xlat_test/fpu_glue.c src/fpu.c src/fdos/xlat/*.c \
+    -lm -o "$out-ring2"
+XLAT_KEEP=1 "${run[@]}" "$out-ring2" "${1:-5000}" "${2:-1}"

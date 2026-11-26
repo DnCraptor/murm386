@@ -131,7 +131,9 @@ typedef struct xlat_stats {
     uint32_t rejects;           /* hot entry points that could not be translated */
     uint32_t invalidations;     /* regions dropped because their x86 bytes changed */
     uint32_t flushes;           /* whole-cache resets */
-    uint32_t evictions;         /* regions dropped to make room (ring) */
+    uint32_t evictions;         /* regions dropped to make room (ring, slots) */
+    uint32_t slot_evictions;    /* of those: for a region slot (all 64 held) */
+    uint32_t ring_retries;      /* translations that did not fit at the ring head */
     uint32_t fn_regions;        /* regions without a loop (traces, function regions) */
     uint32_t exit_built;        /* of those: built at a hot region exit target */
     uint32_t entries_added;     /* regions translated again with one more entry point */

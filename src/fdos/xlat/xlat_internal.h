@@ -64,9 +64,6 @@ static inline uint32_t xlat_link_hash(uint32_t key)
 {
     return (key ^ (key >> 7) ^ (key >> 16)) & (XLAT_LINK_SLOTS - 1u);
 }
-#ifndef XLAT_RING_WANT
-#define XLAT_RING_WANT       2048u           /* bytes evicted ahead of the ring head when a region does not fit */
-#endif
 #define XLAT_ENTRY_BITS      9
 #define XLAT_ENTRY_SLOTS     (1 << XLAT_ENTRY_BITS)  /* power of two */
 #define XLAT_HOT_SLOTS       64              /* power of two */
@@ -103,6 +100,7 @@ typedef struct arm_emit {
     uint32_t pos;      /* byte offset of the next instruction */
     uint32_t cap;      /* bytes available */
     bool full;
+    uint32_t over;     /* bytes that did not fit (pos stays): the size still needed */
 } arm_emit_t;
 
 void arm_e16(arm_emit_t *e, uint16_t hw);
@@ -350,6 +348,7 @@ typedef struct xlat_region_out {
     uint16_t n_runs;
     struct { uint16_t ip, len; } runs[XLAT_MAX_INSNS];
     uint32_t data_size;                /* arena bytes the caller stores the runs in */
+    uint32_t need;                     /* XLAT_RJ_FULL: arena bytes the region needs (code + copies) */
     uint8_t reject;                    /* XLAT_RJ_* when no region was built */
     uint8_t n_insns, n_interp;         /* what discovery found (for the log) */
     uint8_t fn;                        /* a function region (no loop): the fewest native

@@ -1873,7 +1873,8 @@ static int chain_check(void)
                       0x07, 0xf4}},
         {0x0e00, 9, {0x01, 0xdf, 0x45, 0x45, 0x01, 0xde, 0xe9, 0xf7, 0xf7}},
         /* M: inc ax; T: inc bx; dec cx; jnz M; hlt. A burst start at T, in
-         * M's code, gives M one more entry (add_entry), not a second region. */
+         * M's code, is left to XRIP: no second region, M is not rebuilt
+         * (add_entry is for region exits only). */
         {0x0700, 6, {0x40, 0x43, 0x49, 0x75, 0xfb, 0xf4}},
     };
     int bad = 0;
@@ -1960,8 +1961,9 @@ static int chain_check(void)
                     printf("  gpr%d want %08x got %08x\n", i, want.gpr[i], R.gpr[i]);
             bad++;
         }
-        if (test == 5 && (xlat_stats.entries_added == added0 || translations - tr0 != 2)) {
-            printf("  chain test 5: no entry added (translations %lu)\n", translations - tr0);
+        if (test == 5 && (xlat_stats.entries_added != added0 || translations - tr0 != 1)) {
+            printf("  chain test 5: burst start inside a region rebuilt it (translations %lu)\n",
+                   translations - tr0);
             bad++;
         }
         if (test == 4 && (!xlat_stats.exit_built || xlat_stats.links - links0 < 20)) {
@@ -2270,10 +2272,11 @@ int main(int argc, char **argv)
         memset(mem_init + init.seg_base[1], 0, len);
     }
     printf("programs %d, skipped %d, failures %d\n", run, skipped, failures);
-    printf("stats: translations %u (fn %u, at exits %u) links %u rejects %u entries %u invalid %u flushes %u evictions %u exits b/budget/side/stop %u/%u/%u/%u native insns %u interp %lu side %lu\n",
+    printf("stats: translations %u (fn %u, at exits %u) links %u rejects %u entries %u invalid %u flushes %u evictions %u (slots %u, ring retries %u) exits b/budget/side/stop %u/%u/%u/%u native insns %u interp %lu side %lu\n",
            xlat_stats.translations, xlat_stats.fn_regions, xlat_stats.exit_built, xlat_stats.links,
            xlat_stats.rejects, xlat_stats.entries, xlat_stats.invalidations,
-           xlat_stats.flushes, xlat_stats.evictions, xlat_stats.exits[0], xlat_stats.exits[1],
+           xlat_stats.flushes, xlat_stats.evictions, xlat_stats.slot_evictions, xlat_stats.ring_retries,
+           xlat_stats.exits[0], xlat_stats.exits[1],
            xlat_stats.exits[2], xlat_stats.exits[3], xlat_stats.guest_insns, interp_calls, side_calls);
     return failures ? 1 : 0;
 }

@@ -11,6 +11,7 @@ void arm_e16(arm_emit_t *e, uint16_t hw)
 {
     if (e->pos + 2 > e->cap) {
         e->full = true;
+        e->over += 2;
         return;
     }
     e->buf[e->pos] = (uint8_t)hw;
@@ -22,6 +23,7 @@ void arm_e32(arm_emit_t *e, uint16_t hw1, uint16_t hw2)
 {
     if (e->pos + 4 > e->cap) {
         e->full = true;
+        e->over += 4;
         return;
     }
     e->buf[e->pos] = (uint8_t)hw1;

@@ -8,11 +8,11 @@
  * span is available the translator stays off.
  *
  * The arena after the trampoline is a ring: each region takes one chunk (its
- * code, then the copies of its x86 bytes), placed at the ring head. Before a
- * translation the regions in the XLAT_RING_WANT bytes ahead of the head are
- * evicted (as jit_make_room() in frank-386's jit16); a translation that does
- * not fit evicts up to the end of the arena, then wraps to the ring start.
- * Evicting a region drops its entries and rebuilds the entry and code maps
+ * code, then the copies of its x86 bytes), placed at the ring head. A
+ * translation that does not fit in the free space at the head reports the
+ * size it needs; just the chunks in that many bytes ahead of the head are
+ * evicted (from the ring start when the arena ends sooner), the oldest
+ * translations first. Evicting a region drops its entries and rebuilds the entry and code maps
  * from the regions left. Only xlat_flush() drops everything.
  *
  * Hot spots are found by sampling: xlat_run() is called at the start of every
@@ -626,6 +626,7 @@ static int take_slot(bool *evicted)
         }
     }
     evict(best);
+    xlat_stats.slot_evictions++;
     *evicted = true;
     return best;
 }
@@ -639,28 +640,32 @@ static int translate_here(const xlat_rt_t *rt, uint16_t ip, int trace_min, const
     xlat_arena_t *const a = &st->arena;
     bool full, evicted = false;
     /* First the free space at the head as it is (a region rejected for
-     * another reason evicts nothing). When it does not fit: evict
-     * XLAT_RING_WANT bytes ahead of the head (from the ring start when the
-     * arena ends sooner), then up to the arena end, then the whole ring. */
-    for (int attempt = 0; attempt < 4; ++attempt) {
-        uint32_t hi = a->size;
-        if (attempt == 1) {
-            if (st->head + XLAT_RING_WANT > a->size)
+     * another reason evicts nothing). A translation that does not fit tells
+     * the bytes it needs (xlat_translate emits into no space and counts):
+     * exactly the chunks in that many bytes from the head are evicted, from
+     * the ring start when the arena ends sooner. One more try with more room
+     * if the size was off (it is not position-dependent: fixed-size
+     * encodings). */
+    uint32_t need = 0;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        if (attempt) {
+            need = (need + 7u) & ~7u;
+            if (need > a->size - st->ring_lo)
+                break;                  /* larger than the ring */
+            if (st->head + need > a->size)
                 st->head = st->ring_lo;
-            hi = st->head + XLAT_RING_WANT < a->size ? st->head + XLAT_RING_WANT : a->size;
-        } else if (attempt == 3) {
-            if (st->head == st->ring_lo)
-                break;          /* attempt 2 had the whole ring */
-            st->head = st->ring_lo;
+            evicted |= evict_range(st->head, st->head + need);
         }
-        if (attempt)
-            evicted |= evict_range(st->head, hi);
         a->code_top = st->head;
         a->data_bottom = window_end();
         if (xlat_translate(a, rt, ip, trace_min, extra, n_extra, out, &full, st->ctx))
             goto built;
         if (!full)
             break;
+        /* the next try: what it said, at least a bit more than this one had */
+        const uint32_t had = a->data_bottom - st->head;
+        need = out->need > had ? out->need : had + 64u;
+        xlat_stats.ring_retries++;
     }
     if (evicted)
         rebuild_maps();
@@ -804,12 +809,10 @@ static __attribute__((noinline)) bool sample(const xlat_rt_t *rt)
         xlat_stats.stack_skips++;   /* try again when it is hot at a shallower depth */
         return false;
     }
-    /* Inside a live region but not at one of its entries: one more entry
-     * there. Else (inside a cold region) XRIP keeps it. */
-    const int in_live = covering(rt);
-    if (in_live >= 0 && add_entry(rt, in_live))
-        return true;
-    const bool inside = in_live >= 0 || covered(rt);
+    /* Inside a region's code (not at an entry): XRIP keeps it. A burst start
+     * lands anywhere the previous burst ran out; such a point is no target
+     * worth rebuilding a region for (region exits are: sample_exit). */
+    const bool inside = covered(rt);
     if (inside || translate_here(rt, (uint16_t)rt->ip, fn ? XLAT_TRACE_MIN : 0, NULL, 0) < 0) {
         h->reject = 1;
         xlat_stats.rejects++;
@@ -1279,13 +1282,14 @@ void xlat_log_write(uint16_t psp, const char *name)
                (unsigned long)xlat_stats.exits[1], (unsigned long)xlat_stats.exits[2],
                (unsigned long)xlat_stats.exits[3], (unsigned long)xlat_stats.guest_insns, (unsigned long)xlat_stats.code_bytes,
                (unsigned long)xlat_stats.stack_skips);
-    log_printf("interp=%lu side=%lu cuts=%lu/%lu cold=%lu fn=%lu xb=%lu xe=%lu links=%lu lost=%lu skipped=%lu\r\n",
+    log_printf("interp=%lu side=%lu cuts=%lu/%lu cold=%lu fn=%lu xb=%lu xe=%lu links=%lu evs=%lu rr=%lu lost=%lu skipped=%lu\r\n",
                (unsigned long)xlat_stats.interp,
                (unsigned long)xlat_stats.side_interp, (unsigned long)xlat_stats.cut_entries,
                (unsigned long)xlat_stats.cuts, (unsigned long)xlat_stats.cold,
                (unsigned long)xlat_stats.fn_regions, (unsigned long)xlat_stats.exit_built,
                (unsigned long)xlat_stats.entries_added,
-               (unsigned long)xlat_stats.links, (unsigned long)st->log_lost,
+               (unsigned long)xlat_stats.links, (unsigned long)xlat_stats.slot_evictions,
+               (unsigned long)xlat_stats.ring_retries, (unsigned long)st->log_lost,
                (unsigned long)st->log_skipped);
     /* CPU bursts: averages and histograms (xlat_stats_t), XRIP only / with
      * translated code; device service after the bursts. XLAT_SLICE_US is
