@@ -35,10 +35,6 @@ set(XLAT_SRAM_ARENA_KB 8 CACHE STRING "SRAM code arena with XLAT_ARENA_SRAM, KiB
 # Diagnostics: at each DOS program exit append the translated regions (their
 # x86 bytes), per-region entry/exit counts and totals to <SD_DATA_DIR>/xlat.log.
 option(XLAT_LOG "Log translated regions to the SD card" ON)
-# Regions without a loop at hot CALL targets (docs §27). Off: in 10.x each
-# call from XRIP-run code bounced XRIP -> region -> XRIP and cost more than
-# it saved (CheckIt WS halved).
-option(XLAT_FN_REGIONS "Translate hot functions without loops (experiment)" ON)
 # Regions without a loop at hot CALL targets and at hot region exit targets
 # (return sites...), linked to the regions that reach them
 # (docs/FDOS-JIT-architecture.md, 28)

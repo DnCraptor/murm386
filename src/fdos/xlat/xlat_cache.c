@@ -45,6 +45,7 @@ typedef struct {
     uint32_t us;           /* time inside it (rt->clock), entries included */
     uint32_t exits[XLAT_EXIT_COUNT];
     uint32_t epoch;        /* st->epoch when its bytes were last compared */
+    uint32_t mem_size;     /* rt->mem_size it was built for (reads compare with it) */
 } region_t;
 
 typedef struct {
@@ -84,6 +85,7 @@ typedef struct {
     uint32_t ring_lo;       /* first byte after the trampoline */
     uint32_t head;          /* where the next chunk goes */
     uint32_t epoch;         /* changes whenever x86 code may have been written */
+    uint32_t mem_size;      /* rt->mem_size of the last xlat_run() */
     entry_t entry[XLAT_ENTRY_SLOTS];
     hot_t hot[XLAT_HOT_SLOTS];       /* burst-start samples */
     hot_t exit_hot[XLAT_HOT_SLOTS];  /* untranslated region exit targets */
@@ -184,6 +186,13 @@ void xlat_sync_code(void *start, uint32_t len)
     (void)len;
     __asm volatile("dsb 0xf\n\tisb 0xf" ::: "memory");
 #endif
+}
+
+/* lazy_cf is CF when the flags are resolved (xlat.h) */
+static inline void cf_mirror(xlat_rt_t *rt)
+{
+    if (!rt->lazy_op)
+        rt->lazy_cf = (uint8_t)(rt->eflags & 1u);
 }
 
 static uint32_t hash32(uint32_t key)
@@ -468,7 +477,7 @@ static uint32_t XLAT_HOT_FN(load32)(const uint8_t *p)
 /* The x86 bytes the region was built from are still there. */
 static bool XLAT_HOT_FN(region_valid)(const region_t *r, const xlat_rt_t *rt)
 {
-    if (rt->seg_base[1] != r->cs_base)
+    if (rt->seg_base[1] != r->cs_base || rt->mem_size != r->mem_size)
         return false;
     const uint8_t *d = st->arena.base + r->data_off;
     for (unsigned k = 0; k < r->n_runs; ++k) {
@@ -657,6 +666,7 @@ built:;
     r->cs = rt->cs;
     r->ip = (uint16_t)rt->ip;
     r->cs_base = rt->seg_base[1];
+    r->mem_size = rt->mem_size;
     r->lo = out->lo;
     r->span = out->span;
     r->n_runs = out->n_runs;
@@ -799,13 +809,15 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
     rt->code_map = xlat_code_map;
     /* Something but XRIP's ordinary writes ran since the last call (or XRIP
      * wrote into translated code): compare each region's bytes once */
-    if (xlat_dirty) {
+    if (xlat_dirty || rt->mem_size != st->mem_size) {
         xlat_dirty = false;
+        st->mem_size = rt->mem_size;   /* regions built for another size go */
         st->epoch++;
     }
     const xlat_tramp_fn tramp = (xlat_tramp_fn)(uintptr_t)(st->arena.base + 1);
     rt->link = st->link;
     rt->last = st->last;
+    cf_mirror(rt);
     rt->cur = NO_REGION;
     rt->links = 0;
     bool ran = false, built = false;
@@ -887,6 +899,7 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
             rt->extra += XLAT_SLICE_CHECK;
         }
     }
+    xlat_rt_pending(rt);    /* XRIP takes the lazy flags as they are */
     if (ran)
         xlat_stats.guest_insns += (uint32_t)(start + (int32_t)rt->extra - rt->budget);
     xlat_stats.links += rt->links;
@@ -896,9 +909,42 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
 
 /* x86 condition cc (Jcc low nibble) on the lazy flags in rt, as XRIP's
  * condition(). Called from generated code. */
-uint32_t XLAT_HOT_FN(xlat_rt_cond)(const xlat_rt_t *rt, uint32_t cc)
+void XLAT_HOT_FN(xlat_rt_pending)(xlat_rt_t *rt)
+{
+    const uint32_t op = rt->lazy_op;
+    if (!(op & XLAT_LAZY_PENDING))
+        return;
+    const uint32_t kind = (op >> 5) & 3u, shift = op & 30u;
+    const uint32_t d = rt->lazy_dst, s = rt->lazy_src;
+    const bool keep = (op & XLAT_LAZY_KEEP_CF) != 0;
+    if (kind == FK_ADD) {
+        rt->lazy_result = d + s;
+        if (!keep)
+            rt->lazy_cf = rt->lazy_result < d;
+    } else if (kind == FK_SUB) {
+        rt->lazy_result = d - s;
+        if (!keep)
+            rt->lazy_cf = d < s;
+        rt->lazy_src = ~s & ~((1u << shift) - 1u);   /* XRIP keeps (~src) << shift */
+    } else {
+        rt->lazy_result = d;
+        rt->lazy_cf = 0;
+    }
+    rt->lazy_op = (uint8_t)(op & 0x7eu);
+}
+
+uint32_t XLAT_HOT_FN(xlat_interp_call)(xlat_rt_t *rt, uint32_t flags)
+{
+    xlat_rt_pending(rt);
+    const uint32_t r = xlat_interp_one(rt, flags);
+    cf_mirror(rt);
+    return r;
+}
+
+uint32_t XLAT_HOT_FN(xlat_rt_cond)(xlat_rt_t *rt, uint32_t cc)
 {
     bool cf, zf, sf, of, pf;
+    xlat_rt_pending(rt);
     if (rt->lazy_op) {
         const uint32_t r = rt->lazy_result, d = rt->lazy_dst, s = rt->lazy_src;
         uint32_t p = (r >> (rt->lazy_op & 31u)) & 0xffu;
@@ -956,6 +1002,7 @@ static void resolve_rt(xlat_rt_t *rt)
 
 uint32_t XLAT_HOT_FN(xlat_rt_resolve)(xlat_rt_t *rt)
 {
+    xlat_rt_pending(rt);
     resolve_rt(rt);
     return rt->eflags;
 }
@@ -975,6 +1022,7 @@ static uint32_t szp(uint32_t value, int bits)
  * the flags end up resolved in rt->eflags. Called from generated code. */
 uint32_t XLAT_HOT_FN(xlat_rt_shift)(xlat_rt_t *rt, uint32_t value, uint32_t ctl)
 {
+    xlat_rt_pending(rt);
     const uint32_t op = ctl & 7u, bits = ctl & 8u ? 16u : 8u, mask = (1u << bits) - 1u;
     const uint32_t cnt = (ctl >> 8) & 0x1fu;
     uint32_t s = value & mask;
@@ -1045,6 +1093,7 @@ uint32_t XLAT_HOT_FN(xlat_rt_shift)(xlat_rt_t *rt, uint32_t value, uint32_t ctl)
         f = (f & ~0xc4u) | flags_szp;
     }
     rt->eflags = f;
+    cf_mirror(rt);
     return s;
 }
 
@@ -1056,6 +1105,7 @@ uint32_t XLAT_HOT_FN(xlat_rt_shift)(xlat_rt_t *rt, uint32_t value, uint32_t ctl)
  * changed, XRIP runs the instruction). DIV / IDIV leave the flags alone. */
 uint64_t XLAT_HOT_FN(xlat_rt_muldiv)(xlat_rt_t *rt, uint32_t ctl, uint32_t operand, uint32_t axdx)
 {
+    xlat_rt_pending(rt);
     const uint32_t op = ctl & 15u;
     const bool w = (ctl & 16u) != 0;
     uint32_t ax = axdx & 0xffffu, dx = axdx >> 16, out;
@@ -1127,6 +1177,7 @@ uint64_t XLAT_HOT_FN(xlat_rt_muldiv)(xlat_rt_t *rt, uint32_t ctl, uint32_t opera
     }
     }
     rt->eflags = cfof ? rt->eflags | 0x801u : rt->eflags & ~0x801u;
+    cf_mirror(rt);
     return out;
 }
 
@@ -1226,6 +1277,12 @@ void xlat_note_service(uint32_t us)
  * written memory: the running region must still match its x86 bytes. */
 bool XLAT_HOT_FN(xlat_region_still_valid)(xlat_rt_t *rt)
 {
+    /* Nothing wrote translated x86 code since xlat_run() started or the last
+     * check (XRIP's writes into xlat_code_map blocks, native handlers, OUT,
+     * x87 stores set xlat_dirty): nothing to compare. */
+    if (!xlat_dirty)
+        return true;
+    xlat_dirty = false;
     region_t *r = rt->cur < XLAT_MAX_REGIONS ? &st->region[rt->cur] : NULL;
     /* the other regions are compared at their next entry (through
      * xlat_run(): the link table entries are for the old epoch) */

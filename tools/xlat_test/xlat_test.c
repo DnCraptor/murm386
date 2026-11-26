@@ -1981,7 +1981,7 @@ static int dump_region(const char *hex, const char *path)
         if (sscanf(p, "%2x", &v) != 1) return 1;
         mem[0x10100 + n++] = (uint8_t)v;
     }
-    xlat_arena_t a = {xlat_test_calloc(0x10000), 0x10000, 0, 0, 0, 0, 0};
+    xlat_arena_t a = {.base = xlat_test_calloc(0x10000), .size = 0x10000};
     if (!a.base || !xlat_emit_trampoline(&a) || xlat_translate_ctx_size() > sizeof(ctx)) return 1;
     const uint32_t tramp = a.code_top;
     a.data_bottom = a.size;
@@ -1989,7 +1989,7 @@ static int dump_region(const char *hex, const char *path)
     rt.seg_base[1] = 0x10000;
     static xlat_region_out_t out;
     bool full;
-    if (!xlat_translate(&a, &rt, 0x100, XLAT_LINK_MIN, &out, &full, ctx)) {
+    if (!xlat_translate(&a, &rt, 0x100, 1, &out, &full, ctx)) {
         printf("not translated: reason %u (insns %u)\n", out.reject, out.n_insns);
         return 1;
     }
@@ -2002,9 +2002,56 @@ static int dump_region(const char *hex, const char *path)
     return 0;
 }
 
+/* --size LOG: translate every region of an xlat.log (T lines) once and
+ * print the Thumb code size by x86 instruction kind and stub kind. */
+static int size_report(const char *path)
+{
+    static replay_region_t reg[2048];
+    static uint32_t ctx[64 * 1024];
+    const int nreg = replay_parse(path, reg, 2048);
+    xlat_arena_t a = {.base = xlat_test_calloc(0x10000), .size = 0x10000};
+    if (!a.base || !xlat_emit_trampoline(&a)) return 1;
+    const uint32_t tramp = a.code_top;
+    unsigned long insns = 0, code = 0, built = 0;
+    static const char *const names[XLAT_SIZE_N] = {
+        "other", "ALU", "INC/DEC", "MOV", "LEA", "XCHG", "NOP", "Jcc", "JMP", "LOOP", "JCXZ",
+        "PUSH", "POP", "CALL", "RET", "interp", "string", "shift", "MUL/DIV", "misc", "seg",
+        "far", "indirect", "stack", "x87", "flag", "LOOPcc", "IN/OUT",
+        [XLAT_SIZE_RECON] = "(recon)", [XLAT_SIZE_BACK] = "back stub",
+        [XLAT_SIZE_SIDE] = "side stub", [XLAT_SIZE_EXIT] = "exit stub", [XLAT_SIZE_MAT] = "(flags)"};
+    for (int r = 0; r < nreg; ++r) {
+        memset(mem, 0xf1, MEM_BYTES);
+        const uint32_t cs_base = (uint32_t)reg[r].cs << 4;
+        if (cs_base + 0x10000 > MEM_BYTES) continue;
+        for (int l = 0; l < reg[r].nlines; ++l)
+            memcpy(mem + cs_base + reg[r].line[l].ip, reg[r].line[l].b, reg[r].line[l].n);
+        xlat_rt_t rt = {.mem = mem, .mem_size = 0xa0000, .cs = reg[r].cs, .fn_entry = UINT32_MAX};
+        rt.seg_base[1] = cs_base;
+        a.code_top = tramp;
+        a.data_bottom = a.size;
+        static xlat_region_out_t out;
+        bool full;
+        if (getenv("XLAT_SIZE_TRACE")) fprintf(stderr, "region %d %04X:%04X\n", r, reg[r].cs, reg[r].ip);
+        if (!xlat_translate(&a, &rt, reg[r].ip, XLAT_LINK_MIN, &out, &full, ctx)) continue;
+        built++;
+        insns += out.n_insns;
+        code += out.code_len;
+    }
+    printf("%d regions, %lu built: %lu x86 instructions, %lu code bytes (%.1f per instruction)\n",
+           nreg, built, insns, code, insns ? (double)code / (double)insns : 0.0);
+    for (int k = 0; k < XLAT_SIZE_N; ++k)
+        if (xlat_size_count[k])
+            printf("  %-10s n=%6u bytes=%7u (%4.1f%%) avg %.1f\n", names[k] ? names[k] : "?",
+                   xlat_size_count[k], xlat_size_bytes[k], 100.0 * xlat_size_bytes[k] / (double)code,
+                   (double)xlat_size_bytes[k] / xlat_size_count[k]);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     tfpu_mem = mem;
+    if (argc > 2 && !strcmp(argv[1], "--size"))
+        return size_report(argv[2]);
     if (argc > 2 && !strcmp(argv[1], "--dump"))
         return dump_region(argv[2], argc > 3 ? argv[3] : "region.bin");
     if (argc > 1 && !strcmp(argv[1], "--shift")) {

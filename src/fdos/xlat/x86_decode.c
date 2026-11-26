@@ -79,9 +79,10 @@ bool x86_decode(const uint8_t *code, uint16_t ip, x86_insn_t *in)
             in->pad = (uint8_t)q;
             return true;
         }
-        /* 90 9B, 9B 9B ..: one FWAIT */
+        /* 90 9B, 9B 9B ..: one FWAIT (the first 9B of the q bytes; only
+         * NOPs: no FWAIT, nothing to look for) */
         unsigned w = 0;
-        while (code[w] != 0x9b)
+        while (w < q && code[w] != 0x9b)
             ++w;
         if (wait && q >= 2 && decode_one(code + w, (uint16_t)(ip + w), in)) {
             in->ip = ip;

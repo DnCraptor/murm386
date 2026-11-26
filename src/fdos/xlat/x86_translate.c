@@ -2,13 +2,14 @@
  * murm386 xlat: x86 region -> Thumb-2 translation.
  *
  * A region is the set of supported instructions reachable from a hot entry
- * point by direct control flow, limited to XLAT_MAX_INSNS. It must contain a
- * loop (a branch to an instruction at or before it), otherwise translation
- * gains nothing over XRIP.
+ * point by direct control flow, limited to XLAT_MAX_INSNS. It contains a
+ * loop, or every path from the entry runs enough native instructions before
+ * it can leave (a trace, xlat_translate's trace_min).
  *
  * Register convention inside a region:
  *   r4 AX, r5 CX, r6 DX, r7 BX, r8 BP, r9 SI, r10 DI (full 32-bit values;
- *   16-bit writes use BFI), SP stays in rt->gpr (read and written there),
+ *   16-bit writes use BFI), SP stays in rt->sp (read and written there;
+ *   the trampoline copies it from and back to rt->gpr[4]),
  *   r11 = xlat_rt_t *, r0-r3, r12, lr scratch.
  *
  * Flags. XRIP keeps the arithmetic flags lazily (flags_op/result/dst/src/cf);
@@ -20,7 +21,15 @@
  * reconstructing it in the exit stub from registers (the producer is the
  * instruction right before and its operands are still in registers), or by
  * storing it at the producer ("materializing"). A reaching-definitions pass
- * over the region decides which.
+ * over the region decides which. A materializing producer stores only its
+ * operands and kind, marked pending (XLAT_LAZY_PENDING): the result and CF
+ * are worked out by xlat_rt_pending() where C reads the flags (helpers, the
+ * interpreter, the end of xlat_run). Only the code that reads CF itself
+ * (INC / DEC, ADC / SBB) needs it stored by the producers before it.
+ *
+ * Code shared by all regions (xlat_emit_trampoline): the write checks and
+ * PUSH / POP (BL, with the interpreter's arguments after the BL), the exit
+ * tails, the back-edge slow path, the dispatcher.
  *
  * Exits are always at an x86 instruction boundary with all registers written
  * back, so XRIP continues exactly there.
@@ -79,6 +88,7 @@ typedef struct {
     int8_t fall_idx[XLAT_MAX_INSNS], tgt_idx[XLAT_MAX_INSNS];
     int8_t pfp[XLAT_MAX_INSNS];
     uint8_t leader[XLAT_MAX_INSNS], mat[XLAT_MAX_INSNS], need_cf[XLAT_MAX_INSNS];
+    uint8_t full[XLAT_MAX_INSNS];   /* mat: store the whole lazy state, not pending */
     uint8_t local_jcc[XLAT_MAX_INSNS];
     int16_t side_stub[XLAT_MAX_INSNS][2];
     uint32_t label[XLAT_MAX_INSNS];
@@ -90,11 +100,15 @@ typedef struct {
     int n_stubs;
     fixup_t fix[MAX_FIXUPS];
     int n_fix;
+    struct { uint32_t pos; int16_t insn; } dfix[MAX_FIXUPS];   /* emit_checks: halfword offsets */
+    int n_dfix;
     bool overflow;
     arm_emit_t e;
-    uint32_t epilogue, interp_thunk, dispatch;
+    uint32_t epilogue, dispatch, interp_call, exit_ip[2], exit_dyn, wchk[4], wside[4], back_slow, pend;
+    uint32_t spush, spop;
     uint8_t trace_min;             /* a region without a loop may do (xlat_translate) */
     uint8_t fn;                    /* built so: min_native_path (>= trace_min), else 0 */
+    uint8_t no_calls;              /* discover: leave called functions out */
     int n_interp;
 } tctx_t;
 
@@ -275,7 +289,7 @@ static int discover(tctx_t *c, uint16_t start)
     c->n_seen = 0;
     for (;;) {
         if (head == tail) {
-            if (dhead == dtail || c->n >= XLAT_MAX_INSNS)
+            if (dhead == dtail || c->n >= XLAT_MAX_INSNS || c->no_calls)
                 break;
             head = tail = 0;
             const uint16_t f = c->deferred[dhead++];
@@ -568,6 +582,7 @@ static void plan(tctx_t *c)
 {
     memset(c->mat, 0, sizeof(c->mat));
     memset(c->need_cf, 0, sizeof(c->need_cf));
+    memset(c->full, 0, sizeof(c->full));
     for (int i = 0; i < c->n; ++i) {
         const x86_insn_t *in = &c->in[i];
         c->pfp[i] = (int8_t)pred_fall_producer(c, i);
@@ -606,11 +621,32 @@ static void plan(tctx_t *c)
             c->need_cf[i] = 1;
         }
     }
+    /* The code that reads CF from rt (INC/DEC, ADC/SBB) needs it stored, not
+     * pending (xlat_rt_pending): only the entry state may be pending there. */
     for (int i = 0; i < c->n; ++i)
         if (c->need_cf[i])
             for (int k = 0; k < c->n; ++k)
                 if (c->cf_in[i] & (1ull << k))
-                    c->mat[k] = 1;
+                    c->mat[k] = c->full[k] = 1;
+    for (int i = 0; i < c->n; ++i)
+        if (x86_is_carry_op(&c->in[i]))
+            c->full[i] = 1;
+}
+
+static void local_patch(tctx_t *c, uint32_t site, int cond);
+
+/* The lazy state in rt may be pending (an entry state from the region the
+ * dispatcher came from, or a producer of this one): complete it. Keeps
+ * r0-r3; clobbers r12, lr and the ARM flags. */
+static void emit_pending_check(tctx_t *c)
+{
+    arm_emit_t *e = &c->e;
+    arm_ls_imm(e, LS_LDRB, A_R12, A_R11, XLAT_RT_OP);
+    arm_dp_imm(e, DP_AND, 1, A_PC, A_R12, XLAT_LAZY_PENDING);      /* TST */
+    const uint32_t done = arm_branch_slot(e);
+    if (!arm_bl(e, c->pend))
+        c->overflow = true;
+    local_patch(c, done, C_EQ);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -710,8 +746,7 @@ static void get_shifted(tctx_t *c, const x86_opd_t *o, int size, int rd)
     switch (o->kind) {
     case OPD_REG:
         if (size == 16 && o->reg == REG16_SP) {
-            arm_ls_imm(e, LS_LDR, rd, A_R11, XLAT_RT_GPR);
-            arm_ls_imm(e, LS_LDRH, rd, rd, 16);
+            arm_ls_imm(e, LS_LDRH, rd, A_R11, XLAT_RT_SP);
             arm_lsl(e, rd, rd, 16);
         } else if (size >= 16) {
             arm_lsl(e, rd, arm_reg16[o->reg], s);
@@ -741,8 +776,7 @@ static int get_raw(tctx_t *c, const x86_opd_t *o, int size, int scratch)
     switch (o->kind) {
     case OPD_REG:
         if (size == 16 && o->reg == REG16_SP) {
-            arm_ls_imm(e, LS_LDR, scratch, A_R11, XLAT_RT_GPR);
-            arm_ls_imm(e, LS_LDRH, scratch, scratch, 16);
+            arm_ls_imm(e, LS_LDRH, scratch, A_R11, XLAT_RT_SP);
             return scratch;
         }
         if (size >= 16 || o->reg < 4)
@@ -769,9 +803,7 @@ static void put_raw(tctx_t *c, const x86_opd_t *o, int size, int src)
         if (src != arm_reg16[o->reg])
             arm_mov(e, arm_reg16[o->reg], src);
     } else if (size == 16 && o->reg == REG16_SP) {
-        const int t = src == A_LR ? A_R12 : A_LR;
-        arm_ls_imm(e, LS_LDR, t, A_R11, XLAT_RT_GPR);
-        arm_ls_imm(e, LS_STRH, src, t, 16);
+        arm_ls_imm(e, LS_STRH, src, A_R11, XLAT_RT_SP);
     } else if (size == 16) {
         arm_bfi(e, arm_reg16[o->reg], src, 0, 16);
     } else if (o->reg < 4) {
@@ -792,19 +824,24 @@ static void emit_offset(tctx_t *c, const x86_insn_t *in)
         arm_mov32(e, A_R0, disp);
         return;
     }
-    if (index[in->mem_rm] >= 0)
-        arm_dp_reg(e, DP_ADD, 0, A_R0, base[in->mem_rm], index[in->mem_rm], SH_LSL, 0);
-    else
-        arm_mov(e, A_R0, base[in->mem_rm]);
-    if (disp) {
-        if (disp <= 0xfffu) {
-            arm_addw(e, A_R0, A_R0, disp);
-        } else if (0x10000u - disp <= 0xfffu) {
-            arm_subw(e, A_R0, A_R0, 0x10000u - disp);
-        } else {
-            arm_movw(e, A_R12, disp);
-            arm_dp_reg(e, DP_ADD, 0, A_R0, A_R0, A_R12, SH_LSL, 0);
+    /* the base register, then the index and the displacement */
+    int from = base[in->mem_rm];
+    if (index[in->mem_rm] >= 0) {
+        arm_dp_reg(e, DP_ADD, 0, A_R0, from, index[in->mem_rm], SH_LSL, 0);
+        from = A_R0;
+    }
+    if (!disp) {
+        if (from != A_R0) {
+            arm_uxth(e, A_R0, from);
+            return;
         }
+    } else if (disp <= 0xfffu) {
+        arm_addw(e, A_R0, from, disp);
+    } else if (0x10000u - disp <= 0xfffu) {
+        arm_subw(e, A_R0, from, 0x10000u - disp);
+    } else {
+        arm_movw(e, A_R12, disp);
+        arm_dp_reg(e, DP_ADD, 0, A_R0, from, A_R12, SH_LSL, 0);
     }
     arm_uxth(e, A_R0, A_R0);
 }
@@ -843,93 +880,132 @@ static dest_t side_dest(tctx_t *c, int i, int mw)
 }
 
 /* r0 = linear address of an access by instruction i. Uses r12, lr only. */
+static bool emit_side_args(tctx_t *c, int i, uint32_t target, uint32_t xi);
+static bool side_writes_more(const x86_insn_t *in);
+
 static void emit_checks(tctx_t *c, int i, int bytes, bool write)
 {
     arm_emit_t *e = &c->e;
-
-    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_MEM_SIZE);
-    if (bytes > 1) {
-        arm_addw(e, A_LR, A_R0, (uint32_t)bytes - 1u);
-        arm_dp_reg(e, DP_SUB, 1, A_PC, A_LR, A_R12, SH_LSL, 0);
+    if (write) {
+        /* the shared check (xlat_emit_trampoline): fast memory, and the
+         * 64-byte block of addr holds (or is right before) no translated
+         * x86 code of any region (xlat_code_map) */
+        const int k = bytes == 1 ? 0 : bytes == 2 ? 1 : bytes == 4 ? 2 : 3;
+        if (k == 3)
+            arm_addw(e, A_R12, A_R0, (uint32_t)bytes - 1u);
+        /* XRIP rechecks the region after it only if it wrote translated
+         * code (xlat_region_still_valid) */
+        if (emit_side_args(c, i, c->wside[k], XI_MAY_WRITE))
+            return;
+        if (!arm_bl(e, c->wchk[k]))
+            c->overflow = true;
+        emit_branch(c, side_dest(c, i, 1), C_CS);
+        return;
+    }
+    /* the region is built for this fast memory size (region_valid) */
+    const uint32_t size = c->rt->mem_size;
+    if (arm_thumb_imm(size) >= 0) {
+        if (bytes > 1) {
+            arm_addw(e, A_LR, A_R0, (uint32_t)bytes - 1u);
+            arm_dp_imm(e, DP_SUB, 1, A_PC, A_LR, size);
+        } else {
+            arm_dp_imm(e, DP_SUB, 1, A_PC, A_R0, size);
+        }
     } else {
-        arm_dp_reg(e, DP_SUB, 1, A_PC, A_R0, A_R12, SH_LSL, 0);
+        arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_MEM_SIZE);
+        if (bytes > 1) {
+            arm_addw(e, A_LR, A_R0, (uint32_t)bytes - 1u);
+            arm_dp_reg(e, DP_SUB, 1, A_PC, A_LR, A_R12, SH_LSL, 0);
+        } else {
+            arm_dp_reg(e, DP_SUB, 1, A_PC, A_R0, A_R12, SH_LSL, 0);
+        }
     }
     emit_branch(c, side_dest(c, i, 0), C_CS);
-
-    if (write) {
-        /* the 64-byte block of addr holds (or is right before) translated
-         * x86 code of any region: xlat_code_map bit addr >> 6 */
-        arm_lsr(e, A_R12, A_R0, XLAT_CODE_BLOCK_SHIFT + 3);
-        arm_ls_imm(e, LS_LDR, A_LR, A_R11, XLAT_RT_CODE_MAP);
-        arm_ls_reg(e, LS_LDRB, A_R12, A_LR, A_R12);
-        arm_lsr(e, A_LR, A_R0, XLAT_CODE_BLOCK_SHIFT);
-        arm_dp_imm(e, DP_AND, 0, A_LR, A_LR, 7);
-        arm_lsr_reg(e, A_R12, A_R12, A_LR);
-        arm_dp_imm(e, DP_AND, 1, A_PC, A_R12, 1);                    /* TST #1 */
-        emit_branch(c, side_dest(c, i, 1), C_NE);
-    }
 }
 
-static void emit_lazy_values(tctx_t *c, int kind, int size);
+static void emit_lazy_values(tctx_t *c, int kind, int size, bool store_op);
 
 /* Store the lazy flags of an operation: r2 = dst << s, r3 = src << s,
  * r1 = result << s. Clobbers r12, lr and the ARM flags. */
-static void emit_lazy(tctx_t *c, int kind, int size, bool incdec)
+static void emit_lazy(tctx_t *c, int kind, int size, bool incdec, int p)
 {
     arm_emit_t *e = &c->e;
+    const uint32_t op = (uint32_t)(kind << 5 | (32 - size));
     if (incdec) {
-        /* CF stays: if the lazy state is resolved, take CF from FLAGS. */
-        arm_ls_imm(e, LS_LDRB, A_R12, A_R11, XLAT_RT_OP);
-        arm_dp_imm(e, DP_SUB, 1, A_PC, A_R12, 0);
-        const uint32_t skip = arm_branch_slot(e);
-        arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_EFLAGS);
-        arm_dp_imm(e, DP_AND, 0, A_R12, A_R12, 1);
-        arm_ls_imm(e, LS_STRB, A_R12, A_R11, XLAT_RT_CF);
-        local_patch(c, skip, C_NE);
-    } else if (kind == FK_LOGIC) {
-        arm_mov32(e, A_R12, 0);
-        arm_ls_imm(e, LS_STRB, A_R12, A_R11, XLAT_RT_CF);
+        /* CF stays: lazy_cf is CF (xlat.h), unless the entry state is pending */
+        if (c->cf_in[p] & NONE_BIT)
+            emit_pending_check(c);
+        emit_lazy_values(c, kind, size, true);
+        return;
+    }
+    /* lazy_op and lazy_cf (adjacent bytes) in one STRH: op | CF << 8 */
+    if (kind == FK_LOGIC) {
+        arm_mov32(e, A_R12, op);
     } else {
         if (kind == FK_ADD)
             arm_dp_reg(e, DP_ADD, 1, A_PC, A_R2, A_R3, SH_LSL, 0);   /* CMN: C = carry */
         else
             arm_dp_reg(e, DP_SUB, 1, A_PC, A_R2, A_R3, SH_LSL, 0);   /* CMP: C = !borrow */
-        arm_mov32(e, A_R12, 0);
-        arm_dp_imm(e, DP_ADC, 0, A_R12, A_R12, 0);
-        if (kind == FK_SUB)
-            arm_dp_imm(e, DP_EOR, 0, A_R12, A_R12, 1);
-        arm_ls_imm(e, LS_STRB, A_R12, A_R11, XLAT_RT_CF);
+        arm_dp_reg(e, DP_SBC, 0, A_R12, A_R12, A_R12, SH_LSL, 0);     /* C ? 0 : ~0 */
+        arm_dp_imm(e, DP_AND, 0, A_R12, A_R12, 0x100u);
+        /* ADD: CF = C, the bit inverted; SUB: CF = borrow */
+        if (!arm_dp_imm(e, kind == FK_ADD ? DP_EOR : DP_ORR, 0, A_R12, A_R12,
+                        kind == FK_ADD ? 0x100u | op : op)) {
+            arm_mov32(e, A_LR, kind == FK_ADD ? 0x100u | op : op);
+            arm_dp_reg(e, kind == FK_ADD ? DP_EOR : DP_ORR, 0, A_R12, A_R12, A_LR, SH_LSL, 0);
+        }
     }
-    emit_lazy_values(c, kind, size);
+    arm_ls_imm(e, LS_STRH, A_R12, A_R11, XLAT_RT_OP);
+    emit_lazy_values(c, kind, size, false);
 }
 
-/* The lazy fields other than CF: r1 result, r2 dst, r3 src (all << s). */
-static void emit_lazy_values(tctx_t *c, int kind, int size)
+/* The lazy fields other than CF: r1 result, r2 dst, r3 src (all << s);
+ * lazy_op too when store_op. */
+static void emit_lazy_values(tctx_t *c, int kind, int size, bool store_op)
 {
     arm_emit_t *e = &c->e;
     const int s = 32 - size;
-    arm_ls_imm(e, LS_STR, A_R1, A_R11, XLAT_RT_RESULT);
+    _Static_assert(XLAT_RT_DST == XLAT_RT_RESULT + 4 && XLAT_RT_SRC == XLAT_RT_DST + 4 &&
+                   XLAT_RT_CF == XLAT_RT_OP + 1, "lazy flag fields stored together");
     if (kind == FK_LOGIC) {
-        arm_ls_imm(e, LS_STR, A_R1, A_R11, XLAT_RT_DST);
+        arm_strd(e, A_R1, A_R1, A_R11, XLAT_RT_RESULT);
         arm_ls_imm(e, LS_STR, A_R1, A_R11, XLAT_RT_SRC);
     } else {
-        arm_ls_imm(e, LS_STR, A_R2, A_R11, XLAT_RT_DST);
+        arm_strd(e, A_R1, A_R2, A_R11, XLAT_RT_RESULT);
         if (kind == FK_SUB) {
             /* XRIP keeps (~src) << shift */
-            arm_dp_reg(e, DP_ORN, 0, A_R12, A_PC, A_R3, SH_LSL, 0);
-            arm_lsr(e, A_R12, A_R12, s);
-            arm_lsl(e, A_R12, A_R12, s);
+            arm_dp_reg(e, DP_ORN, 0, A_R12, A_PC, A_R3, s ? SH_LSR : SH_LSL, s);   /* MVN r12, r3, LSR #s */
+            if (s)
+                arm_lsl(e, A_R12, A_R12, s);
             arm_ls_imm(e, LS_STR, A_R12, A_R11, XLAT_RT_SRC);
         } else {
             arm_ls_imm(e, LS_STR, A_R3, A_R11, XLAT_RT_SRC);
         }
     }
-    arm_mov32(e, A_R12, (uint32_t)(kind << 5 | s));
-    arm_ls_imm(e, LS_STRB, A_R12, A_R11, XLAT_RT_OP);
+    if (store_op) {
+        arm_mov32(e, A_R12, (uint32_t)(kind << 5 | s));
+        arm_ls_imm(e, LS_STRB, A_R12, A_R11, XLAT_RT_OP);
+    }
 }
 
+#if defined(XLAT_HOST_TEST)
+uint32_t xlat_size_bytes[XLAT_SIZE_N], xlat_size_count[XLAT_SIZE_N];
+#define SIZE_NOTE(k, from) (xlat_size_bytes[k] += c->e.pos - (from), xlat_size_count[k]++)
+#else
+#define SIZE_NOTE(k, from) ((void)0)
+#endif
+
+static void emit_recon_body(tctx_t *c, int p);
 /* Rebuild producer p's lazy flags from registers right after it ran. */
 static void emit_recon(tctx_t *c, int p)
+{
+    const uint32_t from = c->e.pos;
+    emit_recon_body(c, p);
+    SIZE_NOTE(XLAT_SIZE_RECON, from);
+    (void)from;
+}
+
+static void emit_recon_body(tctx_t *c, int p)
 {
     arm_emit_t *e = &c->e;
     const x86_insn_t *in = &c->in[p];
@@ -939,7 +1015,7 @@ static void emit_recon(tctx_t *c, int p)
         get_shifted(c, &in->a, size, A_R1);
         arm_mov32(e, A_R3, 1u << s);
         arm_dp_reg(e, in->sub ? DP_ADD : DP_SUB, 0, A_R2, A_R1, A_R3, SH_LSL, 0);
-        emit_lazy(c, kind, size, true);
+        emit_lazy(c, kind, size, true, p);
         return;
     }
     switch (in->sub) {
@@ -959,30 +1035,28 @@ static void emit_recon(tctx_t *c, int p)
         get_shifted(c, &in->a, size, A_R1);
         break;
     }
-    emit_lazy(c, kind, size, false);
+    emit_lazy(c, kind, size, false, p);
 }
 
-/* r12 = CF from the lazy state in rt (0 or 1). Clobbers the ARM flags. */
-static void emit_carry_in(tctx_t *c)
+/* r12 = CF from the lazy state in rt (0 or 1) at instruction i. Clobbers
+ * the ARM flags. */
+static void emit_carry_in(tctx_t *c, int i)
 {
     arm_emit_t *e = &c->e;
-    arm_ls_imm(e, LS_LDRB, A_R12, A_R11, XLAT_RT_OP);
-    arm_dp_imm(e, DP_SUB, 1, A_PC, A_R12, 0);
-    arm_ls_imm(e, LS_LDRB, A_R12, A_R11, XLAT_RT_CF);   /* flags_op != 0: flags_cf */
-    const uint32_t done = arm_branch_slot(e);
-    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_EFLAGS);
-    arm_dp_imm(e, DP_AND, 0, A_R12, A_R12, 1);
-    local_patch(c, done, C_NE);
+    if (c->cf_in[i] & NONE_BIT)
+        emit_pending_check(c);
+    arm_ls_imm(e, LS_LDRB, A_R12, A_R11, XLAT_RT_CF);   /* CF, resolved or not (xlat.h) */
 }
 
 /* ADC/SBB on r2 = dst << s, r3 = src << s; r1 = result << s, flags stored.
  * The carry is brought into bit s through the low bits: ADC adds
  * (2^s - 1) and 1 below the operands, SBB subtracts 1 below the source. */
-static void emit_carry_op(tctx_t *c, const x86_insn_t *in)
+static void emit_carry_op(tctx_t *c, int i)
 {
     arm_emit_t *e = &c->e;
+    const x86_insn_t *in = &c->in[i];
     const int size = in->size, s = 32 - size;
-    emit_carry_in(c);
+    emit_carry_in(c, i);
     if (in->sub == ALU_ADC) {
         arm_lsl(e, A_LR, A_R12, s);
         arm_dp_reg(e, DP_SUB, 0, A_LR, A_LR, A_R12, SH_LSL, 0);
@@ -1001,7 +1075,7 @@ static void emit_carry_op(tctx_t *c, const x86_insn_t *in)
         arm_lsl(e, A_R1, A_R1, s);
     }
     arm_ls_imm(e, LS_STRB, A_R12, A_R11, XLAT_RT_CF);
-    emit_lazy_values(c, x86_flag_kind(in), size);
+    emit_lazy_values(c, x86_flag_kind(in), size, true);
 }
 
 static void emit_alu(tctx_t *c, int i)
@@ -1025,7 +1099,7 @@ static void emit_alu(tctx_t *c, int i)
     }
     if (x86_is_carry_op(in)) {
         get_shifted(c, &in->b, size, A_R3);
-        emit_carry_op(c, in);
+        emit_carry_op(c, i);
         arm_lsr(e, A_R12, A_R1, 32 - size);
         put_raw(c, &in->a, size, A_R12);
         return;
@@ -1046,8 +1120,28 @@ static void emit_alu(tctx_t *c, int i)
         }
     }
     if (c->mat[i]) {
-        arm_dp_reg(e, dp, 0, A_R1, A_R2, A_R3, SH_LSL, 0);
-        emit_lazy(c, kind, size, incdec);
+        const uint32_t from = e->pos;
+        (void)from;
+        if (c->full[i]) {
+            arm_dp_reg(e, dp, 0, A_R1, A_R2, A_R3, SH_LSL, 0);
+            emit_lazy(c, kind, size, incdec, i);
+        } else {
+            /* pending (xlat_rt_pending): the operands and the kind only;
+             * INC / DEC leave lazy_cf, which is CF unless the entry state
+             * is pending */
+            if (incdec && (c->cf_in[i] & NONE_BIT))
+                emit_pending_check(c);
+            if (kind == FK_LOGIC) {
+                arm_dp_reg(e, dp, 0, A_R1, A_R2, A_R3, SH_LSL, 0);
+                arm_strd(e, A_R1, A_R1, A_R11, XLAT_RT_DST);
+            } else {
+                arm_strd(e, A_R2, A_R3, A_R11, XLAT_RT_DST);
+            }
+            arm_mov32(e, A_R12, XLAT_LAZY_PENDING | (incdec ? XLAT_LAZY_KEEP_CF : 0u) |
+                                    (uint32_t)(kind << 5 | (32 - size)));
+            arm_ls_imm(e, LS_STRB, A_R12, A_R11, XLAT_RT_OP);
+        }
+        SIZE_NOTE(XLAT_SIZE_MAT, from);
     }
     /* The flag-setting operation is last: a Jcc after it reads ARM flags. */
     arm_dp_reg(e, dp, 1, writes ? A_R1 : A_PC, A_R2, A_R3, SH_LSL, 0);
@@ -1081,8 +1175,7 @@ static void emit_xchg(tctx_t *c, int i)
 static void emit_stack_addr(tctx_t *c, int delta)
 {
     arm_emit_t *e = &c->e;
-    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_GPR);
-    arm_ls_imm(e, LS_LDRH, A_R1, A_R12, 16);
+    arm_ls_imm(e, LS_LDRH, A_R1, A_R11, XLAT_RT_SP);
     if (delta < 0)
         arm_subw(e, A_R1, A_R1, (uint32_t)-delta);
     else if (delta > 0)
@@ -1095,8 +1188,7 @@ static void emit_stack_addr(tctx_t *c, int delta)
 
 static void emit_store_sp(tctx_t *c)
 {
-    arm_ls_imm(&c->e, LS_LDR, A_R12, A_R11, XLAT_RT_GPR);
-    arm_ls_imm(&c->e, LS_STRH, A_R1, A_R12, 16);
+    arm_ls_imm(&c->e, LS_STRH, A_R1, A_R11, XLAT_RT_SP);
 }
 
 /* A transfer to the IP in register ipreg (16 bits, CS unchanged) whose
@@ -1129,9 +1221,39 @@ static void emit_site_dispatch(tctx_t *c, int i, int ipreg)
 
 /* PUSH / CALL: the 16-bit value in register v is pushed; checks first, so a
  * side exit leaves SP alone. */
+/* The interpreter's arguments for instruction i after a BL to a check that
+ * calls XRIP itself when the access cannot be done here (wside, spush,
+ * spop): the IP, XI_* flags, the offset of where the region goes on after
+ * it. False (nothing emitted) when the side exit needs a flag
+ * reconstruction or the next instruction lies before this one. */
+static bool emit_side_args(tctx_t *c, int i, uint32_t target, uint32_t xi)
+{
+    arm_emit_t *e = &c->e;
+    const x86_insn_t *in = &c->in[i];
+    const bool cont = falls_through(in) && !is_producer(in) && c->fall_idx[i] >= 0;
+    if (sync_recon(c, c->in_set[i], side_producer(c, i)) >= 0 || c->n_dfix >= MAX_FIXUPS ||
+        (cont && c->fall_idx[i] <= i))
+        return false;
+    if (!arm_bl(e, target))
+        c->overflow = true;
+    arm_e16(e, in->ip);
+    arm_e16(e, (uint16_t)(xi | XI_SIDE | (uint32_t)(in->len & 0xfu) << 8 | (cont ? 0x8000u : 0u)));
+    if (cont) {
+        c->dfix[c->n_dfix].pos = e->pos;
+        c->dfix[c->n_dfix++].insn = c->fall_idx[i];
+    }
+    arm_e16(e, 0);
+    return true;
+}
+
 static void emit_push_value(tctx_t *c, int i, int v)
 {
     arm_emit_t *e = &c->e;
+    /* the shared push (xlat_emit_trampoline): value in r2, r3 kept */
+    if (v != A_R2)
+        arm_mov(e, A_R2, v);
+    if (emit_side_args(c, i, c->spush, XI_MAY_WRITE))
+        return;
     emit_stack_addr(c, -2);
     emit_checks(c, i, 2, true);
     arm_ls_imm(e, LS_LDR, A_LR, A_R11, XLAT_RT_MEM);
@@ -1143,6 +1265,9 @@ static void emit_push_value(tctx_t *c, int i, int v)
 static void emit_pop_value(tctx_t *c, int i, uint32_t release)
 {
     arm_emit_t *e = &c->e;
+    /* the shared pop (xlat_emit_trampoline): r2 = the word, r1 = SP */
+    if (!release && emit_side_args(c, i, c->spop, side_writes_more(&c->in[i]) ? XI_MAY_WRITE : 0u))
+        return;
     emit_stack_addr(c, 0);
     emit_checks(c, i, 2, false);
     arm_ls_imm(e, LS_LDR, A_LR, A_R11, XLAT_RT_MEM);
@@ -1220,11 +1345,10 @@ static void emit_interp_call(tctx_t *c, int i, uint32_t flags, bool cont)
 {
     arm_emit_t *e = &c->e;
     const x86_insn_t *in = &c->in[i];
-    arm_movw(e, A_R12, in->ip);
-    arm_mov32(e, A_R1, flags);
-    arm_mov32(e, A_R2, cont ? (uint16_t)(in->ip + in->len) : UINT32_MAX);
-    if (!arm_bl(e, c->interp_thunk))
+    if (!arm_bl(e, c->interp_call))
         c->overflow = true;
+    arm_e16(e, in->ip);
+    arm_e16(e, (uint16_t)((flags & 0xffu) | (uint32_t)(in->len & 0xfu) << 8 | (cont ? 0x8000u : 0u)));
 }
 
 /* An instruction the translator does not handle: XRIP executes it, and the
@@ -1525,7 +1649,7 @@ static void emit_string_cmp(tctx_t *c, int i)
     }
     arm_lsl(e, A_R3, A_R3, s);
     arm_dp_reg(e, DP_SUB, 0, A_R1, A_R2, A_R3, SH_LSL, 0);
-    emit_lazy(c, FK_SUB, in->size, false);                          /* r1 stays */
+    emit_lazy(c, FK_SUB, in->size, false, i);                        /* r1 stays */
     emit_str_step(c, bytes);
     if (in->sub == STR_CMPS) {
         arm_dp_reg(e, DP_ADD, 0, A_R12, A_R9, A_R0, SH_LSL, 0);
@@ -1883,9 +2007,8 @@ static void emit_flag(tctx_t *c, int i)
     case FL_CLC:
     case FL_STC:
     case FL_CMC: {
-        arm_ls_imm(e, LS_LDRB, A_R12, A_R11, XLAT_RT_OP);
-        arm_dp_imm(e, DP_SUB, 1, A_PC, A_R12, 0);
-        const uint32_t resolved = arm_branch_slot(e);
+        emit_pending_check(c);
+        /* CF in both places: the lazy CF and the image (xlat.h) */
         if (in->sub == FL_CMC) {
             arm_ls_imm(e, LS_LDRB, A_R12, A_R11, XLAT_RT_CF);
             arm_dp_imm(e, DP_EOR, 0, A_R12, A_R12, 1);
@@ -1893,13 +2016,9 @@ static void emit_flag(tctx_t *c, int i)
             arm_mov32(e, A_R12, in->sub == FL_STC);
         }
         arm_ls_imm(e, LS_STRB, A_R12, A_R11, XLAT_RT_CF);
-        const uint32_t done = arm_branch_slot(e);
-        local_patch(c, resolved, C_EQ);
-        arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_EFLAGS);
-        arm_dp_imm(e, in->sub == FL_CLC ? DP_BIC : in->sub == FL_STC ? DP_ORR : DP_EOR, 0,
-                   A_R12, A_R12, 1);
-        arm_ls_imm(e, LS_STR, A_R12, A_R11, XLAT_RT_EFLAGS);
-        local_patch(c, done, C_AL);
+        arm_ls_imm(e, LS_LDR, A_LR, A_R11, XLAT_RT_EFLAGS);
+        arm_bfi(e, A_LR, A_R12, 0, 1);
+        arm_ls_imm(e, LS_STR, A_LR, A_R11, XLAT_RT_EFLAGS);
         break;
     }
     case FL_LAHF:   /* AH = (2 | FLAGS & 0xd5) */
@@ -1915,6 +2034,8 @@ static void emit_flag(tctx_t *c, int i)
         arm_dp_imm(e, DP_BIC, 0, A_R0, A_R0, 0xd5u);
         arm_dp_reg(e, DP_ORR, 0, A_R0, A_R0, A_R12, SH_LSL, 0);
         arm_ls_imm(e, LS_STR, A_R0, A_R11, XLAT_RT_EFLAGS);
+        arm_dp_imm(e, DP_AND, 0, A_R12, A_R0, 1);                /* resolved: lazy_cf = CF */
+        arm_ls_imm(e, LS_STRB, A_R12, A_R11, XLAT_RT_CF);
         break;
     default:        /* PUSHF: 2 | (FLAGS & 0x7fd5), as XRIP's makeflagsword() */
         emit_resolve(c);
@@ -2150,40 +2271,32 @@ static void emit_stubs(tctx_t *c)
             if (pass ? s->type == ST_BACK : s->type != ST_BACK)
                 continue;
             s->pos = e->pos;
+            const uint32_t from = e->pos;
+            (void)from;
             for (int j = 0; j < s->nsites; ++j)
                 if (!arm_patch_branch(e, s->site[j], s->pos, s->cond[j]))
                     c->overflow = true;
             if (s->type == ST_BACK) {
-                /* Budget used up: read the clock, leave at the burst's
-                 * deadline, else go on for XLAT_SLICE_CHECK instructions. */
+                /* Budget used up: a pending IRQ, the burst's deadline leave
+                 * (back_slow), else the loop goes on for XLAT_SLICE_CHECK
+                 * instructions. IRQs are seen there, every XLAT_SLICE_CHECK
+                 * instructions at most, as XRIP sees them between bursts. */
                 const dest_t ex = {D_STUB, s->exit_stub};
                 arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_BUDGET);
                 arm_dp_imm(e, DP_SUB, 1, A_R12, A_R12, s->budget_n);
                 arm_ls_imm(e, LS_STR, A_R12, A_R11, XLAT_RT_BUDGET);
                 const uint32_t slow = arm_branch_slot(e);
-                const uint32_t irq = e->pos;
-                arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_INTR);
-                arm_ls_imm(e, LS_LDRB, A_R12, A_R12, 0);
-                arm_dp_imm(e, DP_SUB, 1, A_PC, A_R12, 0);
-                emit_branch(c, ex, C_NE);
                 uint32_t site = arm_branch_slot(e);
                 if (!arm_patch_branch(e, site, c->label[s->target], C_AL))
                     c->overflow = true;
                 local_patch(c, slow, C_LE);
-                arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_CLOCK);
-                arm_ls_imm(e, LS_LDR, A_R12, A_R12, 0);
-                arm_ls_imm(e, LS_LDR, A_LR, A_R11, XLAT_RT_DEADLINE);
-                arm_dp_reg(e, DP_SUB, 1, A_R12, A_R12, A_LR, SH_LSL, 0);
-                emit_branch(c, ex, C_PL);                      /* clock - deadline >= 0 */
-                arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_BUDGET);
-                arm_dp_imm(e, DP_ADD, 0, A_R12, A_R12, XLAT_SLICE_CHECK);
-                arm_ls_imm(e, LS_STR, A_R12, A_R11, XLAT_RT_BUDGET);
-                arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_EXTRA);
-                arm_dp_imm(e, DP_ADD, 0, A_R12, A_R12, XLAT_SLICE_CHECK);
-                arm_ls_imm(e, LS_STR, A_R12, A_R11, XLAT_RT_EXTRA);
-                site = arm_branch_slot(e);
-                if (!arm_patch_branch(e, site, irq, C_AL))
+                if (!arm_bl(e, c->back_slow))
                     c->overflow = true;
+                emit_branch(c, ex, C_PL);
+                site = arm_branch_slot(e);
+                if (!arm_patch_branch(e, site, c->label[s->target], C_AL))
+                    c->overflow = true;
+                SIZE_NOTE(XLAT_SIZE_BACK, from);
             } else if (s->type == ST_SIDE) {
                 /* The access cannot be done here: XRIP executes the whole
                  * instruction. A MOV, PUSH or POP sets no flags, so the code
@@ -2200,21 +2313,34 @@ static void emit_stubs(tctx_t *c)
                     if (!arm_patch_branch(e, site, c->label[c->fall_idx[i]], C_AL))
                         c->overflow = true;
                 }
+                SIZE_NOTE(XLAT_SIZE_SIDE, from);
             } else {
                 if (s->recon >= 0)
                     emit_recon(c, s->recon);
-                if (!s->dyn) {
-                    arm_movw(e, A_R12, s->ip);
-                    arm_ls_imm(e, LS_STR, A_R12, A_R11, XLAT_RT_IP);
+                /* shared tails (xlat_emit_trampoline); a BRANCH exit goes on
+                 * in the region at its target, if any (the dispatcher leaves
+                 * through the epilogue otherwise) */
+                if (s->dyn && s->exit_kind == XLAT_EXIT_BRANCH) {
+                    const uint32_t site = arm_branch_slot(e);
+                    if (!arm_patch_branch(e, site, c->exit_dyn, C_AL))
+                        c->overflow = true;
+                } else if (!s->dyn && (s->exit_kind == XLAT_EXIT_BRANCH ||
+                                       s->exit_kind == XLAT_EXIT_BUDGET)) {
+                    if (!arm_bl(e, c->exit_ip[s->exit_kind == XLAT_EXIT_BUDGET]))
+                        c->overflow = true;
+                    arm_e16(e, s->ip);
+                } else {
+                    if (!s->dyn) {
+                        arm_movw(e, A_R12, s->ip);
+                        arm_ls_imm(e, LS_STR, A_R12, A_R11, XLAT_RT_IP);
+                    }
+                    arm_mov32(e, A_R12, s->exit_kind);
+                    arm_ls_imm(e, LS_STR, A_R12, A_R11, XLAT_RT_EXIT_KIND);
+                    const uint32_t site = arm_branch_slot(e);
+                    if (!arm_patch_branch(e, site, c->epilogue, C_AL))
+                        c->overflow = true;
                 }
-                arm_mov32(e, A_R12, s->exit_kind);
-                arm_ls_imm(e, LS_STR, A_R12, A_R11, XLAT_RT_EXIT_KIND);
-                /* a BRANCH exit goes on in the region at its target, if any
-                 * (the dispatcher leaves through the epilogue otherwise) */
-                const uint32_t site = arm_branch_slot(e);
-                if (!arm_patch_branch(e, site, s->exit_kind == XLAT_EXIT_BRANCH ? c->dispatch
-                                                                               : c->epilogue, C_AL))
-                    c->overflow = true;
+                SIZE_NOTE(XLAT_SIZE_EXIT, from);
             }
         }
     }
@@ -2224,9 +2350,16 @@ static void emit_stubs(tctx_t *c)
 /* Trampoline and entry point                                             */
 /* ---------------------------------------------------------------------- */
 
+/* B<cond> from slot at to target (inside the trampoline). */
+static bool tramp_patch(arm_emit_t *e, uint32_t at, uint32_t target, int cond)
+{
+    return arm_patch_branch(e, at, target, cond);
+}
+
 bool xlat_emit_trampoline(xlat_arena_t *a)
 {
     arm_emit_t e = {a->base, 0, a->size, false};
+    bool ok = true;
     /* entry(rt = r0, target | 1 = r1) */
     arm_push(&e, 0x4ff8u);                     /* r3-r11, lr: 8-byte aligned */
     arm_mov(&e, A_R11, A_R0);
@@ -2234,6 +2367,8 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
 #define LOAD(r, off) arm_ls_imm(&e, LS_LDR, r, A_R12, off);
     GPR_LIST(LOAD)
 #undef LOAD
+    arm_ls_imm(&e, LS_LDR, A_R0, A_R12, 16);   /* ESP -> rt->sp */
+    arm_ls_imm(&e, LS_STR, A_R0, A_R11, XLAT_RT_SP);
     arm_bx(&e, A_R1);
     arm_e16(&e, 0xbf00u);                      /* align the epilogue */
     a->epilogue = e.pos;
@@ -2241,6 +2376,8 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
 #define STORE(r, off) arm_ls_imm(&e, LS_STR, r, A_R12, off);
     GPR_LIST(STORE)
 #undef STORE
+    arm_ls_imm(&e, LS_LDR, A_R0, A_R11, XLAT_RT_SP);
+    arm_ls_imm(&e, LS_STR, A_R0, A_R12, 16);
     arm_pop(&e, 0x8ff8u);                      /* r3-r11, pc */
 
     /* Dispatcher, reached by B from a BRANCH exit stub: rt->ip and
@@ -2285,14 +2422,205 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     arm_ls_imm(&e, LS_STR, A_R0, A_R11, XLAT_RT_LINKS);
     arm_ls_imm(&e, LS_LDR, A_R0, A_R3, 4);
     arm_bx(&e, A_R0);
-    if (e.full ||
-        !arm_patch_branch(&e, miss1, a->epilogue, C_NE) || !arm_patch_branch(&e, miss2, a->epilogue, C_NE) ||
-        !arm_patch_branch(&e, miss3, a->epilogue, C_NE) || !arm_patch_branch(&e, miss4, a->epilogue, C_LE))
-        return false;
+    ok &= tramp_patch(&e, miss1, a->epilogue, C_NE) && tramp_patch(&e, miss2, a->epilogue, C_NE) &&
+          tramp_patch(&e, miss3, a->epilogue, C_NE) && tramp_patch(&e, miss4, a->epilogue, C_LE);
 
-    /* Interpreter call, reached by BL from region code (emit_interp_call):
-     * r12 = IP of the instruction, r1 = XI_* flags, r2 = IP it falls
-     * through to or 0xffffffff (the region does not go on after it). */
+    /* Exit stubs (emit_stubs): BL here with the exit IP in the halfword
+     * after the BL (exit_ip), or B to exit_dyn when the code stored rt->ip.
+     * They never return. */
+    static const uint8_t exit_kinds[2] = {XLAT_EXIT_BRANCH, XLAT_EXIT_BUDGET};
+    for (int k = 0; k < 2; ++k) {
+        a->exit_ip[k] = e.pos;
+        arm_subw(&e, A_R12, A_LR, 1);                          /* the halfword */
+        arm_ls_imm(&e, LS_LDRH, A_R12, A_R12, 0);
+        arm_ls_imm(&e, LS_STR, A_R12, A_R11, XLAT_RT_IP);
+        if (k == 0)
+            a->exit_dyn = e.pos;
+        arm_mov32(&e, A_R12, exit_kinds[k]);
+        arm_ls_imm(&e, LS_STR, A_R12, A_R11, XLAT_RT_EXIT_KIND);
+        const uint32_t to = arm_branch_slot(&e);
+        ok &= tramp_patch(&e, to, k == 0 ? a->dispatch : a->epilogue, C_AL);
+    }
+
+    /* Write check (emit_checks), BL here with r0 = linear address of an
+     * access of 1, 2, 4 bytes (wchk[0..2]) or of up to 16 ending at r12
+     * (wchk[3]). Returns CS when the access is outside fast memory or its
+     * 64-byte block may hold translated x86 code (xlat_code_map), else CC.
+     * r0 and r1 are kept, r12 clobbered. */
+    static const uint8_t wlast[3] = {0, 1, 3};
+    uint32_t to_common[3];
+    for (int k = 0; k < 3; ++k) {
+        a->wchk[k] = e.pos;
+        if (wlast[k])
+            arm_addw(&e, A_R12, A_R0, wlast[k]);
+        else
+            arm_mov(&e, A_R12, A_R0);
+        to_common[k] = arm_branch_slot(&e);
+    }
+    a->wchk[3] = e.pos;
+    for (int k = 0; k < 3; ++k)
+        ok &= tramp_patch(&e, to_common[k], a->wchk[3], C_AL);
+    arm_e16(&e, 0xb402u);                                    /* PUSH {r1} */
+    arm_ls_imm(&e, LS_LDR, A_R1, A_R11, XLAT_RT_MEM_SIZE);
+    arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R12, A_R1, SH_LSL, 0);   /* CMP last, size */
+    const uint32_t wout = arm_branch_slot(&e);
+    arm_lsr(&e, A_R12, A_R0, XLAT_CODE_BLOCK_SHIFT + 3);
+    arm_ls_imm(&e, LS_LDR, A_R1, A_R11, XLAT_RT_CODE_MAP);
+    arm_ls_reg(&e, LS_LDRB, A_R12, A_R1, A_R12);
+    arm_ubfx(&e, A_R1, A_R0, XLAT_CODE_BLOCK_SHIFT, 3);
+    arm_lsr_reg(&e, A_R12, A_R12, A_R1);
+    arm_dp_imm(&e, DP_AND, 1, A_PC, A_R12, 1);                 /* TST #1: C stays clear */
+    const uint32_t wfree = arm_branch_slot(&e);
+    arm_dp_imm(&e, DP_SUB, 1, A_PC, A_R12, 0);                 /* CMP r12, #0: C set */
+    const uint32_t wdone = e.pos;
+    arm_e16(&e, 0xbc02u);                                    /* POP {r1} */
+    arm_bx(&e, A_LR);
+    ok &= tramp_patch(&e, wout, wdone, C_CS) && tramp_patch(&e, wfree, wdone, C_EQ);
+
+    /* The same check, BL here with three halfwords after the BL: the
+     * interpreter's arguments (interp_call) and the offset of the code
+     * where the region goes on after XRIP did the instruction, from the end
+     * of the halfwords. Returns after them when the access may be done
+     * here (r0, r1 kept); else runs the instruction in XRIP. */
+    uint32_t xto_common[3];
+    for (int k = 0; k < 3; ++k) {
+        a->wside[k] = e.pos;
+        if (wlast[k])
+            arm_addw(&e, A_R12, A_R0, wlast[k]);
+        else
+            arm_mov(&e, A_R12, A_R0);
+        xto_common[k] = arm_branch_slot(&e);
+    }
+    a->wside[3] = e.pos;
+    for (int k = 0; k < 3; ++k)
+        ok &= tramp_patch(&e, xto_common[k], a->wside[3], C_AL);
+    arm_e16(&e, 0xb402u);                                    /* PUSH {r1} */
+    arm_ls_imm(&e, LS_LDR, A_R1, A_R11, XLAT_RT_MEM_SIZE);
+    arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R12, A_R1, SH_LSL, 0);
+    const uint32_t xout = arm_branch_slot(&e);
+    arm_lsr(&e, A_R12, A_R0, XLAT_CODE_BLOCK_SHIFT + 3);
+    arm_ls_imm(&e, LS_LDR, A_R1, A_R11, XLAT_RT_CODE_MAP);
+    arm_ls_reg(&e, LS_LDRB, A_R12, A_R1, A_R12);
+    arm_ubfx(&e, A_R1, A_R0, XLAT_CODE_BLOCK_SHIFT, 3);
+    arm_lsr_reg(&e, A_R12, A_R12, A_R1);
+    arm_dp_imm(&e, DP_AND, 1, A_PC, A_R12, 1);
+    const uint32_t xcode = arm_branch_slot(&e);
+    arm_e16(&e, 0xbc02u);                                    /* POP {r1} */
+    arm_addw(&e, A_LR, A_LR, 6);
+    arm_bx(&e, A_LR);
+    const uint32_t xfail = e.pos;
+    arm_e16(&e, 0xbc02u);                                    /* POP {r1} */
+    arm_subw(&e, A_R0, A_LR, 1);                             /* the halfwords */
+    arm_ls_imm(&e, LS_LDRH, A_R12, A_R0, 4);
+    arm_addw(&e, A_LR, A_LR, 6);
+    arm_dp_reg(&e, DP_ADD, 0, A_LR, A_LR, A_R12, SH_LSL, 0);   /* where it goes on */
+    const uint32_t to_interp = arm_branch_slot(&e);
+    ok &= tramp_patch(&e, xout, xfail, C_CS) && tramp_patch(&e, xcode, xfail, C_NE);
+
+    /* PUSH of r2 (emit_push_value) with the arguments as for wside: SS:SP-2
+     * checked as a write, the word stored, SP lowered. r1 = the new SP,
+     * r0, r12 clobbered, r3 kept. */
+    a->spush = e.pos;
+    arm_ls_imm(&e, LS_LDRH, A_R1, A_R11, XLAT_RT_SP);
+    arm_subw(&e, A_R1, A_R1, 2);
+    arm_uxth(&e, A_R1, A_R1);
+    arm_ls_imm(&e, LS_LDR, A_R12, A_R11, XLAT_RT_SEG_BASE + 8u);
+    arm_dp_reg(&e, DP_ADD, 0, A_R0, A_R1, A_R12, SH_LSL, 0);
+    arm_addw(&e, A_R12, A_R0, 1);
+    arm_e16(&e, 0xb408u);                                    /* PUSH {r3} */
+    arm_ls_imm(&e, LS_LDR, A_R3, A_R11, XLAT_RT_MEM_SIZE);
+    arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R12, A_R3, SH_LSL, 0);
+    const uint32_t pout = arm_branch_slot(&e);
+    arm_lsr(&e, A_R12, A_R0, XLAT_CODE_BLOCK_SHIFT + 3);
+    arm_ls_imm(&e, LS_LDR, A_R3, A_R11, XLAT_RT_CODE_MAP);
+    arm_ls_reg(&e, LS_LDRB, A_R12, A_R3, A_R12);
+    arm_ubfx(&e, A_R3, A_R0, XLAT_CODE_BLOCK_SHIFT, 3);
+    arm_lsr_reg(&e, A_R12, A_R12, A_R3);
+    arm_dp_imm(&e, DP_AND, 1, A_PC, A_R12, 1);
+    const uint32_t pcode = arm_branch_slot(&e);
+    arm_e16(&e, 0xbc08u);                                    /* POP {r3} */
+    arm_ls_imm(&e, LS_LDR, A_R12, A_R11, XLAT_RT_MEM);
+    arm_ls_reg(&e, LS_STRH, A_R2, A_R12, A_R0);
+    arm_ls_imm(&e, LS_STRH, A_R1, A_R11, XLAT_RT_SP);
+    arm_addw(&e, A_LR, A_LR, 6);
+    arm_bx(&e, A_LR);
+    const uint32_t pfail = e.pos;
+    arm_e16(&e, 0xbc08u);                                    /* POP {r3} */
+    const uint32_t pto = arm_branch_slot(&e);
+    ok &= tramp_patch(&e, pout, pfail, C_CS) && tramp_patch(&e, pcode, pfail, C_NE) &&
+          tramp_patch(&e, pto, xfail + 2u, C_AL);            /* wside's failure, after its POP */
+
+    /* POP (emit_pop_value, no release): r2 = the word at SS:SP, r1 = SP + 2
+     * (stored); r0, r12 clobbered. */
+    a->spop = e.pos;
+    arm_ls_imm(&e, LS_LDRH, A_R1, A_R11, XLAT_RT_SP);
+    arm_ls_imm(&e, LS_LDR, A_R12, A_R11, XLAT_RT_SEG_BASE + 8u);
+    arm_dp_reg(&e, DP_ADD, 0, A_R0, A_R1, A_R12, SH_LSL, 0);
+    arm_addw(&e, A_R12, A_R0, 1);
+    arm_ls_imm(&e, LS_LDR, A_R2, A_R11, XLAT_RT_MEM_SIZE);
+    arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R12, A_R2, SH_LSL, 0);
+    const uint32_t oout = arm_branch_slot(&e);
+    arm_ls_imm(&e, LS_LDR, A_R12, A_R11, XLAT_RT_MEM);
+    arm_ls_reg(&e, LS_LDRH, A_R2, A_R12, A_R0);
+    arm_addw(&e, A_R1, A_R1, 2);
+    arm_uxth(&e, A_R1, A_R1);
+    arm_ls_imm(&e, LS_STRH, A_R1, A_R11, XLAT_RT_SP);
+    arm_addw(&e, A_LR, A_LR, 6);
+    arm_bx(&e, A_LR);
+    ok &= tramp_patch(&e, oout, xfail + 2u, C_CS);
+
+    /* Pending flags completed (emit_pending_check): xlat_rt_pending(). */
+    a->pend = e.pos;
+    arm_push(&e, 0x500fu);                     /* r0-r3, r12, lr: 8-byte aligned */
+    arm_mov(&e, A_R0, A_R11);
+    arm_mov32(&e, A_R12, (uint32_t)(uintptr_t)&xlat_rt_pending);
+    arm_blx(&e, A_R12);
+    arm_pop(&e, 0x900fu);                      /* r0-r3, r12, pc */
+
+    /* Back edge whose budget ran out (emit_stubs): returns PL when an IRQ
+     * is pending or the burst's deadline passed (leave), else MI with
+     * budget and extra raised by XLAT_SLICE_CHECK. Uses r0, r12. */
+    a->back_slow = e.pos;
+    arm_ls_imm(&e, LS_LDR, A_R12, A_R11, XLAT_RT_INTR);
+    arm_ls_imm(&e, LS_LDRB, A_R12, A_R12, 0);
+    arm_dp_imm(&e, DP_SUB, 1, A_PC, A_R12, 0);                 /* 1..255: PL */
+    const uint32_t irq_pending = arm_branch_slot(&e);
+    arm_ls_imm(&e, LS_LDR, A_R12, A_R11, XLAT_RT_CLOCK);
+    arm_ls_imm(&e, LS_LDR, A_R12, A_R12, 0);
+    arm_ls_imm(&e, LS_LDR, A_R0, A_R11, XLAT_RT_DEADLINE);
+    arm_dp_reg(&e, DP_SUB, 1, A_R12, A_R12, A_R0, SH_LSL, 0);   /* clock - deadline */
+    const uint32_t expired = arm_branch_slot(&e);
+    arm_ls_imm(&e, LS_LDR, A_R12, A_R11, XLAT_RT_BUDGET);
+    arm_addw(&e, A_R12, A_R12, XLAT_SLICE_CHECK);
+    arm_ls_imm(&e, LS_STR, A_R12, A_R11, XLAT_RT_BUDGET);
+    arm_ls_imm(&e, LS_LDR, A_R12, A_R11, XLAT_RT_EXTRA);
+    arm_addw(&e, A_R12, A_R12, XLAT_SLICE_CHECK);
+    arm_ls_imm(&e, LS_STR, A_R12, A_R11, XLAT_RT_EXTRA);
+    const uint32_t ret = e.pos;
+    arm_bx(&e, A_LR);
+    ok &= tramp_patch(&e, expired, ret, C_PL) && tramp_patch(&e, irq_pending, ret, C_NE);
+
+    /* Interpreter call, reached by BL from region code (emit_interp_call)
+     * with two halfwords after the BL: the IP of the instruction, and
+     * XI_* flags | length << 8 | 0x8000 when the region goes on at the
+     * next instruction. Returns after the halfwords if it does. */
+    a->interp_call = e.pos;
+    arm_subw(&e, A_R0, A_LR, 1);
+    arm_addw(&e, A_LR, A_LR, 4);
+    ok &= tramp_patch(&e, to_interp, e.pos, C_AL);           /* r0 = the halfwords */
+    arm_ls_imm(&e, LS_LDRH, A_R12, A_R0, 0);                  /* ip */
+    arm_ls_imm(&e, LS_LDRH, A_R1, A_R0, 2);                   /* ctl */
+    arm_ubfx(&e, A_R2, A_R1, 8, 4);
+    arm_dp_reg(&e, DP_ADD, 0, A_R2, A_R2, A_R12, SH_LSL, 0);
+    arm_uxth(&e, A_R2, A_R2);                                 /* ip + length */
+    arm_ubfx(&e, A_R0, A_R1, 15, 1);
+    arm_subw(&e, A_R0, A_R0, 1);                              /* 0 / ~0 */
+    arm_dp_reg(&e, DP_ORR, 0, A_R2, A_R2, A_R0, SH_LSL, 0);
+    arm_dp_imm(&e, DP_AND, 0, A_R1, A_R1, 0xffu);
+
+    /* Interpreter thunk: r12 = IP of the instruction, r1 = XI_* flags,
+     * r2 = IP it falls through to or 0xffffffff (the region does not go on
+     * after it); lr = where the region goes on. */
     a->interp_thunk = e.pos;
     arm_push(&e, 0x400eu);                     /* r1-r3, lr: 8-byte aligned */
     arm_ls_imm(&e, LS_STR, A_R12, A_R11, XLAT_RT_IP);
@@ -2300,13 +2628,17 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
 #define STORE(r, off) arm_ls_imm(&e, LS_STR, r, A_R12, off);
     GPR_LIST(STORE)
 #undef STORE
+    arm_ls_imm(&e, LS_LDR, A_R0, A_R11, XLAT_RT_SP);
+    arm_ls_imm(&e, LS_STR, A_R0, A_R12, 16);
     arm_mov(&e, A_R0, A_R11);
-    arm_mov32(&e, A_R12, (uint32_t)(uintptr_t)&xlat_interp_one);
+    arm_mov32(&e, A_R12, (uint32_t)(uintptr_t)&xlat_interp_call);
     arm_blx(&e, A_R12);
     arm_ls_imm(&e, LS_LDR, A_R12, A_R11, XLAT_RT_GPR);
 #define LOAD(r, off) arm_ls_imm(&e, LS_LDR, r, A_R12, off);
     GPR_LIST(LOAD)
 #undef LOAD
+    arm_ls_imm(&e, LS_LDR, A_R3, A_R12, 16);
+    arm_ls_imm(&e, LS_STR, A_R3, A_R11, XLAT_RT_SP);
     arm_pop(&e, 0x400eu);
     arm_dp_imm(&e, DP_SUB, 1, A_PC, A_R0, 1);
     const uint32_t leave1 = arm_branch_slot(&e);      /* 0: stop, 2: other CS */
@@ -2327,7 +2659,7 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     const uint32_t at_store = e.pos;
     arm_ls_imm(&e, LS_STR, A_R12, A_R11, XLAT_RT_EXIT_KIND);
     const uint32_t to_epi = arm_branch_slot(&e);
-    if (e.full ||
+    if (e.full || !ok ||
         !arm_patch_branch(&e, leave1, leave, C_NE) || !arm_patch_branch(&e, leave2, leave, C_EQ) ||
         !arm_patch_branch(&e, leave3, leave, C_NE) || !arm_patch_branch(&e, store, at_store, C_EQ) ||
         !arm_patch_branch(&e, store2, at_store, C_EQ) ||
@@ -2351,17 +2683,44 @@ bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int trace
     bool ok = false;
     c->rt = rt;
     c->cs_base = rt->seg_base[1];
-    c->n_stubs = c->n_fix = 0;
+    c->n_stubs = c->n_fix = c->n_dfix = 0;
     c->overflow = false;
     c->epilogue = a->epilogue;
-    c->interp_thunk = a->interp_thunk;
     c->dispatch = a->dispatch;
+    c->interp_call = a->interp_call;
+    c->exit_ip[0] = a->exit_ip[0];
+    c->exit_ip[1] = a->exit_ip[1];
+    c->exit_dyn = a->exit_dyn;
+    memcpy(c->wchk, a->wchk, sizeof(c->wchk));
+    memcpy(c->wside, a->wside, sizeof(c->wside));
+    c->back_slow = a->back_slow;
+    c->pend = a->pend;
+    c->spush = a->spush;
+    c->spop = a->spop;
     c->n_interp = 0;
     out->reject = XLAT_RJ_NONE;
     c->trace_min = (uint8_t)(trace_min > 0 ? (trace_min < 255 ? trace_min : 255) : 0);
     c->fn = 0;
 
-    const int why = discover(c, ip);
+    c->no_calls = 0;
+    int why = discover(c, ip);
+    bool calls = false;
+    for (int i = 0; i < c->n && !calls; ++i)
+        calls = x86_is_call(&c->in[i]) && c->tgt_idx[i] >= 0;
+    if (why == XLAT_RJ_NONE && c->fn && calls) {
+        /* A region without a loop leaves the functions it calls out: they
+         * get regions of their own, reached through the link table, instead
+         * of a copy in every caller's trace. Unless the path is too short
+         * then. */
+        c->no_calls = 1;
+        c->fn = 0;
+        why = discover(c, ip);
+        if (why != XLAT_RJ_NONE || !c->fn) {
+            c->no_calls = 0;
+            c->fn = 0;
+            why = discover(c, ip);
+        }
+    }
     out->fn = c->fn;
     out->n_insns = (uint8_t)c->n;
     out->n_interp = (uint8_t)c->n_interp;
@@ -2396,9 +2755,23 @@ bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int trace
     c->e = (arm_emit_t){a->base, a->code_top, a->data_bottom - data, false};
     for (int i = 0; i < c->n; ++i)
         c->side_stub[i][0] = c->side_stub[i][1] = -1;
-    for (int i = 0; i < c->n; ++i)
+    for (int i = 0; i < c->n; ++i) {
+        const uint32_t from = c->e.pos;
+        (void)from;
         emit_insn(c, i);
+        SIZE_NOTE(c->in[i].op < XLAT_SIZE_RECON ? c->in[i].op : 0, from);
+    }
     emit_stubs(c);
+    for (int k = 0; k < c->n_dfix; ++k) {
+        /* the label after the instruction, from the end of the halfwords */
+        const uint32_t at = c->dfix[k].pos, to = c->label[c->dfix[k].insn];
+        if (to < at + 2u || to - (at + 2u) > 0xffffu) {
+            c->overflow = true;
+            continue;
+        }
+        c->e.buf[at] = (uint8_t)(to - (at + 2u));
+        c->e.buf[at + 1] = (uint8_t)((to - (at + 2u)) >> 8);
+    }
     for (int k = 0; k < c->n_fix; ++k)
         if (!arm_patch_branch(&c->e, c->fix[k].site, c->label[c->fix[k].insn], c->fix[k].cond))
             c->overflow = true;

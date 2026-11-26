@@ -57,6 +57,8 @@ typedef struct xlat_rt {
     uint32_t *last;
     uint32_t cur;
     uint32_t links;
+    uint32_t sp;                   /* ESP while generated code runs (the trampoline
+                                      copies it from and back to gpr[4]) */
 } xlat_rt_t;
 
 #define XLAT_RT_MEM          0
@@ -84,6 +86,7 @@ typedef struct xlat_rt {
 #define XLAT_RT_LAST        96
 #define XLAT_RT_CUR        100
 #define XLAT_RT_LINKS      104
+#define XLAT_RT_SP         108
 
 #if UINTPTR_MAX == 0xffffffffu
 _Static_assert(__builtin_offsetof(xlat_rt_t, mem_size) == XLAT_RT_MEM_SIZE &&
@@ -109,7 +112,8 @@ _Static_assert(__builtin_offsetof(xlat_rt_t, mem_size) == XLAT_RT_MEM_SIZE &&
                __builtin_offsetof(xlat_rt_t, seq) == XLAT_RT_SEQ &&
                __builtin_offsetof(xlat_rt_t, last) == XLAT_RT_LAST &&
                __builtin_offsetof(xlat_rt_t, cur) == XLAT_RT_CUR &&
-               __builtin_offsetof(xlat_rt_t, links) == XLAT_RT_LINKS,
+               __builtin_offsetof(xlat_rt_t, links) == XLAT_RT_LINKS &&
+               __builtin_offsetof(xlat_rt_t, sp) == XLAT_RT_SP,
                "xlat_rt_t layout is used by generated code");
 #endif
 
@@ -205,7 +209,9 @@ void xlat_log_write(uint16_t psp, const char *name);
 uint32_t xlat_interp_one(xlat_rt_t *rt, uint32_t flags);
 
 /* For xlat_interp_one(): the x86 bytes of the running region are unchanged
- * (if not, the region is dropped). */
+ * (if not, the region is dropped). Compares only when xlat_dirty is set:
+ * the instruction (or something before it) may have written translated
+ * code. */
 bool xlat_region_still_valid(xlat_rt_t *rt);
 
 /* Native stack left (bytes) and the margin needed before translating or
@@ -233,7 +239,9 @@ extern uint8_t xlat_code_map[XLAT_CODE_MAP_BYTES];
  * (xlat_note_write), runs a native BIOS / DOS handler, an x87 instruction
  * (fpu.c stores past XRIP's writes) or an OUT. xlat_run() compares the
  * regions' code again only then: entries through burst cuts (CALLs of
- * function regions) in one burst do not. */
+ * function regions) in one burst do not. Inside xlat_run(), the same for
+ * the instructions XRIP runs for translated code (xlat_region_still_valid):
+ * a side exit for a write outside fast memory compares nothing. */
 extern bool xlat_dirty;
 static inline void xlat_note_write(uint32_t linear)
 {
@@ -296,7 +304,22 @@ static inline uint32_t xlat_us_bucket(uint32_t us)
 void xlat_note_service(uint32_t us);
 
 /* Helper called by generated code: x86 condition code cc on the lazy flags. */
-uint32_t xlat_rt_cond(const xlat_rt_t *rt, uint32_t cc);
+uint32_t xlat_rt_cond(xlat_rt_t *rt, uint32_t cc);
+
+/* Flags left pending by generated code: lazy_op has XLAT_LAZY_PENDING set,
+ * lazy_dst / lazy_src hold the operands (<< shift; LOGIC: the result in
+ * both) of the operation lazy_op & 0x7e, the result and CF are not stored
+ * (CF is, with XLAT_LAZY_KEEP_CF). While generated code runs, lazy_cf is
+ * also CF when lazy_op is 0 (xlat_run, the helpers keep it so): INC / DEC
+ * and ADC / SBB read it there.
+ * xlat_rt_pending() completes the lazy state (XRIP's kinds never set the
+ * bit). xlat_run() returns, and the helpers read, completed flags only. */
+#define XLAT_LAZY_PENDING 0x80u
+#define XLAT_LAZY_KEEP_CF 0x01u   /* pending INC / DEC: lazy_cf is its CF already */
+void xlat_rt_pending(xlat_rt_t *rt);
+
+/* The thunk's interpreter call: xlat_rt_pending(), then xlat_interp_one(). */
+uint32_t xlat_interp_call(xlat_rt_t *rt, uint32_t flags);
 
 /* Helper called by generated code: shift / rotate (group 2) of value with
  * XRIP's flag results in rt. ctl = operation | 16-bit << 3 | count << 8. */

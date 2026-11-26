@@ -178,6 +178,12 @@ void arm_ls_reg(arm_emit_t *e, int kind, int rt, int rn, int rm)
             (uint16_t)((unsigned)rt << 12 | (unsigned)rm));
 }
 
+void arm_strd(arm_emit_t *e, int rt, int rt2, int rn, uint32_t imm)
+{
+    arm_e32(e, (uint16_t)(0xe9c0u | (unsigned)rn),
+            (uint16_t)((unsigned)rt << 12 | (unsigned)rt2 << 8 | (imm >> 2 & 0xffu)));
+}
+
 void arm_push(arm_emit_t *e, uint16_t list)
 {
     arm_e32(e, 0xe92du, list);   /* STMDB SP!, {list} */

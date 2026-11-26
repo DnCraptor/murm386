@@ -126,6 +126,7 @@ void arm_ubfx(arm_emit_t *e, int rd, int rn, int lsb, int width);
 void arm_uxth(arm_emit_t *e, int rd, int rm);
 void arm_ls_imm(arm_emit_t *e, int kind, int rt, int rn, uint32_t imm12);
 void arm_ls_reg(arm_emit_t *e, int kind, int rt, int rn, int rm);
+void arm_strd(arm_emit_t *e, int rt, int rt2, int rn, uint32_t imm);  /* STRD rt, rt2, [rn, #imm] (imm: 4 * 0..255) */
 void arm_push(arm_emit_t *e, uint16_t list);
 void arm_pop(arm_emit_t *e, uint16_t list);
 void arm_bx(arm_emit_t *e, int rm);
@@ -374,8 +375,16 @@ typedef struct xlat_arena {
     uint32_t code_top;     /* where xlat_translate puts the code */
     uint32_t data_bottom;  /* end of the free space: code + source copies stay below */
     uint32_t epilogue;     /* offset of the common exit sequence */
-    uint32_t interp_thunk; /* offset of the common xlat_interp_one() call */
+    uint32_t interp_thunk; /* offset of the common xlat_interp_one() call (after interp_call) */
     uint32_t dispatch;     /* offset of the link-table dispatcher (BRANCH exits) */
+    uint32_t interp_call;  /* xlat_interp_one() call with its arguments after the BL */
+    uint32_t exit_ip[2];   /* exits with the IP after the BL: BRANCH, BUDGET */
+    uint32_t exit_dyn;     /* BRANCH exit, rt->ip stored */
+    uint32_t wchk[4];      /* write checks: 1, 2, 4 bytes; up to 16 (r12 = last byte) */
+    uint32_t wside[4];     /* the same, running the instruction in XRIP when it fails */
+    uint32_t spush, spop;  /* 16-bit PUSH / POP the same way */
+    uint32_t back_slow;    /* back edge with the budget used up: the clock */
+    uint32_t pend;         /* xlat_rt_pending() call keeping r0-r3 */
 } xlat_arena_t;
 
 /* Build the trampoline (entry/exit sequences) at the start of the arena. */
@@ -390,6 +399,15 @@ bool xlat_emit_trampoline(xlat_arena_t *arena);
 size_t xlat_translate_ctx_size(void);
 bool xlat_translate(xlat_arena_t *arena, const xlat_rt_t *rt, uint16_t ip, int trace_min,
                     xlat_region_out_t *out, bool *full, void *ctx_mem);
+
+/* Host test: code bytes and counts by x86 instruction kind (XO_*), stub
+ * kind and flag reconstruction (inside the others), producers that store
+ * their flags (MAT: bytes of their lazy stores), see --size. */
+enum { XLAT_SIZE_RECON = 32, XLAT_SIZE_BACK, XLAT_SIZE_SIDE, XLAT_SIZE_EXIT, XLAT_SIZE_MAT,
+       XLAT_SIZE_N };
+#if defined(XLAT_HOST_TEST)
+extern uint32_t xlat_size_bytes[XLAT_SIZE_N], xlat_size_count[XLAT_SIZE_N];
+#endif
 
 typedef void (*xlat_tramp_fn)(xlat_rt_t *rt, uint32_t target);
 
