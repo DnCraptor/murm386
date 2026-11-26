@@ -104,7 +104,7 @@ typedef struct {
     int n_dfix;
     bool overflow;
     arm_emit_t e;
-    uint32_t epilogue, dispatch, interp_call, exit_ip[2], exit_dyn, wchk[4], wside[4], back_slow, pend;
+    uint32_t epilogue, dispatch, interp_call, exit_ip[2], exit_dyn, wchk[4], wside[4], rchk[2], back_slow, pend;
     uint32_t spush, spop;
     uint8_t trace_min;             /* a region without a loop may do (xlat_translate) */
     uint8_t fn;                    /* built so: min_native_path (>= trace_min), else 0 */
@@ -908,23 +908,22 @@ static void emit_checks(tctx_t *c, int i, int bytes, bool write)
         emit_branch(c, side_dest(c, i, 1), C_CS);
         return;
     }
-    /* the region is built for this fast memory size (region_valid) */
+    /* the region is built for this fast memory size (region_valid); past
+     * it, rchk: upper memory (rt->umb_room). r12 = the last byte. */
     const uint32_t size = c->rt->mem_size;
+    const int last = bytes > 1 ? A_R12 : A_R0;
+    if (bytes > 1)
+        arm_addw(e, A_R12, A_R0, (uint32_t)bytes - 1u);
     if (arm_thumb_imm(size) >= 0) {
-        if (bytes > 1) {
-            arm_addw(e, A_LR, A_R0, (uint32_t)bytes - 1u);
-            arm_dp_imm(e, DP_SUB, 1, A_PC, A_LR, size);
-        } else {
-            arm_dp_imm(e, DP_SUB, 1, A_PC, A_R0, size);
-        }
+        arm_dp_imm(e, DP_SUB, 1, A_PC, last, size);
     } else {
-        arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_MEM_SIZE);
-        if (bytes > 1) {
-            arm_addw(e, A_LR, A_R0, (uint32_t)bytes - 1u);
-            arm_dp_reg(e, DP_SUB, 1, A_PC, A_LR, A_R12, SH_LSL, 0);
-        } else {
-            arm_dp_reg(e, DP_SUB, 1, A_PC, A_R0, A_R12, SH_LSL, 0);
-        }
+        arm_ls_imm(e, LS_LDR, A_LR, A_R11, XLAT_RT_MEM_SIZE);
+        arm_dp_reg(e, DP_SUB, 1, A_PC, last, A_LR, SH_LSL, 0);
+    }
+    if (bytes <= (int)XLAT_UMB_MARGIN + 1) {
+        arm_e16(e, 0xbf28u);                                  /* IT CS */
+        if (!arm_bl(e, c->rchk[bytes > 1]))                  /* BLCS: CC when it is there */
+            c->overflow = true;
     }
     emit_branch(c, side_dest(c, i, 0), C_CS);
 }
@@ -2380,6 +2379,18 @@ static bool tramp_patch(arm_emit_t *e, uint32_t at, uint32_t target, int cond)
     return arm_patch_branch(e, at, target, cond);
 }
 
+/* The upper memory test of the trampolines: r12 = the last byte of an
+ * access whose first byte is at most XLAT_UMB_MARGIN before it. Sets C when
+ * the access is not in [XLAT_UMB_BASE, + XLAT_UMB_MARGIN + rt->umb_room)
+ * (xlat.h). Clobbers r12 and tmp. */
+static void tramp_umb(arm_emit_t *e, int tmp)
+{
+    arm_ls_imm(e, LS_LDR, tmp, A_R11, XLAT_RT_UMB);
+    arm_dp_imm(e, DP_SUB, 0, A_R12, A_R12, XLAT_UMB_BASE);
+    arm_subw(e, A_R12, A_R12, XLAT_UMB_MARGIN);
+    arm_dp_reg(e, DP_SUB, 1, A_PC, A_R12, tmp, SH_LSL, 0);   /* CMP: CS = outside */
+}
+
 bool xlat_emit_trampoline(xlat_arena_t *a)
 {
     arm_emit_t e = {a->base, 0, a->size, false, 0};
@@ -2467,10 +2478,10 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     }
 
     /* Write check (emit_checks), BL here with r0 = linear address of an
-     * access of 1, 2, 4 bytes (wchk[0..2]) or of up to 16 ending at r12
-     * (wchk[3]). Returns CS when the access is outside fast memory or its
-     * 64-byte block may hold translated x86 code (xlat_code_map), else CC.
-     * r0 and r1 are kept, r12 clobbered. */
+     * access of 1, 2, 4 bytes (wchk[0..2]) or of up to 128 ending at r12
+     * (wchk[3]). Returns CS when the access is outside fast and upper
+     * memory (tramp_umb) or its 64-byte block may hold translated x86 code
+     * (xlat_code_map), else CC. r0 and r1 are kept, r12 clobbered. */
     static const uint8_t wlast[3] = {0, 1, 3};
     uint32_t to_common[3];
     for (int k = 0; k < 3; ++k) {
@@ -2488,6 +2499,7 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     arm_ls_imm(&e, LS_LDR, A_R1, A_R11, XLAT_RT_MEM_SIZE);
     arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R12, A_R1, SH_LSL, 0);   /* CMP last, size */
     const uint32_t wout = arm_branch_slot(&e);
+    const uint32_t wmap = e.pos;
     arm_lsr(&e, A_R12, A_R0, XLAT_CODE_BLOCK_SHIFT + 3);
     arm_ls_imm(&e, LS_LDR, A_R1, A_R11, XLAT_RT_CODE_MAP);
     arm_ls_reg(&e, LS_LDRB, A_R12, A_R1, A_R12);
@@ -2499,7 +2511,23 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     const uint32_t wdone = e.pos;
     arm_e16(&e, 0xbc02u);                                    /* POP {r1} */
     arm_bx(&e, A_LR);
-    ok &= tramp_patch(&e, wout, wdone, C_CS) && tramp_patch(&e, wfree, wdone, C_EQ);
+    const uint32_t wumb = e.pos;                             /* past fast memory */
+    tramp_umb(&e, A_R1);
+    const uint32_t wumb_out = arm_branch_slot(&e);
+    const uint32_t wumb_in = arm_branch_slot(&e);
+    ok &= tramp_patch(&e, wout, wumb, C_CS) && tramp_patch(&e, wfree, wdone, C_EQ) &&
+          tramp_patch(&e, wumb_out, wdone, C_CS) && tramp_patch(&e, wumb_in, wmap, C_AL);
+
+    /* Read check past fast memory (emit_checks): BL here (IT CS) with
+     * r0 = linear address, r12 = the last byte (rchk[1]) or r0 (rchk[0]).
+     * Returns CC when the access is in upper memory, else CS. r0-r3 kept. */
+    a->rchk[0] = e.pos;
+    arm_mov(&e, A_R12, A_R0);
+    a->rchk[1] = e.pos;
+    arm_e16(&e, 0xb402u);                                    /* PUSH {r1} */
+    tramp_umb(&e, A_R1);
+    arm_e16(&e, 0xbc02u);                                    /* POP {r1} */
+    arm_bx(&e, A_LR);
 
     /* The same check, BL here with three halfwords after the BL: the
      * interpreter's arguments (interp_call) and the offset of the code
@@ -2522,6 +2550,7 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     arm_ls_imm(&e, LS_LDR, A_R1, A_R11, XLAT_RT_MEM_SIZE);
     arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R12, A_R1, SH_LSL, 0);
     const uint32_t xout = arm_branch_slot(&e);
+    const uint32_t xmap = e.pos;
     arm_lsr(&e, A_R12, A_R0, XLAT_CODE_BLOCK_SHIFT + 3);
     arm_ls_imm(&e, LS_LDR, A_R1, A_R11, XLAT_RT_CODE_MAP);
     arm_ls_reg(&e, LS_LDRB, A_R12, A_R1, A_R12);
@@ -2539,7 +2568,12 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     arm_addw(&e, A_LR, A_LR, 6);
     arm_dp_reg(&e, DP_ADD, 0, A_LR, A_LR, A_R12, SH_LSL, 0);   /* where it goes on */
     const uint32_t to_interp = arm_branch_slot(&e);
-    ok &= tramp_patch(&e, xout, xfail, C_CS) && tramp_patch(&e, xcode, xfail, C_NE);
+    const uint32_t xumb = e.pos;                             /* past fast memory */
+    tramp_umb(&e, A_R1);
+    const uint32_t xumb_out = arm_branch_slot(&e);
+    const uint32_t xumb_in = arm_branch_slot(&e);
+    ok &= tramp_patch(&e, xout, xumb, C_CS) && tramp_patch(&e, xcode, xfail, C_NE) &&
+          tramp_patch(&e, xumb_out, xfail, C_CS) && tramp_patch(&e, xumb_in, xmap, C_AL);
 
     /* PUSH of r2 (emit_push_value) with the arguments as for wside: SS:SP-2
      * checked as a write, the word stored, SP lowered. r1 = the new SP,
@@ -2555,6 +2589,7 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     arm_ls_imm(&e, LS_LDR, A_R3, A_R11, XLAT_RT_MEM_SIZE);
     arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R12, A_R3, SH_LSL, 0);
     const uint32_t pout = arm_branch_slot(&e);
+    const uint32_t pmap = e.pos;
     arm_lsr(&e, A_R12, A_R0, XLAT_CODE_BLOCK_SHIFT + 3);
     arm_ls_imm(&e, LS_LDR, A_R3, A_R11, XLAT_RT_CODE_MAP);
     arm_ls_reg(&e, LS_LDRB, A_R12, A_R3, A_R12);
@@ -2571,8 +2606,13 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     const uint32_t pfail = e.pos;
     arm_e16(&e, 0xbc08u);                                    /* POP {r3} */
     const uint32_t pto = arm_branch_slot(&e);
-    ok &= tramp_patch(&e, pout, pfail, C_CS) && tramp_patch(&e, pcode, pfail, C_NE) &&
-          tramp_patch(&e, pto, xfail + 2u, C_AL);            /* wside's failure, after its POP */
+    const uint32_t pumb = e.pos;                             /* past fast memory */
+    tramp_umb(&e, A_R3);
+    const uint32_t pumb_out = arm_branch_slot(&e);
+    const uint32_t pumb_in = arm_branch_slot(&e);
+    ok &= tramp_patch(&e, pout, pumb, C_CS) && tramp_patch(&e, pcode, pfail, C_NE) &&
+          tramp_patch(&e, pto, xfail + 2u, C_AL) &&          /* wside's failure, after its POP */
+          tramp_patch(&e, pumb_out, pfail, C_CS) && tramp_patch(&e, pumb_in, pmap, C_AL);
 
     /* POP (emit_pop_value, no release): r2 = the word at SS:SP, r1 = SP + 2
      * (stored); r0, r12 clobbered. */
@@ -2584,6 +2624,7 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     arm_ls_imm(&e, LS_LDR, A_R2, A_R11, XLAT_RT_MEM_SIZE);
     arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R12, A_R2, SH_LSL, 0);
     const uint32_t oout = arm_branch_slot(&e);
+    const uint32_t oload = e.pos;
     arm_ls_imm(&e, LS_LDR, A_R12, A_R11, XLAT_RT_MEM);
     arm_ls_reg(&e, LS_LDRH, A_R2, A_R12, A_R0);
     arm_addw(&e, A_R1, A_R1, 2);
@@ -2591,7 +2632,12 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     arm_ls_imm(&e, LS_STRH, A_R1, A_R11, XLAT_RT_SP);
     arm_addw(&e, A_LR, A_LR, 6);
     arm_bx(&e, A_LR);
-    ok &= tramp_patch(&e, oout, xfail + 2u, C_CS);
+    const uint32_t oumb = e.pos;                             /* past fast memory */
+    tramp_umb(&e, A_R2);
+    const uint32_t oumb_out = arm_branch_slot(&e);
+    const uint32_t oumb_in = arm_branch_slot(&e);
+    ok &= tramp_patch(&e, oout, oumb, C_CS) && tramp_patch(&e, oumb_out, xfail + 2u, C_CS) &&
+          tramp_patch(&e, oumb_in, oload, C_AL);
 
     /* Pending flags completed (emit_pending_check): xlat_rt_pending(). */
     a->pend = e.pos;
@@ -2718,6 +2764,7 @@ bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int trace
     c->exit_dyn = a->exit_dyn;
     memcpy(c->wchk, a->wchk, sizeof(c->wchk));
     memcpy(c->wside, a->wside, sizeof(c->wside));
+    memcpy(c->rchk, a->rchk, sizeof(c->rchk));
     c->back_slow = a->back_slow;
     c->pend = a->pend;
     c->spush = a->spush;

@@ -142,6 +142,10 @@ static xlat_rt_t xlat_state;
 static bool xlat_busy;
 /* This burst ran translated code (statistics). */
 static bool xlat_burst_native;
+/* Cuts this burst that found no region (xlat_enter): after XLAT_CUT_MISSES
+ * of them XRIP stops cutting until the next burst. */
+#define XLAT_CUT_MISSES 4u
+static uint8_t xlat_cut_misses;
 
 /* Translated execution needs real mode with 16-bit code and stack, no trap,
  * no HLT, no IRQ shadow, no pending IRQ with IF set, direct fast memory. */
@@ -254,6 +258,24 @@ bool __time_critical_func(xlat_code_direct)(uint32_t linear, uint32_t len)
     return linear + len > linear && far_direct_at(linear, len - 1u) == fast_memory + linear;
 }
 
+/* rt->umb_room: the upper memory far_direct_at() reaches at fast_memory +
+ * linear from XLAT_UMB_BASE on, up to the EMS page frame if there is one. */
+static uint32_t xlat_umb_room(void)
+{
+#if defined(NO_PAGING)
+    if (!fast_memory_size || phys_mem_size < 0x100000u)
+        return 0;
+#if EMULATE_LTEMS
+    const uint32_t end = EMS_START > XLAT_UMB_BASE ? (uint32_t)EMS_START : 0x100000u;
+#else
+    const uint32_t end = 0x100000u;
+#endif
+    return end > XLAT_UMB_BASE + XLAT_UMB_MARGIN ? end - XLAT_UMB_BASE - XLAT_UMB_MARGIN : 0;
+#else
+    return 0;
+#endif
+}
+
 /* Called by translated code (xlat.h): XRIP executes the one instruction at
  * rt->ip. The registers are in cpu->gprx already; the lazy flags come from
  * and go back to rt. */
@@ -345,6 +367,7 @@ static __time_critical_func() uint32_t xlat_enter(CPU *cpu, uint32_t count, uint
     xlat_rt_t *const rt = &xlat_state;
     rt->mem = fast_memory;
     rt->mem_size = fast_memory_size;
+    rt->umb_room = xlat_umb_room();
     rt->seg_base[0] = segment_base[reges];
     rt->seg_base[1] = segment_base[regcs];
     rt->seg_base[2] = segment_base[regss];
@@ -375,9 +398,11 @@ static __time_critical_func() uint32_t xlat_enter(CPU *cpu, uint32_t count, uint
     const bool ran = xlat_run(rt);
     xlat_busy = false;
     /* Nothing to run at a burst start: the marked loop heads XRIP reaches
-     * later may have regions. At a cut (a marked target) without one: no
-     * more cuts this burst (each would cost a lookup and a sample). */
-    xlat_armed = ran || at_start;
+     * later may have regions. At a cut (a marked target) without one: a few
+     * more cuts this burst (each costs a lookup and a sample), then none. */
+    if (at_start)
+        xlat_cut_misses = 0;
+    xlat_armed = ran || at_start || ++xlat_cut_misses < XLAT_CUT_MISSES;
     XLAT_ENTER_NOTE(ran ? XLAT_ENTER_S_RAN : XLAT_ENTER_S_NONE, ran ? XLAT_ENTER_C_RAN : XLAT_ENTER_C_NONE);
 #undef XLAT_ENTER_NOTE
     if (!ran)

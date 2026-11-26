@@ -386,7 +386,8 @@ typedef struct xlat_arena {
     uint32_t interp_call;  /* xlat_interp_one() call with its arguments after the BL */
     uint32_t exit_ip[2];   /* exits with the IP after the BL: BRANCH, BUDGET */
     uint32_t exit_dyn;     /* BRANCH exit, rt->ip stored */
-    uint32_t wchk[4];      /* write checks: 1, 2, 4 bytes; up to 16 (r12 = last byte) */
+    uint32_t wchk[4];      /* write checks: 1, 2, 4 bytes; up to 128 (r12 = last byte) */
+    uint32_t rchk[2];      /* read check in upper memory: r12 = r0, r12 = last byte */
     uint32_t wside[4];     /* the same, running the instruction in XRIP when it fails */
     uint32_t spush, spop;  /* 16-bit PUSH / POP the same way */
     uint32_t back_slow;    /* back edge with the budget used up: the clock */

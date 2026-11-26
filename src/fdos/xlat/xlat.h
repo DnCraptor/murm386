@@ -59,7 +59,16 @@ typedef struct xlat_rt {
     uint32_t links;
     uint32_t sp;                   /* ESP while generated code runs (the trampoline
                                       copies it from and back to gpr[4]) */
+    /* Upper memory the generated code reads and writes through mem as
+     * well: [XLAT_UMB_BASE, XLAT_UMB_BASE + XLAT_UMB_MARGIN + umb_room)
+     * is at mem + linear (0: none). An access of up to XLAT_UMB_MARGIN + 1
+     * bytes is checked by its last byte: the first XLAT_UMB_MARGIN bytes
+     * of the window are left to XRIP. Not the VGA aperture A0000-BFFFF. */
+    uint32_t umb_room;
 } xlat_rt_t;
+
+#define XLAT_UMB_BASE   0xC0000u
+#define XLAT_UMB_MARGIN 127u
 
 #define XLAT_RT_MEM          0
 #define XLAT_RT_MEM_SIZE     4
@@ -87,6 +96,7 @@ typedef struct xlat_rt {
 #define XLAT_RT_CUR        100
 #define XLAT_RT_LINKS      104
 #define XLAT_RT_SP         108
+#define XLAT_RT_UMB        112
 
 #if UINTPTR_MAX == 0xffffffffu
 _Static_assert(__builtin_offsetof(xlat_rt_t, mem_size) == XLAT_RT_MEM_SIZE &&
@@ -113,14 +123,15 @@ _Static_assert(__builtin_offsetof(xlat_rt_t, mem_size) == XLAT_RT_MEM_SIZE &&
                __builtin_offsetof(xlat_rt_t, last) == XLAT_RT_LAST &&
                __builtin_offsetof(xlat_rt_t, cur) == XLAT_RT_CUR &&
                __builtin_offsetof(xlat_rt_t, links) == XLAT_RT_LINKS &&
-               __builtin_offsetof(xlat_rt_t, sp) == XLAT_RT_SP,
+               __builtin_offsetof(xlat_rt_t, sp) == XLAT_RT_SP &&
+               __builtin_offsetof(xlat_rt_t, umb_room) == XLAT_RT_UMB,
                "xlat_rt_t layout is used by generated code");
 #endif
 
 enum {
     XLAT_EXIT_BRANCH = 0,   /* control left the region (target not translated) */
     XLAT_EXIT_BUDGET = 1,   /* burst time used up or IRQ pending, at a back edge */
-    XLAT_EXIT_SIDE = 2,     /* memory operand outside fast memory, or a write to the region's code */
+    XLAT_EXIT_SIDE = 2,     /* memory operand outside fast and upper memory, or a write to the region's code */
     XLAT_EXIT_STOP = 3,     /* after an interpreted instruction the state needs XRIP (mode, CS, IRQ...) */
     XLAT_EXIT_COUNT = 4
 };

@@ -2174,11 +2174,13 @@ int main(int argc, char **argv)
         R = init;
         if (!reuse_cs && rn(8) && !keep_cache) xlat_flush();
         const uint32_t mem_size = rn(3) ? 0xa0000u : 0x20000u + rn(0x80000);
+        const uint32_t umb_room = rn(2) ? 0x100000u - XLAT_UMB_BASE - XLAT_UMB_MARGIN : 0;
         long guard = 0;
         while (!R.halted && guard++ < 400000) {
             xlat_rt_t rt = {.fn_entry = UINT32_MAX};
             rt.mem = mem;
             rt.mem_size = mem_size;
+            rt.umb_room = umb_room;   /* the test's memory is plain up to MEM_BYTES */
             memcpy(rt.seg_base, R.seg_base, sizeof(rt.seg_base));
             rt.budget = 1 + (int32_t)rn(300);
             rt.clock = &test_clock; rt.extra = 0;
