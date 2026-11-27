@@ -15,6 +15,7 @@ void ejectdisk(uint8_t drivenum, bool is_fdd);
 uint8_t insertdisk(uint8_t drivenum, bool is_fdd, bool is_cd, const char *pathname);
 /* Classify .img/.bin by CD sector signature, not by previous IDE device type. */
 bool disk_image_is_cd(const char *filename);
+bool disk_init_storage(void);
 void disk_set_cpu(CPU *cpu);
 // Disk UI API functions
 uint8_t ata_is_inserted(uint8_t drivenum);
@@ -53,6 +54,14 @@ typedef struct {
     uint32_t total_sectors;
 } bios_hdd_info_t;
 
+typedef struct {
+    uint32_t lba;
+    uint32_t sectors;
+    uint8_t fat_bits;
+} disk_sd_boot_volume_t;
+
+bool disk_prepare_sd_boot(uint32_t volume_lba, uint8_t fatfs_type);
+const disk_sd_boot_volume_t *disk_sd_boot_volume(void);
 void disk_set_raw_sd_hdd(uint8_t mode);
 uint8_t disk_raw_sd_hdd_enabled(void);
 void disk_set_raw_usb_hdd(uint32_t sectors);

@@ -1,5 +1,8 @@
 /* Derived from xrip/pico-286, 572890a. See LICENSE.pico-286. */
 #include "platform.h"
+#if XRIP_JIT
+#include "frank_jit16.h"
+#endif
 
 static CPU *active_cpu;
 cpu_state_t cpu_state; // cpu.h
@@ -899,6 +902,10 @@ static __time_critical_func() void op_grp5() {
 #include "cpu386.c.inl"
 
 #include "protected.c.inl"
+#if XRIP_JIT
+#include "frank_jit16.inl"
+#include "frank_fastloop.inl"
+#endif
 
 static __time_critical_func() void op_0f() {
     const uint8_t opcode = getmem8(CS_BASE, XRIP_IP);
@@ -919,6 +926,78 @@ static void xrip_fpu(uint8_t opcode) {
             fpu_exec2(active_cpu->fpu, active_cpu, !opsize32, opcode - 0xd8, reg, 0, ea);
         }
     }
+}
+
+/* The FRANK DOS string chunks also stop at the 16-bit offset wrap.
+ * Here the fast path is confined to conventional RAM, with a scalar
+ * fallback for protected mode, paging, VGA, and the crossing element. */
+static inline uint32_t rep_ram_elements(uint32_t base, uint16_t offset, unsigned shift)
+{
+    if (base >= fast_memory_size || base + offset >= fast_memory_size)
+        return 0;
+    const uint32_t ram_bytes = fast_memory_size - (base + offset);
+    const uint32_t seg_bytes = 0x10000u - offset;
+    return (ram_bytes < seg_bytes ? ram_bytes : seg_bytes) >> shift;
+}
+
+static __time_critical_func() __attribute__((noinline))
+uint32_t rep_movs_stos(uint8_t opcode, uint32_t budget)
+{
+    uint32_t count = XRIP_CX;
+    if (count < 2 || df || tf || active_cpu->native_done || (cr0 & CR0_PE) ||
+        CS_BASE >= fast_memory_size || XRIP_IP > 0x10000u ||
+        CS_BASE + XRIP_IP > fast_memory_size)
+        return 0;
+
+    const unsigned shift = opcode & 1u;
+    const unsigned width = 1u << shift;
+    const bool movs = (opcode & 8u) == 0;
+    const uint32_t destination = ES_BASE + XRIP_DI;
+    const uint32_t dest_room = rep_ram_elements(ES_BASE, XRIP_DI, shift);
+    if (count > dest_room) count = dest_room;
+    if (movs) {
+        const uint32_t src_room = rep_ram_elements(useseg, XRIP_SI, shift);
+        if (count > src_room) count = src_room;
+    }
+    if (count > budget) count = budget;
+    if (count < 2)
+        return 0;
+
+    /* XRIP refetches the prefixes and opcode on each scalar iteration. */
+    if (destination < CS_BASE + XRIP_IP &&
+        destination + count * width > CS_BASE + firstip)
+        return 0;
+
+    const uint16_t value = XRIP_AX;
+    const uint8_t *source = movs ? fast_memory + useseg + XRIP_SI
+                                 : (const uint8_t *)&value;
+    uint8_t *dest = fast_memory + destination;
+    const unsigned src_step = movs ? width : 0;
+    const volatile CPU *const irq_cpu = active_cpu;
+    const bool allow_irq = ifl;
+    uint32_t done = 0;
+
+    /* Copy each element in execution order so overlapping MOVS keeps its
+     * x86 semantics. Check for IRQs at the same boundaries as the decoder. */
+    do {
+        if (width == 1) {
+            *dest = *source;
+        } else {
+            uint16_t word;
+            memcpy(&word, source, sizeof(word));
+            memcpy(dest, &word, sizeof(word));
+        }
+        source += src_step;
+        dest += width;
+        ++done;
+    } while (done < count && !(allow_irq && irq_cpu->intr));
+
+    const uint32_t bytes = done * width;
+    if (movs) XRIP_SI += bytes;
+    XRIP_DI += bytes;
+    XRIP_CX -= done;
+    XRIP_IP = firstip;
+    return done;
 }
 
 // Prefix bytes: segment overrides, 66h, 67h, LOCK, REPNE, REP
@@ -943,6 +1022,21 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
      * every opcode helper call. Limit the alias to this function. */
     CPU *const run_cpu = active_cpu;
 #define active_cpu run_cpu
+#if XRIP_JIT
+    const bool use_fastloop = fastloop_enabled;
+    const bool jit_enabled = jit_cache != NULL;
+    uint32_t next_accelerated = (use_fastloop || jit_enabled) ? 0 : UINT32_MAX;
+    unsigned fast_misses = 0;
+    bool jit_may_compile = jit_enabled;
+    bool jit_probe_backedges = jit_enabled;
+    /* A taken back edge is the only scalar transition that can start a
+     * translated block. Forward and fall-through targets stay scalar. */
+#define JIT_TARGET() do { \
+    if (jit_probe_backedges && XRIP_IP <= firstip) next_accelerated = loopcount + 1; \
+} while (0)
+#else
+#define JIT_TARGET() ((void)0)
+#endif
     for (uint32_t loopcount = 0; loopcount < execloops; loopcount++) {
         if (active_cpu->native_done)
             break;
@@ -959,6 +1053,37 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
         } else if (unlikely(halted)) {
             break;
         }
+#if XRIP_JIT
+        if (unlikely(loopcount >= next_accelerated) && !active_cpu->native_done) {
+            const unsigned budget = execloops - loopcount;
+            unsigned done = 0;
+            if (use_fastloop) {
+                done = fastloop_run(active_cpu, budget);
+                if (done) {
+                    /* One scalar instruction handles the fallback. */
+                    fast_misses = 0;
+                    next_accelerated = loopcount + done + 1;
+                } else {
+                    if (fast_misses < 4) ++fast_misses;
+                    next_accelerated = loopcount + (fast_misses == 4 ? 16 : 1);
+                }
+            } else {
+                next_accelerated = UINT32_MAX;
+                jit_probe_backedges = true;
+                if (!(active_cpu->intr && ifl))
+                    done = jit_run(budget, &jit_may_compile);
+                if (done == JIT_DEFER) {
+                    done = 0;
+                    jit_probe_backedges = false;
+                    next_accelerated = loopcount + 128;
+                }
+            }
+            if (done) {
+                loopcount += done - 1;
+                continue;
+            }
+        }
+#endif
         active_cpu->i286_irq_shadow = false;
         ++retired;
         pending_trap = tf;
@@ -1174,6 +1299,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
 #else
             case 0x0F:
                 op_0f();
+                JIT_TARGET();
                 break;
 #endif
 
@@ -1738,6 +1864,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 const int8_t displacement = (int8_t) getmem8(CS_BASE, XRIP_IP); \
                 StepIP(1); \
                 if (condition(op)) jump_relative(displacement); \
+                JIT_TARGET(); \
                 break; \
             }
             JCC_SHORT(0x70) JCC_SHORT(0x71) JCC_SHORT(0x72) JCC_SHORT(0x73)
@@ -2061,7 +2188,20 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 StepIP(2);
                 break;
 
+            /* The scalar cases charge two loop slots per element. */
+#define XRIP_REP_RAM(op) do { \
+    if (reptype && fast_memory_size && XRIP_CX > 1u) { \
+        const uint32_t budget = 1u + (execloops - loopcount - 1u) / 2u; \
+        const uint32_t done = rep_movs_stos(op, budget); \
+        if (done) { \
+            retired += done - 1u; \
+            loopcount += done * 2u - 1u; \
+            goto instruction_end; \
+        } \
+    } \
+} while (0)
             case 0xA4: /* A4 MOVSB */
+                XRIP_REP_RAM(0xA4);
                 if (
                     reptype && (XRIP_CX
                                 == 0)) {
@@ -2091,6 +2231,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 break;
 
             case 0xA5: /* A5 MOVSW */
+                XRIP_REP_RAM(0xA5);
                 if (
                     reptype && (XRIP_CX
                                 == 0)) {
@@ -2212,6 +2353,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 break;
 
             case 0xAA: /* AA STOSB */
+                XRIP_REP_RAM(0xAA);
                 if (
                     reptype && (XRIP_CX
                                 == 0)) {
@@ -2239,6 +2381,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 break;
 
             case 0xAB: /* AB STOSW */
+                XRIP_REP_RAM(0xAB);
                 if (
                     reptype && (XRIP_CX
                                 == 0)) {
@@ -2264,6 +2407,8 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
 
                 XRIP_IP = firstip;
                 break;
+
+#undef XRIP_REP_RAM
 
             case 0xAC: /* AC LODSB */
                 if (
@@ -2496,10 +2641,12 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 oper1 = getmem16(CS_BASE, XRIP_IP);
                 XRIP_IP = pop();
                 stack_add(oper1);
+                JIT_TARGET();
                 break;
 
             case 0xC3: /* C3 RET */
                 XRIP_IP = pop();
+                JIT_TARGET();
                 break;
 
             case 0xC4: /* C4 LES Gv Mp */
@@ -2577,26 +2724,31 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
 
             case 0xCA: /* CA RETF Iw */
                 far_return(false, getmem16(CS_BASE, XRIP_IP));
+                JIT_TARGET();
                 break;
 
             case 0xCB: /* CB RETF */
                 far_return(false, 0);
+                JIT_TARGET();
                 break;
 
             case 0xCC: /* CC INT 3 */
                 intcall86(3);
+                JIT_TARGET();
                 break;
 
             case 0xCD: /* CD INT Ib */
                 oper1b = getmem8(CS_BASE, XRIP_IP);
                 StepIP(1);
                 intcall86(oper1b);
+                JIT_TARGET();
                 break;
 
             case 0xCE: /* CE INTO */
                 if (of) {
                     intcall86(4);
                 }
+                JIT_TARGET();
                 break;
 
             case 0xCF: /* CF IRET */
@@ -2606,6 +2758,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 /*
                  * if (net.enabled) net.canrecv = 1;
                  */
+                JIT_TARGET();
                 break;
 
             case 0xD0: /* D0 GRP2 Eb 1 */
@@ -2686,6 +2839,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 if ((XRIP_CX) && !get_zf()) {
                     jump_relative((int16_t) temp16);
                 }
+                JIT_TARGET();
                 break;
 
             case 0xE1: /* E1 LOOPZ Jb */
@@ -2695,6 +2849,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 if (XRIP_CX && (get_zf())) {
                     jump_relative((int16_t) temp16);
                 }
+                JIT_TARGET();
                 break;
 
             case 0xE2: /* E2 LOOP Jb */
@@ -2704,6 +2859,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 if (XRIP_CX) {
                     jump_relative((int16_t) temp16);
                 }
+                JIT_TARGET();
                 break;
 
             case 0xE3: /* E3 JCXZ Jb */
@@ -2712,6 +2868,7 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 if (!XRIP_CX) {
                     jump_relative((int16_t) temp16);
                 }
+                JIT_TARGET();
                 break;
 
             case 0xE4: /* E4 IN XRIP_AL Ib */
@@ -2743,12 +2900,14 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 StepIP(2);
                 push(XRIP_IP);
                 jump_relative((int16_t) oper1);
+                JIT_TARGET();
                 break;
 
             case 0xE9: /* E9 JMP Jv */
                 oper1 = getmem16(CS_BASE, XRIP_IP);
                 StepIP(2);
                 jump_relative((int16_t) oper1);
+                JIT_TARGET();
                 break;
 
             case 0xEA: /* EA JMP Ap */
@@ -2756,12 +2915,14 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
                 StepIP(2);
                 oper2 = getmem16(CS_BASE, XRIP_IP);
                 far_jump(oper2, oper1);
+                JIT_TARGET();
                 break;
 
             case 0xEB: /* EB JMP Jb */
                 oper1 = signext(getmem8(CS_BASE, XRIP_IP));
                 StepIP(1);
                 jump_relative((int16_t) oper1);
+                JIT_TARGET();
                 break;
 
             case 0xEC: /* EC IN XRIP_AL regdx */
@@ -2919,6 +3080,9 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
 
                 oper1 = readrm16(rm);
                 op_grp5();
+#if XRIP_JIT
+                if (reg >= 2 && reg <= 5) JIT_TARGET();
+#endif
                 break;
 
             default:
@@ -2929,11 +3093,22 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
 #endif
                 break;
         }
+#if XRIP_JIT
+        else if ((opcode >= 0xE0 && opcode <= 0xE3) ||
+                 (opcode >= 0xE8 && opcode <= 0xEB) ||
+                 opcode == 0xC2 || opcode == 0xC3 || opcode == 0xCA ||
+                 opcode == 0xCB || opcode == 0xCF ||
+                 (opcode == 0xFF && reg >= 2 && reg <= 5)) {
+            JIT_TARGET();
+        }
+#endif
+instruction_end:
         if (pending_trap && tf) {
             active_cpu->i286_irq_shadow = false;
             external_interrupt(1);
         }
     }
+#undef JIT_TARGET
 #undef active_cpu
 }
 

@@ -15,7 +15,7 @@ endif()
 cmake_minimum_required(VERSION 3.13)
 
 # Board configuration variant (M1, M2, PC, Z2 or C2)
-set(BOARD "M1" CACHE STRING "Board variant: M1, M2, PC, Z2 or C2")
+set(BOARD "M2" CACHE STRING "Board variant: M1, M2, PC, Z2 or C2")
 # Alias for backwards compatibility
 if(DEFINED BOARD_VARIANT AND NOT DEFINED BOARD)
     set(BOARD ${BOARD_VARIANT})
@@ -470,6 +470,7 @@ set(EMU_CORE_SOURCES
 add_executable(${BUILD_NAME}
     src/main.c
     src/platform_rp2350.c
+    drivers/flash-config/flash_config.c
     src/stubs_rp2350.c
     src/diskui.c
     src/settingsui.c
@@ -504,6 +505,7 @@ target_include_directories(${BUILD_NAME} PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/drivers/sdcard
     ${CMAKE_CURRENT_LIST_DIR}/drivers/ps2
     ${CMAKE_CURRENT_LIST_DIR}/drivers/psram
+    ${CMAKE_CURRENT_LIST_DIR}/drivers/flash-config
     ${CMAKE_CURRENT_LIST_DIR}/drivers/vga
     ${CMAKE_CURRENT_LIST_DIR}/drivers/hdmi
     ${CMAKE_CURRENT_LIST_DIR}/drivers/audio
@@ -533,6 +535,10 @@ if(EMM)
     )
 endif()
 target_compile_definitions(${BUILD_NAME} PRIVATE I386_MODE=1 XRIP386_CORE=1 EMU_CPU_GEN=3)
+option(XRIP_JIT "Build the XRIP JIT and fast loop (selected at boot by jit=1 or jit=2)" ON)
+if(XRIP_JIT AND PICO_PLATFORM STREQUAL "rp2350-arm-s")
+    target_compile_definitions(${BUILD_NAME} PRIVATE XRIP_JIT=1)
+endif()
 
 # --- Нативный стек core0 -----------------------------------------------
 target_compile_definitions(${BUILD_NAME} PRIVATE

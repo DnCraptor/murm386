@@ -71,7 +71,8 @@ static bool modem_flash_requested = false;
 // keeps reflecting the *running* mode until then. Initialised in diskui_open().
 static int pending_raw_sd;                 // RAW_SD_HDD_*
 static int pending_usb_mode;               // USB_MODE_HOST / USB_MODE_DEVICE
-static int pending_native_dos;              // 1 = native FreeDOS, 0 = guest boot media
+typedef enum { BOOT_NATIVE, BOOT_GUEST, BOOT_SD, BOOT_MODE_COUNT } BootMode;
+static BootMode pending_boot;
 typedef struct {
     DIR dir;
     FILINFO fno;
@@ -158,10 +159,16 @@ static const char *get_drive_filename(int drive_idx) {
     return NULL;                                 // SD-CARD / USB toggles: no file
 }
 
+static BootMode configured_boot_mode(void) {
+    if (!config_get_native_dos())
+        return BOOT_GUEST;
+    return config_get_boot_sd() ? BOOT_SD : BOOT_NATIVE;
+}
+
 static void update_reboot_required(void) {
     reboot_required = (pending_raw_sd != config_get_raw_sd_hdd()) ||
                       (pending_usb_mode != config_get_usb_mode()) ||
-                      (pending_native_dos != config_get_native_dos()) ||
+                      (pending_boot != configured_boot_mode()) ||
                       pending_changed[DRIVE_BIOS];
 
     for (int i = DRIVE_ATA0_0; i <= DRIVE_ATA1_1; i++) {
@@ -203,6 +210,16 @@ static const char *get_display_filename(int drive_idx) {
     if (pending_changed[drive_idx])
         return pending_filename[drive_idx];  // NULL = pending eject/native BIOS
     return get_drive_filename(drive_idx);
+}
+
+/* A pending boot selection is shown immediately. The C: label reflects
+ * the FAT volume accepted at startup. */
+static const char *sd_boot_label(void) {
+    if (pending_boot != BOOT_SD || get_display_filename(DRIVE_BIOS))
+        return NULL;
+    if (pending_boot != configured_boot_mode() || pending_changed[DRIVE_BIOS])
+        return "< Boot pending >";
+    return disk_sd_boot_volume() ? "< Boot C: >" : NULL;
 }
 
 static bool file_is_iso(const char *filename) {
@@ -363,7 +380,7 @@ void diskui_open(void) {
     /* Toggle rows start from the current (running) config. */
     pending_raw_sd     = config_get_raw_sd_hdd();
     pending_usb_mode   = config_get_usb_mode();
-    pending_native_dos = config_get_native_dos();
+    pending_boot       = configured_boot_mode();
 
     menu_state = MENU_MAIN;
     osd_clear();
@@ -496,16 +513,30 @@ static void draw_main_menu(void) {
         if (row_is_toggle(i)) {
             const char *val;
             if (i == DRIVE_SD_CARD) {
-                if (pending_raw_sd == RAW_SD_HDD_FIRST)
-                    val = "< First >";
-                else if (pending_raw_sd == RAW_SD_HDD_LAST)
-                    val = "< Last >";
-                else
-                    val = "< Off >";
+                val = sd_boot_label();
+                if (!val) {
+                    if (pending_raw_sd == RAW_SD_HDD_FIRST)
+                        val = "< First >";
+                    else if (pending_raw_sd == RAW_SD_HDD_LAST)
+                        val = "< Last >";
+                    else
+                        val = "< Off >";
+                }
             } else if (i == DRIVE_USB_MODE) {
                 val = (pending_usb_mode == USB_MODE_DEVICE) ? "< DEVICE >" : "< HOST >";
             } else {
-                val = pending_native_dos ? "< Native >" : "< Guest >";
+                static const char *const boot_labels[] = {
+                    [BOOT_NATIVE] = "< Native >",
+                    [BOOT_GUEST] = "< Guest >",
+                    [BOOT_SD] = "< Native SD >",
+                };
+                val = boot_labels[pending_boot];
+                if (pending_boot == BOOT_SD) {
+                    if (get_display_filename(DRIVE_BIOS))
+                        val = "< SD needs native BIOS >";
+                    else if (!sd_boot_label())
+                        val = "< Native SD (fallback) >";
+                }
             }
             osd_print(MENU_X + MENU_W - 4 - (int)strlen(val), y, val, attr);
             continue;
@@ -869,6 +900,11 @@ static void eject_pending(void) {
 // reboot to take effect, so mark reboot_required; the config is written in
 // apply_and_close(). This keeps config_get_usb_mode() = the running mode.
 static void cycle_sd_card(int direction) {
+    /* Successful SD boot fixes the SD card at BIOS drive 80h.
+     * The raw SD placement remains available for fallback boots. */
+    if (sd_boot_label())
+        return;
+
     static const int values[] = {
         RAW_SD_HDD_OFF, RAW_SD_HDD_FIRST, RAW_SD_HDD_LAST
     };
@@ -892,8 +928,9 @@ static void toggle_usb_mode(void) {
     draw_main_menu();
 }
 
-static void toggle_native_dos(void) {
-    pending_native_dos = !pending_native_dos;
+static void cycle_boot_mode(int direction) {
+    pending_boot = (pending_boot + (direction < 0 ? BOOT_MODE_COUNT - 1 : 1)) %
+                   BOOT_MODE_COUNT;
     update_reboot_required();
     draw_main_menu();
 }
@@ -952,8 +989,10 @@ static void apply_remaining_and_close(void)
         config_set_raw_sd_hdd(pending_raw_sd);
     if (pending_usb_mode != config_get_usb_mode())
         config_set_usb_mode(pending_usb_mode);
-    if (pending_native_dos != config_get_native_dos())
-        config_set_native_dos(pending_native_dos);
+    if (pending_boot != configured_boot_mode()) {
+        config_set_native_dos(pending_boot != BOOT_GUEST);
+        config_set_boot_sd(pending_boot == BOOT_SD);
+    }
 
     if (reboot_required)
         config_save_all();
@@ -1053,7 +1092,7 @@ bool diskui_handle_key(int keycode, bool is_down) {
                     }
                     if (selected_row == DRIVE_SD_CARD) { cycle_sd_card(1); break; }
                     if (selected_row == DRIVE_USB_MODE) { toggle_usb_mode(); break; }
-                    if (selected_row == DRIVE_NATIVE_DOS) { toggle_native_dos(); break; }
+                    if (selected_row == DRIVE_NATIVE_DOS) { cycle_boot_mode(1); break; }
                     const char *filename = get_display_filename(selected_row);
                     if (selected_row == DRIVE_BIOS || selected_row == DRIVE_ESP_FW || !filename ||
                         strcmp(filename, CDROM_EMPTY) == 0) {
@@ -1070,13 +1109,13 @@ bool diskui_handle_key(int keycode, bool is_down) {
                 case KEY_LEFT:
                     if (selected_row == DRIVE_SD_CARD) cycle_sd_card(-1);
                     else if (selected_row == DRIVE_USB_MODE) toggle_usb_mode();
-                    else if (selected_row == DRIVE_NATIVE_DOS) toggle_native_dos();
+                    else if (selected_row == DRIVE_NATIVE_DOS) cycle_boot_mode(-1);
                     break;
 
                 case KEY_RIGHT:
                     if (selected_row == DRIVE_SD_CARD) cycle_sd_card(1);
                     else if (selected_row == DRIVE_USB_MODE) toggle_usb_mode();
-                    else if (selected_row == DRIVE_NATIVE_DOS) toggle_native_dos();
+                    else if (selected_row == DRIVE_NATIVE_DOS) cycle_boot_mode(1);
                     break;
 
                 case KEY_ESC:

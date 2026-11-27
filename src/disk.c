@@ -15,6 +15,8 @@
 #include "ems.h"
 #include "vga.h"
 #include "usbmsc_host.h"
+#include "psram_init.h"
+#include "fdos/psram_layout.h"
 
 extern FATFS fs;
 
@@ -69,6 +71,7 @@ bool disk_image_is_cd(const char *filename)
 
 static uint8_t raw_sd_hdd_mode = RAW_SD_HDD_OFF;
 static uint32_t raw_sd_hdd_sectors = 0;
+static disk_sd_boot_volume_t sd_boot_volume;
 static uint32_t raw_usb_hdd_sectors = 0;
 static uint8_t raw_usb_gpt_projection = 0;
 static uint8_t raw_usb_mbr_type = 0;
@@ -84,10 +87,7 @@ struct struct_fdd {
     uint16_t heads;
     uint8_t readonly;
     uint8_t drive_type;  /* BIOS/CMOS type: 1=360K 2=1.2M 3=720K 4=1.44M 5=2.88M */
-} fdd[2] = {
-    [0] = { .drive_type = 4 },  // A: floppy, default 1.44M
-    [1] = { .drive_type = 4 },  // B: floppy, default 1.44M
-};  // 0-1: floppy, 2-3: HDD, 4: CD-ROM
+};
 
 struct struct_ata {
     FIL fil;
@@ -98,8 +98,43 @@ struct struct_ata {
     uint16_t heads;
     uint8_t iscdrom;
     uint8_t drive_type;
-} ata[4] = { 0 };
+};
 
+static struct struct_fdd *fdd;
+static struct struct_ata *ata;
+
+bool disk_init_storage(void)
+{
+    struct disk_tables {
+        struct struct_fdd fdd[2];
+        struct struct_ata ata[4];
+    };
+    struct disk_tables *tables;
+
+    const size_t usable = psram_usable_size();
+    const size_t reserve = (sizeof(*tables) + 1023u) & ~(size_t)1023u;
+    size_t min_guest = (1u << 20) + ARM_ELF_NATIVE_STACK_ARENA_SIZE;
+#if EMULATE_LTEMS
+    if (usable >= (4u << 20))
+        min_guest = 4u << 20;
+#endif
+    /* FRANK DOS keeps disk FIL objects in PSRAM to leave room on the SRAM
+     * heap. Reserve the tables above guest RAM, below any MIDI bank. */
+    if (usable >= min_guest + reserve) {
+        const size_t limit = usable - reserve;
+        tables = (struct disk_tables *)((uintptr_t)PSRAM_BASE_ADDR + limit);
+        psram_reserve_top(psram_detected_size() - limit);
+        memset(tables, 0, sizeof(*tables));
+    } else {
+        tables = calloc(1, sizeof(*tables));
+        if (!tables)
+            return false;
+    }
+    fdd = tables->fdd;
+    ata = tables->ata;
+    fdd[0].drive_type = fdd[1].drive_type = 4;  /* 1.44 MB */
+    return true;
+}
 
 static CPU *disk_cpu = NULL;
 static VGAState *disk_vga = NULL;
@@ -417,6 +452,9 @@ void disk_set_raw_sd_hdd(uint8_t mode) {
     raw_sd_hdd_mode = RAW_SD_HDD_OFF;
     raw_sd_hdd_sectors = 0;
 
+    if (sd_boot_volume.sectors)
+        mode = RAW_SD_HDD_FIRST;
+
     if (mode != RAW_SD_HDD_FIRST && mode != RAW_SD_HDD_LAST)
         return;
 
@@ -431,17 +469,17 @@ uint8_t disk_raw_sd_hdd_enabled(void) {
     return raw_sd_hdd_mode != RAW_SD_HDD_OFF;
 }
 
-static uint16_t usb_le16(const uint8_t *p) {
+static uint16_t disk_le16(const uint8_t *p) {
     return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
 }
 
-static uint32_t usb_le32(const uint8_t *p) {
+static uint32_t disk_le32(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
 static uint64_t usb_le64(const uint8_t *p) {
-    return (uint64_t)usb_le32(p) | ((uint64_t)usb_le32(p + 4) << 32);
+    return (uint64_t)disk_le32(p) | ((uint64_t)disk_le32(p + 4) << 32);
 }
 
 static void usb_put_le32(uint8_t *p, uint32_t v) {
@@ -458,19 +496,19 @@ static bool usb_guid_nonzero(const uint8_t *p) {
 }
 
 /* Validate a FAT BPB and return the corresponding legacy MBR type. */
-static uint8_t usb_fat_mbr_type(const uint8_t *b, uint32_t part_sectors) {
+static uint8_t fat_bpb_mbr_type(const uint8_t *b, uint32_t part_sectors) {
     if (b[510] != 0x55 || b[511] != 0xAA) return 0;
     if (b[0] != 0xEB && b[0] != 0xE9) return 0;
 
-    uint32_t bps = usb_le16(b + 11);
+    uint32_t bps = disk_le16(b + 11);
     uint32_t spc = b[13];
-    uint32_t reserved = usb_le16(b + 14);
+    uint32_t reserved = disk_le16(b + 14);
     uint32_t fats = b[16];
-    uint32_t root_entries = usb_le16(b + 17);
-    uint32_t total = usb_le16(b + 19);
-    if (!total) total = usb_le32(b + 32);
-    uint32_t fat_sectors = usb_le16(b + 22);
-    if (!fat_sectors) fat_sectors = usb_le32(b + 36);
+    uint32_t root_entries = disk_le16(b + 17);
+    uint32_t total = disk_le16(b + 19);
+    if (!total) total = disk_le32(b + 32);
+    uint32_t fat_sectors = disk_le16(b + 22);
+    if (!fat_sectors) fat_sectors = disk_le32(b + 36);
 
     if (bps != 512u || !spc || (spc & (spc - 1u)) || !reserved || !fats ||
         !total || !fat_sectors || total > part_sectors)
@@ -484,6 +522,42 @@ static uint8_t usb_fat_mbr_type(const uint8_t *b, uint32_t part_sectors) {
     if (clusters < 4085u) return 0x01;       /* FAT12 */
     if (clusters < 65525u) return 0x0E;      /* FAT16 LBA */
     return 0x0C;                             /* FAT32 LBA */
+}
+
+/* Use the same FAT volume that the firmware mounted. This also handles
+ * a card formatted as a superfloppy, with its BPB at LBA 0. */
+bool disk_prepare_sd_boot(uint32_t volume_lba, uint8_t fatfs_type)
+{
+    sd_boot_volume = (disk_sd_boot_volume_t){0};
+
+    uint8_t fat_bits;
+    switch (fatfs_type) {
+    case FS_FAT12: fat_bits = 12; break;
+    case FS_FAT16: fat_bits = 16; break;
+    case FS_FAT32: fat_bits = 32; break;
+    default: return false;
+    }
+
+    DWORD card_sectors = 0;
+    if (disk_ioctl(0, GET_SECTOR_COUNT, &card_sectors) != RES_OK ||
+        volume_lba >= card_sectors ||
+        disk_read(0, sectorbuffer, volume_lba, 1) != RES_OK)
+        return false;
+
+    if (!fat_bpb_mbr_type(sectorbuffer, card_sectors - volume_lba))
+        return false;
+
+    uint32_t sectors = disk_le16(sectorbuffer + 19);
+    if (!sectors)
+        sectors = disk_le32(sectorbuffer + 32);
+    sd_boot_volume = (disk_sd_boot_volume_t){volume_lba, sectors, fat_bits};
+    return true;
+}
+
+const disk_sd_boot_volume_t *disk_sd_boot_volume(void)
+{
+    return sd_boot_volume.sectors && raw_sd_hdd_mode == RAW_SD_HDD_FIRST
+           ? &sd_boot_volume : NULL;
 }
 
 static bool usb_try_gpt_projection(uint32_t sectors) {
@@ -504,10 +578,10 @@ static bool usb_try_gpt_projection(uint32_t sectors) {
     if (!usbmsc_host_read(1, b, 1)) return false;
     if (memcmp(b, "EFI PART", 8) != 0) return false;
 
-    uint32_t header_size = usb_le32(b + 12);
+    uint32_t header_size = disk_le32(b + 12);
     uint64_t entries_lba64 = usb_le64(b + 72);
-    uint32_t entry_count = usb_le32(b + 80);
-    uint32_t entry_size = usb_le32(b + 84);
+    uint32_t entry_count = disk_le32(b + 80);
+    uint32_t entry_size = disk_le32(b + 84);
     if (header_size < 92u || header_size > 512u ||
         entries_lba64 >= sectors || entries_lba64 > 0xFFFFFFFFu ||
         !entry_count || entry_size < 128u || entry_size > 512u ||
@@ -540,7 +614,7 @@ static bool usb_try_gpt_projection(uint32_t sectors) {
         uint32_t first = (uint32_t)first64;
         uint32_t count = (uint32_t)count64;
         if (!usbmsc_host_read(first, b, 1)) continue;
-        uint8_t type = usb_fat_mbr_type(b, count);
+        uint8_t type = fat_bpb_mbr_type(b, count);
         if (!type) continue;
 
         raw_usb_gpt_projection = 1;

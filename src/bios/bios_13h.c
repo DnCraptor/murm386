@@ -220,15 +220,8 @@ static bool int13_transfer_lba(CPU* cpu, const BiosDisk *d, uint32_t lba, uint16
             return true;
         }
 
-        if (!write && !verify) {
-            /* Preserve byte I/O for VGA, including transfers crossing its edge. */
-            if (VGA_WINDOW(addr) || VGA_WINDOW(addr + sector_size - 1u)) {
-                for (UINT j = 0; j < sector_size; j++)
-                    write86(addr + j, buf[j]);
-            } else {
-                guest_write_block(addr, buf, sector_size);
-            }
-        }
+        if (!write && !verify)
+            guest_write_block(addr, buf, sector_size);
     }
 
     if (write) {

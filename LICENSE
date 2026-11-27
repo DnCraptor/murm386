@@ -92,3 +92,6 @@ POSSIBILITY OF SUCH DAMAGE.
 
 For the GNU LGPL v3 license (SeaBIOS), see:
 https://www.gnu.org/licenses/lgpl-3.0.html
+
+The RP2350 flash QE driver is from xrip/pico-386 via rh1tech/frank-dos.
+Copyright (c) 2026 xrip. The MIT license above applies.

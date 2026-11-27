@@ -254,6 +254,17 @@ SECTIONS
     } > RAM_4_EXT AT > FLASH
     __ram_4_ext_code_source__ = LOADADDR(.ram_4_ext_code);
 
+    /* Runtime overlay for the direct-RAM CPU loop. Guest RAM paging may
+     * use this RAM instead; the firmware loads the code only in jit=2. */
+    .xrip_fastloop : {
+        . = ALIGN(4);
+        __xrip_fastloop_start__ = .;
+        *(.xrip_fastloop.*)
+        . = ALIGN(4);
+        __xrip_fastloop_end__ = .;
+    } > RAM_4_EXT AT > FLASH
+    __xrip_fastloop_source__ = LOADADDR(.xrip_fastloop);
+
     .ram_4_ext (NOLOAD) : {
         __ram_4_ext_start__ = .;
         KEEP(*(.bss.ram_4_ext))

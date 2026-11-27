@@ -136,6 +136,18 @@ _Static_assert(__builtin_offsetof(cpu_state_t, code32) == 53 &&
                sizeof(cpu_state_t) == 96,
                "XRIP decoder word alignment changed");
 #endif
+#if XRIP_JIT
+enum {
+    JIT_STATE_RAM = offsetof(cpu_state_t, fast_memory),
+    JIT_STATE_RAM_SIZE = offsetof(cpu_state_t, fast_memory_size),
+    JIT_STATE_FLAGS_RESULT = offsetof(cpu_state_t, flags_result),
+    JIT_STATE_FLAGS_DST = offsetof(cpu_state_t, flags_dst),
+    JIT_STATE_FLAGS_SRC = offsetof(cpu_state_t, flags_src),
+    JIT_STATE_FLAGS_OP = offsetof(cpu_state_t, flags_op),
+    JIT_STATE_FLAGS_CF = offsetof(cpu_state_t, flags_cf),
+    JIT_STATE_SEGMENTS = offsetof(cpu_state_t, segment_base)
+};
+#endif
 extern cpu_state_t cpu_state;
 #define ip32 cpu_state.ip32
 #define fast_memory cpu_state.fast_memory

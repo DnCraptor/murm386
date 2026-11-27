@@ -31,6 +31,7 @@
 
 #include "board_config.h"
 #include "psram_init.h"
+#include "flash_config.h"
 #if defined(MIDI_GM_DLS)
 #include "midi/gm_bank.h"
 #endif
@@ -82,6 +83,9 @@ bool ega128_paging_flush(void);
 #include "bbprofile.h"
 #include "diskcache.h"
 #include "gameport.h"
+#if XRIP_JIT
+#include "xrip386/frank_jit16.h"
+#endif
 
 //=============================================================================
 // Version Information
@@ -1164,6 +1168,49 @@ rst:
 // Configuration Loading
 //=============================================================================
 
+#if XRIP_JIT
+static void configure_cpu_core(void)
+{
+    const CpuCoreMode choice = config_get_jit();
+    if (choice == CPU_CORE_CLASSIC)
+        return;
+
+#if !defined(NO_PAGING)
+    if (guest_ram_base != (uint8_t *)PSRAM_BASE_ADDR || ega128_paging_active()) {
+        printf("jit=%u: direct QSPI guest RAM is unavailable\n", (unsigned)choice);
+        return;
+    }
+#endif
+    extern uint8_t __xrip_fastloop_start__[], __xrip_fastloop_end__[];
+    const size_t overlay_size = __xrip_fastloop_end__ - __xrip_fastloop_start__;
+    if (choice == CPU_CORE_FAST_LOOP) {
+        extern uint8_t __xrip_fastloop_source__[];
+        memcpy(__xrip_fastloop_start__, __xrip_fastloop_source__, overlay_size);
+        __asm volatile("dsb sy\n\tisb sy" ::: "memory");
+        xrip_fastloop_enable();
+        printf("jit=2: XRIP fast loop enabled (%u bytes SRAM)\n", (unsigned)overlay_size);
+        return;
+    }
+
+    const size_t usable = psram_usable_size();
+    const size_t reserve = xrip_jit_cache_size();
+    size_t minimum = (1u << 20) + ARM_ELF_NATIVE_STACK_ARENA_SIZE;
+#if EMULATE_LTEMS
+    if (usable >= (4u << 20))
+        minimum = 4u << 20;
+#endif
+    if (usable < minimum + reserve) {
+        printf("jit=1: insufficient PSRAM for the block cache\n");
+        return;
+    }
+    const size_t limit = usable - reserve;
+    psram_reserve_top(psram_detected_size() - limit);
+    xrip_jit_use_cache((void *)((uintptr_t)PSRAM_BASE_ADDR + limit));
+    xrip_jit_use_sram(__xrip_fastloop_start__, overlay_size);
+    printf("jit=1: XRIP Thumb-2 enabled (%u KiB PSRAM)\n", (unsigned)(reserve >> 10));
+}
+#endif
+
 static void configure_guest_ram(void) {
     // Guest RAM follows the usable PSRAM. The optional
     // Lo-tech EMS board reserves its fixed 2 MiB backing store at the top.
@@ -1379,24 +1426,10 @@ flash_ensure_qe(uint8_t *jedec_mfr) {
     const uint8_t sr2 = rx[1];
     if (sr2 & 0x02) return 0;
 
-    tx[0] = 0x06;                       // Write Enable
-    flash_do_cmd(tx, rx, 1);
-    tx[0] = 0x31; tx[1] = sr2 | 0x02;   // Write SR2, keep the other bits
-    flash_do_cmd(tx, rx, 2);
-
-    // Poll WIP. tW is 15 ms worst case; each poll is tens of us.
-    for (int i = 0; i < 100000; i++) {
-        tx[0] = 0x05; tx[1] = 0;
-        flash_do_cmd(tx, rx, 2);
-        if (!(rx[1] & 0x01)) break;
-    }
-
-    tx[0] = 0x35; tx[1] = 0;
-    flash_do_cmd(tx, rx, 2);
-    return (rx[1] & 0x02) ? 1 : -2;
+    return flash_config_init() ? 1 : -2;
 }
 
-static void flash_qe_fixup(void) {
+static bool flash_qe_fixup(void) {
     uint8_t mfr;
     uint32_t irq = save_and_disable_interrupts();
     int r = flash_ensure_qe(&mfr);
@@ -1408,26 +1441,47 @@ static void flash_qe_fixup(void) {
         printf("WARNING: flash (JEDEC %02X) did not accept the Quad Enable bit\n", mfr);
     else
         DBG_PRINT("Flash JEDEC %02X: QE %s\n", mfr, r == 0 ? "set" : "not checked");
+
+    return r != -2;
 }
+
+static uint32_t boot_flash_rxdelay;
+static uint32_t boot_flash_mhz;
 
 // Flash timing configuration for overclocking
 void __no_inline_not_in_flash_func(set_flash_timings)(int cpu_mhz, int cfg_flash) {
-    const int clock_hz = cpu_mhz * 1000000;
-    const int max_flash_freq = cfg_flash * 1000000;
+    if (cfg_flash <= 0 || cfg_flash > cpu_mhz)
+        cfg_flash = FLASH_MAX_FREQ_MHZ;
 
-    int divisor = (clock_hz + max_flash_freq - (max_flash_freq >> 4) - 1) / max_flash_freq;
-    if (divisor == 1 && clock_hz >= 166000000) {
-        divisor = 2;
+    const uint32_t clock_hz = (uint32_t)cpu_mhz * 1000000u;
+    const uint32_t max_flash_freq = (uint32_t)cfg_flash * 1000000u;
+    uint32_t divisor = (clock_hz + max_flash_freq - (max_flash_freq >> 4) - 1) / max_flash_freq;
+    if (divisor <= 1u)
+        divisor = cpu_mhz >= 166 ? 2u : 1u;
+
+    /* CLKDIV encodes 256 with zero. */
+    const uint32_t clkdiv_mask = QMI_M0_TIMING_CLKDIV_BITS >> QMI_M0_TIMING_CLKDIV_LSB;
+    if (divisor > clkdiv_mask)
+        divisor = clkdiv_mask + 1u;
+
+    uint32_t rxdelay = divisor;
+    if (clock_hz / divisor > 100000000u && cpu_mhz >= 166)
+        ++rxdelay;
+
+    /* FRANK DOS 15dc29b: scale the ROM delay when the legacy value
+     * exceeds the three-bit field (e.g. divider 8 at 504/66 MHz). */
+    const uint32_t max_rxdelay = QMI_M0_TIMING_RXDELAY_BITS >> QMI_M0_TIMING_RXDELAY_LSB;
+    if (rxdelay > max_rxdelay) {
+        rxdelay = boot_flash_mhz && boot_flash_rxdelay
+                ? (boot_flash_rxdelay * (uint32_t)cpu_mhz + boot_flash_mhz - 1u) / boot_flash_mhz
+                : max_rxdelay;
+        if (rxdelay > max_rxdelay)
+            rxdelay = max_rxdelay;
     }
 
-    int rxdelay = divisor;
-    if (clock_hz / divisor > 100000000 && clock_hz >= 166000000) {
-        rxdelay += 1;
-    }
-
-    qmi_hw->m[0].timing = 0x60007000 |
-                        rxdelay << QMI_M0_TIMING_RXDELAY_LSB |
-                        divisor << QMI_M0_TIMING_CLKDIV_LSB;
+    qmi_hw->m[0].timing = 0x60007000u |
+                        (rxdelay << QMI_M0_TIMING_RXDELAY_LSB) |
+                        ((divisor & clkdiv_mask) << QMI_M0_TIMING_CLKDIV_LSB);
 }
 
 static void configure_clocks(void) {
@@ -1610,7 +1664,8 @@ static void wait_for_sd_card_func(void) {
 static bool init_hardware(void) {
     // Before the overclock and before PSRAM: on flash shipped with QE=0
     // both fail (see flash_ensure_qe)
-    flash_qe_fixup();
+    if (!flash_qe_fixup())
+        return false;
 
     // Configure clocks (including overclock if enabled)
     configure_clocks();
@@ -1972,6 +2027,13 @@ static bool init_emulator(void) {
     if (config_get_mpu401())
         gm_midi_load_sd();
 #endif
+    if (!disk_init_storage()) {
+        printf("ERROR: Unable to allocate disk state\n");
+        return false;
+    }
+#if XRIP_JIT
+    configure_cpu_core();
+#endif
     configure_guest_ram();
 
     /* USB modem is an optional COM1 mapping and is meaningful only while
@@ -2078,6 +2140,12 @@ static bool init_emulator(void) {
         disk_set_raw_usb_hdd(0);
     }
 #endif
+
+    if (config_get_boot_sd() && config_get_native_dos() &&
+        (!config.bios || !config.bios[0]) &&
+        !disk_prepare_sd_boot(fatfs.volbase, fatfs.fs_type)) {
+        printf("boot=sd: no usable FAT12/16/32 volume on the SD card\n");
+    }
 
     // Create PC instance
     DBG_PRINT("\nCreating PC instance...\n");
@@ -2404,6 +2472,10 @@ int main(void) {
                (size_t)(__ram_4_ext_code_end__ - __ram_4_ext_code_start__));
 #endif
     }
+
+    boot_flash_rxdelay = (qmi_hw->m[0].timing & QMI_M0_TIMING_RXDELAY_BITS) >>
+                         QMI_M0_TIMING_RXDELAY_LSB;
+    boot_flash_mhz = clock_get_hz(clk_sys) / 1000000u;
 
     // Initialize stdio (USB Serial or UART depending on USB HID mode)
     stdio_init_all();

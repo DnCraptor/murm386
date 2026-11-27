@@ -42,6 +42,13 @@ uint8_t vga_get_panning(VGAState *s);    // Horizontal pixel panning (0-7)
 int vga_get_text_cols(VGAState *s);      // Visible text columns (40/80)
 void vga_get_cursor(VGAState *s, int *x, int *y, int *start, int *end);
 void vga_get_cursor_info(VGAState *s, int *x, int *y, int *start, int *end, int *visible);
+typedef enum {
+    VGA_DEFAULT_PALETTE_EGA,
+    VGA_DEFAULT_PALETTE_CGA,
+    VGA_DEFAULT_PALETTE_256,
+} VGADefaultPalette;
+
+void vga_load_default_palette(VGAState *s, VGADefaultPalette palette);
 const uint8_t *vga_get_palette(VGAState *s);  // 768-byte RGB palette (256 x 3)
 int vga_is_palette_dirty(VGAState *s);        // Check and clear palette dirty flag
 void vga_get_palette16(VGAState *s, uint8_t *palette16);  // 48-byte EGA palette (16 x 3)

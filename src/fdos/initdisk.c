@@ -4,6 +4,7 @@
 #include <ctype.h>
 #include "286/cpu.h"
 #include "bios/bios.h"
+#include "disk.h"
 #include "fdos.h"
 #include "i8254.h"
 
@@ -1050,6 +1051,23 @@ static int ProcessDisk(CPU* cpu, int scanType, unsigned drive, int PartitionsToI
   {
     printf("can't get drive parameters for drive %02x\n", drive);
     return PartitionsToIgnore;
+  }
+
+  /* The firmware's FAT volume is C: in boot=sd mode. Its sector offset
+   * works with or without an MBR, and the same INT 13h SD path serves it. */
+  const disk_sd_boot_volume_t *sd = drive == 0 ? disk_sd_boot_volume() : NULL;
+  if (sd != NULL)
+  {
+    if (scanType != SCAN_PRIMARYBOOT)
+      return PartitionsToIgnore;
+
+    struct PartTableEntry part = {0};
+    part.FileSystem = sd->fat_bits == 32 ? FAT32_LBA :
+                      sd->fat_bits == 16 ? FAT16_LBA : FAT12_LBA;
+    part.RelSect = sd->lba;
+    part.NumSect = sd->sectors;
+    DosDefinePartition(cpu, &driveParam, sd->lba, &part, 0, 0);
+    return 1;
   }
 
   RelSectorOffset = 0;          /* boot sector */

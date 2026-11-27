@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include "286/cpu.h"
 #include "bios.h"
+#include "pc.h"
 #include "vga.h"
 #include "board_config.h"
 #include "hardware/clocks.h"
@@ -218,6 +219,7 @@ static uint32_t bios10_func_modes_bitmap(void)
  * смещены на одно поле и приводили к чтению/записи не тех байт. */
 #define BIOS10_BDA_VIDEO_MSR           0x465
 #define BIOS10_BDA_VIDEO_CTL           0x487
+#define BIOS10_CTL_NO_DEFAULT_PALETTE   0x08
 #define BIOS10_BDA_MODESET_CTL         0x489
 
 /*
@@ -505,7 +507,7 @@ static const VgaRegs vga_320x200x16 = {
      0x9C,0x0E,0x8F,0x14,0x00,0x96,0xB9,0xA3,0xFF},
     {0x00,0x00,0x00,0x00,0x00,0x00,0x05,0x0F,0xFF},
     {0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,
-     0x08,0x09,0x0A,0x0B,0x0C,0x0D,0x0E,0x0F,
+     0x10,0x11,0x12,0x13,0x14,0x15,0x16,0x17,
      0x01,0x00,0x0F,0x00,0x00}
 };
 
@@ -517,7 +519,7 @@ static const VgaRegs vga_640x200x16 = {
      0x9C,0x0E,0x8F,0x28,0x00,0x96,0xB9,0xA3,0xFF},
     {0x00,0x00,0x00,0x00,0x00,0x00,0x05,0x0F,0xFF},
     {0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,
-     0x08,0x09,0x0A,0x0B,0x0C,0x0D,0x0E,0x0F,
+     0x10,0x11,0x12,0x13,0x14,0x15,0x16,0x17,
      0x01,0x00,0x0F,0x00,0x00}
 };
 
@@ -606,6 +608,11 @@ static const VgaMode *vga_find_mode(uint8_t mode)
             return &vga_modes[i];
     }
     return NULL;
+}
+
+static bool bios_10h_uses_cga_dac(uint8_t mode)
+{
+    return (mode >= 0x04 && mode <= 0x06) || mode == 0x0D || mode == 0x0E;
 }
 
 static void vga_program_regs(CPU* cpu, const VgaRegs *r, uint16_t crtc_base)
@@ -824,6 +831,17 @@ static bool bios_10h_00h(CPU* cpu)
 
     vga_program_regs(cpu, m->regs, m->crtc_base);
 
+    uint8_t video_ctl = read86(BIOS10_BDA_VIDEO_CTL) & BIOS10_CTL_NO_DEFAULT_PALETTE;
+    if (!(video_ctl & BIOS10_CTL_NO_DEFAULT_PALETTE)) {
+        PC *pc = cpu->cb.io;
+        VGADefaultPalette palette = VGA_DEFAULT_PALETTE_EGA;
+        if (bios_10h_uses_cga_dac(mode))
+            palette = VGA_DEFAULT_PALETTE_CGA;
+        else if (mode == 0x13)
+            palette = VGA_DEFAULT_PALETTE_256;
+        vga_load_default_palette(pc->vga, palette);
+    }
+
     write86 (0x449, mode);
     writew86(0x44A, m->cols);
     writew86(0x44C, m->page_size);
@@ -845,17 +863,14 @@ static bool bios_10h_00h(CPU* cpu)
        активен; бит 7 = no_clear). Пишем канонические IBM-значения
        3x8 по номеру режима. */
 #if defined(VIDEO_RUNTIME)
-    write86(BIOS10_BDA_VIDEO_CTL,
-            (video_profile_is_mcga() ? 0x00 :
-             (video_profile_has_256k_vram() ? 0x60 : 0x20)) |
-            (no_clear ? 0x80 : 0x00));
-#elif defined(MCGA)
-    write86(BIOS10_BDA_VIDEO_CTL, no_clear ? 0x80 : 0x00);
+    if (!video_profile_is_mcga())
+        video_ctl |= video_profile_has_256k_vram() ? 0x60 : 0x20;
 #elif defined(EGA128) || defined(VGA128)
-    write86(BIOS10_BDA_VIDEO_CTL, no_clear ? 0xA0 : 0x20);
-#else
-    write86(BIOS10_BDA_VIDEO_CTL, no_clear ? 0xE0 : 0x60);
+    video_ctl |= 0x20;
+#elif !defined(MCGA)
+    video_ctl |= 0x60;
 #endif
+    write86(BIOS10_BDA_VIDEO_CTL, video_ctl | (no_clear ? 0x80 : 0x00));
     {
         static const uint8_t crt_msr[8] =
             { 0x2C, 0x28, 0x2D, 0x29, 0x2A, 0x2E, 0x1E, 0x29 };
@@ -2293,7 +2308,9 @@ static void bios_10h_apply_cga_palette(CPU* cpu, uint8_t selector)
 {
     bool alt = (selector & BIOS10_CGA_PALETTE_ALT) != 0;
     bool intense = (selector & BIOS10_CGA_PALETTE_INTENSE) != 0;
-    uint8_t intensity = intense ? 0x08 : 0x00;
+    uint8_t intensity = 0;
+    if (intense)
+        intensity = bios_10h_uses_cga_dac(read86(0x449)) ? 0x10 : 0x08;
 
     uint8_t c1 = alt ? BIOS10_CGA_PAL1_COLOR1 : BIOS10_CGA_PAL0_COLOR1;
     uint8_t c2 = alt ? BIOS10_CGA_PAL1_COLOR2 : BIOS10_CGA_PAL0_COLOR2;
@@ -2982,7 +2999,9 @@ SeaBIOS stores this in BDA 40:65 bit 3.
 static bool bios_10h_1231h(CPU* cpu)
 {
     uint8_t ctl = read86(BIOS10_BDA_VIDEO_CTL);
-    ctl = (ctl & ~0x08) | ((CPU_AL & 0x01) << 3);
+    ctl &= ~BIOS10_CTL_NO_DEFAULT_PALETTE;
+    if (CPU_AL & 1u)
+        ctl |= BIOS10_CTL_NO_DEFAULT_PALETTE;
     write86(BIOS10_BDA_VIDEO_CTL, ctl);
     CPU_AL = 0x12;
     cf = 0;

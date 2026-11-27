@@ -2146,7 +2146,7 @@ PCIDevice *vga_pci_init(VGAState *s, PCIBus *bus,
 
 // from vgabios
 // stdvga mode 2
-const static uint8_t pal_ega[] __not_in_flash("pal_ega") = {
+static const uint8_t pal_ega[] = {
     0x00,0x00,0x00, 0x00,0x00,0x2a, 0x00,0x2a,0x00, 0x00,0x2a,0x2a,
     0x2a,0x00,0x00, 0x2a,0x00,0x2a, 0x2a,0x2a,0x00, 0x2a,0x2a,0x2a,
     0x00,0x00,0x15, 0x00,0x00,0x3f, 0x00,0x2a,0x15, 0x00,0x2a,0x3f,
@@ -2440,12 +2440,66 @@ const static uint8_t vgafont16[256 * 16] = {
  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
 
+/* CGA RGBI and the IBM 256-color DAC palette from rh1tech/frank-dos. */
+static void vga_cga_rgb(uint8_t *rgb, unsigned color)
+{
+    uint8_t intensity = (color & 8u) ? 0x15u : 0;
+    rgb[0] = ((color & 4u) ? 0x2Au : 0) + intensity;
+    rgb[1] = color == 6 ? 0x15u : ((color & 2u) ? 0x2Au : 0) + intensity;
+    rgb[2] = ((color & 1u) ? 0x2Au : 0) + intensity;
+}
+
+static void vga_load_256_palette(uint8_t *dac)
+{
+    static const uint8_t gray[] = {
+        0, 5, 8, 11, 14, 17, 20, 24, 28, 32, 36, 40, 45, 50, 56, 63
+    };
+    static const uint8_t levels[][5] = {
+        {0x00,0x10,0x1F,0x2F,0x3F}, {0x1F,0x27,0x2F,0x37,0x3F}, {0x2D,0x31,0x36,0x3A,0x3F},
+        {0x00,0x07,0x0E,0x15,0x1C}, {0x0E,0x11,0x15,0x18,0x1C}, {0x14,0x16,0x18,0x1A,0x1C},
+        {0x00,0x04,0x08,0x0C,0x10}, {0x08,0x0A,0x0C,0x0E,0x10}, {0x0B,0x0C,0x0D,0x0F,0x10},
+    };
+    static const uint8_t hues[][3] = {
+        {0,0,4}, {1,0,4}, {2,0,4}, {3,0,4}, {4,0,4}, {4,0,3}, {4,0,2}, {4,0,1},
+        {4,0,0}, {4,1,0}, {4,2,0}, {4,3,0}, {4,4,0}, {3,4,0}, {2,4,0}, {1,4,0},
+        {0,4,0}, {0,4,1}, {0,4,2}, {0,4,3}, {0,4,4}, {0,3,4}, {0,2,4}, {0,1,4},
+    };
+
+    for (unsigned i = 0; i < 16; ++i, dac += 3)
+        vga_cga_rgb(dac, i);
+    for (unsigned i = 0; i < sizeof(gray); ++i, dac += 3)
+        dac[0] = dac[1] = dac[2] = gray[i];
+
+    for (unsigned w = 0; w < sizeof(levels) / sizeof(levels[0]); ++w)
+        for (unsigned i = 0; i < sizeof(hues) / sizeof(hues[0]); ++i)
+            for (unsigned c = 0; c < 3; ++c)
+                *dac++ = levels[w][hues[i][c]];
+
+    memset(dac, 0, 8 * 3);
+}
+
+void vga_load_default_palette(VGAState *s, VGADefaultPalette palette)
+{
+    switch (palette) {
+    case VGA_DEFAULT_PALETTE_CGA:
+        /* The 200-line modes wire DAC bit 4 to CGA intensity. */
+        for (unsigned i = 0; i < 64; ++i)
+            vga_cga_rgb(&s->palette[3 * i], (i & 7u) | ((i & 0x10u) >> 1));
+        break;
+    case VGA_DEFAULT_PALETTE_256:
+        vga_load_256_palette(s->palette);
+        break;
+    case VGA_DEFAULT_PALETTE_EGA:
+        memcpy(s->palette, pal_ega, sizeof(pal_ega));
+        break;
+    }
+    s->pel_mask = 0xFF;
+    s->palette_dirty = 1;
+}
+
 static void vga_initmode(VGAState *s)
 {
-    for (int i = 0; i < 64*3; i++)
-        s->palette[i] = pal_ega[i];
-    s->palette_dirty = 1;
-    s->pel_mask = 0xFF;
+    vga_load_default_palette(s, VGA_DEFAULT_PALETTE_EGA);
 
     for (int i = 0; i <= 0x13; i++)
         s->ar[i] = actl[i];

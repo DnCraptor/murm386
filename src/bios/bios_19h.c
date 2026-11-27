@@ -226,6 +226,12 @@ bool bios_19h(CPU* cpu) {
 
     const bool native = config_get_native_dos() != 0;
 
+    /* Native FreeDOS starts directly from the mounted SD volume. */
+    if (native && disk_sd_boot_volume()) {
+        boot_from(cpu, 0x80, true);
+        return false;
+    }
+
     /* Classic boot order used here: floppy A:, then first fixed disk C:.
     * No POST is done here; INT 19h is only bootstrap. */
     if (fdd_is_inserted(0) && read_boot_sector(fdd_get_file(0))) {

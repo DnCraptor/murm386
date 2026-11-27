@@ -18,6 +18,9 @@
 #include "video_profile.h"
 #include "board_config.h"
 #include "ff.h"
+#if XRIP_JIT
+#include "xrip386/frank_jit16.h"
+#endif
 
 extern bool SELECT_VGA;
 
@@ -36,6 +39,9 @@ typedef enum {
     SETTING_STRETCH_350,
     SETTING_SVGA_REFRESH,
     SETTING_FPU,
+#if XRIP_JIT
+    SETTING_JIT,
+#endif
     SETTING_PCSPEAKER,
     SETTING_ADLIB,
     SETTING_SOUNDBLASTER,
@@ -123,6 +129,9 @@ static void ensure_marker_dirs(void) {
 
 // Original values (to detect changes)
 static int orig_fpu, orig_video_adapter;
+#if XRIP_JIT
+static CpuCoreMode pending_jit;
+#endif
 static int orig_pcspeaker, orig_adlib, orig_soundblaster, orig_tandy, orig_covox, orig_dss, orig_mouse, orig_nes_mouse, orig_nes_joystick, orig_mpu401;
 static int orig_cpu_freq, orig_psram_freq, orig_flash_freq, orig_volume, orig_voltage, orig_mouse_invert_y, orig_mouse_sensitivity, orig_usb_modem;
 static int orig_audio_output;
@@ -206,12 +215,16 @@ static void save_audio_output_setting(int setting) {
 }
 #endif
 
-static bool settingsui_has_changes(void) {
-    return config_has_changes() || audio_output_setting != orig_audio_output;
+static bool settings_require_restart(void) {
+#if XRIP_JIT
+    if (pending_jit != config_get_jit())
+        return true;
+#endif
+    return audio_output_setting != orig_audio_output;
 }
 
-static bool audio_output_requires_restart(void) {
-    return audio_output_setting != orig_audio_output;
+static bool settingsui_has_changes(void) {
+    return config_has_changes() || settings_require_restart();
 }
 
 static void save_video_output_setting(VideoOutputSetting setting) {
@@ -250,6 +263,9 @@ void settingsui_open(void) {
     // Store original values
     orig_video_adapter = config_get_video_adapter();
     orig_fpu = config_get_fpu();
+#if XRIP_JIT
+    pending_jit = config_get_jit();
+#endif
     orig_pcspeaker = config_get_pcspeaker();
     orig_adlib = config_get_adlib();
     orig_soundblaster = config_get_soundblaster();
@@ -362,6 +378,12 @@ static void cycle_option(int direction) {
         case SETTING_FPU:
             config_set_fpu(config_get_fpu() ? 0 : 1);
             break;
+
+#if XRIP_JIT
+        case SETTING_JIT:
+            pending_jit = (pending_jit + direction + CPU_CORE_COUNT) % CPU_CORE_COUNT;
+            break;
+#endif
 
         case SETTING_PCSPEAKER:
             config_set_pcspeaker(config_get_pcspeaker() ? 0 : 1);
@@ -542,6 +564,9 @@ static void draw_settings_menu(void) {
         "Stretch 350-line modes:",
         "800x600 refresh:",
         "FPU (387):",
+#if XRIP_JIT
+        "CPU core:",
+#endif
         "PC Speaker:",
         "AdLib:",
         "SoundBlaster:",
@@ -566,7 +591,7 @@ static void draw_settings_menu(void) {
         "Audio output:",
         "VGA/HDMI:"
     };
-    char value[24];
+    char value[32];
 
     for (int i = 0; i < SETTING_COUNT && i < VISIBLE_ITEMS; i++) {
         int setting_idx = i + scroll_offset;
@@ -599,6 +624,17 @@ static void draw_settings_menu(void) {
             case SETTING_FPU:
                 snprintf(value, sizeof(value), "< %s >", config_get_fpu() ? "Enabled" : "Disabled");
                 break;
+#if XRIP_JIT
+            case SETTING_JIT: {
+                static const char *const names[] = { "Classic", "JIT", "Fast loop" };
+                const bool unavailable = pending_jit == config_get_jit() &&
+                    ((pending_jit == CPU_CORE_JIT && !xrip_jit_active()) ||
+                     (pending_jit == CPU_CORE_FAST_LOOP && !xrip_fastloop_active()));
+                snprintf(value, sizeof(value), "< %s%s >", names[pending_jit],
+                         unavailable ? " unavailable" : "");
+                break;
+            }
+#endif
             case SETTING_PCSPEAKER:
                 snprintf(value, sizeof(value), "< %s >", config_get_pcspeaker() ? "Enabled" : "Disabled");
                 break;
@@ -798,7 +834,7 @@ bool settingsui_handle_key(int keycode, bool is_down) {
                     break;
 
                 case KEY_ESC:
-                    if (audio_output_requires_restart()) {
+                    if (settings_require_restart()) {
                         settings_state = SETTINGS_CONFIRM_SAVE_RESTART;
                         draw_confirm_dialog();
                     } else if (config_has_changes()) {
@@ -814,7 +850,19 @@ bool settingsui_handle_key(int keycode, bool is_down) {
         case SETTINGS_CONFIRM_SAVE_RESTART:
             // Y = 21, N = 49
             if (keycode == 21) {  // Y
-                config_save_all();
+#if XRIP_JIT
+                const CpuCoreMode saved_jit = config_get_jit();
+                config_set_jit(pending_jit);
+#endif
+                if (!config_save_all()) {
+#if XRIP_JIT
+                    config_set_jit(saved_jit);
+#endif
+                    settings_state = SETTINGS_MAIN;
+                    draw_settings_menu();
+                    osd_print_center(MENU_Y + MENU_H - 4, "Could not save settings", OSD_ATTR_HIGHLIGHT);
+                    break;
+                }
                 restart_requested = true;
                 settings_state = SETTINGS_CLOSED;
                 osd_hide();

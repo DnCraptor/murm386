@@ -27,6 +27,8 @@
 static int cfg_fpu = 0;
 static char *cfg_bios = NULL;  /* NULL = Native BIOS */
 static int cfg_native_dos = 1;   /* Native BIOS boots native FreeDOS by default */
+static bool cfg_boot_sd;
+static CpuCoreMode cfg_jit;
 static int cfg_raw_sd_hdd = RAW_SD_HDD_LAST;
 static int cfg_usb_mode = USB_MODE_HOST;
 static int cfg_usb_modem = 0;
@@ -117,6 +119,22 @@ const char *config_get_bios_file(void) {
 }
 
 int config_get_native_dos(void) { return cfg_native_dos; }
+CpuCoreMode config_get_jit(void) { return cfg_jit; }
+void config_set_jit(CpuCoreMode choice) {
+    if ((unsigned)choice >= CPU_CORE_COUNT)
+        choice = CPU_CORE_CLASSIC;
+    if (cfg_jit != choice) {
+        cfg_jit = choice;
+        cfg_changed = true;
+    }
+}
+bool config_get_boot_sd(void) { return cfg_boot_sd; }
+void config_set_boot_sd(bool enabled) {
+    if (cfg_boot_sd != enabled) {
+        cfg_boot_sd = enabled;
+        cfg_changed = true;
+    }
+}
 void config_set_native_dos(int enabled) {
     enabled = !!enabled;
     if (cfg_native_dos != enabled) {
@@ -635,6 +653,12 @@ bool config_save_all(void) {
     }
     snprintf(line, sizeof(line), "native_dos=%d\r\n", cfg_native_dos);
     write_line(&fp, line);
+    if (cfg_boot_sd)
+        write_line(&fp, "boot=sd\r\n");
+    if (cfg_jit != CPU_CORE_CLASSIC) {
+        snprintf(line, sizeof(line), "jit=%d\r\n", (int)cfg_jit);
+        write_line(&fp, line);
+    }
     snprintf(line, sizeof(line), "pcspeaker=%d\r\n", cfg_pcspeaker);
     write_line(&fp, line);
     snprintf(line, sizeof(line), "adlib=%d\r\n", cfg_adlib);
@@ -717,7 +741,12 @@ int parse_frank_386_ini(void* user, const char* section,
     // Accept both new and legacy section names
     if (strcmp(section, "murm-286") != 0 && strcmp(section, "murm386") != 0) return 1;
 
-    if (strcmp(name, "native_dos") == 0) {
+    if (strcmp(name, "boot") == 0) {
+        cfg_boot_sd = strcasecmp(value, "sd") == 0;
+    } else if (strcmp(name, "jit") == 0) {
+        cfg_jit = strcmp(value, "2") == 0 ? CPU_CORE_FAST_LOOP :
+                  strcmp(value, "1") == 0 ? CPU_CORE_JIT : CPU_CORE_CLASSIC;
+    } else if (strcmp(name, "native_dos") == 0) {
         cfg_native_dos = !!atoi(value);
     } else if (strcmp(name, "video") == 0) {
         VideoAdapterProfile profile;

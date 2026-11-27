@@ -32,6 +32,16 @@ void config_set_fpu(int enabled);
 const char *config_get_bios_file(void);
 void config_set_bios_file(const char *filename);
 int config_get_native_dos(void);
+typedef enum {
+    CPU_CORE_CLASSIC = 0,
+    CPU_CORE_JIT = 1,
+    CPU_CORE_FAST_LOOP = 2,
+    CPU_CORE_COUNT
+} CpuCoreMode;
+CpuCoreMode config_get_jit(void);
+void config_set_jit(CpuCoreMode choice);
+bool config_get_boot_sd(void);
+void config_set_boot_sd(bool enabled);
 void config_set_native_dos(int enabled);
 int config_get_raw_sd_hdd(void);
 void config_set_raw_sd_hdd(int mode);

@@ -226,6 +226,34 @@ They are intentionally not part of the normal build-script interface. Use direct
 
 The data directory is tied to `CPU_TARGET` by CMake. The 286 build uses `286/` and `.config/286/`. Both 386 builds use `386/` and `.config/386/`. The `tmp/` directory is used for `pagefile.sys` when SD-backed paging is active.
 
+### Boot native FreeDOS from the SD card
+
+In Win+F12, select `< Native SD >` on the `[ BOOT] OS` row, then choose
+`Save and Reboot`. The `[SD-CARD]` row shows `< Boot C: >` after successful
+volume selection. For manual configuration, set `boot=sd` and `native_dos=1`
+in `[murm-286]` with the native BIOS selected. The mounted FAT12, FAT16 or FAT32
+volume becomes C:, including a FAT volume starting at sector 0. Keep
+`CONFIG.SYS` and `AUTOEXEC.BAT` in the root of that volume. Floppy images
+remain A: and B:, and the normal partition scan assigns letters after C:
+to the attached hard disks. An unavailable or unsupported SD volume falls
+back to the normal boot order.
+
+### XRIP CPU core
+
+In Win+F11, choose **CPU core** below **FPU (387)**, then press Enter and
+confirm the restart with Y. The corresponding `[murm-286]` values are:
+
+| Mode | Setting | Execution |
+| --- | --- | --- |
+| Classic | `jit=0` | Standard XRIP interpreter, the default |
+| JIT | `jit=1` | Experimental Thumb-2 translation of hot real-mode blocks with a 139 KiB PSRAM cache and SRAM execution for repeatedly taken self-loops |
+| Fast loop | `jit=2` | Direct-threaded SRAM interpreter for common real-mode 16-bit and flat protected-mode 32-bit instructions, with standard XRIP fallback |
+
+Both acceleration modes need direct QSPI guest RAM. The fast loop also falls
+back during guest paging and single-stepping. The startup log and Win+F11
+show when the selected mode is unavailable. `-DXRIP_JIT=OFF` omits both
+acceleration modes and the menu entry.
+
 ## Clean/reconfigure behaviour
 
 `build.sh` / `build.bat` rerun CMake configure with the normal wrapper options. In the current Windows `build.bat`, `CLEAN=1` is the default, so the selected build directory is removed before every build; `--clean` therefore does not change the default Windows behaviour.

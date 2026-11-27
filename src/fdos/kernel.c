@@ -1299,45 +1299,13 @@ STATIC void PSPInit(void)
 /* Bytes from off to the end of its 64K segment. off == 0 gives a full 64K. */
 static inline size_t seg_room(uint16_t off) { return (size_t)0x10000u - off; }
 
-/*
-    Линейные копиры guest_lin_read()/guest_lin_write()/guest_lin_set() -
-    нижний этаж всех far-примитивов: каждый непрерывный (в смысле 16-бит
-    оффсета) кусок дополнительно дробится guest_span_ptr()'ом по гранулам
-    гостевой физической карты, чтобы копия попадала в АКТИВНУЮ страницу
-    окна EMS, а не в сырую линейную память под ним (см. mem.h). Экспорт в
-    proto.h - для путей данных, держащих гостевой линейный курсор напрямую
-    (rwblock() в fatfs.c).
-*/
+/* DOS file buffers can point into VGA memory as well as RAM or EMS. */
 void __not_in_flash_func(guest_lin_write)(uint32_t lin, const void *src, size_t n) {
-    const uint8_t *p = (const uint8_t *)src;
-    while (n) {
-        uint32_t span;
-        uint8_t *h = guest_span_ptr(lin, &span);
-        size_t chunk = (span < n) ? span : n;
-        dos_api_memcpy(h, p, chunk);
-        p += chunk; lin += chunk; n -= chunk;
-    }
+    guest_write_block(lin, src, n);
 }
 
 void __not_in_flash_func(guest_lin_read)(void *dst, uint32_t lin, size_t n) {
-    uint8_t *p = (uint8_t *)dst;
-    while (n) {
-        uint32_t span;
-        const uint8_t *h = guest_span_ptr(lin, &span);
-        size_t chunk = (span < n) ? span : n;
-        dos_api_memcpy(p, h, chunk);
-        p += chunk; lin += chunk; n -= chunk;
-    }
-}
-
-static void __not_in_flash_func(guest_lin_set)(uint32_t lin, int v, size_t n) {
-    while (n) {
-        uint32_t span;
-        uint8_t *h = guest_span_ptr(lin, &span);
-        size_t chunk = (span < n) ? span : n;
-        nf_memset(h, v, chunk);
-        lin += chunk; n -= chunk;
-    }
+    guest_read_block(lin, dst, n);
 }
 
 void __not_in_flash_func(fmemset)(dos_far_ptr p, int v, unsigned int sz) {
@@ -1347,7 +1315,7 @@ void __not_in_flash_func(fmemset)(dos_far_ptr p, int v, unsigned int sz) {
     while (n) {
         size_t chunk = n, room = seg_room(off);
         if (chunk > room) chunk = room;
-        guest_lin_set(EFFECTIVE(MK_FP(seg, off)), v, chunk);
+        guest_fill_block(EFFECTIVE(MK_FP(seg, off)), (uint8_t)v, chunk);
         n -= chunk;
         off = (uint16_t)(off + chunk);   /* wraps to 0 at the segment end */
     }
@@ -1367,21 +1335,8 @@ void __not_in_flash_func(fmemcpy)(dos_far_ptr d, const dos_far_ptr s, size_t n) 
         if (chunk > droom) chunk = droom;
         if (chunk > sroom) chunk = sroom;
 
-        {
-            uint32_t dlin = EFFECTIVE(MK_FP(dseg, doff));
-            uint32_t slin = EFFECTIVE(MK_FP(sseg, soff));
-            size_t   left = chunk;
-            while (left) {
-                uint32_t dspan, sspan;
-                uint8_t       *dh = guest_span_ptr(dlin, &dspan);
-                const uint8_t *sh = guest_span_ptr(slin, &sspan);
-                size_t m = left;
-                if (m > dspan) m = dspan;
-                if (m > sspan) m = sspan;
-                dos_api_memcpy(dh, sh, m);
-                dlin += m; slin += m; left -= m;
-            }
-        }
+        guest_copy_block(EFFECTIVE(MK_FP(dseg, doff)),
+                         EFFECTIVE(MK_FP(sseg, soff)), chunk);
         n -= chunk;
         doff = (uint16_t)(doff + chunk);
         soff = (uint16_t)(soff + chunk);
