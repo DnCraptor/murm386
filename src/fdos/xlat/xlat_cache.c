@@ -50,8 +50,6 @@ typedef struct {
     uint8_t trace_min;     /* xlat_translate's trace_min it was built with */
     uint8_t n_extra;       /* entry points added (add_entry) */
     uint16_t extra[XLAT_EXTRA_MAX];
-    uint16_t next_ip[4];   /* unvisited direct edges of a time-sealed graph */
-    uint8_t n_next;
 } region_t;
 
 #define XLAT_PAGES 4096u   /* XLAT_LOG: xlat_prof_page() pages (256 bytes) of the first MiB */
@@ -79,9 +77,7 @@ typedef struct {
 enum { HOT_NONE = 0, HOT_RETRY = 1, HOT_FINAL = 2 };
 
 /* In order of increasing priority, FIFO within each priority. */
-enum { COMPILE_BURST, COMPILE_RETRY, COMPILE_CONT, COMPILE_EXIT, COMPILE_CALL };
-#define XLAT_COMPILE_MIN_US 40
-#define XLAT_COMPILE_CREDIT (XLAT_COMPILE_RATIO * (int32_t)XLAT_COMPILE_US)
+enum { COMPILE_BURST, COMPILE_RETRY, COMPILE_EXIT, COMPILE_CALL };
 
 typedef struct {
     uint32_t key;
@@ -131,7 +127,7 @@ typedef struct {
     unsigned queued;
     uint8_t compile_blocked;       /* priorities denied since the last dequeue */
     int32_t compile_credit;        /* microseconds of guest work, debt if negative */
-    uint32_t compile_burst;        /* at most one compiler slice per CPU burst */
+    uint32_t compile_burst;        /* at most one compiler job per CPU burst */
     /* One unpublished region owns the free arena window. Lives in PSRAM. */
     struct {
         xlat_rt_t rt;
@@ -148,7 +144,7 @@ typedef struct {
     /* Per-length counts for ALL successful publications, not just T dumps.
      * state_t is allocated in PSRAM; no new resident SRAM tables. */
     struct {
-        uint32_t built, first, fit, quanta, us, arm, cut, cont, final_us;
+        uint32_t built, first, quanta, us, arm, final_us;
     } compile_len[XLAT_MAX_INSNS + 1];
     char *log;              /* text kept until the next safe point (xlat_log_write) */
     uint32_t log_len;
@@ -312,8 +308,7 @@ static void log_region_code(const region_t *r)
                r->cs, r->ip, (unsigned long)r->lo, (unsigned long)r->span, r->n_runs,
                (unsigned)st->out.n_insns, (unsigned long)st->job.quanta,
                (unsigned long)st->job.us, (unsigned long)st->out.code_len,
-               (unsigned)st->out.adaptive_cut, (unsigned)st->out.n_next,
-               (unsigned long)st->out.final_us, (unsigned)(st->job.request.kind == COMPILE_CONT));
+               0u, 0u, (unsigned long)st->out.final_us, 0u);
     const uint8_t *d = st->arena.base + r->data_off;
     for (unsigned k = 0; k < r->n_runs; ++k) {
         uint32_t linear;
@@ -712,17 +707,6 @@ static entry_t *XLAT_HOT_FN(lookup)(uint32_t key)
             return e;
     }
     return NULL;
-}
-
-/* An existing live entry is a valid graph boundary even if its epoch
- * needs checking later. Never embed its native address in a new region. */
-static bool cached_entry(const xlat_rt_t *rt, uint16_t ip)
-{
-    const entry_t *e = lookup((uint32_t)rt->cs << 16 | ip);
-    if (!e)
-        return false;
-    const region_t *r = &st->region[e->region];
-    return r->live && r->cs_base == rt->seg_base[1] && r->mem_size == rt->mem_size;
 }
 
 static bool insert(uint32_t key, uint16_t region, uint32_t code_off, bool mark)
@@ -1166,7 +1150,7 @@ static int take_slot(bool *evicted)
 void xlat_compile_credit(uint32_t guest_us)
 {
     if (st) {
-        const uint32_t need = (uint32_t)(XLAT_COMPILE_CREDIT - st->compile_credit);
+        const uint32_t need = (uint32_t)(XLAT_COMPILE_CREDIT_US - st->compile_credit);
         st->compile_credit += (int32_t)(guest_us < need ? guest_us : need);
     }
 }
@@ -1176,7 +1160,6 @@ static int translate_at(const xlat_rt_t *rt, uint16_t ip, int trace_min, const u
 {
     xlat_region_out_t *out = &st->out;
     xlat_arena_t *const a = &st->arena;
-    a->reuse_entry = st->job.request.kind == COMPILE_CONT && !n_extra ? cached_entry : NULL;
     bool full, evicted = false;
     for (; st->job.attempt < 3;) {
         if (xlat_compile_irq(rt)) {
@@ -1239,9 +1222,6 @@ built:;
     r->span = out->span;
     r->n_runs = out->n_runs;
     r->fn = out->fn;
-    r->n_next = out->n_next;
-    for (unsigned k = 0; k < r->n_next; ++k)
-        r->next_ip[k] = out->next_ip[k];
     st->last[idx] = st->seq;    /* new: as if entered now */
     xlat_stats.fn_regions += out->fn != 0;
     /* the copies follow the code (xlat_translate keeps code_top + data
@@ -1288,14 +1268,8 @@ built:;
     xlat_stats.compiled_code_bytes += out->code_len;
     xlat_stats.compiled_source_bytes += out->data_size;
     xlat_stats.code_bytes = st->ring_lo + st->held_bytes;
-    if (rt->wall_deadline) {
+    if (rt->wall_deadline)
         out->final_us += *rt->clock - publish_t0;
-        /* Do not train standalone discovery on re-emission or extensions. */
-        if (!st->job.attempt && !n_extra && out->n_insns && out->final_us) {
-            uint32_t *est = &a->finish_est[xlat_finish_bucket(out->n_insns)];
-            *est = *est ? *est - (*est >> 2) + (out->final_us >> 2) : out->final_us;
-        }
-    }
     return idx;
 }
 
@@ -1331,9 +1305,7 @@ static bool queue_compile(uint32_t key, uint8_t kind, uint8_t why)
     const unsigned priority = 1u << kind;
     if (st->compile_blocked & priority)
         return false;
-    if (st->job.pending && st->job.request.key == key &&
-        (st->job.request.kind >= kind ||
-         (st->job.request.kind == COMPILE_CONT && kind == COMPILE_EXIT)))
+    if (st->job.pending && st->job.request.key == key && st->job.request.kind >= kind)
         return true;
 
     unsigned replace = XLAT_COMPILE_QUEUE;
@@ -1341,7 +1313,7 @@ static bool queue_compile(uint32_t key, uint8_t kind, uint8_t why)
     for (unsigned i = 0; i < st->queued; ++i) {
         const compile_request_t *q = &st->queue[i];
         if (q->key == key) {
-            if (q->kind >= kind || (q->kind == COMPILE_CONT && kind == COMPILE_EXIT))
+            if (q->kind >= kind)
                 return true;
             /* Keep only the strongest queued request for this entry. */
             upgrade = i;
@@ -1364,30 +1336,6 @@ static bool queue_compile(uint32_t key, uint8_t kind, uint8_t why)
     }
     st->queue[st->queued++] = (compile_request_t){key, kind, why};
     return true;
-}
-
-/* The final region of a linked chain supplies the frontier. Queue only
- * the edge that was actually taken, not a guessed branch at publication. */
-static __attribute__((noinline)) void queue_reached_continuation(region_t *r, const xlat_rt_t *rt)
-{
-    if (rt->cs != r->cs)
-        return;
-    const uint16_t ip = (uint16_t)rt->ip;
-    for (unsigned k = 0; k < r->n_next; ++k) {
-        if (r->next_ip[k] != ip)
-            continue;
-        const uint32_t key = (uint32_t)rt->cs << 16 | ip;
-        const entry_t *en = lookup(key);
-        hot_t *h = &st->exit_hot[hot_slot(key)];
-        if (!(en && (st->region[en->region].live || st->region[en->region].cold))) {
-            if (h->key != key)
-                *h = (hot_t){.key = key};
-            if (!h->reject && !queue_compile(key, COMPILE_CONT, XLAT_RJ_NONE))
-                return; /* retain the hint if the queue was full */
-        }
-        r->next_ip[k] = r->next_ip[--r->n_next];
-        return;  /* normal hot-exit sampling covers future misses */
-    }
 }
 
 /* Samples can enqueue while the compiler is occupied, out of time, or IF=0.
@@ -1417,7 +1365,7 @@ static __attribute__((noinline)) void sample(uint32_t key, bool exit)
 static void finish_compile(int idx, int why)
 {
     const compile_request_t req = st->job.request;
-    const bool exit = req.kind == COMPILE_EXIT || req.kind == COMPILE_CONT;
+    const bool exit = req.kind == COMPILE_EXIT;
     hot_t *h = &(exit ? st->exit_hot : st->hot)[hot_slot(req.key)];
     if (idx >= 0) {
         const int old = st->job.old_slot;
@@ -1505,12 +1453,6 @@ static void start_compile(const xlat_rt_t *rt)
             unlink_region(e->region);
         }
     }
-    /* A reached continuation is an independent region. Rebuilding the
-     * containing graph here would undo the point of incremental publication. */
-    if (req.kind == COMPILE_CONT) {
-        set_compile_target(-1, XLAT_LINK_MIN);
-        return;
-    }
     const bool retry = req.kind == COMPILE_RETRY;
     const bool exit = req.kind == COMPILE_EXIT;
     const bool call = req.kind == COMPILE_CALL;
@@ -1531,16 +1473,16 @@ static void start_compile(const xlat_rt_t *rt)
     }
 }
 
-static bool compile_ready(const xlat_rt_t *rt, int32_t remaining)
+static bool compile_ready(const xlat_rt_t *rt)
 {
     return (st->job.pending || st->queued) &&
            (!rt->wall_deadline ||
-            (st->compile_credit >= XLAT_COMPILE_CREDIT && (rt->eflags & 0x200u) &&
-             st->compile_burst != rt->wall_deadline && remaining >= XLAT_COMPILE_MIN_US));
+            (st->compile_credit >= XLAT_COMPILE_CREDIT_US && (rt->eflags & 0x200u) &&
+             st->compile_burst != rt->wall_deadline));
 }
 
-/* Run at most one quantum per CPU burst and debit the measured cost,
- * including setup, publication and any overrun of a non-yielding stage. */
+/* Run one job until completion or a real guest IRQ. Debit measured cost,
+ * including setup and publication; no artificial compiler deadline. */
 static __attribute__((noinline)) void compile_slice(const xlat_rt_t *rt)
 {
     if (stack_free() < XLAT_STACK_NEEDED) {
@@ -1556,8 +1498,6 @@ static __attribute__((noinline)) void compile_slice(const xlat_rt_t *rt)
         jrt->intr = rt->intr;
         jrt->clock = rt->clock;
         jrt->wall_deadline = rt->wall_deadline;
-        if (rt->wall_deadline && (int32_t)(rt->wall_deadline - t0) > (int32_t)XLAT_COMPILE_US)
-            jrt->wall_deadline = (t0 + XLAT_COMPILE_US) | 1u;
         if (st->job.started || st->job.attempt)
             xlat_stats.compile_resumes++;
         const int idx = translate_at(jrt, st->job.ip, st->job.trace_min,
@@ -1570,12 +1510,9 @@ static __attribute__((noinline)) void compile_slice(const xlat_rt_t *rt)
             if (n && n <= XLAT_MAX_INSNS) {
                 ++st->compile_len[n].built;
                 st->compile_len[n].first += st->job.quanta == 1;
-                st->compile_len[n].fit += st->job.quanta == 1 && st->job.us <= XLAT_COMPILE_US;
                 st->compile_len[n].quanta += st->job.quanta;
                 st->compile_len[n].us += st->job.us;
                 st->compile_len[n].arm += st->out.code_len;
-                st->compile_len[n].cut += st->out.adaptive_cut != 0;
-                st->compile_len[n].cont += st->job.request.kind == COMPILE_CONT;
                 st->compile_len[n].final_us += st->out.final_us;
             }
             log_region_code(&st->region[idx]);
@@ -1585,8 +1522,7 @@ static __attribute__((noinline)) void compile_slice(const xlat_rt_t *rt)
             xlat_stats.compile_defers++;
         } else if (idx < 0 && st->out.reject < XLAT_RJ_COUNT &&
                    st->job.old_slot >= 0 &&
-                   (st->job.request.kind == COMPILE_EXIT || st->job.request.kind == COMPILE_CONT ||
-                    st->job.request.kind == COMPILE_CALL)) {
+                   (st->job.request.kind == COMPILE_EXIT || st->job.request.kind == COMPILE_CALL)) {
             /* When extending a region fails, try a standalone link trace. */
             set_compile_target(-1, XLAT_LINK_MIN);
         } else {
@@ -1714,8 +1650,7 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
         /* Serve misses after sampling; on a ready path drain a full credit
          * at the burst's first entry so long-running regions cannot starve
          * the queue. Recheck the entry after any cache mutation. */
-        if (!serviced && (!live || (!ran && rt->wall_deadline && remaining >= (int32_t)XLAT_COMPILE_US)) &&
-            compile_ready(rt, remaining)) {
+        if (!serviced && (!live || (!ran && rt->wall_deadline)) && compile_ready(rt)) {
             compile_slice(rt);
             serviced = true;
             resample = false;
@@ -1792,8 +1727,6 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
         /* STOP: XRIP must run the next instruction. */
         if (flush_pending || *rt->intr || rt->exit_kind == XLAT_EXIT_STOP)
             break;
-        if (exit_kind == XLAT_EXIT_BRANCH && x->live && x->n_next)
-            queue_reached_continuation(x, rt);
         /* Budget used up (entry costs, short regions): the burst lasts
          * until its deadline, as in the back-edge stubs. */
         if (rt->budget <= 0) {
@@ -2800,21 +2733,20 @@ void xlat_log_write(uint16_t psp, const char *name)
         xlat_stats.xrip_tail = 0;
     }
     /* Interval totals, including regions whose byte dumps did not fit.
-     * first = one compile_slice; fit also meets the nominal time limit. */
+     * first = completed without suspension. Retired time-cut fields are 0. */
     log_printf("D limit=%u soft=%u quantum_us=%u n:built/first/fit/quanta/us/arm/cut/cont/final_us\r\n",
-               (unsigned)XLAT_MAX_INSNS, (unsigned)XLAT_REGION_INSNS, (unsigned)XLAT_COMPILE_US);
+               (unsigned)XLAT_MAX_INSNS, (unsigned)XLAT_MAX_INSNS, 0u);
     for (unsigned n = 1; n <= XLAT_MAX_INSNS; ++n) {
         if (!st->compile_len[n].built)
             continue;
         log_printf("D %u:%lu/%lu/%lu/%lu/%lu/%lu/%lu/%lu/%lu\r\n", n,
                    (unsigned long)st->compile_len[n].built,
                    (unsigned long)st->compile_len[n].first,
-                   (unsigned long)st->compile_len[n].fit,
+                   0ul,
                    (unsigned long)st->compile_len[n].quanta,
                    (unsigned long)st->compile_len[n].us,
                    (unsigned long)st->compile_len[n].arm,
-                   (unsigned long)st->compile_len[n].cut,
-                   (unsigned long)st->compile_len[n].cont,
+                   0ul, 0ul,
                    (unsigned long)st->compile_len[n].final_us);
     }
     memset(st->compile_len, 0, sizeof(st->compile_len));

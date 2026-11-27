@@ -113,7 +113,7 @@ typedef struct {
     int n_interp;
     /* Persistent compiler cursors in the PSRAM context. */
     uint8_t phase, variant;
-    bool discovering, flow_changed, adaptive_cut;
+    bool discovering, flow_changed;
     uint32_t seal_at, final_us;   /* time in finalization, not time between slices */
     uint64_t plan_mat, plan_full, head_marks;
     uint8_t plan_pass;
@@ -356,7 +356,7 @@ static bool has_cycle(const tctx_t *c, int first)
  * after that, each within the window of its own start, as long as room is
  * left: the loop itself is found first, and a loop whose calls do not fit
  * leaves the region on every pass (has_cycle rejects it). */
-static int discover(tctx_t *c, uint16_t start, bool allow_cut, const xlat_arena_t *a)
+static int discover(tctx_t *c, uint16_t start)
 {
     const int qcap = (int)(sizeof(c->queue) / sizeof(c->queue[0]));
     const int dcap = (int)(sizeof(c->deferred) / sizeof(c->deferred[0]));
@@ -365,48 +365,13 @@ static int discover(tctx_t *c, uint16_t start, bool allow_cut, const xlat_arena_
         c->queue[c->tail++] = (uint32_t)start << 16 | start;
         c->n = c->n_seen = c->n_source = 0;
         c->discovering = true;
-        c->adaptive_cut = false;
     }
-    const bool timed = allow_cut && XLAT_TRACES &&
-                       XLAT_REGION_INSNS < XLAT_MAX_INSNS && c->rt->wall_deadline;
-    uint32_t previous = timed ? *c->rt->clock : 0;
     for (;;) {
         const bool more = c->head < c->tail || (!c->no_calls && c->dhead < c->dtail);
-        const bool may_cut = timed && more && c->n >= XLAT_REGION_INSNS &&
-                             c->n < XLAT_MAX_INSNS;
-        if (xlat_compile_irq(c->rt)) {
-            /* IRQ is never a reason to seal. If the clock has already run
-             * out, remember the boundary and finish it in the next slice. */
-            if (may_cut && !*c->rt->intr &&
-                (int32_t)(*c->rt->clock - c->rt->wall_deadline) >= 0)
-                c->adaptive_cut = true;
+        if (xlat_compile_irq(c->rt))
             return XLAT_RJ_DEFER;
-        }
-        if (c->adaptive_cut || !more || c->n >= XLAT_MAX_INSNS)
+        if (!more || c->n >= XLAT_MAX_INSNS)
             break;
-        if (timed) {
-            const uint32_t now = *c->rt->clock;
-            const uint32_t step = now - previous;
-            previous = now;
-            const int32_t left = (int32_t)(c->rt->wall_deadline - now);
-            if (may_cut) {
-                /* Use the measured cost for the prospective length. If
-                 * finishing cannot fit even an empty quantum, do not waste
-                 * this discovery slice reserving impossible time. Seal when
-                 * the next decoder step no longer fits; finish resumably. */
-                uint32_t reserve = a->finish_est[xlat_finish_bucket((unsigned)c->n + 1u)];
-                if (!reserve)
-                    reserve = a->finish_est[xlat_finish_bucket((unsigned)c->n)];
-                if (!reserve)
-                    reserve = XLAT_DISCOVER_RESERVE_US;
-                if (step >= XLAT_COMPILE_US || reserve >= XLAT_COMPILE_US - step)
-                    reserve = 0;
-                if (left <= (int32_t)reserve || (uint32_t)(left - reserve) <= step) {
-                    c->adaptive_cut = true;
-                    break;
-                }
-            }
-        }
         if (c->head == c->tail) {
             c->head = c->tail = 0;
             const uint16_t f = c->deferred[c->dhead++];
@@ -417,8 +382,6 @@ static int discover(tctx_t *c, uint16_t start, bool allow_cut, const xlat_arena_
         if ((uint16_t)(ip - root + XLAT_SPAN_WINDOW / 2) >= XLAT_SPAN_WINDOW ||
             seen_before(c, ip))
             continue;
-        if (ip != start && a->reuse_entry && a->reuse_entry(c->rt, ip))
-            continue;  /* leave this edge to the existing dispatcher */
         const uint32_t linear = c->cs_base + ip;
         if (!xlat_code_direct(linear, 16u))
             continue;
@@ -545,9 +508,7 @@ static int discover(tctx_t *c, uint16_t start, bool allow_cut, const xlat_arena_
         return XLAT_RJ_INTERP;
     if (has_cycle(c, first))
         return XLAT_RJ_NONE;
-    /* A time-sealed graph is a complete short trace, not an unsupported
-     * region. All its missing edges are planned as ordinary exits. */
-    const int min = c->adaptive_cut ? XLAT_LINK_MIN : c->trace_min;
+    const int min = c->trace_min;
     if (min) {
         const int len = min_native_path(c, first);
         if (len >= min) {
@@ -556,30 +517,6 @@ static int discover(tctx_t *c, uint16_t start, bool allow_cut, const xlat_arena_
         }
     }
     return XLAT_RJ_NOLOOP;
-}
-
-/* Keep only unvisited outgoing edges of the retained graph, in discovery
- * order. They are hints for independent regions, never native addresses. */
-static void remember_continuation(const tctx_t *c, xlat_region_out_t *out, uint16_t ip)
-{
-    if (out->n_next >= sizeof(out->next_ip) / sizeof(out->next_ip[0]))
-        return;
-    for (int k = 0; k < c->n_seen; ++k)
-        if (c->seen[k] == ip)
-            return;
-    for (unsigned k = 0; k < out->n_next; ++k)
-        if (out->next_ip[k] == ip)
-            return;
-    if (!xlat_code_direct(c->cs_base + ip, 16u))
-        return;
-    for (int i = 0; i < c->n; ++i) {
-        const x86_insn_t *in = &c->in[i];
-        if (((falls_through(in) || x86_is_call(in)) && (uint16_t)(in->ip + in->len) == ip) ||
-            (is_branch(in) && in->target == ip)) {
-            out->next_ip[out->n_next++] = ip;
-            return;
-        }
-    }
 }
 
 /* ---------------------------------------------------------------------- */
@@ -3694,10 +3631,10 @@ discover_phase:;
     int why;
     for (;;) {
         /* An existing region extended with extra entries must retain them. */
-        why = discover(c, ip, n_extra == 0, a);
+        why = discover(c, ip);
         if (why == XLAT_RJ_DEFER)
             goto deferred;
-        if (c->variant == 0 && why == XLAT_RJ_NONE && c->fn && !c->adaptive_cut) {
+        if (c->variant == 0 && why == XLAT_RJ_NONE && c->fn) {
             bool calls = false;
             for (int i = 0; i < c->n && !calls; ++i)
                 calls = x86_is_call(&c->in[i]) && c->tgt_idx[i] >= 0;
@@ -3725,15 +3662,6 @@ discover_phase:;
     }
     finishing = true;
     phase_t0 = c->seal_at;
-    out->adaptive_cut = c->adaptive_cut;
-    out->n_next = 0;
-    if (c->adaptive_cut) {
-        for (int k = c->head; k < c->tail && out->n_next < 4; ++k)
-            remember_continuation(c, out, (uint16_t)c->queue[k]);
-        if (!c->no_calls)
-            for (int k = c->dhead; k < c->dtail && out->n_next < 4; ++k)
-                remember_continuation(c, out, c->deferred[k]);
-    }
     /* More entry points (xlat_cache: hot region exits that came to these
      * instructions): leaders, entered with the state in rt */
     for (int k = 0; k < n_extra; ++k) {

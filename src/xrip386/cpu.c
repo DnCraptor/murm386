@@ -1130,9 +1130,8 @@ static inline void xrip_bridge_raise(void)
 
 /* A native caller can enter XRIP under a host interrupt mask or from a
  * native ISR. Such a burst cannot use exception-return redirection; retain
- * the old safe-boundary delivery there. During this interpreter-only
- * validation, CPU.intr remains the request latch; only open the NVIC
- * gate for an actual request. */
+ * the old safe-boundary delivery there. CPU.intr remains the request
+ * latch; only open the NVIC gate for an actual request. */
 static inline bool xrip_bridge_begin(void)
 {
     uint32_t ipsr, primask, basepri;
@@ -1145,6 +1144,23 @@ static inline bool xrip_bridge_begin(void)
 #else
 #define XRIP_HW_IRQ_BRIDGE 0
 #endif
+
+/* The caller must be at a complete x86 instruction boundary, with guest
+ * registers, flags and IP synchronized. Never call while emitting code
+ * or while a generated ARM frame still owns guest registers. */
+static inline void xrip_irq_boundary(CPU *cpu, bool bridge)
+{
+#if XRIP_HW_IRQ_BRIDGE
+    if (bridge) {
+        irq_set_pending((uint)xrip_bridge_irq);
+        xrip_irq_gate(cpu, xrip_bridge_iser, xrip_bridge_icer, xrip_bridge_bit);
+        return;
+    }
+#else
+    (void)bridge;
+#endif
+    xrip_deliver_irq(cpu);
+}
 
 // The instruction loop. It has no setjmp of its own: a function with setjmp is compiled with
 // fewer optimizations, so that is in exec86() around it.
@@ -1163,25 +1179,16 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
     CPU *const run_cpu = active_cpu;
 #if XRIP_HW_IRQ_BRIDGE
     const bool bridge = xrip_bridge_begin();
+#else
+    const bool bridge = false;
 #endif
 #define active_cpu run_cpu
     for (uint32_t loopcount = 0; loopcount < execloops; loopcount++) {
         if (active_cpu->native_done || XLAT_CUT_PENDING())
             break;
         if (unlikely(XRIP_IP > 0xffffu) && !protected_mode) XRIP_IP &= 0xffffu;
-        if (unlikely(active_cpu->intr && ifl && !active_cpu->i286_irq_shadow)) {
-#if XRIP_HW_IRQ_BRIDGE
-            if (bridge) {
-                /* Acknowledge through exception return, not by polling the
-                 * PIC. Re-pend from the authoritative CPU latch so a
-                 * request cannot be stranded by a stale NVIC pending bit.
-                 * Avoid two NVIC writes and four barriers on idle paths. */
-                irq_set_pending((uint)xrip_bridge_irq);
-                xrip_irq_gate(active_cpu, xrip_bridge_iser, xrip_bridge_icer, xrip_bridge_bit);
-            } else
-#endif
-                xrip_deliver_irq(active_cpu);
-        }
+        if (unlikely(active_cpu->intr && ifl && !active_cpu->i286_irq_shadow))
+            xrip_irq_boundary(active_cpu, bridge);
         if (unlikely(halted))
             break;
         active_cpu->i286_irq_shadow = false;

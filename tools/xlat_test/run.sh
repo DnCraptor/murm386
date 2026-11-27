@@ -15,12 +15,12 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 out="${TMPDIR:-/tmp}/xlat_test"
 arm-linux-gnueabihf-gcc -O2 -g -mthumb -march=armv7-a+fp -static -Wall -Wextra \
-    -DXLAT_HOST_TEST -DXLAT_REGION_INSNS=16 -Isrc/fdos/xlat -Isrc \
+    -DXLAT_HOST_TEST -Isrc/fdos/xlat -Isrc \
     tools/xlat_test/xlat_test.c tools/xlat_test/fpu_glue.c src/fpu.c src/fdos/xlat/*.c \
     -lm -o "$out"
 run=()
 [[ "$(uname -m)" == arm* || "$(uname -m)" == aarch64 ]] || run=(qemu-arm)
-"${run[@]}" "$out" --compile-adaptive
+"${run[@]}" "$out" --compile-irq
 "${run[@]}" "$out" --compile-resume
 "${run[@]}" "$out" --compile-scheduler
 "${run[@]}" "$out" --shift   # shift and MUL/DIV helpers

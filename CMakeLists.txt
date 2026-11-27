@@ -24,13 +24,9 @@ set(VIDEO_MODE "VGA256" CACHE STRING "Video adapter: RUNTIME, MCGA, EGA128, VGA1
 # x86 -> Thumb-2 translation of hot real-mode loops (src/fdos/xlat,
 # docs/FDOS-JIT-architecture.md). The arena and tables are allocated from
 # the native PSRAM pool on first use.
-option(XLAT "Translate hot real-mode x86 loops to ARM code" OFF)
-option(XRIP_IRQ_BRIDGE "Experimental core0 NVIC-to-x86 IRQ bridge (interpreter only)" ON)
-if(XRIP_IRQ_BRIDGE)
-    # Override even an existing XLAT=ON cache entry for this experiment.
-    set(XLAT OFF)
-    message(STATUS "XRIP_IRQ_BRIDGE: JIT disabled")
-endif()
+option(XLAT "Translate hot real-mode x86 loops to ARM code" ON)
+option(XRIP_IRQ_BRIDGE "Core0 NVIC-to-x86 IRQ bridge" ON)
+message(STATUS "XRIP_IRQ_BRIDGE=${XRIP_IRQ_BRIDGE}; XLAT=${XLAT}")
 set(XLAT_ARENA_KB 512 CACHE STRING "Translator code arena (ring), KiB, from the native PSRAM pool")
 # Experiment: code arena in a static SRAM buffer of XLAT_SRAM_ARENA_KB instead
 # of the PSRAM span, to measure the XIP-cache contention. The buffer comes out
@@ -46,7 +42,6 @@ option(XLAT_LOG "Log translated regions to the SD card" ON)
 option(XLAT_TRACES "Translate hot code without loops (traces)" ON)
 # Real-time length of a CPU burst with translated code (XRIP: 4096 instructions).
 set(XLAT_SLICE_US 400 CACHE STRING "Translator burst length, microseconds")
-set(XLAT_REGION_INSNS 16 CACHE STRING "JIT region soft instruction threshold (1..63; 63 disables time cuts)")
 # CPU overclock configuration (252, 378, 504 MHz)
 # 252 - very basic overclock, 378 = stable overclock, 504 = high overclock
 set(CPU_SPEED "504" CACHE STRING "CPU clock in MHz: 378, 504")
@@ -671,9 +666,6 @@ if(XRIP_IRQ_BRIDGE)
 endif()
 
 if(XLAT)
-    if(NOT XLAT_REGION_INSNS MATCHES "^[1-9][0-9]*$" OR XLAT_REGION_INSNS GREATER 63)
-        message(FATAL_ERROR "XLAT_REGION_INSNS must be an integer in 1..63")
-    endif()
     if(XLAT_ARENA_SRAM)
         math(EXPR XLAT_ARENA_BYTES "${XLAT_SRAM_ARENA_KB} * 1024")
     else()
@@ -686,8 +678,7 @@ if(XLAT)
         src/fdos/xlat/xlat_cache.c
     )
     target_compile_definitions(${BUILD_NAME} PRIVATE XLAT=1 XLAT_ARENA_SIZE=${XLAT_ARENA_BYTES}u
-                               XLAT_SLICE_US=${XLAT_SLICE_US}u
-                               XLAT_REGION_INSNS=${XLAT_REGION_INSNS})
+                               XLAT_SLICE_US=${XLAT_SLICE_US}u)
     if(XLAT_LOG)
         target_compile_definitions(${BUILD_NAME} PRIVATE XLAT_LOG=1)
     endif()

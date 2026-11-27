@@ -817,6 +817,18 @@ void __time_critical_func(xrip_step_cpu)(CPU *cpu, int count)
                 xlat_burst_native = true;
             }
         }
+        /* A compiler checkpoint or native back edge may return because a
+         * real IRQ arrived after the CPU burst deadline. Guest registers
+         * are synchronized now and fault_point is installed. Deliver it
+         * before returning to device polling, even with no burst credit.
+         * Do not fetch another guest opcode merely to take the IRQ. */
+        if (cpu->intr && ifl && !cpu->i286_irq_shadow && !cpu->native_done && !pending_trap) {
+#if XRIP_HW_IRQ_BRIDGE
+            xrip_irq_boundary(cpu, xrip_bridge_begin());
+#else
+            xrip_irq_boundary(cpu, false);
+#endif
+        }
         xlat_cut = false;
 #if XLAT_LOG
         /* Do not charge nested guest execution to the outer caller's PC.

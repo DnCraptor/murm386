@@ -2195,22 +2195,13 @@ static int compile_resume_check(void)
     return 0;
 }
 
-static bool test_cached_entry(const xlat_rt_t *rt, uint16_t ip)
+/* Expired CPU deadlines do not cut a graph; a real IRQ defers it. */
+static int compile_irq_check(void)
 {
-    return rt->cs == 0x1000 && ip == 0x104;
-}
-
-/* The adaptive threshold is not a length cap. A short deadline seals a
- * graph, a generous deadline admits the complete loop, and IRQ defers. */
-static int compile_adaptive_check(void)
-{
-    if (XLAT_REGION_INSNS >= XLAT_MAX_INSNS || !XLAT_TRACES)
-        return 1;
     static uint32_t ctx[64 * 1024];
     static xlat_region_out_t out;
     const uint16_t ip = 0x100;
-    const unsigned n = XLAT_REGION_INSNS + 4 < XLAT_MAX_INSNS ?
-                       XLAT_REGION_INSNS + 4 : XLAT_MAX_INSNS - 1;
+    const unsigned n = 40;
     memset(mem + 0x10100, 0x40, n); /* INC AX */
     mem[0x10100 + n] = 0xeb;      /* JMP back to the loop head */
     mem[0x10101 + n] = (uint8_t)(-(int)n - 2);
@@ -2218,41 +2209,28 @@ static int compile_adaptive_check(void)
     if (!a.base || !xlat_emit_trampoline(&a) || xlat_translate_ctx_size() > sizeof(ctx))
         return 1;
     const uint32_t top = a.code_top;
-    uint32_t clock = 0;
+    uint32_t clock = 1000;
     uint8_t irq = 0;
     xlat_rt_t rt = {.mem = mem, .mem_size = 0xa0000, .cs = 0x1000,
-                    .clock = &clock, .intr = &irq, .wall_deadline = 1000};
+                    .clock = &clock, .intr = &irq, .wall_deadline = 1};
     rt.seg_base[1] = 0x10000;
     bool full;
     if (!xlat_translate(&a, &rt, ip, 0, NULL, 0, &out, &full, ctx) ||
-        out.n_insns != n + 1 || out.adaptive_cut || out.n_next)
+        out.n_insns != n + 1)
         return 1;
     a.code_top = top;
-    rt.wall_deadline = XLAT_DISCOVER_RESERVE_US;
     irq = 1;
     if (xlat_translate_step(&a, &rt, ip, 0, NULL, 0, &out, &full, ctx, false) ||
         out.reject != XLAT_RJ_DEFER || a.code_top != top)
         return 1;
     irq = 0;
     if (!xlat_translate_step(&a, &rt, ip, 0, NULL, 0, &out, &full, ctx, true) ||
-        !out.adaptive_cut || out.n_insns != XLAT_REGION_INSNS ||
-        !out.n_next || out.next_ip[0] != ip + XLAT_REGION_INSNS)
-        return 1;
-    /* A reached continuation must stop at an already published entry. */
-    a.code_top = top;
-    a.data_bottom = a.size;
-    rt.wall_deadline = 0;
-    a.reuse_entry = test_cached_entry;
-    if (!xlat_translate(&a, &rt, ip, XLAT_LINK_MIN, NULL, 0, &out, &full, ctx) ||
-        out.n_insns != 4 || out.fn != 4 || out.n_next || out.n_entries != 1 ||
-        out.entries[0].ip != ip || !out.entries[0].mark ||
-        out.n_runs != 1 || out.runs[0].len != 4)
+        out.n_insns != n + 1)
         return 1;
     /* The full long loop must emit identical code and entry/run metadata
      * when every compiler phase is repeatedly suspended. */
     static xlat_region_out_t want;
     static uint8_t expected[0x10000];
-    a.reuse_entry = NULL;
     a.code_top = top;
     if (!xlat_translate(&a, &rt, ip, 0, NULL, 0, &want, &full, ctx) ||
         want.code_len > sizeof(expected))
@@ -2283,7 +2261,7 @@ static int compile_adaptive_check(void)
             if (out.runs[k].ip != want.runs[k].ip || out.runs[k].len != want.runs[k].len)
                 return 1;
     }
-    puts("adaptive region discovery / reuse / sliced finalization: OK");
+    puts("IRQ-only compiler suspension / full graph: OK");
     return 0;
 }
 
@@ -2325,7 +2303,7 @@ static int compile_scheduler_check(void)
         if (xlat_call_hot(base + call))
             return 1;
 
-    xlat_compile_credit(XLAT_COMPILE_RATIO * XLAT_COMPILE_US - 1);
+    xlat_compile_credit(XLAT_COMPILE_CREDIT_US - 1);
     rt.eflags = 0x200;
     rt.ip++;
     xlat_run(&rt);
@@ -2425,7 +2403,7 @@ static int compile_scheduler_check(void)
     }
     if (xlat_stats.compile_queue_drops != drops + 2)
         return 1;
-    xlat_compile_credit(XLAT_COMPILE_RATIO * XLAT_COMPILE_US);
+    xlat_compile_credit(XLAT_COMPILE_CREDIT_US);
     rt.eflags = 0x200;
     rt.wall_deadline += XLAT_SLICE_US;
     rt.ip++;
@@ -2450,8 +2428,8 @@ static int compile_scheduler_check(void)
 
 int main(int argc, char **argv)
 {
-    if (argc > 1 && !strcmp(argv[1], "--compile-adaptive"))
-        return compile_adaptive_check();
+    if (argc > 1 && !strcmp(argv[1], "--compile-irq"))
+        return compile_irq_check();
     if (argc > 1 && !strcmp(argv[1], "--compile-resume"))
         return compile_resume_check();
     if (argc > 1 && !strcmp(argv[1], "--compile-scheduler"))
