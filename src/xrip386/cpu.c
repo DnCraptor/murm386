@@ -1047,8 +1047,9 @@ static __attribute__((noinline, used)) void __not_in_flash_func(xrip_deliver_irq
  * Only this IRQ is disabled outside the gate; PIT, DMA, USB, etc. can
  * interrupt even a long x86 instruction or a native BIOS/FDOS call. */
 static int xrip_bridge_irq = -1;
-static uint32_t xrip_bridge_bit;
-static volatile uint32_t *xrip_bridge_iser, *xrip_bridge_icer;
+static uint32_t xrip_bridge_bit __asm__("xrip_bridge_bit") __attribute__((used));
+static volatile uint32_t *xrip_bridge_iser;
+static volatile uint32_t *xrip_bridge_icer __asm__("xrip_bridge_icer") __attribute__((used));
 
 /* AAPCS leaf gate: r0=CPU*, r1=ISER, r2=ICER, r3=bit. LR is the
  * interpreter's normal return address. Do not add a stack frame here.
@@ -1094,9 +1095,20 @@ static __attribute__((noinline, used)) void __not_in_flash_func(xrip_bridge_exce
     }
 }
 
+#if XLAT_STACKFUL
+#include "xlat_preempt.inl"
+#endif
+
 static __attribute__((naked, used)) void __not_in_flash_func(xrip_bridge_handler)(void)
 {
     __asm volatile(
+#if XLAT_STACKFUL
+        "ldr r0, =xlat_switch_mode\n"
+        "ldr r0, [r0]\n"
+        "cbz r0, 1f\n"
+        "b.w xlat_switch_context\n"
+        "1:\n"
+#endif
         "tst lr, #4\n"
         "ite eq\n"
         "mrseq r0, msp\n"
@@ -1120,6 +1132,9 @@ static void xrip_bridge_init(void)
     irq_set_priority(irq, PICO_LOWEST_IRQ_PRIORITY);
     xrip_bridge_irq = (int)irq;
     printf("[XRIP] core0 IRQ bridge: NVIC %u\r\n", irq);
+#if XLAT_STACKFUL
+    printf("[XLAT] hardware compiler preemption, PSP %u bytes\r\n", (unsigned)sizeof(xlat_psp_stack));
+#endif
 }
 
 static inline void xrip_bridge_raise(void)

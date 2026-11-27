@@ -475,6 +475,7 @@ bool xlat_emit_trampoline(xlat_arena_t *arena);
  * arena is full (*full set). ctx_mem: xlat_translate_ctx_size() bytes of
  * working memory, word aligned (kept off the small core-0 stack and heap). */
 size_t xlat_translate_ctx_size(void);
+bool xlat_translate_validate(const xlat_rt_t *rt, const void *ctx_mem);
 /* On DEFER retain the arena window, output and context. On FULL the next
  * step may use a new arena offset (only emission is restarted). */
 bool xlat_translate_step(xlat_arena_t *arena, const xlat_rt_t *rt, uint16_t ip,

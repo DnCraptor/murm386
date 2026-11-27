@@ -136,6 +136,9 @@ typedef struct {
         uint16_t ip, extra[XLAT_EXTRA_MAX];
         int trace_min, n_extra, attempt, old_slot;
         bool pending, started;
+#if XLAT_STACKFUL
+        bool result, full;  /* written by the PSP worker, never caller MSP */
+#endif
 #if XLAT_LOG
         uint32_t quanta, us;
 #endif
@@ -579,6 +582,7 @@ static void clear_compile_blocked(void)
 
 static void reset_tables(void)
 {
+    xlat_preempt_discard();
     gap_reset();
     st->job.pending = false;
     st->queued = 0;
@@ -659,6 +663,7 @@ static __attribute__((noinline)) bool ready(void)
 
 void xlat_release(void)
 {
+    xlat_preempt_discard();
     gap_reset();
     flush_pending = false;
     xlat_write_hi = 0;
@@ -1018,6 +1023,7 @@ void xlat_forget_range(uint32_t linear, uint32_t len)
     if (!st)
         return;
     if (st->job.pending) {
+        xlat_preempt_discard();
         rearm_request(st->job.request);
         st->job.pending = false;
         xlat_stats.compile_cancel++;
@@ -1155,6 +1161,18 @@ void xlat_compile_credit(uint32_t guest_us)
     }
 }
 
+#if XLAT_STACKFUL
+/* Only private compilation executes on PSP. The window is reserved and
+ * all arguments/results live in the PSRAM job across hardware switches. */
+static void translate_worker(void *arg)
+{
+    state_t *s = arg;
+    s->job.result = xlat_translate_step(&s->arena, &s->job.rt, s->job.ip,
+                                        s->job.trace_min, s->job.extra, s->job.n_extra,
+                                        &s->out, &s->job.full, s->ctx, s->job.attempt != 0);
+}
+#endif
+
 static int translate_at(const xlat_rt_t *rt, uint16_t ip, int trace_min, const uint16_t *extra,
                         int n_extra)
 {
@@ -1163,7 +1181,9 @@ static int translate_at(const xlat_rt_t *rt, uint16_t ip, int trace_min, const u
     bool full, evicted = false;
     for (; st->job.attempt < 3;) {
         if (xlat_compile_irq(rt)) {
+#if !XLAT_STACKFUL
             out->reject = XLAT_RJ_DEFER;
+#endif
             return -1;
         }
         if (!st->job.started) {
@@ -1183,6 +1203,24 @@ static int translate_at(const xlat_rt_t *rt, uint16_t ip, int trace_min, const u
             a->code_top = st->head;
             a->data_bottom = window_end();
         }
+#if XLAT_STACKFUL
+        st->job.started = true;
+        if (!xlat_preempt_run(translate_worker, st, rt->intr, rt->clock))
+            return -1;  /* IRQ: preserve the exact ARM context and its output */
+        full = st->job.full;
+        if (st->job.result) {
+            /* No guest execution between validation and publication. PSP
+             * may have been interrupted even after its last source read. */
+            const uint32_t t = rt->wall_deadline ? *rt->clock : 0;
+            if (xlat_translate_validate(rt, st->ctx)) {
+                if (rt->wall_deadline)
+                    out->final_us += *rt->clock - t;
+                goto built;
+            }
+            a->code_top = st->head;
+            out->reject = XLAT_RJ_CHANGED;
+        }
+#else
         const bool resume = st->job.started || st->job.attempt != 0;
         st->job.started = true;
         if (xlat_translate_step(a, rt, ip, trace_min, extra, n_extra, out, &full,
@@ -1190,6 +1228,7 @@ static int translate_at(const xlat_rt_t *rt, uint16_t ip, int trace_min, const u
             goto built;
         if (out->reject == XLAT_RJ_DEFER)
             return -1;
+#endif
         if (!full)
             break;
         const uint32_t had = a->data_bottom - st->head;
@@ -1404,6 +1443,7 @@ static void finish_compile(int idx, int why)
 
 static void set_compile_target(int old, int trace_min)
 {
+    xlat_preempt_discard();
     st->job.ip = (uint16_t)st->job.request.key;
     st->job.n_extra = 0;
     st->job.trace_min = trace_min;
@@ -1478,7 +1518,11 @@ static bool compile_ready(const xlat_rt_t *rt)
     return (st->job.pending || st->queued) &&
            (!rt->wall_deadline ||
             (st->compile_credit >= XLAT_COMPILE_CREDIT_US && (rt->eflags & 0x200u) &&
-             st->compile_burst != rt->wall_deadline));
+             st->compile_burst != rt->wall_deadline))
+#if XLAT_STACKFUL
+           && xlat_preempt_available()
+#endif
+           ;
 }
 
 /* Run one job until completion or a real guest IRQ. Debit measured cost,
@@ -1558,6 +1602,7 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
      * wrote into translated code): compare each region's bytes once */
     if (rt->mem != st->mem || rt->mem_size != st->mem_size) {
         if (st->job.pending) {
+            xlat_preempt_discard();
             rearm_request(st->job.request);
             st->job.pending = false;
             xlat_stats.compile_cancel++;

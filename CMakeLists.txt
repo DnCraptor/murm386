@@ -26,6 +26,7 @@ set(VIDEO_MODE "VGA256" CACHE STRING "Video adapter: RUNTIME, MCGA, EGA128, VGA1
 # the native PSRAM pool on first use.
 option(XLAT "Translate hot real-mode x86 loops to ARM code" ON)
 option(XRIP_IRQ_BRIDGE "Core0 NVIC-to-x86 IRQ bridge" ON)
+option(XLAT_HW_PREEMPT "Hardware-preempted JIT compiler on Cortex-M33 NO_PAGING builds" ON)
 message(STATUS "XRIP_IRQ_BRIDGE=${XRIP_IRQ_BRIDGE}; XLAT=${XLAT}")
 set(XLAT_ARENA_KB 512 CACHE STRING "Translator code arena (ring), KiB, from the native PSRAM pool")
 # Experiment: code arena in a static SRAM buffer of XLAT_SRAM_ARENA_KB instead
@@ -679,6 +680,9 @@ if(XLAT)
     )
     target_compile_definitions(${BUILD_NAME} PRIVATE XLAT=1 XLAT_ARENA_SIZE=${XLAT_ARENA_BYTES}u
                                XLAT_SLICE_US=${XLAT_SLICE_US}u)
+    if(XLAT_HW_PREEMPT AND XRIP_IRQ_BRIDGE)
+        target_compile_definitions(${BUILD_NAME} PRIVATE XLAT_HW_PREEMPT=1)
+    endif()
     if(XLAT_LOG)
         target_compile_definitions(${BUILD_NAME} PRIVATE XLAT_LOG=1)
     endif()

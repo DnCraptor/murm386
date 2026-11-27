@@ -16,6 +16,21 @@
 extern "C" {
 #endif
 
+/* Paging builds cannot reserve SRAM in RAM_4_EXT. Keep the old compiler
+ * there, with the hardware bridge itself still enabled. */
+#if XLAT_HW_PREEMPT && XRIP_IRQ_BRIDGE && defined(NO_PAGING) && \
+    defined(__ARM_ARCH_8M_MAIN__) && !defined(XLAT_HOST_TEST)
+#define XLAT_STACKFUL 1
+bool xlat_preempt_available(void);
+bool xlat_preempt_run(void (*fn)(void *), void *arg,
+                      const volatile uint8_t *intr, const volatile uint32_t *clock);
+void xlat_preempt_discard(void);
+uint32_t xlat_preempt_time(const volatile uint32_t *clock);
+#else
+#define XLAT_STACKFUL 0
+static inline void xlat_preempt_discard(void) {}
+#endif
+
 /*
  * Guest state shared with the generated code. The generated code addresses
  * the fields by the XLAT_RT_* offsets below, so the layout is fixed.

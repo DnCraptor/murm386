@@ -112,7 +112,10 @@ typedef struct {
     uint8_t no_calls;              /* discover: leave called functions out */
     int n_interp;
     /* Persistent compiler cursors in the PSRAM context. */
-    uint8_t phase, variant;
+    uint8_t variant;
+#if !XLAT_STACKFUL
+    uint8_t phase;
+#endif
     bool discovering, flow_changed;
     uint32_t seal_at, final_us;   /* time in finalization, not time between slices */
     uint64_t plan_mat, plan_full, head_marks;
@@ -124,7 +127,27 @@ typedef struct {
     struct { uint16_t ip; uint8_t len, b[16]; } source[XLAT_MAX_INSNS];
 } tctx_t;
 
+#if XLAT_STACKFUL
+/* The PSP context preserves locals and PC at an arbitrary ARM instruction.
+ * The firmware compiler has no software checkpoints or phase dispatch. */
+#define compiler_checkpoint(rt) false
+#define COMPILER_PHASE(c, p) ((void)0)
+#define COMPILER_LABEL(name)
+#else
 enum { PH_DISCOVER, PH_FLOW, PH_PLAN, PH_RUNS, PH_EMIT_INIT, PH_EMIT, PH_STUBS, PH_FINISH };
+#define compiler_checkpoint(rt) xlat_compile_irq(rt)
+#define COMPILER_PHASE(c, p) ((c)->phase = (p))
+#define COMPILER_LABEL(name) name:
+#endif
+
+static inline uint32_t compiler_clock(const xlat_rt_t *rt)
+{
+#if XLAT_STACKFUL
+    return xlat_preempt_time(rt->clock);
+#else
+    return *rt->clock;
+#endif
+}
 
 #if defined(XLAT_HOST_TEST)
 uint32_t xlat_test_compile_ticks = UINT32_MAX;
@@ -368,7 +391,7 @@ static int discover(tctx_t *c, uint16_t start)
     }
     for (;;) {
         const bool more = c->head < c->tail || (!c->no_calls && c->dhead < c->dtail);
-        if (xlat_compile_irq(c->rt))
+        if (compiler_checkpoint(c->rt))
             return XLAT_RJ_DEFER;
         if (!more || c->n >= XLAT_MAX_INSNS)
             break;
@@ -412,7 +435,7 @@ static int discover(tctx_t *c, uint16_t start)
             }
         }
     }
-    c->seal_at = c->rt->wall_deadline ? *c->rt->clock : 0;
+    c->seal_at = c->rt->wall_deadline ? compiler_clock(c->rt) : 0;
     c->discovering = false;
     if (!c->n || c->in[0].ip != start)
         return XLAT_RJ_START;
@@ -651,7 +674,7 @@ static bool dataflow(tctx_t *c)
     uint64_t *const cf_out = c->cf_out;
     for (;;) {
         for (; c->flow_i < c->n; ++c->flow_i) {
-            if (xlat_compile_irq(c->rt))
+            if (compiler_checkpoint(c->rt))
                 return false;
             const int i = c->flow_i;
             uint64_t in = c->leader[i] ? NONE_BIT : 0, cfin = in;
@@ -787,7 +810,7 @@ static bool plan(tctx_t *c)
 {
     if (c->plan_pass == 0) {
         for (; c->plan_i < c->n; ++c->plan_i) {
-            if (xlat_compile_irq(c->rt))
+            if (compiler_checkpoint(c->rt))
                 return false;
             const int i = c->plan_i;
             const x86_insn_t *in = &c->in[i];
@@ -822,7 +845,7 @@ static bool plan(tctx_t *c)
          * and ADC/SBB require CF. Full CF materialization must not feed back
          * into that set (same order of dependencies as the original plan). */
         for (; c->plan_i < c->n; ++c->plan_i) {
-            if (xlat_compile_irq(c->rt))
+            if (compiler_checkpoint(c->rt))
                 return false;
             const int i = c->plan_i;
             const uint64_t bit = 1ull << i;
@@ -841,7 +864,7 @@ static bool plan(tctx_t *c)
         c->plan_pass = 2;
     }
     for (; c->plan_i < c->n; ++c->plan_i) {
-        if (xlat_compile_irq(c->rt))
+        if (compiler_checkpoint(c->rt))
             return false;
         const int i = c->plan_i;
         c->mat[i] = (uint8_t)((c->plan_mat >> i) & 1u);
@@ -2947,7 +2970,7 @@ static bool emit_stubs(tctx_t *c)
     /* Back-edge stubs first: they branch to exit stubs emitted after them. */
     for (; c->stub_pass < 2; ++c->stub_pass, c->stub_i = 0) {
         for (; c->stub_i < c->n_stubs; ++c->stub_i) {
-            if (xlat_compile_irq(c->rt))
+            if (compiler_checkpoint(c->rt))
                 return false;
             stub_t *s = &c->stub[c->stub_i];
             if (c->stub_pass ? s->type == ST_BACK : s->type != ST_BACK)
@@ -3575,6 +3598,21 @@ size_t xlat_translate_ctx_size(void)
     return sizeof(tctx_t);
 }
 
+/* Must execute after the worker has stopped and before the cache copies
+ * the guest source bytes into the published region. */
+bool xlat_translate_validate(const xlat_rt_t *rt, const void *ctx_mem)
+{
+    const tctx_t *c = ctx_mem;
+    for (int s = 0; s < c->n_source; ++s) {
+        const uint32_t linear = c->cs_base + c->source[s].ip;
+        const uint32_t len = c->source[s].len;
+        if (!xlat_code_direct(linear, len) ||
+            memcmp(c->source[s].b, rt->mem + linear, len))
+            return false;
+    }
+    return true;
+}
+
 bool xlat_translate_step(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int trace_min,
                     const uint16_t *extra, int n_extra,
                     xlat_region_out_t *out, bool *full, void *ctx_mem, bool resume)
@@ -3583,11 +3621,19 @@ bool xlat_translate_step(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int 
     tctx_t *const c = (tctx_t *)ctx_mem;
     bool ok = false;
     const bool measure = rt->wall_deadline != 0;
-    bool finishing = resume && c->phase != PH_DISCOVER;
-    uint32_t phase_t0 = measure && finishing ? *rt->clock : 0;
+    bool finishing = resume;
+#if !XLAT_STACKFUL
+    finishing = resume && c->phase != PH_DISCOVER;
+#endif
+    uint32_t phase_t0 = measure && finishing ? compiler_clock(rt) : 0;
     c->rt = rt;
     out->reject = XLAT_RJ_NONE;
     if (resume) {
+#if XLAT_STACKFUL
+        /* Only an arena FULL retry calls us again. A preempted worker
+         * resumes via exception return, without calling this function. */
+        goto emit_init_phase;
+#else
         switch (c->phase) {
         case PH_DISCOVER:  goto discover_phase;
         case PH_FLOW:      goto flow_phase;
@@ -3599,8 +3645,9 @@ bool xlat_translate_step(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int 
         case PH_FINISH:    goto finish_phase;
         default:           out->reject = XLAT_RJ_EMIT; return false;
         }
+#endif
     }
-    c->phase = PH_DISCOVER;
+    COMPILER_PHASE(c, PH_DISCOVER);
     c->final_us = 0;
     c->variant = 0;
     c->discovering = false;
@@ -3627,7 +3674,7 @@ bool xlat_translate_step(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int 
     c->fn = 0;
 
     c->no_calls = 0;
-discover_phase:;
+    COMPILER_LABEL(discover_phase);
     int why;
     for (;;) {
         /* An existing region extended with extra entries must retain them. */
@@ -3681,16 +3728,16 @@ discover_phase:;
     memset(c->cf_out, 0, sizeof(c->cf_out));
     c->flow_i = 0;
     c->flow_changed = false;
-    c->phase = PH_FLOW;
-flow_phase:
+    COMPILER_PHASE(c, PH_FLOW);
+    COMPILER_LABEL(flow_phase)
     if (!dataflow(c))
         goto deferred;
-    c->phase = PH_PLAN;
+    COMPILER_PHASE(c, PH_PLAN);
     c->plan_pass = 0;
     c->plan_i = 0;
     c->plan_mat = c->plan_full = 0;
     memset(c->need_cf, 0, sizeof(c->need_cf));
-plan_phase:
+    COMPILER_LABEL(plan_phase)
     if (!plan(c))
         goto deferred;
     /* Source copies: omit only the runtime-read operand of unprefixed INT.
@@ -3698,10 +3745,10 @@ plan_phase:
     out->n_runs = 0;
     c->data_bytes = 0;
     c->plan_i = 0;
-    c->phase = PH_RUNS;
-runs_phase:
+    COMPILER_PHASE(c, PH_RUNS);
+    COMPILER_LABEL(runs_phase)
     for (; c->plan_i < c->n; ++c->plan_i) {
-        if (xlat_compile_irq(rt))
+        if (compiler_checkpoint(rt))
             goto deferred;
         const int i = c->plan_i;
         const uint16_t len = (uint16_t)(c->in[i].len -
@@ -3719,9 +3766,9 @@ runs_phase:
             c->data_bytes += 8u + ((len + 3u) & ~3u);
         }
     }
-    c->phase = PH_EMIT_INIT;
+    COMPILER_PHASE(c, PH_EMIT_INIT);
 emit_init_phase:
-    if (xlat_compile_irq(rt))
+    if (compiler_checkpoint(rt))
         goto deferred;
     c->n_stubs = c->n_fix = c->n_dfix = 0;
     c->overflow = false;
@@ -3733,38 +3780,38 @@ emit_init_phase:
     for (int i = 0; i < c->n; ++i)
         c->side_stub[i][0] = c->side_stub[i][1] = -1;
     c->emit_i = 0;
-    c->phase = PH_EMIT;
-emit_phase:
+    COMPILER_PHASE(c, PH_EMIT);
+    COMPILER_LABEL(emit_phase)
     for (; c->emit_i < c->n; ++c->emit_i) {
         const int i = c->emit_i;
         const uint32_t from = c->e.pos;
         (void)from;
-        if (xlat_compile_irq(rt))
+        if (compiler_checkpoint(rt))
             goto deferred;
         emit_insn(c, i);
         SIZE_NOTE(c->in[i].op < XLAT_SIZE_RECON ? c->in[i].op : 0, from);
     }
     c->stub_pass = c->stub_i = 0;
-    c->phase = PH_STUBS;
-stubs_phase:
+    COMPILER_PHASE(c, PH_STUBS);
+    COMPILER_LABEL(stubs_phase)
     if (!emit_stubs(c))
         goto deferred;
-    c->phase = PH_FINISH;
+    COMPILER_PHASE(c, PH_FINISH);
     c->dfix_i = c->fix_i = c->entry_i = 0;
     out->n_entries = 0;
-finish_phase:
+    COMPILER_LABEL(finish_phase)
     if (c->e.full) {
-        if (xlat_compile_irq(rt))
+        if (compiler_checkpoint(rt))
             goto deferred;
         /* labels past the space are not real: no patching */
         *full = true;
         out->reject = XLAT_RJ_FULL;
         out->need = (c->e.pos - a->code_top) + c->e.over + 4u + c->data_bytes;
-        c->phase = PH_EMIT_INIT;
+        COMPILER_PHASE(c, PH_EMIT_INIT);
         goto done;
     }
     for (; c->dfix_i < c->n_dfix; ++c->dfix_i) {
-        if (xlat_compile_irq(rt))
+        if (compiler_checkpoint(rt))
             goto deferred;
         const int k = c->dfix_i;
         /* Forward continuation or native SIDE stub, from the payload end. */
@@ -3779,7 +3826,7 @@ finish_phase:
         c->e.buf[at + 1] = (uint8_t)((to - (at + 2u)) >> 8);
     }
     for (; c->fix_i < c->n_fix; ++c->fix_i) {
-        if (xlat_compile_irq(rt))
+        if (compiler_checkpoint(rt))
             goto deferred;
         const int k = c->fix_i;
         if (!arm_patch_branch(&c->e, c->fix[k].site, c->label[c->fix[k].insn], c->fix[k].cond))
@@ -3791,7 +3838,7 @@ finish_phase:
     }
 
     for (; c->entry_i < c->n; ++c->entry_i) {
-        if (xlat_compile_irq(rt))
+        if (compiler_checkpoint(rt))
             goto deferred;
         const int i = c->entry_i;
         if (c->leader[i]) {
@@ -3801,19 +3848,16 @@ finish_phase:
             out->n_entries++;
         }
     }
-    if (xlat_compile_irq(rt))
+    if (compiler_checkpoint(rt))
         goto deferred;
-    /* Validation and publication must remain in the same slice. */
-    /* Validate the exact bytes decoded before any suspension. */
-    for (int s = 0; s < c->n_source; ++s) {
-        const uint32_t linear = c->cs_base + c->source[s].ip;
-        const uint32_t len = c->source[s].len;
-        if (!xlat_code_direct(linear, len) ||
-            memcmp(c->source[s].b, rt->mem + linear, len)) {
-            out->reject = XLAT_RJ_CHANGED;
-            goto done;
-        }
+#if !XLAT_STACKFUL
+    /* Cooperative path: validation and publication share the last slice.
+     * On PSP the final check instead belongs to the MSP caller. */
+    if (!xlat_translate_validate(rt, c)) {
+        out->reject = XLAT_RJ_CHANGED;
+        goto done;
     }
+#endif
     out->code_off = a->code_top;
     out->code_len = c->e.pos - a->code_top;
     out->lo = c->lo;
@@ -3827,7 +3871,7 @@ deferred:
     out->reject = XLAT_RJ_DEFER;
 done:
     if (measure && finishing)
-        c->final_us += *rt->clock - phase_t0;
+        c->final_us += compiler_clock(rt) - phase_t0;
     if (ok)
         out->final_us = c->final_us;
     return ok;
@@ -3837,6 +3881,19 @@ bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int trace
                     const uint16_t *extra, int n_extra,
                     xlat_region_out_t *out, bool *full, void *ctx_mem)
 {
+#if XLAT_STACKFUL
+    /* Direct callers, unlike the cache's worker, need validation here. */
+    const uint32_t top = a->code_top;
+    if (!xlat_translate_step(a, rt, ip, trace_min, extra, n_extra, out, full,
+                             ctx_mem, false))
+        return false;
+    if (xlat_translate_validate(rt, ctx_mem))
+        return true;
+    a->code_top = top;
+    out->reject = XLAT_RJ_CHANGED;
+    return false;
+#else
     return xlat_translate_step(a, rt, ip, trace_min, extra, n_extra, out, full,
                                ctx_mem, false);
+#endif
 }
