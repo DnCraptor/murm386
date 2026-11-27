@@ -914,7 +914,13 @@ void xrip_enable_fpu(CPU *cpu)
     if (cpu->fpu) fpu_delete(cpu->fpu);
     cpu->fpu = fpu_new();
 }
-static void raise_irq(CPU *cpu) { cpu->intr = true; }
+static void raise_irq(CPU *cpu)
+{
+    cpu->intr = true;
+#if XRIP_HW_IRQ_BRIDGE
+    xrip_bridge_raise();
+#endif
+}
 void xrip_set_exception(CPU *cpu, int exception, uword error)
 {
     cpu->excno = exception;
@@ -954,6 +960,9 @@ CPU *cpu_new(int gen, CPU_CB **callbacks)
     writedw86 = bus_write32;
     cpu_set_a20(cpu, 1);
     xrip_reset_cpu(cpu);
+#if XRIP_HW_IRQ_BRIDGE
+    xrip_bridge_init();
+#endif
     if (callbacks) *callbacks = &cpu->cb;
     return cpu;
 }

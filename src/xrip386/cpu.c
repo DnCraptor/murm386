@@ -1019,6 +1019,133 @@ static const bool __not_in_flash("cpu.prefix") is_prefix[256] = {
     [0xF0] = 1, [0xF2] = 1, [0xF3] = 1,
 };
 
+/* Deliver only in Thread mode, at an x86 instruction boundary. A protected
+ * interrupt can fault and longjmp to xrip_step_cpu's fault_point; it must
+ * never be delivered from an ARM exception handler. */
+static __attribute__((noinline, used)) void __not_in_flash_func(xrip_deliver_irq)(CPU *cpu)
+{
+    uint32_t irq_state = save_and_disable_interrupts();
+    if (!cpu->intr) {                 /* stale NVIC request after reset/ack */
+        restore_interrupts(irq_state);
+        return;
+    }
+    cpu->intr = false;
+    int vector = cpu->cb.pic_read_irq(cpu->cb.pic);
+    restore_interrupts(irq_state);
+    halted = false;
+    firstip = XRIP_IP;
+    first_esp = dwordregs[regsp];
+    external_interrupt((uint8_t)vector);
+}
+
+#if XRIP_IRQ_BRIDGE && defined(__ARM_ARCH_8M_MAIN__)
+#define XRIP_HW_IRQ_BRIDGE 1
+#include "hardware/irq.h"
+#include "hardware/structs/nvic.h"
+
+/* One software-only IRQ, on core0. Its pending bit is the event latch.
+ * Only this IRQ is disabled outside the gate; PIT, DMA, USB, etc. can
+ * interrupt even a long x86 instruction or a native BIOS/FDOS call. */
+static int xrip_bridge_irq = -1;
+static uint32_t xrip_bridge_bit;
+static volatile uint32_t *xrip_bridge_iser, *xrip_bridge_icer;
+
+/* AAPCS leaf gate: r0=CPU*, r1=ISER, r2=ICER, r3=bit. LR is the
+ * interpreter's normal return address. Do not add a stack frame here.
+ * noipa is essential: exception return can substitute a C call for this
+ * gate, so the caller must assume that arbitrary memory may change.
+ * Do not use irq_set_enabled(true): Pico SDK clears pending on enable. */
+static __attribute__((naked, noipa, used)) void __not_in_flash_func(xrip_irq_gate)(
+    CPU *cpu, volatile uint32_t *iser, volatile uint32_t *icer, uint32_t bit)
+{
+    __asm volatile(
+        "str r3, [r1]\n"
+        "dsb sy\n"
+        "isb sy\n"
+        "nop\n"
+        "str r3, [r2]\n"
+        "dsb sy\n"
+        "isb sy\n"
+        "bx lr\n"
+        ".global xrip_irq_gate_end\n"
+        "xrip_irq_gate_end:\n");
+}
+extern const char xrip_irq_gate_end[];
+
+/* ARMv8-M basic core frame: r0-r3,r12,lr,pc,xPSR. The core frame starts
+ * at the selected SP even when an extended FP frame is present. This
+ * firmware does not switch security states. Leave every stacked register
+ * except PC intact; the normal C ABI takes care of the return from the
+ * substituted call. The lowest-priority IRQ may tail-chain from a device
+ * IRQ, but must never redirect a Handler-mode or non-gate frame. */
+static __attribute__((noinline, used)) void __not_in_flash_func(xrip_bridge_exception)(
+    uint32_t *frame, uint32_t exc_return)
+{
+    *xrip_bridge_icer = xrip_bridge_bit;
+    __asm volatile("dsb sy\n\tisb sy" ::: "memory");
+    const uintptr_t pc = frame[6];
+    if ((exc_return & 8u) &&
+        pc >= ((uintptr_t)xrip_irq_gate & ~(uintptr_t)1u) &&
+        pc < (uintptr_t)xrip_irq_gate_end) {
+        frame[6] = (uint32_t)((uintptr_t)xrip_deliver_irq & ~(uintptr_t)1u);
+    } else {
+        /* Unexpected context: preserve the request for the next safe gate. */
+        irq_set_pending((uint)xrip_bridge_irq);
+    }
+}
+
+static __attribute__((naked, used)) void __not_in_flash_func(xrip_bridge_handler)(void)
+{
+    __asm volatile(
+        "tst lr, #4\n"
+        "ite eq\n"
+        "mrseq r0, msp\n"
+        "mrsne r0, psp\n"
+        "mov r1, lr\n"
+        "b.w xrip_bridge_exception\n");
+}
+
+static void xrip_bridge_init(void)
+{
+    if (xrip_bridge_irq >= 0)
+        return;
+    hard_assert(get_core_num() == 0);
+    const uint irq = (uint)user_irq_claim_unused(true);
+    irq_set_enabled(irq, false);
+    xrip_bridge_bit = 1u << (irq & 31u);
+    xrip_bridge_iser = &nvic_hw->iser[irq >> 5];
+    xrip_bridge_icer = &nvic_hw->icer[irq >> 5];
+    nvic_hw->icpr[irq >> 5] = xrip_bridge_bit;
+    irq_set_exclusive_handler(irq, xrip_bridge_handler);
+    irq_set_priority(irq, PICO_LOWEST_IRQ_PRIORITY);
+    xrip_bridge_irq = (int)irq;
+    printf("[XRIP] core0 IRQ bridge: NVIC %u\r\n", irq);
+}
+
+static inline void xrip_bridge_raise(void)
+{
+    if (xrip_bridge_irq >= 0 && get_core_num() == 0)
+        irq_set_pending((uint)xrip_bridge_irq);
+}
+
+/* A native caller can enter XRIP under a host interrupt mask or from a
+ * native ISR. Such a burst cannot use exception-return redirection; retain
+ * the old safe-boundary delivery there. During this interpreter-only
+ * validation, CPU.intr remains the request latch; only open the NVIC
+ * gate for an actual request. */
+static inline bool xrip_bridge_begin(void)
+{
+    uint32_t ipsr, primask, basepri;
+    __asm volatile("mrs %0, ipsr\n\tmrs %1, primask\n\tmrs %2, basepri"
+                   : "=r"(ipsr), "=r"(primask), "=r"(basepri));
+    if (xrip_bridge_irq < 0 || get_core_num() != 0 || ipsr || primask || basepri)
+        return false;
+    return true;
+}
+#else
+#define XRIP_HW_IRQ_BRIDGE 0
+#endif
+
 // The instruction loop. It has no setjmp of its own: a function with setjmp is compiled with
 // fewer optimizations, so that is in exec86() around it.
 #if defined(NO_PAGING)
@@ -1034,23 +1161,29 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
      * Reuse that CPU pointer rather than reloading the global after
      * every opcode helper call. Limit the alias to this function. */
     CPU *const run_cpu = active_cpu;
+#if XRIP_HW_IRQ_BRIDGE
+    const bool bridge = xrip_bridge_begin();
+#endif
 #define active_cpu run_cpu
     for (uint32_t loopcount = 0; loopcount < execloops; loopcount++) {
         if (active_cpu->native_done || XLAT_CUT_PENDING())
             break;
         if (unlikely(XRIP_IP > 0xffffu) && !protected_mode) XRIP_IP &= 0xffffu;
         if (unlikely(active_cpu->intr && ifl && !active_cpu->i286_irq_shadow)) {
-            uint32_t irq_state = save_and_disable_interrupts();
-            active_cpu->intr = false;
-            int vector = active_cpu->cb.pic_read_irq(active_cpu->cb.pic);
-            restore_interrupts(irq_state);
-            halted = false;
-            firstip = XRIP_IP;
-            first_esp = dwordregs[regsp];
-            external_interrupt((uint8_t)vector);
-        } else if (unlikely(halted)) {
-            break;
+#if XRIP_HW_IRQ_BRIDGE
+            if (bridge) {
+                /* Acknowledge through exception return, not by polling the
+                 * PIC. Re-pend from the authoritative CPU latch so a
+                 * request cannot be stranded by a stale NVIC pending bit.
+                 * Avoid two NVIC writes and four barriers on idle paths. */
+                irq_set_pending((uint)xrip_bridge_irq);
+                xrip_irq_gate(active_cpu, xrip_bridge_iser, xrip_bridge_icer, xrip_bridge_bit);
+            } else
+#endif
+                xrip_deliver_irq(active_cpu);
         }
+        if (unlikely(halted))
+            break;
         active_cpu->i286_irq_shadow = false;
         ++retired;
         pending_trap = tf;

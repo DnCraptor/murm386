@@ -157,7 +157,7 @@ struct CPU {
 	x86_flags_t flags;
 	uword flags_mask;
 
-	bool intr;
+	volatile bool intr;  /* may be asserted by a native IRQ */
 
 	int gen;
 	u32 a20_mask;  /* A20 is modeled as permanently enabled */

@@ -22,10 +22,15 @@ option(NO_PAGING "Disable guest-RAM paging and use direct QSPI PSRAM access" ON)
 # Video adapter profile: one mutually exclusive build mode.
 set(VIDEO_MODE "VGA256" CACHE STRING "Video adapter: RUNTIME, MCGA, EGA128, VGA128 or VGA256")
 # x86 -> Thumb-2 translation of hot real-mode loops (src/fdos/xlat,
-# docs/FDOS-JIT-architecture.md). Off by default: with XLAT=OFF the XRIP
-# interpreter is built exactly as before. The arena (code + source copies)
-# and tables are allocated from the native PSRAM pool on first use.
-option(XLAT "Translate hot real-mode x86 loops to ARM code" ON)
+# docs/FDOS-JIT-architecture.md). The arena and tables are allocated from
+# the native PSRAM pool on first use.
+option(XLAT "Translate hot real-mode x86 loops to ARM code" OFF)
+option(XRIP_IRQ_BRIDGE "Experimental core0 NVIC-to-x86 IRQ bridge (interpreter only)" ON)
+if(XRIP_IRQ_BRIDGE)
+    # Override even an existing XLAT=ON cache entry for this experiment.
+    set(XLAT OFF)
+    message(STATUS "XRIP_IRQ_BRIDGE: JIT disabled")
+endif()
 set(XLAT_ARENA_KB 512 CACHE STRING "Translator code arena (ring), KiB, from the native PSRAM pool")
 # Experiment: code arena in a static SRAM buffer of XLAT_SRAM_ARENA_KB instead
 # of the PSRAM span, to measure the XIP-cache contention. The buffer comes out
@@ -659,6 +664,10 @@ endif()
 
 if(CONTROL_STACK)
     target_compile_definitions(${BUILD_NAME} PRIVATE CONTROL_STACK=1)
+endif()
+
+if(XRIP_IRQ_BRIDGE)
+    target_compile_definitions(${BUILD_NAME} PRIVATE XRIP_IRQ_BRIDGE=1)
 endif()
 
 if(XLAT)

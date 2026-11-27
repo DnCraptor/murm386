@@ -25,6 +25,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <pico.h>
+#include <hardware/sync.h>
 #include "i8259.h"
 
 typedef struct PicState {
@@ -129,8 +130,10 @@ static void __not_in_flash_func(pic_update_irq)(PicState2 *s)
 
 void __not_in_flash_func(i8259_set_irq)(PicState2 *s, int irq, int level)
 {
+	uint32_t irq_state = save_and_disable_interrupts();
 	pic_set_irq1(&s->pics[irq >> 3], irq & 7, level);
 	pic_update_irq(s);
+	restore_interrupts(irq_state);
 }
 
 /* acknowledge interrupt 'irq' */
@@ -147,6 +150,7 @@ static inline void pic_intack(PicState *s, int irq)
 
 int i8259_read_irq(PicState2 *s)
 {
+	uint32_t irq_state = save_and_disable_interrupts();
 	int irq, irq2, intno;
 
 	irq = pic_get_irq(&s->pics[0]);
@@ -171,6 +175,7 @@ int i8259_read_irq(PicState2 *s)
 		intno = s->pics[0].irq_base + irq;
 	}
 	pic_update_irq(s);
+	restore_interrupts(irq_state);
 	return intno;
 }
 
@@ -339,16 +344,17 @@ static uint32_t pic_ioport_read(void *opaque, uint32_t addr1)
 
 uint32_t i8259_ioport_read(PicState2 *s, uint32_t addr)
 {
-	if (addr == 0x20 || addr == 0x21)
-		return pic_ioport_read(&s->pics[0], addr);
-	return pic_ioport_read(&s->pics[1], addr);
+	uint32_t irq_state = save_and_disable_interrupts();
+	uint32_t ret = pic_ioport_read(&s->pics[(addr == 0x20 || addr == 0x21) ? 0 : 1], addr);
+	restore_interrupts(irq_state);
+	return ret;
 }
 
 void i8259_ioport_write(PicState2 *s, uint32_t addr, uint32_t val)
 {
-	if (addr == 0x20 || addr == 0x21)
-		return pic_ioport_write(&s->pics[0], addr, val);
-	pic_ioport_write(&s->pics[1], addr, val);
+	uint32_t irq_state = save_and_disable_interrupts();
+	pic_ioport_write(&s->pics[(addr == 0x20 || addr == 0x21) ? 0 : 1], addr, val);
+	restore_interrupts(irq_state);
 }
 
 PicState2 *i8259_init(void (*raise_fn)(void *, PicState2 *s), void *obj)
