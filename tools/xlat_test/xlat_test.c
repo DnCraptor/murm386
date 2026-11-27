@@ -2195,6 +2195,98 @@ static int compile_resume_check(void)
     return 0;
 }
 
+static bool test_cached_entry(const xlat_rt_t *rt, uint16_t ip)
+{
+    return rt->cs == 0x1000 && ip == 0x104;
+}
+
+/* The adaptive threshold is not a length cap. A short deadline seals a
+ * graph, a generous deadline admits the complete loop, and IRQ defers. */
+static int compile_adaptive_check(void)
+{
+    if (XLAT_REGION_INSNS >= XLAT_MAX_INSNS || !XLAT_TRACES)
+        return 1;
+    static uint32_t ctx[64 * 1024];
+    static xlat_region_out_t out;
+    const uint16_t ip = 0x100;
+    const unsigned n = XLAT_REGION_INSNS + 4 < XLAT_MAX_INSNS ?
+                       XLAT_REGION_INSNS + 4 : XLAT_MAX_INSNS - 1;
+    memset(mem + 0x10100, 0x40, n); /* INC AX */
+    mem[0x10100 + n] = 0xeb;      /* JMP back to the loop head */
+    mem[0x10101 + n] = (uint8_t)(-(int)n - 2);
+    xlat_arena_t a = {.base = xlat_test_calloc(0x10000), .size = 0x10000};
+    if (!a.base || !xlat_emit_trampoline(&a) || xlat_translate_ctx_size() > sizeof(ctx))
+        return 1;
+    const uint32_t top = a.code_top;
+    uint32_t clock = 0;
+    uint8_t irq = 0;
+    xlat_rt_t rt = {.mem = mem, .mem_size = 0xa0000, .cs = 0x1000,
+                    .clock = &clock, .intr = &irq, .wall_deadline = 1000};
+    rt.seg_base[1] = 0x10000;
+    bool full;
+    if (!xlat_translate(&a, &rt, ip, 0, NULL, 0, &out, &full, ctx) ||
+        out.n_insns != n + 1 || out.adaptive_cut || out.n_next)
+        return 1;
+    a.code_top = top;
+    rt.wall_deadline = XLAT_DISCOVER_RESERVE_US;
+    irq = 1;
+    if (xlat_translate_step(&a, &rt, ip, 0, NULL, 0, &out, &full, ctx, false) ||
+        out.reject != XLAT_RJ_DEFER || a.code_top != top)
+        return 1;
+    irq = 0;
+    if (!xlat_translate_step(&a, &rt, ip, 0, NULL, 0, &out, &full, ctx, true) ||
+        !out.adaptive_cut || out.n_insns != XLAT_REGION_INSNS ||
+        !out.n_next || out.next_ip[0] != ip + XLAT_REGION_INSNS)
+        return 1;
+    /* A reached continuation must stop at an already published entry. */
+    a.code_top = top;
+    a.data_bottom = a.size;
+    rt.wall_deadline = 0;
+    a.reuse_entry = test_cached_entry;
+    if (!xlat_translate(&a, &rt, ip, XLAT_LINK_MIN, NULL, 0, &out, &full, ctx) ||
+        out.n_insns != 4 || out.fn != 4 || out.n_next || out.n_entries != 1 ||
+        out.entries[0].ip != ip || !out.entries[0].mark ||
+        out.n_runs != 1 || out.runs[0].len != 4)
+        return 1;
+    /* The full long loop must emit identical code and entry/run metadata
+     * when every compiler phase is repeatedly suspended. */
+    static xlat_region_out_t want;
+    static uint8_t expected[0x10000];
+    a.reuse_entry = NULL;
+    a.code_top = top;
+    if (!xlat_translate(&a, &rt, ip, 0, NULL, 0, &want, &full, ctx) ||
+        want.code_len > sizeof(expected))
+        return 1;
+    memcpy(expected, a.base + want.code_off, want.code_len);
+    for (uint32_t ticks = 1; ticks <= 16; ++ticks) {
+        a.code_top = top;
+        a.data_bottom = a.size;
+        bool resume = false, ok = false;
+        for (unsigned step = 0; step < 4096; ++step) {
+            xlat_test_compile_ticks = ticks;
+            ok = xlat_translate_step(&a, &rt, ip, 0, NULL, 0, &out, &full, ctx, resume);
+            if (ok || out.reject != XLAT_RJ_DEFER)
+                break;
+            resume = true;
+        }
+        xlat_test_compile_ticks = UINT32_MAX;
+        if (!ok || out.code_len != want.code_len || out.n_entries != want.n_entries ||
+            out.n_runs != want.n_runs || out.data_size != want.data_size ||
+            memcmp(expected, a.base + out.code_off, want.code_len))
+            return 1;
+        for (unsigned k = 0; k < out.n_entries; ++k)
+            if (out.entries[k].ip != want.entries[k].ip ||
+                out.entries[k].mark != want.entries[k].mark ||
+                out.entries[k].code_off != want.entries[k].code_off)
+                return 1;
+        for (unsigned k = 0; k < out.n_runs; ++k)
+            if (out.runs[k].ip != want.runs[k].ip || out.runs[k].len != want.runs[k].len)
+                return 1;
+    }
+    puts("adaptive region discovery / reuse / sliced finalization: OK");
+    return 0;
+}
+
 /* Schedule at a different PC so this test only executes host C. */
 static int compile_scheduler_check(void)
 {
@@ -2358,6 +2450,8 @@ static int compile_scheduler_check(void)
 
 int main(int argc, char **argv)
 {
+    if (argc > 1 && !strcmp(argv[1], "--compile-adaptive"))
+        return compile_adaptive_check();
     if (argc > 1 && !strcmp(argv[1], "--compile-resume"))
         return compile_resume_check();
     if (argc > 1 && !strcmp(argv[1], "--compile-scheduler"))

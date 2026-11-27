@@ -108,7 +108,10 @@ static __time_critical_func() void paged_write32(uint32_t a, uint32_t v) {
     }
 }
 
-static __time_critical_func() void set_paging(bool on) {
+/* Mode transitions and system instructions are cold relative to the
+ * real-mode execution path. Keep them in flash rather than the startup
+ * heap's RAM region; noinline below keeps cold bodies out of RAM callers. */
+static void set_paging(bool on) {
     static uint32_t fast_size, extended_size; // the direct memory paths are only right without paging
     if (on == (read86 == paged_read8)) return;
     if (on) {
@@ -128,7 +131,7 @@ static __time_critical_func() void set_paging(bool on) {
     flush_tlb();
 }
 
-static __time_critical_func() void set_cr0(uint32_t value) {
+static void set_cr0(uint32_t value) {
     value |= CR0_ET;
     const uint32_t changed = cr0 ^ value;
     if (changed & (CR0_PE | CR0_PG))
@@ -305,7 +308,7 @@ static __time_critical_func() void check_gate(uint16_t selector, descriptor_t ga
 }
 
 // LLDT and task switches: a null selector leaves no LDT.
-static __time_critical_func() void load_ldtr(uint16_t selector) {
+static void load_ldtr(uint16_t selector) {
     descriptor_t d;
     ldtr_selector = selector;
     ldtr = (table_register_t) {0, 0};
@@ -315,7 +318,7 @@ static __time_critical_func() void load_ldtr(uint16_t selector) {
     ldtr = (table_register_t) {descriptor_base(d), descriptor_limit(d)};
 }
 
-static __time_critical_func() void set_tss_busy(uint16_t selector, bool busy) {
+static void set_tss_busy(uint16_t selector, bool busy) {
     const uint32_t address = descriptor_address(selector) + 4;
     const uint32_t high = system_read32(address);
     system_write32(address, busy ? high | 0x200 : high & ~0x200u);
@@ -329,7 +332,7 @@ static __time_critical_func() void set_tss_busy(uint16_t selector, bool busy) {
 enum { TASK_JMP, TASK_CALL, TASK_IRET };
 
 // The 386 TSS: EIP at 20h, EFLAGS 24h, EAX..EDI 28h-44h, ES CS SS DS FS GS 48h-5Ch, LDT 60h, CR3 1Ch
-static __time_critical_func() void task_switch(uint16_t selector, uint8_t reason, int32_t error_code) {
+static __attribute__((noinline)) void task_switch(uint16_t selector, uint8_t reason, int32_t error_code) {
     descriptor_t d;
     if (!read_descriptor(selector, &d) || is_segment(d)) raise_fault(13, selector & ~3u);
     if (system_type(d) == 5) { // a task gate in the GDT or LDT
@@ -655,7 +658,7 @@ static __time_critical_func() void privileged(void) {
 }
 
 // VERR and VERW: can this selector be read (or written) at the current privilege?
-static __time_critical_func() bool verify_segment(uint16_t selector, bool write) {
+static bool verify_segment(uint16_t selector, bool write) {
     descriptor_t d;
     if (!read_descriptor(selector, &d) || !is_segment(d)) return false;
     if (!is_conforming(d) && (descriptor_dpl(d) < cpl || descriptor_dpl(d) < (selector & 3))) return false;
@@ -664,7 +667,7 @@ static __time_critical_func() bool verify_segment(uint16_t selector, bool write)
 }
 
 // LAR and LSL: ZF = 1 and the access rights or the limit, if the descriptor is visible.
-static __time_critical_func() void load_access_or_limit(bool limit) {
+static __attribute__((noinline)) void load_access_or_limit(bool limit) {
     modregrm();
     const uint16_t selector = readrm16(rm);
     descriptor_t d;
@@ -679,7 +682,7 @@ static __time_critical_func() void load_access_or_limit(bool limit) {
 }
 
 // 0F 00 group: SLDT, STR, LLDT, LTR, VERR, VERW. Only in protected mode.
-static __time_critical_func() bool group6(void) {
+static __attribute__((noinline)) bool group6(void) {
     modregrm();
     switch (reg) {
         case 0: writerm16(rm, ldtr_selector); return true;
@@ -710,7 +713,7 @@ static __time_critical_func() bool group6(void) {
 }
 
 // 0F 01 group: SGDT, SIDT, LGDT, LIDT, SMSW, LMSW
-static __time_critical_func() bool group7(void) {
+static __attribute__((noinline)) bool group7(void) {
     modregrm();
     switch (reg) {
         case 0:
@@ -745,7 +748,7 @@ static __time_critical_func() bool group7(void) {
 }
 
 // MOV to and from CR0, CR2, CR3 and DR0-DR7. The r/m byte always names a register.
-static __time_critical_func() bool move_special(uint8_t opcode) {
+static __attribute__((noinline)) bool move_special(uint8_t opcode) {
     modregrm();
     privileged();
     const bool to_register = !(opcode & 2), debug = opcode & 1;
@@ -790,7 +793,7 @@ static __time_critical_func() __attribute__((noinline)) bool op_0f_system(uint8_
 }
 
 // 63 ARPL: raise the RPL of the r/m selector to the RPL of the register. Only in protected mode.
-static __time_critical_func() void adjust_rpl(void) {
+static __attribute__((noinline)) void adjust_rpl(void) {
     if (!protected_mode) {
         cpu_fault(6);
         return;
@@ -801,7 +804,7 @@ static __time_critical_func() void adjust_rpl(void) {
     if (zf) writerm16(rm, (selector & ~3u) | (source & 3));
 }
 
-static __time_critical_func() void reset_protected_mode(void) {
+static __attribute__((noinline)) void reset_protected_mode(void) {
     set_cr0(CR0_ET);
     stack32 = 0;
     set_code32(0);

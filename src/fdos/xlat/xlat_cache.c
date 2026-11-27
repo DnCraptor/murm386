@@ -50,6 +50,8 @@ typedef struct {
     uint8_t trace_min;     /* xlat_translate's trace_min it was built with */
     uint8_t n_extra;       /* entry points added (add_entry) */
     uint16_t extra[XLAT_EXTRA_MAX];
+    uint16_t next_ip[4];   /* unvisited direct edges of a time-sealed graph */
+    uint8_t n_next;
 } region_t;
 
 #define XLAT_PAGES 4096u   /* XLAT_LOG: xlat_prof_page() pages (256 bytes) of the first MiB */
@@ -77,7 +79,7 @@ typedef struct {
 enum { HOT_NONE = 0, HOT_RETRY = 1, HOT_FINAL = 2 };
 
 /* In order of increasing priority, FIFO within each priority. */
-enum { COMPILE_BURST, COMPILE_RETRY, COMPILE_EXIT, COMPILE_CALL };
+enum { COMPILE_BURST, COMPILE_RETRY, COMPILE_CONT, COMPILE_EXIT, COMPILE_CALL };
 #define XLAT_COMPILE_MIN_US 40
 #define XLAT_COMPILE_CREDIT (XLAT_COMPILE_RATIO * (int32_t)XLAT_COMPILE_US)
 
@@ -114,6 +116,9 @@ typedef struct {
     uint32_t seq;           /* xlat_run() region entries so far */
     uint32_t ring_lo;       /* first byte after the trampoline */
     uint32_t head;          /* where the next chunk goes */
+    uint32_t free_end;      /* cached window_end(), zero means recompute */
+    uint32_t held_bytes;    /* sum of all held chunks, including invalidated */
+    uint32_t free_slots[REGION_WORDS];
     uint32_t epoch;         /* changes whenever x86 code may have been written */
     uint8_t *mem;
     uint32_t mem_size;      /* guest memory of the last xlat_run() */
@@ -135,8 +140,16 @@ typedef struct {
         uint16_t ip, extra[XLAT_EXTRA_MAX];
         int trace_min, n_extra, attempt, old_slot;
         bool pending, started;
+#if XLAT_LOG
+        uint32_t quanta, us;
+#endif
     } job;
 #if XLAT_LOG
+    /* Per-length counts for ALL successful publications, not just T dumps.
+     * state_t is allocated in PSRAM; no new resident SRAM tables. */
+    struct {
+        uint32_t built, first, fit, quanta, us, arm, cut, cont, final_us;
+    } compile_len[XLAT_MAX_INSNS + 1];
     char *log;              /* text kept until the next safe point (xlat_log_write) */
     uint32_t log_len;
     uint32_t log_lost;      /* bytes that did not fit */
@@ -153,7 +166,7 @@ typedef struct {
 #define XLAT_LOG_SIZE (XLAT_LOG ? 32768u : 0u)
 /* The region dumps (T lines, C lines of evicted regions) stop this far
  * from the end: the summary at the program's exit always fits. */
-#define XLAT_LOG_RESERVE 8192u
+#define XLAT_LOG_RESERVE (8192u + XLAT_MAX_INSNS * 112u)
 
 #define ALIGN8(n) (((n) + 7u) & ~(size_t)7u)
 
@@ -295,8 +308,12 @@ static void log_region_code(const region_t *r)
 {
     if (!log_dump_room())
         return;
-    log_printf("T %04X:%04X lo=%05lX span=%lu runs=%u\r\n", r->cs, r->ip,
-               (unsigned long)r->lo, (unsigned long)r->span, r->n_runs);
+    log_printf("T %04X:%04X lo=%05lX span=%lu runs=%u n=%u quanta=%lu us=%lu arm=%lu cut=%u next=%u final=%lu cont=%u\r\n",
+               r->cs, r->ip, (unsigned long)r->lo, (unsigned long)r->span, r->n_runs,
+               (unsigned)st->out.n_insns, (unsigned long)st->job.quanta,
+               (unsigned long)st->job.us, (unsigned long)st->out.code_len,
+               (unsigned)st->out.adaptive_cut, (unsigned)st->out.n_next,
+               (unsigned long)st->out.final_us, (unsigned)(st->job.request.kind == COMPILE_CONT));
     const uint8_t *d = st->arena.base + r->data_off;
     for (unsigned k = 0; k < r->n_runs; ++k) {
         uint32_t linear;
@@ -304,16 +321,41 @@ static void log_region_code(const region_t *r)
         const uint32_t len = d[4] | (uint32_t)d[5] << 8;
         const uint8_t *b = d + 8;
         for (uint32_t i = 0; i < len; i += 16) {
-            char hex[16 * 3 + 1];
-            uint32_t n = len - i < 16 ? len - i : 16;
-            for (uint32_t j = 0; j < n; ++j) {
-                static const char digits[] = "0123456789ABCDEF";
-                hex[j * 3] = ' ';
-                hex[j * 3 + 1] = digits[b[i + j] >> 4];
-                hex[j * 3 + 2] = digits[b[i + j] & 15];
+            /* Fixed-width replay line; avoid vsnprintf on every 16 bytes. */
+            static const char digits[] = "0123456789ABCDEF";
+            char line[15 + 16 * 3 + 2];
+            const uint32_t n = len - i < 16 ? len - i : 16;
+            const uint32_t ip = linear - r->cs_base + i;
+            line[0] = line[1] = ' ';
+            line[6] = ':';
+            for (unsigned j = 0; j < 4; ++j)
+                line[2 + j] = digits[(r->cs >> (12u - 4u * j)) & 15u];
+            unsigned pos = 7;
+            /* %04X is a minimum width, not truncation at 16 bits. */
+            unsigned shift = 28;
+            while (shift > 12u && !(ip >> shift))
+                shift -= 4u;
+            for (;;) {
+                line[pos++] = digits[(ip >> shift) & 15u];
+                if (!shift)
+                    break;
+                shift -= 4u;
             }
-            hex[n * 3] = 0;
-            log_printf("  %04X:%04X%s\r\n", r->cs, (unsigned)(linear - r->cs_base + i), hex);
+            for (uint32_t j = 0; j < n; ++j) {
+                const uint8_t v = b[i + j];
+                line[pos++] = ' ';
+                line[pos++] = digits[v >> 4];
+                line[pos++] = digits[v & 15u];
+            }
+            line[pos++] = '\r';
+            line[pos++] = '\n';
+            const uint32_t bytes = pos;
+            if (st->log_len + bytes > XLAT_LOG_SIZE) {
+                st->log_lost += bytes;
+            } else {
+                memcpy(st->log + st->log_len, line, bytes);
+                st->log_len += bytes;
+            }
         }
         d += 8 + ((len + 3u) & ~3u);
     }
@@ -562,7 +604,11 @@ static void reset_tables(void)
     xlat_emit_trampoline(&st->arena);
     xlat_sync_code(st->arena.base, st->arena.code_top);
     st->ring_lo = st->head = (st->arena.code_top + 7u) & ~7u;
-    xlat_stats.code_bytes = st->arena.code_top;
+    st->free_end = st->arena.size;
+    st->held_bytes = 0;
+    memset(st->free_slots, 0xff, sizeof(st->free_slots));
+    st->free_slots[REGION_WORDS - 1] = UINT32_MAX >> ((32u - (XLAT_MAX_REGIONS & 31u)) & 31u);
+    xlat_stats.code_bytes = st->ring_lo;
 }
 
 static __attribute__((noinline)) bool ready(void)
@@ -666,6 +712,17 @@ static entry_t *XLAT_HOT_FN(lookup)(uint32_t key)
             return e;
     }
     return NULL;
+}
+
+/* An existing live entry is a valid graph boundary even if its epoch
+ * needs checking later. Never embed its native address in a new region. */
+static bool cached_entry(const xlat_rt_t *rt, uint16_t ip)
+{
+    const entry_t *e = lookup((uint32_t)rt->cs << 16 | ip);
+    if (!e)
+        return false;
+    const region_t *r = &st->region[e->region];
+    return r->live && r->cs_base == rt->seg_base[1] && r->mem_size == rt->mem_size;
 }
 
 static bool insert(uint32_t key, uint16_t region, uint32_t code_off, bool mark)
@@ -821,21 +878,33 @@ static void unlink_region(int k)
 
 /* Drop region k: its entries go (the chunk is reused when the head comes
  * to it). The maps are rebuilt by the caller (rebuild_maps). */
-static void evict(int k)
+static void evict_storage(int k)
 {
     region_t *r = &st->region[k];
     if (log_dump_room())
         log_region_count(r);
     index_region((unsigned)k, false);
+    if (r->held) {
+        st->held_bytes -= r->chunk_hi - r->chunk_lo;
+        xlat_stats.code_bytes = st->ring_lo + st->held_bytes;
+        if (r->chunk_lo == st->free_end)
+            st->free_end = 0;
+        st->free_slots[(unsigned)k >> 5] |= 1u << ((unsigned)k & 31u);
+    }
+    memset(r, 0, sizeof(*r));
+    xlat_stats.evictions++;
+}
+
+static void evict(int k)
+{
+    evict_storage(k);
     unlink_region(k);
     for (int j = 0; j < XLAT_ENTRY_SLOTS; ++j) {
         entry_t *e = &st->entry[j];
         if (e->used >= E_LIVE && e->region == k)
             e->used = E_DEAD;
     }
-    memset(r, 0, sizeof(*r));
     gap_reset();
-    xlat_stats.evictions++;
 }
 
 /* xlat_entry_map and xlat_code_map from the regions left. */
@@ -1011,33 +1080,70 @@ void xlat_forget_range(uint32_t linear, uint32_t len)
 /* Evict the regions whose chunks meet [lo, hi). */
 static bool evict_range(uint32_t lo, uint32_t hi)
 {
-    bool any = false;
+    int first = -1;
+    bool batch = false;
     for (int k = 0; k < XLAT_MAX_REGIONS; ++k) {
         const region_t *r = &st->region[k];
         if (r->held && r->chunk_lo < hi && r->chunk_hi > lo) {
-            evict(k);
-            any = true;
+            if (first < 0) {
+                first = k;
+                continue;
+            }
+            if (!batch) {
+                evict_storage(first);
+                batch = true;
+            }
+            evict_storage(k);
         }
     }
-    return any;
+    if (first < 0)
+        return false;
+    if (!batch) {
+        evict(first);
+    } else {
+        /* No guest execution between storage release and table cleanup.
+         * Free-slot bits are dense; avoid touching PSRAM region descriptors
+         * for every entry, and avoid O(victims * table size) cleanup. */
+        for (unsigned j = 0; j < XLAT_LINK_ENTRIES; ++j) {
+            xlat_link_t *l = &st->link[j];
+            if (l->key != UINT32_MAX &&
+                (st->free_slots[l->region >> 5] & (1u << (l->region & 31u))))
+                l->key = UINT32_MAX;
+        }
+        for (int j = 0; j < XLAT_ENTRY_SLOTS; ++j) {
+            entry_t *e = &st->entry[j];
+            if (e->used >= E_LIVE &&
+                (st->free_slots[e->region >> 5] & (1u << (e->region & 31u))))
+                e->used = E_DEAD;
+        }
+        gap_reset();
+    }
+    return true;
 }
 
 /* End of the free space from the head: the next chunk, or the arena end. */
 static uint32_t window_end(void)
 {
+    if (st->free_end)
+        return st->free_end;
     uint32_t end = st->arena.size;
     for (int k = 0; k < XLAT_MAX_REGIONS; ++k) {
         const region_t *r = &st->region[k];
         if (r->held && r->chunk_lo >= st->head && r->chunk_lo < end)
             end = r->chunk_lo;
     }
-    return end;
+    return st->free_end = end;
 }
 
 /* A free region slot: an empty one, else an invalidated one, else the
  * region entered longest ago (a hot loop translated early stays). */
 static int take_slot(bool *evicted)
 {
+    for (unsigned w = 0; w < REGION_WORDS; ++w) {
+        const uint32_t bits = st->free_slots[w];
+        if (bits)
+            return (int)(w * 32u + (unsigned)__builtin_ctz(bits));
+    }
     int best = -1;
     uint32_t best_d = UINT32_MAX;
     for (int k = 0; k < XLAT_MAX_REGIONS; ++k) {
@@ -1046,7 +1152,7 @@ static int take_slot(bool *evicted)
             return k;
         const uint32_t age = st->seq - st->last[k];
         const uint32_t d = !r->live && !r->cold ? 0u : UINT32_MAX - age;
-        if (d < best_d) {
+        if (best < 0 || d < best_d) {
             best_d = d;
             best = k;
         }
@@ -1070,6 +1176,7 @@ static int translate_at(const xlat_rt_t *rt, uint16_t ip, int trace_min, const u
 {
     xlat_region_out_t *out = &st->out;
     xlat_arena_t *const a = &st->arena;
+    a->reuse_entry = st->job.request.kind == COMPILE_CONT && !n_extra ? cached_entry : NULL;
     bool full, evicted = false;
     for (; st->job.attempt < 3;) {
         if (xlat_compile_irq(rt)) {
@@ -1083,8 +1190,10 @@ static int translate_at(const xlat_rt_t *rt, uint16_t ip, int trace_min, const u
                     out->reject = XLAT_RJ_FULL;
                     break;
                 }
-                if (st->head + need > a->size)
+                if (st->head + need > a->size) {
                     st->head = st->ring_lo;
+                    st->free_end = 0;
+                }
                 if (evict_range(st->head, st->head + need))
                     rebuild_maps();  /* guest can run between slices */
             }
@@ -1114,6 +1223,7 @@ static int translate_at(const xlat_rt_t *rt, uint16_t ip, int trace_min, const u
     return -1;
 
 built:;
+    const uint32_t publish_t0 = rt->wall_deadline ? *rt->clock : 0;
     st->job.pending = false;
     const int idx = take_slot(&evicted);   /* not in the new chunk: it was free */
     region_t *r = &st->region[idx];
@@ -1129,6 +1239,9 @@ built:;
     r->span = out->span;
     r->n_runs = out->n_runs;
     r->fn = out->fn;
+    r->n_next = out->n_next;
+    for (unsigned k = 0; k < r->n_next; ++k)
+        r->next_ip[k] = out->next_ip[k];
     st->last[idx] = st->seq;    /* new: as if entered now */
     xlat_stats.fn_regions += out->fn != 0;
     /* the copies follow the code (xlat_translate keeps code_top + data
@@ -1138,6 +1251,8 @@ built:;
     r->chunk_hi = r->data_off + out->data_size;
     st->head = (r->chunk_hi + 7u) & ~7u;
     r->held = 1;
+    st->free_slots[(unsigned)idx >> 5] &= ~(1u << ((unsigned)idx & 31u));
+    st->held_bytes += r->chunk_hi - r->chunk_lo;
     uint8_t *d = st->arena.base + r->data_off;
     for (unsigned k = 0; k < out->n_runs; ++k) {
         const uint32_t linear = r->cs_base + out->runs[k].ip;
@@ -1146,8 +1261,7 @@ built:;
         d[4] = (uint8_t)len;
         d[5] = (uint8_t)(len >> 8);
         d[6] = d[7] = 0;
-        for (uint32_t i = 0; i < len; ++i)
-            d[8 + i] = rt->mem[linear + i];
+        memcpy(d + 8, rt->mem + linear, len);
         /* the blocks a write may reach the run from (up to 16 bytes long) */
         const uint32_t from = linear >= 15u ? linear - 15u : 0u;
         for (uint32_t b = from >> XLAT_CODE_BLOCK_SHIFT;
@@ -1170,15 +1284,18 @@ built:;
         }
     }
     xlat_sync_code(st->arena.base + out->code_off, out->code_len);
-    log_region_code(r);
     xlat_stats.translations++;
     xlat_stats.compiled_code_bytes += out->code_len;
     xlat_stats.compiled_source_bytes += out->data_size;
-    uint32_t used = st->ring_lo;
-    for (int k = 0; k < XLAT_MAX_REGIONS; ++k)
-        if (st->region[k].held)
-            used += st->region[k].chunk_hi - st->region[k].chunk_lo;
-    xlat_stats.code_bytes = used;
+    xlat_stats.code_bytes = st->ring_lo + st->held_bytes;
+    if (rt->wall_deadline) {
+        out->final_us += *rt->clock - publish_t0;
+        /* Do not train standalone discovery on re-emission or extensions. */
+        if (!st->job.attempt && !n_extra && out->n_insns && out->final_us) {
+            uint32_t *est = &a->finish_est[xlat_finish_bucket(out->n_insns)];
+            *est = *est ? *est - (*est >> 2) + (out->final_us >> 2) : out->final_us;
+        }
+    }
     return idx;
 }
 
@@ -1214,7 +1331,9 @@ static bool queue_compile(uint32_t key, uint8_t kind, uint8_t why)
     const unsigned priority = 1u << kind;
     if (st->compile_blocked & priority)
         return false;
-    if (st->job.pending && st->job.request.key == key && st->job.request.kind >= kind)
+    if (st->job.pending && st->job.request.key == key &&
+        (st->job.request.kind >= kind ||
+         (st->job.request.kind == COMPILE_CONT && kind == COMPILE_EXIT)))
         return true;
 
     unsigned replace = XLAT_COMPILE_QUEUE;
@@ -1222,7 +1341,7 @@ static bool queue_compile(uint32_t key, uint8_t kind, uint8_t why)
     for (unsigned i = 0; i < st->queued; ++i) {
         const compile_request_t *q = &st->queue[i];
         if (q->key == key) {
-            if (q->kind >= kind)
+            if (q->kind >= kind || (q->kind == COMPILE_CONT && kind == COMPILE_EXIT))
                 return true;
             /* Keep only the strongest queued request for this entry. */
             upgrade = i;
@@ -1245,6 +1364,30 @@ static bool queue_compile(uint32_t key, uint8_t kind, uint8_t why)
     }
     st->queue[st->queued++] = (compile_request_t){key, kind, why};
     return true;
+}
+
+/* The final region of a linked chain supplies the frontier. Queue only
+ * the edge that was actually taken, not a guessed branch at publication. */
+static __attribute__((noinline)) void queue_reached_continuation(region_t *r, const xlat_rt_t *rt)
+{
+    if (rt->cs != r->cs)
+        return;
+    const uint16_t ip = (uint16_t)rt->ip;
+    for (unsigned k = 0; k < r->n_next; ++k) {
+        if (r->next_ip[k] != ip)
+            continue;
+        const uint32_t key = (uint32_t)rt->cs << 16 | ip;
+        const entry_t *en = lookup(key);
+        hot_t *h = &st->exit_hot[hot_slot(key)];
+        if (!(en && (st->region[en->region].live || st->region[en->region].cold))) {
+            if (h->key != key)
+                *h = (hot_t){.key = key};
+            if (!h->reject && !queue_compile(key, COMPILE_CONT, XLAT_RJ_NONE))
+                return; /* retain the hint if the queue was full */
+        }
+        r->next_ip[k] = r->next_ip[--r->n_next];
+        return;  /* normal hot-exit sampling covers future misses */
+    }
 }
 
 /* Samples can enqueue while the compiler is occupied, out of time, or IF=0.
@@ -1274,7 +1417,7 @@ static __attribute__((noinline)) void sample(uint32_t key, bool exit)
 static void finish_compile(int idx, int why)
 {
     const compile_request_t req = st->job.request;
-    const bool exit = req.kind == COMPILE_EXIT;
+    const bool exit = req.kind == COMPILE_EXIT || req.kind == COMPILE_CONT;
     hot_t *h = &(exit ? st->exit_hot : st->hot)[hot_slot(req.key)];
     if (idx >= 0) {
         const int old = st->job.old_slot;
@@ -1321,6 +1464,9 @@ static void set_compile_target(int old, int trace_min)
     st->job.started = false;
     st->job.pending = true;
     st->job.old_slot = old;
+#if XLAT_LOG
+    st->job.quanta = st->job.us = 0;
+#endif
     if (old >= 0) {
         const region_t *r = &st->region[old];
         st->job.old_lo = r->chunk_lo;
@@ -1358,6 +1504,12 @@ static void start_compile(const xlat_rt_t *rt)
             gap_reset();
             unlink_region(e->region);
         }
+    }
+    /* A reached continuation is an independent region. Rebuilding the
+     * containing graph here would undo the point of incremental publication. */
+    if (req.kind == COMPILE_CONT) {
+        set_compile_target(-1, XLAT_LINK_MIN);
+        return;
     }
     const bool retry = req.kind == COMPILE_RETRY;
     const bool exit = req.kind == COMPILE_EXIT;
@@ -1410,11 +1562,31 @@ static __attribute__((noinline)) void compile_slice(const xlat_rt_t *rt)
             xlat_stats.compile_resumes++;
         const int idx = translate_at(jrt, st->job.ip, st->job.trace_min,
                                      st->job.extra, st->job.n_extra);
+#if XLAT_LOG
+        ++st->job.quanta;
+        st->job.us += *rt->clock - t0;
+        if (idx >= 0) {
+            const unsigned n = st->out.n_insns;
+            if (n && n <= XLAT_MAX_INSNS) {
+                ++st->compile_len[n].built;
+                st->compile_len[n].first += st->job.quanta == 1;
+                st->compile_len[n].fit += st->job.quanta == 1 && st->job.us <= XLAT_COMPILE_US;
+                st->compile_len[n].quanta += st->job.quanta;
+                st->compile_len[n].us += st->job.us;
+                st->compile_len[n].arm += st->out.code_len;
+                st->compile_len[n].cut += st->out.adaptive_cut != 0;
+                st->compile_len[n].cont += st->job.request.kind == COMPILE_CONT;
+                st->compile_len[n].final_us += st->out.final_us;
+            }
+            log_region_code(&st->region[idx]);
+        }
+#endif
         if (st->job.pending) {
             xlat_stats.compile_defers++;
         } else if (idx < 0 && st->out.reject < XLAT_RJ_COUNT &&
                    st->job.old_slot >= 0 &&
-                   (st->job.request.kind == COMPILE_EXIT || st->job.request.kind == COMPILE_CALL)) {
+                   (st->job.request.kind == COMPILE_EXIT || st->job.request.kind == COMPILE_CONT ||
+                    st->job.request.kind == COMPILE_CALL)) {
             /* When extending a region fails, try a standalone link trace. */
             set_compile_target(-1, XLAT_LINK_MIN);
         } else {
@@ -1620,6 +1792,8 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
         /* STOP: XRIP must run the next instruction. */
         if (flush_pending || *rt->intr || rt->exit_kind == XLAT_EXIT_STOP)
             break;
+        if (exit_kind == XLAT_EXIT_BRANCH && x->live && x->n_next)
+            queue_reached_continuation(x, rt);
         /* Budget used up (entry costs, short regions): the burst lasts
          * until its deadline, as in the back-edge stubs. */
         if (rt->budget <= 0) {
@@ -2625,6 +2799,25 @@ void xlat_log_write(uint16_t psp, const char *name)
         memset(xlat_stats.enter_why, 0, sizeof(xlat_stats.enter_why));
         xlat_stats.xrip_tail = 0;
     }
+    /* Interval totals, including regions whose byte dumps did not fit.
+     * first = one compile_slice; fit also meets the nominal time limit. */
+    log_printf("D limit=%u soft=%u quantum_us=%u n:built/first/fit/quanta/us/arm/cut/cont/final_us\r\n",
+               (unsigned)XLAT_MAX_INSNS, (unsigned)XLAT_REGION_INSNS, (unsigned)XLAT_COMPILE_US);
+    for (unsigned n = 1; n <= XLAT_MAX_INSNS; ++n) {
+        if (!st->compile_len[n].built)
+            continue;
+        log_printf("D %u:%lu/%lu/%lu/%lu/%lu/%lu/%lu/%lu/%lu\r\n", n,
+                   (unsigned long)st->compile_len[n].built,
+                   (unsigned long)st->compile_len[n].first,
+                   (unsigned long)st->compile_len[n].fit,
+                   (unsigned long)st->compile_len[n].quanta,
+                   (unsigned long)st->compile_len[n].us,
+                   (unsigned long)st->compile_len[n].arm,
+                   (unsigned long)st->compile_len[n].cut,
+                   (unsigned long)st->compile_len[n].cont,
+                   (unsigned long)st->compile_len[n].final_us);
+    }
+    memset(st->compile_len, 0, sizeof(st->compile_len));
     log_pages();
     log_rejects();
     log_prof();

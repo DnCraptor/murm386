@@ -86,6 +86,7 @@ typedef struct {
     uint64_t in_set[XLAT_MAX_INSNS], out_set[XLAT_MAX_INSNS], cf_in[XLAT_MAX_INSNS];
     uint64_t cf_out[XLAT_MAX_INSNS];
     int8_t fall_idx[XLAT_MAX_INSNS], tgt_idx[XLAT_MAX_INSNS];
+    uint8_t pred_head[XLAT_MAX_INSNS], pred_next[2 * XLAT_MAX_INSNS];
     int8_t pfp[XLAT_MAX_INSNS];
     uint8_t leader[XLAT_MAX_INSNS], mat[XLAT_MAX_INSNS], need_cf[XLAT_MAX_INSNS];
     uint8_t full[XLAT_MAX_INSNS];   /* mat: store the whole lazy state, not pending */
@@ -112,14 +113,18 @@ typedef struct {
     int n_interp;
     /* Persistent compiler cursors in the PSRAM context. */
     uint8_t phase, variant;
-    bool discovering, flow_changed;
+    bool discovering, flow_changed, adaptive_cut;
+    uint32_t seal_at, final_us;   /* time in finalization, not time between slices */
+    uint64_t plan_mat, plan_full, head_marks;
+    uint8_t plan_pass;
+    int plan_i, fix_i, dfix_i, entry_i;
     int head, tail, dhead, dtail, flow_i, emit_i, stub_pass, stub_i;
     uint32_t data_bytes;
     int n_source;
     struct { uint16_t ip; uint8_t len, b[16]; } source[XLAT_MAX_INSNS];
 } tctx_t;
 
-enum { PH_DISCOVER, PH_FLOW, PH_PLAN, PH_EMIT_INIT, PH_EMIT, PH_STUBS, PH_FINISH };
+enum { PH_DISCOVER, PH_FLOW, PH_PLAN, PH_RUNS, PH_EMIT_INIT, PH_EMIT, PH_STUBS, PH_FINISH };
 
 #if defined(XLAT_HOST_TEST)
 uint32_t xlat_test_compile_ticks = UINT32_MAX;
@@ -351,7 +356,7 @@ static bool has_cycle(const tctx_t *c, int first)
  * after that, each within the window of its own start, as long as room is
  * left: the loop itself is found first, and a loop whose calls do not fit
  * leaves the region on every pass (has_cycle rejects it). */
-static int discover(tctx_t *c, uint16_t start)
+static int discover(tctx_t *c, uint16_t start, bool allow_cut, const xlat_arena_t *a)
 {
     const int qcap = (int)(sizeof(c->queue) / sizeof(c->queue[0]));
     const int dcap = (int)(sizeof(c->deferred) / sizeof(c->deferred[0]));
@@ -360,13 +365,49 @@ static int discover(tctx_t *c, uint16_t start)
         c->queue[c->tail++] = (uint32_t)start << 16 | start;
         c->n = c->n_seen = c->n_source = 0;
         c->discovering = true;
+        c->adaptive_cut = false;
     }
+    const bool timed = allow_cut && XLAT_TRACES &&
+                       XLAT_REGION_INSNS < XLAT_MAX_INSNS && c->rt->wall_deadline;
+    uint32_t previous = timed ? *c->rt->clock : 0;
     for (;;) {
-        if (xlat_compile_irq(c->rt))
+        const bool more = c->head < c->tail || (!c->no_calls && c->dhead < c->dtail);
+        const bool may_cut = timed && more && c->n >= XLAT_REGION_INSNS &&
+                             c->n < XLAT_MAX_INSNS;
+        if (xlat_compile_irq(c->rt)) {
+            /* IRQ is never a reason to seal. If the clock has already run
+             * out, remember the boundary and finish it in the next slice. */
+            if (may_cut && !*c->rt->intr &&
+                (int32_t)(*c->rt->clock - c->rt->wall_deadline) >= 0)
+                c->adaptive_cut = true;
             return XLAT_RJ_DEFER;
+        }
+        if (c->adaptive_cut || !more || c->n >= XLAT_MAX_INSNS)
+            break;
+        if (timed) {
+            const uint32_t now = *c->rt->clock;
+            const uint32_t step = now - previous;
+            previous = now;
+            const int32_t left = (int32_t)(c->rt->wall_deadline - now);
+            if (may_cut) {
+                /* Use the measured cost for the prospective length. If
+                 * finishing cannot fit even an empty quantum, do not waste
+                 * this discovery slice reserving impossible time. Seal when
+                 * the next decoder step no longer fits; finish resumably. */
+                uint32_t reserve = a->finish_est[xlat_finish_bucket((unsigned)c->n + 1u)];
+                if (!reserve)
+                    reserve = a->finish_est[xlat_finish_bucket((unsigned)c->n)];
+                if (!reserve)
+                    reserve = XLAT_DISCOVER_RESERVE_US;
+                if (step >= XLAT_COMPILE_US || reserve >= XLAT_COMPILE_US - step)
+                    reserve = 0;
+                if (left <= (int32_t)reserve || (uint32_t)(left - reserve) <= step) {
+                    c->adaptive_cut = true;
+                    break;
+                }
+            }
+        }
         if (c->head == c->tail) {
-            if (c->dhead == c->dtail || c->n >= XLAT_MAX_INSNS || c->no_calls)
-                break;
             c->head = c->tail = 0;
             const uint16_t f = c->deferred[c->dhead++];
             c->queue[c->tail++] = (uint32_t)f << 16 | f;
@@ -374,8 +415,10 @@ static int discover(tctx_t *c, uint16_t start)
         const uint32_t item = c->queue[c->head++];
         const uint16_t ip = (uint16_t)item, root = (uint16_t)(item >> 16);
         if ((uint16_t)(ip - root + XLAT_SPAN_WINDOW / 2) >= XLAT_SPAN_WINDOW ||
-            c->n >= XLAT_MAX_INSNS || seen_before(c, ip))
+            seen_before(c, ip))
             continue;
+        if (ip != start && a->reuse_entry && a->reuse_entry(c->rt, ip))
+            continue;  /* leave this edge to the existing dispatcher */
         const uint32_t linear = c->cs_base + ip;
         if (!xlat_code_direct(linear, 16u))
             continue;
@@ -406,6 +449,7 @@ static int discover(tctx_t *c, uint16_t start)
             }
         }
     }
+    c->seal_at = c->rt->wall_deadline ? *c->rt->clock : 0;
     c->discovering = false;
     if (!c->n || c->in[0].ip != start)
         return XLAT_RJ_START;
@@ -454,25 +498,35 @@ static int discover(tctx_t *c, uint16_t start)
     if (first < 0)
         return XLAT_RJ_START;
     c->leader[first] = 1;
+    c->head_marks = 1ull << first;
     c->lo = UINT32_MAX;
     uint32_t hi = 0;
     for (int i = 0; i < c->n; ++i) {
         const x86_insn_t *in = &c->in[i];
         c->fall_idx[i] = falls_through(in) ? (int8_t)find_insn(c, (uint16_t)(in->ip + in->len)) : -1;
         c->tgt_idx[i] = is_branch(in) ? (int8_t)find_insn(c, in->target) : -1;
-        if (c->tgt_idx[i] >= 0)
+        if (c->tgt_idx[i] >= 0) {
             c->leader[c->tgt_idx[i]] = 1;
-        if (native_string(in) && in->rep)
+            if (c->tgt_idx[i] <= i)
+                c->head_marks |= 1ull << c->tgt_idx[i];
+        }
+        if (native_string(in) && in->rep) {
             c->leader[i] = 1;   /* restart after IRQ or partial REP */
+            c->head_marks |= 1ull << i;
+        }
         if (sti_pop(c, i) >= 0) {
             const int ret = find_insn(c, (uint16_t)(in->ip + 2u));
-            if (ret >= 0)
+            if (ret >= 0) {
                 c->leader[ret] = 1;
+                c->head_marks |= 1ull << ret;
+            }
         }
         if (x86_is_call(in) || (in->op == XO_INTERP && (in->sub & XLAT_XI_INT_MASK))) {
             const int ret = find_insn(c, (uint16_t)(in->ip + in->len));
-            if (ret >= 0)
+            if (ret >= 0) {
                 c->leader[ret] = 1;
+                c->head_marks |= 1ull << ret;
+            }
         }
         const uint32_t l = c->cs_base + in->ip;
         if (l < c->lo)
@@ -491,14 +545,41 @@ static int discover(tctx_t *c, uint16_t start)
         return XLAT_RJ_INTERP;
     if (has_cycle(c, first))
         return XLAT_RJ_NONE;
-    if (c->trace_min) {
+    /* A time-sealed graph is a complete short trace, not an unsupported
+     * region. All its missing edges are planned as ordinary exits. */
+    const int min = c->adaptive_cut ? XLAT_LINK_MIN : c->trace_min;
+    if (min) {
         const int len = min_native_path(c, first);
-        if (len >= c->trace_min) {
+        if (len >= min) {
             c->fn = (uint8_t)(len < 255 ? len : 255);
             return XLAT_RJ_NONE;
         }
     }
     return XLAT_RJ_NOLOOP;
+}
+
+/* Keep only unvisited outgoing edges of the retained graph, in discovery
+ * order. They are hints for independent regions, never native addresses. */
+static void remember_continuation(const tctx_t *c, xlat_region_out_t *out, uint16_t ip)
+{
+    if (out->n_next >= sizeof(out->next_ip) / sizeof(out->next_ip[0]))
+        return;
+    for (int k = 0; k < c->n_seen; ++k)
+        if (c->seen[k] == ip)
+            return;
+    for (unsigned k = 0; k < out->n_next; ++k)
+        if (out->next_ip[k] == ip)
+            return;
+    if (!xlat_code_direct(c->cs_base + ip, 16u))
+        return;
+    for (int i = 0; i < c->n; ++i) {
+        const x86_insn_t *in = &c->in[i];
+        if (((falls_through(in) || x86_is_call(in)) && (uint16_t)(in->ip + in->len) == ip) ||
+            (is_branch(in) && in->target == ip)) {
+            out->next_ip[out->n_next++] = ip;
+            return;
+        }
+    }
 }
 
 /* ---------------------------------------------------------------------- */
@@ -610,6 +691,24 @@ static void mark_dead_flags(tctx_t *c)
     }
 }
 
+/* Each vertex has at most two outgoing edges. Build incoming lists once,
+ * after overlap removal and edge construction, then reuse across flow slices. */
+static void build_preds(tctx_t *c)
+{
+    memset(c->pred_head, 0xff, sizeof(c->pred_head));
+    for (int p = c->n - 1; p >= 0; --p) {
+        const int f = c->fall_idx[p], t = c->tgt_idx[p];
+        if (f >= 0) {
+            c->pred_next[2 * p] = c->pred_head[f];
+            c->pred_head[f] = (uint8_t)(2 * p);
+        }
+        if (t >= 0 && t != f) {
+            c->pred_next[2 * p + 1] = c->pred_head[t];
+            c->pred_head[t] = (uint8_t)(2 * p + 1);
+        }
+    }
+}
+
 static bool dataflow(tctx_t *c)
 {
     uint64_t *const cf_out = c->cf_out;
@@ -619,11 +718,11 @@ static bool dataflow(tctx_t *c)
                 return false;
             const int i = c->flow_i;
             uint64_t in = c->leader[i] ? NONE_BIT : 0, cfin = in;
-            for (int p = 0; p < c->n; ++p) {
-                if (c->fall_idx[p] == i || c->tgt_idx[p] == i) {
-                    in |= c->out_set[p];
-                    cfin |= cf_out[p];
-                }
+            for (unsigned edge = c->pred_head[i]; edge != 0xffu;
+                 edge = c->pred_next[edge]) {
+                const unsigned p = edge >> 1;
+                in |= c->out_set[p];
+                cfin |= cf_out[p];
             }
             const x86_insn_t *x = &c->in[i];
             /* after the interpreter or a helper the flags are in rt, as at
@@ -667,13 +766,7 @@ static void plan_sync(tctx_t *c, uint64_t reach, int p)
         if (c->in[r].op == XO_INCDEC)
             c->need_cf[r] = 1;
     } else if (r == -1) {
-        for (int k = 0; k < c->n; ++k) {
-            if (reach & (1ull << k)) {
-                c->mat[k] = 1;
-                if (c->in[k].op == XO_INCDEC)
-                    c->need_cf[k] = 1;
-            }
-        }
+        c->plan_mat |= reach & ~NONE_BIT;
     }
 }
 
@@ -753,59 +846,71 @@ static int side_producer(const tctx_t *c, int i)
     return in->op == XO_STR && in->rep ? -1 : c->pfp[i];
 }
 
-static void plan(tctx_t *c)
+static bool plan(tctx_t *c)
 {
-    memset(c->mat, 0, sizeof(c->mat));
-    memset(c->need_cf, 0, sizeof(c->need_cf));
-    memset(c->full, 0, sizeof(c->full));
-    for (int i = 0; i < c->n; ++i) {
-        const x86_insn_t *in = &c->in[i];
-        c->pfp[i] = (int8_t)pred_fall_producer(c, i);
-        c->local_jcc[i] = 0;
-        if ((in->op == XO_JCC || in->op == XO_LOOPCC) && c->pfp[i] >= 0) {
-            const x86_insn_t *p = &c->in[c->pfp[i]];
-            jstep_t s[2];
-            /* LOOPZ / LOOPNZ test ZF: the condition code 4 (JZ) */
-            const int cc = in->op == XO_JCC ? in->sub : 4;
-            c->local_jcc[i] = !x86_is_carry_op(p) &&
-                              jcc_map(x86_flag_kind(p), p->op == XO_INCDEC, cc, s) >= 0;
+    if (c->plan_pass == 0) {
+        for (; c->plan_i < c->n; ++c->plan_i) {
+            if (xlat_compile_irq(c->rt))
+                return false;
+            const int i = c->plan_i;
+            const x86_insn_t *in = &c->in[i];
+            c->pfp[i] = (int8_t)pred_fall_producer(c, i);
+            c->local_jcc[i] = 0;
+            if ((in->op == XO_JCC || in->op == XO_LOOPCC) && c->pfp[i] >= 0) {
+                const x86_insn_t *p = &c->in[c->pfp[i]];
+                jstep_t s[2];
+                const int cc = in->op == XO_JCC ? in->sub : 4;
+                c->local_jcc[i] = !x86_is_carry_op(p) &&
+                                  jcc_map(x86_flag_kind(p), p->op == XO_INCDEC, cc, s) >= 0;
+            }
+            if (x86_accesses_mem(in) || in->op == XO_FPU || in->op == XO_IO || x86_is_div(in))
+                plan_sync(c, c->in_set[i], side_producer(c, i));
+            if (dyn_exit(in))
+                plan_sync(c, c->out_set[i], edge_producer(c, i));
+            if (flags_in_rt(in))
+                plan_sync(c, c->in_set[i], c->pfp[i]);
+            if ((in->op == XO_JCC || in->op == XO_LOOPCC) && !c->local_jcc[i])
+                plan_sync(c, c->in_set[i], c->pfp[i]);
+            const int ep = edge_producer(c, i);
+            if (falls_through(in) && edge_needs_sync(i, c->fall_idx[i]))
+                plan_sync(c, c->out_set[i], ep);
+            if (is_branch(in) && edge_needs_sync(i, c->tgt_idx[i]))
+                plan_sync(c, c->out_set[i], ep);
         }
+        c->plan_i = 0;
+        c->plan_pass = 1;
     }
-    for (int i = 0; i < c->n; ++i) {
-        const x86_insn_t *in = &c->in[i];
-        if (x86_accesses_mem(in) || in->op == XO_FPU || in->op == XO_IO || x86_is_div(in))
-            plan_sync(c, c->in_set[i], side_producer(c, i));  /* side exit */
-        if (dyn_exit(in))
-            plan_sync(c, c->out_set[i], edge_producer(c, i)); /* exit to the popped IP */
-        if (flags_in_rt(in))
-            plan_sync(c, c->in_set[i], c->pfp[i]);            /* the helper reads rt */
-        if ((in->op == XO_JCC || in->op == XO_LOOPCC) && !c->local_jcc[i])
-            plan_sync(c, c->in_set[i], c->pfp[i]);            /* helper condition */
-        const int ep = edge_producer(c, i);
-        if (falls_through(in) && edge_needs_sync(i, c->fall_idx[i]))
-            plan_sync(c, c->out_set[i], ep);
-        if (is_branch(in) && edge_needs_sync(i, c->tgt_idx[i]))
-            plan_sync(c, c->out_set[i], ep);
-    }
-    /* ADC/SBB always store their flags and read CF from rt. INC/DEC whose
-     * flags reach rt read CF from rt too. The CF producers that reach them
-     * must have stored it. */
-    for (int i = 0; i < c->n; ++i) {
-        if (x86_is_carry_op(&c->in[i])) {
-            c->mat[i] = 1;
-            c->need_cf[i] = 1;
+    if (c->plan_pass == 1) {
+        /* Only INC/DEC materialized by the first pass, reconstructed INC/DEC
+         * and ADC/SBB require CF. Full CF materialization must not feed back
+         * into that set (same order of dependencies as the original plan). */
+        for (; c->plan_i < c->n; ++c->plan_i) {
+            if (xlat_compile_irq(c->rt))
+                return false;
+            const int i = c->plan_i;
+            const uint64_t bit = 1ull << i;
+            const x86_insn_t *in = &c->in[i];
+            if (x86_is_carry_op(in)) {
+                c->plan_full |= bit;
+                c->need_cf[i] = 1;
+            } else if (in->op == XO_INCDEC && (c->plan_mat & bit)) {
+                c->need_cf[i] = 1;
+            }
+            if (c->need_cf[i])
+                c->plan_full |= c->cf_in[i] & ~NONE_BIT;
         }
+        c->plan_mat |= c->plan_full;
+        c->plan_i = 0;
+        c->plan_pass = 2;
     }
-    /* The code that reads CF from rt (INC/DEC, ADC/SBB) needs it stored, not
-     * pending (xlat_rt_pending): only the entry state may be pending there. */
-    for (int i = 0; i < c->n; ++i)
-        if (c->need_cf[i])
-            for (int k = 0; k < c->n; ++k)
-                if (c->cf_in[i] & (1ull << k))
-                    c->mat[k] = c->full[k] = 1;
-    for (int i = 0; i < c->n; ++i)
-        if (x86_is_carry_op(&c->in[i]))
-            c->full[i] = 1;
+    for (; c->plan_i < c->n; ++c->plan_i) {
+        if (xlat_compile_irq(c->rt))
+            return false;
+        const int i = c->plan_i;
+        c->mat[i] = (uint8_t)((c->plan_mat >> i) & 1u);
+        c->full[i] = (uint8_t)((c->plan_full >> i) & 1u);
+    }
+    return true;
 }
 
 static void local_patch(tctx_t *c, uint32_t site, int cond);
@@ -3540,6 +3645,9 @@ bool xlat_translate_step(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int 
     *full = false;
     tctx_t *const c = (tctx_t *)ctx_mem;
     bool ok = false;
+    const bool measure = rt->wall_deadline != 0;
+    bool finishing = resume && c->phase != PH_DISCOVER;
+    uint32_t phase_t0 = measure && finishing ? *rt->clock : 0;
     c->rt = rt;
     out->reject = XLAT_RJ_NONE;
     if (resume) {
@@ -3547,6 +3655,7 @@ bool xlat_translate_step(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int 
         case PH_DISCOVER:  goto discover_phase;
         case PH_FLOW:      goto flow_phase;
         case PH_PLAN:      goto plan_phase;
+        case PH_RUNS:      goto runs_phase;
         case PH_EMIT_INIT: goto emit_init_phase;
         case PH_EMIT:      goto emit_phase;
         case PH_STUBS:     goto stubs_phase;
@@ -3555,6 +3664,7 @@ bool xlat_translate_step(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int 
         }
     }
     c->phase = PH_DISCOVER;
+    c->final_us = 0;
     c->variant = 0;
     c->discovering = false;
     c->cs_base = rt->seg_base[1];
@@ -3583,10 +3693,11 @@ bool xlat_translate_step(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int 
 discover_phase:;
     int why;
     for (;;) {
-        why = discover(c, ip);
+        /* An existing region extended with extra entries must retain them. */
+        why = discover(c, ip, n_extra == 0, a);
         if (why == XLAT_RJ_DEFER)
             goto deferred;
-        if (c->variant == 0 && why == XLAT_RJ_NONE && c->fn) {
+        if (c->variant == 0 && why == XLAT_RJ_NONE && c->fn && !c->adaptive_cut) {
             bool calls = false;
             for (int i = 0; i < c->n && !calls; ++i)
                 calls = x86_is_call(&c->in[i]) && c->tgt_idx[i] >= 0;
@@ -3612,6 +3723,17 @@ discover_phase:;
         out->reject = (uint8_t)why;
         goto done;
     }
+    finishing = true;
+    phase_t0 = c->seal_at;
+    out->adaptive_cut = c->adaptive_cut;
+    out->n_next = 0;
+    if (c->adaptive_cut) {
+        for (int k = c->head; k < c->tail && out->n_next < 4; ++k)
+            remember_continuation(c, out, (uint16_t)c->queue[k]);
+        if (!c->no_calls)
+            for (int k = c->dhead; k < c->dtail && out->n_next < 4; ++k)
+                remember_continuation(c, out, c->deferred[k]);
+    }
     /* More entry points (xlat_cache: hot region exits that came to these
      * instructions): leaders, entered with the state in rt */
     for (int k = 0; k < n_extra; ++k) {
@@ -3621,8 +3743,10 @@ discover_phase:;
             goto done;
         }
         c->leader[j] = 1;
+        c->head_marks |= 1ull << j;
     }
     mark_dead_flags(c);
+    build_preds(c);
     memset(c->in_set, 0, sizeof(c->in_set));
     memset(c->out_set, 0, sizeof(c->out_set));
     memset(c->cf_in, 0, sizeof(c->cf_in));
@@ -3634,29 +3758,39 @@ flow_phase:
     if (!dataflow(c))
         goto deferred;
     c->phase = PH_PLAN;
+    c->plan_pass = 0;
+    c->plan_i = 0;
+    c->plan_mat = c->plan_full = 0;
+    memset(c->need_cf, 0, sizeof(c->need_cf));
 plan_phase:
-    if (xlat_compile_irq(rt))
+    if (!plan(c))
         goto deferred;
-    plan(c);
     /* Source copies: omit only the runtime-read operand of unprefixed INT.
      * The opcode and every other decoded byte remain protected. */
     out->n_runs = 0;
-    uint32_t data = 0;
-    for (int i = 0; i < c->n; ++i) {
+    c->data_bytes = 0;
+    c->plan_i = 0;
+    c->phase = PH_RUNS;
+runs_phase:
+    for (; c->plan_i < c->n; ++c->plan_i) {
+        if (xlat_compile_irq(rt))
+            goto deferred;
+        const int i = c->plan_i;
         const uint16_t len = (uint16_t)(c->in[i].len -
             (c->in[i].op == XO_INTERP && (c->in[i].sub & XLAT_XI_INT_IMM) != 0));
         if (out->n_runs && out->runs[out->n_runs - 1].ip + out->runs[out->n_runs - 1].len ==
                                c->in[i].ip) {
-            out->runs[out->n_runs - 1].len += len;
+            const uint32_t old = out->runs[out->n_runs - 1].len;
+            const uint32_t total = old + len;
+            out->runs[out->n_runs - 1].len = (uint16_t)total;
+            c->data_bytes += ((total + 3u) & ~3u) - ((old + 3u) & ~3u);
         } else {
             out->runs[out->n_runs].ip = c->in[i].ip;
             out->runs[out->n_runs].len = len;
             out->n_runs++;
+            c->data_bytes += 8u + ((len + 3u) & ~3u);
         }
     }
-    for (int r = 0; r < out->n_runs; ++r)
-        data += 8u + ((out->runs[r].len + 3u) & ~3u);
-    c->data_bytes = data;
     c->phase = PH_EMIT_INIT;
 emit_init_phase:
     if (xlat_compile_irq(rt))
@@ -3688,10 +3822,12 @@ stubs_phase:
     if (!emit_stubs(c))
         goto deferred;
     c->phase = PH_FINISH;
+    c->dfix_i = c->fix_i = c->entry_i = 0;
+    out->n_entries = 0;
 finish_phase:
-    if (xlat_compile_irq(rt))
-        goto deferred;
     if (c->e.full) {
+        if (xlat_compile_irq(rt))
+            goto deferred;
         /* labels past the space are not real: no patching */
         *full = true;
         out->reject = XLAT_RJ_FULL;
@@ -3699,7 +3835,10 @@ finish_phase:
         c->phase = PH_EMIT_INIT;
         goto done;
     }
-    for (int k = 0; k < c->n_dfix; ++k) {
+    for (; c->dfix_i < c->n_dfix; ++c->dfix_i) {
+        if (xlat_compile_irq(rt))
+            goto deferred;
+        const int k = c->dfix_i;
         /* Forward continuation or native SIDE stub, from the payload end. */
         const int idx = c->dfix[k].insn;
         const uint32_t at = c->dfix[k].pos;
@@ -3711,14 +3850,32 @@ finish_phase:
         c->e.buf[at] = (uint8_t)(to - (at + 2u));
         c->e.buf[at + 1] = (uint8_t)((to - (at + 2u)) >> 8);
     }
-    for (int k = 0; k < c->n_fix; ++k)
+    for (; c->fix_i < c->n_fix; ++c->fix_i) {
+        if (xlat_compile_irq(rt))
+            goto deferred;
+        const int k = c->fix_i;
         if (!arm_patch_branch(&c->e, c->fix[k].site, c->label[c->fix[k].insn], c->fix[k].cond))
             c->overflow = true;
+    }
     if (c->overflow) {
         out->reject = XLAT_RJ_EMIT;
         goto done;
     }
 
+    for (; c->entry_i < c->n; ++c->entry_i) {
+        if (xlat_compile_irq(rt))
+            goto deferred;
+        const int i = c->entry_i;
+        if (c->leader[i]) {
+            out->entries[out->n_entries].ip = c->in[i].ip;
+            out->entries[out->n_entries].mark = (c->head_marks >> i) & 1u;
+            out->entries[out->n_entries].code_off = c->label[i];
+            out->n_entries++;
+        }
+    }
+    if (xlat_compile_irq(rt))
+        goto deferred;
+    /* Validation and publication must remain in the same slice. */
     /* Validate the exact bytes decoded before any suspension. */
     for (int s = 0; s < c->n_source; ++s) {
         const uint32_t linear = c->cs_base + c->source[s].ip;
@@ -3733,27 +3890,6 @@ finish_phase:
     out->code_len = c->e.pos - a->code_top;
     out->lo = c->lo;
     out->span = c->span;
-    out->n_entries = 0;
-    for (int i = 0; i < c->n; ++i) {
-        if (c->leader[i]) {
-            /* Also mark call continuations: an interpreted callee can
-             * return straight to an existing native entry. */
-            bool head = c->in[i].ip == ip ||
-                        (native_string(&c->in[i]) && c->in[i].rep);
-            for (int j = 0; j < c->n && !head; ++j)
-                head = (j >= i && c->tgt_idx[j] == i) ||
-                       (sti_pop(c, j) >= 0 && (uint16_t)(c->in[j].ip + 2u) == c->in[i].ip) ||
-                       ((x86_is_call(&c->in[j]) ||
-                         (c->in[j].op == XO_INTERP && (c->in[j].sub & XLAT_XI_INT_MASK))) &&
-                        (uint16_t)(c->in[j].ip + c->in[j].len) == c->in[i].ip);
-            for (int k = 0; k < n_extra && !head; ++k)
-                head = c->in[i].ip == extra[k];
-            out->entries[out->n_entries].ip = c->in[i].ip;
-            out->entries[out->n_entries].mark = head;
-            out->entries[out->n_entries].code_off = c->label[i];
-            out->n_entries++;
-        }
-    }
     out->data_size = c->data_bytes;
     a->code_top = (c->e.pos + 3u) & ~3u;
     ok = true;
@@ -3762,6 +3898,10 @@ deferred:
     /* Preserve the context and uncommitted arena window. */
     out->reject = XLAT_RJ_DEFER;
 done:
+    if (measure && finishing)
+        c->final_us += *rt->clock - phase_t0;
+    if (ok)
+        out->final_us = c->final_us;
     return ok;
 }
 

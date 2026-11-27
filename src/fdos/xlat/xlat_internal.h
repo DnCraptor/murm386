@@ -32,7 +32,13 @@
 #ifndef XLAT_ARENA_SIZE
 #define XLAT_ARENA_SIZE      (16u * 1024u)   /* code + source copies, allocated on first use */
 #endif
-#define XLAT_MAX_INSNS       63              /* per region; bit 63 of a set is "entry state" */
+#define XLAT_MAX_INSNS       63              /* storage capacity; bit 63 is "entry state" */
+#ifndef XLAT_REGION_INSNS
+#define XLAT_REGION_INSNS    XLAT_MAX_INSNS  /* soft threshold; 63 disables adaptive cuts */
+#endif
+#if XLAT_REGION_INSNS < 1 || XLAT_REGION_INSNS > XLAT_MAX_INSNS
+#error "XLAT_REGION_INSNS must be in 1..XLAT_MAX_INSNS"
+#endif
 #ifndef XLAT_MAX_REGIONS
 #define XLAT_MAX_REGIONS     384             /* region slots (entry_t.region, xlat_link_t.region: 16 bits) */
 #endif
@@ -377,6 +383,9 @@ typedef struct xlat_region_out {
     uint32_t need;                     /* XLAT_RJ_FULL: arena bytes the region needs (code + copies) */
     uint8_t reject;                    /* XLAT_RJ_* when no region was built */
     uint8_t n_insns, n_interp;         /* what discovery found (for the log) */
+    uint8_t adaptive_cut, n_next;       /* graph sealed by time; unvisited outgoing edges */
+    uint16_t next_ip[4];
+    uint32_t final_us;                 /* actual active time after closing discovery */
     uint8_t fn;                        /* a function region (no loop): the fewest native
                                           instructions an entry runs, else 0 */
 } xlat_region_out_t;
@@ -399,6 +408,13 @@ enum {
 /* A compiler slice is separate from the CPU instruction budget. */
 #define XLAT_COMPILE_QUEUE 16u
 #define XLAT_COMPILE_US 150u
+/* Bootstrap estimate until real finishing times have been observed. */
+#define XLAT_DISCOVER_RESERVE_US (XLAT_COMPILE_US / 4u)
+#define XLAT_FINISH_BUCKETS ((XLAT_MAX_INSNS + 7u) / 8u)
+static inline unsigned xlat_finish_bucket(unsigned n)
+{
+    return (n - 1u) >> 3;
+}
 #define XLAT_COMPILE_RATIO 12 /* microseconds of guest time per microsecond of compiler time */
 #if defined(XLAT_HOST_TEST)
 extern uint32_t xlat_test_compile_ticks;
@@ -458,6 +474,10 @@ typedef struct xlat_arena {
     uint32_t spush, spop;  /* 16-bit PUSH / POP the same way */
     uint32_t back_slow;    /* back edge with the budget used up: the clock */
     uint32_t pend;         /* xlat_rt_pending() call keeping r0-r3 */
+    uint32_t finish_est[XLAT_FINISH_BUCKETS]; /* measured finishing time by length */
+    /* Optional discovery boundary. The target is still a guest CS:IP;
+     * the normal dispatcher validates and links it at execution time. */
+    bool (*reuse_entry)(const xlat_rt_t *rt, uint16_t ip);
 } xlat_arena_t;
 
 /* Build the trampoline (entry/exit sequences) at the start of the arena. */

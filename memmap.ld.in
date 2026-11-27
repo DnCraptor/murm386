@@ -146,6 +146,15 @@ SECTIONS
     
     /* TODO: analize what may be moved higher */
     .lca : {
+        /* Native application ABI helpers for complex arithmetic and powers.
+         * Keep these cold libgcc members in flash before the general libgcc
+         * exclusion below. Leave the normal arithmetic helpers in SRAM. */
+        *libgcc.a:_powisf2.o(.text* .rodata*)
+        *libgcc.a:_powidf2.o(.text* .rodata*)
+        *libgcc.a:_mulsc3.o(.text* .rodata*)
+        *libgcc.a:_muldc3.o(.text* .rodata*)
+        *libgcc.a:_divsc3.o(.text* .rodata*)
+        *libgcc.a:_divdc3.o(.text* .rodata*)
         *(EXCLUDE_FILE(*libgcc.a: *libc.a:*lib_a-mem*.o *libm.a: *emu8950.c.obj *slot_render.cpp.obj) .text*)
     } > FLASH
 
