@@ -174,6 +174,21 @@ typedef struct {
 #endif
 
 static state_t *st;
+/* Keep the IRQ-only sentinel out of published epochs. On wrap force the
+ * old regions through validation and drop stale link entries. */
+static inline uint32_t advance_epoch(void)
+{
+#if XLAT_EVENT_GATE
+    if (st->epoch == XLAT_IRQ_BLOCKED - 1u) {
+        for (unsigned i = 0; i < XLAT_MAX_REGIONS; ++i)
+            st->region[i].epoch = XLAT_IRQ_BLOCKED;
+        for (unsigned i = 0; i < XLAT_LINK_ENTRIES; ++i)
+            st->link[i].key = UINT32_MAX;
+        return st->epoch = 0;
+    }
+#endif
+    return ++st->epoch;
+}
 static bool disabled;
 /* Non-NULL only while xlat_run owns this runtime state. */
 static xlat_rt_t *gap_rt;
@@ -1618,7 +1633,7 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
     }
     if (xlat_dirty) {
         xlat_dirty = false;
-        st->epoch++;
+        advance_epoch();
 #if XLAT_LOG
         ++xlat_stats.epoch_start;
 #endif
@@ -1633,6 +1648,7 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
     rt->links = 0;
     rt->link_alt = 0;
     rt->epoch = st->epoch;
+    xlat_irq_refresh(rt);
     if (rt->fn_key != UINT32_MAX) {
         const entry_t *e = lookup(rt->fn_key);
         const region_t *r = e ? &st->region[e->region] : NULL;
@@ -1743,6 +1759,14 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
         const uint32_t t0 = *rt->clock;
         rt->cur = e->region;
         st->last[e->region] = rt->seq = ++st->seq;
+#if XLAT_EVENT_GATE
+        /* A delayed producer may have closed either gate separately, e.g.
+         * across CLI or a native callback that consumed the request. Repair
+         * both at this synchronized boundary, not just the link epoch. */
+        if (__atomic_load_n(&rt->dispatch_epoch, __ATOMIC_RELAXED) != rt->epoch ||
+            __atomic_load_n(&rt->back_deadline, __ATOMIC_RELAXED) != rt->deadline)
+            xlat_irq_refresh(rt);
+#endif
         tramp(rt, code);
         /* the region it left from (entered through the link table, maybe) */
         region_t *const x = &st->region[rt->cur];
@@ -2852,7 +2876,8 @@ bool XLAT_HOT_FN(xlat_region_still_valid)(xlat_rt_t *rt)
     xlat_dirty = false;
     /* the other regions are compared at their next entry (through
      * xlat_run(): the link table entries are for the old epoch) */
-    rt->epoch = ++st->epoch;
+    rt->epoch = advance_epoch();
+    xlat_irq_refresh(rt);
 #if XLAT_LOG
     ++xlat_stats.epoch_helper;
 #endif

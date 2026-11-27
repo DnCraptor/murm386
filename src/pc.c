@@ -719,6 +719,7 @@ bool pc_xlat_safe_out(void *o, uint16_t port, bool word)
     case 0x20: case 0x21: case 0xa0: case 0xa1:
     case 0x40: case 0x41: case 0x42: case 0x43:
     case 0x80: case 0xed:
+    case 0x61:  /* speaker and PIT channel 2 only; no RAM or mapping writes */
         return !word;
     /* Legacy VGA register writes touch VGAState only. The CPU code
      * cache never covers the VGA aperture (A0000-BFFFF). */

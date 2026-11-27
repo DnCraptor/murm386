@@ -31,6 +31,15 @@ uint32_t xlat_preempt_time(const volatile uint32_t *clock);
 static inline void xlat_preempt_discard(void) {}
 #endif
 
+#ifndef XLAT_IRQ_EVENT_GATE
+#define XLAT_IRQ_EVENT_GATE 1
+#endif
+#if XLAT_IRQ_EVENT_GATE && XRIP_IRQ_BRIDGE && defined(__ARM_ARCH_8M_MAIN__) && !defined(XLAT_HOST_TEST)
+#define XLAT_EVENT_GATE 1
+#else
+#define XLAT_EVENT_GATE 0
+#endif
+
 /*
  * Guest state shared with the generated code. The generated code addresses
  * the fields by the XLAT_RT_* offsets below, so the layout is fixed.
@@ -89,7 +98,58 @@ typedef struct xlat_rt {
     uint32_t budget_limit;        /* total instruction credit, 0 unlimited */
     uint32_t link_alt;            /* secondary link matches, before budget check */
     uint32_t gap2_lo, gap2_hi;    /* second exact negative range, checked in ARM */
+#if XLAT_EVENT_GATE
+    uint32_t dispatch_epoch;      /* actual epoch or XLAT_IRQ_BLOCKED */
+    uint32_t back_deadline;       /* actual deadline or a timestamp already due */
+#endif
 } xlat_rt_t;
+
+/* The two fields are stop gates, not cache invalidation or rate accounting.
+ * Producers can only close them. Reopening publishes the normal values
+ * BEFORE sampling the request latch. SC atomics also cover a producer on
+ * core1 racing an IF change or a new runtime entry on core0. */
+#if XLAT_EVENT_GATE
+#define XLAT_IRQ_BLOCKED UINT32_MAX
+_Static_assert(__atomic_always_lock_free(4, 0) && __atomic_always_lock_free(1, 0),
+               "JIT IRQ gate needs lock-free SRAM accesses");
+static inline void xlat_irq_close(xlat_rt_t *rt, uint32_t now)
+{
+    __atomic_store_n(&rt->dispatch_epoch, XLAT_IRQ_BLOCKED, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&rt->back_deadline, now, __ATOMIC_SEQ_CST);
+}
+static inline void xlat_irq_refresh(xlat_rt_t *rt)
+{
+    /* A cache epoch change does not change the burst's deadline. Avoid
+     * publishing either field again when it already has the desired value.
+     * The request sample must still follow the last possible publication. */
+    if (__atomic_load_n(&rt->dispatch_epoch, __ATOMIC_RELAXED) != rt->epoch)
+        __atomic_store_n(&rt->dispatch_epoch, rt->epoch, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&rt->back_deadline, __ATOMIC_RELAXED) != rt->deadline)
+        __atomic_store_n(&rt->back_deadline, rt->deadline, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(rt->intr, __ATOMIC_SEQ_CST))
+        xlat_irq_close(rt, *rt->clock);
+}
+/* At burst entry xlat_run publishes the actual epoch and deadline before
+ * any generated code runs. Publish only the IRQ source there; inside a
+ * running region an IF change must refresh the gates immediately. */
+static inline void xlat_irq_source(xlat_rt_t *rt, const volatile uint8_t *intr,
+                                   bool refresh)
+{
+    if (__atomic_load_n(&rt->intr, __ATOMIC_RELAXED) != intr) {
+        __atomic_store_n(&rt->intr, intr, __ATOMIC_SEQ_CST);
+        if (refresh)
+            xlat_irq_refresh(rt);
+    }
+}
+#else
+static inline void xlat_irq_refresh(xlat_rt_t *rt) { (void)rt; }
+static inline void xlat_irq_source(xlat_rt_t *rt, const volatile uint8_t *intr,
+                                   bool refresh)
+{
+    (void)refresh;
+    rt->intr = intr;
+}
+#endif
 
 #define XLAT_UMB_BASE   0xC0000u
 #define XLAT_UMB_MARGIN 127u
@@ -128,6 +188,13 @@ typedef struct xlat_rt {
 #define XLAT_RT_LINK_ALT   140
 #define XLAT_RT_GAP2_LO    144
 #define XLAT_RT_GAP2_HI    148
+#if XLAT_EVENT_GATE
+#define XLAT_RT_DISPATCH_EPOCH 152
+#define XLAT_RT_BACK_DEADLINE  156
+#else
+#define XLAT_RT_DISPATCH_EPOCH XLAT_RT_EPOCH
+#define XLAT_RT_BACK_DEADLINE  XLAT_RT_DEADLINE
+#endif
 
 #if UINTPTR_MAX == 0xffffffffu
 _Static_assert(__builtin_offsetof(xlat_rt_t, mem_size) == XLAT_RT_MEM_SIZE &&
@@ -164,6 +231,11 @@ _Static_assert(__builtin_offsetof(xlat_rt_t, mem_size) == XLAT_RT_MEM_SIZE &&
                __builtin_offsetof(xlat_rt_t, gap2_lo) == XLAT_RT_GAP2_LO &&
                __builtin_offsetof(xlat_rt_t, gap2_hi) == XLAT_RT_GAP2_HI,
                "xlat_rt_t layout is used by generated code");
+#if XLAT_EVENT_GATE
+_Static_assert(__builtin_offsetof(xlat_rt_t, dispatch_epoch) == XLAT_RT_DISPATCH_EPOCH &&
+               __builtin_offsetof(xlat_rt_t, back_deadline) == XLAT_RT_BACK_DEADLINE,
+               "JIT IRQ gate offsets");
+#endif
 #endif
 
 enum {

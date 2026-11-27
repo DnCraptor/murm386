@@ -3135,10 +3135,12 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
      * the budget covers the entry; else the epilogue returns to xlat_run(),
      * which decides (and fills the entry). r0-r3, r12 are free here. */
     a->dispatch = e.pos;
+#if !XLAT_EVENT_GATE
     arm_ls_imm(&e, LS_LDR, A_R0, A_R11, XLAT_RT_INTR);
     arm_ls_imm(&e, LS_LDRB, A_R0, A_R0, 0);
     arm_dp_imm(&e, DP_SUB, 1, A_PC, A_R0, 0);                 /* CMP r0, #0 */
     const uint32_t miss1 = arm_branch_slot(&e);
+#endif
     arm_ls_imm(&e, LS_LDRH, A_R1, A_R11, XLAT_RT_CS);
     arm_ls_imm(&e, LS_LDRH, A_R2, A_R11, XLAT_RT_IP);         /* ip & 0xffff */
     arm_dp_reg(&e, DP_ORR, 0, A_R1, A_R2, A_R1, SH_LSL, 16);  /* key */
@@ -3154,7 +3156,7 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     arm_e32(&e, 0xe893u, 0x5005u);                           /* LDM.W r3,{r0,r2,r12,lr} */
     arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R0, A_R1, SH_LSL, 0);   /* CMP key */
     const uint32_t miss2 = arm_branch_slot(&e);
-    arm_ls_imm(&e, LS_LDR, A_R0, A_R11, XLAT_RT_EPOCH);
+    arm_ls_imm(&e, LS_LDR, A_R0, A_R11, XLAT_RT_DISPATCH_EPOCH);
     arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R12, A_R0, SH_LSL, 0);  /* CMP epoch */
     const uint32_t miss3 = arm_branch_slot(&e);
     const uint32_t link_charge = e.pos;
@@ -3179,14 +3181,17 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     arm_e32(&e, 0xe893u, 0x5005u);                           /* LDM.W r3,{r0,r2,r12,lr} */
     arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R0, A_R1, SH_LSL, 0);
     const uint32_t alt_miss = arm_branch_slot(&e);
-    arm_ls_imm(&e, LS_LDR, A_R0, A_R11, XLAT_RT_EPOCH);
+    arm_ls_imm(&e, LS_LDR, A_R0, A_R11, XLAT_RT_DISPATCH_EPOCH);
     arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R12, A_R0, SH_LSL, 0);
     const uint32_t alt_stale = arm_branch_slot(&e);
     arm_ls_imm(&e, LS_LDR, A_R0, A_R11, XLAT_RT_LINK_ALT);
     arm_dp_imm(&e, DP_ADD, 0, A_R0, A_R0, 1);
     arm_ls_imm(&e, LS_STR, A_R0, A_R11, XLAT_RT_LINK_ALT);
     const uint32_t alt_charge = arm_branch_slot(&e);
-    ok &= tramp_patch(&e, miss1, a->epilogue, C_NE) && tramp_patch(&e, miss2, alt_link, C_NE) &&
+#if !XLAT_EVENT_GATE
+    ok &= tramp_patch(&e, miss1, a->epilogue, C_NE);
+#endif
+    ok &= tramp_patch(&e, miss2, alt_link, C_NE) &&
           tramp_patch(&e, miss3, a->epilogue, C_NE) && tramp_patch(&e, miss4, a->epilogue, C_LE) &&
           tramp_patch(&e, alt_miss, a->epilogue, C_NE) && tramp_patch(&e, alt_stale, a->epilogue, C_NE) &&
           tramp_patch(&e, alt_charge, link_charge, C_AL);
@@ -3458,13 +3463,17 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
      * is pending or the burst's deadline passed (leave), else MI with
      * budget and extra raised by XLAT_SLICE_CHECK. Uses r0, r12. */
     a->back_slow = e.pos;
+#if !XLAT_EVENT_GATE
     arm_ls_imm(&e, LS_LDR, A_R12, A_R11, XLAT_RT_INTR);
     arm_ls_imm(&e, LS_LDRB, A_R12, A_R12, 0);
     arm_dp_imm(&e, DP_SUB, 1, A_PC, A_R12, 0);                 /* 1..255: PL */
     const uint32_t irq_pending = arm_branch_slot(&e);
+#endif
+    /* Read the deadline first: if an IRQ closes it between these loads,
+     * the sampled clock must not predate the timestamp of that IRQ. */
+    arm_ls_imm(&e, LS_LDR, A_R0, A_R11, XLAT_RT_BACK_DEADLINE);
     arm_ls_imm(&e, LS_LDR, A_R12, A_R11, XLAT_RT_CLOCK);
     arm_ls_imm(&e, LS_LDR, A_R12, A_R12, 0);
-    arm_ls_imm(&e, LS_LDR, A_R0, A_R11, XLAT_RT_DEADLINE);
     arm_dp_reg(&e, DP_SUB, 1, A_R12, A_R12, A_R0, SH_LSL, 0);   /* clock - deadline */
     const uint32_t expired = arm_branch_slot(&e);
     arm_ls_imm(&e, LS_LDR, A_R12, A_R11, XLAT_RT_BUDGET);
@@ -3475,7 +3484,10 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     arm_ls_imm(&e, LS_STR, A_R12, A_R11, XLAT_RT_EXTRA);
     const uint32_t ret = e.pos;
     arm_bx(&e, A_LR);
-    ok &= tramp_patch(&e, expired, ret, C_PL) && tramp_patch(&e, irq_pending, ret, C_NE);
+    ok &= tramp_patch(&e, expired, ret, C_PL);
+#if !XLAT_EVENT_GATE
+    ok &= tramp_patch(&e, irq_pending, ret, C_NE);
+#endif
 
     /* Interpreter call, reached by BL from region code (emit_interp_call)
      * with two halfwords after the BL: the IP of the instruction, and

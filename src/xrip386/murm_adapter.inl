@@ -246,7 +246,7 @@ uint32_t __time_critical_func(xlat_rt_io)(xlat_rt_t *rt, uint32_t ctl, uint32_t 
                             ((ctl & XLAT_IO_SET_IF) && value);
         const bool shadow = (ctl & XLAT_IO_STI) && !(rt->eflags & 0x200u);
         rt->eflags = (rt->eflags & ~0x200u) | (enable ? 0x200u : 0u);
-        rt->intr = enable ? (const volatile uint8_t *)&cpu->intr : &xlat_no_irq;
+        xlat_irq_source(rt, enable ? (const volatile uint8_t *)&cpu->intr : &xlat_no_irq, true);
         if (shadow)
             cpu->i286_irq_shadow = true;
         return XLAT_IO_DONE | ((shadow || *rt->intr) ? XLAT_IO_BOUNDARY : 0u);
@@ -436,7 +436,7 @@ static inline uint32_t xlat_save_guest(xlat_rt_t *rt, CPU *cpu)
     rt->seg_base[0] = segment_base[reges];
     rt->seg_base[2] = segment_base[regss];
     rt->seg_base[3] = segment_base[regds];
-    rt->intr = ifl ? (const volatile uint8_t *)&cpu->intr : &xlat_no_irq;
+    xlat_irq_source(rt, ifl ? (const volatile uint8_t *)&cpu->intr : &xlat_no_irq, true);
     const bool changed_cs = segregs[regcs] != rt->cs ||
                             segment_base[regcs] != rt->seg_base[1];
     const bool can_continue = fast_memory_size == rt->mem_size && xlat_state_ok(cpu);
@@ -684,7 +684,7 @@ static __time_critical_func() uint32_t xlat_enter(CPU *cpu, uint32_t count, uint
     rt->deadline = rt->budget_limit ? t0 : rt->wall_deadline;
     rt->extra = 0;
     /* With IF clear an IRQ cannot be taken: the back edges need not stop. */
-    rt->intr = ifl ? (const volatile uint8_t *)&cpu->intr : &xlat_no_irq;
+    xlat_irq_source(rt, ifl ? (const volatile uint8_t *)&cpu->intr : &xlat_no_irq, false);
     rt->gpr = (uint32_t *)cpu->gprx;
     rt->lazy_result = flags_result;
     rt->lazy_dst = flags_dst;
@@ -928,7 +928,16 @@ void xrip_enable_fpu(CPU *cpu)
 }
 void xrip_raise_irq(CPU *cpu)
 {
+#if XLAT && XLAT_EVENT_GATE
+    __atomic_store_n(&cpu->intr, true, __ATOMIC_SEQ_CST);
+    /* Publish the request before testing the current IF source. The state
+     * is static SRAM, so a delayed producer can only cause an extra exit.
+     * No guest register or compiler context is changed here. */
+    if (__atomic_load_n(&xlat_state.intr, __ATOMIC_SEQ_CST) == (const volatile uint8_t *)&cpu->intr)
+        xlat_irq_close(&xlat_state, timer_hw->timerawl);
+#else
     cpu->intr = true;
+#endif
 #if XRIP_HW_IRQ_BRIDGE
     xrip_bridge_raise();
 #endif

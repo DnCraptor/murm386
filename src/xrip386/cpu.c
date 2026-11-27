@@ -1036,6 +1036,13 @@ static __attribute__((noinline, used)) void __not_in_flash_func(xrip_deliver_irq
     firstip = XRIP_IP;
     first_esp = dwordregs[regsp];
     external_interrupt((uint8_t)vector);
+#if XLAT && XLAT_EVENT_GATE
+    /* A real IRQ can land on an already published entry. Do not interpret
+     * its first opcode merely because the preceding region stopped. */
+    if (!protected_mode && !pending_trap && !cpu->native_done &&
+        !cpu->i286_irq_shadow && !(cpu->intr && ifl))
+        XLAT_BRANCH_SEEN();
+#endif
 }
 
 #if XRIP_IRQ_BRIDGE && defined(__ARM_ARCH_8M_MAIN__)
@@ -1202,8 +1209,13 @@ static XRIP_INTERPRETER_CODE __attribute__((noinline)) void run_instructions(uin
         if (active_cpu->native_done || XLAT_CUT_PENDING())
             break;
         if (unlikely(XRIP_IP > 0xffffu) && !protected_mode) XRIP_IP &= 0xffffu;
-        if (unlikely(active_cpu->intr && ifl && !active_cpu->i286_irq_shadow))
+        if (unlikely(active_cpu->intr && ifl && !active_cpu->i286_irq_shadow)) {
             xrip_irq_boundary(active_cpu, bridge);
+#if XLAT && XLAT_EVENT_GATE
+            if (XLAT_CUT_PENDING())
+                break;
+#endif
+        }
         if (unlikely(halted))
             break;
         active_cpu->i286_irq_shadow = false;
