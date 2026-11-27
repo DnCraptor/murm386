@@ -926,7 +926,7 @@ void xrip_enable_fpu(CPU *cpu)
     if (cpu->fpu) fpu_delete(cpu->fpu);
     cpu->fpu = fpu_new();
 }
-static void raise_irq(CPU *cpu)
+void xrip_raise_irq(CPU *cpu)
 {
     cpu->intr = true;
 #if XRIP_HW_IRQ_BRIDGE
@@ -955,7 +955,7 @@ CPU *cpu_new(int gen, CPU_CB **callbacks)
         .set_reg8 = set_reg8, .set_reg16 = set_reg16, .set_reg32 = set_reg32,
         .get_seg16 = xrip_get_seg16, .set_seg16 = xrip_set_seg16, .get_flags = xrip_get_flags,
         .set_flag = set_flag, .set_flags = xrip_set_cpu_flags, .enable_fpu = xrip_enable_fpu,
-        .reset = xrip_reset_cpu, .step = xrip_step_cpu, .raise_irq = raise_irq,
+        .reset = xrip_reset_cpu, .step = xrip_step_cpu, .raise_irq = xrip_raise_irq,
         .setexc = xrip_set_exception, .abort = xrip_abort_cpu,
     };
     (void)gen;

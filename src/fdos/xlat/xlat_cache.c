@@ -2470,10 +2470,9 @@ uint32_t xlat_rt_rep(xlat_rt_t *rt, uint32_t src, uint32_t dst, uint32_t ctl)
                                        dst + done * bytes, (ctl & ~0xffffu) | left);
             break;
         }
+        /* The next iteration checks IRQ, deadline and budget before the
+         * next chunk. On completion the generated REP tail checks IRQ. */
         done += n;
-        if (*rt->intr || (rt->wall_deadline &&
-            (int32_t)(*rt->clock - rt->wall_deadline) >= 0))
-            break;
     }
     if (done < count && ((rt->budget_limit && rt->budget <= 0) ||
         (rt->wall_deadline && (int32_t)(*rt->clock - rt->wall_deadline) >= 0))) {
@@ -2702,6 +2701,11 @@ void xlat_log_write(uint16_t psp, const char *name)
                (unsigned long)xlat_stats.compile_defers, (unsigned long)xlat_stats.disk_irq_yields,
                (unsigned long)xlat_stats.compile_resumes, (unsigned long)xlat_stats.compile_cancel,
                (unsigned long)xlat_stats.compile_queue_drops);
+#if XLAT_STACKFUL
+    log_printf("HW psp_done=%lu psp_irq=%lu psp_other=%lu psp_start_cancel=%lu\r\n",
+               (unsigned long)xlat_stats.psp_done, (unsigned long)xlat_stats.psp_irq,
+               (unsigned long)xlat_stats.psp_other, (unsigned long)xlat_stats.psp_start_cancel);
+#endif
     log_printf("I int_direct=%lu bios_leaf=%lu local_checks=%lu local_invalid=%lu local_candidates=%lu gap_candidates=%lu rom_dispatch=%lu\r\n",
                (unsigned long)xlat_stats.int_direct, (unsigned long)xlat_stats.int_leaf,
                (unsigned long)xlat_stats.local_checks, (unsigned long)xlat_stats.local_invalid,

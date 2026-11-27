@@ -294,6 +294,7 @@ extern "C" {
 void xrip_enable_fpu(CPU *cpu);
 void xrip_reset_cpu(CPU *cpu);
 void xrip_step_cpu(CPU *cpu, int count);
+void xrip_raise_irq(CPU *cpu);
 void xrip_set_exception(CPU *cpu, int exception, uword error);
 void xrip_set_cpu_flags(CPU *cpu, uword set, uword clear);
 uint32_t xrip_get_flags(CPU *cpu, u32 mask);
@@ -314,7 +315,9 @@ inline static void cpu_step(CPU *cpu, int stepcount) {
 	xrip_step_cpu(cpu, stepcount);
 }
 inline static void cpu_raise_irq(CPU *cpu) {
-	cpu->intr = true;
+	/* The direct firmware path must notify the same NVIC bridge as the
+	 * ABI accessor. A store to intr alone cannot preempt the PSP worker. */
+	xrip_raise_irq(cpu);
 }
 inline static void cpu_setexc(CPU *cpu, int excno, uword excerr) {
 	xrip_set_exception(cpu, excno, excerr);

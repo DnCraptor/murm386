@@ -18,6 +18,12 @@ static uint32_t *volatile xlat_saved_psp __asm__("xlat_saved_psp") __attribute__
 static const volatile uint8_t *volatile xlat_switch_intr
     __asm__("xlat_switch_intr") __attribute__((used));
 static volatile bool xlat_worker_done;
+#if XLAT_LOG
+/* 0: MSP->PSP cancelled; 1: PSP returned without a guest request;
+ * 2: PSP returned with an asserted guest request. Written while IRQs
+ * are masked in the switch handler, before restoring the MSP context. */
+static volatile uint32_t xlat_switch_result __asm__("xlat_switch_result") __attribute__((used));
+#endif
 static uint32_t xlat_active_us, xlat_active_start;
 
 #if defined(__ARM_FP) && __ARM_FP
@@ -49,6 +55,14 @@ static __attribute__((naked, used)) void __not_in_flash_func(xlat_switch_context
         "cmp r1, #1\n"
         "beq 1f\n"
         /* PSP -> MSP. Preserve the interrupted compiler at its exact PC. */
+#if XLAT_LOG
+        "ldr r2, =xlat_switch_intr\n"
+        "ldr r2, [r2]\n"
+        "ldrb r2, [r2]\n"
+        "adds r2, #1\n"
+        "ldr r3, =xlat_switch_result\n"
+        "str r2, [r3]\n"
+#endif
         "mrs r2, psp\n"
         XLAT_SAVE_PSP_FP
         "stmdb r2!, {r4-r11, lr}\n"
@@ -173,6 +187,9 @@ bool xlat_preempt_run(void (*fn)(void *), void *arg,
     __asm volatile("msr psplim, %0" :: "r"(limit) : "memory");
     xlat_switch_intr = intr;
     xlat_active_start = *clock;
+#if XLAT_LOG
+    xlat_switch_result = 0;
+#endif
     xlat_switch_mode = 1;
     __asm volatile("dmb sy" ::: "memory");
     irq_set_pending((uint)xrip_bridge_irq);
@@ -184,6 +201,16 @@ bool xlat_preempt_run(void (*fn)(void *), void *arg,
     __asm volatile("msr psplim, %0\n\tmsr psp, %1\n\tisb sy"
                    :: "r"(old_limit), "r"(old_psp) : "memory");
     const bool done = xlat_worker_done;
+#if XLAT_LOG
+    if (!xlat_switch_result)
+        ++xlat_stats.psp_start_cancel;
+    else if (done)
+        ++xlat_stats.psp_done;
+    else if (xlat_switch_result == 2)
+        ++xlat_stats.psp_irq;
+    else
+        ++xlat_stats.psp_other;
+#endif
     if (done)
         xlat_preempt_discard();
     return done;

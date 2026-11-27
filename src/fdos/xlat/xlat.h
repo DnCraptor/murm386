@@ -200,6 +200,11 @@ typedef struct xlat_stats {
     uint32_t compile_resumes;   /* work continued from a previous slice */
     uint32_t compile_cancel;    /* unpublished job discarded on memory change */
     uint32_t compile_queue_drops; /* requests denied or displaced by a higher priority */
+#if XLAT_STACKFUL && XLAT_LOG
+    /* Cumulative PSP results. IRQ is sampled in Handler mode, not after
+     * returning to MSP where a new request could have arrived. */
+    uint32_t psp_done, psp_irq, psp_other, psp_start_cancel;
+#endif
     uint32_t disk_irq_yields;   /* ISR service points in native FDOS reads */
     uint32_t fn_regions;        /* regions without a loop (traces, function regions) */
     uint32_t exit_built;        /* of those: built at a hot region exit target */
