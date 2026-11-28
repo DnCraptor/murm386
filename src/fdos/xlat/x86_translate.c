@@ -223,6 +223,7 @@ static bool native_scalar(const x86_insn_t *in)
 {
     switch (in->op) {
     case XO_MOV: return x86_has_mem(in);
+    case XO_STR: return in->sub == STR_LODS || x86_str_flags(in);
     case XO_ALU:
         return in->sub == ALU_ADD && in->a.kind == OPD_MEM &&
                (in->b.kind == OPD_REG || in->b.kind == OPD_IMM);
@@ -499,7 +500,7 @@ static int discover(tctx_t *c, uint16_t start)
             if (c->tgt_idx[i] <= i)
                 c->head_marks |= 1ull << c->tgt_idx[i];
         }
-        if ((native_string(in) && in->rep) ||
+        if ((in->op == XO_STR && in->rep) ||
             (in->op == XO_INTERP && (in->sub & XLAT_XI_OUTS) && in->len == 2)) {
             c->leader[i] = 1;   /* restart after IRQ or partial REP */
             c->head_marks |= 1ull << i;
@@ -2053,7 +2054,9 @@ static void emit_string_cmp(tctx_t *c, int i)
     if (in->rep) {
         arm_uxth(e, A_R12, A_R5);
         arm_dp_imm(e, DP_SUB, 1, A_PC, A_R12, XLAT_REP_CHUNK);
-        emit_branch(c, (dest_t){D_STUB, (int16_t)exit_stub(c, in->ip, XLAT_EXIT_STOP, -1)}, C_HI);
+        /* A large initial CX need not imply a long search. Use the
+         * decoded read helper, not a STOP before the first comparison. */
+        emit_branch(c, side_dest(c, i, 0), C_HI);
     }
     uint32_t top = 0, done = 0;
     if (in->rep) {
@@ -2205,11 +2208,11 @@ static void emit_string(tctx_t *c, int i)
         emit_rep_bulk(c, i);
         return;
     }
-    /* Long non-bulk REP is restartable in XRIP (one element per iteration). */
+    /* Long REP LODS uses the same decoded read path as a memory miss. */
     if (in->rep) {
         arm_uxth(e, A_R12, A_R5);
         arm_dp_imm(e, DP_SUB, 1, A_PC, A_R12, XLAT_REP_CHUNK);
-        emit_branch(c, (dest_t){D_STUB, (int16_t)exit_stub(c, in->ip, XLAT_EXIT_STOP, -1)}, C_HI);
+        emit_branch(c, side_dest(c, i, 0), C_HI);
     }
     /* r2 = step: bytes, or -bytes when DF is set */
     arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_EFLAGS);
@@ -2889,6 +2892,11 @@ static bool emit_scalar_side(tctx_t *c, int i, bool cont, uint32_t xi)
     uint32_t imm = 0;
     const x86_opd_t *src = NULL;
     switch (in->op) {
+    case XO_STR:
+        op = SC_STR_READ;
+        ea = (unsigned)in->sub | (unsigned)in->rep << SC_STR_REP_SHIFT |
+             (unsigned)in->mem_seg << SC_STR_SEG_SHIFT;
+        break;
     case XO_MOV:
         if (in->a.kind == OPD_MEM) {
             op = SC_STORE;

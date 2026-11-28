@@ -2221,6 +2221,117 @@ static uint32_t scalar_address(const xlat_rt_t *rt, const uint32_t *frame, unsig
     return rt->seg_base[(ea >> 3) & 3u] + (uint16_t)off;
 }
 
+/* Read-only string operands use the same mapping as the scalar path.
+ * Keep conventional memory inline; other windows use the XRIP bus read,
+ * without loading or spilling the architectural XRIP register file. */
+static inline uint32_t scalar_string_value(xlat_rt_t *rt, uint32_t a, unsigned bytes)
+{
+    if (!string_ram(rt, a, bytes))
+        return xlat_bus_read(a, bytes);
+    if (bytes == 1u)
+        return rt->mem[a];
+    if (bytes == 2u) {
+        uint16_t v;
+        __builtin_memcpy(&v, rt->mem + a, 2);
+        return v;
+    }
+    uint32_t v;
+    __builtin_memcpy(&v, rt->mem + a, 4);
+    return v;
+}
+
+/* SCAS/CMPS/LODS, including large CX and side exits. The existing scalar
+ * snapshot supplies EAX/ECX/ESI/EDI; no full XRIP state switch or opcode
+ * fetch. Read both operands before committing a comparison. Materialize
+ * the last comparison once, including a partial REP stopped by IRQ. */
+static uint32_t scalar_string_read(xlat_rt_t *rt, uint32_t *frame,
+                                   const uint16_t *d, unsigned bytes)
+{
+    const unsigned kind = d[1] & 7u;
+    const unsigned rep = (d[1] >> SC_STR_REP_SHIFT) & 3u;
+    if ((kind != STR_LODS && kind != STR_CMPS && kind != STR_SCAS) || rep > 2u) {
+        ++xlat_stats.scalar_refused;
+        return SC_REFUSED;
+    }
+    const uint32_t sb = rt->seg_base[(d[1] >> SC_STR_SEG_SHIFT) & 3u];
+    const uint32_t db = rt->seg_base[0];
+    const int step = (rt->eflags & 0x400u) ? -(int)bytes : (int)bytes;
+    const unsigned shift = 32u - bytes * 8u;
+    uint32_t left = rep ? (uint16_t)frame[1] : 1u;
+    uint16_t si = (uint16_t)frame[5], di = (uint16_t)frame[6];
+    uint32_t a = 0, b = 0, done = 0;
+    const uint32_t acc = frame[0] << shift >> shift;
+    bool complete = !left;
+    ++xlat_stats.fast_string_calls;
+    while (left) {
+        if (*rt->intr || (rt->wall_deadline &&
+            (int32_t)(*rt->clock - rt->wall_deadline) >= 0) ||
+            (rt->budget_limit && rt->budget <= 0))
+            break;
+        const uint32_t sa = sb + si, da = db + di;
+        /* Two non-direct reads may have observable device ordering.
+         * Retain the reference path before either read in this case. */
+        if (kind == STR_CMPS && !string_ram(rt, sa, bytes) &&
+            !string_ram(rt, da, bytes)) {
+            if (!done) {
+                ++xlat_stats.scalar_refused;
+                return SC_REFUSED;
+            }
+            break;
+        }
+        a = kind == STR_SCAS ? acc : scalar_string_value(rt, sa, bytes);
+        if (kind != STR_LODS)
+            b = scalar_string_value(rt, da, bytes);
+        if (kind != STR_SCAS)
+            si = (uint16_t)(si + step);
+        if (kind != STR_LODS)
+            di = (uint16_t)(di + step);
+        ++done;
+        --left;
+        if (rep)
+            --rt->budget;
+        /* Like string_step(): CX exhaustion or the compare condition
+         * ends REP. CX=0 before entry leaves flags and registers alone. */
+        complete = !left || (kind != STR_LODS &&
+                   ((rep == 1u && a != b) || (rep == 2u && a == b)));
+        if (complete)
+            break;
+    }
+    if (done) {
+        if (kind != STR_SCAS)
+            frame[5] = (frame[5] & 0xffff0000u) | si;
+        if (kind != STR_LODS)
+            frame[6] = (frame[6] & 0xffff0000u) | di;
+        if (rep)
+            frame[1] = (frame[1] & 0xffff0000u) | (uint16_t)left;
+        if (kind == STR_LODS)
+            scalar_put(rt, frame, 0, bytes, a);
+        else {
+            /* Exact XRIP sub_flags representation, including AF/OF/PF. */
+            rt->lazy_dst = a << shift;
+            rt->lazy_src = (~b) << shift;
+            rt->lazy_result = (a - b) << shift;
+            rt->lazy_cf = a < b;
+            rt->lazy_op = (uint8_t)((FK_SUB << 5) | shift);
+        }
+    }
+    xlat_stats.fast_string_elems += done;
+    rt->ip = complete ? d[5] : d[6];
+    if (!complete || *rt->intr) {
+        if (!complete && !*rt->intr && ((rt->budget_limit && rt->budget <= 0) ||
+            (rt->wall_deadline && (int32_t)(*rt->clock - rt->wall_deadline) >= 0)))
+            ++xlat_stats.rep_yield;
+        ++xlat_stats.scalar_stop;
+        return SC_STOP;
+    }
+    if (!(d[0] & SC_CONT)) {
+        ++xlat_stats.scalar_dispatch;
+        return SC_DISPATCH;
+    }
+    ++xlat_stats.scalar_resume;
+    return SC_RESUME;
+}
+
 /* Run an already decoded scalar operation. The descriptor belongs to
  * generated code, not guest memory. On refusal no guest effects occurred;
  * after a committed store, never execute the old instruction again. */
@@ -2235,10 +2346,12 @@ uint32_t xlat_rt_scalar(xlat_rt_t *rt, uint32_t *frame, const uint16_t *d)
         ++xlat_stats.scalar_stop;
         return SC_STOP;
     }
-    if (bytes > 4u || op > SC_SEG_POP) {
+    if (bytes > 4u || op > SC_STR_READ) {
         ++xlat_stats.scalar_refused;
         return SC_REFUSED;
     }
+    if (op == SC_STR_READ)
+        return scalar_string_read(rt, frame, d, bytes);
     switch (op) {
     case SC_LOAD:
     case SC_MOVZX:
