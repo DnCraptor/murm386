@@ -2036,6 +2036,48 @@ static void emit_mul_value(tctx_t *c, int i, int v)
     }
 }
 
+/* Guarded straight-line unsigned MUL/DIV pair. DIV's flags are preserved
+ * on its independent entry and on #DE; only the successful combined path
+ * may omit the MUL flags, because the next register ALU overwrites them.
+ * No guest registers or flags are committed before the fault guard. */
+static void emit_muldiv_pair(tctx_t *c, int i)
+{
+    const x86_insn_t *m = &c->in[i];
+    if (m->local || m->sub != 4 || m->size != 16 || m->b.kind != OPD_REG ||
+        i + 2 >= c->n || c->fall_idx[i] != i + 1 || c->fall_idx[i + 1] != i + 2)
+        return;
+    const x86_insn_t *d = &c->in[i + 1], *a = &c->in[i + 2];
+    if (d->op != XO_MULDIV || d->sub != 6 || d->size != 16 || d->b.kind != OPD_REG ||
+        d->b.reg == 0 /* AX */ || d->b.reg == 2 /* DX */ ||
+        a->op != XO_ALU || x86_is_carry_op(a) || x86_has_mem(a))
+        return;
+
+    arm_emit_t *e = &c->e;
+    const int v = get_raw(c, &m->b, 16, A_R2);
+    arm_uxth(e, A_R2, v);
+    arm_uxth(e, A_R1, A_R4);
+    arm_mul(e, A_R1, A_R1, A_R2);  /* full unsigned product */
+    if (m->b.reg == d->b.reg) {
+        /* For a nonzero unchanged divisor, (AX * d) / d always fits. */
+        arm_dp_imm(e, DP_SUB, 1, A_PC, A_R2, 0);
+    } else {
+        const int w = get_raw(c, &d->b, 16, A_R2);
+        arm_uxth(e, A_R2, w);
+        arm_lsr(e, A_R3, A_R1, 16);
+        /* Unsigned quotient fits iff high word < divisor, including d=0. */
+        arm_dp_reg(e, DP_SUB, 1, A_PC, A_R3, A_R2, SH_LSL, 0);
+    }
+    const uint32_t fault = arm_branch_slot(e);
+    arm_udiv(e, A_R3, A_R1, A_R2);
+    arm_mls(e, A_R1, A_R3, A_R2, A_R1);
+    arm_bfi(e, A_R4, A_R3, 0, 16);
+    arm_bfi(e, A_R6, A_R1, 0, 16);
+    emit_branch(c, make_dest(c, i, a->ip), C_AL);
+    /* Fault: original MUL (including flags), then original DIV and #DE.
+     * The independent DIV label is unchanged for all other predecessors. */
+    local_patch(c, fault, m->b.reg == d->b.reg ? C_EQ : C_CS);
+}
+
 static void emit_muldiv(tctx_t *c, int i)
 {
     arm_emit_t *e = &c->e;
@@ -2051,6 +2093,7 @@ static void emit_muldiv(tctx_t *c, int i)
             emit_mul_value(c, i, v);
         return;
     }
+    emit_muldiv_pair(c, i);
     const int r = sync_recon(c, c->in_set[i], c->pfp[i]);
     if (r >= 0)
         emit_recon(c, r);
