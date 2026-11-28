@@ -50,6 +50,9 @@ typedef struct {
     uint8_t trace_min;     /* xlat_translate's trace_min it was built with */
     uint8_t n_extra;       /* entry points added (add_entry) */
     uint16_t extra[XLAT_EXTRA_MAX];
+#if XLAT_PRECOMPILE && XLAT_LOG
+    bool precompiled;
+#endif
 } region_t;
 
 #define XLAT_PAGES 4096u   /* XLAT_LOG: xlat_prof_page() pages (256 bytes) of the first MiB */
@@ -144,7 +147,10 @@ typedef struct {
 #endif
     } job;
 #if XLAT_LOG
-    /* Per-length counts for ALL successful publications, not just T dumps.
+#if XLAT_PRECOMPILE
+    uint32_t startup_seq, startup_used;
+#endif
+    /* Per-length counts for successful runtime publications, including ones without T dumps.
      * state_t is allocated in PSRAM; no new resident SRAM tables. */
     struct {
         uint32_t built, first, quanta, us, arm, final_us;
@@ -595,6 +601,18 @@ static void clear_compile_blocked(void)
     xlat_call_queue_blocked = false;
 }
 
+#if XLAT_PRECOMPILE && XLAT_LOG
+static void note_startup_use(unsigned idx)
+{
+    region_t *r = &st->region[idx];
+    /* The existing entry sequence also tracks entries through ARM links. */
+    if (r->precompiled && st->last[idx] != st->startup_seq) {
+        r->precompiled = false;
+        ++st->startup_used;
+    }
+}
+#endif
+
 static void reset_tables(void)
 {
     xlat_preempt_discard();
@@ -605,6 +623,10 @@ static void reset_tables(void)
     st->compile_credit = 0;
     st->compile_burst = 0;
     log_region_counts();    /* the regions are about to go */
+#if XLAT_PRECOMPILE && XLAT_LOG
+    for (unsigned i = 0; i < XLAT_MAX_REGIONS; ++i)
+        note_startup_use(i);
+#endif
     xlat_memset(st->region, 0, sizeof(st->region));
     xlat_memset(st->page_regions, 0, sizeof(st->page_regions));
     xlat_memset(st->last, 0, sizeof(st->last));
@@ -625,7 +647,7 @@ static void reset_tables(void)
     xlat_stats.code_bytes = st->ring_lo;
 }
 
-static __attribute__((noinline)) bool ready(void)
+static __attribute__((noinline)) bool ready(bool optional)
 {
     if (st)
         return true;
@@ -656,7 +678,7 @@ static __attribute__((noinline)) bool ready(void)
     }
 #endif
     if (!block) {
-        disabled = true;
+        disabled = !optional;
         xlat_stats.alloc_failed = 1;
         return false;
     }
@@ -885,6 +907,9 @@ static void unlink_region(int k)
 static void evict_storage(int k)
 {
     region_t *r = &st->region[k];
+#if XLAT_PRECOMPILE && XLAT_LOG
+    note_startup_use((unsigned)k);
+#endif
     if (log_dump_room())
         log_region_count(r);
     index_region((unsigned)k, false);
@@ -1176,6 +1201,9 @@ void xlat_compile_credit(uint32_t guest_us)
     }
 }
 
+static int publish_region(const xlat_rt_t *rt, uint16_t ip, int trace_min,
+                          const uint16_t *extra, int n_extra);
+
 #if XLAT_STACKFUL
 /* Only private compilation executes on PSP. The window is reserved and
  * all arguments/results live in the PSRAM job across hardware switches. */
@@ -1184,7 +1212,7 @@ static void translate_worker(void *arg)
     state_t *s = arg;
     s->job.result = xlat_translate_step(&s->arena, &s->job.rt, s->job.ip,
                                         s->job.trace_min, s->job.extra, s->job.n_extra,
-                                        &s->out, &s->job.full, s->ctx, s->job.attempt != 0);
+                                        &s->out, &s->job.full, s->ctx, s->job.attempt != 0, NULL);
 }
 #endif
 
@@ -1193,7 +1221,7 @@ static int translate_at(const xlat_rt_t *rt, uint16_t ip, int trace_min, const u
 {
     xlat_region_out_t *out = &st->out;
     xlat_arena_t *const a = &st->arena;
-    bool full, evicted = false;
+    bool full;
     for (; st->job.attempt < 3;) {
         if (xlat_compile_irq(rt)) {
 #if !XLAT_STACKFUL
@@ -1239,7 +1267,7 @@ static int translate_at(const xlat_rt_t *rt, uint16_t ip, int trace_min, const u
         const bool resume = st->job.started || st->job.attempt != 0;
         st->job.started = true;
         if (xlat_translate_step(a, rt, ip, trace_min, extra, n_extra, out, &full,
-                                st->ctx, resume))
+                                st->ctx, resume, NULL))
             goto built;
         if (out->reject == XLAT_RJ_DEFER)
             return -1;
@@ -1259,9 +1287,18 @@ static int translate_at(const xlat_rt_t *rt, uint16_t ip, int trace_min, const u
     }
     return -1;
 
-built:;
-    const uint32_t publish_t0 = rt->wall_deadline ? *rt->clock : 0;
+built:
     st->job.pending = false;
+    return publish_region(rt, ip, trace_min, extra, n_extra);
+}
+
+static int publish_region(const xlat_rt_t *rt, uint16_t ip, int trace_min,
+                          const uint16_t *extra, int n_extra)
+{
+    xlat_region_out_t *const out = &st->out;
+    xlat_arena_t *const a = &st->arena;
+    bool evicted = false;
+    const uint32_t publish_t0 = rt->wall_deadline ? *rt->clock : 0;
     const int idx = take_slot(&evicted);   /* not in the new chunk: it was free */
     region_t *r = &st->region[idx];
     r->cs = rt->cs;
@@ -1326,6 +1363,83 @@ built:;
         out->final_us += *rt->clock - publish_t0;
     return idx;
 }
+
+#if XLAT_PRECOMPILE
+void xlat_precompile_image(uint8_t *mem, uint32_t mem_size, uint32_t key,
+                           uint32_t linear, uint32_t size, const volatile uint32_t *clock)
+{
+    const uint32_t entry = ((key >> 16) << 4) + (uint16_t)key;
+    if (!size || linear >= 0x100000u || size > 0x100000u - linear ||
+        entry - linear >= size || gap_rt || flush_pending ||
+        (st && (st->held_bytes || st->job.pending || st->queued)) ||
+        stack_free() < XLAT_STACK_NEEDED || !xlat_code_direct(linear, size))
+        return;
+
+#if XLAT_LOG
+    const uint32_t t0 = *clock;
+#endif
+    if (!ready(true))
+        return;
+
+    xlat_arena_t *const a = &st->arena;
+    const uint32_t room = (a->size - st->head) / 8u;
+    const uint32_t limit = (st->head + (room < 32768u ? room : 32768u)) & ~7u;
+    xlat_image_t image = {.lo = linear, .end = linear + size, .keys = {key}, .n = 1};
+    const int trace_min = XLAT_TRACES ? XLAT_TRACE_MIN : 0;
+    unsigned tried = 0, built = 0;
+#if XLAT_LOG
+    const uint32_t arm0 = xlat_stats.compiled_code_bytes;
+    st->startup_seq = st->seq;
+#endif
+    /* Borrow the idle compiler's PSRAM scratch. No burst budget or guest
+     * IRQ pointer. Pending guest IRQs are serviced at regular burst entry. */
+    xlat_rt_t *const rt = &st->job.rt;
+    xlat_memset(rt, 0, sizeof(*rt));
+    rt->mem = mem;
+    rt->mem_size = mem_size;
+    rt->clock = clock;
+    st->mem = mem;
+    st->mem_size = mem_size;
+    for (unsigned i = 0; i < image.n && st->head < limit && built < (XLAT_MAX_REGIONS + 1u) / 2u; ++i) {
+        const uint32_t target = image.keys[i];
+        if (lookup(target))
+            continue;
+        rt->cs = (uint16_t)(target >> 16);
+        rt->seg_base[1] = (uint32_t)rt->cs << 4;
+        rt->ip = (uint16_t)target;
+        a->code_top = st->head;
+        a->data_bottom = limit;
+        bool full;
+        ++tried;
+        if (!xlat_translate_step(a, rt, (uint16_t)rt->ip, trace_min, NULL, 0,
+                                 &st->out, &full, st->ctx, false, &image))
+            continue;
+#if XLAT_STACKFUL
+        if (!xlat_translate_validate(rt, st->ctx))
+            continue;
+#endif
+        const int idx = publish_region(rt, (uint16_t)rt->ip, trace_min, NULL, 0);
+#if XLAT_LOG
+        st->region[idx].precompiled = true;
+#else
+        (void)idx;
+#endif
+        ++built;
+    }
+    a->code_top = st->head;
+    a->data_bottom = window_end();
+#if XLAT_LOG
+    if (log_dump_room())
+        log_printf("A %04X:%04X load=%05lX size=%lu tried=%u regions=%u entry=%u arm=%lu us=%lu\r\n",
+                   (unsigned)(key >> 16), (unsigned)(uint16_t)key, (unsigned long)linear,
+                   (unsigned long)size, tried, built, (unsigned)(lookup(key) != NULL),
+                   (unsigned long)(xlat_stats.compiled_code_bytes - arm0),
+                   (unsigned long)(*clock - t0));
+#else
+    (void)tried;
+#endif
+}
+#endif
 
 /* The live region of this CS whose x86 code holds rt->cs:ip, or -1. */
 static int covering(const xlat_rt_t *rt)
@@ -1607,7 +1721,7 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
             first_key = key;
             return false;
         }
-        if (!ready())
+        if (!ready(false))
             return false;
     }
     const int32_t start = rt->budget;
@@ -2899,6 +3013,11 @@ void xlat_log_write(uint16_t psp, const char *name)
                (unsigned long)xlat_stats.compile_defers, (unsigned long)xlat_stats.disk_irq_yields,
                (unsigned long)xlat_stats.compile_resumes, (unsigned long)xlat_stats.compile_cancel,
                (unsigned long)xlat_stats.compile_queue_drops);
+#if XLAT_PRECOMPILE
+    for (unsigned i = 0; i < XLAT_MAX_REGIONS; ++i)
+        note_startup_use(i);
+    log_printf("A used_total=%lu\r\n", (unsigned long)st->startup_used);
+#endif
 #if XLAT_STACKFUL
     log_printf("HW psp_done=%lu psp_irq=%lu psp_other=%lu psp_start_cancel=%lu\r\n",
                (unsigned long)xlat_stats.psp_done, (unsigned long)xlat_stats.psp_irq,

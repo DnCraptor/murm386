@@ -4612,6 +4612,7 @@ struct exec_process_start
   enum exec_process_kind kind;
   arm_elf_load_meta *arm_elf;
   arm_ez_load_meta *arm_ez;
+  uint32_t image_linear, image_bytes;
 };
 
 static void exec_set_initial_registers(const struct exec_process_start *start)
@@ -5256,6 +5257,10 @@ static COUNT exec_run_process(const struct exec_process_start *start)
   }
   else
   {
+#if XLAT && XLAT_PRECOMPILE
+    if (xlat_stack_free() >= XLAT_STACK_NEEDED)
+      xrip_precompile_exec(cpu, start->image_linear, start->image_bytes);
+#endif
     for (;;)
     {
       bool continuation = false;
@@ -5329,7 +5334,8 @@ static COUNT exec_run_arm_ez(UWORD child_psp_seg, arm_ez_load_meta *meta)
 }
 
 static COUNT exec_run_child(dos_far_ptr entry, dos_far_ptr stack,
-                            UWORD dses, UWORD ax_bx, UWORD child_psp_seg)
+                            UWORD dses, UWORD ax_bx, UWORD child_psp_seg,
+                            uint32_t image_linear, uint32_t image_bytes)
 {
   struct exec_process_start start;
 
@@ -5341,11 +5347,14 @@ static COUNT exec_run_child(dos_far_ptr entry, dos_far_ptr stack,
   start.kind = EXEC_PROCESS_GUEST;
   start.arm_elf = NULL;
   start.arm_ez = NULL;
+  start.image_linear = image_linear;
+  start.image_bytes = image_bytes;
 
   return exec_run_process(&start);
 }
 
-STATIC int load_transfer(UWORD ds, exec_blk * exp, UWORD fcbcode, COUNT mode)
+STATIC int load_transfer(UWORD ds, exec_blk * exp, UWORD fcbcode, COUNT mode,
+                         uint32_t image_linear, uint32_t image_bytes)
 {
   fdos_psp_set_parent(ds, fdos_dos_cu_psp());
   fdos_psp_set_prev(ds, MK_FP(fdos_dos_cu_psp(), 0));
@@ -5356,7 +5365,8 @@ STATIC int load_transfer(UWORD ds, exec_blk * exp, UWORD fcbcode, COUNT mode)
                   FP_SEG(exp->exec.start_addr), FP_OFF(exp->exec.start_addr),
                   FP_SEG(exp->exec.stack), FP_OFF(exp->exec.stack),
                   ds, fcbcode));
-    return exec_run_child(exp->exec.start_addr, exp->exec.stack, ds, fcbcode, ds);
+    return exec_run_child(exp->exec.start_addr, exp->exec.stack, ds, fcbcode, ds,
+                          image_linear, image_bytes);
   }
 
   /* mode == EXEC_LOAD: don't run it, just hand the caller back the
@@ -5434,6 +5444,7 @@ COUNT DosComLoader(dos_far_ptr namep, exec_blk * exp, COUNT mode, COUNT fd)
 {
   UWORD mem;
   UWORD env = 0, asize = 0;
+  uint32_t image_bytes;
 
   {
     UWORD com_size;
@@ -5492,8 +5503,10 @@ COUNT DosComLoader(dos_far_ptr namep, exec_blk * exp, COUNT mode, COUNT fd)
       sp = MK_FP(mem, sizeof(psp));
 
     /* DOS always loads only the first 64K - sizeof(psp) bytes */
+    const UWORD to_read = mode == EXEC_OVERLAY ? 0xfffeU : 0xff00U;
     SftSeek(fd, 0, SEEK_SET);
-    DosRWSft(fd, (mode == EXEC_OVERLAY) ? 0xfffeU : 0xff00U, sp, XFR_READ);
+    const long got = DosRWSft(fd, to_read, sp, XFR_READ);
+    image_bytes = got > 0 && got <= to_read ? (uint32_t)got : 0;
     DosCloseSft(fd, FALSE);
   }
 
@@ -5526,7 +5539,8 @@ COUNT DosComLoader(dos_far_ptr namep, exec_blk * exp, COUNT mode, COUNT fd)
     exp->exec.stack = MK_FP(mem, asize);
     exp->exec.start_addr = MK_FP(mem, 0x100);
     pstore16(task_guest_seg_linear(mem) + asize, 0);
-    load_transfer(mem, exp, fcbcode, mode);
+    load_transfer(mem, exp, fcbcode, mode,
+                  task_guest_seg_linear(mem) + sizeof(psp), image_bytes);
   }
   return SUCCESS;
 }
@@ -5536,6 +5550,7 @@ COUNT DosExeLoader(dos_far_ptr namep, exec_blk * exp, COUNT mode, COUNT fd)
   UWORD mem, env = 0, start_seg, asize = 0;
   UWORD exe_size;
   UWORD image_size;
+  uint32_t image_bytes = 0;
 
   image_size = (EXE_U16(exPages) << 5) - EXE_U16(exHeaderSize);
 
@@ -5627,6 +5642,10 @@ COUNT DosExeLoader(dos_far_ptr namep, exec_blk * exp, COUNT mode, COUNT fd)
       if (exe_size < CHUNK / 16)
         toRead = exe_size * 16;
       nBytesRead = (int) DosRWSft(fd, toRead, MK_FP(sp, 0), XFR_READ);
+      if (nBytesRead < 0)
+        image_bytes = 0;
+      else
+        image_bytes += (uint32_t)nBytesRead;
       if (nBytesRead < toRead || exe_size <= CHUNK / 16)
         break;
       sp += CHUNK / 16;
@@ -5687,7 +5706,7 @@ COUNT DosExeLoader(dos_far_ptr namep, exec_blk * exp, COUNT mode, COUNT fd)
     fcbcode = patchPSPGuest(mem - 1, env, exp, namep);
     exp->exec.stack = MK_FP(EXE_U16(exInitSS) + start_seg, EXE_U16(exInitSP));
     exp->exec.start_addr = MK_FP(EXE_U16(exInitCS) + start_seg, EXE_U16(exInitIP));
-    load_transfer(mem, exp, fcbcode, mode);
+    load_transfer(mem, exp, fcbcode, mode, task_guest_seg_linear(start_seg), image_bytes);
   }
   return SUCCESS;
 }

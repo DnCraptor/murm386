@@ -2,9 +2,8 @@
  * murm386 x86 -> ARM Thumb-2 region translator (FDOS xlat).
  * See docs/FDOS-JIT-architecture.md.
  *
- * Public interface used by the XRIP adapter. The translator is entered only
- * at the start of an XRIP burst (one lookup per <= 4096 guest instructions);
- * the interpreter loop itself carries no translator checks.
+ * Public interface used by the XRIP adapter. Code runs at synchronized
+ * burst boundaries. FDOS can also prepare regions before starting a child.
  */
 #ifndef FDOS_XLAT_H
 #define FDOS_XLAT_H
@@ -14,6 +13,14 @@
 
 #ifdef __cplusplus
 extern "C" {
+#endif
+
+#ifndef XLAT_PRECOMPILE
+#ifdef XLAT_HOST_TEST
+#define XLAT_PRECOMPILE 1
+#else
+#define XLAT_PRECOMPILE 0
+#endif
 #endif
 
 /* Paging builds cannot reserve SRAM in RAM_4_EXT. Keep the old compiler
@@ -352,6 +359,15 @@ extern xlat_stats_t xlat_stats;
 bool xlat_run(xlat_rt_t *rt);
 /* Credit from completed guest CPU bursts, excluding compiler time. */
 void xlat_compile_credit(uint32_t guest_us);
+
+#if XLAT_PRECOMPILE
+struct CPU;
+void xrip_precompile_exec(struct CPU *cpu, uint32_t linear, uint32_t size);
+/* Compile into a freshly flushed cache. The loaded image and initial
+ * real-mode entry (CS:IP in key) must already be in place. */
+void xlat_precompile_image(uint8_t *mem, uint32_t mem_size, uint32_t key,
+                           uint32_t linear, uint32_t size, const volatile uint32_t *clock);
+#endif
 
 /* Drop every translation; defer recycling while a trampoline is active. */
 void xlat_flush(void);

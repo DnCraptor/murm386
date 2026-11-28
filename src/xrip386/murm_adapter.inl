@@ -198,15 +198,20 @@ static uint8_t xlat_cut_misses;
 /* Translated execution needs real mode with 16-bit code and stack, no trap,
  * no HLT, no IRQ shadow, no pending IRQ with IF set, direct fast memory. */
 /* The machine mode translated code runs in: stays so for the burst. */
-static __time_critical_func() bool xlat_mode_ok(const CPU *cpu)
+static __force_inline bool xlat_real_mode_ok(const CPU *cpu, uint32_t ip)
 {
     return !(protected_mode || (cr0 & CR0_PE) || code32 || stack32 || !fast_memory_size || tf ||
-             cpu->native_done || XRIP_IP > 0xffffu) &&
+             cpu->native_done || ip > 0xffffu) &&
            /* plain real-mode segments: translated code takes selector = base >> 4 */
            segment_base[reges] == (uint32_t)segregs[reges] << 4 &&
            segment_base[regcs] == (uint32_t)segregs[regcs] << 4 &&
            segment_base[regss] == (uint32_t)segregs[regss] << 4 &&
            segment_base[regds] == (uint32_t)segregs[regds] << 4;
+}
+
+static __time_critical_func() bool xlat_mode_ok(const CPU *cpu)
+{
+    return xlat_real_mode_ok(cpu, XRIP_IP);
 }
 
 /* XRIP must run the next instruction first (an IRQ to take, the STI / MOV SS
@@ -773,22 +778,44 @@ static __time_critical_func() uint32_t xlat_enter(CPU *cpu, uint32_t count, uint
 }
 #endif
 
+static __force_inline void xrip_bind_memory(void)
+{
+#if !defined(NO_PAGING)
+    const bool direct = !ega128_paging_active() && PC_RAM == (uint8_t *)0x11000000u;
+#else
+    const bool direct = true;
+#endif
+    fast_memory = PC_RAM;
+    fast_memory_size = direct && phys_mem_size >= 0xa0000u ? 0xa0000u : 0;
+    extended_memory = PC_RAM + HMA_START;
+    extended_memory_size = direct && phys_mem_size > HMA_START
+                           ? phys_mem_size - HMA_START : 0;
+}
+
+#if XLAT && XLAT_PRECOMPILE
+void xrip_precompile_exec(CPU *cpu, uint32_t linear, uint32_t size)
+{
+    if (!size || xlat_busy || (cr0 & CR0_PG))
+        return;
+    uint32_t ipsr, primask, basepri;
+    __asm volatile("mrs %0, ipsr\n\tmrs %1, primask\n\tmrs %2, basepri"
+                   : "=r"(ipsr), "=r"(primask), "=r"(basepri));
+    if (ipsr || primask || basepri)
+        return;
+    xrip_bind_memory();
+    if (!xlat_real_mode_ok(cpu, cpu->next_ip))
+        return;
+    const uint32_t key = (uint32_t)segregs[regcs] << 16 | cpu->next_ip;
+    xlat_precompile_image(fast_memory, fast_memory_size, key, linear, size, &timer_hw->timerawl);
+}
+#endif
+
 void __time_critical_func(xrip_step_cpu)(CPU *cpu, int count)
 {
     active_cpu = cpu;
     XRIP_IP = cpu->next_ip;
-    if (!(cr0 & CR0_PG)) {
-#if !defined(NO_PAGING)
-        const bool direct = !ega128_paging_active() && PC_RAM == (uint8_t *)0x11000000u;
-#else
-        const bool direct = true;
-#endif
-        fast_memory = PC_RAM;
-        fast_memory_size = direct && phys_mem_size >= 0xa0000u ? 0xa0000u : 0;
-        extended_memory = PC_RAM + HMA_START;
-        extended_memory_size = direct && phys_mem_size > HMA_START
-                               ? phys_mem_size - HMA_START : 0;
-    }
+    if (!(cr0 & CR0_PG))
+        xrip_bind_memory();
 #if XLAT
     static uint32_t burst_seq;   /* changes if this burst runs nested bursts */
     const uint32_t seq0 = ++burst_seq;

@@ -941,9 +941,19 @@ bool xlat_try_native_thunk(xlat_rt_t *rt, unsigned kind)
     return false;
 }
 
+#if XLAT_PRECOMPILE
+static void (*exec_inflight)(void);
+#endif
+
 /* The test's xlat_interp_one(): the reference interpreter is the "XRIP". */
 uint32_t xlat_interp_one(xlat_rt_t *rt, uint32_t flags)
 {
+#if XLAT_PRECOMPILE
+    if (exec_inflight) {
+        exec_inflight();
+        return 0;
+    }
+#endif
     if (flags & 4u)
         side_calls++;
     R.ip = (uint16_t)rt->ip;
@@ -2135,6 +2145,123 @@ static int size_report(const char *path)
     return 0;
 }
 
+#if XLAT_PRECOMPILE
+static const uint8_t exec_loop[] = {0xb9, 5, 0, 0x40, 0xe2, 0xfd, 0xeb, 0x40};
+enum { EXEC_FAR_CS = 0x1020, EXEC_FAR_ENTRY = EXEC_FAR_CS << 4 };
+
+static void prepare_exec_test(uint16_t cs, uint16_t ip, uint32_t linear, uint32_t size)
+{
+    xlat_precompile_image(mem, 0xa0000u, (uint32_t)cs << 16 | ip, linear, size, &test_clock);
+}
+
+static xlat_rt_t exec_test_rt(uint16_t cs, uint16_t ip)
+{
+    return (xlat_rt_t){
+        .mem = mem, .mem_size = 0xa0000u, .cs = cs, .ip = ip,
+        .seg_base = {[1] = (uint32_t)cs << 4},
+        .budget = 50, .deadline = test_clock, .wall_deadline = test_clock + XLAT_SLICE_US,
+        .intr = &zero_byte, .clock = &test_clock, .gpr = R.gpr,
+        .eflags = 0x202, .fn_key = UINT32_MAX,
+    };
+}
+
+static void try_exec_inflight(void)
+{
+    exec_inflight = NULL;
+    xlat_flush();
+    prepare_exec_test(EXEC_FAR_CS, 0, EXEC_FAR_ENTRY, sizeof(exec_loop));
+}
+
+static int precompile_check(void)
+{
+    const uint16_t cs = 0x1000, ip = 0x100;
+    const uint32_t entry = ((uint32_t)cs << 4) + ip;
+    const uint32_t built0 = xlat_stats.translations, runs0 = xlat_stats.entries;
+    const uint32_t time0 = xlat_stats.translate_us, evict0 = xlat_stats.evictions;
+    const uint32_t retry0 = xlat_stats.ring_retries;
+    tfpu_mem = mem;
+    memcpy(mem + entry, exec_loop, sizeof(exec_loop));
+
+    /* The LOOP displacement is outside the image, even though it is in RAM. */
+    prepare_exec_test(cs, ip, entry, sizeof(exec_loop) - 3u);
+    if (xlat_stats.translations != built0) {
+        puts("precompile read an incomplete instruction beyond the image");
+        return 1;
+    }
+    prepare_exec_test(cs, ip, entry, sizeof(exec_loop));
+    if (xlat_stats.translations != built0 + 1u || xlat_stats.entries != runs0 ||
+        R.gpr[0] || xlat_stats.translate_us != time0) {
+        puts("precompile did not only publish the initial region");
+        return 1;
+    }
+    xlat_rt_t rt = exec_test_rt(cs, ip);
+    xlat_dirty = true;
+    if (!xlat_run(&rt) || R.gpr[0] != 5) {
+        puts("cold EXEC entry did not run the prepared code");
+        return 1;
+    }
+    rt = exec_test_rt(cs, ip);
+    wr8(entry + 3u, 0x48);        /* INC AX -> DEC AX after publication */
+    if (xlat_run(&rt)) {
+        puts("modified precompiled code was still executable");
+        return 1;
+    }
+
+    xlat_flush();
+    memcpy(mem + EXEC_FAR_ENTRY, exec_loop, sizeof(exec_loop));
+    mem[entry] = 0xea;             /* JMP FAR 0000:0000 prior to fixup */
+    wr16(entry + 1u, 0);
+    wr16(entry + 3u, EXEC_FAR_CS);  /* post-relocation segment */
+    prepare_exec_test(cs, ip, entry, 5);
+    if (xlat_stats.translations != built0 + 1u) {
+        puts("precompile followed a direct edge outside the image");
+        return 1;
+    }
+    prepare_exec_test(cs, ip, entry, EXEC_FAR_ENTRY - entry + sizeof(exec_loop));
+    R.gpr[0] = 0;
+    rt = exec_test_rt(EXEC_FAR_CS, 0);
+    if (xlat_stats.translations != built0 + 2u || !xlat_run(&rt) || R.gpr[0] != 5) {
+        puts("precompile missed the direct target in the relocated segment");
+        return 1;
+    }
+
+    /* A flush from inside a native return frame cannot recycle its arena. */
+    xlat_flush();
+    memcpy(mem + entry, exec_loop, sizeof(exec_loop) - 2u);
+    mem[entry + 6u] = 0xcc;
+    prepare_exec_test(cs, ip, entry, 7);
+    const uint32_t running_built = xlat_stats.translations, running_flushes = xlat_stats.flushes;
+    exec_inflight = try_exec_inflight;
+    rt = exec_test_rt(cs, ip);
+    if (!xlat_run(&rt) || exec_inflight || xlat_stats.translations != running_built ||
+        xlat_stats.flushes != running_flushes + 1u) {
+        puts("nested EXEC precompile did not honor the deferred flush");
+        return 1;
+    }
+
+    xlat_flush();
+    const uint32_t chain_built0 = xlat_stats.translations, ring0 = xlat_stats.code_bytes;
+    const unsigned chain = XLAT_IMAGE_ROOTS + 2u;
+    for (unsigned i = 0; i < chain; ++i) {
+        const uint32_t linear = EXEC_FAR_ENTRY + 16u * i;
+        memcpy(mem + linear, exec_loop, sizeof(exec_loop) - 2u);
+        mem[linear + 6u] = 0xea;
+        wr16(linear + 7u, 0);
+        wr16(linear + 9u, (uint16_t)(EXEC_FAR_CS + i + 1u));
+    }
+    prepare_exec_test(EXEC_FAR_CS, 0, EXEC_FAR_ENTRY, 16u * chain);
+    const unsigned built = xlat_stats.translations - chain_built0;
+    const uint32_t bytes = xlat_stats.code_bytes - ring0;
+    if (!built || built > XLAT_IMAGE_ROOTS || bytes > XLAT_ARENA_SIZE / 8u || bytes > 32768u ||
+        xlat_stats.evictions != evict0 || xlat_stats.ring_retries != retry0) {
+        puts("precompile exceeded its root or arena budget");
+        return 1;
+    }
+    printf("EXEC precompile: cold entry, bounds, far target, invalidation, deferred flush, budget (%u roots) OK\n", built);
+    return 0;
+}
+#endif
+
 /* Compare uninterrupted and sliced emission, then change a decoded byte
  * while a job is paused. No execution of the unpublished native code. */
 static int compile_resume_check(void)
@@ -2160,7 +2287,7 @@ static int compile_resume_check(void)
         bool resume = false, ok = false;
         for (int step = 0; step < 4096; ++step) {
             xlat_test_compile_ticks = ticks;
-            ok = xlat_translate_step(&a, &rt, 0x100, 0, NULL, 0, &got, &full, ctx, resume);
+            ok = xlat_translate_step(&a, &rt, 0x100, 0, NULL, 0, &got, &full, ctx, resume, NULL);
             if (ok || got.reject != XLAT_RJ_DEFER)
                 break;
             resume = true;
@@ -2173,22 +2300,22 @@ static int compile_resume_check(void)
     /* Insufficient room must preserve analysis for a new emission pass. */
     a.code_top = top;
     a.data_bottom = top + 8u;
-    if (xlat_translate_step(&a, &rt, 0x100, 0, NULL, 0, &got, &full, ctx, false) ||
+    if (xlat_translate_step(&a, &rt, 0x100, 0, NULL, 0, &got, &full, ctx, false, NULL) ||
         !full || got.reject != XLAT_RJ_FULL || a.code_top != top)
         return 1;
     a.data_bottom = a.size;
-    if (!xlat_translate_step(&a, &rt, 0x100, 0, NULL, 0, &got, &full, ctx, true) ||
+    if (!xlat_translate_step(&a, &rt, 0x100, 0, NULL, 0, &got, &full, ctx, true, NULL) ||
         got.code_len != want.code_len || memcmp(expected, a.base + got.code_off, want.code_len))
         return 1;
     a.code_top = top;
     a.data_bottom = a.size;
     xlat_test_compile_ticks = 1; /* first instruction decoded */
-    bool ok = xlat_translate_step(&a, &rt, 0x100, 0, NULL, 0, &got, &full, ctx, false);
+    bool ok = xlat_translate_step(&a, &rt, 0x100, 0, NULL, 0, &got, &full, ctx, false, NULL);
     xlat_test_compile_ticks = UINT32_MAX;
     if (ok || got.reject != XLAT_RJ_DEFER)
         return 1;
     mem[0x10100] = 0x48; /* INC -> DEC, same length */
-    ok = xlat_translate_step(&a, &rt, 0x100, 0, NULL, 0, &got, &full, ctx, true);
+    ok = xlat_translate_step(&a, &rt, 0x100, 0, NULL, 0, &got, &full, ctx, true, NULL);
     if (ok || got.reject != XLAT_RJ_CHANGED || a.code_top != top)
         return 1;
     puts("resumable compiler: OK");
@@ -2220,11 +2347,11 @@ static int compile_irq_check(void)
         return 1;
     a.code_top = top;
     irq = 1;
-    if (xlat_translate_step(&a, &rt, ip, 0, NULL, 0, &out, &full, ctx, false) ||
+    if (xlat_translate_step(&a, &rt, ip, 0, NULL, 0, &out, &full, ctx, false, NULL) ||
         out.reject != XLAT_RJ_DEFER || a.code_top != top)
         return 1;
     irq = 0;
-    if (!xlat_translate_step(&a, &rt, ip, 0, NULL, 0, &out, &full, ctx, true) ||
+    if (!xlat_translate_step(&a, &rt, ip, 0, NULL, 0, &out, &full, ctx, true, NULL) ||
         out.n_insns != n + 1)
         return 1;
     /* The full long loop must emit identical code and entry/run metadata
@@ -2242,7 +2369,7 @@ static int compile_irq_check(void)
         bool resume = false, ok = false;
         for (unsigned step = 0; step < 4096; ++step) {
             xlat_test_compile_ticks = ticks;
-            ok = xlat_translate_step(&a, &rt, ip, 0, NULL, 0, &out, &full, ctx, resume);
+            ok = xlat_translate_step(&a, &rt, ip, 0, NULL, 0, &out, &full, ctx, resume, NULL);
             if (ok || out.reject != XLAT_RJ_DEFER)
                 break;
             resume = true;
@@ -2428,6 +2555,10 @@ static int compile_scheduler_check(void)
 
 int main(int argc, char **argv)
 {
+#if XLAT_PRECOMPILE
+    if (argc > 1 && !strcmp(argv[1], "--precompile"))
+        return precompile_check();
+#endif
     if (argc > 1 && !strcmp(argv[1], "--compile-irq"))
         return compile_irq_check();
     if (argc > 1 && !strcmp(argv[1], "--compile-resume"))

@@ -498,11 +498,18 @@ bool xlat_emit_trampoline(xlat_arena_t *arena);
  * working memory, word aligned (kept off the small core-0 stack and heap). */
 size_t xlat_translate_ctx_size(void);
 bool xlat_translate_validate(const xlat_rt_t *rt, const void *ctx_mem);
+#define XLAT_IMAGE_ROOTS 8u
+typedef struct {
+    uint32_t lo, end;
+    uint32_t keys[XLAT_IMAGE_ROOTS];  /* CS:IP, assigned in discovery order */
+    unsigned n;
+} xlat_image_t;
 /* On DEFER retain the arena window, output and context. On FULL the next
  * step may use a new arena offset (only emission is restarted). */
 bool xlat_translate_step(xlat_arena_t *arena, const xlat_rt_t *rt, uint16_t ip,
                          int trace_min, const uint16_t *extra, int n_extra,
-                         xlat_region_out_t *out, bool *full, void *ctx_mem, bool resume);
+                         xlat_region_out_t *out, bool *full, void *ctx_mem, bool resume,
+                         xlat_image_t *image);
 bool xlat_translate(xlat_arena_t *arena, const xlat_rt_t *rt, uint16_t ip, int trace_min,
                     const uint16_t *extra, int n_extra,
                     xlat_region_out_t *out, bool *full, void *ctx_mem);

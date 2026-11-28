@@ -390,8 +390,11 @@ static bool has_cycle(const tctx_t *c, int first)
  * after that, each within the window of its own start, as long as room is
  * left: the loop itself is found first, and a loop whose calls do not fit
  * leaves the region on every pass (has_cycle rejects it). */
-static int discover(tctx_t *c, uint16_t start)
+static int discover(tctx_t *c, uint16_t start, const xlat_image_t *image)
 {
+#if !XLAT_PRECOMPILE
+    (void)image;
+#endif
     const int qcap = (int)(sizeof(c->queue) / sizeof(c->queue[0]));
     const int dcap = (int)(sizeof(c->deferred) / sizeof(c->deferred[0]));
     if (!c->discovering) {
@@ -417,21 +420,39 @@ static int discover(tctx_t *c, uint16_t start)
             seen_before(c, ip))
             continue;
         const uint32_t linear = c->cs_base + ip;
-        if (!xlat_code_direct(linear, 16u))
+        uint32_t bytes = 16u;
+#if XLAT_PRECOMPILE
+        if (image) {
+            if (linear < image->lo || linear >= image->end)
+                continue;
+            if (image->end - linear < bytes)
+                bytes = image->end - linear;
+            if (0x10000u - ip < bytes)
+                bytes = 0x10000u - ip;
+        }
+#endif
+        if (!xlat_code_direct(linear, bytes))
             continue;
         x86_insn_t in;
         const int s = c->n_source;
-        /* Four fixed-size loads/stores, including an unaligned guest IP.
-         * A single 16-byte builtin may become __aeabi_memcpy under -Os. */
-        for (unsigned j = 0; j < 16; j += 4) {
-            uint32_t word;
-            __builtin_memcpy(&word, c->rt->mem + linear + j, 4);
-            __builtin_memcpy(c->source[s].b + j, &word, 4);
+        uint8_t *const snapshot = c->source[s].b;
+        const uint8_t *const code = c->rt->mem + linear;
+        if (bytes < 16u) {
+            xlat_memcpy(snapshot, code, bytes);
+            xlat_memset(snapshot + bytes, 0, 16u - bytes);
+        } else {
+            /* Four fixed-size loads/stores, including an unaligned guest IP.
+             * A single 16-byte builtin may become __aeabi_memcpy under -Os. */
+            for (unsigned j = 0; j < 16; j += 4) {
+                uint32_t word;
+                __builtin_memcpy(&word, code + j, 4);
+                __builtin_memcpy(snapshot + j, &word, 4);
+            }
         }
         if (!x86_decode(c->source[s].b, ip, &in) &&
             !x86_decode_interp(c->source[s].b, ip, &in))
             continue;
-        if (!in.len || in.len > 15u)
+        if (!in.len || in.len > 15u || in.len > bytes)
             continue;
         c->source[s].ip = ip;
         c->source[s].len = (uint8_t)(in.len -
@@ -559,6 +580,40 @@ static int discover(tctx_t *c, uint16_t start)
     }
     return XLAT_RJ_NOLOOP;
 }
+
+#if XLAT_PRECOMPILE
+static void image_target(xlat_image_t *image, uint16_t cs, uint16_t ip)
+{
+    const uint32_t linear = ((uint32_t)cs << 4) + ip;
+    if (linear < image->lo || linear >= image->end || image->n == XLAT_IMAGE_ROOTS)
+        return;
+    const uint32_t key = (uint32_t)cs << 16 | ip;
+    for (unsigned i = 0; i < image->n; ++i)
+        if (image->keys[i] == key)
+            return;
+    image->keys[image->n++] = key;
+}
+
+/* Continue at direct edges left outside the region. If its entry was
+ * rejected, also try the known loop heads and direct callees inside it. */
+static void image_targets(const tctx_t *c, xlat_image_t *image, bool rejected)
+{
+    const uint16_t cs = c->rt->cs;
+    for (int i = 0; i < c->n && image->n < XLAT_IMAGE_ROOTS; ++i) {
+        const x86_insn_t *in = &c->in[i];
+        if (in->op == XO_FAR && !in->local && (in->sub == FAR_CALL || in->sub == FAR_JMP))
+            image_target(image, (uint16_t)in->a.imm, in->target);
+        else if (is_branch(in) && (c->tgt_idx[i] < 0 ||
+                 (rejected && (in->target <= in->ip || x86_is_call(in)))))
+            image_target(image, cs, in->target);
+
+        /* Also consider the return site of a call. */
+        const uint16_t next = (uint16_t)(in->ip + in->len);
+        if ((falls_through(in) || x86_is_call(in)) && find_insn(c, next) < 0)
+            image_target(image, cs, next);
+    }
+}
+#endif
 
 /* ---------------------------------------------------------------------- */
 /* Flag analysis                                                          */
@@ -3676,7 +3731,8 @@ bool xlat_translate_validate(const xlat_rt_t *rt, const void *ctx_mem)
 
 bool xlat_translate_step(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int trace_min,
                     const uint16_t *extra, int n_extra,
-                    xlat_region_out_t *out, bool *full, void *ctx_mem, bool resume)
+                    xlat_region_out_t *out, bool *full, void *ctx_mem, bool resume,
+                    xlat_image_t *image)
 {
     *full = false;
     tctx_t *const c = (tctx_t *)ctx_mem;
@@ -3739,7 +3795,7 @@ bool xlat_translate_step(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int 
     int why;
     for (;;) {
         /* An existing region extended with extra entries must retain them. */
-        why = discover(c, ip);
+        why = discover(c, ip, image);
         if (why == XLAT_RJ_DEFER)
             goto deferred;
         if (c->variant == 0 && why == XLAT_RJ_NONE && c->fn) {
@@ -3761,6 +3817,10 @@ bool xlat_translate_step(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int 
         }
         break;
     }
+#if XLAT_PRECOMPILE
+    if (image && why != XLAT_RJ_START)
+        image_targets(c, image, why != XLAT_RJ_NONE);
+#endif
     out->fn = c->fn;
     out->n_insns = (uint8_t)c->n;
     out->n_interp = (uint8_t)c->n_interp;
@@ -3946,7 +4006,7 @@ bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int trace
     /* Direct callers, unlike the cache's worker, need validation here. */
     const uint32_t top = a->code_top;
     if (!xlat_translate_step(a, rt, ip, trace_min, extra, n_extra, out, full,
-                             ctx_mem, false))
+                             ctx_mem, false, NULL))
         return false;
     if (xlat_translate_validate(rt, ctx_mem))
         return true;
@@ -3955,6 +4015,6 @@ bool xlat_translate(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int trace
     return false;
 #else
     return xlat_translate_step(a, rt, ip, trace_min, extra, n_extra, out, full,
-                               ctx_mem, false);
+                               ctx_mem, false, NULL);
 #endif
 }

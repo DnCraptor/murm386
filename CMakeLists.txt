@@ -25,6 +25,7 @@ set(VIDEO_MODE "VGA256" CACHE STRING "Video adapter: RUNTIME, MCGA, EGA128, VGA1
 # docs/FDOS-JIT-architecture.md). The arena and tables are allocated from
 # the native PSRAM pool on first use.
 option(XLAT "Translate hot real-mode x86 loops to ARM code" ON)
+option(XLAT_PRECOMPILE "Prepare real-mode XLAT regions at DOS EXEC/00" ON)
 option(XRIP_IRQ_BRIDGE "Core0 NVIC-to-x86 IRQ bridge" ON)
 option(XLAT_IRQ_EVENT_GATE "Fold JIT IRQ polling into link epoch and deadline guards" ON)
 option(XLAT_HW_PREEMPT "Hardware-preempted JIT compiler on Cortex-M33 NO_PAGING builds" ON)
@@ -681,6 +682,9 @@ if(XLAT)
     )
     target_compile_definitions(${BUILD_NAME} PRIVATE XLAT=1 XLAT_ARENA_SIZE=${XLAT_ARENA_BYTES}u
                                XLAT_SLICE_US=${XLAT_SLICE_US}u)
+    if(XLAT_PRECOMPILE)
+        target_compile_definitions(${BUILD_NAME} PRIVATE XLAT_PRECOMPILE=1)
+    endif()
     if(NOT XLAT_IRQ_EVENT_GATE)
         target_compile_definitions(${BUILD_NAME} PRIVATE XLAT_IRQ_EVENT_GATE=0)
     endif()
