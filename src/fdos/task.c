@@ -4729,8 +4729,10 @@ static void arm_elf_service_guest_irq(void)
   cpu_setflags(cpu, 0x0200u, 0x0100u); /* IF=1, TF=0 */
   cpu->native_done = false;
 
+  bool continuation = false;
   while (!params.done) {
-    pc_step(pc, 10);
+    pc_step_guest(pc, 10, continuation);
+    continuation = true;
 
     /* A DOS termination request aborts the active guest burst.  Do not spin on
        native_done waiting for an IRET which will never arrive. */

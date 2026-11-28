@@ -513,11 +513,9 @@ static const struct lol lol = {
     .prn_str = "PRN",
 };
 
-/* pc_step()/pc are declared the same way bios/bios_intcall.c declares
-   them (there is no shared header for it) - see that file for the
-   INT-call counterpart of the mechanism used below. */
+/* Guest continuation API, as in bios/bios_intcall.c. */
 extern struct PC* pc;
-void pc_step(struct PC* pc, size_t max_ops);
+void pc_step_guest(struct PC* pc, size_t max_ops, bool continuation);
 
 /*
    cpu_far_call_waiter() - bios_callback_params_t callback fired when
@@ -579,6 +577,7 @@ void cpu_far_call(CPU* cpu, UWORD seg, UWORD off)
 
   SET_CS(seg);
   SET_IP(off);
+  bool continuation = false;
   while (!params.done) {
     /* See bios_intcall(): bail out when a terminate is pending so we
        do not spin with a latched native_done.  A guest reached through
@@ -588,7 +587,8 @@ void cpu_far_call(CPU* cpu, UWORD seg, UWORD off)
        left armed for the enclosing exec_run_process() to consume. */
     if (terminate_requested())
       break;
-    pc_step(pc, 4096); /// ???
+    pc_step_guest(pc, 4096, continuation);
+    continuation = true;
     /*
     if (CPU_CS == params.expected_cs && CPU_IP == params.expected_ip) {
         printf("cpu_far_call reached return %04x:%04x SP=%04x\n",

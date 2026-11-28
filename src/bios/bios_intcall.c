@@ -21,7 +21,7 @@ static bool intcall_waiter(CPU* cpu, bios_callback_params_t* params) {
 }
 
 extern struct PC* pc;
-void pc_step(struct PC* pc, size_t max_ops);
+void pc_step_guest(struct PC* pc, size_t max_ops, bool continuation);
 /* proto.h (fdos) not included here - forward-declare the terminate probe. */
 extern bool terminate_requested(void);
 
@@ -81,6 +81,7 @@ void bios_intcall(CPU* cpu, uint8_t intnum, const char* owner) {
     // set CS:IP/flags, prep stack, and on IRET will recover
     cpu_intcall(cpu, intnum);
     cpu->native_done = false;
+    bool continuation = false;
     while(!params.done) {
 #if WAIT_LOOPS_DETECTION
         if (++wait_loops == 256u) {
@@ -90,6 +91,7 @@ void bios_intcall(CPU* cpu, uint8_t intnum, const char* owner) {
                      "WAIT INT %02X AX=%04X %s",
                      intnum, entry_ax, owner ? owner : "?");
             print_line(buf, 0);
+            continuation = false;
         }
 #endif
         /* Break the nested guest burst when a terminate is pending.
@@ -103,7 +105,10 @@ void bios_intcall(CPU* cpu, uint8_t intnum, const char* owner) {
            exec_run_process(), which performs the process teardown. */
         if (terminate_requested())
             break;
-        pc_step(pc, 4096); /// TODO: a lot of?
+        /* The initial native entry is dirty. Subsequent iterations execute
+         * only guest code and the audited device tail until the waiter fires. */
+        pc_step_guest(pc, 4096, continuation);
+        continuation = true;
     }
     cpu->native_done = old_native_done;
     drop_bios_callback(cpu, &params);
@@ -121,6 +126,9 @@ handler_t handlers[256];
 
 #if XLAT
 #if !BIOS_DEBUG && !PDB_DEBUG
+#ifndef NO_HANDLER_DETECTOR
+static bool no_handler(CPU* cpu);
+#endif
 /* Cursor helpers take the CRTC port from BDA. Do not audit an arbitrary
  * guest-supplied I/O port as a VGA-only operation. */
 static bool xlat_crtc_port(void)
@@ -201,12 +209,25 @@ unsigned bios_xlat_leaf_scope(CPU *cpu, uint8_t id)
     }
     if (id == 0x16 && handlers[id] == bios_16h) {
         switch (CPU_AH) {
+        case 0x00: case 0x10:
+            return BIOS_XLAT_KBD_READ;
         case 0x01: case 0x11:
             return BIOS_XLAT_STACK_FLAGS;
-        case 0x02: case 0x12:
+        case 0x02: case 0x12: case 0x09: case 0x0a:
+        case 0x6f: case 0x92: case 0xa2:
             return BIOS_XLAT_READONLY;
         }
     }
+    /* AH=00h clears midnight rollover, AH=01h also updates ticks.
+     * Both write the caller FLAGS word, neither accesses CMOS ports. */
+    if (id == 0x1a && handlers[id] == bios_1Ah && CPU_AH <= 1u)
+        return BIOS_XLAT_CLOCK;
+    if (id == 0x28 && handlers[id] == fdos_28h)
+        return BIOS_XLAT_READONLY;
+#ifndef NO_HANDLER_DETECTOR
+    if (handlers[id] == no_handler)
+        return BIOS_XLAT_READONLY;
+#endif
     if (id == 0x33 && handlers[id] == bios_33h && CPU_AX == 3)
         return BIOS_XLAT_READONLY;
 #else
@@ -232,6 +253,11 @@ bool bios_xlat_can_dispatch(CPU *cpu, uint8_t id)
             return xlat_crtc_port();
         }
     }
+    /* An empty blocking read must still leave the JIT and let XRIP wait
+     * for a key/IRQ. A queued key can be consumed without nested dispatch. */
+    if (id == 0x16 && handlers[id] == bios_16h &&
+        (CPU_AH == 0x00 || CPU_AH == 0x10))
+        return readw86(0x41au) != readw86(0x41cu);
     if (bios_xlat_leaf_scope(cpu, id) != BIOS_XLAT_UNKNOWN)
         return true;
     if (id == 0x21 && handlers[id] == fdos_21h) {

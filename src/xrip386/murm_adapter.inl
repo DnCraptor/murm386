@@ -107,9 +107,13 @@ static bool bios_escape_impl(uint8_t id, bool leaf)
         (XRIP_AH == 2 || XRIP_AH == 0x0e) ?
         0x450u + ((uint32_t)XRIP_BH & 7u) * 2u : 0x462u;
     const unsigned cursor_bytes = XRIP_AH == 5 ? 1u : 2u;
-    const bool local = scope == BIOS_XLAT_READONLY || scope == BIOS_XLAT_VRAM || cursor ||
-        (scope == BIOS_XLAT_STACK_FLAGS && (flags_ram || flags_umb));
-    if (scope == BIOS_XLAT_STACK_FLAGS && flags_umb)
+    const bool flags_local = (flags_ram || flags_umb) &&
+        (scope == BIOS_XLAT_STACK_FLAGS ||
+         (scope == BIOS_XLAT_KBD_READ && fast_memory_size >= 0x41cu) ||
+         (scope == BIOS_XLAT_CLOCK && fast_memory_size >= 0x471u));
+    const unsigned clock_bytes = XRIP_AH == 0 ? 1u : 5u;
+    const bool local = scope == BIOS_XLAT_READONLY || scope == BIOS_XLAT_VRAM || cursor || flags_local;
+    if (flags_local && flags_umb)
         ++xlat_stats.bios_flags_umb;
     if (!local)
         XLAT_NOTE_FOREIGN();
@@ -120,9 +124,17 @@ static bool bios_escape_impl(uint8_t id, bool leaf)
 #if XLAT
     if (!local)
         XLAT_NOTE_FOREIGN();    /* may have written after a nested call */
-    else if (scope == BIOS_XLAT_STACK_FLAGS)
-        xlat_note_write_n(flags_linear, 2u);
-    else if (cursor) {
+    else if (flags_local) {
+        /* KBD_READ either patches FLAGS while waiting or advances the BDA
+         * head when a key is available. Report only the path actually taken. */
+        if (scope == BIOS_XLAT_KBD_READ && iret)
+            xlat_note_write_n(0x41au, 2u);
+        else {
+            xlat_note_write_n(flags_linear, 2u);
+            if (scope == BIOS_XLAT_CLOCK)
+                xlat_note_write_n(clock_bytes == 1u ? 0x470u : 0x46cu, clock_bytes);
+        }
+    } else if (cursor) {
         xlat_note_write_n(cursor_linear, cursor_bytes);
         ++xlat_stats.bios_cursor_local;
     }
