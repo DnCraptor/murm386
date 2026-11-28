@@ -95,8 +95,19 @@ static bool bios_escape_impl(uint8_t id, bool leaf)
     flags_now();
 #if XLAT
     const unsigned scope = bios_xlat_leaf_scope(active_cpu, id);
-    if (leaf && scope == BIOS_XLAT_UNKNOWN)
+    const bool dos_local = scope == BIOS_XLAT_DOS_QUERY && fast_memory_size == 0xa0000u &&
+        !(cr0 & (CR0_PE | CR0_PG)) && !stack32 &&
+        segment_base[regss] == (uint32_t)segregs[regss] << 4 &&
+        fdos_xlat_query_scope(active_cpu, true);
+    if (leaf && (scope == BIOS_XLAT_UNKNOWN || (scope == BIOS_XLAT_DOS_QUERY && !dos_local)))
         ++xlat_stats.bios_write_leaf;
+#if XLAT_LOG
+    if (dos_local) {
+        ++xlat_stats.dos_query_local;
+        if (XRIP_AH == 0x2au || XRIP_AH == 0x2cu)
+            ++xlat_stats.dos_clock_local;
+    }
+#endif
     const uint32_t flags_linear = ((uint32_t)segregs[regss] << 4) +
                                   (uint16_t)dwordregs[regsp] + 4u;
     const bool flags_ram = fast_memory_size >= 2u && flags_linear <= fast_memory_size - 2u;
@@ -112,7 +123,7 @@ static bool bios_escape_impl(uint8_t id, bool leaf)
          (scope == BIOS_XLAT_KBD_READ && fast_memory_size >= 0x41cu) ||
          (scope == BIOS_XLAT_CLOCK && fast_memory_size >= 0x471u));
     const unsigned clock_bytes = XRIP_AH == 0 ? 1u : 5u;
-    const bool local = scope == BIOS_XLAT_READONLY || scope == BIOS_XLAT_VRAM || cursor || flags_local;
+    const bool local = scope == BIOS_XLAT_READONLY || scope == BIOS_XLAT_VRAM || cursor || flags_local || dos_local;
     if (flags_local && flags_umb)
         ++xlat_stats.bios_flags_umb;
     if (!local)

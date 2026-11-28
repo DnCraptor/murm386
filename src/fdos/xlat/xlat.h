@@ -308,6 +308,9 @@ typedef struct xlat_stats {
     uint32_t thunk_int, thunk_retf, link_alt, bios_flags_umb;
     uint32_t bus_read, bus_write, bus_smc, bus_write_miss, bus_pop, bus_rmw;
     uint32_t string_preempt, bios_write_leaf, bios_cursor_local;
+#if XLAT_LOG
+    uint32_t dos_query_local, dos_clock_local;
+#endif
     uint32_t scalar_resume, scalar_dispatch, scalar_refused, scalar_stop;
     uint32_t compiled_code_bytes, compiled_source_bytes;
     uint32_t epoch_start, epoch_helper, revalidations, revalidate_bytes;

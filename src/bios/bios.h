@@ -41,9 +41,11 @@ void bios_intcall(CPU*, uint8_t, const char*); // sync call
  * selected BDA field in guest RAM. VRAM never writes translated RAM.
  * KBD_READ writes stack FLAGS or BDA head; CLOCK writes FLAGS and ticks. */
 enum { BIOS_XLAT_UNKNOWN, BIOS_XLAT_READONLY, BIOS_XLAT_STACK_FLAGS, BIOS_XLAT_CURSOR,
-       BIOS_XLAT_VRAM, BIOS_XLAT_KBD_READ, BIOS_XLAT_CLOCK };
+       BIOS_XLAT_VRAM, BIOS_XLAT_KBD_READ, BIOS_XLAT_CLOCK, BIOS_XLAT_DOS_QUERY };
 unsigned bios_xlat_leaf_scope(CPU *cpu, uint8_t id);
 bool bios_xlat_can_dispatch(CPU *cpu, uint8_t id);
+/* Candidate DOS query: certify layout/driver; optionally note write ranges. */
+bool fdos_xlat_query_scope(CPU *cpu, bool note);
 #endif
 
 bool bios_teletype(CPU* cpu, uint8_t ch, uint8_t page);

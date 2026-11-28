@@ -12,6 +12,9 @@ extern "C" {
 #endif
 #include <cstring>
 #include "guest_ref.hpp"
+#if XLAT
+#include "native_devices.h"
+#endif
 
 using fdos_guest::cpu_regs_ref;
 using fdos_guest::dos_data_ref;
@@ -32,6 +35,102 @@ static inline request_ref fdos_char_request()
 {
   return request_ref(MK_FP(DOS_PSP, (UWORD)(X86_INTERNAL_DATA_OFF + offsetof(dos_data, ClkReqHdr))));
 }
+
+#if XLAT
+extern "C" void xlat_note_host_write(uint32_t linear, uint32_t len);
+extern "C" bool xlat_host_async_writers(void);
+
+#if defined(NO_PAGING) && !BIOS_DEBUG && !PDB_DEBUG
+static inline bool xlat_query_ram(uint32_t at, uint32_t len)
+{
+    return at >= 0x500u && at < 0xa0000u && len <= 0xa0000u - at;
+}
+
+static inline bool xlat_query_overlap(uint32_t a, uint32_t an,
+                                      uint32_t b, uint32_t bn)
+{
+    return a < b + bn && b < a + an;
+}
+#endif
+
+/* Only certify the actual fdos_21h path, not an arbitrary INT 21h hook.
+ * The caller checks handler identity and direct real-mode mapping. The
+ * private/public frames must not alias DOS metadata or the device header:
+ * otherwise even a nominally read-only query could change its dispatch. */
+extern "C" bool fdos_xlat_query_scope(CPU *cpu, bool note)
+{
+#if defined(NO_PAGING) && !BIOS_DEBUG && !PDB_DEBUG
+    const unsigned ah = CPU_AH;
+    const bool clock = ah == 0x2au || ah == 0x2cu;
+    switch (ah) {
+    case 0x19: case 0x2a: case 0x2c: case 0x2f: case 0x30:
+    case 0x34: case 0x35: case 0x51: case 0x54: case 0x59: case 0x62:
+        break;
+    default:
+        return false;
+    }
+    if (phys_mem_size < 0xa0000u || X86_RAM_BASE != PC_RAM ||
+        xlat_host_async_writers())
+        return false;
+    const uint32_t sp = CPU_SP;
+    /* Match fdos_21h's frame_sp and aligned regs_sp, without 16-bit wrap.
+     * The final FLAGS store is at entry_sp + 4, not on the private frame. */
+    if (sp < sizeof(int21_guest_iregs) + sizeof(CPU_regs) || sp > 0xfffau)
+        return false;
+    const uint32_t ss = (uint32_t)CPU_SS << 4;
+    const uint32_t lo = ss + ((sp - sizeof(int21_guest_iregs) - sizeof(CPU_regs)) & ~3u);
+    const uint32_t n = ss + sp + 6u - lo;
+    const uint32_t sda = ((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF;
+    const uint32_t list = ((uint32_t)DOS_PSP << 4) + 0x08f0u;
+    const uint32_t ps = (uint32_t)(UWORD)fdos_idata.cu_psp() << 4;
+    if (!xlat_query_ram(lo, n) || !xlat_query_ram(ps, sizeof(psp)) ||
+        !xlat_query_ram(sda, sizeof(dos_data)) || !xlat_query_ram(list, sizeof(lol)) ||
+        xlat_query_overlap(lo, n, ps, sizeof(psp)) ||
+        xlat_query_overlap(lo, n, sda, sizeof(dos_data)) ||
+        xlat_query_overlap(lo, n, list, sizeof(lol)) ||
+        xlat_query_overlap(ps, sizeof(psp), sda, sizeof(dos_data)) ||
+        xlat_query_overlap(ps, sizeof(psp), list, sizeof(lol)))
+        return false;
+    if (clock) {
+        /* ExecuteClockDriverRequest -> BinaryCharIO -> CharRequest ->
+         * execrh -> native ClkEntry(C_INPUT). The built-in driver writes
+         * only the fixed-size request and ClockRecord. An external CLOCK$
+         * or an aliased header must still run with the old dirty policy. */
+        const dos_far_ptr dev = fdos_lol.clock();
+        const uint32_t at = ((uint32_t)FP_SEG(dev) << 4) + FP_OFF(dev);
+        if (!xlat_query_ram(at, sizeof(dhdr)) ||
+            xlat_query_overlap(at, sizeof(dhdr), lo, n) ||
+            xlat_query_overlap(at, sizeof(dhdr), ps, sizeof(psp)) ||
+            xlat_query_overlap(at, sizeof(dhdr), sda, sizeof(dos_data)))
+            return false;
+        const fdos_guest::dhdr_ref dh(dev);
+        if (!(dh.attr() & ATTR_NATIVE) || dh.native_interrupt() != ClkEntry)
+            return false;
+    }
+    if (note) {
+        // There is no nested guest execution in the certified paths.
+        // Publish all write ranges before entering the unchanged handler.
+        xlat_note_host_write(lo, n);
+        xlat_note_host_write(ps + offsetof(psp, ps_stack), sizeof(dos_far_ptr));
+        xlat_note_host_write(sda + offsetof(dos_data, ErrorMode), 2u);
+#define NOTE_SDA(field) xlat_note_host_write(sda + offsetof(dos_data, field), sizeof(((dos_data *)0)->field))
+        NOTE_SDA(Int21AX);
+        NOTE_SDA(user_r);
+        NOTE_SDA(prev_user_r);
+        if (clock) {
+            NOTE_SDA(ClkReqHdr);
+            NOTE_SDA(ClkRecord);
+        }
+#undef NOTE_SDA
+    }
+    return true;
+#else
+    (void)cpu;
+    (void)note;
+    return false;
+#endif
+}
+#endif
 
 #if PDB_DEBUG
 extern "C" int snprintf(char *s, size_t n, const char *fmt, ...);

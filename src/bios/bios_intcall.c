@@ -222,6 +222,13 @@ unsigned bios_xlat_leaf_scope(CPU *cpu, uint8_t id)
      * Both write the caller FLAGS word, neither accesses CMOS ports. */
     if (id == 0x1a && handlers[id] == bios_1Ah && CPU_AH <= 1u)
         return BIOS_XLAT_CLOCK;
+    if (id == 0x21 && handlers[id] == fdos_21h) {
+        switch (CPU_AH) {
+        case 0x19: case 0x2a: case 0x2c: case 0x2f: case 0x30:
+        case 0x34: case 0x35: case 0x51: case 0x54: case 0x59: case 0x62:
+            return BIOS_XLAT_DOS_QUERY;  /* layout checked at escape */
+        }
+    }
     if (id == 0x28 && handlers[id] == fdos_28h)
         return BIOS_XLAT_READONLY;
 #ifndef NO_HANDLER_DETECTOR
@@ -258,18 +265,10 @@ bool bios_xlat_can_dispatch(CPU *cpu, uint8_t id)
     if (id == 0x16 && handlers[id] == bios_16h &&
         (CPU_AH == 0x00 || CPU_AH == 0x10))
         return readw86(0x41au) != readw86(0x41cu);
-    if (bios_xlat_leaf_scope(cpu, id) != BIOS_XLAT_UNKNOWN)
-        return true;
-    if (id == 0x21 && handlers[id] == fdos_21h) {
-        /* Only audited, nonblocking queries in fdos_21h.cpp. The common
-         * DOS register frame, PSP and internal data still require the
-         * conservative write scope. Date/time may call a guest driver. */
-        switch (CPU_AH) {
-        case 0x19: case 0x2f: case 0x30: case 0x34: case 0x35:
-        case 0x51: case 0x54: case 0x59: case 0x62:
-            return true;
-        }
-    }
+    const unsigned scope = bios_xlat_leaf_scope(cpu, id);
+    if (scope == BIOS_XLAT_DOS_QUERY && (CPU_AH == 0x2au || CPU_AH == 0x2cu))
+        return fdos_xlat_query_scope(cpu, false);  /* no external CLOCK$ dispatch */
+    return scope != BIOS_XLAT_UNKNOWN;
 #else
     (void)cpu;
     (void)id;

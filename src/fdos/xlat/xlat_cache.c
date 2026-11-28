@@ -3107,11 +3107,12 @@ void xlat_log_write(uint16_t psp, const char *name)
                (unsigned long)xlat_stats.psp_done, (unsigned long)xlat_stats.psp_irq,
                (unsigned long)xlat_stats.psp_other, (unsigned long)xlat_stats.psp_start_cancel);
 #endif
-    log_printf("I int_direct=%lu bios_leaf=%lu local_checks=%lu local_invalid=%lu local_candidates=%lu gap_candidates=%lu rom_dispatch=%lu\r\n",
+    log_printf("I int_direct=%lu bios_leaf=%lu local_checks=%lu local_invalid=%lu local_candidates=%lu gap_candidates=%lu rom_dispatch=%lu dos_query_local=%lu dos_clock_local=%lu\r\n",
                (unsigned long)xlat_stats.int_direct, (unsigned long)xlat_stats.int_leaf,
                (unsigned long)xlat_stats.local_checks, (unsigned long)xlat_stats.local_invalid,
                (unsigned long)xlat_stats.local_candidates, (unsigned long)xlat_stats.gap_candidates,
-               (unsigned long)xlat_stats.rom_dispatch);
+               (unsigned long)xlat_stats.rom_dispatch,
+               (unsigned long)xlat_stats.dos_query_local, (unsigned long)xlat_stats.dos_clock_local);
     log_printf("N string_calls=%lu string_elems=%lu shadow_pop=%lu fast_string_calls=%lu fast_string_elems=%lu shadow_fast=%lu gap_reuse=%lu\r\n",
                (unsigned long)xlat_stats.string_calls, (unsigned long)xlat_stats.string_elems,
                (unsigned long)xlat_stats.shadow_pop, (unsigned long)xlat_stats.fast_string_calls,
