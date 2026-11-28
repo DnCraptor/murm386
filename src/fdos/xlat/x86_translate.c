@@ -3267,8 +3267,9 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
      * exit_kind stored, the lazy flags in rt, the GPRs still in r4-r10 (as
      * at a region entry). The region at rt->cs:ip is entered at once when
      * the link table has it for the current epoch, no IRQ is pending and
-     * the budget covers the entry; else the epilogue returns to xlat_run(),
-     * which decides (and fills the entry). r0-r3, r12 are free here. */
+     * the budget covers the entry. A table miss may refill a live target
+     * without leaving the trampoline; true misses return to xlat_run().
+     * r0-r3, r12 and lr are free here. */
     a->dispatch = e.pos;
 #if !XLAT_EVENT_GATE
     arm_ls_imm(&e, LS_LDR, A_R0, A_R11, XLAT_RT_INTR);
@@ -3323,13 +3324,31 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     arm_dp_imm(&e, DP_ADD, 0, A_R0, A_R0, 1);
     arm_ls_imm(&e, LS_STR, A_R0, A_R11, XLAT_RT_LINK_ALT);
     const uint32_t alt_charge = arm_branch_slot(&e);
+    /* Cold link lookup: the outer trampoline already saves host LR and
+     * has an AAPCS-aligned stack. C preserves r4-r11 (guest GPRs + rt).
+     * A prepared entry returns through the SAME charge/epoch path. */
+    const uint32_t refill = e.pos;
+    arm_mov(&e, A_R0, A_R11);
+    arm_mov32(&e, A_R12, (uint32_t)(uintptr_t)&xlat_rt_link_refill);
+    arm_blx(&e, A_R12);
+    arm_dp_imm(&e, DP_SUB, 1, A_PC, A_R0, 0);
+    const uint32_t refill_miss = arm_branch_slot(&e);
+    arm_mov(&e, A_R3, A_R0);
+    arm_e32(&e, 0xe893u, 0x5005u);                           /* LDM.W r3,{r0,r2,r12,lr} */
+    arm_ls_imm(&e, LS_LDR, A_R0, A_R11, XLAT_RT_DISPATCH_EPOCH);
+    arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R12, A_R0, SH_LSL, 0);
+    const uint32_t refill_stale = arm_branch_slot(&e);
+    const uint32_t refill_charge = arm_branch_slot(&e);
 #if !XLAT_EVENT_GATE
     ok &= tramp_patch(&e, miss1, a->epilogue, C_NE);
 #endif
     ok &= tramp_patch(&e, miss2, alt_link, C_NE) &&
-          tramp_patch(&e, miss3, a->epilogue, C_NE) && tramp_patch(&e, miss4, a->epilogue, C_LE) &&
-          tramp_patch(&e, alt_miss, a->epilogue, C_NE) && tramp_patch(&e, alt_stale, a->epilogue, C_NE) &&
-          tramp_patch(&e, alt_charge, link_charge, C_AL);
+          tramp_patch(&e, miss3, refill, C_NE) && tramp_patch(&e, miss4, a->epilogue, C_LE) &&
+          tramp_patch(&e, alt_miss, refill, C_NE) && tramp_patch(&e, alt_stale, refill, C_NE) &&
+          tramp_patch(&e, alt_charge, link_charge, C_AL) &&
+          tramp_patch(&e, refill_miss, a->epilogue, C_EQ) &&
+          tramp_patch(&e, refill_stale, a->epilogue, C_NE) &&
+          tramp_patch(&e, refill_charge, link_charge, C_AL);
 
     /* Exit stubs (emit_stubs): BL here with the exit IP in the halfword
      * after the BL (exit_ip), or B to exit_dyn when the code stored rt->ip.

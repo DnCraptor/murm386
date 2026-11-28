@@ -67,7 +67,7 @@ int dos_api_memcmp(const void *a, const void *b, size_t len);
 #endif
 /* Link table: a region exit (BRANCH) looks its target up here, in the
  * trampoline's dispatcher, and goes on without returning to xlat_run().
- * xlat_run() fills an entry at each region entry it makes. */
+ * xlat_run() and the dispatcher refill publish entries. */
 #define XLAT_LINK_BITS       8
 #define XLAT_LINK_SLOTS      (1u << XLAT_LINK_BITS)
 #define XLAT_LINK_ENTRIES    (2u * XLAT_LINK_SLOTS) /* primary + secondary banks */
@@ -78,6 +78,7 @@ typedef struct xlat_link {
     uint16_t charge;       /* budget charged on entry: XLAT_ENTRY_COST + region fn */
     uint16_t region;       /* the dispatcher reads it at offset 14 (LDRH) */
 } xlat_link_t;
+const xlat_link_t *xlat_rt_link_refill(xlat_rt_t *rt);
 _Static_assert(__builtin_offsetof(xlat_link_t, charge) == 12 &&
                __builtin_offsetof(xlat_link_t, region) == 14,
                "xlat_link_t layout is used by the dispatcher");

@@ -288,7 +288,10 @@ typedef struct xlat_stats {
     uint32_t fn_regions;        /* regions without a loop (traces, function regions) */
     uint32_t exit_built;        /* of those: built at a hot region exit target */
     uint32_t entries_added;     /* regions translated again with one more entry point */
-    uint32_t links;             /* region entries through the link table (no C) */
+    uint32_t links;             /* region entries through the link table (no GPR spill) */
+#if XLAT_LOG
+    uint32_t link_refill, link_refill_try; /* prepared / eligible refill attempts */
+#endif
     uint32_t exits[XLAT_EXIT_COUNT];
     uint32_t guest_insns;       /* approximate guest instructions run natively */
     uint32_t code_bytes;        /* current code-cache use */

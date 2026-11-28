@@ -1710,6 +1710,68 @@ static __attribute__((noinline)) void compile_slice(const xlat_rt_t *rt)
         xlat_stats.translate_max_us = us;
 }
 
+/* Publish a link identically at an ordinary entry or a dispatcher refill. */
+static inline __attribute__((always_inline)) xlat_link_t *install_link(
+    uint32_t key, const entry_t *e, uint32_t charge, uint32_t code)
+{
+    const unsigned slot = xlat_link_hash(key);
+    xlat_link_t *l = &st->link[slot];
+    xlat_link_t *alt = &st->link[slot + XLAT_LINK_SLOTS];
+    /* Keep a colliding current entry in the secondary bank. */
+    if (l->key != key) {
+        if (l->key != UINT32_MAX && l->epoch == st->epoch)
+            *alt = *l;
+        else if (alt->key == key)
+            alt->key = UINT32_MAX;
+    }
+    l->key = key;
+    l->code = code;
+    l->epoch = st->epoch;
+    l->charge = (uint16_t)charge;
+    l->region = e->region;
+    return l;
+}
+
+/* Resolve only a published live target. Never compile, evict, sample or
+ * execute guest/BIOS code with the guest GPRs still in ARM registers.
+ * Budget charging and the actual transfer remain in the ARM dispatcher. */
+const xlat_link_t *XLAT_HOT_FN(xlat_rt_link_refill)(xlat_rt_t *rt)
+{
+    if (flush_pending || xlat_dirty || xlat_write_hi ||
+        rt->epoch != st->epoch || rt->budget <= XLAT_ENTRY_COST ||
+        *rt->intr || (rt->wall_deadline &&
+        (int32_t)(*rt->clock - rt->wall_deadline) >= 0))
+        return NULL;
+#if XLAT_EVENT_GATE
+    if (__atomic_load_n(&rt->dispatch_epoch, __ATOMIC_RELAXED) != rt->epoch)
+        return NULL;
+#endif
+#if XLAT_LOG
+    ++xlat_stats.link_refill_try;
+#endif
+    const uint32_t key = (uint32_t)rt->cs << 16 | (uint16_t)rt->ip;
+    const entry_t *e = lookup(key);
+    if (!e)
+        return NULL;
+    region_t *r = &st->region[e->region];
+    const uint32_t charge = XLAT_ENTRY_COST + r->fn;
+    if (!r->live || r->cs_base != rt->seg_base[1] ||
+        rt->budget <= (int32_t)charge)
+        return NULL;
+    if (r->epoch != st->epoch && !region_valid(r, rt))
+        return NULL;   /* ordinary dispatcher owns invalidation */
+    if (flush_pending || xlat_dirty || xlat_write_hi || *rt->intr ||
+        (rt->wall_deadline &&
+         (int32_t)(*rt->clock - rt->wall_deadline) >= 0))
+        return NULL;
+    r->epoch = st->epoch;
+    const uint32_t code = (uint32_t)(uintptr_t)(st->arena.base + e->code_off) | 1u;
+#if XLAT_LOG
+    ++xlat_stats.link_refill;
+#endif
+    return install_link(key, e, charge, code);
+}
+
 bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
 {
     if (!st) {
@@ -1850,23 +1912,7 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
          * at least r->fn instructions run. */
         const uint32_t charge = XLAT_ENTRY_COST + r->fn;
         const uint32_t code = (uint32_t)(uintptr_t)(st->arena.base + e->code_off) | 1u;
-        /* the exits that reach this entry from now on go on here at once */
-        const unsigned slot = xlat_link_hash(key);
-        xlat_link_t *l = &st->link[slot];
-        xlat_link_t *alt = &st->link[slot + XLAT_LINK_SLOTS];
-        /* Keep a colliding valid entry in the secondary bank. An old
-         * epoch is never promoted; both banks obey the same invalidation. */
-        if (l->key != key) {
-            if (l->key != UINT32_MAX && l->epoch == st->epoch)
-                *alt = *l;
-            else if (alt->key == key)
-                alt->key = UINT32_MAX;
-        }
-        l->key = key;
-        l->code = code;
-        l->epoch = st->epoch;
-        l->charge = (uint16_t)charge;
-        l->region = e->region;
+        install_link(key, e, charge, code);
         rt->epoch = st->epoch;
         rt->budget -= (int32_t)charge;
         const int32_t b0 = rt->budget, x0 = (int32_t)rt->extra;
@@ -3082,10 +3128,11 @@ void xlat_log_write(uint16_t psp, const char *name)
                (unsigned long)xlat_stats.bus_pop, (unsigned long)xlat_stats.bus_rmw,
                (unsigned long)xlat_stats.string_preempt,
                (unsigned long)xlat_stats.bios_write_leaf, (unsigned long)xlat_stats.bios_cursor_local);
-    log_printf("Z scalar_resume=%lu scalar_dispatch=%lu scalar_refused=%lu scalar_stop=%lu compiled_code=%lu compiled_source=%lu\r\n",
+    log_printf("Z scalar_resume=%lu scalar_dispatch=%lu scalar_refused=%lu scalar_stop=%lu compiled_code=%lu compiled_source=%lu link_refill=%lu link_refill_try=%lu\r\n",
                (unsigned long)xlat_stats.scalar_resume, (unsigned long)xlat_stats.scalar_dispatch,
                (unsigned long)xlat_stats.scalar_refused, (unsigned long)xlat_stats.scalar_stop,
-               (unsigned long)xlat_stats.compiled_code_bytes, (unsigned long)xlat_stats.compiled_source_bytes);
+               (unsigned long)xlat_stats.compiled_code_bytes, (unsigned long)xlat_stats.compiled_source_bytes,
+               (unsigned long)xlat_stats.link_refill, (unsigned long)xlat_stats.link_refill_try);
     log_printf("K epoch_start=%lu epoch_helper=%lu revalidations=%lu revalidate_bytes=%lu service_clean=%lu service_foreign=%lu host_local=%lu host_unknown=%lu\r\n",
                (unsigned long)xlat_stats.epoch_start, (unsigned long)xlat_stats.epoch_helper,
                (unsigned long)xlat_stats.revalidations, (unsigned long)xlat_stats.revalidate_bytes,
