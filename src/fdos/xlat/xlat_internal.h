@@ -430,10 +430,11 @@ static inline bool xlat_compile_irq(const xlat_rt_t *rt)
 enum {
     SC_LOAD, SC_STORE, SC_ADD, SC_MOVZX, SC_MOVSX, SC_PUSH, SC_POP,
     SC_CALL, SC_RET, SC_RETF, SC_SEG_LOAD, SC_SEG_STORE, SC_SEG_PUSH, SC_SEG_POP,
-    SC_STR_READ
+    SC_STR_READ, SC_STI_STR
 };
 /* SC_STR_READ uses d[1]: STR_* in bits 0..2, REP kind in 3..4,
- * source segment in 5..6. The eight-halfword descriptor is unchanged. */
+ * source segment in 5..6. SC_STI_STR uses the same encoding, without REP.
+ * The eight-halfword descriptor is unchanged. */
 #define SC_STR_REP_SHIFT 3u
 #define SC_STR_SEG_SHIFT 5u
 #define SC_IMM   0x0200u

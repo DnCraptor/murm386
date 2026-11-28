@@ -2332,6 +2332,65 @@ static uint32_t scalar_string_read(xlat_rt_t *rt, uint32_t *frame,
     return SC_RESUME;
 }
 
+/* STI + one unprefixed string transfer. Neither STI nor its successor
+ * changes arithmetic flags. No guest instruction can observe the temporary
+ * IF state while the pair is in the helper; publish IF only after the
+ * protected operation is committed. In the IF=1 case an IRQ can instead
+ * be taken at the successor IP before it has any effects. */
+static uint32_t scalar_sti_string(xlat_rt_t *rt, uint32_t *frame,
+                                  const uint16_t *d, unsigned bytes)
+{
+    const unsigned kind = d[1] & 7u;
+    const bool load = kind == STR_LODS || kind == STR_MOVS;
+    const bool store = kind == STR_STOS || kind == STR_MOVS;
+    const uint16_t si = (uint16_t)frame[5], di = (uint16_t)frame[6];
+    const uint32_t sa = rt->seg_base[(d[1] >> SC_STR_SEG_SHIFT) & 3u] + si;
+    const uint32_t da = rt->seg_base[0] + di;
+    /* A source read must be side-effect-free before a possible store
+     * refusal. Admit conventional RAM only for the paired source read;
+     * other mappings fall back to STI and the ordinary shadow path. */
+    if ((bytes != 1u && bytes != 2u) || (!load && !store) ||
+        (load && !string_ram(rt, sa, bytes)) ||
+        (store && !bus_write_ok(rt, da, bytes))) {
+        ++xlat_stats.scalar_refused;
+        return SC_REFUSED;
+    }
+    const bool enabled = (rt->eflags & 0x200u) != 0;
+    if (enabled && *rt->intr) {
+        rt->ip = (uint16_t)(d[6] + 1u);  /* STI with IF=1 creates no shadow */
+        ++xlat_stats.scalar_stop;
+        return SC_STOP;
+    }
+    const uint32_t value = load ? scalar_string_value(rt, sa, bytes) : frame[0];
+    const uint32_t status = store ? xlat_rt_bus_write(rt, da, value, bytes) : 1u;
+    if (!status) {   /* no guest effects, including IF */
+        ++xlat_stats.scalar_refused;
+        return SC_REFUSED;
+    }
+    const int step = (rt->eflags & 0x400u) ? -(int)bytes : (int)bytes;
+    if (load)
+        frame[5] = (frame[5] & 0xffff0000u) | (uint16_t)(si + step);
+    if (store)
+        frame[6] = (frame[6] & 0xffff0000u) | (uint16_t)(di + step);
+    else
+        scalar_put(rt, frame, 0, bytes, value);
+    if (!enabled)
+        xlat_rt_io(rt, XLAT_IO_SET_IF, 1);  /* shadow consumed, no XRIP shadow */
+    rt->ip = d[5];
+    ++xlat_stats.fast_string_calls;
+    ++xlat_stats.fast_string_elems;
+    if (*rt->intr || status == XLAT_MEM_REDISPATCH) {
+        ++xlat_stats.scalar_stop;
+        return SC_STOP;
+    }
+    if (!(d[0] & SC_CONT)) {
+        ++xlat_stats.scalar_dispatch;
+        return SC_DISPATCH;
+    }
+    ++xlat_stats.scalar_resume;
+    return SC_RESUME;
+}
+
 /* Run an already decoded scalar operation. The descriptor belongs to
  * generated code, not guest memory. On refusal no guest effects occurred;
  * after a committed store, never execute the old instruction again. */
@@ -2346,10 +2405,12 @@ uint32_t xlat_rt_scalar(xlat_rt_t *rt, uint32_t *frame, const uint16_t *d)
         ++xlat_stats.scalar_stop;
         return SC_STOP;
     }
-    if (bytes > 4u || op > SC_STR_READ) {
+    if (bytes > 4u) {
         ++xlat_stats.scalar_refused;
         return SC_REFUSED;
     }
+    if (op == SC_STI_STR)
+        return scalar_sti_string(rt, frame, d, bytes);
     if (op == SC_STR_READ)
         return scalar_string_read(rt, frame, d, bytes);
     switch (op) {

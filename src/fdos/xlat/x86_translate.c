@@ -252,8 +252,9 @@ static uint32_t string_ctl(const x86_insn_t *in)
            ((uint32_t)in->mem_seg << XLAT_XS_SEG_SHIFT);
 }
 
-/* One-byte STI followed by a one-byte POP DS/ES, no folded prefix. */
-static int sti_pop(const tctx_t *c, int i)
+/* STI followed by an audited one-byte instruction. The successor keeps
+ * its ordinary entry for branches which do not execute STI. */
+static int sti_successor(const tctx_t *c, int i)
 {
     const x86_insn_t *in = &c->in[i];
     if (in->op != XO_IO || in->sub != IO_STI || in->len != 1)
@@ -262,8 +263,14 @@ static int sti_pop(const tctx_t *c, int i)
     if (j <= i)
         return -1;
     const x86_insn_t *p = &c->in[j];
-    return p->op == XO_SEG && p->sub == SEG_POP && p->len == 1 &&
-           (p->sreg == 0 || p->sreg == 3) ? j : -1;
+    if (p->len != 1)
+        return -1;
+    if (p->op == XO_SEG && p->sub == SEG_POP && (p->sreg == 0 || p->sreg == 3))
+        return j;
+    if (p->op == XO_STR && !p->rep && (p->size == 8 || p->size == 16) &&
+        (p->sub == STR_STOS || p->sub == STR_MOVS || p->sub == STR_LODS))
+        return j;
+    return -1;
 }
 
 static bool seen_before(tctx_t *c, uint16_t ip)
@@ -505,7 +512,7 @@ static int discover(tctx_t *c, uint16_t start)
             c->leader[i] = 1;   /* restart after IRQ or partial REP */
             c->head_marks |= 1ull << i;
         }
-        if (sti_pop(c, i) >= 0) {
+        if (sti_successor(c, i) >= 0) {
             const int ret = find_insn(c, (uint16_t)(in->ip + 2u));
             if (ret >= 0) {
                 c->leader[ret] = 1;
@@ -2647,7 +2654,30 @@ static void emit_io(tctx_t *c, int i)
         if (r >= 0)
             emit_recon(c, r);
     }
-    const int shadow = sti_pop(c, i);
+    const int shadow = sti_successor(c, i);
+    if (shadow >= 0 && c->in[shadow].op == XO_STR) {
+        const x86_insn_t *p = &c->in[shadow];
+        const uint16_t next = (uint16_t)(in->ip + 2u);
+        const int ret = find_insn(c, next);
+        const bool resume = ret > i;
+        /* The shared scalar trampoline saves only its local ARM frame.
+         * On refusal its ordinary payload executes STI ALONE, never the
+         * protected instruction: XRIP then consumes the real shadow. */
+        if (!arm_bl(e, c->scalar_call))
+            c->overflow = true;
+        arm_e16(e, (uint16_t)(SC_STI_STR | (p->size == 16 ? 1u << 4 : 0u) |
+                              (resume ? SC_CONT : 0u)));
+        arm_e16(e, (uint16_t)(p->sub | (unsigned)p->mem_seg << SC_STR_SEG_SHIFT));
+        arm_e16(e, 0);
+        arm_e16(e, 0);
+        arm_e16(e, 0);
+        arm_e16(e, next);
+        arm_e16(e, in->ip);
+        arm_e16(e, 1u << 8);   /* fallback length=1, no continuation */
+        if (resume)
+            emit_branch(c, (dest_t){D_INSN, (int16_t)ret}, C_AL);
+        return;
+    }
     if (shadow >= 0) {
         /* The helper completes STI and exactly its shadow instruction.
          * POP still has its own label for branches targeting it. */
