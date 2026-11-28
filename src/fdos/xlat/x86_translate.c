@@ -1397,7 +1397,27 @@ static void emit_carry_op(tctx_t *c, int i)
     emit_lazy_values(c, x86_flag_kind(in), size, true);
 }
 
-static void emit_alu(tctx_t *c, int i)
+/* In a guarded frame body r0 is a host pointer to the lowest local.
+ * These operands use the proven range; all other forms retain their
+ * original emitter. The frame matcher permits only 16-bit accesses. */
+static void get_shifted_at(tctx_t *c, const x86_opd_t *o, int size, int rd, int off)
+{
+    if (off >= 0 && o->kind == OPD_MEM) {
+        arm_ls_imm(&c->e, LS_LDRH, rd, A_R0, (uint32_t)off);
+        arm_lsl(&c->e, rd, rd, 16);
+    } else
+        get_shifted(c, o, size, rd);
+}
+
+static void put_raw_at(tctx_t *c, const x86_opd_t *o, int size, int src, int off)
+{
+    if (off >= 0 && o->kind == OPD_MEM)
+        arm_ls_imm(&c->e, LS_STRH, src, A_R0, (uint32_t)off);
+    else
+        put_raw(c, o, size, src);
+}
+
+static void emit_alu_at(tctx_t *c, int i, int off, bool discard_flags)
 {
     arm_emit_t *e = &c->e;
     const x86_insn_t *in = &c->in[i];
@@ -1407,20 +1427,20 @@ static void emit_alu(tctx_t *c, int i)
     const bool writes = incdec || (in->sub != ALU_CMP && in->sub != ALU_TEST);
     int dp;
 
-    if (x86_has_mem(in))
+    if (off < 0 && x86_has_mem(in))
         emit_mem_access(c, i, size / 8, in->a.kind == OPD_MEM && writes);
 
     if (in->op == XO_ALU && in->sub == ALU_NEG) {
-        get_shifted(c, &in->a, size, A_R3);
+        get_shifted_at(c, &in->a, size, A_R3, off);
         arm_mov32(e, A_R2, 0);
     } else {
-        get_shifted(c, &in->a, size, A_R2);
+        get_shifted_at(c, &in->a, size, A_R2, off);
     }
     if (x86_is_carry_op(in)) {
-        get_shifted(c, &in->b, size, A_R3);
+        get_shifted_at(c, &in->b, size, A_R3, off);
         emit_carry_op(c, i);
         arm_lsr(e, A_R12, A_R1, 32 - size);
-        put_raw(c, &in->a, size, A_R12);
+        put_raw_at(c, &in->a, size, A_R12, off);
         return;
     }
     if (incdec) {
@@ -1429,7 +1449,7 @@ static void emit_alu(tctx_t *c, int i)
     } else if (in->sub == ALU_NEG) {
         dp = DP_SUB;                        /* 0 - operand */
     } else {
-        get_shifted(c, &in->b, size, A_R3);
+        get_shifted_at(c, &in->b, size, A_R3, off);
         switch (in->sub) {
         case ALU_ADD: dp = DP_ADD; break;
         case ALU_OR:  dp = DP_ORR; break;
@@ -1438,7 +1458,7 @@ static void emit_alu(tctx_t *c, int i)
         default:      dp = DP_SUB; break;   /* SUB, CMP */
         }
     }
-    if (c->mat[i]) {
+    if (!discard_flags && c->mat[i]) {
         const uint32_t from = e->pos;
         (void)from;
         if (c->full[i]) {
@@ -1466,7 +1486,7 @@ static void emit_alu(tctx_t *c, int i)
     arm_dp_reg(e, dp, 1, writes ? A_R1 : A_PC, A_R2, A_R3, SH_LSL, 0);
     if (writes) {
         arm_lsr(e, A_R12, A_R1, 32 - size);
-        put_raw(c, &in->a, size, A_R12);
+        put_raw_at(c, &in->a, size, A_R12, off);
     }
 }
 
@@ -2882,15 +2902,115 @@ static void emit_fpu(tctx_t *c, int i)
     }
 }
 
+/* Consecutive 16-bit MOV/ALU/INCDEC on SS:[BP+disp]. No instruction
+ * changes BP or SS, reads CF explicitly, or calls out. The last operation
+ * must be a full ALU producer, so the successful path need not materialize
+ * earlier flags. The ordinary path and all independent entry labels stay. */
+static bool frame_member(const x86_insn_t *in)
+{
+    return in->size == 16 && !in->mem_direct && in->mem_rm == 6 &&
+           in->mem_mod != 0 && in->mem_seg == 2 && x86_has_mem(in) &&
+           (in->op == XO_MOV || in->op == XO_INCDEC ||
+            (in->op == XO_ALU && !x86_is_carry_op(in))) &&
+           !(in->a.kind == OPD_REG && (in->a.reg == 5 /* BP */ || in->a.reg == REG16_SP));
+}
+
+/* Emit a bounded prefix only at the start of a run (or an independent
+ * entry). The guard proves every access before changing any guest state.
+ * A single zero code-map byte covers 512 bytes, including every possible
+ * write start in this span. A marked byte is conservatively slow. */
+static void emit_frame_run(tctx_t *c, int i)
+{
+    if (!frame_member(&c->in[i]) ||
+        (i && !c->leader[i] && c->fall_idx[i - 1] == i && frame_member(&c->in[i - 1])))
+        return;
+    int lo = (int16_t)c->in[i].disp, hi = lo + 2;
+    int end = -1, best_lo = 0, best_hi = 0;
+    bool write = false;
+    for (int j = i; j < c->n - 1 && j < i + 8; ++j) {
+        const x86_insn_t *in = &c->in[j];
+        if (!frame_member(in) || c->fall_idx[j] != j + 1)
+            break;
+        const int d = (int16_t)in->disp;
+        if (d < lo) lo = d;
+        if (d + 2 > hi) hi = d + 2;
+        if (hi - lo > 64)
+            break;
+        write |= in->a.kind == OPD_MEM &&
+                 (in->op != XO_ALU || (in->sub != ALU_CMP && in->sub != ALU_TEST));
+        if (write && j >= i + 2 && in->op == XO_ALU) {
+            end = j + 1;
+            best_lo = lo;
+            best_hi = hi;
+        }
+    }
+    if (end < 0)
+        return;
+
+    arm_emit_t *e = &c->e;
+    x86_insn_t first = c->in[i];
+    first.disp = (uint16_t)best_lo;
+    const uint32_t last = (uint32_t)(best_hi - best_lo - 1);
+    uint32_t slow[4];
+    emit_offset(c, &first);                                  /* wrapped offset */
+    arm_addw(e, A_R1, A_R0, last);
+    arm_dp_reg(e, DP_ORR, 1, A_R12, A_PC, A_R1, SH_LSR, 16);
+    slow[0] = arm_branch_slot(e);                             /* offset wrap / #GP */
+    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_SEG_BASE + 8u);
+    arm_dp_reg(e, DP_ADD, 0, A_R0, A_R0, A_R12, SH_LSL, 0);
+    arm_dp_reg(e, DP_ADD, 0, A_R1, A_R1, A_R12, SH_LSL, 0);    /* linear last */
+    const uint32_t limit = c->rt->mem_size < XLAT_CODE_LIMIT ? c->rt->mem_size : XLAT_CODE_LIMIT;
+    if (!arm_dp_imm(e, DP_SUB, 1, A_PC, A_R1, limit)) {
+        arm_mov32(e, A_R12, limit);
+        arm_dp_reg(e, DP_SUB, 1, A_PC, A_R1, A_R12, SH_LSL, 0);
+    }
+    slow[1] = arm_branch_slot(e);                             /* not direct RAM */
+    arm_dp_reg(e, DP_EOR, 0, A_R2, A_R0, A_R1, SH_LSL, 0);
+    arm_dp_reg(e, DP_ORR, 1, A_R2, A_PC, A_R2, SH_LSR, XLAT_CODE_BLOCK_SHIFT + 3);
+    slow[2] = arm_branch_slot(e);                             /* crosses map byte */
+    arm_lsr(e, A_R2, A_R0, XLAT_CODE_BLOCK_SHIFT + 3);
+    arm_ls_imm(e, LS_LDR, A_R3, A_R11, XLAT_RT_CODE_MAP);
+    arm_ls_reg(e, LS_LDRB, A_R2, A_R3, A_R2);
+    arm_dp_imm(e, DP_SUB, 1, A_PC, A_R2, 0);
+    slow[3] = arm_branch_slot(e);                             /* possible SMC */
+    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_MEM);
+    arm_dp_reg(e, DP_ADD, 0, A_R0, A_R0, A_R12, SH_LSL, 0);    /* host pointer */
+
+    for (int j = i; j < end; ++j) {
+        const x86_insn_t *in = &c->in[j];
+        const int off = (int16_t)in->disp - best_lo;
+        if (in->op == XO_MOV) {
+            int v;
+            if (in->b.kind == OPD_MEM) {
+                arm_ls_imm(e, LS_LDRH, A_R1, A_R0, (uint32_t)off);
+                v = A_R1;
+            } else {
+                v = get_raw(c, &in->b, 16, A_R1);
+            }
+            put_raw_at(c, &in->a, 16, v, off);
+        } else {
+            emit_alu_at(c, j, off, j + 1 != end);
+        }
+    }
+    /* Forward edge only: normal back-edge budget, original instruction
+     * accounting and all independently reachable instructions are retained. */
+    emit_branch(c, (dest_t){D_INSN, (int16_t)end}, C_AL);
+    local_patch(c, slow[0], C_NE);
+    local_patch(c, slow[1], C_CS);
+    local_patch(c, slow[2], C_NE);
+    local_patch(c, slow[3], C_NE);
+}
+
 static void emit_insn(tctx_t *c, int i)
 {
     arm_emit_t *e = &c->e;
     const x86_insn_t *in = &c->in[i];
     c->label[i] = e->pos;
+    emit_frame_run(c, i);
     switch (in->op) {
     case XO_ALU:
     case XO_INCDEC:
-        emit_alu(c, i);
+        emit_alu_at(c, i, -1, false);
         break;
     case XO_MOV:
         emit_mov(c, i);
