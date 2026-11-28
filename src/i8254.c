@@ -281,12 +281,23 @@ void __not_in_flash_func(i8254_update_irq)(PITState *pit)
 {
 	uint32_t uticks = get_uticks();
 	PITChannelState *s = pit->channels;
-	uint32_t d = ((uint64_t) (uticks - s->count_load_time)) * PIT_FREQ / 1000000;
 
 	switch(s->mode) {
 	case 2:
-	case 3:
-		/* if d >= last_irq_count + count */
+	case 3: {
+		const uint64_t scaled = (uint64_t)(uticks - s->count_load_time) * PIT_FREQ;
+		const uint32_t next = s->last_irq_count + s->count;
+		/* Fast rejection of a not-yet-due IRQ, including equality.
+		 * For the unwrapped quotient d, ahead is
+		 * (next - d) * 1000000 + (999999 - remainder).
+		 * A value in this unsigned range proves that the original
+		 * modular comparison is false. All other cases fall through
+		 * to the original test (including wraparound). */
+		const uint64_t ahead = (uint64_t)next * 1000000u + 999999u - scaled;
+		if (ahead < (uint64_t)0x80000000u * 1000000u)
+			break;
+
+		const uint32_t d = (uint32_t)(scaled / 1000000u);
 		if (s->last_irq_count + s->count - d >= 0x80000000) {
 			int i = 0;
 			/* we loop to catch up, but not too much to avoid freezing
@@ -305,6 +316,7 @@ void __not_in_flash_func(i8254_update_irq)(PITState *pit)
 			}
 		}
 		break;
+	}
 	default:
 		abort();
 	}
