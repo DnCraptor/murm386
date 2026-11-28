@@ -11,6 +11,7 @@
 extern "C" {
 #endif
 void *dos_api_memcpy(void *dst, const void *src, size_t len);
+int dos_api_memcmp(const void *a, const void *b, size_t len);
 const void *dos_api_memchr(const void *src, int value, size_t len);
 void *nf_memset(void *ptr, int value, size_t len);
 #if EMULATE_LTEMS

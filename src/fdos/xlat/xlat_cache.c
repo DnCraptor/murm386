@@ -330,7 +330,7 @@ static void log_region_code(const region_t *r)
     const uint8_t *d = st->arena.base + r->data_off;
     for (unsigned k = 0; k < r->n_runs; ++k) {
         uint32_t linear;
-        memcpy(&linear, d, 4);
+        __builtin_memcpy(&linear, d, 4);
         const uint32_t len = d[4] | (uint32_t)d[5] << 8;
         const uint8_t *b = d + 8;
         for (uint32_t i = 0; i < len; i += 16) {
@@ -605,22 +605,22 @@ static void reset_tables(void)
     st->compile_credit = 0;
     st->compile_burst = 0;
     log_region_counts();    /* the regions are about to go */
-    memset(st->region, 0, sizeof(st->region));
-    memset(st->page_regions, 0, sizeof(st->page_regions));
-    memset(st->last, 0, sizeof(st->last));
+    xlat_memset(st->region, 0, sizeof(st->region));
+    xlat_memset(st->page_regions, 0, sizeof(st->page_regions));
+    xlat_memset(st->last, 0, sizeof(st->last));
     for (unsigned k = 0; k < XLAT_LINK_ENTRIES; ++k)
         st->link[k].key = UINT32_MAX;
-    memset(st->entry, 0, sizeof(st->entry));
-    memset(st->exit_hot, 0, sizeof(st->exit_hot));
-    memset(st->hot, 0, sizeof(st->hot));
-    memset(xlat_entry_map, 0, sizeof(xlat_entry_map));
-    memset(xlat_code_map, 0, sizeof(xlat_code_map));
+    xlat_memset(st->entry, 0, sizeof(st->entry));
+    xlat_memset(st->exit_hot, 0, sizeof(st->exit_hot));
+    xlat_memset(st->hot, 0, sizeof(st->hot));
+    xlat_memset(xlat_entry_map, 0, sizeof(xlat_entry_map));
+    xlat_memset(xlat_code_map, 0, sizeof(xlat_code_map));
     xlat_emit_trampoline(&st->arena);
     xlat_sync_code(st->arena.base, st->arena.code_top);
     st->ring_lo = st->head = (st->arena.code_top + 7u) & ~7u;
     st->free_end = st->arena.size;
     st->held_bytes = 0;
-    memset(st->free_slots, 0xff, sizeof(st->free_slots));
+    xlat_memset(st->free_slots, 0xff, sizeof(st->free_slots));
     st->free_slots[REGION_WORDS - 1] = UINT32_MAX >> ((32u - (XLAT_MAX_REGIONS & 31u)) & 31u);
     xlat_stats.code_bytes = st->ring_lo;
 }
@@ -661,7 +661,7 @@ static __attribute__((noinline)) bool ready(void)
         return false;
     }
     st = (state_t *)block;
-    memset(st, 0, sizeof(*st));
+    xlat_memset(st, 0, sizeof(*st));
     st->ctx = block + ctx_off;
 #if XLAT_ARENA_SRAM
     st->arena.base = (uint8_t *)sram_arena;
@@ -683,10 +683,10 @@ void xlat_release(void)
     flush_pending = false;
     xlat_write_hi = 0;
     xlat_call_queue_blocked = false;
-    memset(xlat_call_key, 0, sizeof(xlat_call_key));
-    memset(xlat_call_count, 0, sizeof(xlat_call_count));
-    memset(xlat_entry_map, 0, sizeof(xlat_entry_map));
-    memset(xlat_code_map, 0, sizeof(xlat_code_map));
+    xlat_memset(xlat_call_key, 0, sizeof(xlat_call_key));
+    xlat_memset(xlat_call_count, 0, sizeof(xlat_call_count));
+    xlat_memset(xlat_entry_map, 0, sizeof(xlat_entry_map));
+    xlat_memset(xlat_code_map, 0, sizeof(xlat_code_map));
     st = NULL;
     disabled = false;
 }
@@ -704,15 +704,15 @@ void xlat_flush(void)
             st->region[k].live = st->region[k].cold = 0;
         for (unsigned k = 0; k < XLAT_LINK_ENTRIES; ++k)
             st->link[k].key = UINT32_MAX;
-        memset(xlat_entry_map, 0, sizeof(xlat_entry_map));
+        xlat_memset(xlat_entry_map, 0, sizeof(xlat_entry_map));
         gap_reset();
         return;
     }
     flush_pending = false;
     xlat_write_hi = 0;
     reset_tables();
-    memset(xlat_call_key, 0, sizeof(xlat_call_key));
-    memset(xlat_call_count, 0, sizeof(xlat_call_count));
+    xlat_memset(xlat_call_key, 0, sizeof(xlat_call_key));
+    xlat_memset(xlat_call_count, 0, sizeof(xlat_call_count));
     xlat_stats.flushes++;
 }
 
@@ -747,7 +747,7 @@ static bool insert(uint32_t key, uint16_t region, uint32_t code_off, bool mark)
     return false;
 }
 
-static uint32_t XLAT_HOT_FN(load32)(const uint8_t *p)
+static inline __attribute__((always_inline)) uint32_t load32(const uint8_t *p)
 {
     uint32_t v;
     __builtin_memcpy(&v, p, 4);  /* one unaligned LDR */
@@ -802,7 +802,7 @@ static bool covered(const xlat_rt_t *rt)
         const uint8_t *d = st->arena.base + r->data_off;
         for (unsigned j = 0; j < r->n_runs; ++j) {
             uint32_t at;
-            memcpy(&at, d, 4);
+            __builtin_memcpy(&at, d, 4);
             const uint32_t len = d[4] | (uint32_t)d[5] << 8;
             if (linear - at < len)
                 return true;
@@ -895,7 +895,7 @@ static void evict_storage(int k)
             st->free_end = 0;
         st->free_slots[(unsigned)k >> 5] |= 1u << ((unsigned)k & 31u);
     }
-    memset(r, 0, sizeof(*r));
+    xlat_memset(r, 0, sizeof(*r));
     xlat_stats.evictions++;
 }
 
@@ -914,8 +914,8 @@ static void evict(int k)
 /* xlat_entry_map and xlat_code_map from the regions left. */
 static void rebuild_maps(void)
 {
-    memset(xlat_entry_map, 0, sizeof(xlat_entry_map));
-    memset(xlat_code_map, 0, sizeof(xlat_code_map));
+    xlat_memset(xlat_entry_map, 0, sizeof(xlat_entry_map));
+    xlat_memset(xlat_code_map, 0, sizeof(xlat_code_map));
     for (int j = 0; j < XLAT_ENTRY_SLOTS; ++j) {
         const entry_t *e = &st->entry[j];
         if ((e->used & (E_LIVE | E_MARK)) == (E_LIVE | E_MARK) &&
@@ -932,7 +932,7 @@ static void rebuild_maps(void)
         const uint8_t *d = st->arena.base + r->data_off;
         for (unsigned j = 0; j < r->n_runs; ++j) {
             uint32_t linear;
-            memcpy(&linear, d, 4);
+            __builtin_memcpy(&linear, d, 4);
             const uint32_t len = d[4] | (uint32_t)d[5] << 8;
             /* the blocks a write may reach the run from (up to 16 bytes long) */
             const uint32_t from = linear >= 15u ? linear - 15u : 0u;
@@ -1053,7 +1053,7 @@ void xlat_forget_range(uint32_t linear, uint32_t len)
         for (unsigned j = 0; j < 2; ++j) {
             const uint32_t at = request_linear(h[j]->key);
             if (at >= linear && at < end)
-                memset(h[j], 0, sizeof(*h[j]));
+                xlat_memset(h[j], 0, sizeof(*h[j]));
         }
     }
     bool changed = false;
@@ -1295,7 +1295,7 @@ built:;
         d[4] = (uint8_t)len;
         d[5] = (uint8_t)(len >> 8);
         d[6] = d[7] = 0;
-        memcpy(d + 8, rt->mem + linear, len);
+        xlat_memcpy(d + 8, rt->mem + linear, len);
         /* the blocks a write may reach the run from (up to 16 bytes long) */
         const uint32_t from = linear >= 15u ? linear - 15u : 0u;
         for (uint32_t b = from >> XLAT_CODE_BLOCK_SHIFT;
@@ -1339,7 +1339,7 @@ static int covering(const xlat_rt_t *rt)
         const uint8_t *d = st->arena.base + r->data_off;
         for (unsigned j = 0; j < r->n_runs; ++j) {
             uint32_t at;
-            memcpy(&at, d, 4);
+            __builtin_memcpy(&at, d, 4);
             const uint32_t len = d[4] | (uint32_t)d[5] << 8;
             if (linear - at < len)
                 return k;
@@ -1475,7 +1475,7 @@ static void set_compile_target(int old, int trace_min)
         st->job.old_lo = r->chunk_lo;
         st->job.trace_min = r->trace_min;
         st->job.n_extra = r->n_extra + 1;
-        memcpy(st->job.extra, r->extra, r->n_extra * sizeof(r->extra[0]));
+        xlat_memcpy(st->job.extra, r->extra, r->n_extra * sizeof(r->extra[0]));
         st->job.extra[r->n_extra] = st->job.ip;
         st->job.ip = r->ip;
     }
@@ -1964,7 +1964,7 @@ static void gap_reset(void)
         gap_rt->gap_lo = gap_rt->gap_hi = gap_rt->hit_lo = gap_rt->hit_hi = 0;
         gap_rt->gap2_lo = gap_rt->gap2_hi = 0;
     }
-    memset(gap_recent, 0, sizeof(gap_recent));
+    xlat_memset(gap_recent, 0, sizeof(gap_recent));
     gap_next = 0;
 }
 
@@ -2409,11 +2409,11 @@ uint32_t xlat_rt_scalar(xlat_rt_t *rt, uint32_t *frame, const uint16_t *d)
         ++xlat_stats.scalar_refused;
         return SC_REFUSED;
     }
-    if (op == SC_STI_STR)
-        return scalar_sti_string(rt, frame, d, bytes);
-    if (op == SC_STR_READ)
-        return scalar_string_read(rt, frame, d, bytes);
     switch (op) {
+    case SC_STI_STR:
+        return scalar_sti_string(rt, frame, d, bytes);
+    case SC_STR_READ:
+        return scalar_string_read(rt, frame, d, bytes);
     case SC_LOAD:
     case SC_MOVZX:
     case SC_MOVSX:

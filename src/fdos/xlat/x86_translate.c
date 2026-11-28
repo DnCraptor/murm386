@@ -352,7 +352,7 @@ static bool has_cycle(const tctx_t *c, int first)
     uint8_t color[XLAT_MAX_INSNS];         /* 0 new, 1 on the path, 2 done */
     int8_t stack[XLAT_MAX_INSNS];
     uint8_t next[XLAT_MAX_INSNS];          /* successor tried next */
-    memset(color, 0, sizeof(color));
+    xlat_memset(color, 0, sizeof(color));
     int sp = 0;
     stack[sp++] = (int8_t)first;
     color[first] = 1;
@@ -421,7 +421,13 @@ static int discover(tctx_t *c, uint16_t start)
             continue;
         x86_insn_t in;
         const int s = c->n_source;
-        memcpy(c->source[s].b, c->rt->mem + linear, 16);
+        /* Four fixed-size loads/stores, including an unaligned guest IP.
+         * A single 16-byte builtin may become __aeabi_memcpy under -Os. */
+        for (unsigned j = 0; j < 16; j += 4) {
+            uint32_t word;
+            __builtin_memcpy(&word, c->rt->mem + linear + j, 4);
+            __builtin_memcpy(c->source[s].b + j, &word, 4);
+        }
         if (!x86_decode(c->source[s].b, ip, &in) &&
             !x86_decode_interp(c->source[s].b, ip, &in))
             continue;
@@ -490,7 +496,7 @@ static int discover(tctx_t *c, uint16_t start)
     }
 
     /* Edges, leaders, loop check. */
-    memset(c->leader, 0, sizeof(c->leader));
+    xlat_memset(c->leader, 0, sizeof(c->leader));
     const int first = find_insn(c, start);
     if (first < 0)
         return XLAT_RJ_START;
@@ -667,7 +673,7 @@ static void mark_dead_flags(tctx_t *c)
  * after overlap removal and edge construction, then reuse across flow slices. */
 static void build_preds(tctx_t *c)
 {
-    memset(c->pred_head, 0xff, sizeof(c->pred_head));
+    xlat_memset(c->pred_head, 0xff, sizeof(c->pred_head));
     for (int p = c->n - 1; p >= 0; --p) {
         const int f = c->fall_idx[p], t = c->tgt_idx[p];
         if (f >= 0) {
@@ -912,7 +918,7 @@ static int new_stub(tctx_t *c, uint8_t type)
         return 0;
     }
     stub_t *s = &c->stub[c->n_stubs];
-    memset(s, 0, sizeof(*s));
+    xlat_memset(s, 0, sizeof(*s));
     s->type = type;
     s->recon = -1;
     s->exit_stub = -1;
@@ -3662,7 +3668,7 @@ bool xlat_translate_validate(const xlat_rt_t *rt, const void *ctx_mem)
         const uint32_t linear = c->cs_base + c->source[s].ip;
         const uint32_t len = c->source[s].len;
         if (!xlat_code_direct(linear, len) ||
-            memcmp(c->source[s].b, rt->mem + linear, len))
+            xlat_memcmp(c->source[s].b, rt->mem + linear, len))
             return false;
     }
     return true;
@@ -3715,9 +3721,9 @@ bool xlat_translate_step(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int 
     c->exit_ip[0] = a->exit_ip[0];
     c->exit_ip[1] = a->exit_ip[1];
     c->exit_dyn = a->exit_dyn;
-    memcpy(c->wchk, a->wchk, sizeof(c->wchk));
-    memcpy(c->wside, a->wside, sizeof(c->wside));
-    memcpy(c->rchk, a->rchk, sizeof(c->rchk));
+    __builtin_memcpy(c->wchk, a->wchk, sizeof(c->wchk));
+    __builtin_memcpy(c->wside, a->wside, sizeof(c->wside));
+    __builtin_memcpy(c->rchk, a->rchk, sizeof(c->rchk));
     c->back_slow = a->back_slow;
     c->pend = a->pend;
     c->spush = a->spush;
@@ -3777,10 +3783,10 @@ bool xlat_translate_step(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int 
     }
     mark_dead_flags(c);
     build_preds(c);
-    memset(c->in_set, 0, sizeof(c->in_set));
-    memset(c->out_set, 0, sizeof(c->out_set));
-    memset(c->cf_in, 0, sizeof(c->cf_in));
-    memset(c->cf_out, 0, sizeof(c->cf_out));
+    xlat_memset(c->in_set, 0, sizeof(c->in_set));
+    xlat_memset(c->out_set, 0, sizeof(c->out_set));
+    xlat_memset(c->cf_in, 0, sizeof(c->cf_in));
+    xlat_memset(c->cf_out, 0, sizeof(c->cf_out));
     c->flow_i = 0;
     c->flow_changed = false;
     COMPILER_PHASE(c, PH_FLOW);
@@ -3791,7 +3797,7 @@ bool xlat_translate_step(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int 
     c->plan_pass = 0;
     c->plan_i = 0;
     c->plan_mat = c->plan_full = 0;
-    memset(c->need_cf, 0, sizeof(c->need_cf));
+    xlat_memset(c->need_cf, 0, sizeof(c->need_cf));
     COMPILER_LABEL(plan_phase)
     if (!plan(c))
         goto deferred;

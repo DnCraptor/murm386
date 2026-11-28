@@ -155,10 +155,10 @@ static bool bios_escape(uint8_t id)
 static void reset86(void)
 {
     reset_protected_mode();
-    memset(active_cpu->gprx, 0, sizeof(active_cpu->gprx));
-    memset(segregs, 0, sizeof(segregs));
-    memset(segment_base, 0, sizeof(segment_base));
-    memset(debug_registers, 0, sizeof(debug_registers));
+    nf_memset(active_cpu->gprx, 0, sizeof(active_cpu->gprx));
+    nf_memset(segregs, 0, sizeof(segregs));
+    nf_memset(segment_base, 0, sizeof(segment_base));
+    nf_memset(debug_registers, 0, sizeof(debug_registers));
     cr2 = cr3 = 0;
     flush_tlb();
     flags_op = 0;
@@ -1050,7 +1050,7 @@ void cpu_intcall(CPU *cpu, uint8_t vector)
 void cpu_save_regs(const CPU *cpu, CPU_regs *regs)
 {
     flags_now();
-    memcpy(regs->gprx, cpu->gprx, sizeof(regs->gprx));
+    __builtin_memcpy(regs->gprx, cpu->gprx, sizeof(regs->gprx));
     regs->flags = cpu->flags;
     regs->es = XRIP_ES;
     regs->ds = XRIP_DS;
@@ -1066,7 +1066,7 @@ void cpu_restore_regs(CPU *cpu, const CPU_regs *regs)
     load_segment(regds, regs->ds);
     load_segment(regfs, regs->fs);
     load_segment(reggs, regs->gs);
-    memcpy(cpu->gprx, regs->gprx, sizeof(cpu->gprx));
+    __builtin_memcpy(cpu->gprx, regs->gprx, sizeof(cpu->gprx));
 }
 
 cpu_int_hook_t *cpu_set_int_hook(CPU *cpu, u8 vector, cpu_int_hook_t *hook)

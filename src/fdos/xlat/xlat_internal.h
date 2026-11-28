@@ -25,6 +25,22 @@
 #endif
 #endif
 
+/* Reuse the firmware's SRAM memory primitives. The standalone translator
+ * test has no Pico firmware or native DOS API linked into it. */
+#if defined(XLAT_HOST_TEST)
+#include <string.h>
+#define xlat_memcpy memcpy
+#define xlat_memset memset
+#define xlat_memcmp memcmp
+#else
+void *dos_api_memcpy(void *dst, const void *src, size_t len);
+void *nf_memset(void *ptr, int value, size_t len);
+int dos_api_memcmp(const void *a, const void *b, size_t len);
+#define xlat_memcpy dos_api_memcpy
+#define xlat_memset nf_memset
+#define xlat_memcmp dos_api_memcmp
+#endif
+
 /* ---------------------------------------------------------------------- */
 /* Limits                                                                 */
 /* ---------------------------------------------------------------------- */

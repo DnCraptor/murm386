@@ -144,7 +144,7 @@ static __time_critical_func() __attribute__((noinline)) uint16_t mem_read16_far(
     const uint8_t *direct = far_direct_at(address, 1);
     if (!direct) return readw86(address);
     uint16_t value;
-    memcpy(&value, direct, 2);
+    __builtin_memcpy(&value, direct, 2);
     return value;
 }
 
@@ -152,7 +152,7 @@ static __time_critical_func() __attribute__((noinline)) uint32_t mem_read32_far(
     const uint8_t *direct = far_direct_at(address, 3);
     if (!direct) return readdw86(address);
     uint32_t value;
-    memcpy(&value, direct, 4);
+    __builtin_memcpy(&value, direct, 4);
     return value;
 }
 
@@ -176,14 +176,14 @@ static __time_critical_func() __attribute__((noinline)) void mem_write8_far(uint
 static __time_critical_func() __attribute__((noinline)) void mem_write16_far(uint32_t address, uint16_t value) {
     uint8_t *direct = far_direct_at(address, 1);
     XLAT_NOTE_FAR(address, 2u);
-    if (direct) memcpy(direct, &value, 2);
+    if (direct) __builtin_memcpy(direct, &value, 2);
     else writew86(address, value);
 }
 
 static __time_critical_func() __attribute__((noinline)) void mem_write32_far(uint32_t address, uint32_t value) {
     uint8_t *direct = far_direct_at(address, 3);
     XLAT_NOTE_FAR(address, 4u);
-    if (direct) memcpy(direct, &value, 4);
+    if (direct) __builtin_memcpy(direct, &value, 4);
     else writedw86(address, value);
 }
 
@@ -194,14 +194,14 @@ static __time_critical_func() inline uint8_t mem_read8(uint32_t address) {
 static __time_critical_func() inline uint16_t mem_read16(uint32_t address) {
     if (!in_fast_memory_wide(address, 2)) return mem_read16_far(address);
     uint16_t value;
-    memcpy(&value, fast_memory + address, 2);
+    __builtin_memcpy(&value, fast_memory + address, 2);
     return value;
 }
 
 static __time_critical_func() inline uint32_t mem_read32(uint32_t address) {
     if (!in_fast_memory_wide(address, 4)) return mem_read32_far(address);
     uint32_t value;
-    memcpy(&value, fast_memory + address, 4);
+    __builtin_memcpy(&value, fast_memory + address, 4);
     return value;
 }
 
@@ -218,12 +218,12 @@ static __time_critical_func() inline void mem_write8(uint32_t address, uint8_t v
 }
 
 static __time_critical_func() inline void mem_write16(uint32_t address, uint16_t value) {
-    if (in_fast_memory_wide(address, 2)) { memcpy(fast_memory + address, &value, 2); XLAT_NOTE_WRITE(address, 2u); }
+    if (in_fast_memory_wide(address, 2)) { __builtin_memcpy(fast_memory + address, &value, 2); XLAT_NOTE_WRITE(address, 2u); }
     else mem_write16_far(address, value);
 }
 
 static __time_critical_func() inline void mem_write32(uint32_t address, uint32_t value) {
-    if (in_fast_memory_wide(address, 4)) { memcpy(fast_memory + address, &value, 4); XLAT_NOTE_WRITE(address, 4u); }
+    if (in_fast_memory_wide(address, 4)) { __builtin_memcpy(fast_memory + address, &value, 4); XLAT_NOTE_WRITE(address, 4u); }
     else mem_write32_far(address, value);
 }
 

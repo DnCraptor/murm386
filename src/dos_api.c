@@ -339,7 +339,7 @@ static void *__not_in_flash_func(dos_api_memmove)(void *dst,
     return dst;
 }
 
-static int __not_in_flash_func(dos_api_memcmp)(const void *a,
+int __not_in_flash_func(dos_api_memcmp)(const void *a,
                                                 const void *b,
                                                 size_t len)
 {

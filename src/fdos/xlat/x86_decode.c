@@ -200,7 +200,10 @@ static bool decode_one(const uint8_t *code, uint16_t ip, x86_insn_t *in)
     const bool str = (op >= 0xa4 && op <= 0xa7) || (op >= 0xaa && op <= 0xaf);
     if (rep && !str)
         return false;
-    if (str) {
+    /* The primary opcode selects a handler directly. Only grouped opcodes
+     * need to inspect a second byte. Keep the existing operand checks. */
+    switch (op) {
+    case 0xa4 ... 0xa7: case 0xaa ... 0xaf: {
         /* MOVS / CMPS / STOS / LODS / SCAS: DS:SI (override allowed) and
          * ES:DI, step by DF */
         in->op = XO_STR;
@@ -215,7 +218,9 @@ static bool decode_one(const uint8_t *code, uint16_t ip, x86_insn_t *in)
             in->b.kind = OPD_MEM;
         if (in->sub == STR_MOVS || in->sub == STR_CMPS)
             in->a.kind = OPD_MEM;
-    } else if (op == 0xc0 || op == 0xc1 || (op >= 0xd0 && op <= 0xd3)) {
+        break;
+    }
+    case 0xc0: case 0xc1: case 0xd0 ... 0xd3: {
         /* group 2 shifts and rotates: count imm8, 1 or CL */
         decode_modrm(code, &pos, seg, in, &in->a, &g);
         in->op = XO_SHIFT;
@@ -231,7 +236,10 @@ static bool decode_one(const uint8_t *code, uint16_t ip, x86_insn_t *in)
             in->b.kind = OPD_REG;
             in->b.reg = 1;   /* CL */
         }
-    } else if (op < 0x40 && (op & 7) < 6) {
+        break;
+    }
+    case 0x00 ... 0x05: case 0x08 ... 0x0d: case 0x10 ... 0x15: case 0x18 ... 0x1d:
+    case 0x20 ... 0x25: case 0x28 ... 0x2d: case 0x30 ... 0x35: case 0x38 ... 0x3d: {
         const uint8_t alu = op >> 3;
         in->op = XO_ALU;
         in->sub = alu;
@@ -258,25 +266,35 @@ static bool decode_one(const uint8_t *code, uint16_t ip, x86_insn_t *in)
             in->b.imm = imm_z(code, &pos, o32);
             break;
         }
-    } else if (op >= 0x40 && op <= 0x4f) {
+        break;
+    }
+    case 0x40 ... 0x4f: {
         in->op = XO_INCDEC;
         in->sub = op >= 0x48;
         in->a.kind = OPD_REG;
         in->a.reg = op & 7;
-    } else if (op >= 0x70 && op <= 0x7f) {
+        break;
+    }
+    case 0x70 ... 0x7f: {
         in->op = XO_JCC;
         in->sub = op & 0x0f;
         const int8_t rel = (int8_t)code[pos++];
         in->target = (uint16_t)(ip + pos + rel);
-    } else if (op >= 0x50 && op <= 0x57) {
+        break;
+    }
+    case 0x50 ... 0x57: {
         in->op = XO_PUSH;
         in->b.kind = OPD_REG;
         in->b.reg = op & 7;
-    } else if (op >= 0x58 && op <= 0x5f) {
+        break;
+    }
+    case 0x58 ... 0x5f: {
         in->op = XO_POP;
         in->a.kind = OPD_REG;
         in->a.reg = op & 7;
-    } else if (op == 0x68 || op == 0x6a) {
+        break;
+    }
+    case 0x68: case 0x6a: {
         in->op = XO_PUSH;
         in->b.kind = OPD_IMM;
         if (op == 0x68) {
@@ -285,41 +303,52 @@ static bool decode_one(const uint8_t *code, uint16_t ip, x86_insn_t *in)
         } else {
             in->b.imm = (uint16_t)(int16_t)(int8_t)code[pos++];
         }
-    } else if (op == 0xe8) {
+        break;
+    }
+    case 0xe8: {
         in->op = XO_CALL;
         const uint16_t rel = rd16(code + pos);
         pos += 2;
         in->target = (uint16_t)(ip + pos + rel);
-    } else if (op == 0xc3 || op == 0xc2) {
+        break;
+    }
+    case 0xc2: case 0xc3: {
         in->op = XO_RET;
         if (op == 0xc2) {
             in->b.imm = rd16(code + pos);
             pos += 2;
         }
-    } else if (op == 0x0f && code[pos] >= 0x80 && code[pos] <= 0x8f) {
-        in->op = XO_JCC;
-        in->sub = code[pos++] & 0x0f;
-        const uint16_t rel = rd16(code + pos);
-        pos += 2;
-        in->target = (uint16_t)(ip + pos + rel);
-    } else if (op == 0x0f && (code[pos] == 0xb6 || code[pos] == 0xbe ||
-                              code[pos] == 0xb7 || code[pos] == 0xbf)) {
-        /* MOVZX / MOVSX r16, r/m8; with r/m16 (16-bit operand) a plain MOV */
-        const uint8_t op2 = code[pos++];
-        decode_modrm(code, &pos, seg, in, &in->b, &g);
-        in->a.kind = OPD_REG;
-        in->a.reg = g;
-        if ((op2 & 1) && o32) {
-            in->op = XO_MISC;      /* r32 <- r/m16 */
-            in->sub = op2 == 0xb7 ? MISC_MOVZX : MISC_MOVSX;
-        } else if (op2 & 1) {
-            in->op = XO_MOV;
+        break;
+    }
+    case 0x0f: {
+        if (code[pos] >= 0x80 && code[pos] <= 0x8f) {
+            in->op = XO_JCC;
+            in->sub = code[pos++] & 0x0f;
+            const uint16_t rel = rd16(code + pos);
+            pos += 2;
+            in->target = (uint16_t)(ip + pos + rel);
+        } else if (code[pos] == 0xb6 || code[pos] == 0xbe || code[pos] == 0xb7 || code[pos] == 0xbf) {
+            /* MOVZX / MOVSX r16, r/m8; with r/m16 (16-bit operand) a plain MOV */
+            const uint8_t op2 = code[pos++];
+            decode_modrm(code, &pos, seg, in, &in->b, &g);
+            in->a.kind = OPD_REG;
+            in->a.reg = g;
+            if ((op2 & 1) && o32) {
+                in->op = XO_MISC;      /* r32 <- r/m16 */
+                in->sub = op2 == 0xb7 ? MISC_MOVZX : MISC_MOVSX;
+            } else if (op2 & 1) {
+                in->op = XO_MOV;
+            } else {
+                in->op = XO_MISC;
+                in->sub = op2 == 0xb6 ? MISC_MOVZX : MISC_MOVSX;
+                in->size = 8;
+            }
         } else {
-            in->op = XO_MISC;
-            in->sub = op2 == 0xb6 ? MISC_MOVZX : MISC_MOVSX;
-            in->size = 8;
+            return false;
         }
-    } else if (op == 0x80 || op == 0x81 || op == 0x83) {
+        break;
+    }
+    case 0x80: case 0x81: case 0x83: {
         decode_modrm(code, &pos, seg, in, &in->a, &g);
         in->op = XO_ALU;
         in->sub = g;
@@ -334,21 +363,27 @@ static bool decode_one(const uint8_t *code, uint16_t ip, x86_insn_t *in)
         } else {
             in->b.imm = code[pos++];
         }
-    } else if (op == 0x84 || op == 0x85) {
+        break;
+    }
+    case 0x84: case 0x85: {
         decode_modrm(code, &pos, seg, in, &in->a, &g);
         in->op = XO_ALU;
         in->sub = ALU_TEST;
         in->size = op == 0x84 ? 8 : 16;
         in->b.kind = OPD_REG;
         in->b.reg = g;
-    } else if (op == 0x86 || op == 0x87) {
+        break;
+    }
+    case 0x86: case 0x87: {
         /* r/m, r: the memory form reads and writes the operand (emit_xchg) */
         decode_modrm(code, &pos, seg, in, &in->a, &g);
         in->op = XO_XCHG;
         in->size = op == 0x86 ? 8 : 16;
         in->b.kind = OPD_REG;
         in->b.reg = g;
-    } else if (op >= 0x88 && op <= 0x8b) {
+        break;
+    }
+    case 0x88 ... 0x8b: {
         in->op = XO_MOV;
         in->size = (op & 1) ? 16 : 8;
         if (op < 0x8a) {
@@ -360,21 +395,29 @@ static bool decode_one(const uint8_t *code, uint16_t ip, x86_insn_t *in)
             in->a.kind = OPD_REG;
             in->a.reg = g;
         }
-    } else if (op == 0x8d) {
+        break;
+    }
+    case 0x8d: {
         decode_modrm(code, &pos, seg, in, &in->b, &g);
         if (in->b.kind != OPD_MEM)
             return false;
         in->op = XO_LEA;
         in->a.kind = OPD_REG;
         in->a.reg = g;
-    } else if (op == 0x90) {
+        break;
+    }
+    case 0x90: {
         in->op = XO_NOP;
-    } else if (op >= 0x91 && op <= 0x97) {
+        break;
+    }
+    case 0x91 ... 0x97: {
         in->op = XO_XCHG;
         in->a.kind = in->b.kind = OPD_REG;
         in->a.reg = 0;
         in->b.reg = op & 7;
-    } else if (op >= 0xa0 && op <= 0xa3) {
+        break;
+    }
+    case 0xa0 ... 0xa3: {
         in->op = XO_MOV;
         in->size = (op & 1) ? 16 : 8;
         x86_opd_t *m = op < 0xa2 ? &in->b : &in->a;
@@ -386,7 +429,9 @@ static bool decode_one(const uint8_t *code, uint16_t ip, x86_insn_t *in)
         in->mem_seg = seg >= 0 ? (uint8_t)seg : SEG_DS;
         in->disp = rd16(code + pos);
         pos += 2;
-    } else if (op == 0xa8 || op == 0xa9) {
+        break;
+    }
+    case 0xa8: case 0xa9: {
         in->op = XO_ALU;
         in->sub = ALU_TEST;
         in->size = op == 0xa8 ? 8 : 16;
@@ -396,7 +441,9 @@ static bool decode_one(const uint8_t *code, uint16_t ip, x86_insn_t *in)
             in->b.imm = code[pos++];
         else
             in->b.imm = imm_z(code, &pos, o32);
-    } else if (op >= 0xb0 && op <= 0xbf) {
+        break;
+    }
+    case 0xb0 ... 0xbf: {
         in->op = XO_MOV;
         in->size = op >= 0xb8 ? 16 : 8;
         in->a.kind = OPD_REG;
@@ -407,7 +454,9 @@ static bool decode_one(const uint8_t *code, uint16_t ip, x86_insn_t *in)
         } else {
             in->b.imm = code[pos++];
         }
-    } else if (op == 0xc6 || op == 0xc7) {
+        break;
+    }
+    case 0xc6: case 0xc7: {
         decode_modrm(code, &pos, seg, in, &in->a, &g);
         if (g != 0)
             return false;
@@ -418,60 +467,100 @@ static bool decode_one(const uint8_t *code, uint16_t ip, x86_insn_t *in)
             in->b.imm = code[pos++];
         else
             in->b.imm = imm_z(code, &pos, o32);
-    } else if (op == 0xe2 || op == 0xe3 || op == 0xeb) {
+        break;
+    }
+    case 0xe2: case 0xe3: case 0xeb: {
         in->op = op == 0xe2 ? XO_LOOP : op == 0xe3 ? XO_JCXZ : XO_JMP;
         const int8_t rel = (int8_t)code[pos++];
         in->target = (uint16_t)(ip + pos + rel);
-    } else if (op == 0xe9) {
+        break;
+    }
+    case 0xe9: {
         in->op = XO_JMP;
         const uint16_t rel = rd16(code + pos);
         pos += 2;
         in->target = (uint16_t)(ip + pos + rel);
-    } else if (op == 0x06 || op == 0x0e || op == 0x16 || op == 0x1e) {
+        break;
+    }
+    case 0x06: case 0x0e: case 0x16: case 0x1e: {
         in->op = XO_SEG;                                  /* PUSH sreg */
         in->sub = SEG_PUSH;
         in->sreg = (uint8_t)(op >> 3);
-    } else if (op == 0x07 || op == 0x1f) {
+        break;
+    }
+    case 0x07: case 0x1f: {
         in->op = XO_SEG;                                  /* POP ES / DS */
         in->sub = SEG_POP;
         in->sreg = (uint8_t)(op >> 3);
-    } else if (op == 0x8e && (((code[pos] >> 3) & 7) == 0 || ((code[pos] >> 3) & 7) == 3)) {
+        break;
+    }
+    case 0x8e: {
+        if (!(((code[pos] >> 3) & 7) == 0 || ((code[pos] >> 3) & 7) == 3))
+            return false;
         decode_modrm(code, &pos, seg, in, &in->b, &g);   /* MOV ES / DS, r/m16 */
         in->op = XO_SEG;
         in->sub = SEG_LOAD;
         in->sreg = g;
-    } else if (op == 0x8c && ((code[pos] >> 3) & 7) < 4) {
+        break;
+    }
+    case 0x8c: {
+        if (!(((code[pos] >> 3) & 7) < 4))
+            return false;
         decode_modrm(code, &pos, seg, in, &in->a, &g);   /* MOV r/m16, sreg */
         in->op = XO_SEG;
         in->sub = SEG_STORE;
         in->sreg = g;
-    } else if ((op == 0xc4 || op == 0xc5) && (code[pos] >> 6) != 3) {
+        break;
+    }
+    case 0xc4: case 0xc5: {
+        if (!((code[pos] >> 6) != 3))
+            return false;
         decode_modrm(code, &pos, seg, in, &in->b, &g);   /* LES / LDS r16, m16:16 */
         in->op = XO_SEG;
         in->sub = op == 0xc4 ? SEG_LES : SEG_LDS;
         in->sreg = op == 0xc4 ? SEG_ES : SEG_DS;
         in->a.kind = OPD_REG;
         in->a.reg = g;
-    } else if (op == 0x98 || op == 0x99 || op == 0xfc || op == 0xfd) {
+        break;
+    }
+    case 0x98: case 0x99: case 0xfc: case 0xfd: {
         in->op = XO_MISC;
         in->sub = op == 0x98 ? MISC_CBW : op == 0x99 ? MISC_CWD : op == 0xfc ? MISC_CLD : MISC_STD;
-    } else if ((op == 0xf6 || op == 0xf7) && ((code[pos] >> 3) & 7) == 2) {
-        decode_modrm(code, &pos, seg, in, &in->a, &g);   /* NOT r/m */
-        in->op = XO_MISC;
-        in->sub = MISC_NOT;
-        in->size = op == 0xf6 ? 8 : 16;
-    } else if ((op == 0xf6 || op == 0xf7) && ((code[pos] >> 3) & 7) == 3) {
-        decode_modrm(code, &pos, seg, in, &in->a, &g);   /* NEG r/m */
-        in->op = XO_ALU;
-        in->sub = ALU_NEG;
-        in->size = op == 0xf6 ? 8 : 16;
-    } else if ((op == 0xf6 || op == 0xf7) && ((code[pos] >> 3) & 7) >= 4) {
-        /* MUL / IMUL / DIV / IDIV r/m: AX (DX) implicit */
-        decode_modrm(code, &pos, seg, in, &in->b, &g);
-        in->op = XO_MULDIV;
-        in->sub = g;
-        in->size = op == 0xf6 ? 8 : 16;
-    } else if (op == 0x69 || op == 0x6b) {
+        break;
+    }
+    case 0xf6: case 0xf7: {
+        if (((code[pos] >> 3) & 7) == 2) {
+            decode_modrm(code, &pos, seg, in, &in->a, &g);   /* NOT r/m */
+            in->op = XO_MISC;
+            in->sub = MISC_NOT;
+            in->size = op == 0xf6 ? 8 : 16;
+        } else if (((code[pos] >> 3) & 7) == 3) {
+            decode_modrm(code, &pos, seg, in, &in->a, &g);   /* NEG r/m */
+            in->op = XO_ALU;
+            in->sub = ALU_NEG;
+            in->size = op == 0xf6 ? 8 : 16;
+        } else if (((code[pos] >> 3) & 7) >= 4) {
+            /* MUL / IMUL / DIV / IDIV r/m: AX (DX) implicit */
+            decode_modrm(code, &pos, seg, in, &in->b, &g);
+            in->op = XO_MULDIV;
+            in->sub = g;
+            in->size = op == 0xf6 ? 8 : 16;
+        } else {
+            decode_modrm(code, &pos, seg, in, &in->a, &g);
+            if (g != 0)
+                return false;
+            in->op = XO_ALU;
+            in->sub = ALU_TEST;
+            in->size = op == 0xf6 ? 8 : 16;
+            in->b.kind = OPD_IMM;
+            if (op == 0xf6)
+                in->b.imm = code[pos++];
+            else
+                in->b.imm = imm_z(code, &pos, o32);
+        }
+        break;
+    }
+    case 0x69: case 0x6b: {
         /* IMUL r16, r/m16, imm16 / imm8 (sign-extended) */
         decode_modrm(code, &pos, seg, in, &in->b, &g);
         in->op = XO_MULDIV;
@@ -484,49 +573,63 @@ static bool decode_one(const uint8_t *code, uint16_t ip, x86_insn_t *in)
         } else {
             in->a.imm = (uint16_t)(int16_t)(int8_t)code[pos++];
         }
-    } else if (op == 0xf6 || op == 0xf7) {
-        decode_modrm(code, &pos, seg, in, &in->a, &g);
-        if (g != 0)
-            return false;
-        in->op = XO_ALU;
-        in->sub = ALU_TEST;
-        in->size = op == 0xf6 ? 8 : 16;
-        in->b.kind = OPD_IMM;
-        if (op == 0xf6)
-            in->b.imm = code[pos++];
-        else
-            in->b.imm = imm_z(code, &pos, o32);
-    } else if (op == 0xff && (((code[pos] >> 3) & 7) == 2 || ((code[pos] >> 3) & 7) == 4)) {
-        decode_modrm(code, &pos, seg, in, &in->b, &g);   /* CALL / JMP r/m16 */
-        in->op = XO_IND;
-        in->sub = g == 2 ? IND_CALL : IND_JMP;
-    } else if (op == 0xff && (((code[pos] >> 3) & 7) == 3 || ((code[pos] >> 3) & 7) == 5) &&
-               (code[pos] >> 6) != 3) {
-        decode_modrm(code, &pos, seg, in, &in->b, &g);   /* CALL / JMP m16:16 */
-        in->op = XO_FAR;
-        in->sub = g == 3 ? FAR_CALLM : FAR_JMPM;
-    } else if (op == 0x9a || op == 0xea) {
+        break;
+    }
+    case 0xfe: case 0xff: {
+        if (op == 0xff && (((code[pos] >> 3) & 7) == 2 || ((code[pos] >> 3) & 7) == 4)) {
+            decode_modrm(code, &pos, seg, in, &in->b, &g);   /* CALL / JMP r/m16 */
+            in->op = XO_IND;
+            in->sub = g == 2 ? IND_CALL : IND_JMP;
+        } else if (op == 0xff && (((code[pos] >> 3) & 7) == 3 || ((code[pos] >> 3) & 7) == 5) && (code[pos] >> 6) != 3) {
+            decode_modrm(code, &pos, seg, in, &in->b, &g);   /* CALL / JMP m16:16 */
+            in->op = XO_FAR;
+            in->sub = g == 3 ? FAR_CALLM : FAR_JMPM;
+        } else if (op == 0xff && ((code[pos] >> 3) & 7) == 6) {
+            decode_modrm(code, &pos, seg, in, &in->b, &g);   /* PUSH r/m16 */
+            in->op = XO_PUSH;
+        } else {
+            decode_modrm(code, &pos, seg, in, &in->a, &g);
+            if (g > 1)
+                return false;
+            in->op = XO_INCDEC;
+            in->sub = g;
+            in->size = op == 0xfe ? 8 : 16;
+        }
+        break;
+    }
+    case 0x9a: case 0xea: {
         in->op = XO_FAR;                                  /* CALL / JMP ptr16:16 */
         in->sub = op == 0x9a ? FAR_CALL : FAR_JMP;
         in->target = rd16(code + pos);
         in->a.imm = rd16(code + pos + 2);
         pos += 4;
-    } else if (op == 0xcb || op == 0xca) {
+        break;
+    }
+    case 0xca: case 0xcb: {
         in->op = XO_FAR;                                  /* RETF [imm16] */
         in->sub = FAR_RET;
         if (op == 0xca) {
             in->b.imm = rd16(code + pos);
             pos += 2;
         }
-    } else if (op == 0x60 || op == 0x61 || op == 0xc9) {
+        break;
+    }
+    case 0x60: case 0x61: case 0xc9: {
         in->op = XO_STK;
         in->sub = op == 0x60 ? STK_PUSHA : op == 0x61 ? STK_POPA : STK_LEAVE;
-    } else if (op == 0xc8 && (code[pos + 2] & 0x1f) < 2) {
+        break;
+    }
+    case 0xc8: {
+        if (!((code[pos + 2] & 0x1f) < 2))
+            return false;
         in->op = XO_STK;                                  /* ENTER imm16, 0 / 1 */
         in->sub = (code[pos + 2] & 0x1f) ? STK_ENTER1 : STK_ENTER0;
         in->b.imm = rd16(code + pos);
         pos += 3;
-    } else if ((op & 0xf4) == 0xe4) {      /* E4..E7, EC..EF: IN / OUT */
+        break;
+    }
+    case 0xe4 ... 0xe7: case 0xec ... 0xef: {
+        /* E4..E7, EC..EF: IN / OUT */
         in->op = XO_IO;
         in->sub = op & 2 ? IO_OUT : IO_IN;
         in->size = op & 1 ? 16 : 8;
@@ -536,21 +639,28 @@ static bool decode_one(const uint8_t *code, uint16_t ip, x86_insn_t *in)
             in->a.kind = OPD_IMM;
             in->a.imm = code[pos++];
         }
-    } else if (op == 0xfa || op == 0xfb) {
+        break;
+    }
+    case 0xfa: case 0xfb: {
         in->op = XO_IO;
         in->sub = op == 0xfa ? IO_CLI : IO_STI;
-    } else if (op == 0xf8 || op == 0xf9 || op == 0xf5 || op == 0x9f || op == 0x9e || op == 0x9c ||
-               op == 0x9d) {
+        break;
+    }
+    case 0x9c ... 0x9f: case 0xf5: case 0xf8: case 0xf9: {
         in->op = XO_FLAG;
         in->sub = op == 0xf8 ? FL_CLC : op == 0xf9 ? FL_STC : op == 0xf5 ? FL_CMC :
                   op == 0x9f ? FL_LAHF : op == 0x9e ? FL_SAHF : op == 0x9d ? FL_POPF : FL_PUSHF;
-    } else if (op == 0xd7) {
+        break;
+    }
+    case 0xd7: {
         in->op = XO_MISC;                                 /* XLAT: AL = [BX + AL] */
         in->sub = MISC_XLAT;
         in->size = 8;
         in->b.kind = OPD_MEM;
         in->mem_seg = seg >= 0 ? (uint8_t)seg : SEG_DS;
-    } else if (op >= 0xd8 && op <= 0xdf) {
+        break;
+    }
+    case 0xd8 ... 0xdf: {
         const uint8_t m = code[pos];
         const int grp = (m >> 3) & 7, sub = op - 0xd8;
         if ((m >> 6) == 3) {
@@ -569,28 +679,28 @@ static bool decode_one(const uint8_t *code, uint16_t ip, x86_insn_t *in)
         in->op = XO_FPU;
         in->sub = (uint8_t)sub;
         in->sreg = (uint8_t)grp;
-    } else if (op == 0x9b) {
+        break;
+    }
+    case 0x9b: {
         in->op = XO_FPU;                                  /* FWAIT */
         in->sub = FPU_WAIT;
-    } else if (op == 0xe0 || op == 0xe1) {
+        break;
+    }
+    case 0xe0: case 0xe1: {
         in->op = XO_LOOPCC;                               /* LOOPNZ / LOOPZ */
         in->sub = op & 1;
         const int8_t rel = (int8_t)code[pos++];
         in->target = (uint16_t)(ip + pos + rel);
-    } else if (op == 0xff && ((code[pos] >> 3) & 7) == 6) {
-        decode_modrm(code, &pos, seg, in, &in->b, &g);   /* PUSH r/m16 */
-        in->op = XO_PUSH;
-    } else if (op == 0x8f && ((code[pos] >> 3) & 7) == 0) {
+        break;
+    }
+    case 0x8f: {
+        if (!(((code[pos] >> 3) & 7) == 0))
+            return false;
         decode_modrm(code, &pos, seg, in, &in->a, &g);   /* POP r/m16 */
         in->op = XO_POP;
-    } else if (op == 0xfe || op == 0xff) {
-        decode_modrm(code, &pos, seg, in, &in->a, &g);
-        if (g > 1)
-            return false;
-        in->op = XO_INCDEC;
-        in->sub = g;
-        in->size = op == 0xfe ? 8 : 16;
-    } else {
+        break;
+    }
+    default:
         return false;
     }
 
