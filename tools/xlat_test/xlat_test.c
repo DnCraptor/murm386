@@ -93,23 +93,25 @@ static void undo_note(uint32_t a)
 }
 static void undo_apply(void)
 {
-    xlat_dirty = true;
     while (undo_n > 0) {
         --undo_n;
+        xlat_note_write_n(undo_log[undo_n].a, 1u);
         mem[undo_log[undo_n].a] = undo_log[undo_n].v;
     }
 }
 
 static uint8_t rd8(uint32_t a) { return mem[a]; }
 static uint16_t rd16(uint32_t a) { return (uint16_t)(mem[a] | mem[a + 1] << 8); }
-/* XRIP's write path: a write into translated code sets xlat_dirty */
+/* XRIP's write path: report actual writes into the translated code map. */
 static void note_w(uint32_t a) { if (a < XLAT_CODE_MAP_BYTES * 8u << XLAT_CODE_BLOCK_SHIFT) xlat_note_write(a); }
 static void wr8(uint32_t a, uint8_t v) { undo_note(a); note_w(a); mem[a] = v; }
 /* x87 stores (fpu_glue.c) into the test memory */
 void tfpu_note_write(uint32_t a, uint32_t n)
 {
-    if (tfpu_mem == mem)
+    if (tfpu_mem == mem) {
+        xlat_note_host_write(a, n);
         for (uint32_t k = 0; k < n; ++k) undo_note(a + k);
+    }
 }
 static void wr16(uint32_t a, uint16_t v) { undo_note(a); undo_note(a + 1); note_w(a); mem[a] = (uint8_t)v; mem[a + 1] = (uint8_t)(v >> 8); }
 
@@ -768,7 +770,6 @@ static void ref_step(void)
     case 0xe4: case 0xe5: case 0xe6: case 0xe7: case 0xec: case 0xed: case 0xee: case 0xef: {
         const uint32_t port = op & 8 ? getreg16(2) : fetch8(), bytes = op & 1 ? 2u : 1u;
         if (op & 2) {
-            xlat_dirty = true;   /* XRIP: an OUT may start a device writing RAM */
             tio(port, bytes, true, bytes == 2 ? getreg16(0) : getreg8(0));
         }
         else if (bytes == 2)
@@ -855,7 +856,6 @@ static void ref_step(void)
             break;
         const int exc = tfpu_exceptions;
         uint16_t ax = getreg16(0);
-        xlat_dirty = true;   /* XRIP: fpu.c stores past mem_write */
         tfpu_exec(fop, reg, rm, mode != 3, ea, &ax);
         putreg16(0, ax);
         if (tfpu_exceptions != exc) break;
@@ -1709,13 +1709,13 @@ static int replay(const char *path, int states)
         int ran_states = 0, fails = 0;
         for (int t = 0; t < states && fails < 3; ++t) {
             /* memory: random data, the region's segment filled with F1 and its code */
-            xlat_dirty = true, memcpy(mem, base_mem, REPLAY_SPAN);
+            xlat_note_host_write(0, REPLAY_SPAN), memcpy(mem, base_mem, REPLAY_SPAN);
             const uint32_t cs_base = (uint32_t)reg[r].cs << 4;
             memset(mem + cs_base, 0xf1, 0x10000);   /* F1: decoded by neither decoder */
             for (int l = 0; l < reg[r].nlines; ++l)
                 memcpy(mem + cs_base + reg[r].line[l].ip, reg[r].line[l].b, reg[r].line[l].n);
             for (int k = 0; k < 64; ++k) mem[rn(REPLAY_SPAN)] = (uint8_t)rn(4);   /* small values */
-            xlat_dirty = true;
+            xlat_note_host_write(cs_base, 0x10000);
             memset(&R, 0, sizeof(R));
             for (int i = 0; i < 8; ++i) R.gpr[i] = rn(3) ? rnd() : (rnd() & 0xffff0000u) | rn(8);
             R.gpr[1] = (R.gpr[1] & 0xffff0000u) | (rn(2) ? rn(40) : (uint16_t)rnd());
@@ -1768,7 +1768,7 @@ static int replay(const char *path, int states)
             const uint32_t io_after = io_sum;
             io_sum = io_before;
             /* the reference from 'before' must reach the same registers, flags and memory */
-            xlat_dirty = true, memcpy(mem, before_mem, REPLAY_SPAN);
+            xlat_note_host_write(0, REPLAY_SPAN), memcpy(mem, before_mem, REPLAY_SPAN);
             undo_apply();
             undo_from = UINT32_MAX;
             R = before;
@@ -1960,7 +1960,6 @@ static int chain_check(void)
         for (size_t k = 0; k < sizeof(code) / sizeof(code[0]); ++k)
             memcpy(mem + ((uint32_t)cs << 4) + code[k].ip, code[k].b, code[k].n);
         mem[0x20403] = 0xf4;   /* 2000:0403: HLT */
-        xlat_dirty = true;
         memcpy(mem_init, mem, MEM_BYTES);
         xlat_flush();
         /* make the regions: entries seen at burst starts, run on scratch state */
@@ -1981,7 +1980,7 @@ static int chain_check(void)
                 rt.cs = R.cs; rt.ip = R.ip;
                 rt.fn_key = test == 4 ? ((uint32_t)R.cs << 16 | R.ip) : UINT32_MAX;   /* L: as a hot CALL target */
                 xlat_run(&rt);
-                xlat_dirty = true, memcpy(mem, mem_init, MEM_BYTES);
+                xlat_note_host_write(0, MEM_BYTES), memcpy(mem, mem_init, MEM_BYTES);
             }
         const unsigned long translations = xlat_stats.translations;
         /* reference */
@@ -1992,7 +1991,7 @@ static int chain_check(void)
         static uint8_t want_mem[MEM_BYTES];
         memcpy(want_mem, mem, MEM_BYTES);
         /* translated, XRIP (the reference) where it stops */
-        xlat_dirty = true, memcpy(mem, mem_init, MEM_BYTES);
+        xlat_note_host_write(0, MEM_BYTES), memcpy(mem, mem_init, MEM_BYTES);
         R = init;
         R.ip = starts[test];
         const unsigned long entries0 = xlat_stats.entries, links0 = xlat_stats.links;
@@ -2043,7 +2042,7 @@ static int chain_check(void)
                 rt.intr = &zero_byte; rt.gpr = scratch.gpr; rt.eflags = init.eflags;
                 rt.cs = init.cs; rt.ip = 0x0701;
                 xlat_run(&rt);
-                xlat_dirty = true, memcpy(mem, mem_init, MEM_BYTES);
+                xlat_note_host_write(0, MEM_BYTES), memcpy(mem, mem_init, MEM_BYTES);
             }
             if (xlat_stats.retries_built != retries0 + 1 || xlat_stats.entries_added != added0 + 1) {
                 printf("  chain test 5: hot burst start inside a region got no entry\n");
@@ -2195,7 +2194,6 @@ static int precompile_check(void)
         return 1;
     }
     xlat_rt_t rt = exec_test_rt(cs, ip);
-    xlat_dirty = true;
     if (!xlat_run(&rt) || R.gpr[0] != 5) {
         puts("cold EXEC entry did not run the prepared code");
         return 1;
@@ -2615,7 +2613,7 @@ int main(int argc, char **argv)
         fpu_random_state(fpu_init);
 
         /* reference */
-        xlat_dirty = true, memcpy(mem, mem_init, MEM_BYTES);
+        xlat_note_host_write(0, MEM_BYTES), memcpy(mem, mem_init, MEM_BYTES);
         tfpu_state(fpu_init, 0);
         const uint32_t io_init = io_sum = rnd();
         R = init;
@@ -2634,7 +2632,7 @@ int main(int argc, char **argv)
         const uint32_t io_want = io_sum;
 
         /* translated */
-        xlat_dirty = true, memcpy(mem, mem_init, MEM_BYTES);
+        xlat_note_host_write(0, MEM_BYTES), memcpy(mem, mem_init, MEM_BYTES);
         tfpu_state(fpu_init, 0);
         io_sum = io_init;
         R = init;
@@ -2688,7 +2686,7 @@ int main(int argc, char **argv)
                     ref_t after = R;
                     static uint8_t after_mem[MEM_BYTES];
                     memcpy(after_mem, mem, MEM_BYTES);
-                    xlat_dirty = true, memcpy(mem, before_mem, MEM_BYTES);
+                    xlat_note_host_write(0, MEM_BYTES), memcpy(mem, before_mem, MEM_BYTES);
                     tfpu_state(fpu_after, 1);
                     tfpu_state(fpu_before, 0);
                     const uint32_t io_after = io_sum;
@@ -2720,7 +2718,7 @@ int main(int argc, char **argv)
                         }
                     }
                     if (!found && getenv("XLAT_TRACE3")) {
-                        xlat_dirty = true, memcpy(mem, before_mem, MEM_BYTES);
+                        xlat_note_host_write(0, MEM_BYTES), memcpy(mem, before_mem, MEM_BYTES);
                         R = before;
                         for (int k = 0; k < 300 && !R.halted; ++k) {
                             printf("   r %04x: %02x %02x %02x %02x  ax %04x cx %04x dx %04x bx %04x sp %04x bp %04x si %04x di %04x\n",
@@ -2740,11 +2738,11 @@ int main(int argc, char **argv)
                         for (int k = 0; k < 8; ++k) printf(" %08x", before.gpr[k]);
                         printf("\n  segs ES CS SS DS: %05x %05x %05x %05x\n", before.seg_base[0], before.seg_base[1], before.seg_base[2], before.seg_base[3]);
                         failures++;
-                        xlat_dirty = true, memcpy(mem, after_mem, MEM_BYTES);
+                        xlat_note_host_write(0, MEM_BYTES), memcpy(mem, after_mem, MEM_BYTES);
                         R = after;
                         break;
                     }
-                    xlat_dirty = true, memcpy(mem, after_mem, MEM_BYTES);
+                    xlat_note_host_write(0, MEM_BYTES), memcpy(mem, after_mem, MEM_BYTES);
                     tfpu_state(fpu_after, 0);
                     io_sum = io_after;
                     R = after;

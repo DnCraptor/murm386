@@ -21,6 +21,7 @@ __attribute__((always_inline)) static inline T unaligned_load(const void *p)
 template <typename T>
 __attribute__((always_inline)) static inline void unaligned_store(void *p, T value)
 {
+    guest_note_ptr_write_n(p, sizeof(T));
     reinterpret_cast<unaligned_value<T> *>(p)->value = value;
 }
 

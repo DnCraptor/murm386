@@ -51,11 +51,9 @@ static bool dispatch_int_hook(uint8_t vector)
     if (!hook || protected_mode)
         return false;
     flags_now();
-    XLAT_NOTE_FOREIGN();    /* native code writes guest RAM directly */
     const uint32_t saved_ip = firstip, saved_esp = first_esp;
     active_cpu->ip = active_cpu->next_ip = XRIP_IP;
     const bool handled = hook->handler(active_cpu, hook->opaque);
-    XLAT_NOTE_FOREIGN();    /* a nested guest call may have consumed it */
     XRIP_IP = active_cpu->next_ip;
     firstip = saved_ip;
     first_esp = saved_esp;
@@ -93,63 +91,9 @@ static bool bios_escape_impl(uint8_t id, bool leaf)
         return false;
 
     flags_now();
-#if XLAT
-    const unsigned scope = bios_xlat_leaf_scope(active_cpu, id);
-    const bool dos_local = scope == BIOS_XLAT_DOS_QUERY && fast_memory_size == 0xa0000u &&
-        !(cr0 & (CR0_PE | CR0_PG)) && !stack32 &&
-        segment_base[regss] == (uint32_t)segregs[regss] << 4 &&
-        fdos_xlat_query_scope(active_cpu, true);
-    if (leaf && (scope == BIOS_XLAT_UNKNOWN || (scope == BIOS_XLAT_DOS_QUERY && !dos_local)))
-        ++xlat_stats.bios_write_leaf;
-#if XLAT_LOG
-    if (dos_local) {
-        ++xlat_stats.dos_query_local;
-        if (XRIP_AH == 0x2au || XRIP_AH == 0x2cu)
-            ++xlat_stats.dos_clock_local;
-    }
-#endif
-    const uint32_t flags_linear = ((uint32_t)segregs[regss] << 4) +
-                                  (uint16_t)dwordregs[regsp] + 4u;
-    const bool flags_ram = fast_memory_size >= 2u && flags_linear <= fast_memory_size - 2u;
-    const bool flags_umb = flags_linear >= 0xc0000u && flags_linear < 0xfffffu &&
-        fast_memory_size && far_direct_at(flags_linear, 1u) == fast_memory + flags_linear;
-    const bool cursor = scope == BIOS_XLAT_CURSOR && fast_memory_size >= 0x463u;
-    const uint32_t cursor_linear = XRIP_AH == 1 ? 0x460u :
-        (XRIP_AH == 2 || XRIP_AH == 0x0e) ?
-        0x450u + ((uint32_t)XRIP_BH & 7u) * 2u : 0x462u;
-    const unsigned cursor_bytes = XRIP_AH == 5 ? 1u : 2u;
-    const bool flags_local = (flags_ram || flags_umb) &&
-        (scope == BIOS_XLAT_STACK_FLAGS ||
-         (scope == BIOS_XLAT_KBD_READ && fast_memory_size >= 0x41cu) ||
-         (scope == BIOS_XLAT_CLOCK && fast_memory_size >= 0x471u));
-    const unsigned clock_bytes = XRIP_AH == 0 ? 1u : 5u;
-    const bool local = scope == BIOS_XLAT_READONLY || scope == BIOS_XLAT_VRAM || cursor || flags_local || dos_local;
-    if (flags_local && flags_umb)
-        ++xlat_stats.bios_flags_umb;
-    if (!local)
-        XLAT_NOTE_FOREIGN();
-#endif
     const uint32_t saved_ip = firstip, saved_esp = first_esp;
     active_cpu->ip = active_cpu->next_ip = firstip;
     const bool iret = rp2350_bios_handler(active_cpu, id);
-#if XLAT
-    if (!local)
-        XLAT_NOTE_FOREIGN();    /* may have written after a nested call */
-    else if (flags_local) {
-        /* KBD_READ either patches FLAGS while waiting or advances the BDA
-         * head when a key is available. Report only the path actually taken. */
-        if (scope == BIOS_XLAT_KBD_READ && iret)
-            xlat_note_write_n(0x41au, 2u);
-        else {
-            xlat_note_write_n(flags_linear, 2u);
-            if (scope == BIOS_XLAT_CLOCK)
-                xlat_note_write_n(clock_bytes == 1u ? 0x470u : 0x46cu, clock_bytes);
-        }
-    } else if (cursor) {
-        xlat_note_write_n(cursor_linear, cursor_bytes);
-        ++xlat_stats.bios_cursor_local;
-    }
-#endif
     XRIP_IP = active_cpu->next_ip;
     firstip = saved_ip;
     first_esp = saved_esp;
@@ -590,7 +534,7 @@ static void xlat_direct_string(xlat_rt_t *rt, CPU *cpu, uint32_t ctl, uint8_t op
         string_step(op, bytes);
         ++xlat_stats.string_elems;
         --rt->budget;   /* slow-path work, counted by xlat_enter */
-        if ((xlat_dirty || xlat_write_hi) && !xlat_region_still_valid(rt))
+        if (xlat_write_hi && !xlat_region_still_valid(rt))
             return;    /* re-decode modified REP before another element */
         if (!rep || !XRIP_CX) {
             XRIP_IP = next;
@@ -796,8 +740,13 @@ static __force_inline void xrip_bind_memory(void)
 #else
     const bool direct = true;
 #endif
+    const uint32_t new_size = direct && phys_mem_size >= 0xa0000u ? 0xa0000u : 0;
+#if XLAT
+    if (fast_memory_size && (fast_memory != PC_RAM || fast_memory_size != new_size))
+        xlat_flush();
+#endif
     fast_memory = PC_RAM;
-    fast_memory_size = direct && phys_mem_size >= 0xa0000u ? 0xa0000u : 0;
+    fast_memory_size = new_size;
     extended_memory = PC_RAM + HMA_START;
     extended_memory_size = direct && phys_mem_size > HMA_START
                            ? phys_mem_size - HMA_START : 0;
@@ -837,10 +786,6 @@ void __time_critical_func(xrip_step_cpu)(CPU *cpu, int count)
     uint32_t burst_xrip_us = 0, burst_xrip_insns = 0;   /* in run_instructions() */
 #endif
     const uint32_t t0 = timer_hw->timerawl;
-    const bool clean_resume = xlat_clean_resume;
-    xlat_clean_resume = false;
-    if (!clean_resume || !xlat_mode_ok(cpu))
-        xlat_dirty = true;
     uint32_t xlat_used = xlat_enter(cpu, (uint32_t)count, t0, true);
     xlat_burst_native = xlat_used != 0;
 #endif
@@ -1069,7 +1014,6 @@ void cpu_intcall(CPU *cpu, uint8_t vector)
     XRIP_IP = cpu->next_ip;
     void *context[5];
     void **const outer_fault_point = fault_point;
-    XLAT_NOTE_FOREIGN();    /* native code writes guest RAM directly */
     const uint32_t saved_ip = firstip, saved_esp = first_esp;
     firstip = XRIP_IP;
     first_esp = dwordregs[regsp];
@@ -1078,7 +1022,6 @@ void cpu_intcall(CPU *cpu, uint8_t vector)
         deliver_fault();
     else
         external_interrupt(vector);
-    XLAT_NOTE_FOREIGN();    /* native hook may have executed nested guest code */
     fault_point = outer_fault_point;
     firstip = saved_ip;
     first_esp = saved_esp;

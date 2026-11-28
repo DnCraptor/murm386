@@ -205,6 +205,7 @@ static uint32_t __not_in_flash_func(psram_size)(void) {
 __attribute__((optimize("no-tree-loop-distribute-patterns")))
 void *__not_in_flash_func(nf_memset)(void *ptr, int value, size_t len)
 {
+    guest_note_ptr_write(ptr, len);
     uint8_t *p = (uint8_t *)ptr;
     uint8_t v8 = (uint8_t)value;
 
@@ -253,6 +254,7 @@ void *__not_in_flash_func(dos_api_memcpy)(void *dst,
                                           const void *src,
                                           size_t len)
 {
+    guest_note_ptr_write(dst, len);
     uint8_t *d = (uint8_t *)dst;
     const uint8_t *s = (const uint8_t *)src;
 
@@ -308,6 +310,7 @@ static void *__not_in_flash_func(dos_api_memmove)(void *dst,
     if (da < sa || da - sa >= len)
         return dos_api_memcpy(dst, src, len);
 
+    guest_note_ptr_write(dst, len);
     /* Overlap with dst inside src: copy backwards. Word transfers are safe
        only when source and destination have the same alignment. */
     d += len;
@@ -376,6 +379,23 @@ int __not_in_flash_func(dos_api_memcmp)(const void *a,
     }
 
     return 0;
+}
+
+/* Raw native writes into guest code must be reported before the next guest
+ * instruction. Only synchronous core0 callers may modify the JIT journal. */
+static bool dos_jit_note_write(uint32_t linear, uint32_t len)
+{
+#if XLAT
+    uint32_t ipsr;
+    __asm volatile("mrs %0, ipsr" : "=r"(ipsr));
+    if (get_core_num() != 0 || ipsr)
+        return false;
+    xlat_note_host_write(linear, len);
+#else
+    (void)linear;
+    (void)len;
+#endif
+    return true;
 }
 
 // To be placed on 0x10100000
@@ -500,5 +520,6 @@ unsigned long __in_systable() __aligned(4096) dos_api_table_ptrs[] = {
     (unsigned long)set_tsr0_callback, /* 117: core0 timer callback chain */
     (unsigned long)set_tsr1_callback, /* 118: core1 VGA scanline callback chain */
     (unsigned long)dos_keyboard_get_event_raw, /* 119: native keyboard event queue */
+    (unsigned long)dos_jit_note_write, /* 120: raw guest-memory write notification */
     0
 };

@@ -627,6 +627,7 @@ void __not_in_flash_func(pstore8)(uint32_t addr, uint8_t val)
         ems_mem_write8(addr, val);
         return;
     }
+    guest_note_write_n(addr, 1u);
 #if !defined(NO_PAGING)
     ega128_mem_write8(addr, val);
 #else
@@ -665,6 +666,7 @@ void __not_in_flash_func(pstore32)(uint32_t addr, uint32_t val)
         ems_mem_write32(addr, val);
         return;
     }
+    guest_note_write_n(addr, 4u);
 #if !defined(NO_PAGING)
     ega128_mem_write32(addr, val);
 #else
@@ -1147,8 +1149,6 @@ static void __not_in_flash_func(pc_rate_update)(PC *pc, int limit)
 
 #if XLAT
 #include "fdos/xlat/xlat.h"
-extern bool xlat_host_async_writers(void);
-extern bool xlat_platform_callbacks_safe(const PC *pc);
 #endif
 
 static void __not_in_flash_func(pc_service_impl)(PC *pc, bool full)
@@ -1162,12 +1162,8 @@ static void __not_in_flash_func(pc_service_impl)(PC *pc, bool full)
      */
     pc_last_device_service = get_uticks();
 #if XLAT
-    const bool foreign = !xlat_platform_callbacks_safe(pc) || xlat_host_async_writers();
-    if (full) {
+    if (full)
         pc_last_full_service = pc_last_device_service;
-        if (foreign)
-            xlat_dirty = true;
-    }
 #endif
 
     if (full) {
@@ -1199,10 +1195,6 @@ static void __not_in_flash_func(pc_service_impl)(PC *pc, bool full)
     {
         PROF_T(t_refresh);
         if (refresh && pc->redraw) {
-#if XLAT
-            if (foreign)
-                xlat_dirty = true;
-#endif
             vga_refresh(pc->vga, pc->redraw, pc->redraw_data,
                         pc->full_update != 0);
             if (pc->full_update == 2)
@@ -1211,18 +1203,9 @@ static void __not_in_flash_func(pc_service_impl)(PC *pc, bool full)
         PROF_ADD(t_refresh, refresh);
     }
 #if XLAT
-    /* Device state and IRQ delivery do not write guest code. DMA and the
-     * deferred INT 15h event report their actual RAM writes separately.
-     * Untrusted callbacks may have consumed dirty in a nested call. */
-    if (foreign && (full || refresh))
-        xlat_dirty = true;
 #if XLAT_LOG
-    if (full) {
-        if (foreign || xlat_dirty)
-            ++xlat_stats.service_foreign;
-        else
-            ++xlat_stats.service_clean;
-    }
+    if (full)
+        ++xlat_stats.service_clean;
     xlat_note_service(get_uticks() - pc_last_device_service);
 #endif
 #endif
@@ -1242,23 +1225,13 @@ static void __not_in_flash_func(pc_service_due)(PC *pc)
 
 void __not_in_flash_func(pc_service)(PC *pc)
 {
-#if XLAT
-    /* Public native-ELF yield is not a certified guest continuation. */
-    xlat_dirty = true;
-#endif
     pc_service_impl(pc, true);
-#if XLAT
-    xlat_dirty = true;
-#endif
 }
 
 static void __not_in_flash_func(pc_step_impl)(PC *pc, size_t max_ops, bool continuation)
 {
     PROF_T(t_total);
-#if XLAT
-    if (!continuation)
-        xlat_dirty = true;
-#endif
+    (void)continuation;  /* writes, not entry provenance, determine cache validity */
     /*
      * Порядок слайса: сначала CPU-burst, затем обслуживание устройств.
      *
@@ -1310,17 +1283,7 @@ static void __not_in_flash_func(pc_step_impl)(PC *pc, size_t max_ops, bool conti
             }
         }
         PROF_T(t_cpu);
-#if XLAT
-        /* Only an explicitly uninterrupted guest loop can reuse the epoch.
-         * Consume the permission at CPU entry, never in a nested callback. */
-        xlat_clean_resume = continuation && !xlat_host_async_writers();
-#else
-        (void)continuation;
-#endif
         cpu_step(pc->cpu, max_ops);
-#if XLAT
-        xlat_clean_resume = false;
-#endif
         PROF_ADD(t_cpu, cpu);
         if (limit > 0) {
             pc_rate_update(pc, limit);
@@ -2650,6 +2613,9 @@ void bios_post(PC *pc) {
 
 void load_bios_and_reset(PC *pc)
 {
+#if XLAT
+    xlat_flush();  /* ROM images / guest backing can be replaced here */
+#endif
 	int bios_size = 0;
 	int vga_loaded = 0;
 	if (pc->bios && pc->bios[0]) {

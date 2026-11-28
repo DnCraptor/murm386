@@ -70,30 +70,9 @@ static __time_critical_func() inline void load_segment(uint8_t index, uint16_t s
 
 #define portin(port) active_cpu->cb.io_read8(active_cpu->cb.io, (port))
 #define portin16(port) active_cpu->cb.io_read16(active_cpu->cb.io, (port))
-#if XLAT
-#define XLAT_NOTE_FOREIGN() (xlat_dirty = true)   /* a device or native code may write guest RAM */
 extern bool pc_xlat_safe_out(void *o, uint16_t port, bool word);
-static __time_critical_func() inline void xlat_portout8(CPU *cpu, uint16_t port, uint8_t value)
-{
-    const bool foreign = !pc_xlat_safe_out(cpu->cb.io, port, false);
-    if (foreign) XLAT_NOTE_FOREIGN();
-    cpu->cb.io_write8(cpu->cb.io, port, value);
-    if (foreign) XLAT_NOTE_FOREIGN();
-}
-static __time_critical_func() inline void xlat_portout16(CPU *cpu, uint16_t port, uint16_t value)
-{
-    const bool foreign = !pc_xlat_safe_out(cpu->cb.io, port, true);
-    if (foreign) XLAT_NOTE_FOREIGN();
-    cpu->cb.io_write16(cpu->cb.io, port, value);
-    if (foreign) XLAT_NOTE_FOREIGN();
-}
-#define portout(port, value) xlat_portout8(active_cpu, (port), (value))
-#define portout16(port, value) xlat_portout16(active_cpu, (port), (value))
-#else
-#define XLAT_NOTE_FOREIGN() ((void)0)
 #define portout(port, value) active_cpu->cb.io_write8(active_cpu->cb.io, (port), (value))
 #define portout16(port, value) active_cpu->cb.io_write16(active_cpu->cb.io, (port), (value))
-#endif
 // The memory accesses of the CPU, by linear address. Conventional RAM is reached inline; the memory
 // from 1 MB directly too (cpu.h), from a small function; the rest goes through read86/write86.
 // A word or dword is one load or store: the Cortex-M33 and the host take it at any address.
@@ -994,11 +973,6 @@ static __time_critical_func() void op_0f() {
 }
 
 static void xrip_fpu(uint8_t opcode) {
-    /* The XRIP cpu_store* adapters now use mem_write*, including the
-     * translated-source write map. Keep the conservative path outside
-     * direct real mode; ordinary x87 operations need no global epoch. */
-    if (protected_mode || (cr0 & (CR0_PE | CR0_PG)) || !fast_memory_size)
-        XLAT_NOTE_FOREIGN();
     if (cr0 & 0x0c)
         cpu_fault(7);
     else {

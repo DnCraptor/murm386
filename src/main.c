@@ -781,17 +781,7 @@ static bool process_keycode_impl(int is_down, int keycode) {
 
 static bool process_keycode(int is_down, int keycode)
 {
-#if XLAT
-    /* Host keys can enter disk/settings UI and run arbitrary native work.
-     * Ordinary empty input polls have no such effect. A nested guest call
-     * may consume dirty, so bracket the actual host event. */
-    xlat_dirty = true;
-#endif
-    const bool pass = process_keycode_impl(is_down, keycode);
-#if XLAT
-    xlat_dirty = true;
-#endif
-    return pass;
+    return process_keycode_impl(is_down, keycode);
 }
 
 typedef struct {

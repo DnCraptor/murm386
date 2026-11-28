@@ -3266,7 +3266,7 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     /* Dispatcher, reached by B from a BRANCH exit stub: rt->ip and
      * exit_kind stored, the lazy flags in rt, the GPRs still in r4-r10 (as
      * at a region entry). The region at rt->cs:ip is entered at once when
-     * the link table has it for the current epoch, no IRQ is pending and
+     * the link table has a valid entry, no IRQ is pending and
      * the budget covers the entry. A table miss may refill a live target
      * without leaving the trampoline; true misses return to xlat_run().
      * r0-r3, r12 and lr are free here. */
@@ -3287,13 +3287,13 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     arm_dp_reg(&e, DP_ADD, 0, A_R3, A_R3, A_R2, SH_LSL, 4);
     /* The dispatcher is a tail transfer: LR is scratch here (the host LR
      * is saved by the outer trampoline). Fetch the complete aligned link
-     * in one LDM: r0=key, r2=code, r12=epoch, lr=charge | region<<16.
+     * in one LDM: r0=key, r2=code, r12=reserved, lr=charge | region<<16.
      * Keep code in r2 until BX; no second metadata load after validation. */
     arm_e32(&e, 0xe893u, 0x5005u);                           /* LDM.W r3,{r0,r2,r12,lr} */
     arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R0, A_R1, SH_LSL, 0);   /* CMP key */
     const uint32_t miss2 = arm_branch_slot(&e);
-    arm_ls_imm(&e, LS_LDR, A_R0, A_R11, XLAT_RT_DISPATCH_EPOCH);
-    arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R12, A_R0, SH_LSL, 0);  /* CMP epoch */
+    arm_ls_imm(&e, LS_LDR, A_R0, A_R11, XLAT_RT_DISPATCH_GATE);
+    arm_dp_imm(&e, DP_SUB, 1, A_PC, A_R0, 0);  /* IRQ gate open? */
     const uint32_t miss3 = arm_branch_slot(&e);
     const uint32_t link_charge = e.pos;
     arm_ls_imm(&e, LS_LDR, A_R0, A_R11, XLAT_RT_BUDGET);
@@ -3317,8 +3317,8 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     arm_e32(&e, 0xe893u, 0x5005u);                           /* LDM.W r3,{r0,r2,r12,lr} */
     arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R0, A_R1, SH_LSL, 0);
     const uint32_t alt_miss = arm_branch_slot(&e);
-    arm_ls_imm(&e, LS_LDR, A_R0, A_R11, XLAT_RT_DISPATCH_EPOCH);
-    arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R12, A_R0, SH_LSL, 0);
+    arm_ls_imm(&e, LS_LDR, A_R0, A_R11, XLAT_RT_DISPATCH_GATE);
+    arm_dp_imm(&e, DP_SUB, 1, A_PC, A_R0, 0);  /* IRQ gate open? */
     const uint32_t alt_stale = arm_branch_slot(&e);
     arm_ls_imm(&e, LS_LDR, A_R0, A_R11, XLAT_RT_LINK_ALT);
     arm_dp_imm(&e, DP_ADD, 0, A_R0, A_R0, 1);
@@ -3326,7 +3326,7 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     const uint32_t alt_charge = arm_branch_slot(&e);
     /* Cold link lookup: the outer trampoline already saves host LR and
      * has an AAPCS-aligned stack. C preserves r4-r11 (guest GPRs + rt).
-     * A prepared entry returns through the SAME charge/epoch path. */
+     * A prepared entry returns through the SAME charge/IRQ gate path. */
     const uint32_t refill = e.pos;
     arm_mov(&e, A_R0, A_R11);
     arm_mov32(&e, A_R12, (uint32_t)(uintptr_t)&xlat_rt_link_refill);
@@ -3335,8 +3335,8 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
     const uint32_t refill_miss = arm_branch_slot(&e);
     arm_mov(&e, A_R3, A_R0);
     arm_e32(&e, 0xe893u, 0x5005u);                           /* LDM.W r3,{r0,r2,r12,lr} */
-    arm_ls_imm(&e, LS_LDR, A_R0, A_R11, XLAT_RT_DISPATCH_EPOCH);
-    arm_dp_reg(&e, DP_SUB, 1, A_PC, A_R12, A_R0, SH_LSL, 0);
+    arm_ls_imm(&e, LS_LDR, A_R0, A_R11, XLAT_RT_DISPATCH_GATE);
+    arm_dp_imm(&e, DP_SUB, 1, A_PC, A_R0, 0);  /* IRQ gate open? */
     const uint32_t refill_stale = arm_branch_slot(&e);
     const uint32_t refill_charge = arm_branch_slot(&e);
 #if !XLAT_EVENT_GATE

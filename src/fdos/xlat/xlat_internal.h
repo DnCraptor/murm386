@@ -74,7 +74,7 @@ int dos_api_memcmp(const void *a, const void *b, size_t len);
 typedef struct xlat_link {
     uint32_t key;          /* cs << 16 | ip */
     uint32_t code;         /* entry label address | 1 */
-    uint32_t epoch;        /* rt->epoch it is good for */
+    uint32_t reserved;     /* keep the 16-byte dispatcher layout */
     uint16_t charge;       /* budget charged on entry: XLAT_ENTRY_COST + region fn */
     uint16_t region;       /* the dispatcher reads it at offset 14 (LDRH) */
 } xlat_link_t;

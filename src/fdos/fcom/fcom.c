@@ -235,6 +235,7 @@ public:
     dirty_ = true;
     return buffer_;
 #else
+    guest_note_ptr_write(ptr_, sizeof(T) * N);
     return ptr_;
 #endif
   }
@@ -255,6 +256,7 @@ public:
     dirty_ = true;
     return buffer_[(size_t)index];
 #else
+    guest_note_ptr_write_n(ptr_ + (size_t)index, sizeof(T));
     return ptr_[(size_t)index];
 #endif
   }

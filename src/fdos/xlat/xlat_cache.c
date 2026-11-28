@@ -45,7 +45,6 @@ typedef struct {
     uint32_t us;           /* time inside it (rt->clock), entries included */
     uint32_t sides;        /* instructions sent to XRIP for memory outside fast memory */
     uint32_t exits[XLAT_EXIT_COUNT];
-    uint32_t epoch;        /* st->epoch when its bytes were last compared */
     uint32_t mem_size;     /* rt->mem_size it was built for (reads compare with it) */
     uint8_t trace_min;     /* xlat_translate's trace_min it was built with */
     uint8_t n_extra;       /* entry points added (add_entry) */
@@ -118,7 +117,6 @@ typedef struct {
     uint32_t free_end;      /* cached window_end(), zero means recompute */
     uint32_t held_bytes;    /* sum of all held chunks, including invalidated */
     uint32_t free_slots[REGION_WORDS];
-    uint32_t epoch;         /* changes whenever x86 code may have been written */
     uint8_t *mem;
     uint32_t mem_size;      /* guest memory of the last xlat_run() */
     entry_t entry[XLAT_ENTRY_SLOTS];
@@ -180,21 +178,6 @@ typedef struct {
 #endif
 
 static state_t *st;
-/* Keep the IRQ-only sentinel out of published epochs. On wrap force the
- * old regions through validation and drop stale link entries. */
-static inline uint32_t advance_epoch(void)
-{
-#if XLAT_EVENT_GATE
-    if (st->epoch == XLAT_IRQ_BLOCKED - 1u) {
-        for (unsigned i = 0; i < XLAT_MAX_REGIONS; ++i)
-            st->region[i].epoch = XLAT_IRQ_BLOCKED;
-        for (unsigned i = 0; i < XLAT_LINK_ENTRIES; ++i)
-            st->link[i].key = UINT32_MAX;
-        return st->epoch = 0;
-    }
-#endif
-    return ++st->epoch;
-}
 static bool disabled;
 /* Non-NULL only while xlat_run owns this runtime state. */
 static xlat_rt_t *gap_rt;
@@ -208,9 +191,7 @@ static unsigned gap_next;
 
 uint8_t xlat_entry_map[XLAT_MAP_BITS / 8];
 uint8_t xlat_code_map[XLAT_CODE_MAP_BYTES];
-bool xlat_dirty = true;
 uint32_t xlat_write_lo, xlat_write_hi;
-bool xlat_clean_resume;
 uint32_t xlat_call_key[XLAT_CALL_SLOTS];
 uint8_t xlat_call_count[XLAT_CALL_SLOTS];
 bool xlat_call_queue_blocked;
@@ -776,42 +757,6 @@ static inline __attribute__((always_inline)) uint32_t load32(const uint8_t *p)
     return v;
 }
 
-/* The x86 bytes the region was built from are still there. */
-static bool XLAT_HOT_FN(region_bytes_valid)(const region_t *r, const xlat_rt_t *rt)
-{
-#if XLAT_LOG
-    ++xlat_stats.revalidations;
-#endif
-    if (rt->mem_size != r->mem_size)
-        return false;
-    const uint8_t *d = st->arena.base + r->data_off;
-    for (unsigned k = 0; k < r->n_runs; ++k) {
-        const uint32_t linear = load32(d);
-        const uint32_t len = d[4] | (uint32_t)d[5] << 8;
-        const uint8_t *copy = d + 8;
-#if XLAT_LOG
-        xlat_stats.revalidate_bytes += len;
-#endif
-        if (!xlat_code_direct(linear, len))
-            return false;
-        const uint8_t *g = rt->mem + linear;
-        uint32_t i = 0;
-        for (; i + 4 <= len; i += 4)
-            if (load32(g + i) != load32(copy + i))
-                return false;
-        for (; i < len; ++i)
-            if (g[i] != copy[i])
-                return false;
-        d += 8 + ((len + 3u) & ~3u);
-    }
-    return true;
-}
-
-static bool XLAT_HOT_FN(region_valid)(const region_t *r, const xlat_rt_t *rt)
-{
-    return rt->seg_base[1] == r->cs_base && region_bytes_valid(r, rt);
-}
-
 /* rt->cs:ip is in the x86 code of a live or dropped region (its runs: a
  * region may take code from far apart, e.g. called functions). */
 static bool covered(const xlat_rt_t *rt)
@@ -952,7 +897,7 @@ static void rebuild_maps(void)
     }
     for (int k = 0; k < XLAT_MAX_REGIONS; ++k) {
         const region_t *r = &st->region[k];
-        if (!r->live)
+        if (!(r->live || r->cold))
             continue;
         const uint8_t *d = st->arena.base + r->data_off;
         for (unsigned j = 0; j < r->n_runs; ++j) {
@@ -971,7 +916,7 @@ static void rebuild_maps(void)
 }
 
 /* Compare only the intersection with saved source for a known write.
- * Unrelated bytes and regions retain their existing epoch. */
+ * Unrelated bytes and regions remain valid. */
 static bool region_range_changed(const region_t *r, const xlat_rt_t *rt,
                                  uint32_t lo, uint32_t hi)
 {
@@ -994,7 +939,7 @@ static bool region_range_changed(const region_t *r, const xlat_rt_t *rt,
     return false;
 }
 
-/* Only known guest writes reach here. Retain the epoch and every link
+/* Only known guest writes reach here. Retain every link
  * whose region still matches its source bytes, even across different CS. */
 static void validate_local_writes(const xlat_rt_t *rt)
 {
@@ -1342,7 +1287,6 @@ static int publish_region(const xlat_rt_t *rt, uint16_t ip, int trace_min,
     }
     r->live = 1;
     index_region((unsigned)idx, true);
-    r->epoch = st->epoch;
     gap_reset();           /* its bytes may be in a cached gap */
     if (evicted)
         rebuild_maps();    /* before the new marks: they are set below */
@@ -1380,6 +1324,8 @@ void xlat_precompile_image(uint8_t *mem, uint32_t mem_size, uint32_t key,
 #endif
     if (!ready(true))
         return;
+    if (st->mem && (st->mem != mem || st->mem_size != mem_size))
+        xlat_flush();
 
     xlat_arena_t *const a = &st->arena;
     const uint32_t room = (a->size - st->head) / 8u;
@@ -1612,15 +1558,8 @@ static void start_compile(const xlat_rt_t *rt)
         return;  /* dynamic thunk may have appeared since enqueue */
     if (e) {
         region_t *r = &st->region[e->region];
-        if ((r->live || r->cold) &&
-            (r->epoch == st->epoch || region_valid(r, &st->job.rt)))
+        if (r->live || r->cold)
             return; /* another request has already covered this entry */
-        if (r->live || r->cold) {
-            xlat_stats.invalidations += r->live != 0;
-            r->live = r->cold = 0;
-            gap_reset();
-            unlink_region(e->region);
-        }
     }
     const bool retry = req.kind == COMPILE_RETRY;
     const bool exit = req.kind == COMPILE_EXIT;
@@ -1719,14 +1658,14 @@ static inline __attribute__((always_inline)) xlat_link_t *install_link(
     xlat_link_t *alt = &st->link[slot + XLAT_LINK_SLOTS];
     /* Keep a colliding current entry in the secondary bank. */
     if (l->key != key) {
-        if (l->key != UINT32_MAX && l->epoch == st->epoch)
+        if (l->key != UINT32_MAX)
             *alt = *l;
         else if (alt->key == key)
             alt->key = UINT32_MAX;
     }
     l->key = key;
     l->code = code;
-    l->epoch = st->epoch;
+    l->reserved = 0;
     l->charge = (uint16_t)charge;
     l->region = e->region;
     return l;
@@ -1737,13 +1676,12 @@ static inline __attribute__((always_inline)) xlat_link_t *install_link(
  * Budget charging and the actual transfer remain in the ARM dispatcher. */
 const xlat_link_t *XLAT_HOT_FN(xlat_rt_link_refill)(xlat_rt_t *rt)
 {
-    if (flush_pending || xlat_dirty || xlat_write_hi ||
-        rt->epoch != st->epoch || rt->budget <= XLAT_ENTRY_COST ||
+    if (flush_pending || xlat_write_hi || rt->budget <= XLAT_ENTRY_COST ||
         *rt->intr || (rt->wall_deadline &&
         (int32_t)(*rt->clock - rt->wall_deadline) >= 0))
         return NULL;
 #if XLAT_EVENT_GATE
-    if (__atomic_load_n(&rt->dispatch_epoch, __ATOMIC_RELAXED) != rt->epoch)
+    if (__atomic_load_n(&rt->dispatch_gate, __ATOMIC_RELAXED) != 0u)
         return NULL;
 #endif
 #if XLAT_LOG
@@ -1758,13 +1696,10 @@ const xlat_link_t *XLAT_HOT_FN(xlat_rt_link_refill)(xlat_rt_t *rt)
     if (!r->live || r->cs_base != rt->seg_base[1] ||
         rt->budget <= (int32_t)charge)
         return NULL;
-    if (r->epoch != st->epoch && !region_valid(r, rt))
-        return NULL;   /* ordinary dispatcher owns invalidation */
-    if (flush_pending || xlat_dirty || xlat_write_hi || *rt->intr ||
+    if (flush_pending || xlat_write_hi || *rt->intr ||
         (rt->wall_deadline &&
          (int32_t)(*rt->clock - rt->wall_deadline) >= 0))
         return NULL;
-    r->epoch = st->epoch;
     const uint32_t code = (uint32_t)(uintptr_t)(st->arena.base + e->code_off) | 1u;
 #if XLAT_LOG
     ++xlat_stats.link_refill;
@@ -1787,34 +1722,15 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
             return false;
     }
     const int32_t start = rt->budget;
-    gap_rt = rt;
-    rt->code_map = xlat_code_map;
-    /* Something but XRIP's ordinary writes ran since the last call (or XRIP
-     * wrote into translated code): compare each region's bytes once */
+    /* A different backing is a mapping change, not a write epoch. */
     if (rt->mem != st->mem || rt->mem_size != st->mem_size) {
-        if (st->job.pending) {
-            xlat_preempt_discard();
-            rearm_request(st->job.request);
-            st->job.pending = false;
-            xlat_stats.compile_cancel++;
-        }
-        for (unsigned i = 0; i < st->queued; ++i)
-            rearm_request(st->queue[i]);
-        st->queued = 0;
-        clear_compile_blocked();
-        gap_reset();
+        if (st->mem)
+            xlat_flush();
         st->mem = rt->mem;
         st->mem_size = rt->mem_size;
-        xlat_dirty = true;
     }
-    if (xlat_dirty) {
-        xlat_dirty = false;
-        advance_epoch();
-#if XLAT_LOG
-        ++xlat_stats.epoch_start;
-#endif
-        rt->hit_lo = rt->hit_hi = 0;
-    }
+    gap_rt = rt;
+    rt->code_map = xlat_code_map;
     validate_local_writes(rt);
     const xlat_tramp_fn tramp = (xlat_tramp_fn)(uintptr_t)(st->arena.base + 1);
     rt->link = st->link;
@@ -1823,18 +1739,22 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
     rt->cur = NO_REGION;
     rt->links = 0;
     rt->link_alt = 0;
-    rt->epoch = st->epoch;
+    rt->dispatch_ready = 0;
     xlat_irq_refresh(rt);
     if (rt->fn_key != UINT32_MAX) {
         const entry_t *e = lookup(rt->fn_key);
         const region_t *r = e ? &st->region[e->region] : NULL;
         if (xlat_thunk_kind(rt, rt->fn_key) ||
-            (r && (r->live || r->cold) && r->epoch == st->epoch) ||
+            (r && (r->live || r->cold)) ||
             queue_compile(rt->fn_key, COMPILE_CALL, XLAT_RJ_NONE))
             xlat_call_ack(request_linear(rt->fn_key));
     }
     bool ran = false, serviced = false, resample = true;
     for (;;) {
+        if (flush_pending)
+            break;
+        if (xlat_write_hi)
+            validate_local_writes(rt);
         const uint32_t key = (uint32_t)rt->cs << 16 | (uint16_t)rt->ip;
         entry_t *e = lookup(key);
         const bool live = e && st->region[e->region].live;
@@ -1896,24 +1816,11 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
         if (!live)
             break;
         region_t *r = &st->region[e->region];
-        if (r->epoch != st->epoch) {
-            /* Since then XRIP may have written anywhere; translated code
-             * cannot write into translated x86 code (xlat_code_map). */
-            if (!region_valid(r, rt)) {
-                r->live = 0;
-                gap_reset();
-                unlink_region(e->region);
-                xlat_stats.invalidations++;
-                break;
-            }
-            r->epoch = st->epoch;
-        }
         /* A region without a loop has no back edge charging the budget:
          * at least r->fn instructions run. */
         const uint32_t charge = XLAT_ENTRY_COST + r->fn;
         const uint32_t code = (uint32_t)(uintptr_t)(st->arena.base + e->code_off) | 1u;
         install_link(key, e, charge, code);
-        rt->epoch = st->epoch;
         rt->budget -= (int32_t)charge;
         const int32_t b0 = rt->budget, x0 = (int32_t)rt->extra;
         const uint32_t t0 = *rt->clock;
@@ -1922,8 +1829,8 @@ bool XLAT_HOT_FN(xlat_run)(xlat_rt_t *rt)
 #if XLAT_EVENT_GATE
         /* A delayed producer may have closed either gate separately, e.g.
          * across CLI or a native callback that consumed the request. Repair
-         * both at this synchronized boundary, not just the link epoch. */
-        if (__atomic_load_n(&rt->dispatch_epoch, __ATOMIC_RELAXED) != rt->epoch ||
+         * both at this synchronized boundary. */
+        if (__atomic_load_n(&rt->dispatch_gate, __ATOMIC_RELAXED) != 0u ||
             __atomic_load_n(&rt->back_deadline, __ATOMIC_RELAXED) != rt->deadline)
             xlat_irq_refresh(rt);
 #endif
@@ -2128,40 +2035,50 @@ static void gap_reset(void)
     gap_next = 0;
 }
 
+void xlat_record_write(uint32_t linear, uint32_t len)
+{
+#ifndef XLAT_HOST_TEST
+    uint32_t ipsr;
+    __asm volatile("mrs %0, ipsr" : "=r"(ipsr));
+    if (get_core_num() != 0 || ipsr)
+        return; /* async modification of guest code violates the native ABI */
+#endif
+    if (!xlat_write_hi || linear < xlat_write_lo)
+        xlat_write_lo = linear;
+    if (linear + len > xlat_write_hi)
+        xlat_write_hi = linear + len;
+}
+
 void xlat_note_host_write(uint32_t linear, uint32_t len)
 {
-    if (!len)
+    /* Physical range, not a permission to write arbitrary guest memory.
+     * The direct code map covers conventional RAM, UMB and HMA alike.
+     * EMS backing and XMS above it cannot contain translated real-mode code. */
+#ifndef XLAT_HOST_TEST
+    uint32_t ipsr;
+    __asm volatile("mrs %0, ipsr" : "=r"(ipsr));
+    if (get_core_num() != 0 || ipsr)
         return;
-#if defined(NO_PAGING)
-    /* The conventional window cannot be banked or aliased by EMS/VGA.
-     * Scan the conservative map across the whole destination, not just
-     * the first byte. The local validator checks the actual source bytes. */
-    if (linear < 0xa0000u && len <= 0xa0000u - linear) {
-        const uint32_t last = linear + len - 1u;
-        for (uint32_t b = linear >> XLAT_CODE_BLOCK_SHIFT;
-             b <= (last >> XLAT_CODE_BLOCK_SHIFT); ++b) {
-            if (xlat_code_map[b >> 3] & (1u << (b & 7u))) {
-                if (!xlat_write_hi || linear < xlat_write_lo)
-                    xlat_write_lo = linear;
-                if (last + 1u > xlat_write_hi)
-                    xlat_write_hi = last + 1u;
-                break;
-            }
+#endif
+    const uint32_t limit = XLAT_CODE_MAP_BYTES * 8u << XLAT_CODE_BLOCK_SHIFT;
+    if (!len || linear >= limit)
+        return;
+    if (len > limit - linear)
+        len = limit - linear;
+    const uint32_t end = linear + len;
+    for (uint32_t b = linear >> XLAT_CODE_BLOCK_SHIFT;
+         b <= ((end - 1u) >> XLAT_CODE_BLOCK_SHIFT); ++b) {
+        if (xlat_code_map[b >> 3] & (1u << (b & 7u))) {
+            xlat_record_write(linear, len);
+            break;
         }
-#if XLAT_LOG
-        ++xlat_stats.host_local;
-#endif
-        return;
     }
-#endif
-    /* HMA, UMB/EMS, VGA, remote or paged RAM: keep the original policy. */
-    xlat_dirty = true;
 #if XLAT_LOG
-    ++xlat_stats.host_unknown;
+    ++xlat_stats.host_local;
 #endif
 }
 
-/* [addr, last] meets the x86 bytes of a live region. Cold/invalidated
+/* [addr, last] meets the x86 bytes of a live or cold region. Invalidated
  * chunks are retained for allocation/statistics, not for code protection.
  * Else *lo, *hi (when given) are narrowed to the gap around the write. */
 static bool code_meets(uint32_t addr, uint32_t last, uint32_t *lo, uint32_t *hi,
@@ -2171,7 +2088,7 @@ static bool code_meets(uint32_t addr, uint32_t last, uint32_t *lo, uint32_t *hi,
     region_iter_t it = regions_in(wlo, whi);
     for (int k; (k = region_next(&it)) >= 0;) {
         const region_t *r = &st->region[k];
-        if (!r->live || r->lo >= whi || r->lo + r->span <= wlo)
+        if (!(r->live || r->cold) || r->lo >= whi || r->lo + r->span <= wlo)
             continue;
         xlat_stats.gap_candidates++;
         const uint8_t *d = st->arena.base + r->data_off;
@@ -2296,7 +2213,7 @@ uint32_t XLAT_HOT_FN(xlat_rt_bus_write)(xlat_rt_t *rt, uint32_t address, uint32_
     }
     ++xlat_stats.bus_write;
     xlat_note_write_n(address, bytes);
-    if ((xlat_write_hi || xlat_dirty) && !xlat_region_still_valid(rt)) {
+    if (xlat_write_hi && !xlat_region_still_valid(rt)) {
         ++xlat_stats.bus_smc;
         return XLAT_MEM_REDISPATCH;
     }
@@ -3248,27 +3165,5 @@ bool XLAT_HOT_FN(xlat_region_still_valid)(xlat_rt_t *rt)
     region_t *r = rt->cur < XLAT_MAX_REGIONS ? &st->region[rt->cur] : NULL;
     if (xlat_write_hi)
         validate_local_writes(rt);
-    if (r && !r->live)
-        return false;
-    if (!xlat_dirty)
-        return true;
-    xlat_dirty = false;
-    /* the other regions are compared at their next entry (through
-     * xlat_run(): the link table entries are for the old epoch) */
-    rt->epoch = advance_epoch();
-    xlat_irq_refresh(rt);
-#if XLAT_LOG
-    ++xlat_stats.epoch_helper;
-#endif
-    rt->hit_lo = rt->hit_hi = 0;
-    if (!r || region_valid(r, rt)) {
-        if (r)
-            r->epoch = st->epoch;
-        return true;
-    }
-    r->live = 0;
-    gap_reset();
-    unlink_region((int)rt->cur);
-    xlat_stats.invalidations++;
-    return false;
+    return !r || r->live;
 }

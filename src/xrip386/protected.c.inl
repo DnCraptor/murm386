@@ -114,6 +114,9 @@ static __time_critical_func() void paged_write32(uint32_t a, uint32_t v) {
 static void set_paging(bool on) {
     static uint32_t fast_size, extended_size; // the direct memory paths are only right without paging
     if (on == (read86 == paged_read8)) return;
+#if XLAT
+    xlat_flush();  /* direct backing / paging transition */
+#endif
     if (on) {
         fast_size = fast_memory_size;
         extended_size = extended_memory_size;
@@ -134,8 +137,6 @@ static void set_paging(bool on) {
 static void set_cr0(uint32_t value) {
     value |= CR0_ET;
     const uint32_t changed = cr0 ^ value;
-    if (changed & (CR0_PE | CR0_PG))
-        XLAT_NOTE_FOREIGN();
     cr0 = value;
     protected_mode = (cr0 & CR0_PE) && !v86;
     if (!(cr0 & CR0_PE)) cpl = 0;

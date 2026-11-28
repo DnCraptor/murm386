@@ -78,11 +78,11 @@ typedef struct xlat_rt {
     const uint8_t *code_map;       /* xlat_code_map (set by xlat_run) */
     uint32_t fn_key;               /* CS:IP of a hot CALL target, or UINT32_MAX */
     /* Set by xlat_run() (the caller need not): the link table the region
-     * exits look the next region up in (xlat_emit_trampoline), the epoch
-     * its entries must carry, the stamp written to last[region] on a linked
+     * exits look the next region up in (xlat_emit_trampoline), a reserved
+     * zero gate word, the stamp written to last[region] on a linked
      * entry, the running region (index) and the linked entries made. */
     const void *link;
-    uint32_t epoch;
+    uint32_t dispatch_ready;     /* zero; preserves generated ABI */
     uint32_t seq;
     uint32_t *last;
     uint32_t cur;
@@ -106,7 +106,7 @@ typedef struct xlat_rt {
     uint32_t link_alt;            /* secondary link matches, before budget check */
     uint32_t gap2_lo, gap2_hi;    /* second exact negative range, checked in ARM */
 #if XLAT_EVENT_GATE
-    uint32_t dispatch_epoch;      /* actual epoch or XLAT_IRQ_BLOCKED */
+    uint32_t dispatch_gate;      /* zero or XLAT_IRQ_BLOCKED */
     uint32_t back_deadline;       /* actual deadline or a timestamp already due */
 #endif
 } xlat_rt_t;
@@ -121,22 +121,21 @@ _Static_assert(__atomic_always_lock_free(4, 0) && __atomic_always_lock_free(1, 0
                "JIT IRQ gate needs lock-free SRAM accesses");
 static inline void xlat_irq_close(xlat_rt_t *rt, uint32_t now)
 {
-    __atomic_store_n(&rt->dispatch_epoch, XLAT_IRQ_BLOCKED, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&rt->dispatch_gate, XLAT_IRQ_BLOCKED, __ATOMIC_SEQ_CST);
     __atomic_store_n(&rt->back_deadline, now, __ATOMIC_SEQ_CST);
 }
 static inline void xlat_irq_refresh(xlat_rt_t *rt)
 {
-    /* A cache epoch change does not change the burst's deadline. Avoid
-     * publishing either field again when it already has the desired value.
+    /* Avoid publishing either field again when it already has the desired value.
      * The request sample must still follow the last possible publication. */
-    if (__atomic_load_n(&rt->dispatch_epoch, __ATOMIC_RELAXED) != rt->epoch)
-        __atomic_store_n(&rt->dispatch_epoch, rt->epoch, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&rt->dispatch_gate, __ATOMIC_RELAXED) != 0u)
+        __atomic_store_n(&rt->dispatch_gate, 0u, __ATOMIC_SEQ_CST);
     if (__atomic_load_n(&rt->back_deadline, __ATOMIC_RELAXED) != rt->deadline)
         __atomic_store_n(&rt->back_deadline, rt->deadline, __ATOMIC_SEQ_CST);
     if (__atomic_load_n(rt->intr, __ATOMIC_SEQ_CST))
         xlat_irq_close(rt, *rt->clock);
 }
-/* At burst entry xlat_run publishes the actual epoch and deadline before
+/* At burst entry xlat_run publishes the open gate and deadline before
  * any generated code runs. Publish only the IRQ source there; inside a
  * running region an IF change must refresh the gates immediately. */
 static inline void xlat_irq_source(xlat_rt_t *rt, const volatile uint8_t *intr,
@@ -181,7 +180,7 @@ static inline void xlat_irq_source(xlat_rt_t *rt, const volatile uint8_t *intr,
 #define XLAT_RT_EXTRA       72
 #define XLAT_RT_CODE_MAP    76
 #define XLAT_RT_LINK        84
-#define XLAT_RT_EPOCH       88
+#define XLAT_RT_DISPATCH_READY 88
 #define XLAT_RT_SEQ         92
 #define XLAT_RT_LAST        96
 #define XLAT_RT_CUR        100
@@ -196,10 +195,10 @@ static inline void xlat_irq_source(xlat_rt_t *rt, const volatile uint8_t *intr,
 #define XLAT_RT_GAP2_LO    144
 #define XLAT_RT_GAP2_HI    148
 #if XLAT_EVENT_GATE
-#define XLAT_RT_DISPATCH_EPOCH 152
+#define XLAT_RT_DISPATCH_GATE 152
 #define XLAT_RT_BACK_DEADLINE  156
 #else
-#define XLAT_RT_DISPATCH_EPOCH XLAT_RT_EPOCH
+#define XLAT_RT_DISPATCH_GATE XLAT_RT_DISPATCH_READY
 #define XLAT_RT_BACK_DEADLINE  XLAT_RT_DEADLINE
 #endif
 
@@ -223,7 +222,7 @@ _Static_assert(__builtin_offsetof(xlat_rt_t, mem_size) == XLAT_RT_MEM_SIZE &&
                __builtin_offsetof(xlat_rt_t, extra) == XLAT_RT_EXTRA &&
                __builtin_offsetof(xlat_rt_t, code_map) == XLAT_RT_CODE_MAP &&
                __builtin_offsetof(xlat_rt_t, link) == XLAT_RT_LINK &&
-               __builtin_offsetof(xlat_rt_t, epoch) == XLAT_RT_EPOCH &&
+               __builtin_offsetof(xlat_rt_t, dispatch_ready) == XLAT_RT_DISPATCH_READY &&
                __builtin_offsetof(xlat_rt_t, seq) == XLAT_RT_SEQ &&
                __builtin_offsetof(xlat_rt_t, last) == XLAT_RT_LAST &&
                __builtin_offsetof(xlat_rt_t, cur) == XLAT_RT_CUR &&
@@ -239,7 +238,7 @@ _Static_assert(__builtin_offsetof(xlat_rt_t, mem_size) == XLAT_RT_MEM_SIZE &&
                __builtin_offsetof(xlat_rt_t, gap2_hi) == XLAT_RT_GAP2_HI,
                "xlat_rt_t layout is used by generated code");
 #if XLAT_EVENT_GATE
-_Static_assert(__builtin_offsetof(xlat_rt_t, dispatch_epoch) == XLAT_RT_DISPATCH_EPOCH &&
+_Static_assert(__builtin_offsetof(xlat_rt_t, dispatch_gate) == XLAT_RT_DISPATCH_GATE &&
                __builtin_offsetof(xlat_rt_t, back_deadline) == XLAT_RT_BACK_DEADLINE,
                "JIT IRQ gate offsets");
 #endif
@@ -467,10 +466,8 @@ static inline unsigned xlat_thunk_kind(const xlat_rt_t *rt, uint32_t key)
 }
 bool xlat_try_native_thunk(xlat_rt_t *rt, unsigned kind);
 
-/* For xlat_interp_one(): the x86 bytes of the running region are unchanged
- * (if not, the region is dropped). Compares only when xlat_dirty is set:
- * the instruction (or something before it) may have written translated
- * code. */
+/* For xlat_interp_one(): consume pending address-specific writes and
+ * reject a running region that was invalidated. */
 bool xlat_region_still_valid(xlat_rt_t *rt);
 
 /* Native stack left (bytes) and the margin needed before translating or
@@ -484,44 +481,7 @@ uint32_t xlat_stack_free(void);
  * A set bit ends the interpreter burst early so the adapter can enter the
  * translated code (xrip_step_cpu); a false hit only costs a lookup.
  */
-/* Translated x86 code by 64-byte block. The filter also marks possible
- * starting addresses of writes up to 16 bytes. Wider individual stores
- * use XRIP; bulk REP checks its whole destination separately. */
-#define XLAT_CODE_BLOCK_SHIFT 6u
-/* Up to the end of the HMA: code outside fast memory (upper memory, ROM,
- * HMA) can be translated too (xlat_code_direct) */
-#define XLAT_CODE_MAP_BYTES (0x110000u >> (XLAT_CODE_BLOCK_SHIFT + 3u))
-extern uint8_t xlat_code_map[XLAT_CODE_MAP_BYTES];
-
-/* Translated x86 code may have changed since the last xlat_run(). Set on
- * untrusted CPU entry, untrusted callbacks, native BIOS/DOS calls and
- * mapping changes. Known RAM writes use the local range below.
- * Consecutive guest-only bursts may retain their epoch. xlat_run() and
- * xlat_region_still_valid() revalidate the affected regions when dirty. */
-extern bool xlat_dirty;  /* unknown writes / mapping changes */
-extern uint32_t xlat_write_lo, xlat_write_hi; /* known writes: half-open range, hi=0 when clean */
-/* One-shot permission from an audited consecutive guest loop. Other CPU
- * entry points retain the conservative dirty-on-entry behavior. */
-extern bool xlat_clean_resume;
-/* n is 1..16: the map also covers starts of writes before source bytes. */
-static inline void xlat_note_write_n(uint32_t linear, uint32_t n)
-{
-    if (xlat_code_map[linear >> (XLAT_CODE_BLOCK_SHIFT + 3)] & (1u << ((linear >> XLAT_CODE_BLOCK_SHIFT) & 7u))) {
-        if (!xlat_write_hi || linear < xlat_write_lo)
-            xlat_write_lo = linear;
-        if (linear + n > xlat_write_hi)
-            xlat_write_hi = linear + n;
-    }
-}
-
-static inline void xlat_note_write(uint32_t linear)
-{
-    xlat_note_write_n(linear, 16u);
-}
-
-/* Synchronous host/device write, before the actual store(s). Only audited
- * direct conventional RAM is admitted to the exact local-write path. */
-void xlat_note_host_write(uint32_t linear, uint32_t len);
+#include "xlat_write.h"
 
 /* Hot CALL targets (near, far, r/m) seen by XRIP: a target reaching
  * XLAT_CALL_HOT calls in its slot requests a cut (the caller sets

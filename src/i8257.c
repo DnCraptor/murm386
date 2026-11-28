@@ -477,24 +477,6 @@ int i8257_dma_write_memory(IsaDma *obj, int nchan, void *buf, int pos, int len)
 
     uint8_t *p = buf;
 
-#if XLAT
-    /* Use precisely the addresses written by the two loops below. A
-     * wrapping transfer, or any non-direct mapping, stays conservative. */
-    if (len > 0) {
-        const uint32_t first = (uint32_t)(r->mode & 0x20 ? addr - pos : addr + pos);
-        const uint32_t tail = (uint32_t)len - 1u;
-        if (r->mode & 0x20) {
-            if (first < tail)
-                xlat_dirty = true;
-            else
-                xlat_note_host_write(first - tail, (uint32_t)len);
-        } else if (first > UINT32_MAX - tail) {
-            xlat_dirty = true;
-        } else {
-            xlat_note_host_write(first, (uint32_t)len);
-        }
-    }
-#endif
     if (r->mode & 0x20) {
         for (int i = 0; i < len; i++)
             pstore8((uint32_t)(addr - pos - i), p[i]);

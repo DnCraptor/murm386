@@ -6,6 +6,9 @@
 #include <stddef.h>
 #include <string.h>
 #include "ems.h"
+#if XLAT
+#include "fdos/xlat/xlat_write.h"
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -44,6 +47,37 @@ extern uint32_t ram_pages_size;
 #define PC_RAM ((uint8_t *)0x11000000u)
 #define PC_RAM32 ((uint32_t *)0x11000000u)
 #endif
+/* Synchronous write barrier. Pointer form is for native code holding a
+ * direct RAM pointer; paged accesses use the address form. */
+#if XLAT
+static inline void guest_note_write_n(uint32_t addr, uint32_t len)
+{
+    xlat_note_write_n(addr, len);
+}
+static inline void guest_note_write_range(uint32_t addr, uint32_t len)
+{
+    xlat_note_host_write(addr, len);
+}
+static inline void guest_note_ptr_write(const void *ptr, size_t len)
+{
+    const uintptr_t offset = (uintptr_t)ptr - (uintptr_t)PC_RAM;
+    if (offset < XLAT_CODE_LIMIT && len)
+        xlat_note_host_write((uint32_t)offset,
+            len > XLAT_CODE_LIMIT - offset ? (uint32_t)(XLAT_CODE_LIMIT - offset) : (uint32_t)len);
+}
+static inline void guest_note_ptr_write_n(const void *ptr, uint32_t len)
+{
+    const uintptr_t offset = (uintptr_t)ptr - (uintptr_t)PC_RAM;
+    if (offset < XLAT_CODE_LIMIT)
+        xlat_note_write_n((uint32_t)offset, len);
+}
+#else
+#define guest_note_write_n(addr, len) ((void)0)
+#define guest_note_write_range(addr, len) ((void)0)
+#define guest_note_ptr_write(ptr, len) ((void)0)
+#define guest_note_ptr_write_n(ptr, len) ((void)0)
+#endif
+
 #define CHECK_RAM_BOARDER_ENABLED 0
 extern unsigned long phys_mem_size;
 extern void* g_pc;
@@ -225,6 +259,7 @@ static inline void __attribute__((always_inline)) pstore8(uint32_t addr, uint8_t
     if (unlikely(VGA_WINDOW(addr))) {
         return iomem_write8(g_pc, addr, val);
     }
+    guest_note_write_n(addr, 1u);
 #if !defined(NO_PAGING)
     ega128_mem_write8(addr, val);
     return;
@@ -249,6 +284,7 @@ static inline void __attribute__((always_inline)) pstore16(uint32_t addr, uint16
         return;
     }
 #endif
+    guest_note_write_n(addr, 2u);
 #if !defined(NO_PAGING)
     ega128_mem_write16(addr, val);
     return;
@@ -273,6 +309,7 @@ static inline void __attribute__((always_inline)) pstore32(uint32_t addr, uint32
         return;
     }
 #endif
+    guest_note_write_n(addr, 4u);
 #if !defined(NO_PAGING)
     ega128_mem_write32(addr, val);
     return;
@@ -416,6 +453,8 @@ pstore_block(uint32_t dst, uint32_t src, int len)
 #if CHECK_RAM_BOARDER_ENABLED
         if (unlikely((uint32_t)(dst + len) > phys_mem_size)) return false;
 #endif
+        if (len > 0)
+            guest_note_write_range(dst, (uint32_t)len);
         const uint8_t *s = PC_RAM + src;
         uint8_t       *d = PC_RAM + dst;
         int n32 = len >> 2;

@@ -2,6 +2,7 @@
 #define __NATIVE_DOS_PHYS_H__
 
 #include <stdint.h>
+#include <stdbool.h>
 
 #ifndef DOS_OS_API_SYS_TABLE_BASE
 #define DOS_OS_API_SYS_TABLE_BASE ((void*)(0x10100000ul))
@@ -42,6 +43,16 @@ inline static void dos_phys_write16(uint32_t addr, uint16_t val) {
 inline static void dos_phys_write32(uint32_t addr, uint32_t val) {
     typedef void (*fn_ptr_t)(uint32_t, uint32_t);
     ((fn_ptr_t)_dos_phys_sys_table_ptrs[8])(addr, val);
+}
+
+/* API v22: notify JIT of a raw write to physical x86 memory.
+ * Notify before or immediately after the write, with no guest execution
+ * between notification and write. Only synchronous core0 thread context
+ * is permitted. False means the caller must not perform the raw write.
+ * dos_phys_write* already notify the JIT automatically. */
+inline static bool dos_jit_note_write(uint32_t addr, uint32_t len) {
+    typedef bool (*fn_ptr_t)(uint32_t, uint32_t);
+    return ((fn_ptr_t)_dos_phys_sys_table_ptrs[120])(addr, len);
 }
 
 #ifdef __cplusplus
