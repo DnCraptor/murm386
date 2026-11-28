@@ -539,16 +539,15 @@ bool xlat_try_native_thunk(xlat_rt_t *rt, unsigned kind)
 /* Decoded string continuation for VGA/MMIO, DF=1, segment wrap and
  * writes to cached source. Reuse XRIP's memory semantics, not its loop
  * or decoder. REP can be interrupted between elements. */
-static void xlat_direct_string(xlat_rt_t *rt, CPU *cpu, uint32_t ctl)
+static void xlat_direct_string(xlat_rt_t *rt, CPU *cpu, uint32_t ctl, uint8_t op)
 {
     const unsigned len = (ctl >> 8) & 15u;
     const uint8_t bytes = (uint8_t)(1u << ((ctl >> XLAT_XS_SIZE_SHIFT) & 3u));
     const bool rep = (ctl & XLAT_XS_REP) != 0;
-    const uint8_t op = (ctl & XLAT_XS_STOS) ? 0xaa : 0xa4;
     xlat_prepare_insn();
     const uint16_t next = (uint16_t)(XRIP_IP + len);
     useseg = segment_base[(ctl >> XLAT_XS_SEG_SHIFT) & 3u];
-    reptype = rep ? 1 : 0;    /* F2 and F3 have identical MOVS/STOS semantics */
+    reptype = rep ? 1 : 0;    /* F2 and F3 are identical for MOVS/STOS/OUTS */
     opsize32 = bytes == 4;
     xlat_stats.string_calls++;
     if (rep && !XRIP_CX) {
@@ -604,16 +603,20 @@ uint32_t __time_critical_func(xlat_interp_one)(xlat_rt_t *rt, uint32_t flags)
 
     const bool str = (flags & XLAT_XI_STRING) != 0;
     const bool shadow = (flags & XLAT_XI_STI_POP) != 0;
-    if ((str || shadow) && !xlat_state_ok(cpu))
+    const bool ordinary = !str && !shadow;
+    const bool iret = ordinary && (flags & XLAT_XI_IRET);
+    const bool outs = ordinary && (flags & XLAT_XI_OUTS) &&
+        pc_xlat_safe_out(cpu->cb.io, XRIP_DX, (flags & XLAT_XI_OUTS_WORD) != 0);
+    if ((str || shadow || iret || outs) && !xlat_state_ok(cpu))
         return 0;
-    const bool direct = !str && !shadow && (flags & XLAT_XI_INT_MASK) && xlat_state_ok(cpu);
+    const bool direct = ordinary && (flags & XLAT_XI_INT_MASK) && xlat_state_ok(cpu);
     const uint8_t vector = !direct ? 0 :
         (flags & XLAT_XI_INT3) ? 3 : getmem8(CS_BASE, (uint16_t)(XRIP_IP + 1u));
     /* EXEC can synchronously run a whole child. Unwind the trampoline
      * before dispatch so the child can enter its own JIT normally. */
     if (direct && vector == 0x21 && XRIP_AH == 0x4b)
         return 0;
-    if (!direct && !str && !shadow) {
+    if (!direct && !str && !shadow && !iret && !outs) {
         xlat_stats.interp++;
         if (flags & 4u) {
             xlat_stats.side_interp++;
@@ -632,10 +635,26 @@ uint32_t __time_critical_func(xlat_interp_one)(xlat_rt_t *rt, uint32_t flags)
     if (__builtin_setjmp(context))
         deliver_fault();
     else if (str)
-        xlat_direct_string(rt, cpu, flags);
+        xlat_direct_string(rt, cpu, flags, (flags & XLAT_XS_STOS) ? 0xaa : 0xa4);
     else if (shadow)
         xlat_direct_sti_pop(cpu, flags);
-    else if (direct) {
+    else if (outs) {
+        /* The decoded forms have 16-bit addresses and no segment override.
+         * Keep all elements in one helper; string_step preserves DF, the
+         * high halves of SI/CX, I/O ordering and the restart IP. Unsafe
+         * ports still use the original single-instruction XRIP path. */
+        const uint32_t ctl = (flags & 0xf00u) |
+            (((flags >> 8) & 15u) == 2 ? XLAT_XS_REP : 0u) |
+            ((flags & XLAT_XI_OUTS_WORD) ? 1u << XLAT_XS_SIZE_SHIFT : 0u) |
+            (regds << XLAT_XS_SEG_SHIFT);
+        xlat_direct_string(rt, cpu, ctl, 0x6e);
+    } else if (iret) {
+        /* Same real-mode stack and flag semantics as opcode CF. The
+         * common save/dispatch path checks restored TF/IF and pending IRQ. */
+        xlat_prepare_insn();
+        StepIP(1);
+        interrupt_return(false);
+    } else if (direct) {
         xlat_stats.int_direct++;
         xlat_direct_int(cpu, vector, (flags & XLAT_XI_INT3) ? 1u : 2u);
     } else

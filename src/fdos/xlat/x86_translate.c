@@ -302,8 +302,11 @@ static int min_native_path(const tctx_t *c, int first)
                 continue;
             const x86_insn_t *in = &c->in[i];
             if (in->op == XO_INTERP) {
-                /* INT is a native helper, but may transfer to guest code. */
-                const int d = dist[i] + ((in->sub & XLAT_XI_INT_MASK) != 0);
+                /* Decoded helpers may leave the region. A REP OUTS can
+                 * execute many elements without dispatching each one. */
+                const int w = (in->sub & XLAT_XI_OUTS) && in->len == 2 ? XLAT_TRACE_MIN :
+                              (in->sub & XLAT_XI_DIRECT_MASK) != 0;
+                const int d = dist[i] + w;
                 if (d < best)
                     best = d;
                 continue;
@@ -496,7 +499,8 @@ static int discover(tctx_t *c, uint16_t start)
             if (c->tgt_idx[i] <= i)
                 c->head_marks |= 1ull << c->tgt_idx[i];
         }
-        if (native_string(in) && in->rep) {
+        if ((native_string(in) && in->rep) ||
+            (in->op == XO_INTERP && (in->sub & XLAT_XI_OUTS) && in->len == 2)) {
             c->leader[i] = 1;   /* restart after IRQ or partial REP */
             c->head_marks |= 1ull << i;
         }
@@ -525,7 +529,7 @@ static int discover(tctx_t *c, uint16_t start)
      * call: keep regions mostly native. */
     int interp = 0;
     for (int i = 0; i < c->n; ++i)
-        interp += c->in[i].op == XO_INTERP && !(c->in[i].sub & XLAT_XI_INT_MASK);
+        interp += c->in[i].op == XO_INTERP && !(c->in[i].sub & XLAT_XI_DIRECT_MASK);
     c->n_interp = interp;
     if (interp * XLAT_INTERP_RATIO > c->n)
         return XLAT_RJ_INTERP;
@@ -1644,7 +1648,8 @@ static void emit_interp(tctx_t *c, int i)
     const int r = sync_recon(c, c->in_set[i], c->pfp[i]);
     if (r >= 0)
         emit_recon(c, r);
-    emit_interp_call(c, i, in->sub & (XI_MAY_WRITE | XLAT_XI_INT_MASK), !(in->sub & XI_NO_FALL));
+    emit_interp_call(c, i, in->sub & (XI_MAY_WRITE | XLAT_XI_DIRECT_MASK | XLAT_XI_OUTS_WORD),
+                     !(in->sub & XI_NO_FALL));
 }
 
 static void emit_jcc(tctx_t *c, int i)

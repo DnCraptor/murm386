@@ -404,6 +404,12 @@ void xlat_prof_note(unsigned kind, uint32_t key, uint32_t linear, const uint8_t 
 #define XLAT_XI_INT3     8u
 #define XLAT_XI_INT_IMM 16u
 #define XLAT_XI_INT_MASK (XLAT_XI_INT3 | XLAT_XI_INT_IMM)
+/* Decoded helpers, in XO_INTERP's sub and the ordinary thunk payload.
+ * Not interpreted as flags for XLAT_XI_STRING or XLAT_XI_STI_POP. */
+#define XLAT_XI_OUTS       0x20u
+#define XLAT_XI_IRET       0x40u
+#define XLAT_XI_OUTS_WORD  0x80u
+#define XLAT_XI_DIRECT_MASK (XLAT_XI_INT_MASK | XLAT_XI_OUTS | XLAT_XI_IRET)
 /* Bits 8..11 carry the decoded length; bit 15 is the continuation.
  * The low bits of a native string call encode operands, not INT flags. */
 #define XLAT_XI_STRING     0x1000u

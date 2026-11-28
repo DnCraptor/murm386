@@ -808,6 +808,11 @@ bool x86_decode_interp(const uint8_t *code, uint16_t ip, x86_insn_t *in)
         in->sub |= XLAT_XI_INT3;
     else if (code[0] == 0xcd && pos == 2)
         in->sub |= XLAT_XI_INT_IMM;
+    else if (code[0] == 0xcf && pos == 1)
+        in->sub |= XLAT_XI_IRET;
+    else if ((op == 0x6e || op == 0x6f) &&
+             (pos == 1 || (pos == 2 && (code[0] == 0xf2 || code[0] == 0xf3))))
+        in->sub |= XLAT_XI_OUTS | (op == 0x6f ? XLAT_XI_OUTS_WORD : 0u);
     in->size = 16;
     in->a.kind = in->b.kind = OPD_NONE;
     in->mem_mod = in->mem_rm = in->mem_direct = 0;
