@@ -1655,6 +1655,144 @@ static void emit_pop_value(tctx_t *c, int i, uint32_t release)
     emit_store_sp(c);
 }
 
+/* Inline a forward, straight-line, flag-neutral near leaf. The simulated SP
+ * is relative to the caller's SP; only balanced register/immediate pushes,
+ * register pops and MOVs are admitted. BP-based loads require a known frame.
+ * The real return-address and saved-register stores are retained, even though
+ * the return target is known and the final SP equals its original value. */
+static bool emit_leaf_call(tctx_t *c, int i)
+{
+    const x86_insn_t *call = &c->in[i];
+    const int start = c->tgt_idx[i];
+    const uint16_t next = (uint16_t)(call->ip + call->len);
+    const int site = find_insn(c, next);
+    if (call->size != 16 || start <= i || site != i + 1 || start <= site ||
+        (c->in_set[i] & ~NONE_BIT & ~c->plan_mat))
+        return false;
+
+    int sp = -2, lo = -2, hi = 0, bp = 0, ret = -1;
+    bool bp_known = false;
+    int load_off[8];
+    for (int j = start; j < c->n && j < start + 8; ++j) {
+        const x86_insn_t *x = &c->in[j];
+        if (x->size != 16)
+            return false;
+        if (x->op == XO_RET) {
+            if (sp != -2 || x->b.imm || j == start)
+                return false;
+            ret = j;
+            break;
+        }
+        if (c->fall_idx[j] != j + 1)
+            return false;
+        if (x->op == XO_PUSH) {
+            if ((x->b.kind != OPD_REG && x->b.kind != OPD_IMM) ||
+                is_sp(&x->b, 16))
+                return false;
+            sp -= 2;
+            if (sp < lo) lo = sp;
+        } else if (x->op == XO_POP) {
+            if (x->a.kind != OPD_REG || is_sp(&x->a, 16) || sp >= -2)
+                return false;   /* never pop the return address */
+            sp += 2;
+            if (x->a.reg == 5 /* BP */) bp_known = false;
+        } else if (x->op == XO_MOV) {
+            if (x->a.kind != OPD_REG || is_sp(&x->a, 16))
+                return false;
+            if (x->b.kind == OPD_MEM) {
+                if (!bp_known || x->mem_direct || !x->mem_mod ||
+                    x->mem_seg != 2 || x->mem_rm != 6)
+                    return false;
+                const int off = bp + (int16_t)x->disp;
+                load_off[j - start] = off;
+                if (off < lo) lo = off;
+                if (off + 2 > hi) hi = off + 2;
+            } else if (x->b.kind != OPD_REG && x->b.kind != OPD_IMM) {
+                return false;
+            }
+            if (x->a.reg == 5 /* BP */) {
+                bp_known = is_sp(&x->b, 16);
+                bp = sp;
+            }
+        } else {
+            return false;
+        }
+        if (hi - lo > 64)
+            return false;
+    }
+    if (ret < 0 || sync_recon(c, c->out_set[ret], edge_producer(c, ret)) >= 0)
+        return false;
+
+    /* Guard before any guest mutation. Require an unwrapped offset range,
+     * direct RAM and one zero map byte. The ordinary path handles all
+     * other mappings, possible code writes, and independent entry points. */
+    arm_emit_t *e = &c->e;
+    uint32_t slow[4];
+    arm_ls_imm(e, LS_LDRH, A_R3, A_R11, XLAT_RT_SP); /* original SP */
+    arm_subw(e, A_R0, A_R3, (uint32_t)-lo);
+    arm_addw(e, A_R1, A_R0, (uint32_t)(hi - lo - 1));
+    arm_dp_reg(e, DP_ORR, 0, A_R12, A_R0, A_R1, SH_LSL, 0);
+    arm_dp_reg(e, DP_ORR, 1, A_R12, A_PC, A_R12, SH_LSR, 16);
+    slow[0] = arm_branch_slot(e);
+    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_SEG_BASE + 8u);
+    arm_dp_reg(e, DP_ADD, 0, A_R0, A_R0, A_R12, SH_LSL, 0);
+    arm_dp_reg(e, DP_ADD, 0, A_R1, A_R1, A_R12, SH_LSL, 0);
+    const uint32_t limit = c->rt->mem_size < XLAT_CODE_LIMIT ? c->rt->mem_size : XLAT_CODE_LIMIT;
+    if (!arm_dp_imm(e, DP_SUB, 1, A_PC, A_R1, limit)) {
+        arm_mov32(e, A_R12, limit);
+        arm_dp_reg(e, DP_SUB, 1, A_PC, A_R1, A_R12, SH_LSL, 0);
+    }
+    slow[1] = arm_branch_slot(e);
+    arm_dp_reg(e, DP_EOR, 0, A_R2, A_R0, A_R1, SH_LSL, 0);
+    arm_dp_reg(e, DP_ORR, 1, A_R2, A_PC, A_R2, SH_LSR, XLAT_CODE_BLOCK_SHIFT + 3);
+    slow[2] = arm_branch_slot(e);
+    arm_lsr(e, A_R2, A_R0, XLAT_CODE_BLOCK_SHIFT + 3);
+    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_CODE_MAP);
+    arm_ls_reg(e, LS_LDRB, A_R2, A_R12, A_R2);
+    arm_dp_imm(e, DP_SUB, 1, A_PC, A_R2, 0);
+    slow[3] = arm_branch_slot(e);
+    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_MEM);
+    arm_dp_reg(e, DP_ADD, 0, A_R0, A_R0, A_R12, SH_LSL, 0);
+
+    /* r0 = checked host pointer at SP + lo; r3 = original SP.
+     * All guest register accesses are 16-bit, preserving high halves. */
+    sp = -2;
+    arm_mov32(e, A_R1, next);
+    arm_ls_imm(e, LS_STRH, A_R1, A_R0, (uint32_t)(sp - lo));
+    for (int j = start; j < ret; ++j) {
+        const x86_insn_t *x = &c->in[j];
+        if (x->op == XO_PUSH) {
+            const int v = get_raw(c, &x->b, 16, A_R1);
+            sp -= 2;
+            arm_ls_imm(e, LS_STRH, v, A_R0, (uint32_t)(sp - lo));
+        } else if (x->op == XO_POP) {
+            arm_ls_imm(e, LS_LDRH, A_R1, A_R0, (uint32_t)(sp - lo));
+            put_raw(c, &x->a, 16, A_R1);
+            sp += 2;
+        } else {
+            int v;
+            if (x->b.kind == OPD_MEM) {
+                arm_ls_imm(e, LS_LDRH, A_R1, A_R0, (uint32_t)(load_off[j - start] - lo));
+                v = A_R1;
+            } else if (is_sp(&x->b, 16)) {
+                arm_subw(e, A_R1, A_R3, (uint32_t)-sp);
+                v = A_R1;
+            } else {
+                v = get_raw(c, &x->b, 16, A_R1);
+            }
+            put_raw(c, &x->a, 16, v);
+        }
+    }
+    /* No writes can overlap the return word. No SP store is needed. Keep
+     * exactly the original RET's backward-edge charge and exit IP. */
+    emit_branch(c, make_dest(c, ret, next), C_AL);
+    local_patch(c, slow[0], C_NE);
+    local_patch(c, slow[1], C_CS);
+    local_patch(c, slow[2], C_NE);
+    local_patch(c, slow[3], C_NE);
+    return true;
+}
+
 static void emit_stack_op(tctx_t *c, int i)
 {
     arm_emit_t *e = &c->e;
@@ -1681,6 +1819,7 @@ static void emit_stack_op(tctx_t *c, int i)
         }
         break;
     case XO_CALL:
+        (void)emit_leaf_call(c, i); /* guarded prefix, followed by the original path */
         arm_mov32(e, A_R2, (uint16_t)(in->ip + in->len));
         emit_push_value(c, i, A_R2);
         emit_branch(c, make_dest(c, i, in->target), C_AL);
