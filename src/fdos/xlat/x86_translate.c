@@ -3252,12 +3252,110 @@ static void emit_lods_alu_stos(tctx_t *c, int i)
         local_patch(c, slow[j], cond[j]);
 }
 
+/* A closed register-only LOOP body. For the first fifteen iterations the
+ * low 16 bits of each result are independent of all high bits and flags.
+ * Save the affected high halves once; the original final iteration makes
+ * the lazy flags and the last budget/IRQ edge exactly as before. */
+static void emit_reg_loop(tctx_t *c, int i)
+{
+    enum { count = 16, unroll = 3, repeats = (count - 1) / unroll };
+    static const int scratch[] = {A_R0, A_R1, A_R2, A_R3, A_LR};
+    int save[8], dp[8], end = i, nsave = 0;
+    if (c->in[i].op != XO_ALU)
+        return;                         /* first op must replace all arithmetic flags */
+    for (int k = 0; k < 8; ++k)
+        save[k] = -1;
+    for (; end < c->n && end < i + 9; ++end) {
+        const x86_insn_t *in = &c->in[end];
+        if (in->op == XO_LOOP)
+            break;
+        if (end == i + 8 || in->size != 16 || in->pad ||
+            c->fall_idx[end] != end + 1 || in->a.kind != OPD_REG ||
+            in->a.reg >= 8 || in->a.reg == 1 || in->a.reg == REG16_SP)
+            return;
+        int op;
+        if (in->op == XO_INCDEC) {
+            op = in->sub ? DP_SUB : DP_ADD;
+        } else if (in->op == XO_ALU) {
+            switch (in->sub) {
+            case ALU_ADD: op = DP_ADD; break;
+            case ALU_SUB: op = DP_SUB; break;
+            case ALU_AND: op = DP_AND; break;
+            case ALU_OR:  op = DP_ORR; break;
+            case ALU_XOR: op = DP_EOR; break;
+            default: return;
+            }
+            if (in->b.kind == OPD_REG) {
+                if (in->b.reg >= 8 || in->b.reg == 1 || in->b.reg == REG16_SP)
+                    return;
+            } else if (in->b.kind != OPD_IMM || arm_thumb_imm(in->b.imm & 0xffffu) < 0) {
+                return;
+            }
+        } else {
+            return;
+        }
+        dp[end - i] = op;
+        if (save[in->a.reg] < 0) {
+            if (nsave == (int)(sizeof(scratch) / sizeof(scratch[0])))
+                return;
+            save[in->a.reg] = scratch[nsave++];
+        }
+    }
+    if (end >= c->n || end - i < 3 || c->in[end].op != XO_LOOP ||
+        c->in[end].size != 16 || c->in[end].pad || c->tgt_idx[end] != i)
+        return;
+    arm_emit_t *e = &c->e;
+    const uint32_t charge = (count - 1u) * (uint32_t)(end - i + 1);
+    arm_uxth(e, A_R12, A_R5);
+    arm_dp_imm(e, DP_SUB, 1, A_PC, A_R12, count);
+    const uint32_t short_cx = arm_branch_slot(e);
+    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_BUDGET);
+    arm_dp_imm(e, DP_SUB, 1, A_PC, A_R12, charge);
+    const uint32_t short_budget = arm_branch_slot(e);
+
+    for (int k = 0; k < 8; ++k)
+        if (save[k] >= 0)
+            arm_lsr(e, save[k], arm_reg16[k], 16);
+    arm_mov32(e, A_R12, repeats);
+    const uint32_t top = e->pos;
+    for (int u = 0; u < unroll; ++u) {
+        for (int j = i; j < end; ++j) {
+            const x86_insn_t *in = &c->in[j];
+            const int rd = arm_reg16[in->a.reg], op = dp[j - i];
+            if (in->op == XO_INCDEC)
+                arm_dp_imm(e, op, 0, rd, rd, 1u);
+            else if (in->b.kind == OPD_IMM)
+                arm_dp_imm(e, op, 0, rd, rd, in->b.imm & 0xffffu);
+            else
+                arm_dp_reg(e, op, 0, rd, rd, arm_reg16[in->b.reg], SH_LSL, 0);
+        }
+    }
+    arm_dp_imm(e, DP_SUB, 1, A_R12, A_R12, 1u);
+    const uint32_t back = arm_branch_slot(e);
+    if (!arm_patch_branch(e, back, top, C_NE))
+        c->overflow = true;
+    for (int k = 0; k < 8; ++k)
+        if (save[k] >= 0)
+            arm_bfi(e, arm_reg16[k], save[k], 16, 16);
+    arm_subw(e, A_R12, A_R5, count - 1u);
+    arm_bfi(e, A_R5, A_R12, 0, 16);
+    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_BUDGET);
+    arm_subw(e, A_R12, A_R12, charge);
+    arm_ls_imm(e, LS_STR, A_R12, A_R11, XLAT_RT_BUDGET);
+    /* No skipped edge would have reached back_slow. The original labels,
+     * final iteration, LOOP and independent entries are left untouched. */
+    local_patch(c, short_cx, C_CC);
+    local_patch(c, short_budget, C_LE);
+}
+
 static void emit_insn(tctx_t *c, int i)
 {
     arm_emit_t *e = &c->e;
     const x86_insn_t *in = &c->in[i];
     c->label[i] = e->pos;
     emit_frame_run(c, i);
+    if (in->op == XO_ALU && c->leader[i])
+        emit_reg_loop(c, i);
     switch (in->op) {
     case XO_ALU:
     case XO_INCDEC:
