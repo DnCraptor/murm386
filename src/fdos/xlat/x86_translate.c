@@ -1245,8 +1245,11 @@ static void emit_checks(tctx_t *c, int i, int bytes, bool write)
 static void emit_lazy_values(tctx_t *c, int kind, int size, bool store_op);
 
 /* Store the lazy flags of an operation: r2 = dst << s, r3 = src << s,
- * r1 = result << s. Clobbers r12, lr and the ARM flags. */
-static void emit_lazy(tctx_t *c, int kind, int size, bool incdec, int p)
+ * r1 = result << s. Clobbers r12 and lr. For non-INC/DEC, flags_ready
+ * means NZCV already describes this operation; the stores and CF extraction
+ * below preserve NZCV. Otherwise compute C here, as before. INC/DEC may
+ * clobber NZCV in pend. */
+static void emit_lazy(tctx_t *c, int kind, int size, bool incdec, int p, bool flags_ready)
 {
     arm_emit_t *e = &c->e;
     const uint32_t op = (uint32_t)(kind << 5 | (32 - size));
@@ -1261,10 +1264,12 @@ static void emit_lazy(tctx_t *c, int kind, int size, bool incdec, int p)
     if (kind == FK_LOGIC) {
         arm_mov32(e, A_R12, op);
     } else {
-        if (kind == FK_ADD)
-            arm_dp_reg(e, DP_ADD, 1, A_PC, A_R2, A_R3, SH_LSL, 0);   /* CMN: C = carry */
-        else
-            arm_dp_reg(e, DP_SUB, 1, A_PC, A_R2, A_R3, SH_LSL, 0);   /* CMP: C = !borrow */
+        if (!flags_ready) {
+            if (kind == FK_ADD)
+                arm_dp_reg(e, DP_ADD, 1, A_PC, A_R2, A_R3, SH_LSL, 0);   /* CMN: C = carry */
+            else
+                arm_dp_reg(e, DP_SUB, 1, A_PC, A_R2, A_R3, SH_LSL, 0);   /* CMP: C = !borrow */
+        }
         arm_dp_reg(e, DP_SBC, 0, A_R12, A_R12, A_R12, SH_LSL, 0);     /* C ? 0 : ~0 */
         arm_dp_imm(e, DP_AND, 0, A_R12, A_R12, 0x100u);
         /* ADD: CF = C, the bit inverted; SUB: CF = borrow */
@@ -1334,7 +1339,7 @@ static void emit_recon_body(tctx_t *c, int p)
         get_shifted(c, &in->a, size, A_R1);
         arm_mov32(e, A_R3, 1u << s);
         arm_dp_reg(e, in->sub ? DP_ADD : DP_SUB, 0, A_R2, A_R1, A_R3, SH_LSL, 0);
-        emit_lazy(c, kind, size, true, p);
+        emit_lazy(c, kind, size, true, p, false);
         return;
     }
     switch (in->sub) {
@@ -1354,7 +1359,7 @@ static void emit_recon_body(tctx_t *c, int p)
         get_shifted(c, &in->a, size, A_R1);
         break;
     }
-    emit_lazy(c, kind, size, false, p);
+    emit_lazy(c, kind, size, false, p, false);
 }
 
 /* r12 = CF from the lazy state in rt (0 or 1) at instruction i. Clobbers
@@ -1443,6 +1448,22 @@ static void emit_alu_at(tctx_t *c, int i, int off, bool discard_flags)
         put_raw_at(c, &in->a, size, A_R12, off);
         return;
     }
+    /* With no lazy operands to save, an encodable arithmetic immediate
+     * supplies exactly the same NZCV without first loading r3. */
+    if ((discard_flags || !c->mat[i]) &&
+        (incdec || (in->b.kind == OPD_IMM &&
+         (in->sub == ALU_ADD || in->sub == ALU_SUB || in->sub == ALU_CMP)))) {
+        const int op = incdec ? (in->sub ? DP_SUB : DP_ADD) :
+                       (in->sub == ALU_ADD ? DP_ADD : DP_SUB);
+        const uint32_t imm = (incdec ? 1u : (uint32_t)in->b.imm) << (32 - size);
+        if (arm_dp_imm(e, op, 1, writes ? A_R1 : A_PC, A_R2, imm)) {
+            if (writes) {
+                arm_lsr(e, A_R12, A_R1, 32 - size);
+                put_raw_at(c, &in->a, size, A_R12, off);
+            }
+            return;
+        }
+    }
     if (incdec) {
         arm_mov32(e, A_R3, 1u << (32 - size));
         dp = in->sub ? DP_SUB : DP_ADD;
@@ -1458,12 +1479,16 @@ static void emit_alu_at(tctx_t *c, int i, int off, bool discard_flags)
         default:      dp = DP_SUB; break;   /* SUB, CMP */
         }
     }
+    bool result_ready = false;
     if (!discard_flags && c->mat[i]) {
         const uint32_t from = e->pos;
         (void)from;
         if (c->full[i]) {
-            arm_dp_reg(e, dp, 0, A_R1, A_R2, A_R3, SH_LSL, 0);
-            emit_lazy(c, kind, size, incdec, i);
+            /* INC/DEC may call pend, which clobbers NZCV. Other full ALUs
+             * can use the result and NZCV from one operation. */
+            result_ready = !incdec;
+            arm_dp_reg(e, dp, result_ready, A_R1, A_R2, A_R3, SH_LSL, 0);
+            emit_lazy(c, kind, size, incdec, i, result_ready);
         } else {
             /* pending (xlat_rt_pending): the operands and the kind only;
              * INC / DEC leave lazy_cf, which is CF unless the entry state
@@ -1471,8 +1496,9 @@ static void emit_alu_at(tctx_t *c, int i, int off, bool discard_flags)
             if (incdec && (c->cf_in[i] & NONE_BIT))
                 emit_pending_check(c);
             if (kind == FK_LOGIC) {
-                arm_dp_reg(e, dp, 0, A_R1, A_R2, A_R3, SH_LSL, 0);
+                arm_dp_reg(e, dp, 1, A_R1, A_R2, A_R3, SH_LSL, 0);
                 arm_strd(e, A_R1, A_R1, A_R11, XLAT_RT_DST);
+                result_ready = true;
             } else {
                 arm_strd(e, A_R2, A_R3, A_R11, XLAT_RT_DST);
             }
@@ -1482,8 +1508,10 @@ static void emit_alu_at(tctx_t *c, int i, int off, bool discard_flags)
         }
         SIZE_NOTE(XLAT_SIZE_MAT, from);
     }
-    /* The flag-setting operation is last: a Jcc after it reads ARM flags. */
-    arm_dp_reg(e, dp, 1, writes ? A_R1 : A_PC, A_R2, A_R3, SH_LSL, 0);
+    /* A Jcc after this instruction reads NZCV. Only repeat the operation
+     * when it has not already been computed with NZCV preserved. */
+    if (!result_ready)
+        arm_dp_reg(e, dp, 1, writes ? A_R1 : A_PC, A_R2, A_R3, SH_LSL, 0);
     if (writes) {
         arm_lsr(e, A_R12, A_R1, 32 - size);
         put_raw_at(c, &in->a, size, A_R12, off);
@@ -2363,7 +2391,7 @@ static void emit_string_cmp(tctx_t *c, int i)
     }
     arm_lsl(e, A_R3, A_R3, s);
     arm_dp_reg(e, DP_SUB, 0, A_R1, A_R2, A_R3, SH_LSL, 0);
-    emit_lazy(c, FK_SUB, in->size, false, i);                        /* r1 stays */
+    emit_lazy(c, FK_SUB, in->size, false, i, false);                        /* r1 stays */
     emit_str_step(c, bytes);
     if (in->sub == STR_CMPS) {
         arm_dp_reg(e, DP_ADD, 0, A_R12, A_R9, A_R0, SH_LSL, 0);
