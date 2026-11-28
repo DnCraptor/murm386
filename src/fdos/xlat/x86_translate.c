@@ -3140,6 +3140,118 @@ static void emit_frame_run(tctx_t *c, int i)
     local_patch(c, slow[3], C_NE);
 }
 
+/* A bounded block of LODS; accumulator ALU imm; STOS; LOOP. The source
+ * and destination are checked in full before committing any guest state.
+ * Each element is loaded and stored in order, including overlapping ranges.
+ * The last ALU uses its ordinary flag emitter; only the earlier results
+ * are dead. The ordinary LOOP charges the final edge and observes IRQs. */
+static void emit_lods_alu_stos(tctx_t *c, int i)
+{
+    enum { count = 16, charge = (count - 1) * 4 };
+    if (i + 3 >= c->n || c->fall_idx[i] != i + 1 ||
+        c->fall_idx[i + 1] != i + 2 || c->fall_idx[i + 2] != i + 3)
+        return;
+    const x86_insn_t *l = &c->in[i], *a = &c->in[i + 1];
+    const x86_insn_t *s = &c->in[i + 2], *b = &c->in[i + 3];
+    const int size = l->size;
+    if (l->op != XO_STR || l->sub != STR_LODS || l->rep || l->mem_seg > 3 ||
+        (size != 8 && size != 16) || a->op != XO_ALU || a->size != size ||
+        a->a.kind != OPD_REG || a->a.reg != 0 || a->b.kind != OPD_IMM ||
+        s->op != XO_STR || s->sub != STR_STOS || s->rep || s->size != size ||
+        b->op != XO_LOOP || b->size != 16 || c->tgt_idx[i + 3] != i ||
+        l->pad || a->pad || s->pad || b->pad || !c->mat[i + 1])
+        return;
+    int dp;
+    switch (a->sub) {
+    case ALU_ADD: dp = DP_ADD; break;
+    case ALU_SUB: dp = DP_SUB; break;
+    case ALU_AND: dp = DP_AND; break;
+    case ALU_OR:  dp = DP_ORR; break;
+    case ALU_XOR: dp = DP_EOR; break;
+    default: return;
+    }
+    arm_emit_t *e = &c->e;
+    const uint32_t bytes = (uint32_t)size / 8u;
+    const uint32_t span = count * bytes, last = span - 1u;
+    const uint32_t imm = a->b.imm & (size == 8 ? 0xffu : 0xffffu);
+    const uint32_t limit = c->rt->mem_size < XLAT_CODE_LIMIT ? c->rt->mem_size : XLAT_CODE_LIMIT;
+    uint32_t slow[8];
+    /* CX=0 denotes 65536 iterations for LOOP; use the normal path there.
+     * A positive budget after every skipped edge excludes back_slow. */
+    arm_uxth(e, A_R12, A_R5);
+    arm_dp_imm(e, DP_SUB, 1, A_PC, A_R12, count);
+    slow[0] = arm_branch_slot(e);
+    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_BUDGET);
+    arm_dp_imm(e, DP_SUB, 1, A_PC, A_R12, charge);
+    slow[1] = arm_branch_slot(e);
+    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_EFLAGS);
+    arm_dp_imm(e, DP_AND, 1, A_PC, A_R12, 0x400u);
+    slow[2] = arm_branch_slot(e);                         /* DF != 0 */
+
+    arm_uxth(e, A_R0, A_R10);                            /* destination */
+    arm_uxth(e, A_R1, A_R9);                             /* source */
+    arm_addw(e, A_R2, A_R0, last);
+    arm_addw(e, A_R3, A_R1, last);
+    arm_dp_reg(e, DP_ORR, 0, A_R12, A_R2, A_R3, SH_LSL, 0);
+    arm_dp_reg(e, DP_ORR, 1, A_R12, A_PC, A_R12, SH_LSR, 16);
+    slow[3] = arm_branch_slot(e);                         /* offset wrap */
+    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_SEG_BASE);
+    arm_dp_reg(e, DP_ADD, 0, A_R0, A_R0, A_R12, SH_LSL, 0);
+    arm_dp_reg(e, DP_ADD, 0, A_R2, A_R2, A_R12, SH_LSL, 0);
+    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_SEG_BASE + 4u * l->mem_seg);
+    arm_dp_reg(e, DP_ADD, 0, A_R1, A_R1, A_R12, SH_LSL, 0);
+    arm_dp_reg(e, DP_ADD, 0, A_R3, A_R3, A_R12, SH_LSL, 0);
+    arm_mov32(e, A_R12, limit);
+    arm_dp_reg(e, DP_SUB, 1, A_PC, A_R2, A_R12, SH_LSL, 0);
+    slow[4] = arm_branch_slot(e);
+    arm_dp_reg(e, DP_SUB, 1, A_PC, A_R3, A_R12, SH_LSL, 0);
+    slow[5] = arm_branch_slot(e);
+    /* One zero code-map byte proves the complete destination, including
+     * every possible write start. Cross-byte or marked spans stay slow. */
+    arm_dp_reg(e, DP_EOR, 0, A_R3, A_R0, A_R2, SH_LSL, 0);
+    arm_dp_reg(e, DP_ORR, 1, A_R3, A_PC, A_R3, SH_LSR, XLAT_CODE_BLOCK_SHIFT + 3);
+    slow[6] = arm_branch_slot(e);
+    arm_lsr(e, A_R3, A_R0, XLAT_CODE_BLOCK_SHIFT + 3);
+    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_CODE_MAP);
+    arm_ls_reg(e, LS_LDRB, A_R3, A_R12, A_R3);
+    arm_dp_imm(e, DP_SUB, 1, A_PC, A_R3, 0);
+    slow[7] = arm_branch_slot(e);
+
+    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_MEM);
+    arm_dp_reg(e, DP_ADD, 0, A_R0, A_R0, A_R12, SH_LSL, 0);
+    arm_dp_reg(e, DP_ADD, 0, A_R1, A_R1, A_R12, SH_LSL, 0);
+    const bool imm_ok = arm_thumb_imm(imm) >= 0;
+    if (!imm_ok)
+        arm_mov32(e, A_R3, imm);
+    for (unsigned j = 0; j < count - 1u; ++j) {
+        arm_ls_imm(e, ls_load(size), A_R2, A_R1, j * bytes);
+        if (imm_ok)
+            arm_dp_imm(e, dp, 0, A_R2, A_R2, imm);
+        else
+            arm_dp_reg(e, dp, 0, A_R2, A_R2, A_R3, SH_LSL, 0);
+        arm_ls_imm(e, ls_store(size), A_R2, A_R0, j * bytes);
+    }
+    arm_ls_imm(e, ls_load(size), A_R2, A_R1, span - bytes);
+    put_raw(c, &a->a, size, A_R2);
+    arm_addw(e, A_R12, A_R9, span);
+    arm_bfi(e, A_R9, A_R12, 0, 16);
+    arm_addw(e, A_R12, A_R10, span);
+    arm_bfi(e, A_R10, A_R12, 0, 16);
+    arm_subw(e, A_R12, A_R5, count - 1u);
+    arm_bfi(e, A_R5, A_R12, 0, 16);
+    arm_ls_imm(e, LS_LDR, A_R12, A_R11, XLAT_RT_BUDGET);
+    arm_subw(e, A_R12, A_R12, charge);
+    arm_ls_imm(e, LS_STR, A_R12, A_R11, XLAT_RT_BUDGET);
+    /* r0 remains the host destination across the register/immediate ALU.
+     * Keep the ordinary lazy-flags representation, including CF and AF. */
+    emit_alu_at(c, i + 1, -1, false);
+    arm_ls_imm(e, ls_store(size), A_R4, A_R0, span - bytes);
+    emit_branch(c, (dest_t){D_INSN, (int16_t)(i + 3)}, C_AL);
+    static const uint8_t cond[8] = {C_CC, C_LE, C_NE, C_NE, C_CS, C_CS, C_NE, C_NE};
+    for (unsigned j = 0; j < 8; ++j)
+        local_patch(c, slow[j], cond[j]);
+}
+
 static void emit_insn(tctx_t *c, int i)
 {
     arm_emit_t *e = &c->e;
@@ -3191,8 +3303,11 @@ static void emit_insn(tctx_t *c, int i)
     case XO_STR:
         if (x86_str_flags(in))
             emit_string_cmp(c, i);
-        else
+        else {
+            if (in->sub == STR_LODS && !in->rep)
+                emit_lods_alu_stos(c, i);
             emit_string(c, i);
+        }
         break;
     case XO_SHIFT:
         emit_shift(c, i);
