@@ -2753,6 +2753,28 @@ static uint32_t rep_chunk(xlat_rt_t *rt, uint32_t src, uint32_t dst, uint32_t ct
         return 1;
     }
     uint32_t k = 0;
+#if defined(__arm__) && defined(__thumb2__)
+    /* LDM/STM require word-aligned host pointers. Equal alignment permits
+     * a byte prefix; the hazardous forward-overlap case returned above.
+     * For dst <= src, reading ahead is safe: no earlier store can change
+     * a later source byte. Keep the same REP chunk / IRQ boundary. */
+    if (len >= 32u && !(((uintptr_t)s ^ (uintptr_t)d) & 3u)) {
+        for (; ((uintptr_t)(s + k) & 3u) != 0; ++k)
+            d[k] = s[k];
+        const uint8_t *sp = s + k;
+        uint8_t *dp = d + k;
+        uint32_t blocks = (len - k) >> 4;
+        k += blocks << 4;
+        do {
+            __asm__ volatile (
+                "ldmia.w %[src]!, {r0-r3}\n\t"
+                "stmia.w %[dst]!, {r0-r3}"
+                : [src] "+&r" (sp), [dst] "+&r" (dp)
+                :
+                : "r0", "r1", "r2", "r3", "memory");
+        } while (--blocks);
+    }
+#endif
     for (; k + 4u <= len; k += 4u) {
         uint32_t w;
         __builtin_memcpy(&w, s + k, 4);
