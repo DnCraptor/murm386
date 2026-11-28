@@ -106,7 +106,7 @@ typedef struct {
     bool overflow;
     arm_emit_t e;
     uint32_t epilogue, dispatch, interp_call, exit_ip[2], exit_dyn, wchk[4], wside[4], rchk[2], back_slow, pend;
-    uint32_t spush, spop, scalar_call;
+    uint32_t spush, spop, scalar_call[SC_PATH_COUNT];
     uint8_t trace_min;             /* a region without a loop may do (xlat_translate) */
     uint8_t fn;                    /* built so: min_native_path (>= trace_min), else 0 */
     uint8_t no_calls;              /* discover: leave called functions out */
@@ -2724,7 +2724,7 @@ static void emit_io(tctx_t *c, int i)
         /* The shared scalar trampoline saves only its local ARM frame.
          * On refusal its ordinary payload executes STI ALONE, never the
          * protected instruction: XRIP then consumes the real shadow. */
-        if (!arm_bl(e, c->scalar_call))
+        if (!arm_bl(e, c->scalar_call[SC_PATH_STI_STR]))
             c->overflow = true;
         arm_e16(e, (uint16_t)(SC_STI_STR | (p->size == 16 ? 1u << 4 : 0u) |
                               (resume ? SC_CONT : 0u)));
@@ -3049,7 +3049,38 @@ static bool emit_scalar_side(tctx_t *c, int i, bool cont, uint32_t xi)
     const bool resume = (cont || op == SC_ADD) && c->fall_idx[i] > i;
     if (resume)
         flags |= SC_CONT;
-    if (!arm_bl(e, c->scalar_call))
+    unsigned path;
+    switch (op) {
+    case SC_LOAD: case SC_MOVZX: case SC_MOVSX: case SC_SEG_LOAD:
+        path = SC_PATH_LOAD; break;
+    case SC_STORE: case SC_SEG_STORE: path = SC_PATH_STORE; break;
+    case SC_ADD: path = SC_PATH_ADD; break;
+    case SC_CALL: case SC_PUSH: case SC_SEG_PUSH: path = SC_PATH_PUSH; break;
+    case SC_POP: case SC_SEG_POP: case SC_RET: case SC_RETF:
+        path = SC_PATH_POP; break;
+    case SC_STR_READ: path = SC_PATH_STR_READ; break;
+    default: c->overflow = true; return true;
+    }
+    /* The failed memory check and lazy reconstruction preserve r0
+     * (linear address). Writes need only an explicit value in r1; the
+     * guest GPRs remain in the AAPCS callee-saved registers. */
+    if (path == SC_PATH_STORE || path == SC_PATH_ADD) {
+        if (op == SC_SEG_STORE) {
+            arm_ls_imm(e, LS_LDR, A_R1, A_R11, XLAT_RT_SEG_BASE + 4u * reg);
+            arm_lsr(e, A_R1, A_R1, 4);
+        } else if (flags & SC_IMM) {
+            arm_mov32(e, A_R1, imm);
+        } else if (bytes == 1u) {
+            arm_ubfx(e, A_R1, arm_reg16[reg & 3u], reg >= 4u ? 8 : 0, 8);
+        } else if (reg == REG16_SP) {
+            arm_ls_imm(e, bytes == 2u ? LS_LDRH : LS_LDR, A_R1, A_R11, XLAT_RT_SP);
+        } else if (bytes == 2u) {
+            arm_uxth(e, A_R1, arm_reg16[reg]);
+        } else {
+            arm_mov(e, A_R1, arm_reg16[reg]);
+        }
+    }
+    if (!arm_bl(e, c->scalar_call[path]))
         c->overflow = true;
     arm_e16(e, (uint16_t)(op | (bytes == 4 ? 2u : bytes == 2 ? 1u : 0u) << 4 | reg << 6 | flags));
     arm_e16(e, (uint16_t)ea);
@@ -3664,17 +3695,46 @@ bool xlat_emit_trampoline(xlat_arena_t *a)
         !arm_patch_branch(&e, to_dispatch, a->dispatch, C_AL) ||
         !arm_patch_branch(&e, to_epi, a->epilogue, C_AL))
         return false;
-    /* Cold scalar path: local ARM stack snapshot, no XRIP register-file
-     * synchronization. r4-r10,lr = 32 bytes, preserving AAPCS alignment.
-     * The runtime commits only the affected registers in that snapshot. */
-    a->scalar_call = e.pos;
+    /* Function addresses are selected only when building the trampoline.
+     * Load takes the checked address as its fourth argument. STORE/ADD
+     * use the separate no-GPR-snapshot ABI (rt, address, value, descriptor). */
+    static const uintptr_t scalar_fn[SC_PATH_COUNT] = {
+        (uintptr_t)&xlat_rt_scalar_load, (uintptr_t)&xlat_rt_scalar_store,
+        (uintptr_t)&xlat_rt_scalar_add, (uintptr_t)&xlat_rt_scalar_push,
+        (uintptr_t)&xlat_rt_scalar_pop, (uintptr_t)&xlat_rt_scalar_str_read,
+        (uintptr_t)&xlat_rt_scalar_sti_str
+    };
+    uint32_t sc_enter[SC_PATH_COUNT];
+    for (unsigned p = 0; p < SC_PATH_COUNT; ++p) {
+        a->scalar_call[p] = e.pos;
+        arm_mov32(&e, A_R12, (uint32_t)scalar_fn[p]);
+        if (p == SC_PATH_LOAD)
+            arm_mov(&e, A_R3, A_R0);          /* preserve checked address */
+        sc_enter[p] = arm_branch_slot(&e);
+    }
+    const uint32_t sc_write = e.pos;
+    arm_push(&e, 0x4008u);                   /* r3,lr: 8-byte alignment */
+    arm_mov(&e, A_R2, A_R1);                  /* value */
+    arm_mov(&e, A_R1, A_R0);                  /* address */
+    arm_mov(&e, A_R0, A_R11);                 /* rt */
+    arm_subw(&e, A_R3, A_LR, 1);              /* descriptor */
+    arm_blx(&e, A_R12);
+    arm_pop(&e, 0x4008u);
+    const uint32_t sc_write_done = arm_branch_slot(&e);
+    const uint32_t sc_frame = e.pos;
+    for (unsigned p = 0; p < SC_PATH_COUNT; ++p)
+        if (!tramp_patch(&e, sc_enter[p],
+                         p == SC_PATH_STORE || p == SC_PATH_ADD ? sc_write : sc_frame, C_AL))
+            return false;
+    /* Load, stack and string operations may update guest GPRs. */
     arm_push(&e, 0x47f0u);                     /* r4-r10, lr */
     arm_mov(&e, A_R0, A_R11);
     arm_e16(&e, 0x4669u);                    /* MOV r1, sp */
     arm_subw(&e, A_R2, A_LR, 1);               /* descriptor */
-    arm_mov32(&e, A_R12, (uint32_t)(uintptr_t)&xlat_rt_scalar);
     arm_blx(&e, A_R12);
     arm_pop(&e, 0x47f0u);
+    if (!tramp_patch(&e, sc_write_done, e.pos, C_AL))
+        return false;
     arm_dp_imm(&e, DP_SUB, 1, A_PC, A_R0, SC_REFUSED);
     const uint32_t sc_refused = arm_branch_slot(&e);
     arm_dp_imm(&e, DP_SUB, 1, A_PC, A_R0, SC_DISPATCH);
@@ -3784,7 +3844,7 @@ bool xlat_translate_step(xlat_arena_t *a, const xlat_rt_t *rt, uint16_t ip, int 
     c->pend = a->pend;
     c->spush = a->spush;
     c->spop = a->spop;
-    c->scalar_call = a->scalar_call;
+    xlat_memcpy(c->scalar_call, a->scalar_call, sizeof(c->scalar_call));
     c->n_interp = 0;
     out->reject = XLAT_RJ_NONE;
     c->trace_min = (uint8_t)(trace_min > 0 ? (trace_min < 255 ? trace_min : 255) : 0);

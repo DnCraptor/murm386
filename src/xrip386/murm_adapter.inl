@@ -295,7 +295,7 @@ uint32_t __time_critical_func(xlat_rt_io)(xlat_rt_t *rt, uint32_t ctl, uint32_t 
 
 /* Decoded scalar reads use precisely the memory functions of readrm8/16/32.
  * They need no GPR spill, segment reload or decoder. */
-uint32_t xlat_bus_read(uint32_t address, unsigned bytes)
+uint32_t __time_critical_func(xlat_bus_read)(uint32_t address, unsigned bytes)
 {
     ++xlat_stats.bus_read;
     return bytes == 1 ? mem_read8(address) : bytes == 2 ? mem_read16(address) : mem_read32(address);
@@ -308,7 +308,7 @@ uint32_t xlat_vga_read(uint32_t address, unsigned bytes)
     return bytes == 1 ? read86(address) : bytes == 2 ? readw86(address) : readdw86(address);
 }
 
-void xlat_vga_write(uint32_t address, uint32_t value, unsigned bytes)
+void __time_critical_func(xlat_vga_write)(uint32_t address, uint32_t value, unsigned bytes)
 {
     if (bytes == 1)
         write86(address, (uint8_t)value);

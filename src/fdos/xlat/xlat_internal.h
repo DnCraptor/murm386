@@ -463,7 +463,18 @@ enum {
  * stub, rather than to the interpreter. Only used in the check payload. */
 #define SC_CHECK_REDIRECT 0x4000u
 enum { SC_REFUSED, SC_RESUME, SC_DISPATCH, SC_STOP, SC_RESUME_ADD };
-uint32_t xlat_rt_scalar(xlat_rt_t *rt, uint32_t *frame, const uint16_t *d);
+/* Selected by the translator, not by a runtime opcode dispatcher. */
+enum { SC_PATH_LOAD, SC_PATH_STORE, SC_PATH_ADD, SC_PATH_PUSH, SC_PATH_POP,
+       SC_PATH_STR_READ, SC_PATH_STI_STR, SC_PATH_COUNT };
+/* Memory side paths receive the already computed linear address. Stores
+ * and ADD use AAPCS callee-saved guest GPRs, not a register snapshot. */
+uint32_t xlat_rt_scalar_load(xlat_rt_t *rt, uint32_t *frame, const uint16_t *d, uint32_t address);
+uint32_t xlat_rt_scalar_store(xlat_rt_t *rt, uint32_t address, uint32_t value, const uint16_t *d);
+uint32_t xlat_rt_scalar_add(xlat_rt_t *rt, uint32_t address, uint32_t value, const uint16_t *d);
+uint32_t xlat_rt_scalar_push(xlat_rt_t *rt, uint32_t *frame, const uint16_t *d);
+uint32_t xlat_rt_scalar_pop(xlat_rt_t *rt, uint32_t *frame, const uint16_t *d);
+uint32_t xlat_rt_scalar_str_read(xlat_rt_t *rt, uint32_t *frame, const uint16_t *d);
+uint32_t xlat_rt_scalar_sti_str(xlat_rt_t *rt, uint32_t *frame, const uint16_t *d);
 
 typedef struct xlat_arena {
     uint8_t *base;
@@ -474,7 +485,7 @@ typedef struct xlat_arena {
     uint32_t interp_thunk; /* offset of the common xlat_interp_one() call (after interp_call) */
     uint32_t dispatch;     /* offset of the link-table dispatcher (BRANCH exits) */
     uint32_t interp_call;  /* xlat_interp_one() call with its arguments after the BL */
-    uint32_t scalar_call;  /* shared native scalar SIDE dispatcher */
+    uint32_t scalar_call[SC_PATH_COUNT]; /* shared scalar entry offsets, PSRAM */
     uint32_t exit_ip[2];   /* exits with the IP after the BL: BRANCH, BUDGET */
     uint32_t exit_dyn;     /* BRANCH exit, rt->ip stored */
     uint32_t wchk[4];      /* write checks: 1, 2, 4 bytes; up to 128 (r12 = last byte) */

@@ -2224,13 +2224,20 @@ static bool bus_write_ok(const xlat_rt_t *rt, uint32_t address, unsigned bytes)
  * Never bypass EMS/HMA/other non-direct mappings for writes. A store to
  * live source is committed once, validated locally, then redispatched if
  * the active region was invalidated. The caller commits SP afterwards. */
-uint32_t xlat_rt_bus_write(xlat_rt_t *rt, uint32_t address, uint32_t value, unsigned bytes)
+uint32_t XLAT_HOT_FN(xlat_rt_bus_write)(xlat_rt_t *rt, uint32_t address, uint32_t value, unsigned bytes)
 {
-    if (!bus_write_ok(rt, address, bytes)) {
+    /* Compute the mapping once, with the original bounds check first. */
+    if ((bytes != 1u && bytes != 2u && bytes != 4u) ||
+        address >= 0x110000u || bytes > 0x110000u - address) {
         ++xlat_stats.bus_write_miss;
         return 0;
     }
-    if (rep_direct(rt, address, bytes)) {
+    const bool direct = rep_direct(rt, address, bytes);
+    if (!direct && !string_vga(address, bytes)) {
+        ++xlat_stats.bus_write_miss;
+        return 0;
+    }
+    if (direct) {
         if (bytes == 1)
             rt->mem[address] = (uint8_t)value;
         else if (bytes == 2) {
@@ -2293,12 +2300,12 @@ uint32_t xlat_rt_bus_pop(xlat_rt_t *rt, uint32_t release, uint32_t far_ret)
 
 /* ARM r4-r10 are EAX, ECX, EDX, EBX, EBP, ESI, EDI in this order.
  * ESP is already in rt. No writes to XRIP's register file or decoder state. */
-static uint32_t *scalar_reg(xlat_rt_t *rt, uint32_t *frame, unsigned reg)
+static inline __attribute__((always_inline)) uint32_t *scalar_reg(xlat_rt_t *rt, uint32_t *frame, unsigned reg)
 {
     return reg == 4u ? &rt->sp : &frame[reg - (reg > 4u)];
 }
 
-static uint32_t scalar_get(xlat_rt_t *rt, uint32_t *frame, unsigned reg, unsigned bytes)
+static inline __attribute__((always_inline)) uint32_t scalar_get(xlat_rt_t *rt, uint32_t *frame, unsigned reg, unsigned bytes)
 {
     if (bytes == 1u)
         return (uint8_t)(frame[reg & 3u] >> (reg >= 4u ? 8u : 0u));
@@ -2306,7 +2313,7 @@ static uint32_t scalar_get(xlat_rt_t *rt, uint32_t *frame, unsigned reg, unsigne
     return bytes == 2u ? (uint16_t)v : v;
 }
 
-static void scalar_put(xlat_rt_t *rt, uint32_t *frame, unsigned reg, unsigned bytes, uint32_t v)
+static inline __attribute__((always_inline)) void scalar_put(xlat_rt_t *rt, uint32_t *frame, unsigned reg, unsigned bytes, uint32_t v)
 {
     if (bytes == 1u) {
         const unsigned shift = reg >= 4u ? 8u : 0u;
@@ -2318,22 +2325,6 @@ static void scalar_put(xlat_rt_t *rt, uint32_t *frame, unsigned reg, unsigned by
     }
 }
 
-static uint32_t scalar_address(const xlat_rt_t *rt, const uint32_t *frame, unsigned ea, uint16_t disp)
-{
-    /* BX+SI, BX+DI, BP+SI, BP+DI, SI, DI, BP, BX. */
-    static const uint8_t base[8] = {3, 3, 4, 4, 5, 6, 4, 3};
-    static const uint8_t index[4] = {5, 6, 5, 6};
-    const unsigned rm = ea & 7u;
-    uint32_t off = disp;
-    if (ea & SC_EA_XLAT)
-        off = frame[3] + (uint8_t)frame[0];
-    else if (!(ea & SC_EA_DIRECT)) {
-        off += frame[base[rm]];
-        if (rm < 4u)
-            off += frame[index[rm]];
-    }
-    return rt->seg_base[(ea >> 3) & 3u] + (uint16_t)off;
-}
 
 /* Read-only string operands use the same mapping as the scalar path.
  * Keep conventional memory inline; other windows use the XRIP bus read,
@@ -2505,15 +2496,10 @@ static uint32_t scalar_sti_string(xlat_rt_t *rt, uint32_t *frame,
     return SC_RESUME;
 }
 
-/* Run an already decoded scalar operation. The descriptor belongs to
- * generated code, not guest memory. On refusal no guest effects occurred;
- * after a committed store, never execute the old instruction again. */
-uint32_t xlat_rt_scalar(xlat_rt_t *rt, uint32_t *frame, const uint16_t *d)
+/* Each entry is selected at emission time. Preserve the original IRQ /
+ * invalid-width checks and commit protocol for every descriptor. */
+static inline __attribute__((always_inline)) uint32_t scalar_begin(xlat_rt_t *rt, const uint16_t *d, unsigned bytes)
 {
-    const unsigned ctl = d[0], op = ctl & 15u;
-    const unsigned bytes = 1u << ((ctl >> 4) & 3u), reg = (ctl >> 6) & 7u;
-    const uint32_t imm = d[3] | (uint32_t)d[4] << 16;
-    uint32_t next = d[5], status = 1, v;
     if (*rt->intr) {
         rt->ip = d[6];
         ++xlat_stats.scalar_stop;
@@ -2523,62 +2509,12 @@ uint32_t xlat_rt_scalar(xlat_rt_t *rt, uint32_t *frame, const uint16_t *d)
         ++xlat_stats.scalar_refused;
         return SC_REFUSED;
     }
-    switch (op) {
-    case SC_STI_STR:
-        return scalar_sti_string(rt, frame, d, bytes);
-    case SC_STR_READ:
-        return scalar_string_read(rt, frame, d, bytes);
-    case SC_LOAD:
-    case SC_MOVZX:
-    case SC_MOVSX:
-    case SC_SEG_LOAD:
-        v = xlat_bus_read(scalar_address(rt, frame, d[1], d[2]), bytes);
-        if (op == SC_SEG_LOAD)
-            rt->seg_base[reg] = (uint32_t)(uint16_t)v << 4;
-        else {
-            if (op == SC_MOVSX)
-                v = bytes == 1u ? (uint32_t)(int32_t)(int8_t)v : (uint32_t)(int32_t)(int16_t)v;
-            scalar_put(rt, frame, reg, op == SC_LOAD ? bytes : (ctl & SC_WIDE ? 4u : 2u), v);
-        }
-        break;
-    case SC_STORE:
-    case SC_ADD:
-    case SC_SEG_STORE: {
-        const uint32_t a = scalar_address(rt, frame, d[1], d[2]);
-        v = op == SC_SEG_STORE ? rt->seg_base[reg] >> 4 :
-            (ctl & SC_IMM) ? imm : scalar_get(rt, frame, reg, bytes);
-        status = op == SC_ADD ? xlat_rt_bus_add(rt, a, v, bytes) : xlat_rt_bus_write(rt, a, v, bytes);
-        break;
-    }
-    case SC_CALL:
-    case SC_PUSH:
-    case SC_SEG_PUSH: {
-        const uint16_t sp = (uint16_t)(rt->sp - 2u);
-        v = op == SC_SEG_PUSH ? rt->seg_base[reg] >> 4 :
-            (ctl & SC_IMM) ? imm : scalar_get(rt, frame, reg, 2u);
-        status = xlat_rt_bus_write(rt, rt->seg_base[2] + sp, v, 2u);
-        if (status)
-            rt->sp = (rt->sp & 0xffff0000u) | sp;
-        break;
-    }
-    case SC_POP:
-    case SC_SEG_POP:
-    case SC_RET:
-    case SC_RETF:
-        v = xlat_rt_bus_pop(rt, imm, op == SC_RETF);
-        if (op == SC_POP)
-            scalar_put(rt, frame, reg, 2u, v);
-        else if (op == SC_SEG_POP)
-            rt->seg_base[reg] = (uint32_t)(uint16_t)v << 4;
-        else {
-            next = (uint16_t)v;
-            if (op == SC_RETF) {
-                rt->cs = (uint16_t)(v >> 16);
-                rt->seg_base[1] = (uint32_t)rt->cs << 4;
-            }
-        }
-        break;
-    }
+    return SC_RESUME;
+}
+
+static inline __attribute__((always_inline)) uint32_t scalar_finish(xlat_rt_t *rt, unsigned ctl,
+                                           uint32_t status, uint32_t next, uint32_t resume)
+{
     if (!status) {
         ++xlat_stats.scalar_refused;
         return SC_REFUSED;
@@ -2593,7 +2529,109 @@ uint32_t xlat_rt_scalar(xlat_rt_t *rt, uint32_t *frame, const uint16_t *d)
         return SC_DISPATCH;
     }
     ++xlat_stats.scalar_resume;
-    return op == SC_ADD ? SC_RESUME_ADD : SC_RESUME;
+    return resume;
+}
+
+static inline __attribute__((always_inline)) unsigned scalar_bytes(const uint16_t *d)
+{
+    return 1u << ((d[0] >> 4) & 3u);
+}
+
+static inline __attribute__((always_inline)) uint32_t scalar_imm(const uint16_t *d)
+{
+    return d[3] | (uint32_t)d[4] << 16;
+}
+
+/* Only the common memory paths move into SRAM. String and stack groups
+ * have their own compact frames; no whole 16-way selector is needed. */
+uint32_t XLAT_HOT_FN(xlat_rt_scalar_load)(xlat_rt_t *rt, uint32_t *frame, const uint16_t *d, uint32_t address)
+{
+    const unsigned bytes = scalar_bytes(d), ctl = d[0], op = ctl & 15u, reg = (ctl >> 6) & 7u;
+    const uint32_t next = d[5];
+    const uint32_t begin = scalar_begin(rt, d, bytes);
+    if (begin != SC_RESUME)
+        return begin;
+    uint32_t v = xlat_bus_read(address, bytes);
+    if (op == SC_SEG_LOAD)
+        rt->seg_base[reg] = (uint32_t)(uint16_t)v << 4;
+    else {
+        if (op == SC_MOVSX)
+            v = bytes == 1u ? (uint32_t)(int32_t)(int8_t)v : (uint32_t)(int32_t)(int16_t)v;
+        scalar_put(rt, frame, reg, op == SC_LOAD ? bytes : (ctl & SC_WIDE ? 4u : 2u), v);
+    }
+    return scalar_finish(rt, ctl, 1u, next, SC_RESUME);
+}
+
+uint32_t XLAT_HOT_FN(xlat_rt_scalar_store)(xlat_rt_t *rt, uint32_t address, uint32_t value, const uint16_t *d)
+{
+    const unsigned bytes = scalar_bytes(d), ctl = d[0];
+    const uint32_t next = d[5];
+    const uint32_t begin = scalar_begin(rt, d, bytes);
+    if (begin != SC_RESUME)
+        return begin;
+    return scalar_finish(rt, ctl, xlat_rt_bus_write(rt, address, value, bytes), next, SC_RESUME);
+}
+
+uint32_t xlat_rt_scalar_add(xlat_rt_t *rt, uint32_t address, uint32_t value, const uint16_t *d)
+{
+    const unsigned bytes = scalar_bytes(d), ctl = d[0];
+    const uint32_t next = d[5];
+    const uint32_t begin = scalar_begin(rt, d, bytes);
+    if (begin != SC_RESUME)
+        return begin;
+    return scalar_finish(rt, ctl, xlat_rt_bus_add(rt, address, value, bytes), next, SC_RESUME_ADD);
+}
+
+uint32_t xlat_rt_scalar_push(xlat_rt_t *rt, uint32_t *frame, const uint16_t *d)
+{
+    const unsigned ctl = d[0], reg = (ctl >> 6) & 7u;
+    const uint32_t next = d[5];
+    const uint32_t begin = scalar_begin(rt, d, scalar_bytes(d));
+    if (begin != SC_RESUME)
+        return begin;
+    const uint16_t sp = (uint16_t)(rt->sp - 2u);
+    const uint32_t v = (ctl & 15u) == SC_SEG_PUSH ? rt->seg_base[reg] >> 4 :
+        (ctl & SC_IMM) ? scalar_imm(d) : scalar_get(rt, frame, reg, 2u);
+    const uint32_t status = xlat_rt_bus_write(rt, rt->seg_base[2] + sp, v, 2u);
+    if (status)
+        rt->sp = (rt->sp & 0xffff0000u) | sp;
+    return scalar_finish(rt, ctl, status, next, SC_RESUME);
+}
+
+uint32_t xlat_rt_scalar_pop(xlat_rt_t *rt, uint32_t *frame, const uint16_t *d)
+{
+    const unsigned ctl = d[0], op = ctl & 15u, reg = (ctl >> 6) & 7u;
+    uint32_t next = d[5];
+    const uint32_t begin = scalar_begin(rt, d, scalar_bytes(d));
+    if (begin != SC_RESUME)
+        return begin;
+    const uint32_t v = xlat_rt_bus_pop(rt, scalar_imm(d), op == SC_RETF);
+    if (op == SC_POP)
+        scalar_put(rt, frame, reg, 2u, v);
+    else if (op == SC_SEG_POP)
+        rt->seg_base[reg] = (uint32_t)(uint16_t)v << 4;
+    else {
+        next = (uint16_t)v;
+        if (op == SC_RETF) {
+            rt->cs = (uint16_t)(v >> 16);
+            rt->seg_base[1] = (uint32_t)rt->cs << 4;
+        }
+    }
+    return scalar_finish(rt, ctl, 1u, next, SC_RESUME);
+}
+
+uint32_t xlat_rt_scalar_str_read(xlat_rt_t *rt, uint32_t *frame, const uint16_t *d)
+{
+    const unsigned bytes = scalar_bytes(d);
+    const uint32_t begin = scalar_begin(rt, d, bytes);
+    return begin != SC_RESUME ? begin : scalar_string_read(rt, frame, d, bytes);
+}
+
+uint32_t xlat_rt_scalar_sti_str(xlat_rt_t *rt, uint32_t *frame, const uint16_t *d)
+{
+    const unsigned bytes = scalar_bytes(d);
+    const uint32_t begin = scalar_begin(rt, d, bytes);
+    return begin != SC_RESUME ? begin : scalar_sti_string(rt, frame, d, bytes);
 }
 
 /* Check at the last possible moment before the full GPR spill. The

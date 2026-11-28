@@ -165,16 +165,14 @@ bool xlat_preempt_run(void (*fn)(void *), void *arg,
         return false;
     if (!xlat_saved_psp) {
         /* Eight hardware words; nine software words (including LR). PSP
-         * at exception return is 8-byte aligned, per AAPCS. */
+         * at exception return is 8-byte aligned, per AAPCS. Clear both
+         * frames through the SRAM primitive, not a compiler-generated libc call. */
         uint32_t *frame = xlat_psp_stack + XLAT_PSP_WORDS - 8u;
-        for (unsigned i = 0; i < 8u; ++i)
-            frame[i] = 0;
+        nf_memset(frame - 9, 0, 17u * sizeof(*frame));
         frame[0] = (uint32_t)(uintptr_t)arg;
         frame[1] = (uint32_t)(uintptr_t)fn;
         frame[6] = (uint32_t)(uintptr_t)xlat_worker & ~1u;
         frame[7] = 0x01000000u; /* Thumb, no stack-alignment padding */
-        for (unsigned i = 1; i <= 9u; ++i)
-            frame[-(int)i] = 0;
         xlat_saved_psp = frame - 9;
         xlat_worker_done = false;
         xlat_active_us = 0;
