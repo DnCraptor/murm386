@@ -75,8 +75,9 @@ static __time_critical_func() void real_interrupt(uint8_t vector)
     ifl = tf = false;
 }
 
-static bool bios_escape(uint8_t id)
+static bool bios_escape_impl(uint8_t id, bool leaf)
 {
+    (void)leaf;
     /* Native BIOS stubs live at guest physical addresses, including the
      * sentinel used by nested BIOS and DOS far calls. */
     if (active_cpu->bios || protected_mode)
@@ -94,6 +95,8 @@ static bool bios_escape(uint8_t id)
     flags_now();
 #if XLAT
     const unsigned scope = bios_xlat_leaf_scope(active_cpu, id);
+    if (leaf && scope == BIOS_XLAT_UNKNOWN)
+        ++xlat_stats.bios_write_leaf;
     const uint32_t flags_linear = ((uint32_t)segregs[regss] << 4) +
                                   (uint16_t)dwordregs[regsp] + 4u;
     const bool flags_ram = fast_memory_size >= 2u && flags_linear <= fast_memory_size - 2u;
@@ -101,9 +104,10 @@ static bool bios_escape(uint8_t id)
         fast_memory_size && far_direct_at(flags_linear, 1u) == fast_memory + flags_linear;
     const bool cursor = scope == BIOS_XLAT_CURSOR && fast_memory_size >= 0x463u;
     const uint32_t cursor_linear = XRIP_AH == 1 ? 0x460u :
-        XRIP_AH == 2 ? 0x450u + ((uint32_t)XRIP_BH & 7u) * 2u : 0x462u;
+        (XRIP_AH == 2 || XRIP_AH == 0x0e) ?
+        0x450u + ((uint32_t)XRIP_BH & 7u) * 2u : 0x462u;
     const unsigned cursor_bytes = XRIP_AH == 5 ? 1u : 2u;
-    const bool local = scope == BIOS_XLAT_READONLY || cursor ||
+    const bool local = scope == BIOS_XLAT_READONLY || scope == BIOS_XLAT_VRAM || cursor ||
         (scope == BIOS_XLAT_STACK_FLAGS && (flags_ram || flags_umb));
     if (scope == BIOS_XLAT_STACK_FLAGS && flags_umb)
         ++xlat_stats.bios_flags_umb;
@@ -129,6 +133,11 @@ static bool bios_escape(uint8_t id)
     if (iret)
         interrupt_return(false);
     return true;
+}
+
+static bool bios_escape(uint8_t id)
+{
+    return bios_escape_impl(id, false);
 }
 
 static void reset86(void)
@@ -391,11 +400,9 @@ static unsigned xlat_leaf_run(CPU *cpu, const xlat_leaf_t *leaf)
             return steps;
         ++steps;
     }
-    if (bios_xlat_leaf_scope(cpu, leaf->id) == BIOS_XLAT_UNKNOWN)
-        ++xlat_stats.bios_write_leaf;
     xlat_begin_insn();
     StepIP(3);
-    bios_escape(leaf->id);
+    bios_escape_impl(leaf->id, true);
     xlat_stats.int_leaf++;
     return steps;
 }

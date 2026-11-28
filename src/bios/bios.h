@@ -37,8 +37,9 @@ void bios_intcall(CPU*, uint8_t, const char*); // sync call
 #if XLAT
 /* Write scope and ability to dispatch are separate. A nonblocking service
  * may still need conservative validation after arbitrary guest writes.
- * STACK_FLAGS writes SS:SP+4; CURSOR writes only the selected BDA field. */
-enum { BIOS_XLAT_UNKNOWN, BIOS_XLAT_READONLY, BIOS_XLAT_STACK_FLAGS, BIOS_XLAT_CURSOR };
+ * STACK_FLAGS writes SS:SP+4; CURSOR may also write VGA, but only the
+ * selected BDA field in guest RAM. VRAM never writes translated RAM. */
+enum { BIOS_XLAT_UNKNOWN, BIOS_XLAT_READONLY, BIOS_XLAT_STACK_FLAGS, BIOS_XLAT_CURSOR, BIOS_XLAT_VRAM };
 unsigned bios_xlat_leaf_scope(CPU *cpu, uint8_t id);
 bool bios_xlat_can_dispatch(CPU *cpu, uint8_t id);
 #endif

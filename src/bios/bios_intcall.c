@@ -128,6 +128,43 @@ static bool xlat_crtc_port(void)
     const uint16_t port = readw86(0x463u);
     return port == 0 || port == 0x3b4u || port == 0x3d4u;
 }
+
+/* These INT 10h handlers use guest-controlled BDA geometry, not just the
+ * mode table. Prove their entire destination page stays in the VGA aperture
+ * (including both bytes of the last cell). Use the full page*size product:
+ * the 16-bit truncation in AH=09h/0Eh can only reduce the offset. */
+extern bool pc_xlat_safe_out(void *o, uint16_t port, bool word);
+static bool xlat_text_page(CPU *cpu, unsigned page, bool tty)
+{
+    const uint8_t mode = read86(0x449u);
+    if (mode > 3u && mode != 7u)
+        return false;
+    uint32_t cols = readw86(0x44au);
+    uint32_t rows = read86(0x484u);
+    uint32_t page_size = readw86(0x44cu);
+    cols = cols ? cols : 80u;
+    rows = rows ? rows + 1u : 25u;
+    page_size = page_size ? page_size : 0x1000u;
+    if (page > 7u || cols > 255u || rows > 255u)
+        return false;
+    const uint32_t room = mode == 7u ? 0x10000u : 0x8000u;
+    if (page * page_size + 2u * rows * cols > room)
+        return false;
+    if (tty) {
+        const uint16_t cur = readw86(0x450u + page * 2u);
+        if ((cur >> 8) >= rows || (cur & 0xffu) >= cols)
+            return false;
+        const uint16_t crtc = readw86(0x463u);
+        const uint16_t port = crtc ? crtc : 0x3d4u;
+        if (port != 0x3b4u && port != 0x3d4u)
+            return false;
+        /* The actual I/O backend may route even a VGA port to a device. */
+        if (!pc_xlat_safe_out(cpu->cb.io, port, false) ||
+            !pc_xlat_safe_out(cpu->cb.io, port + 1u, false))
+            return false;
+    }
+    return true;
+}
 #endif
 
 unsigned bios_xlat_leaf_scope(CPU *cpu, uint8_t id)
@@ -141,6 +178,25 @@ unsigned bios_xlat_leaf_scope(CPU *cpu, uint8_t id)
             break;
         case 0x03: case 0x04: case 0x08: case 0x0d: case 0x0f:
             return BIOS_XLAT_READONLY;
+        case 0x06: case 0x07:
+            if (xlat_text_page(cpu, read86(0x462u), false))
+                return BIOS_XLAT_VRAM;
+            break;
+        case 0x09: case 0x0a:
+            if (xlat_text_page(cpu, CPU_BH, false))
+                return BIOS_XLAT_VRAM;
+            break;
+        case 0x0e:
+            if (xlat_text_page(cpu, CPU_BH, true))
+                return BIOS_XLAT_CURSOR;
+            break;
+        case 0x0c:
+            /* Mode 13h has a fixed linear pixel address. The planar
+             * implementation also adds a guest-selected page: keep it
+             * conservative until all of its modes are audited. */
+            if (read86(0x449u) == 0x13u)
+                return BIOS_XLAT_VRAM;
+            break;
         }
     }
     if (id == 0x16 && handlers[id] == bios_16h) {
@@ -163,11 +219,9 @@ unsigned bios_xlat_leaf_scope(CPU *cpu, uint8_t id)
 bool bios_xlat_can_dispatch(CPU *cpu, uint8_t id)
 {
 #if !BIOS_DEBUG && !PDB_DEBUG
-    if (bios_xlat_leaf_scope(cpu, id) != BIOS_XLAT_UNKNOWN)
-        return true;
     if (id == 0x10 && handlers[id] == bios_10h) {
-        /* These video functions do not run guest code. Writes are NOT
-         * assumed to stay in VGA: addresses may depend on mutable BDA. */
+        /* Dispatchability is independent of write scope. Test these
+         * functions first: the scope is evaluated once at BIOS entry. */
         switch (CPU_AH) {
         case 0x06: case 0x07:
             /* The scroll implementation uses uint8_t loop variables. */
@@ -178,6 +232,8 @@ bool bios_xlat_can_dispatch(CPU *cpu, uint8_t id)
             return xlat_crtc_port();
         }
     }
+    if (bios_xlat_leaf_scope(cpu, id) != BIOS_XLAT_UNKNOWN)
+        return true;
     if (id == 0x21 && handlers[id] == fdos_21h) {
         /* Only audited, nonblocking queries in fdos_21h.cpp. The common
          * DOS register frame, PSP and internal data still require the
