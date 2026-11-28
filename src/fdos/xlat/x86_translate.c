@@ -1923,37 +1923,50 @@ static void emit_shift_value(tctx_t *c, int i)
     arm_emit_t *e = &c->e;
     const x86_insn_t *in = &c->in[i];
     const int size = in->size;
-    const int v = get_raw(c, &in->a, size, A_R1);
     const bool rot = in->sub < 2;
-    /* r1 = the operand as the shift needs it */
-    if (rot) {
-        arm_ubfx(e, A_R1, v, 0, size);
-        arm_dp_reg(e, DP_ORR, 0, A_R1, A_R1, A_R1, SH_LSL, size);        /* x:x */
-        if (size == 8)
-            arm_dp_reg(e, DP_ORR, 0, A_R1, A_R1, A_R1, SH_LSL, 16);    /* x:x:x:x */
-    } else if (in->sub == 5) {
-        arm_ubfx(e, A_R1, v, 0, size);
-    } else if (in->sub == 7) {
-        arm_sbfx(e, A_R1, v, 0, size);
-    } else if (v != A_R1) {
-        arm_mov(e, A_R1, v);
-    }
-    const int sh = rot ? SH_ROR : in->sub == 5 ? SH_LSR : in->sub == 7 ? SH_ASR : SH_LSL;
-    if (in->b.kind == OPD_IMM) {
-        int n = (int)(in->b.imm & 31u);
+    const bool imm = in->b.kind == OPD_IMM;
+    const int n = imm ? (int)(in->b.imm & (rot ? (uint32_t)size - 1u : 31u)) : 0;
+    if (imm && !n)
+        return;
+    const int v = get_raw(c, &in->a, size, A_R1);
+    if (imm) {
         if (rot) {
-            n &= size - 1;
-            if (n && in->sub == 0)
-                n = size - n;                 /* ROL n = ROR size - n */
+            const int left = in->sub == 0 ? n : size - n;
+            /* Extract the wrap bits before shifting. R2 also works when
+             * get_raw returned R1 (AH..BH or SP). Only low bits are stored. */
+            arm_ubfx(e, A_R2, v, size - left, left);
+            arm_dp_reg(e, DP_ORR, 0, A_R1, A_R2, v, SH_LSL, left);
+        } else if (in->sub == 5) {
+            if (n < size)
+                arm_ubfx(e, A_R1, v, n, size - n);
+            else
+                arm_mov32(e, A_R1, 0);
+        } else if (in->sub == 7) {
+            const int bit = n < size ? n : size - 1;
+            arm_sbfx(e, A_R1, v, bit, size - bit);
+        } else {
+            arm_shift_imm(e, SH_LSL, A_R1, v, n);
         }
-        if (!n)
-            return;                           /* the value stays */
-        arm_shift_imm(e, sh, A_R1, A_R1, n);
     } else {
-        arm_dp_imm(e, DP_AND, 0, A_R2, A_R5, rot ? (uint32_t)size - 1u : 31u);   /* CL */
+        int operand = v;
+        if (rot) {
+            arm_ubfx(e, A_R1, v, 0, size);
+            arm_dp_reg(e, DP_ORR, 0, A_R1, A_R1, A_R1, SH_LSL, size);
+            if (size == 8)
+                arm_dp_reg(e, DP_ORR, 0, A_R1, A_R1, A_R1, SH_LSL, 16);
+            operand = A_R1;
+        } else if (in->sub == 5) {
+            arm_ubfx(e, A_R1, v, 0, size);
+            operand = A_R1;
+        } else if (in->sub == 7) {
+            arm_sbfx(e, A_R1, v, 0, size);
+            operand = A_R1;
+        }
+        const int sh = rot ? SH_ROR : in->sub == 5 ? SH_LSR : in->sub == 7 ? SH_ASR : SH_LSL;
+        arm_dp_imm(e, DP_AND, 0, A_R2, A_R5, rot ? (uint32_t)size - 1u : 31u);
         if (rot && in->sub == 0)
-            arm_dp_imm(e, DP_RSB, 0, A_R2, A_R2, (uint32_t)size);  /* ROR by size - n (or size) */
-        arm_shift_reg(e, sh, A_R1, A_R1, A_R2);
+            arm_dp_imm(e, DP_RSB, 0, A_R2, A_R2, (uint32_t)size);
+        arm_shift_reg(e, sh, A_R1, operand, A_R2);
     }
     put_raw(c, &in->a, size, A_R1);
 }
